@@ -2088,6 +2088,14 @@ test = false
 doc = false
 bench = false
 
+# Runtime diagnostic counter snapshot fuzzer.
+[[bin]]
+name = "diagnostic_counter_snapshot"
+path = "fuzz_targets/diagnostic_counter_snapshot.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "quic_tls_hello"
 path = "fuzz_targets/quic_tls_hello.rs"

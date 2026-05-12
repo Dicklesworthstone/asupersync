@@ -1,420 +1,377 @@
+//! Fuzz runtime diagnostic counter snapshots against real state transitions.
+//!
+//! The snapshot surface is `StateSnapshot::from_runtime_state`, which backs the
+//! scheduler governor and diagnostic views. This target mutates `RuntimeState`
+//! through public creation, completion, and obligation-resolution APIs, then
+//! checks that every sampled aggregate matches an independently tracked model.
+
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use arbitrary::{Arbitrary, Unstructured};
-use asupersync::observability::diagnostics::Diagnostics;
+use arbitrary::Arbitrary;
+use asupersync::obligation::lyapunov::StateSnapshot;
+use asupersync::record::obligation::{ObligationAbortReason, ObligationKind};
 use asupersync::runtime::state::RuntimeState;
-use asupersync::types::{Budget, Time};
-use asupersync::record::task::TaskState;
-use asupersync::record::region::RegionState;
-use asupersync::record::obligation::ObligationKind;
-use asupersync::record::ObligationState;
-use std::sync::Arc;
-use std::collections::HashMap;
+use asupersync::types::{Budget, ObligationId, Outcome, RegionId, TaskId, Time};
+use libfuzzer_sys::fuzz_target;
 
-// Maximum bounds to prevent OOM during fuzzing
-const MAX_OPERATIONS: usize = 100;
-const MAX_REGIONS: usize = 20;
-const MAX_TASKS: usize = 50;
-const MAX_OBLIGATIONS: usize = 30;
+const MAX_OPERATIONS: usize = 96;
+const MAX_REGIONS: usize = 24;
+const MAX_TASKS: usize = 64;
+const MAX_OBLIGATIONS: usize = 96;
+const MAX_INITIAL_TIME_MILLIS: u64 = 1_000_000;
+const MAX_ADVANCE_MILLIS: u64 = 10_000;
 
-/// Arbitrary operations that can modify diagnostic counters.
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Debug, Arbitrary)]
+struct DiagnosticCounterCase {
+    initial_time_millis: u64,
+    operations: Vec<DiagnosticOperation>,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
 enum DiagnosticOperation {
-    /// Create a new region.
-    CreateRegion {
-        parent_region_idx: Option<usize>,
+    EnsureRoot,
+    CreateChildRegion {
+        parent_idx: u8,
     },
-    /// Close a region.
-    CloseRegion {
-        region_idx: usize,
-    },
-    /// Create a new task in a region.
     CreateTask {
-        region_idx: usize,
-        state_variant: u8, // Maps to TaskState variants
+        region_idx: u8,
     },
-    /// Complete a task.
     CompleteTask {
-        task_idx: usize,
+        task_idx: u8,
     },
-    /// Create an obligation.
     CreateObligation {
-        region_idx: usize,
-        task_idx: usize,
-        kind_variant: u8, // Maps to ObligationKind variants
+        task_idx: u8,
+        kind: ObligationKindChoice,
     },
-    /// Commit an obligation.
     CommitObligation {
-        obligation_idx: usize,
+        obligation_idx: u8,
     },
-    /// Reset all diagnostic counters.
-    ResetCounters,
-    /// Take a diagnostic snapshot.
+    AbortObligation {
+        obligation_idx: u8,
+    },
+    AdvanceTime {
+        millis: u16,
+    },
     TakeSnapshot,
 }
 
-/// Fuzzing input containing a sequence of operations.
-#[derive(Arbitrary, Debug)]
-struct FuzzDiagnosticInput {
-    operations: Vec<DiagnosticOperation>,
-    initial_time_millis: u64,
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum ObligationKindChoice {
+    SendPermit,
+    Ack,
+    Lease,
+    IoOp,
+    SemaphorePermit,
 }
 
-/// Snapshot of diagnostic counters for consistency checking.
-#[derive(Debug, Clone, PartialEq)]
-struct DiagnosticSnapshot {
-    /// Number of active regions.
-    active_region_count: usize,
-    /// Number of closed regions.
-    closed_region_count: usize,
-    /// Number of running tasks.
-    running_task_count: usize,
-    /// Number of completed tasks.
-    completed_task_count: usize,
-    /// Number of reserved obligations.
-    reserved_obligation_count: usize,
-    /// Number of committed obligations.
-    committed_obligation_count: usize,
-    /// Number of leaked obligations detected.
-    leaked_obligation_count: usize,
-    /// Total regions ever created (monotonic).
-    total_regions_created: usize,
-    /// Total tasks ever created (monotonic).
-    total_tasks_created: usize,
-    /// Total obligations ever created (monotonic).
-    total_obligations_created: usize,
+impl ObligationKindChoice {
+    fn into_kind(self) -> ObligationKind {
+        match self {
+            Self::SendPermit => ObligationKind::SendPermit,
+            Self::Ack => ObligationKind::Ack,
+            Self::Lease => ObligationKind::Lease,
+            Self::IoOp => ObligationKind::IoOp,
+            Self::SemaphorePermit => ObligationKind::SemaphorePermit,
+        }
+    }
 }
 
-/// Test state that tracks diagnostic counters.
-struct DiagnosticTestState {
-    state: Arc<RuntimeState>,
-    diagnostics: Diagnostics,
-    regions: Vec<asupersync::types::RegionId>,
-    tasks: Vec<asupersync::types::TaskId>,
-    obligations: Vec<asupersync::types::ObligationId>,
-    total_regions_created: usize,
-    total_tasks_created: usize,
-    total_obligations_created: usize,
-    snapshots: Vec<DiagnosticSnapshot>,
-    last_reset_totals: (usize, usize, usize), // (regions, tasks, obligations) at last reset
+#[derive(Debug, Clone, Copy)]
+struct TaskSlot {
+    id: TaskId,
+    region: RegionId,
+    live: bool,
 }
 
-impl DiagnosticTestState {
+#[derive(Debug, Clone, Copy)]
+struct ObligationSlot {
+    id: ObligationId,
+    kind: ObligationKind,
+    holder: TaskId,
+    reserved_at: Time,
+    pending: bool,
+}
+
+struct DiagnosticCounterHarness {
+    state: RuntimeState,
+    regions: Vec<RegionId>,
+    tasks: Vec<TaskSlot>,
+    obligations: Vec<ObligationSlot>,
+}
+
+impl DiagnosticCounterHarness {
     fn new(initial_time: Time) -> Self {
         let mut state = RuntimeState::new();
         state.now = initial_time;
-        let state_arc = Arc::new(state);
-        let diagnostics = Diagnostics::new(Arc::clone(&state_arc));
-
         Self {
-            state: state_arc,
-            diagnostics,
+            state,
             regions: Vec::new(),
             tasks: Vec::new(),
             obligations: Vec::new(),
-            total_regions_created: 0,
-            total_tasks_created: 0,
-            total_obligations_created: 0,
-            snapshots: Vec::new(),
-            last_reset_totals: (0, 0, 0),
         }
     }
 
-    fn create_region(&mut self, parent_idx: Option<usize>) -> Result<(), String> {
+    fn apply(&mut self, operation: DiagnosticOperation) {
+        match operation {
+            DiagnosticOperation::EnsureRoot => {
+                self.ensure_root();
+            }
+            DiagnosticOperation::CreateChildRegion { parent_idx } => {
+                self.create_child_region(parent_idx);
+            }
+            DiagnosticOperation::CreateTask { region_idx } => {
+                self.create_task(region_idx);
+            }
+            DiagnosticOperation::CompleteTask { task_idx } => {
+                self.complete_task(task_idx);
+            }
+            DiagnosticOperation::CreateObligation { task_idx, kind } => {
+                self.create_obligation(task_idx, kind.into_kind());
+            }
+            DiagnosticOperation::CommitObligation { obligation_idx } => {
+                self.resolve_obligation(obligation_idx, ObligationResolution::Commit);
+            }
+            DiagnosticOperation::AbortObligation { obligation_idx } => {
+                self.resolve_obligation(obligation_idx, ObligationResolution::Abort);
+            }
+            DiagnosticOperation::AdvanceTime { millis } => {
+                let bounded = u64::from(millis).min(MAX_ADVANCE_MILLIS);
+                self.state.now = self
+                    .state
+                    .now
+                    .saturating_add_nanos(bounded.saturating_mul(1_000_000));
+            }
+            DiagnosticOperation::TakeSnapshot => {}
+        }
+    }
+
+    fn ensure_root(&mut self) {
+        if self.regions.is_empty() {
+            let root = self.state.create_root_region(Budget::INFINITE);
+            self.regions.push(root);
+        }
+    }
+
+    fn create_child_region(&mut self, parent_idx: u8) {
         if self.regions.len() >= MAX_REGIONS {
-            return Err("Maximum regions reached".to_string());
+            return;
         }
-
-        let parent_id = if let Some(idx) = parent_idx {
-            if idx >= self.regions.len() {
-                return Err("Invalid parent region index".to_string());
-            }
-            self.regions[idx]
-        } else {
-            // Create root region if no parent
-            if self.regions.is_empty() {
-                let root = unsafe {
-                    std::ptr::write(
-                        std::alloc::alloc(std::alloc::Layout::new::<RuntimeState>()) as *mut RuntimeState,
-                        RuntimeState::new()
-                    );
-                    (*self.state.as_ptr()).create_root_region(Budget::INFINITE)
-                };
-                self.regions.push(root);
-                self.total_regions_created += 1;
-                return Ok(());
-            }
-            self.regions[0] // Use first region as parent
-        };
-
-        // For simplification in fuzzing, we'll just track the creation
-        let new_region_id = asupersync::types::RegionId::new_for_test(
-            self.total_regions_created as u32,
-            0
-        );
-        self.regions.push(new_region_id);
-        self.total_regions_created += 1;
-        Ok(())
+        self.ensure_root();
+        let parent = self.regions[usize::from(parent_idx) % self.regions.len()];
+        if let Ok(region) = self.state.create_child_region(parent, Budget::INFINITE) {
+            self.regions.push(region);
+        }
     }
 
-    fn close_region(&mut self, region_idx: usize) -> Result<(), String> {
-        if region_idx >= self.regions.len() {
-            return Err("Invalid region index".to_string());
-        }
-        // In a real implementation, we'd close the region
-        // For fuzzing, we just mark it as closed by removing from active list
-        self.regions.remove(region_idx);
-        Ok(())
-    }
-
-    fn create_task(&mut self, region_idx: usize, state_variant: u8) -> Result<(), String> {
+    fn create_task(&mut self, region_idx: u8) {
         if self.tasks.len() >= MAX_TASKS {
-            return Err("Maximum tasks reached".to_string());
+            return;
         }
-        if region_idx >= self.regions.len() {
-            return Err("Invalid region index".to_string());
+        self.ensure_root();
+        let region = self.regions[usize::from(region_idx) % self.regions.len()];
+        if let Ok((task_id, _handle)) = self.state.create_task(region, Budget::INFINITE, async {}) {
+            self.tasks.push(TaskSlot {
+                id: task_id,
+                region,
+                live: true,
+            });
         }
+    }
 
-        let _task_state = match state_variant % 4 {
-            0 => TaskState::Queued,
-            1 => TaskState::Running,
-            2 => TaskState::Blocked,
-            _ => TaskState::Completed(asupersync::types::Outcome::Ok(())),
+    fn complete_task(&mut self, task_idx: u8) {
+        let Some(index) = self.live_task_index(task_idx) else {
+            return;
         };
-
-        let new_task_id = asupersync::types::TaskId::new_for_test(
-            self.total_tasks_created as u32,
-            0
-        );
-        self.tasks.push(new_task_id);
-        self.total_tasks_created += 1;
-        Ok(())
-    }
-
-    fn complete_task(&mut self, task_idx: usize) -> Result<(), String> {
-        if task_idx >= self.tasks.len() {
-            return Err("Invalid task index".to_string());
+        let task_id = self.tasks[index].id;
+        if !self.state.complete_task(task_id, Outcome::Ok(())) {
+            return;
         }
-        // Mark task as completed by removing from active list
-        self.tasks.remove(task_idx);
-        Ok(())
+        let _ = self.state.task_completed(task_id);
+        self.tasks[index].live = false;
+
+        for obligation in &mut self.obligations {
+            if obligation.holder == task_id {
+                obligation.pending = false;
+            }
+        }
     }
 
-    fn create_obligation(&mut self, region_idx: usize, task_idx: usize, kind_variant: u8) -> Result<(), String> {
+    fn create_obligation(&mut self, task_idx: u8, kind: ObligationKind) {
         if self.obligations.len() >= MAX_OBLIGATIONS {
-            return Err("Maximum obligations reached".to_string());
+            return;
         }
-        if region_idx >= self.regions.len() || task_idx >= self.tasks.len() {
-            return Err("Invalid region or task index".to_string());
-        }
-
-        let _obligation_kind = match kind_variant % 3 {
-            0 => ObligationKind::Permit,
-            1 => ObligationKind::Ack,
-            _ => ObligationKind::Lease,
+        let Some(index) = self.live_task_index(task_idx) else {
+            return;
         };
-
-        let new_obligation_id = asupersync::types::ObligationId::new_for_test(
-            self.total_obligations_created as u32,
-            0
-        );
-        self.obligations.push(new_obligation_id);
-        self.total_obligations_created += 1;
-        Ok(())
-    }
-
-    fn commit_obligation(&mut self, obligation_idx: usize) -> Result<(), String> {
-        if obligation_idx >= self.obligations.len() {
-            return Err("Invalid obligation index".to_string());
+        let task = self.tasks[index];
+        if let Ok(id) = self
+            .state
+            .create_obligation(kind, task.id, task.region, None)
+        {
+            self.obligations.push(ObligationSlot {
+                id,
+                kind,
+                holder: task.id,
+                reserved_at: self.state.now,
+                pending: true,
+            });
         }
-        // Mark obligation as committed by removing from active list
-        self.obligations.remove(obligation_idx);
-        Ok(())
     }
 
-    fn reset_counters(&mut self) {
-        // Record totals at reset point for monotonicity checking
-        self.last_reset_totals = (
-            self.total_regions_created,
-            self.total_tasks_created,
-            self.total_obligations_created,
-        );
-        // Reset non-monotonic counters (clear active collections)
-        self.regions.clear();
-        self.tasks.clear();
-        self.obligations.clear();
-    }
-
-    fn take_snapshot(&mut self) -> DiagnosticSnapshot {
-        // Get leaked obligations using actual diagnostics
-        let leaked_obligations = self.diagnostics.find_leaked_obligations();
-
-        let snapshot = DiagnosticSnapshot {
-            active_region_count: self.regions.len(),
-            closed_region_count: 0, // Simplified for fuzzing
-            running_task_count: self.tasks.len(),
-            completed_task_count: 0, // Simplified for fuzzing
-            reserved_obligation_count: self.obligations.len(),
-            committed_obligation_count: 0, // Simplified for fuzzing
-            leaked_obligation_count: leaked_obligations.len(),
-            total_regions_created: self.total_regions_created,
-            total_tasks_created: self.total_tasks_created,
-            total_obligations_created: self.total_obligations_created,
+    fn resolve_obligation(&mut self, obligation_idx: u8, resolution: ObligationResolution) {
+        let Some(index) = self.pending_obligation_index(obligation_idx) else {
+            return;
         };
-
-        self.snapshots.push(snapshot.clone());
-        snapshot
+        let id = self.obligations[index].id;
+        let resolved = match resolution {
+            ObligationResolution::Commit => self.state.commit_obligation(id).is_ok(),
+            ObligationResolution::Abort => self
+                .state
+                .abort_obligation(id, ObligationAbortReason::Explicit)
+                .is_ok(),
+        };
+        if resolved {
+            self.obligations[index].pending = false;
+        }
     }
 
-    /// Check invariants that must hold for diagnostic counters.
-    fn check_invariants(&self) -> Result<(), String> {
-        let last_snapshot = self.snapshots.last();
-        if last_snapshot.is_none() {
-            return Ok(()); // No snapshots to check
-        }
+    fn live_task_index(&self, selector: u8) -> Option<usize> {
+        select_index(
+            self.tasks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, task)| task.live.then_some(index)),
+            selector,
+        )
+    }
 
-        let snapshot = last_snapshot.unwrap();
+    fn pending_obligation_index(&self, selector: u8) -> Option<usize> {
+        select_index(
+            self.obligations
+                .iter()
+                .enumerate()
+                .filter_map(|(index, obligation)| obligation.pending.then_some(index)),
+            selector,
+        )
+    }
 
-        // Invariant 1: Monotonic counters never decrease
-        if self.snapshots.len() > 1 {
-            let prev_snapshot = &self.snapshots[self.snapshots.len() - 2];
+    fn assert_snapshot_matches_model(&self) {
+        let snapshot = StateSnapshot::from_runtime_state(&self.state);
+        let expected = ExpectedSnapshot::from_model(self);
 
-            if snapshot.total_regions_created < prev_snapshot.total_regions_created {
-                return Err("Total regions created decreased (non-monotonic)".to_string());
-            }
-            if snapshot.total_tasks_created < prev_snapshot.total_tasks_created {
-                return Err("Total tasks created decreased (non-monotonic)".to_string());
-            }
-            if snapshot.total_obligations_created < prev_snapshot.total_obligations_created {
-                return Err("Total obligations created decreased (non-monotonic)".to_string());
-            }
-        }
-
-        // Invariant 2: Monotonic counters only reset to previous values after explicit reset
-        let (reset_regions, reset_tasks, reset_obligations) = self.last_reset_totals;
-        if snapshot.total_regions_created < reset_regions {
-            return Err("Total regions decreased below reset baseline".to_string());
-        }
-        if snapshot.total_tasks_created < reset_tasks {
-            return Err("Total tasks decreased below reset baseline".to_string());
-        }
-        if snapshot.total_obligations_created < reset_obligations {
-            return Err("Total obligations decreased below reset baseline".to_string());
-        }
-
-        // Invariant 3: Active counts are non-negative
-        // (This is automatically ensured by using usize, but good to document)
-
-        // Invariant 4: Snapshot consistency - active counts match our tracking
-        if snapshot.active_region_count != self.regions.len() {
-            return Err(format!(
-                "Active region count mismatch: snapshot={}, actual={}",
-                snapshot.active_region_count, self.regions.len()
-            ));
-        }
-        if snapshot.running_task_count != self.tasks.len() {
-            return Err(format!(
-                "Running task count mismatch: snapshot={}, actual={}",
-                snapshot.running_task_count, self.tasks.len()
-            ));
-        }
-        if snapshot.reserved_obligation_count != self.obligations.len() {
-            return Err(format!(
-                "Reserved obligation count mismatch: snapshot={}, actual={}",
-                snapshot.reserved_obligation_count, self.obligations.len()
-            ));
-        }
-
-        Ok(())
+        assert_eq!(
+            snapshot.live_tasks, expected.live_tasks,
+            "live task counter diverged from runtime model"
+        );
+        assert_eq!(
+            snapshot.pending_obligations, expected.pending_obligations,
+            "pending obligation counter diverged from runtime model"
+        );
+        assert_eq!(
+            snapshot.pending_send_permits, expected.pending_send_permits,
+            "send-permit obligation counter diverged"
+        );
+        assert_eq!(
+            snapshot.pending_acks, expected.pending_acks,
+            "ack obligation counter diverged"
+        );
+        assert_eq!(
+            snapshot.pending_leases, expected.pending_leases,
+            "lease obligation counter diverged"
+        );
+        assert_eq!(
+            snapshot.pending_io_ops, expected.pending_io_ops,
+            "I/O obligation counter diverged"
+        );
+        assert_eq!(
+            snapshot.obligation_age_sum_ns, expected.obligation_age_sum_ns,
+            "pending obligation age sum diverged"
+        );
+        assert_eq!(
+            snapshot.total_cancelling_tasks(),
+            0,
+            "target never drives cancellation phases"
+        );
+        assert!(
+            snapshot.deadline_pressure >= 0.0,
+            "deadline pressure should not be negative"
+        );
     }
 }
 
-fuzz_target!(|data: &[u8]| {
-    // Limit input size to prevent excessive memory usage
-    if data.len() > 10_000 {
-        return;
-    }
+#[derive(Debug, Clone, Copy)]
+enum ObligationResolution {
+    Commit,
+    Abort,
+}
 
-    let mut unstructured = Unstructured::new(data);
-    let fuzz_input = match FuzzDiagnosticInput::arbitrary(&mut unstructured) {
-        Ok(input) => input,
-        Err(_) => return, // Not enough data to generate arbitrary input
-    };
+#[derive(Debug, Default)]
+struct ExpectedSnapshot {
+    live_tasks: u32,
+    pending_obligations: u32,
+    obligation_age_sum_ns: u64,
+    pending_send_permits: u32,
+    pending_acks: u32,
+    pending_leases: u32,
+    pending_io_ops: u32,
+}
 
-    // Limit number of operations
-    let operations = fuzz_input.operations.into_iter().take(MAX_OPERATIONS);
-
-    let initial_time = Time::from_millis(fuzz_input.initial_time_millis % 1_000_000);
-    let mut test_state = DiagnosticTestState::new(initial_time);
-
-    // Execute operations sequence
-    for (i, operation) in operations.enumerate() {
-        let result = match operation {
-            DiagnosticOperation::CreateRegion { parent_region_idx } => {
-                test_state.create_region(parent_region_idx)
-            }
-            DiagnosticOperation::CloseRegion { region_idx } => {
-                test_state.close_region(region_idx)
-            }
-            DiagnosticOperation::CreateTask { region_idx, state_variant } => {
-                test_state.create_task(region_idx, state_variant)
-            }
-            DiagnosticOperation::CompleteTask { task_idx } => {
-                test_state.complete_task(task_idx)
-            }
-            DiagnosticOperation::CreateObligation { region_idx, task_idx, kind_variant } => {
-                test_state.create_obligation(region_idx, task_idx, kind_variant)
-            }
-            DiagnosticOperation::CommitObligation { obligation_idx } => {
-                test_state.commit_obligation(obligation_idx)
-            }
-            DiagnosticOperation::ResetCounters => {
-                test_state.reset_counters();
-                Ok(())
-            }
-            DiagnosticOperation::TakeSnapshot => {
-                test_state.take_snapshot();
-                Ok(())
-            }
+impl ExpectedSnapshot {
+    fn from_model(harness: &DiagnosticCounterHarness) -> Self {
+        let mut expected = Self {
+            live_tasks: harness.tasks.iter().filter(|task| task.live).count() as u32,
+            ..Self::default()
         };
 
-        // Operations can fail due to invalid indices, which is acceptable
-        if let Err(_) = result {
-            continue; // Skip failed operations
-        }
+        for obligation in harness
+            .obligations
+            .iter()
+            .filter(|obligation| obligation.pending)
+        {
+            expected.pending_obligations = expected.pending_obligations.saturating_add(1);
+            expected.obligation_age_sum_ns = expected
+                .obligation_age_sum_ns
+                .saturating_add(harness.state.now.duration_since(obligation.reserved_at));
 
-        // Take a snapshot after each successful operation
-        test_state.take_snapshot();
-
-        // Check invariants after each operation
-        if let Err(e) = test_state.check_invariants() {
-            panic!("Diagnostic counter invariant violated after operation {}: {}", i, e);
-        }
-    }
-
-    // Final invariant check
-    if let Err(e) = test_state.check_invariants() {
-        panic!("Final diagnostic counter invariant check failed: {}", e);
-    }
-
-    // Ensure we have at least some meaningful state
-    if !test_state.snapshots.is_empty() {
-        let final_snapshot = test_state.snapshots.last().unwrap();
-
-        // Verify monotonic properties across all snapshots
-        for window in test_state.snapshots.windows(2) {
-            let prev = &window[0];
-            let curr = &window[1];
-
-            // After reset, monotonic counters should not decrease
-            if curr.total_regions_created < prev.total_regions_created ||
-               curr.total_tasks_created < prev.total_tasks_created ||
-               curr.total_obligations_created < prev.total_obligations_created {
-                // This is only allowed if there was a reset between snapshots
-                // Since we don't track reset points in snapshots, we accept this
-                // as long as the invariant check passed above
+            match obligation.kind {
+                ObligationKind::SendPermit => {
+                    expected.pending_send_permits = expected.pending_send_permits.saturating_add(1);
+                }
+                ObligationKind::Ack => {
+                    expected.pending_acks = expected.pending_acks.saturating_add(1);
+                }
+                ObligationKind::Lease | ObligationKind::SemaphorePermit => {
+                    expected.pending_leases = expected.pending_leases.saturating_add(1);
+                }
+                ObligationKind::IoOp => {
+                    expected.pending_io_ops = expected.pending_io_ops.saturating_add(1);
+                }
             }
         }
+
+        expected
+    }
+}
+
+fn select_index<I>(indices: I, selector: u8) -> Option<usize>
+where
+    I: Iterator<Item = usize>,
+{
+    let collected: Vec<usize> = indices.collect();
+    if collected.is_empty() {
+        None
+    } else {
+        Some(collected[usize::from(selector) % collected.len()])
+    }
+}
+
+fuzz_target!(|case: DiagnosticCounterCase| {
+    let initial_time = Time::from_millis(case.initial_time_millis.min(MAX_INITIAL_TIME_MILLIS));
+    let mut harness = DiagnosticCounterHarness::new(initial_time);
+    harness.assert_snapshot_matches_model();
+
+    for operation in case.operations.into_iter().take(MAX_OPERATIONS) {
+        harness.apply(operation);
+        harness.assert_snapshot_matches_model();
     }
 });
