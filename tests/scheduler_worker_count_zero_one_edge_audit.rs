@@ -60,7 +60,7 @@
 //!     constructor docs (would lose the historical context
 //!     for future maintainers — the silent-hang failure
 //!     mode the fix closed),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -89,8 +89,7 @@ fn infallible_constructor_clamps_worker_count_to_at_least_one() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
     let _ = after;
@@ -124,8 +123,7 @@ fn fallible_constructor_rejects_zero_with_config_error() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
     let _ = after;
@@ -284,8 +282,7 @@ fn cancel_streak_limit_clamped_to_at_least_one() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
