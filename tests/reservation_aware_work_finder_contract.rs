@@ -130,6 +130,26 @@ fn clean_workspace_selects_highest_priority_fallback_candidate() {
 }
 
 #[test]
+fn pathless_epic_ready_queue_falls_through_to_fallback_candidate() {
+    let receipt = finder_json("epic_queue_fallback.json");
+    let epic = candidate(&receipt, "asupersync-lhx6m4");
+
+    assert_eq!(epic["status"].as_str(), Some("blocked"));
+    assert_eq!(
+        epic["blockers"][0]["kind"].as_str(),
+        Some("non-shippable-epic")
+    );
+    assert_eq!(
+        receipt["recommendation"]["category"].as_str(),
+        Some("run-fallback-lane")
+    );
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("testing-conformance-harnesses:session-closeout")
+    );
+}
+
+#[test]
 fn unapproved_fallback_lane_is_blocked_by_policy() {
     let receipt = finder_json("unapproved_lane.json");
     let candidate = candidate(&receipt, "custom-scan:src");

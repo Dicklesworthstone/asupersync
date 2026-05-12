@@ -256,9 +256,14 @@ def ready_candidates(source: dict[str, Any]) -> list[dict[str, Any]]:
                 "bead_id": issue_id,
                 "lane": "br-ready",
                 "title": str(issue.get("title") or issue_id),
+                "issue_type": str(issue.get("issue_type") or ""),
                 "priority": int(issue.get("priority", 2) or 2),
                 "paths": candidate_paths(issue),
-                "proof_commands": [],
+                "proof_commands": [
+                    str(command)
+                    for command in issue.get("proof_commands", [])
+                    if isinstance(command, str) and command
+                ],
             }
         )
     return rows
@@ -325,6 +330,21 @@ def lane_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def bead_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
+    if candidate["kind"] != "ready-bead":
+        return []
+    if candidate.get("issue_type") != "epic":
+        return []
+    if candidate["paths"] or candidate["proof_commands"]:
+        return []
+    return [
+        {
+            "kind": "non-shippable-epic",
+            "reason": "ready epic has no paths or proof commands; use child beads or fallback lanes",
+        }
+    ]
+
+
 def classify_candidate(
     candidate: dict[str, Any],
     reservations: list[dict[str, Any]],
@@ -334,6 +354,7 @@ def classify_candidate(
     paths = candidate["paths"]
     blockers = []
     blockers.extend(lane_blockers(candidate))
+    blockers.extend(bead_blockers(candidate))
     blockers.extend(reservation_blockers(paths, reservations, agent))
     blockers.extend(dirty_blockers(paths, dirty, reservations, agent))
 
