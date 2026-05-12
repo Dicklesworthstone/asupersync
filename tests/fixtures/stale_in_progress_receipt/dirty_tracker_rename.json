@@ -1,0 +1,38 @@
+{
+  "agent_mail": {
+    "agents": [
+      {
+        "last_active_ts": "2026-05-07T00:00:00Z",
+        "name": "OlderAgent"
+      }
+    ],
+    "available": true,
+    "messages": [],
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [
+      {
+        "assignee": "OlderAgent",
+        "id": "asupersync-tracker-rename",
+        "title": "Ambiguous tracker rename state",
+        "updated_at": "2026-05-07T00:00:00Z"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": [
+      {
+        "path": "docs/stale-state.md -> .beads/issues.jsonl",
+        "status": "R "
+      }
+    ],
+    "status": "ok"
+  },
+  "git": {
+    "recent_commits": [],
+    "status": "ok"
+  }
+}

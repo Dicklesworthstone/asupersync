@@ -72,6 +72,27 @@ def load_json(path: Path) -> Any:
         return json.load(handle)
 
 
+def normalize_path(path: str) -> str:
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def status_paths(status: str, path: str) -> list[str]:
+    raw_path = path.strip()
+    if not raw_path:
+        return []
+    if ("R" in status or "C" in status) and " -> " in raw_path:
+        return [
+            normalized
+            for part in raw_path.split(" -> ", 1)
+            if (normalized := normalize_path(part))
+        ]
+    normalized = normalize_path(raw_path)
+    return [normalized] if normalized else []
+
+
 def run_json(repo_path: Path, command: list[str], timeout: float) -> tuple[str, Any]:
     try:
         output = subprocess.run(
@@ -165,7 +186,11 @@ def dirty_tracker_status(source: dict[str, Any]) -> dict[str, Any]:
     dirty = source.get("dirty_tree") or {}
     entries = dirty.get("entries") if isinstance(dirty, dict) else []
     rows = [item for item in entries if isinstance(item, dict)]
-    dirty_paths = [str(row.get("path", "")) for row in rows if row.get("path")]
+    dirty_paths = [
+        path
+        for row in rows
+        for path in status_paths(str(row.get("status") or ""), str(row.get("path") or ""))
+    ]
     tracker_dirty = [path for path in dirty_paths if path in TRACKER_PATHS]
     non_tracker_dirty = [path for path in dirty_paths if path and path not in TRACKER_PATHS]
     if tracker_dirty and not non_tracker_dirty:
@@ -363,7 +388,9 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
     if status_status == "ok":
         for line in raw_status.splitlines():
             if len(line) >= 4:
-                dirty_entries.append({"status": line[:2], "path": line[3:]})
+                status = line[:2]
+                for path in status_paths(status, line[3:]):
+                    dirty_entries.append({"status": status, "path": path})
 
     return {
         "beads": {

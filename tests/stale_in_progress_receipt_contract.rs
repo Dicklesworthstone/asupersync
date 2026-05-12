@@ -292,6 +292,42 @@ fn active_reservation_blocker_matches_full_output_golden() {
 }
 
 #[test]
+fn dirty_tracker_rename_target_requires_human_escalation() {
+    let receipt = receipt_json("dirty_tracker_rename.json");
+    let row = first_classification(&receipt);
+
+    assert_eq!(
+        receipt["tracker_state"]["status"].as_str(),
+        Some("dirty-tracker-and-code")
+    );
+    assert_eq!(
+        receipt["tracker_state"]["tracker_paths"][0].as_str(),
+        Some(".beads/issues.jsonl")
+    );
+    assert_eq!(
+        receipt["tracker_state"]["non_tracker_paths"][0].as_str(),
+        Some("docs/stale-state.md")
+    );
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("needs-human-escalation")
+    );
+    assert_eq!(
+        row["proposed_action"]["kind"].as_str(),
+        Some("blocker-bead-suggestion")
+    );
+}
+
+#[test]
+fn dirty_tracker_rename_output_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "dirty_tracker_rename.json",
+        "dirty_tracker_rename_expected.json",
+        "stale in-progress dirty-tracker rename receipt changed; update the golden only after reviewing porcelain rename tracker semantics",
+    );
+}
+
+#[test]
 fn dirty_tracker_only_state_requires_human_escalation() {
     let receipt = receipt_json("dirty_tracker_only.json");
     let row = first_classification(&receipt);
