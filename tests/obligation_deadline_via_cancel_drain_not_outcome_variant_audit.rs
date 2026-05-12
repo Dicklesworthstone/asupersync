@@ -460,6 +460,7 @@ struct MockRegionId(u32);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MockObligationState {
     Reserved,
+    #[expect(dead_code, reason = "mock mirrors committed production state")]
     Committed,
     Aborted,
 }
@@ -467,6 +468,7 @@ enum MockObligationState {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CancelKind {
     Deadline,
+    #[expect(dead_code, reason = "mock mirrors non-deadline cancellation")]
     User,
 }
 
@@ -477,9 +479,12 @@ struct CancelReason {
 
 #[derive(Debug, PartialEq, Eq)]
 enum MockOutcome<T, E> {
+    #[expect(dead_code, reason = "mock mirrors four-valued production Outcome")]
     Ok(T),
+    #[expect(dead_code, reason = "mock mirrors four-valued production Outcome")]
     Err(E),
     Cancelled(CancelKind),
+    #[expect(dead_code, reason = "mock mirrors four-valued production Outcome")]
     Panicked(String),
 }
 

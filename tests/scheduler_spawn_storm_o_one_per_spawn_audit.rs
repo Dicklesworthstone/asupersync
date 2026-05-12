@@ -67,18 +67,18 @@
 //!     add lock contention — per-spawn becomes O(N) under
 //!     concurrent spawn-storm),
 //!   - replaced the arena with Box-per-task (would lose the
-//:     amortized-O(1) slot reuse — per-spawn cost grows
+//!     amortized-O(1) slot reuse — per-spawn cost grows
 //!     with allocator fragmentation),
 //!   - moved priority-heap operations to the spawn path
-//:     (would make per-spawn O(log N)),
+//!     (would make per-spawn O(log N)),
 //!   - introduced a per-spawn O(N) scan (e.g., for
 //!     duplicate detection across all live tasks) — would
 //!     be O(N) per spawn, O(N^2) for the full storm,
 //!   - lost the lock-free FAA queue (would force locking
-//:     on the global injector — concurrent spawn-storm
+//!     on the global injector — concurrent spawn-storm
 //!     becomes serialized),
-//! would all be caught by the structural pins or by the
-//! behavioral benchmark.
+//!     would all be caught by the structural pins or by the
+//!     behavioral benchmark.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -154,8 +154,7 @@ fn schedule_internal_does_not_touch_priority_heap_on_spawn_path() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -386,6 +385,13 @@ fn spawn_storm_100k_completes_under_one_second_via_mock_path() {
         "REGRESSION: 100K-spawn arena did not allocate {N} \
          slots. Arena allocator is broken.",
     );
+
+    let first_task = arena.tasks[0].expect("first mock task exists");
+    let last_task = arena.tasks[(N - 1) as usize].expect("last mock task exists");
+    assert_eq!(first_task.id, 0);
+    assert_eq!(first_task.priority, 128);
+    assert_eq!(last_task.id, N - 1);
+    assert_eq!(last_task.priority, 128);
 
     // The 1-second bound. In practice this completes in
     // tens of milliseconds — the per-spawn latency is
