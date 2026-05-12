@@ -577,8 +577,11 @@ fn build_overload_brownout_report(
     let cancel_p99_improvement_ns = full_summary
         .cancel_p99_ns
         .saturating_sub(brownout_summary.cancel_p99_ns);
-    let core_units_delta =
-        brownout_summary.core_units_preserved as i64 - full_summary.core_units_preserved as i64;
+    let brownout_core_units = i64::try_from(brownout_summary.core_units_preserved)
+        .expect("brownout preserved units fit report delta");
+    let full_core_units = i64::try_from(full_summary.core_units_preserved)
+        .expect("full-surface preserved units fit report delta");
+    let core_units_delta = brownout_core_units - full_core_units;
     let winner_profile = if cancel_p99_improvement_ns >= 40_000 || core_units_delta >= 8 {
         "brownout"
     } else {
