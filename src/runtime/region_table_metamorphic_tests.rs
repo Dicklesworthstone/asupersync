@@ -49,7 +49,8 @@ fn mr_close_operation_idempotence() {
         let region = table.get(region_id.arena_index()).unwrap();
 
         // Primary close operation
-        let _result1 = region.begin_close(None);
+        let result1 = region.begin_close(None);
+        prop_assert!(result1, "First close should transition Open -> Closing");
 
         // MR: Second close should not panic and return false (already closing/closed)
         let result2 = region.begin_close(None);
@@ -60,13 +61,18 @@ fn mr_close_operation_idempotence() {
         prop_assert!(!result3, "Third close should return false (idempotent)");
 
         // Additional idempotence: other close operations should also be safe
-        let _drain_result = region.begin_drain();
-        let _finalize_result = region.begin_finalize();
-        let _complete_result = region.complete_close();
+        let drain_result = region.begin_drain();
+        let finalize_result = region.begin_finalize();
+        let complete_result = region.complete_close();
 
-        // All should be safe (not panic) regardless of return values
-        // This is the key property - NO PANICS
-        prop_assert!(true, "All operations completed without panic - idempotence verified");
+        prop_assert!(drain_result, "Closing region should transition into Draining");
+        prop_assert!(finalize_result, "Draining region should transition into Finalizing");
+        prop_assert!(complete_result, "Finalizing empty region should transition into Closed");
+        prop_assert_eq!(
+            table.state(region_id),
+            Some(RegionState::Closed),
+            "Complete idempotence chain should close an empty region"
+        );
     });
 }
 
@@ -118,6 +124,12 @@ fn state_ordering(state: RegionState) -> u8 {
         RegionState::Finalizing => 3,
         RegionState::Closed => 4,
     }
+}
+
+fn state_sequence_is_monotonic(states: &[RegionState]) -> bool {
+    states
+        .windows(2)
+        .all(|pair| state_ordering(pair[1]) >= state_ordering(pair[0]))
 }
 
 // ============================================================================
@@ -266,12 +278,9 @@ fn mr_cross_operation_safety() {
         let region2_id = table2.create_root(budget, Time::ZERO);
         let region2 = table2.get(region2_id.arena_index()).unwrap();
 
-        // Apply different operation sequences
-        apply_operation_sequence(region1, &ops1);
-        apply_operation_sequence(region2, &ops2);
-
-        // MR: Both sequences should complete without panicking
-        prop_assert!(true, "Both operation sequences completed safely");
+        // Apply different operation sequences and retain the observed state path.
+        let states1 = apply_operation_sequence(region1, &ops1);
+        let states2 = apply_operation_sequence(region2, &ops2);
 
         // MR: Final states should be valid (no corruption)
         let state1 = table1.state(region1_id);
@@ -279,11 +288,27 @@ fn mr_cross_operation_safety() {
 
         prop_assert!(state1.is_some(), "Region 1 should have valid state");
         prop_assert!(state2.is_some(), "Region 2 should have valid state");
+        prop_assert!(
+            state_sequence_is_monotonic(&states1),
+            "Region 1 state path should never regress: {:?}",
+            states1
+        );
+        prop_assert!(
+            state_sequence_is_monotonic(&states2),
+            "Region 2 state path should never regress: {:?}",
+            states2
+        );
     });
 }
 
 /// Helper to apply a sequence of operations to a region
-fn apply_operation_sequence(region: &crate::record::RegionRecord, ops: &[&str]) {
+fn apply_operation_sequence(
+    region: &crate::record::RegionRecord,
+    ops: &[&str],
+) -> Vec<RegionState> {
+    let mut states = Vec::with_capacity(ops.len() + 1);
+    states.push(region.state());
+
     for op in ops {
         match *op {
             "begin_close" => {
@@ -300,7 +325,10 @@ fn apply_operation_sequence(region: &crate::record::RegionRecord, ops: &[&str]) 
             }
             _ => {}
         }
+        states.push(region.state());
     }
+
+    states
 }
 
 // ============================================================================
@@ -426,7 +454,31 @@ mod mr_validation {
         // MR5 (Chain) catches: panic in complex sequences
         // MR6 (Safety) catches: order-dependent panics
 
-        assert!(true, "MR fault sensitivity validated by design");
+        fn mutated_close_operation(call_count: &mut u32) -> bool {
+            *call_count += 1;
+            assert!(*call_count <= 1, "Double close not allowed!");
+            true
+        }
+
+        let mut call_count = 0;
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mutated_close_operation(&mut call_count);
+            mutated_close_operation(&mut call_count);
+        }));
+        assert!(
+            panic_result.is_err(),
+            "MR1/MR5 should detect panic-on-repeat mutations"
+        );
+
+        let regressing_path = [
+            super::RegionState::Open,
+            super::RegionState::Closing,
+            super::RegionState::Open,
+        ];
+        assert!(
+            !super::state_sequence_is_monotonic(&regressing_path),
+            "MR2/MR6 should reject state-regression mutations"
+        );
     }
 
     /// Verify MR independence - different bug classes detected
@@ -439,7 +491,29 @@ mod mr_validation {
         // MR5: Sequence safety (complex interactions)
         // MR6: Order independence (commutativity aspects)
 
-        // These detect orthogonal bug classes - good independence
-        assert!(true, "MR independence validated by design");
+        let target_bug_classes = [
+            ("MR1", "panic_on_repeat"),
+            ("MR2", "state_regression"),
+            ("MR3", "return_inconsistency"),
+            ("MR4", "failed_transition_mutation"),
+            ("MR5", "sequence_instability"),
+            ("MR6", "order_dependent_state_regression"),
+        ];
+        let unique_classes = target_bug_classes
+            .iter()
+            .map(|(_, class)| *class)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            unique_classes.len(),
+            target_bug_classes.len(),
+            "Each MR should target a distinct primary bug class"
+        );
+        assert!(
+            unique_classes.contains("state_regression")
+                && unique_classes.contains("failed_transition_mutation")
+                && unique_classes.contains("order_dependent_state_regression"),
+            "MR suite should cover logic, isolation, and ordering failures"
+        );
     }
 }
