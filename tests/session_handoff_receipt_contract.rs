@@ -237,6 +237,33 @@ fn stale_in_progress_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn stale_in_progress_without_proof_suggestions_recommends_reopen() {
+    let receipt = receipt_json("stale_in_progress_no_proof.json");
+    assert_eq!(next_action_category(&receipt), "reopen-stale-bead");
+    assert_eq!(
+        receipt["next_action"]["bead_id"].as_str(),
+        Some("asupersync-stale1")
+    );
+    assert_eq!(
+        receipt["next_action"]["assignee"].as_str(),
+        Some("OlderAgent")
+    );
+    assert_eq!(
+        receipt["next_action"]["reason"].as_str(),
+        Some("stale in-progress bead needs owner or reclaim review")
+    );
+}
+
+#[test]
+fn stale_in_progress_no_proof_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "stale_in_progress_no_proof.json",
+        "stale_in_progress_no_proof_expected.json",
+        "stale-in-progress no-proof handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn epic_only_ready_queue_is_not_claimed() {
     let receipt = receipt_json("epic_only_ready.json");
     assert_eq!(next_action_category(&receipt), "blocked");

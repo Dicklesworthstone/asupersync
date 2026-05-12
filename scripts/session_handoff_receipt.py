@@ -22,6 +22,7 @@ NEXT_ACTIONS = {
     "avoid-peer-owned-surface",
     "wait-for-reservation",
     "proof-only",
+    "reopen-stale-bead",
     "blocked",
 }
 TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db"}
@@ -375,6 +376,7 @@ def choose_next_action(
     dirty: list[dict[str, str]],
     reservations: list[dict[str, Any]],
     proof_suggestions: list[str],
+    stale: list[dict[str, Any]],
     agent_mail_available: bool,
     branch: str,
 ) -> dict[str, Any]:
@@ -420,6 +422,15 @@ def choose_next_action(
             "reason": "no ready bead is available, but proof suggestions exist",
             "lane": proof_suggestions[0],
         }
+    if stale:
+        return {
+            "category": "reopen-stale-bead",
+            "reason": "stale in-progress bead needs owner or reclaim review",
+            "bead_id": stale[0].get("id", ""),
+            "assignee": stale[0].get("assignee", ""),
+            "updated_at": stale[0].get("updated_at", ""),
+            "age_hours": stale[0].get("age_hours", 0),
+        }
     if not agent_mail_available:
         return {
             "category": "blocked",
@@ -462,6 +473,7 @@ def build_receipt(
         dirty_entries,
         reservations,
         proof_suggestions,
+        stale_ids,
         agent_mail_available,
         branch,
     )
