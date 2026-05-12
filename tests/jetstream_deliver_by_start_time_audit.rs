@@ -6,7 +6,7 @@ use asupersync::messaging::jetstream::{
     ConsumerConfig, DeliverPolicy, FuzzPullSubscriberState, FuzzPullSubscriberStep,
     FuzzPullSubscriberTerminal, fuzz_apply_pull_subscriber_step,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 #[test]
 fn deliver_by_start_time_configuration_preserves_historical_start_time() {
