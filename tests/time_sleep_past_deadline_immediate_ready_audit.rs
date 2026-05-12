@@ -342,9 +342,8 @@ fn sleep_assert_polled_after_completion_message_is_clear() {
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -404,15 +403,10 @@ impl MockSleep {
     }
 }
 
-struct NullWake;
-impl Wake for NullWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 #[test]
 fn behavioral_zero_duration_resolves_immediately() {
     // sleep(now, ZERO) — the operator's exact case.
-    let now = MockTime::from_nanos(1_000_000);
+    let now = MockTime::ZERO;
     let s = MockSleep::after(now, Duration::ZERO);
 
     assert_eq!(
@@ -521,8 +515,8 @@ fn behavioral_full_future_poll_converges_for_zero_duration() {
         time: now,
     };
 
-    let waker = Waker::from(Arc::new(NullWake));
-    let mut ctx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
     let mut pinned = std::pin::pin!(f);
 
     let result = pinned.as_mut().poll(&mut ctx);

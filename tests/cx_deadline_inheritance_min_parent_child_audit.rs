@@ -45,9 +45,9 @@
 //!        - **cost_quota**: MIN (less cost = tighter).
 //!        - **priority**: MAX (higher priority for cleanup
 //!          = stronger preemption).
-//!      The None-case handling (None means "no constraint")
-//!      lets either side be unconstrained without the other
-//!      being clamped to None.
+//!          The None-case handling (None means "no constraint")
+//!          lets either side be unconstrained without the other
+//!          being clamped to None.
 //!
 //!   2. **`Budget::meet` is an alias for `combine`** (budget.
 //!      rs:441): documented as the lattice-meet operation.
@@ -85,7 +85,7 @@
 //! A regression that:
 //!   - replaced MIN with MAX on the deadline axis (would
 //!     let children RELAX parent deadlines — full
-//:     structured-concurrency violation),
+//!     structured-concurrency violation),
 //!   - removed the None-arm fallback (would force every
 //!     ancestor to set a finite deadline — defeats the
 //!     escape hatch for unbounded scopes),
@@ -93,12 +93,12 @@
 //!     downgrade cleanup priority on nesting — cleanup
 //!     under cancellation would deprioritize),
 //!   - removed RegionTable::create_child's
-//:     parent_budget.meet(budget) call (would give the
+//!     parent_budget.meet(budget) call (would give the
 //!     child its proposed budget directly — could exceed
 //!     parent constraints, violating MIN),
 //!   - removed the tightening trace event (would lose
 //!     observability when child budgets get clamped),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -270,8 +270,7 @@ fn region_table_create_child_stores_effective_not_proposed_budget() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 

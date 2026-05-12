@@ -417,7 +417,8 @@ fn behavioral_join_handle_drop_is_detach_no_abort() {
     let h = MockJoinHandle {
         completed: AtomicBool::new(false),
     };
-    drop(h);
+    assert!(!h.completed.load(Ordering::Acquire));
+    let _detached = h;
     // No abort, no panic — pure detach. The compile-time
     // absence of abort logic IS the proof.
 }
