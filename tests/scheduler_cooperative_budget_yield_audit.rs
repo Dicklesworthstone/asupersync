@@ -34,13 +34,12 @@
 //!        path. Otherwise returns Ok(()) without touching the
 //!        write lock.
 //!      - Slow path (cx.rs:1697-1733): under write lock,
-//!        re-runs `checkpoint_budget_exhaustion`. If exhausted:
-//!          a. Sets `inner.cancel_requested = true`.
-//!          b. Sets `inner.fast_cancel = true` (Release).
-//!          c. Strengthens `inner.cancel_reason` with the new
-//!             reason.
-//!          d. If mask_depth == 0, sets cancel_acknowledged.
-//!          e. Returns `Err(crate::error::Error)` to the caller.
+//!        re-runs `checkpoint_budget_exhaustion`. If exhausted,
+//!        it sets `inner.cancel_requested = true`, sets
+//!        `inner.fast_cancel = true` (Release), strengthens
+//!        `inner.cancel_reason` with the new reason, sets
+//!        cancel_acknowledged when mask_depth == 0, and returns
+//!        `Err(crate::error::Error)` to the caller.
 //!
 //!   3. **`checkpoint_budget_exhaustion`** (cx.rs:1952-1999)
 //!      checks all three exhaustion classes (deadline, poll
@@ -64,6 +63,7 @@
 //!        threshold for last-checkpoint age).
 //!      - `Cx::cancel_acknowledged` flag (false until
 //!        checkpoint observes the request).
+//!
 //!      The runtime does NOT preempt them; observability is
 //!      the mitigation. Operators can build alerts on these
 //!      metrics to detect runaway tasks.
@@ -100,7 +100,7 @@
 //!     latched exhaustion via the fast path),
 //!   - removed the `is_exhausted` / `is_past_deadline` methods
 //!     on Budget (the underlying check primitives),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 

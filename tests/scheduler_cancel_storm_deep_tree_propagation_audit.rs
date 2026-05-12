@@ -8,11 +8,11 @@
 //!
 //! Audit findings:
 //!
-//!   The deep-tree cancel propagation is **O(N + total_edges
-//!   + total_tasks)** — that's O(N) for a tree (since edges
-//!   = N-1 in a tree). The N log N sort by depth is the only
-//!   super-linear term, well under O(N²) for 1000 regions
-//!   (~10K comparisons → microseconds). The chain:
+//! The deep-tree cancel propagation is **O(N + total_edges +
+//! total_tasks)**. That is O(N) for a tree because edges =
+//! N-1 in a tree. The N log N sort by depth is the only
+//! super-linear term, well under O(N²) for 1000 regions
+//! (~10K comparisons → microseconds). The chain:
 //!
 //!   1. **Single subtree collection pass** (state.rs:2531):
 //!      ```ignore
@@ -45,9 +45,9 @@
 //!      Each region is pushed onto the stack EXACTLY ONCE
 //!      and popped EXACTLY ONCE. Per-region work is
 //!      copy_child_ids_into (which is O(C) where C is the
-//!      direct child count). Sum over the tree:
-//!        Σ_regions (1 + child_count) = N + total_edges = 2N - 1
-//!      for a tree → strictly O(N).
+//!      direct child count). The sum over the tree is
+//!      Σ_regions (1 + child_count) = N + total_edges = 2N - 1,
+//!      which is strictly O(N).
 //!
 //!   3. **Iterative — NOT recursive**: the `let mut stack`
 //!      pattern means deep linear chains (1000 levels) do
@@ -129,7 +129,7 @@
 //!   - replaced the region_reasons HashMap with a Vec.iter().
 //!     find() (would be O(N) per parent lookup → O(N²)
 //!     total),
-//:   - removed the child_buf reuse (would allocate per
+//!   - removed the child_buf reuse (would allocate per
 //!     region — pathological allocator pressure under deep
 //!     trees),
 //!   - replaced the sort_by_key with bubble-sort or O(N²)
@@ -138,8 +138,8 @@
 //!   - introduced a nested for-loop in the cancel_request
 //!     body (e.g., for each region, scan ALL OTHER regions
 //!     for dependent state),
-//! would be caught by the structural pins below or by the
-//! behavioral benchmark.
+//!     would be caught by the structural pins below or by the
+//!     behavioral benchmark.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -261,8 +261,7 @@ fn cancel_request_first_pass_is_single_iteration_no_subtree_recollect() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -294,8 +293,7 @@ fn cancel_request_second_pass_is_single_iteration_no_subtree_recollect() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -377,8 +375,7 @@ fn task_id_buf_reused_across_regions_in_second_pass() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -426,6 +423,11 @@ fn collect_subtree(regions: &HashMap<u64, MockRegion>, root: u64) -> Vec<MockNod
             depth,
         });
         if let Some(region) = regions.get(&rid) {
+            assert_eq!(region.id, rid, "mock region id must match map key");
+            assert_eq!(
+                region.parent, parent,
+                "mock region parent must match traversal parent",
+            );
             child_buf.clear();
             child_buf.extend_from_slice(&region.children);
             for &child_id in &child_buf {
@@ -598,7 +600,7 @@ fn deep_tree_subtree_collection_visits_each_region_exactly_once() {
                 .and_modify(|r| r.children.push(id))
                 .or_insert_with(|| MockRegion {
                     id: prev,
-                    parent: None,
+                    parent: Some(0),
                     children: vec![id],
                     state: 0,
                     cancel_reason: None,
