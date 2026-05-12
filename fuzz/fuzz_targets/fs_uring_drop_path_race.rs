@@ -27,6 +27,7 @@ use arbitrary::Arbitrary;
 use asupersync::fs::IoUringFile;
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
+use std::thread::Result as ThreadResult;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
@@ -125,7 +126,7 @@ impl DropRaceHarness {
 
             // Start an operation that will be in-flight
             let handle = std::thread::spawn(move || {
-                let _result = futures::executor::block_on(async {
+                futures::executor::block_on(async {
                     let mut buffer = vec![0u8; (op.buffer_size as usize).min(MAX_BUFFER_SIZE)];
 
                     match op.operation_type {
@@ -145,7 +146,7 @@ impl DropRaceHarness {
                         }
                         OperationType::Sync => arc_file_clone.sync_all().await,
                     }
-                });
+                })
             });
 
             // Inject timing variance to hit different Drop race windows
@@ -156,7 +157,7 @@ impl DropRaceHarness {
             // VULNERABILITY: Drop arc_file while operation may be in-flight
             // This triggers the Drop cleanup path with pending operations
             drop(arc_file);
-            let _ = handle.join();
+            observe_io_join(handle.join(), "drop during in-flight operation");
         }
 
         Ok(())
@@ -204,7 +205,7 @@ impl DropRaceHarness {
 
             // Clean up threads
             for handle in handles {
-                let _ = handle.join();
+                observe_io_join(handle.join(), "drop during completion operation");
             }
         }
 
@@ -235,7 +236,7 @@ impl DropRaceHarness {
 
                 let handle = std::thread::spawn(move || {
                     // Start operation
-                    let _result = futures::executor::block_on(async {
+                    let result = futures::executor::block_on(async {
                         let mut buffer = vec![0u8; buffer_size];
                         arc_clone.read_at(&mut buffer, 0).await
                     });
@@ -243,6 +244,7 @@ impl DropRaceHarness {
                     // RACE: Multiple threads drop simultaneously
                     // Only one should run the Drop cleanup, but strong_count check may race
                     drop(arc_clone);
+                    result
                 });
                 handles.push(handle);
             }
@@ -252,7 +254,7 @@ impl DropRaceHarness {
 
             // Wait for all threads
             for handle in handles {
-                let _ = handle.join();
+                observe_io_join(handle.join(), "drop under concurrency operation");
             }
         }
 
@@ -276,7 +278,7 @@ impl DropRaceHarness {
                 IoUringFile::open(&file_path).map_err(|e| format!("Failed to open file: {e}"))?;
 
             // Force rapid operation submission to increase user_data collision probability
-            let _result = futures::executor::block_on(async {
+            let results = futures::executor::block_on(async {
                 let arc_file = Arc::new(uring_file);
                 let mut futures = Vec::new();
 
@@ -301,6 +303,7 @@ impl DropRaceHarness {
                 drop(arc_file);
                 futures::future::join_all(futures).await
             });
+            observe_io_results(results, "drop with user-data collision operation");
 
             // VULNERABILITY: Drop will try to cancel operations by user_data,
             // but if user_data values wrapped/collided, wrong ops might be cancelled
@@ -308,6 +311,28 @@ impl DropRaceHarness {
 
         Ok(())
     }
+}
+
+fn observe_io_join<T>(join_result: ThreadResult<std::io::Result<T>>, context: &str) {
+    match join_result.expect("drop-race helper thread should not panic") {
+        Ok(_) => {}
+        Err(error) => observe_drop_race_io_error(error, context),
+    }
+}
+
+fn observe_io_results<T>(results: Vec<std::io::Result<T>>, context: &str) {
+    for result in results {
+        if let Err(error) = result {
+            observe_drop_race_io_error(error, context);
+        }
+    }
+}
+
+fn observe_drop_race_io_error(error: std::io::Error, context: &str) {
+    assert!(
+        error.raw_os_error().is_some() || !error.to_string().is_empty(),
+        "{context} error should preserve an OS code or diagnostic message"
+    );
 }
 
 fuzz_target!(|data: (DropAttackVector, Vec<FileOperation>)| {
