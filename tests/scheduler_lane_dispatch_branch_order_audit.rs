@@ -81,7 +81,7 @@
 //!     the cancel branch in stable Rust without a cargo
 //!     feature gate) that would shift cancel-dispatch latency
 //!     in the cold case,
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 

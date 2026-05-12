@@ -79,7 +79,7 @@
 //!     (would let runtime worker code emit events after the
 //!     user's process started teardown — a different but
 //!     related failure),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -189,7 +189,7 @@ fn no_set_global_default_in_production_code() {
             // If the finding is in a path that includes "tests"
             // or under a #[cfg(test)] mod, skip. This is a coarse
             // filter; the comprehensive list is the audit doc.
-            !f.contains("/tests/") && !f.contains("_tests.rs")
+            !f.contains("/tests/") && !f.contains("_test.rs") && !f.contains("_tests.rs")
         })
         .collect();
 
