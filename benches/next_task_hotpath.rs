@@ -1,3 +1,9 @@
+//! Focused benchmark for next_task() hot dispatch loop in three_lane.rs
+//!
+//! This micro-benchmark measures the performance bottlenecks in the core
+//! scheduler dispatch loop by testing next_task() in isolation with various
+//! queue states and workloads.
+
 // br-asupersync-gppp8h: bench is gated off (cfg(any()) is permanently false)
 // until it is updated for the current scheduler API. The body still references
 // WorkerConfig and ThreeLaneScheduler::create_worker, which have been
@@ -6,11 +12,6 @@
 // once the bench is rewritten against ThreeLaneScheduler::new_with_options +
 // worker_mut_for_test (or whatever the new construction surface is).
 #![cfg(all(feature = "test-internals", any()))]
-//! Focused benchmark for next_task() hot dispatch loop in three_lane.rs
-//!
-//! This micro-benchmark measures the performance bottlenecks in the core
-//! scheduler dispatch loop by testing next_task() in isolation with various
-//! queue states and workloads.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;

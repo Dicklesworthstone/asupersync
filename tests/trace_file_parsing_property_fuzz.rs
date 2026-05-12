@@ -30,16 +30,16 @@ use proptest::prelude::*;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-/// Build a header-only valid prefix: magic + version + flags + compression byte.
-/// `HEADER_SIZE` is `11 + 2 + 2 + 1 = 16` (per src/trace/file.rs:83) so the
-/// returned vec is exactly 16 bytes when version=TRACE_FILE_VERSION,
-/// flags=0, compression=0 (uncompressed).
+/// Build a header-only valid prefix:
+/// magic + version + flags + compression byte + metadata length.
+/// `HEADER_SIZE` is `11 + 2 + 2 + 1 + 4 = 20` (per src/trace/file.rs:83).
 fn valid_header_prefix(version: u16, flags: u16, compression: u8) -> Vec<u8> {
     let mut buf = Vec::with_capacity(HEADER_SIZE);
     buf.extend_from_slice(TRACE_MAGIC);
     buf.extend_from_slice(&version.to_le_bytes());
     buf.extend_from_slice(&flags.to_le_bytes());
     buf.push(compression);
+    buf.extend_from_slice(&0u32.to_le_bytes());
     debug_assert_eq!(buf.len(), HEADER_SIZE);
     buf
 }
@@ -50,24 +50,17 @@ fn valid_header_prefix(version: u16, flags: u16, compression: u8) -> Vec<u8> {
 fn try_open(bytes: &[u8]) -> bool {
     let mut tmp = NamedTempFile::new().expect("tempfile");
     tmp.write_all(bytes).expect("write");
-    let path = tmp.path().to_owned();
-    drop(tmp.into_temp_path()); // keep the path alive
-    let path = path; // local binding so the file persists for open()
-    let _ = path; // silence unused if needed
-    // Re-create via the original tempfile pattern: write, flush, then open.
-    let mut tmp2 = NamedTempFile::new().expect("tempfile2");
-    tmp2.write_all(bytes).expect("write2");
-    tmp2.flush().expect("flush");
-    let result = TraceReader::open(tmp2.path());
+    tmp.flush().expect("flush");
+    let result = TraceReader::open(tmp.path());
     result.is_ok()
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// Truncation at any offset strictly less than HEADER_SIZE (16
+    /// Truncation at any offset strictly less than HEADER_SIZE (20
     /// bytes) MUST return Err. The parser cannot read a complete header
-    /// without all 16 bytes, so an Ok return would imply the parser
+    /// without all 20 bytes, so an Ok return would imply the parser
     /// silently accepted a truncated file.
     #[test]
     fn truncation_below_header_size_always_errors(truncate_at in 0usize..HEADER_SIZE) {

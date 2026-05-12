@@ -71,7 +71,7 @@
 //!   - exposed a `decrement` or `reset` API on `Counter`,
 //!   - introduced a stateful exporter that computed deltas from
 //!     snapshots without start_time bookkeeping,
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -224,22 +224,21 @@ fn otlp_counter_encoding_declares_cumulative_and_monotonic() {
     // semantics), that's acceptable — but the Counter path must
     // stay Cumulative.
     let delta_count = source.matches("AggregationTemporality::Delta").count();
-    if delta_count > 0 {
-        // A Delta usage means a future metric type adopted delta
-        // temporality. Verify that, when this happens, the
-        // implementer also added prev-value/reset-detection
-        // bookkeeping. We can't structurally prove that; bail
-        // with a clear message.
-        panic!(
-            "AUDIT GATE: otel.rs now contains \
-             AggregationTemporality::Delta ({delta_count} \
-             occurrences). Delta temporality requires prev-value \
-             tracking and reset detection per OTLP spec. Review \
-             the new code and update this audit test to verify \
-             the new path does NOT silently emit a negative \
-             delta on counter resets."
-        );
-    }
+    // A Delta usage means a future metric type adopted delta
+    // temporality. Verify that, when this happens, the
+    // implementer also added prev-value/reset-detection
+    // bookkeeping. We can't structurally prove that; bail
+    // with a clear message.
+    assert_eq!(
+        delta_count, 0,
+        "AUDIT GATE: otel.rs now contains \
+         AggregationTemporality::Delta ({delta_count} \
+         occurrences). Delta temporality requires prev-value \
+         tracking and reset detection per OTLP spec. Review \
+         the new code and update this audit test to verify \
+         the new path does NOT silently emit a negative \
+         delta on counter resets."
+    );
 }
 
 #[test]
