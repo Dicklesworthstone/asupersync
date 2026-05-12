@@ -62,10 +62,10 @@
 //!        queue OR local stealable LocalQueue.
 //!      - `spawn_local` → `LocalStoredTask` (no Send) →
 //!        local non-stealable `local_ready` queue.
-//!      The user's choice of which to call IS the choice of
-//!      scheduling discipline. Both type-checked, both
-//!      enforced — by the type bound on `spawn` and by the
-//!      routing target on `spawn_local`.
+//!        The user's choice of which to call IS the choice of
+//!        scheduling discipline. Both type-checked, both
+//!        enforced — by the type bound on `spawn` and by the
+//!        routing target on `spawn_local`.
 //!
 //!   6. **Send users gain by choosing spawn_local
 //!      explicitly**: a Send future passed to spawn_local
@@ -125,7 +125,7 @@
 //!   - made spawn require !Send (would break the existing
 //!     work-stealing path for the common case of Send
 //!     futures),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -147,8 +147,7 @@ fn spawn_local_accepts_both_send_and_non_send_via_no_send_bound() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let where_section = &source[start..safe_end];
 
@@ -199,8 +198,7 @@ fn spawn_local_output_still_requires_send_for_cross_thread_join() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let where_section = &source[start..safe_end];
 
@@ -231,8 +229,7 @@ fn spawn_local_routes_through_local_stored_task_not_stored_task() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -268,8 +265,7 @@ fn spawn_local_pins_task_record_to_current_worker() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -306,8 +302,7 @@ fn spawn_local_schedules_via_schedule_local_task_non_stealable() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -375,8 +370,7 @@ fn spawn_path_signature_remains_send_bounded_for_contrast() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let where_section = &source[start..safe_end];
 
