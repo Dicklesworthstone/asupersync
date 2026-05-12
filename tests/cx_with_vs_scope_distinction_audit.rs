@@ -88,21 +88,21 @@
 //!     Cx::current() returns stale Cxs from prior scopes),
 //!   - made set_current return Self instead of a guard
 //!     (callers would have to manually pop — error-prone,
-//:     RAII contract broken),
+//!     RAII contract broken),
 //!   - removed the MaskGuard Drop impl (would leak mask
 //!     depth; cancel acknowledgment never fires),
 //!   - removed RegionRunner::drop (would leak regions;
 //!     dropping the region future before await completes
 //!     would leave the region in non-terminal state — full
-//:     close-protocol deadlock),
+//!     close-protocol deadlock),
 //!   - made Scope::region a non-async method (would lose
 //!     the region-future + drop-cancels semantics; couldnt
 //!     express the "drop before completion cancels region"
 //!     contract),
-//:   - made set_current allocate a region (would conflate
+//!   - made set_current allocate a region (would conflate
 //!     the two semantics — every Cx push would consume an
-//:     arena slot),
-//! would all be caught by the structural pins below.
+//!     arena slot),
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -188,8 +188,7 @@ fn cx_masked_returns_value_uses_mask_guard_for_decrement() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -246,8 +245,8 @@ fn cx_with_current_borrows_ambient_for_closure_body() {
 #[test]
 fn scope_region_allocates_new_region_via_create_child_region() {
     // Pin (link 1 contrast): Scope::region calls
-    // state.create_child_region — this is what allocates a
-    // NEW RegionRecord in the arena. Without this call, no
+    // through the child-admission path, which allocates a
+    // NEW RegionRecord in the arena. Without this path, no
     // new region is created.
     let source = read("src/cx/scope.rs");
 
@@ -260,25 +259,46 @@ fn scope_region_allocates_new_region_via_create_child_region() {
          without it, the scope contract is broken.",
     );
 
-    // The body must call create_child_region.
+    // The public budgeted region path must route through
+    // the admission helper that performs capability-aware
+    // child-region allocation.
     let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
     let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 4000).min(source.len());
+    let window_end = (start + 1200).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("state.create_child_region(self.region, budget)?"),
-        "REGRESSION: Scope::region_with_budget no longer calls \
-         create_child_region. Either no region is allocated \
-         (scope contract broken) or it uses some other path \
-         that bypasses the admission check (resource-pressure \
-         enforcement broken).",
+        body.contains("self.region_with_budget_and_priority(")
+            && body.contains("RegionPriority::Normal"),
+        "REGRESSION: Scope::region_with_budget no longer routes \
+         through the priority-aware child admission path. Either \
+         no region is allocated (scope contract broken) or it \
+         bypasses resource-pressure classification.",
+    );
+
+    let helper_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let helper_start = source
+        .find(helper_marker)
+        .expect("region_with_child_admission helper");
+    let helper_window_end = (helper_start + 2000).min(source.len());
+    let helper_safe_end = source
+        .char_indices()
+        .map(|(i, _)| i)
+        .rfind(|&i| i <= helper_window_end)
+        .unwrap_or(helper_window_end);
+    let helper_body = &source[helper_start..helper_safe_end];
+
+    assert!(
+        helper_body.contains("state.create_child_region_with_capability_budget_and_priority("),
+        "REGRESSION: region_with_child_admission no longer allocates \
+         a child region through the capability/priority-aware runtime \
+         state path. Either no RegionRecord is allocated or admission \
+         constraints are bypassed.",
     );
 }
 
