@@ -73,7 +73,7 @@
 //!   - made wake_all() non-idempotent (e.g., enforcing
 //!     "each parker can only be unparked once" — would
 //!     panic on second call from concurrent shutdown),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
