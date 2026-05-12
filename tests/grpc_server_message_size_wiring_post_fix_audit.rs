@@ -177,10 +177,10 @@ fn framed_codec_helper_returns_independent_codec_per_call() {
     );
     // But they're independent instances (we can't compare
     // FramedCodec for equality directly; pin via independent
-    // mutability — taking each by value into separate scopes
+    // ownership — moving each by value into a distinct binding
     // implies independence).
-    drop(codec_a);
-    let _ = codec_b;
+    let _codec_a = codec_a;
+    let _codec_b = codec_b;
 }
 
 #[test]
