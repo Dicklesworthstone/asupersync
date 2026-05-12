@@ -29,8 +29,8 @@
 //!        - 0.5 — moderate degradation
 //!        - 0.25 — heavy degradation
 //!        - 0.0 — emergency degradation
-//!      Atomic load with Relaxed ordering — lock-free, can
-//!      be called arbitrarily often without contention.
+//!          Atomic load with Relaxed ordering — lock-free, can
+//!          be called arbitrarily often without contention.
 //!
 //!   3. **`SystemPressure::should_degrade(threshold) -> bool`**
 //!      (pressure.rs:79): boolean check against a caller-
@@ -114,10 +114,10 @@
 //!     + state.region_limits.
 //!   - Current usage: state.live_task_count + region state
 //!     predicates.
-//! The spawn API also surfaces backpressure as a typed
-//! Err (RegionAtCapacity / ResourcePressure / RegionClosed)
-//! — so even spawn-without-pre-check produces actionable
-//! error information rather than a runtime panic.
+//!     The spawn API also surfaces backpressure as a typed
+//!     Err (RegionAtCapacity / ResourcePressure / RegionClosed)
+//!     — so even spawn-without-pre-check produces actionable
+//!     error information rather than a runtime panic.
 //!
 //! No bead filed. The framing "spawn-and-pray" is incorrect:
 //! spawn() returns Result with structured backpressure
@@ -145,7 +145,7 @@
 //!   - changed spawn to panic on capacity exhaustion
 //!     instead of returning Err (would break the Result
 //!     contract — apps lose graceful-degradation hooks),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -387,20 +387,51 @@ fn check_resource_pressure_enforces_admission_at_create_child_region() {
     // after the fact.
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub fn create_child_region(";
-    let start = source.find(fn_marker).expect("create_child_region fn");
-    let body_end = source[start..]
+    let default_marker = "pub fn create_child_region(";
+    let default_start = source.find(default_marker).expect("create_child_region fn");
+    let default_body_end = source[default_start..]
         .find("\n    }\n")
         .expect("create_child_region close");
-    let body = &source[start..start + body_end];
+    let default_body = &source[default_start..default_start + default_body_end];
 
     assert!(
-        body.contains("self.check_resource_pressure_for_region("),
-        "REGRESSION: create_child_region no longer calls \
-         check_resource_pressure_for_region. Backpressure \
-         enforcement happens AFTER region creation — \
-         pathway for unbounded region fan-out under \
-         resource pressure.",
+        default_body.contains("self.create_child_region_with_priority("),
+        "REGRESSION: create_child_region no longer delegates through \
+         the priority-aware admission path. Backpressure enforcement may \
+         be bypassed for default-priority child regions.",
+    );
+
+    let priority_marker = "pub fn create_child_region_with_priority(";
+    let priority_start = source
+        .find(priority_marker)
+        .expect("create_child_region_with_priority fn");
+    let priority_body_end = source[priority_start..]
+        .find("\n    }\n")
+        .expect("create_child_region_with_priority close");
+    let priority_body = &source[priority_start..priority_start + priority_body_end];
+
+    assert!(
+        priority_body.contains("self.create_child_region_with_capability_budget_and_priority("),
+        "REGRESSION: create_child_region_with_priority no longer \
+         delegates through the capability-budget admission path. \
+         Resource-pressure admission may be bypassed.",
+    );
+
+    let admission_marker = "pub fn create_child_region_with_capability_budget_and_priority(";
+    let admission_start = source
+        .find(admission_marker)
+        .expect("create_child_region_with_capability_budget_and_priority fn");
+    let admission_body_end = source[admission_start..]
+        .find("\n    }\n")
+        .expect("create_child_region_with_capability_budget_and_priority close");
+    let admission_body = &source[admission_start..admission_start + admission_body_end];
+
+    assert!(
+        admission_body.contains("self.check_resource_pressure_for_region("),
+        "REGRESSION: create_child_region_with_capability_budget_and_priority \
+         no longer calls check_resource_pressure_for_region. Backpressure \
+         enforcement happens AFTER region creation — pathway for \
+         unbounded region fan-out under resource pressure.",
     );
 }
 
