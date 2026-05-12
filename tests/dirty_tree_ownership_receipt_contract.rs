@@ -204,6 +204,36 @@ fn directory_reservation_matches_full_output_golden() {
 }
 
 #[test]
+fn rename_target_reservation_blocks_destination_after_porcelain_expansion() {
+    let receipt = receipt_json("rename_target_reservation.json");
+    let source = row(&receipt, "docs/old-secret.rs");
+    let target = row(&receipt, "src/security/secret.rs");
+
+    assert_eq!(source["classification"].as_str(), Some("unattributed"));
+    assert_eq!(target["classification"].as_str(), Some("peer-owned"));
+    assert_eq!(target["owner"].as_str(), Some("BoldPlateau"));
+    assert_eq!(
+        target["evidence"]["reservation_path_pattern"].as_str(),
+        Some("src/security")
+    );
+    assert_eq!(
+        target["staging_guidance"]["decision"].as_str(),
+        Some("do-not-stage")
+    );
+    assert_eq!(receipt["summary"]["total_paths"].as_u64(), Some(2));
+    assert_eq!(receipt["summary"]["peer_owned"].as_u64(), Some(1));
+    assert_eq!(receipt["summary"]["unattributed"].as_u64(), Some(1));
+}
+
+#[test]
+fn rename_target_reservation_matches_full_output_golden() {
+    assert_receipt_output_matches_golden(
+        "rename_target_reservation.json",
+        "rename_target_reservation_expected.json",
+    );
+}
+
+#[test]
 fn self_reservation_allows_pathspec_staging() {
     let receipt = receipt_json("self_reservation.json");
     let row = row(&receipt, "scripts/dirty_tree_ownership_receipt.py");

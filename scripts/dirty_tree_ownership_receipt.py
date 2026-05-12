@@ -100,6 +100,17 @@ def normalize_path(path: str) -> str:
     return path.replace("\\", "/").removeprefix("./").rstrip("/")
 
 
+def status_paths(status: str, path: str) -> list[str]:
+    if ("R" in status or "C" in status) and " -> " in path:
+        paths = []
+        for part in path.split(" -> ", 1):
+            normalized = normalize_path(part.strip())
+            if normalized and normalized not in paths:
+                paths.append(normalized)
+        return paths
+    return [path] if path else []
+
+
 def has_glob_magic(path: str) -> bool:
     return any(char in path for char in "*?[")
 
@@ -155,11 +166,12 @@ def git_entries(source: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path", ""))
-        if path:
+        status = str(item.get("status", ""))
+        for expanded_path in status_paths(status, path):
             entries.append(
                 {
-                    "status": str(item.get("status", "")),
-                    "path": path,
+                    "status": status,
+                    "path": expanded_path,
                 }
             )
     return entries
@@ -170,7 +182,10 @@ def parse_status_lines(raw: str) -> list[dict[str, str]]:
     for line in raw.splitlines():
         if len(line) < 4:
             continue
-        entries.append({"status": line[:2], "path": line[3:]})
+        status = line[:2]
+        path = line[3:]
+        for expanded_path in status_paths(status, path):
+            entries.append({"status": status, "path": expanded_path})
     return entries
 
 
