@@ -144,6 +144,7 @@
 //:     region_with_budget — would let region() return
 //!     before child quiescence, breaking the
 //!     structured-concurrency contract,
+//!
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
@@ -203,14 +204,15 @@ fn region_with_budget_cleanup_runs_before_function_return() {
     // — user future is alive throughout cleanup.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
     let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -257,14 +259,15 @@ fn region_with_budget_returns_ok_outcome_at_function_end() {
     // is returned to the caller.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
     let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -292,8 +295,7 @@ fn region_with_budget_pins_pinned_fut_after_factory_succeeds() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -401,8 +403,7 @@ fn region_close_future_poll_returns_ready_when_state_closed() {
     let start = source.find(impl_marker).expect("RegionCloseFuture impl");
     let next_impl = source[start + impl_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + impl_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + impl_marker.len() + o);
     let body = &source[start..next_impl];
 
     assert!(
@@ -423,14 +424,15 @@ fn no_explicit_drop_or_mem_drop_on_pinned_fut_in_region_with_budget() {
     // would duplicate the standard behavior.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
     let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
