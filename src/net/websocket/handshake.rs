@@ -106,6 +106,24 @@ fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError
     )
 }
 
+fn validate_url_host(host: &str) -> Result<(), HandshakeError> {
+    if host.bytes().any(|b| matches!(b, 0..=32 | 127)) {
+        return Err(HandshakeError::InvalidUrl(
+            "host contains an invalid HTTP authority byte".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_url_request_target(path: &str) -> Result<(), HandshakeError> {
+    if path.bytes().any(|b| matches!(b, 0..=32 | 127)) {
+        return Err(HandshakeError::InvalidUrl(
+            "request target contains an invalid HTTP request-line byte".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Parsed WebSocket URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WsUrl {
@@ -157,14 +175,17 @@ impl WsUrl {
                 },
                 |bracket_end| {
                     let host = &host_port[1..bracket_end];
-                    let port = if host_port.len() > bracket_end + 1
-                        && host_port.as_bytes()[bracket_end + 1] == b':'
-                    {
-                        host_port[bracket_end + 2..]
+                    let suffix = &host_port[bracket_end + 1..];
+                    let port = if suffix.is_empty() {
+                        default_port
+                    } else if let Some(port_str) = suffix.strip_prefix(':') {
+                        port_str
                             .parse()
                             .map_err(|_| HandshakeError::InvalidUrl("invalid port".into()))?
                     } else {
-                        default_port
+                        return Err(HandshakeError::InvalidUrl(
+                            "unexpected data after bracketed IPv6 address".into(),
+                        ));
                     };
                     Ok((host.to_string(), port))
                 },
@@ -186,6 +207,8 @@ impl WsUrl {
         if host.is_empty() {
             return Err(HandshakeError::InvalidUrl("empty host".into()));
         }
+        validate_url_host(&host)?;
+        validate_url_request_target(path)?;
 
         Ok(Self {
             host,
@@ -942,6 +965,39 @@ mod tests {
         assert_eq!(url.host, "::1");
         assert_eq!(url.port, 8080);
         assert_eq!(url.path, "/test");
+    }
+
+    #[test]
+    fn ws_url_parse_rejects_raw_request_line_delimiters() {
+        for url in [
+            "ws://example.com/chat\r\nX-Injected: yes",
+            "ws://example.com/chat\nX-Injected: yes",
+            "ws://example.com/chat with space",
+        ] {
+            let err = WsUrl::parse(url).expect_err("raw request-line delimiter must be rejected");
+            assert!(
+                matches!(err, HandshakeError::InvalidUrl(_)),
+                "unexpected error for {url:?}: {err:?}"
+            );
+        }
+
+        let encoded = WsUrl::parse("ws://example.com/chat%0D%0AX-Injected:%20yes")
+            .expect("percent-encoded delimiters are data, not raw request-line bytes");
+        assert_eq!(encoded.path, "/chat%0D%0AX-Injected:%20yes");
+    }
+
+    #[test]
+    fn ws_url_parse_rejects_invalid_authority_bytes_and_ipv6_suffix() {
+        for url in [
+            "ws://example.com\r\nX-Injected: yes/chat",
+            "ws://[::1]evil.test/chat",
+        ] {
+            let err = WsUrl::parse(url).expect_err("malformed authority must be rejected");
+            assert!(
+                matches!(err, HandshakeError::InvalidUrl(_)),
+                "unexpected error for {url:?}: {err:?}"
+            );
+        }
     }
 
     #[test]
