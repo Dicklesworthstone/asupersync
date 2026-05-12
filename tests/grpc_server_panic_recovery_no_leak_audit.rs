@@ -206,7 +206,7 @@ fn no_panic_payload_format_in_status_construction() {
             "tick #173 audit pin: Status:: constructor argument references \
              a panic-payload-shaped token. A panic payload's Display can \
              contain arbitrary user-supplied data (file paths, secrets in \
-             stack-locals, raw strings from format!('{:?}', err)). When \
+             stack-locals, raw strings from debug-formatted errors). When \
              converting Outcome::Panicked → Status, use a STATIC message \
              ('internal server error') rather than the payload contents. \
              Hits:\n",

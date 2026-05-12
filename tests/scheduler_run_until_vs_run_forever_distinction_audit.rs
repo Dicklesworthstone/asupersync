@@ -142,9 +142,9 @@
 //!   - run_until_quiescent (lab: full drain)
 //!   - run_until_idle (lab: weaker drain)
 //!   - run_once (test-only single-step)
-//! All five are distinct, all five have observably different
-//! exit conditions and return types. No conflation —
-//! verdict SOUND, no bead filed.
+//!     All five are distinct, all five have observably different
+//!     exit conditions and return types. No conflation —
+//!     verdict SOUND, no bead filed.
 //!
 //! A regression that:
 //!   - removed Runtime::block_on (would lose the public
@@ -154,7 +154,7 @@
 //!     full-drain entry point — testing tool gap),
 //!   - made run_until_idle equivalent to run_until_quiescent
 //!     (would silently strengthen the weaker variant —
-//:     existing tests using run_until_idle would observe
+//!     existing tests using run_until_idle would observe
 //!     different behavior),
 //!   - removed the steps return value from
 //!     run_until_quiescent / run_until_idle (would lose
@@ -164,8 +164,8 @@
 //!     shutdown (would weaken the worker-thread driver
 //!     semantics),
 //!   - made run_once dispatch more than one task (would
-//:     break the test-single-step contract),
-//! would all be caught by the structural pins below.
+//!     break the test-single-step contract),
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -401,8 +401,7 @@ fn worker_run_loop_does_not_call_block_on_internally() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
