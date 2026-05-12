@@ -263,6 +263,42 @@ fn dirty_index_conflict_takes_precedence_over_reservations() {
 }
 
 #[test]
+fn dirty_rename_index_lists_source_and_target_paths() {
+    let receipt = receipt("clear_reservations.json", "dirty_rename_index.json");
+    let staged_paths = receipt["preflight"]["dirty_index"]["staged_paths"]
+        .as_array()
+        .expect("staged paths array");
+    let staged = staged_paths
+        .iter()
+        .map(|value| value.as_str().expect("staged path string"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        receipt["recommended_next_action"].as_str(),
+        Some("clear-dirty-index-before-claim")
+    );
+    assert_eq!(
+        staged,
+        vec![
+            "docs/old-tracker.md",
+            ".beads/issues.jsonl",
+            "scripts/old_claim_helper.py",
+            "scripts/claim_reservation_receipt.py",
+        ]
+    );
+}
+
+#[test]
+fn dirty_rename_index_output_matches_full_reviewed_golden() {
+    assert_output_matches_golden(
+        "clear_reservations.json",
+        "dirty_rename_index.json",
+        "dirty_rename_index_expected.json",
+        "claim/reservation dirty-rename-index receipt changed; update the golden only after reviewing staged rename endpoint semantics",
+    );
+}
+
+#[test]
 fn dirty_index_output_matches_full_reviewed_golden() {
     assert_output_matches_golden(
         "clear_reservations.json",

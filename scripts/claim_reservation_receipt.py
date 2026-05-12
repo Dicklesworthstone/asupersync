@@ -248,6 +248,17 @@ def status_lines(snapshot: Any) -> List[str]:
     return []
 
 
+def status_paths(status: str, path: str) -> List[str]:
+    if ("R" in status or "C" in status) and " -> " in path:
+        paths: List[str] = []
+        for part in path.split(" -> ", 1):
+            normalized = part.strip().replace("\\", "/").removeprefix("./").rstrip("/")
+            if normalized and normalized not in paths:
+                paths.append(normalized)
+        return paths
+    return [path] if path else []
+
+
 def staged_paths(snapshot: Any) -> List[str]:
     paths: List[str] = []
     for line in status_lines(snapshot):
@@ -255,7 +266,7 @@ def staged_paths(snapshot: Any) -> List[str]:
             continue
         index_status = line[0]
         if index_status not in (" ", "?"):
-            paths.append(line[3:])
+            paths.extend(status_paths(line[:2], line[3:]))
     return paths
 
 
