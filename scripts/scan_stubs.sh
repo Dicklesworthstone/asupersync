@@ -293,6 +293,13 @@ row_inventory_path_field = f"{artifact_path_root}/{row_inventory_name}" if artif
 default_revisit_condition = str(row_output.get("revisit_condition", ""))
 
 
+def is_src_rust_test_module(rel_path: str) -> bool:
+    if not rel_path.startswith("src/"):
+        return False
+    name = pathlib.PurePosixPath(rel_path).name
+    return name.endswith("_test.rs") or name.startswith("test_")
+
+
 def selector_matches(selector: dict, rel_path: str, text: str, term: str) -> bool:
     exact_paths = selector.get("paths", []) or []
     prefixes = selector.get("path_prefixes", []) or []
@@ -322,6 +329,8 @@ for root_name in inventory.get("scanned_paths", []):
         if not path.is_file() or path.suffix.removeprefix(".") not in extensions:
             continue
         rel_path = path.relative_to(project_root).as_posix()
+        if is_src_rust_test_module(rel_path):
+            continue
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -556,6 +565,13 @@ root = pathlib.Path(sys.argv[1])
 pattern = re.compile(sys.argv[2])
 
 
+def is_src_rust_test_module(rel_path: str) -> bool:
+    name = pathlib.PurePosixPath(rel_path).name
+    return rel_path.startswith("src/") and (
+        name.endswith("_test.rs") or name.startswith("test_")
+    )
+
+
 def brace_delta(line: str) -> int:
     # Good enough for marker filtering: test modules/functions use ordinary
     # braces, and marker comments/strings should not control test scope.
@@ -615,6 +631,8 @@ def production_lines(path: pathlib.Path) -> list[tuple[int, str]]:
 
 for path in sorted((root / "src").rglob("*.rs")):
     rel = path.relative_to(root).as_posix()
+    if is_src_rust_test_module(rel):
+        continue
     for line_no, line in production_lines(path):
         print(f"{rel}:{line_no}:{line}")
 PY

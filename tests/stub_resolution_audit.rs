@@ -44,6 +44,14 @@ fn path_is_git_ignored(path: &Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+fn is_src_rust_test_module_path(path: &str) -> bool {
+    path.starts_with("src/")
+        && path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.ends_with("_test.rs") || name.starts_with("test_"))
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 struct IncompleteMarker {
     path: String,
@@ -58,6 +66,10 @@ fn brace_delta(line: &str) -> isize {
 }
 
 fn production_incomplete_markers(path: &str, source: &str) -> Vec<IncompleteMarker> {
+    if is_src_rust_test_module_path(path) {
+        return Vec::new();
+    }
+
     let lines = source.lines().collect::<Vec<_>>();
     if lines
         .iter()
@@ -273,6 +285,9 @@ fn live_placeholder_inventory_markers(
     for root in roots {
         for file in walk_marker_inventory_files(Path::new(&root), &extensions) {
             let path = file.to_string_lossy().replace('\\', "/");
+            if is_src_rust_test_module_path(&path) {
+                continue;
+            }
             let Ok(source) = fs::read_to_string(&file) else {
                 continue;
             };
@@ -731,6 +746,20 @@ fn standalone_test_marker() {
         once.contains("\"schema_version\":\"mock-code-finder-incomplete-marker-report-v1\"")
             && once.contains("\"marker_count\":2"),
         "serialized report must include schema and marker count: {once}"
+    );
+
+    let src_test_module = r#"
+//! Test-only audit prose may mention TODO, unimplemented!(, and panic!("not implemented")
+//! without becoming production marker evidence.
+
+#[test]
+fn test_only_marker() {
+    todo!("test-only marker");
+}
+"#;
+    assert!(
+        production_incomplete_markers("src/demo_test.rs", src_test_module).is_empty(),
+        "src Rust test modules must be excluded from production incomplete-marker scans"
     );
 
     eprintln!(
