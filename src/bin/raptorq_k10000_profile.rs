@@ -169,13 +169,13 @@ fn main() {
     }
 
     // Verify correctness
-    if decoded_flat.len() != source_flat.len() {
-        panic!(
-            "Decoded length mismatch: {} vs {}",
-            decoded_flat.len(),
-            source_flat.len()
-        );
-    }
+    assert_eq!(
+        decoded_flat.len(),
+        source_flat.len(),
+        "Decoded length mismatch: {} vs {}",
+        decoded_flat.len(),
+        source_flat.len()
+    );
 
     let mut corruption_count = 0;
     for (i, (&expected, &actual)) in source_flat.iter().zip(decoded_flat.iter()).enumerate() {
@@ -191,9 +191,10 @@ fn main() {
         }
     }
 
-    if corruption_count > 0 {
-        panic!("Decoded data has {} corrupted bytes!", corruption_count);
-    }
+    assert_eq!(
+        corruption_count, 0,
+        "Decoded data has {corruption_count} corrupted bytes!"
+    );
 
     // Show decode stats if available
     println!(

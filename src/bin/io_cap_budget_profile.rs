@@ -89,12 +89,14 @@ fn main() {
         final_stats.submitted, final_stats.completed
     );
 
-    if final_stats.submitted != total_ops as u64 || final_stats.completed != total_ops as u64 {
-        panic!(
-            "Incorrect accounting! Expected {}, got submit={} complete={}",
-            total_ops, final_stats.submitted, final_stats.completed
-        );
-    }
+    let expected_ops = total_ops as u64;
+    assert!(
+        final_stats.submitted == expected_ops && final_stats.completed == expected_ops,
+        "Incorrect accounting! Expected {}, got submit={} complete={}",
+        total_ops,
+        final_stats.submitted,
+        final_stats.completed
+    );
 
     println!("✓ Budget accounting correctness verified");
 }

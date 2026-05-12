@@ -125,22 +125,20 @@ fn main() {
 
     // Verify correctness
     let decoded_symbols = decode_result.source;
-    if decoded_symbols.len() != k {
-        panic!(
-            "Decoded symbol count mismatch: {} vs {}",
-            decoded_symbols.len(),
-            k
-        );
-    }
+    assert_eq!(
+        decoded_symbols.len(),
+        k,
+        "Decoded symbol count mismatch: {} vs {}",
+        decoded_symbols.len(),
+        k
+    );
 
     for (i, (original, decoded)) in source_symbols
         .iter()
         .zip(decoded_symbols.iter())
         .enumerate()
     {
-        if original != decoded {
-            panic!("Symbol {} data mismatch!", i);
-        }
+        assert_eq!(original, decoded, "Symbol {i} data mismatch!");
     }
 
     println!("Success! Decoded data matches original.");

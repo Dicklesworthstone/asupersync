@@ -115,9 +115,7 @@ fn main() {
         .zip(decoded_symbols.iter())
         .enumerate()
     {
-        if original != decoded {
-            panic!("Symbol {} data mismatch!", i);
-        }
+        assert_eq!(original, decoded, "Symbol {i} data mismatch!");
     }
 
     println!("✓ Decode successful - data matches original");
