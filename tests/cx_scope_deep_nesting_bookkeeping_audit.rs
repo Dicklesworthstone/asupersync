@@ -102,8 +102,8 @@
 //!     optimized (Rust doesn't guarantee TCO; recursion
 //!     during scope construction would hit stack limits at
 //!     small N),
-//! would all be caught by the structural pins below or by
-//! the behavioral deep-nesting test.
+//!     would all be caught by the structural pins below or by
+//!     the behavioral deep-nesting test.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -398,13 +398,13 @@ impl<T> MockArena<T> {
 #[derive(Debug)]
 struct MockRegionRecord {
     parent: Option<usize>,
-    depth: u32,
+    _depth: u32,
 }
 
 #[derive(Clone, Copy)]
 struct MockScope {
-    region_idx: usize,
-    budget_priority: u8,
+    _region_idx: usize,
+    _budget_priority: u8,
 }
 
 #[test]
@@ -420,11 +420,11 @@ fn deep_nesting_200_scopes_uses_bounded_stack_via_arena() {
     // Root.
     let root_idx = arena.insert(MockRegionRecord {
         parent: None,
-        depth: 0,
+        _depth: 0,
     });
     let _root_scope = MockScope {
-        region_idx: root_idx,
-        budget_priority: 128,
+        _region_idx: root_idx,
+        _budget_priority: 128,
     };
 
     fn nest(arena: &mut MockArena<MockRegionRecord>, parent_idx: usize, depth: u32, target: u32) {
@@ -433,13 +433,13 @@ fn deep_nesting_200_scopes_uses_bounded_stack_via_arena() {
         }
         let new_idx = arena.insert(MockRegionRecord {
             parent: Some(parent_idx),
-            depth: depth + 1,
+            _depth: depth + 1,
         });
         // The "Scope" struct is stack-allocated — this is the
         // O(1) per-level stack overhead.
         let _scope = MockScope {
-            region_idx: new_idx,
-            budget_priority: 128,
+            _region_idx: new_idx,
+            _budget_priority: 128,
         };
         nest(arena, new_idx, depth + 1, target);
     }
@@ -465,12 +465,11 @@ fn deep_nesting_200_scopes_uses_bounded_stack_via_arena() {
         } else {
             break;
         }
-        if walk_depth > 1000 {
-            panic!(
-                "REGRESSION: parent-walk exceeded 1000 steps \
-                    — indicates a cycle or arena corruption"
-            );
-        }
+        assert!(
+            walk_depth <= 1000,
+            "REGRESSION: parent-walk exceeded 1000 steps \
+                — indicates a cycle or arena corruption"
+        );
     }
     assert_eq!(
         walk_depth, 201,
@@ -490,7 +489,7 @@ fn deep_nesting_500_scopes_bookkeeping_is_o_n_total_o_1_per_scope() {
 
     let root_idx = arena.insert(MockRegionRecord {
         parent: None,
-        depth: 0,
+        _depth: 0,
     });
     scopes_created.fetch_add(1, Ordering::Relaxed);
 
@@ -499,12 +498,12 @@ fn deep_nesting_500_scopes_bookkeeping_is_o_n_total_o_1_per_scope() {
     for depth in 0..target_depth {
         let new_idx = arena.insert(MockRegionRecord {
             parent: Some(current_idx),
-            depth: depth + 1,
+            _depth: depth + 1,
         });
         // Per-scope work: O(1) — one arena insert.
         let _scope = MockScope {
-            region_idx: new_idx,
-            budget_priority: 128,
+            _region_idx: new_idx,
+            _budget_priority: 128,
         };
         scopes_created.fetch_add(1, Ordering::Relaxed);
         current_idx = new_idx;

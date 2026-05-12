@@ -722,9 +722,18 @@ fn current_fault_actions_are_explicit_and_future_dimensions_fail_closed() {
     }
 
     let rows = rows_by_scenario(&contract);
-    assert!(rows["chaos-partition-cancel-storm"]["live_runner_wired"] == true);
-    assert!(rows["chaos-disk-pressure-cleanup-delay"]["live_runner_wired"] == true);
-    assert!(rows["chaos-process-stall-minimized-counterexample"]["live_runner_wired"] == true);
+    assert_eq!(
+        rows["chaos-partition-cancel-storm"]["live_runner_wired"],
+        true,
+    );
+    assert_eq!(
+        rows["chaos-disk-pressure-cleanup-delay"]["live_runner_wired"],
+        true,
+    );
+    assert_eq!(
+        rows["chaos-process-stall-minimized-counterexample"]["live_runner_wired"],
+        true,
+    );
 }
 
 #[test]

@@ -113,7 +113,7 @@ fn with_details_caps_both_message_and_details() {
         status.message().len() <= MAX_STATUS_MESSAGE_LEN,
         "with_details message cap not enforced",
     );
-    let details_len = status.details().map(|b| b.len()).unwrap_or(0);
+    let details_len = status.details().map_or(0, |b| b.len());
     assert!(
         details_len <= MAX_DETAILS_LEN,
         "with_details details cap not enforced; got {details_len} bytes",
@@ -178,7 +178,7 @@ fn status_at_exact_cap_passes_through_unchanged() {
         MAX_STATUS_MESSAGE_LEN,
         "at-cap message preserved at full length",
     );
-    assert_eq!(status.message(), exact.as_str(), "at-cap content unchanged",);
+    assert_eq!(status.message(), exact.as_str(), "at-cap content unchanged");
 }
 
 #[test]
@@ -198,10 +198,7 @@ fn details_at_exact_cap_passes_through_unchanged() {
     // pass through.
     let at_cap = vec![b'D'; MAX_DETAILS_LEN];
     let status = Status::with_details(Code::Internal, "msg", Bytes::from(at_cap));
-    assert_eq!(
-        status.details().map(|b| b.len()).unwrap_or(0),
-        MAX_DETAILS_LEN,
-    );
+    assert_eq!(status.details().map_or(0, |b| b.len()), MAX_DETAILS_LEN);
 }
 
 #[test]
