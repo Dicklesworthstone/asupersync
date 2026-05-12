@@ -12,10 +12,11 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 /// # Implementation
 ///
 /// This implementation uses `Vec<u8>` as the backing storage, ensuring
-/// safety without unsafe code. Because `Vec<u8>` has unique ownership over a
-/// contiguous allocation, split operations must copy one side of the split
-/// rather than creating two O(1) views into the same storage. For small
-/// buffers, inline storage could be added as an optimization in the future.
+/// safety without unsafe code. The active bytes may start at an offset inside
+/// the allocation, so repeated front splits can advance the active view without
+/// repeatedly moving the remaining suffix. Returned split parts still own
+/// distinct `Vec<u8>` storage, preserving mutable independence without shared
+/// mutable backing.
 ///
 /// # Examples
 ///
@@ -33,6 +34,8 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 pub struct BytesMut {
     /// The backing storage.
     data: Vec<u8>,
+    /// Start offset of the active byte range in `data`.
+    start: usize,
 }
 
 impl BytesMut {
@@ -59,6 +62,60 @@ impl BytesMut {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             data: Vec::with_capacity(capacity),
+            start: 0,
+        }
+    }
+
+    #[inline]
+    fn active(&self) -> &[u8] {
+        &self.data[self.start..]
+    }
+
+    #[inline]
+    fn active_mut(&mut self) -> &mut [u8] {
+        &mut self.data[self.start..]
+    }
+
+    #[inline]
+    fn active_capacity(&self) -> usize {
+        self.data.capacity() - self.start
+    }
+
+    #[inline]
+    fn compact_front(&mut self) {
+        if self.start == 0 {
+            return;
+        }
+        self.data.drain(..self.start);
+        self.start = 0;
+    }
+
+    #[inline]
+    fn compact_front_if_empty(&mut self) {
+        if self.start == self.data.len() {
+            self.data.clear();
+            self.start = 0;
+        }
+    }
+
+    #[inline]
+    fn compact_front_for_additional(&mut self, additional: usize) {
+        if self.start == 0 {
+            return;
+        }
+
+        let len = self.len();
+        if len == 0 {
+            self.data.clear();
+            self.start = 0;
+            return;
+        }
+
+        let required = len
+            .checked_add(additional)
+            .expect("BytesMut required capacity overflow");
+        if required > self.active_capacity() {
+            self.compact_front();
         }
     }
 
@@ -66,21 +123,21 @@ impl BytesMut {
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.data.len() - self.start
     }
 
     /// Returns true if empty.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.len() == 0
     }
 
     /// Returns the capacity.
     #[inline]
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.data.capacity()
+        self.active_capacity()
     }
 
     /// Freeze into an immutable `Bytes`.
@@ -98,7 +155,8 @@ impl BytesMut {
     /// ```
     #[inline]
     #[must_use]
-    pub fn freeze(self) -> Bytes {
+    pub fn freeze(mut self) -> Bytes {
+        self.compact_front();
         Bytes::from(self.data)
     }
 
@@ -123,7 +181,8 @@ impl BytesMut {
     /// remains "consume self, return owned Vec<u8>".
     #[inline]
     #[must_use]
-    pub fn into_vec(self) -> Vec<u8> {
+    pub fn into_vec(mut self) -> Vec<u8> {
+        self.compact_front();
         self.data
     }
 
@@ -140,6 +199,7 @@ impl BytesMut {
     /// ```
     #[inline]
     pub fn reserve(&mut self, additional: usize) {
+        self.compact_front_for_additional(additional);
         self.data.reserve(additional);
     }
 
@@ -157,6 +217,7 @@ impl BytesMut {
     /// ```
     #[inline]
     pub fn put_slice(&mut self, src: &[u8]) {
+        self.compact_front_for_additional(src.len());
         self.data.extend_from_slice(src);
     }
 
@@ -169,6 +230,7 @@ impl BytesMut {
     /// Put a single byte.
     #[inline]
     pub fn put_u8(&mut self, n: u8) {
+        self.compact_front_for_additional(1);
         self.data.push(n);
     }
 
@@ -201,19 +263,25 @@ impl BytesMut {
             self.len()
         );
 
-        let tail = self.data.split_off(at);
-        Self { data: tail }
+        let split_at = self
+            .start
+            .checked_add(at)
+            .expect("BytesMut::split_off offset overflow");
+        let tail = self.data.split_off(split_at);
+        self.compact_front_if_empty();
+        Self {
+            data: tail,
+            start: 0,
+        }
     }
 
     /// Split off bytes from beginning to `at`.
     ///
     /// Self becomes `[at, len)`, returns `[0, at)`.
     ///
-    /// This is O(n) in the current `Vec<u8>`-backed implementation. Unlike
-    /// [`Bytes`](super::Bytes), `BytesMut` does not carry shared backing storage
-    /// plus offset metadata, so splitting requires copying one side of the
-    /// buffer to preserve distinct ownership of the returned prefix and the
-    /// remaining suffix.
+    /// This is O(n) in the returned prefix length: the prefix is copied so the
+    /// returned `BytesMut` remains mutably independent, while `self` advances
+    /// its active start offset instead of moving the remaining suffix.
     ///
     /// # Panics
     ///
@@ -241,11 +309,18 @@ impl BytesMut {
         );
 
         let mut head = Vec::with_capacity(at);
-        head.extend_from_slice(&self.data[..at]);
+        head.extend_from_slice(&self.active()[..at]);
 
-        self.data.drain(..at);
+        self.start = self
+            .start
+            .checked_add(at)
+            .expect("BytesMut::split_to offset overflow");
+        self.compact_front_if_empty();
 
-        Self { data: head }
+        Self {
+            data: head,
+            start: 0,
+        }
     }
 
     /// Truncate to `len` bytes.
@@ -253,13 +328,22 @@ impl BytesMut {
     /// If `len` is greater than the current length, this has no effect.
     #[inline]
     pub fn truncate(&mut self, len: usize) {
-        self.data.truncate(len);
+        if len == 0 {
+            self.clear();
+        } else if len < self.len() {
+            let new_len = self
+                .start
+                .checked_add(len)
+                .expect("BytesMut::truncate offset overflow");
+            self.data.truncate(new_len);
+        }
     }
 
     /// Clear the buffer.
     #[inline]
     pub fn clear(&mut self) {
         self.data.clear();
+        self.start = 0;
     }
 
     /// Resize to `new_len`, filling with `value` if growing.
@@ -282,7 +366,18 @@ impl BytesMut {
     /// ```
     #[inline]
     pub fn resize(&mut self, new_len: usize, value: u8) {
-        self.data.resize(new_len, value);
+        if new_len <= self.len() {
+            self.truncate(new_len);
+            return;
+        }
+
+        let additional = new_len - self.len();
+        self.compact_front_for_additional(additional);
+        let new_data_len = self
+            .start
+            .checked_add(new_len)
+            .expect("BytesMut::resize offset overflow");
+        self.data.resize(new_data_len, value);
     }
 
     /// Returns a slice of self for the given range.
@@ -307,6 +402,15 @@ impl BytesMut {
             Bound::Unbounded => self.len(),
         };
 
+        let start = self
+            .start
+            .checked_add(start)
+            .expect("BytesMut::slice start offset overflow");
+        let end = self
+            .start
+            .checked_add(end)
+            .expect("BytesMut::slice end offset overflow");
+
         &self.data[start..end]
     }
 
@@ -314,6 +418,7 @@ impl BytesMut {
     #[must_use]
     #[inline]
     pub fn spare_capacity_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
+        self.compact_front_if_empty();
         self.data.spare_capacity_mut()
     }
 
@@ -337,7 +442,7 @@ impl BytesMut {
             "set_len out of bounds: len={len}, capacity={}",
             self.capacity()
         );
-        self.data.resize(len, 0);
+        self.resize(len, 0);
     }
 }
 
@@ -346,35 +451,38 @@ impl Deref for BytesMut {
 
     #[inline]
     fn deref(&self) -> &[u8] {
-        &self.data
+        self.active()
     }
 }
 
 impl DerefMut for BytesMut {
     #[inline]
     fn deref_mut(&mut self) -> &mut [u8] {
-        &mut self.data
+        self.active_mut()
     }
 }
 
 impl AsRef<[u8]> for BytesMut {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        &self.data
+        self.active()
     }
 }
 
 impl AsMut<[u8]> for BytesMut {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.data
+        self.active_mut()
     }
 }
 
 impl From<Vec<u8>> for BytesMut {
     #[inline]
     fn from(vec: Vec<u8>) -> Self {
-        Self { data: vec }
+        Self {
+            data: vec,
+            start: 0,
+        }
     }
 }
 
@@ -383,6 +491,7 @@ impl From<&[u8]> for BytesMut {
     fn from(slice: &[u8]) -> Self {
         Self {
             data: slice.to_vec(),
+            start: 0,
         }
     }
 }
@@ -405,8 +514,9 @@ impl std::fmt::Debug for BytesMut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BytesMut")
             .field("len", &self.len())
+            .field("start", &self.start)
             .field("capacity", &self.capacity())
-            .field("data", &self.data.as_slice())
+            .field("data", &self.active())
             .finish()
     }
 }
@@ -414,7 +524,7 @@ impl std::fmt::Debug for BytesMut {
 impl PartialEq for BytesMut {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
+        self.active() == other.active()
     }
 }
 
@@ -423,28 +533,28 @@ impl Eq for BytesMut {}
 impl PartialEq<[u8]> for BytesMut {
     #[inline]
     fn eq(&self, other: &[u8]) -> bool {
-        self.data.as_slice() == other
+        self.active() == other
     }
 }
 
 impl PartialEq<BytesMut> for [u8] {
     #[inline]
     fn eq(&self, other: &BytesMut) -> bool {
-        self == other.data.as_slice()
+        self == other.active()
     }
 }
 
 impl PartialEq<Vec<u8>> for BytesMut {
     #[inline]
     fn eq(&self, other: &Vec<u8>) -> bool {
-        &self.data == other
+        self.active() == other.as_slice()
     }
 }
 
 impl std::hash::Hash for BytesMut {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        self.active().hash(state);
     }
 }
 
@@ -475,6 +585,7 @@ impl BufMut for BytesMut {
     // Override put_slice for efficient BytesMut implementation
     #[inline]
     fn put_slice(&mut self, src: &[u8]) {
+        self.compact_front_for_additional(src.len());
         self.data.extend_from_slice(src);
     }
 }
@@ -652,6 +763,75 @@ mod tests {
         let ok = &b[..] == b"world";
         crate::assert_with_log!(ok, "right", b"world", &b[..]);
         crate::test_complete!("test_bytes_mut_split_to");
+    }
+
+    #[test]
+    fn bytes_mut_split_to_advances_suffix_without_memmove() {
+        init_test("bytes_mut_split_to_advances_suffix_without_memmove");
+        let mut b = BytesMut::with_capacity(64);
+        b.put_slice(b"abcdefghijklmnop");
+
+        let expected_suffix_ptr = b[4..].as_ptr();
+        let head = b.split_to(4);
+
+        crate::assert_with_log!(&head[..] == b"abcd", "head", b"abcd", &head[..]);
+        crate::assert_with_log!(&b[..] == b"efghijklmnop", "suffix", b"efghijklmnop", &b[..]);
+        let suffix_ptr_preserved = std::ptr::eq(b.as_ptr(), expected_suffix_ptr);
+        crate::assert_with_log!(
+            suffix_ptr_preserved,
+            "suffix pointer preserved",
+            true,
+            suffix_ptr_preserved
+        );
+        crate::test_complete!("bytes_mut_split_to_advances_suffix_without_memmove");
+    }
+
+    #[test]
+    fn bytes_mut_split_to_all_reclaims_front_capacity_for_reuse() {
+        init_test("bytes_mut_split_to_all_reclaims_front_capacity_for_reuse");
+        let mut b = BytesMut::with_capacity(16);
+        b.put_slice(b"abcd");
+        let original_capacity = b.capacity();
+
+        let head = b.split_to(4);
+
+        crate::assert_with_log!(&head[..] == b"abcd", "head", b"abcd", &head[..]);
+        crate::assert_with_log!(b.is_empty(), "buffer empty", true, b.is_empty());
+        let capacity_reused = b.capacity() >= original_capacity;
+        crate::assert_with_log!(capacity_reused, "capacity reused", true, capacity_reused);
+
+        b.put_slice(b"xy");
+        crate::assert_with_log!(&b[..] == b"xy", "rewritten", b"xy", &b[..]);
+        let capacity_still_reused = b.capacity() >= original_capacity;
+        crate::assert_with_log!(
+            capacity_still_reused,
+            "capacity still reused",
+            true,
+            capacity_still_reused
+        );
+        crate::test_complete!("bytes_mut_split_to_all_reclaims_front_capacity_for_reuse");
+    }
+
+    #[test]
+    fn bytes_mut_freeze_and_into_vec_discard_consumed_prefix() {
+        init_test("bytes_mut_freeze_and_into_vec_discard_consumed_prefix");
+        let mut frozen_tail = BytesMut::from(&b"headerbody"[..]);
+        let header = frozen_tail.split_to(6);
+        crate::assert_with_log!(&header[..] == b"header", "header", b"header", &header[..]);
+        let frozen = frozen_tail.freeze();
+        crate::assert_with_log!(&frozen[..] == b"body", "frozen tail", b"body", &frozen[..]);
+
+        let mut vec_tail = BytesMut::from(&b"prefixpayload"[..]);
+        let prefix = vec_tail.split_to(6);
+        crate::assert_with_log!(&prefix[..] == b"prefix", "prefix", b"prefix", &prefix[..]);
+        let vec = vec_tail.into_vec();
+        crate::assert_with_log!(
+            vec.as_slice() == b"payload",
+            "vec tail",
+            b"payload",
+            vec.as_slice()
+        );
+        crate::test_complete!("bytes_mut_freeze_and_into_vec_discard_consumed_prefix");
     }
 
     #[test]
