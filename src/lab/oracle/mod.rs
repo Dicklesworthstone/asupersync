@@ -1595,7 +1595,7 @@ mod tests {
         let entry = report
             .entry("region_leak")
             .expect("region_leak entry must be present");
-        crate::assert_with_log!(entry.passed == false, "entry passed", false, entry.passed);
+        crate::assert_with_log!(!entry.passed, "entry passed", false, entry.passed);
         let mentions_stuck_creation = entry
             .violation
             .as_deref()
