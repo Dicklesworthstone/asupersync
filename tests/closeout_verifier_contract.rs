@@ -227,6 +227,14 @@ fn code_only_without_bead_gets_tracker_note_instead_of_failure() {
 }
 
 #[test]
+fn code_only_without_bead_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "code_only_without_bead.json",
+        "code_only_without_bead_expected.json",
+    );
+}
+
+#[test]
 fn verifier_declares_forbidden_actions_false() {
     let report = report("clean_closeout.json");
 
