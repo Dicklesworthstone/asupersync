@@ -351,6 +351,7 @@ impl Semaphore {
                 obligation: Some(ObligationToken::reserve("semaphore-permit")),
                 semaphore: self,
                 count,
+                release_lock_order_on_drop: true,
             })
         } else {
             Err(TryAcquireError)
@@ -498,6 +499,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                 obligation: Some(ObligationToken::reserve("semaphore-permit")),
                 semaphore: self.semaphore,
                 count: self.count,
+                release_lock_order_on_drop: true,
             }));
         }
 
@@ -535,6 +537,7 @@ pub struct SemaphorePermit<'a> {
     obligation: Option<ObligationToken<SemaphorePermitKind>>,
     semaphore: &'a Semaphore,
     count: usize,
+    release_lock_order_on_drop: bool,
 }
 
 impl SemaphorePermit<'_> {
@@ -563,6 +566,8 @@ impl SemaphorePermit<'_> {
         let count = self.count;
         let obligation = self.obligation.take();
         self.count = 0; // Prevent Drop from releasing permits
+        // The owned permit now owns the debug lock-order release.
+        self.release_lock_order_on_drop = false;
         (count, obligation)
     }
 
@@ -589,8 +594,10 @@ impl Drop for SemaphorePermit<'_> {
         }
 
         // Record lock release for ordering tracking
-        if let Some(rank) = self.semaphore.rank {
-            lock_ordering::record_release(rank);
+        if self.release_lock_order_on_drop {
+            if let Some(rank) = self.semaphore.rank {
+                lock_ordering::record_release(rank);
+            }
         }
 
         // Ordinary RAII drop is the normal release path for semaphore permits.
@@ -1883,6 +1890,40 @@ mod tests {
         let avail_after = sem.available_permits();
         crate::assert_with_log!(avail_after == 3, "after owned drop", 3usize, avail_after);
         crate::test_complete!("owned_permit_try_acquire_and_drop");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn owned_try_acquire_keeps_lock_order_until_owned_drop() {
+        init_test("owned_try_acquire_keeps_lock_order_until_owned_drop");
+        lock_ordering::clear_held_locks();
+
+        let sem = Arc::new(Semaphore::with_name("tasks", 1));
+        let permit = OwnedSemaphorePermit::try_acquire(Arc::clone(&sem), 1).expect("try_acquire");
+
+        let lower_rank_acquire = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lock_ordering::check_acquire("regions_test", LockRank::Regions);
+        }));
+        crate::assert_with_log!(
+            lower_rank_acquire.is_err(),
+            "owned permit keeps task-rank lock ordering active",
+            true,
+            lower_rank_acquire.is_err()
+        );
+
+        drop(permit);
+
+        let after_drop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lock_ordering::check_acquire("regions_test", LockRank::Regions);
+        }));
+        lock_ordering::clear_held_locks();
+        crate::assert_with_log!(
+            after_drop.is_ok(),
+            "owned permit drop releases task-rank lock ordering",
+            true,
+            after_drop.is_ok()
+        );
+        crate::test_complete!("owned_try_acquire_keeps_lock_order_until_owned_drop");
     }
 
     #[test]
