@@ -67,7 +67,7 @@
 //!   - changed intercept_error_with_request to forward order
 //!     (would call cleanup on outer layers BEFORE inner
 //!     layers had released their resources — wrong order),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -507,6 +507,15 @@ mod behavioral {
                 &self,
                 _resp: &mut asupersync::grpc::streaming::Response<Bytes>,
             ) -> Result<(), Status> {
+                Ok(())
+            }
+
+            fn intercept_error_with_request(
+                &self,
+                _request: &Request<Bytes>,
+                _status: &mut Status,
+            ) -> Result<(), Status> {
+                self.log.lock().unwrap().push(format!("err:{}", self.tag));
                 Ok(())
             }
         }

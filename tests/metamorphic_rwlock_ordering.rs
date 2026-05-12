@@ -166,7 +166,7 @@ fn mr_mutual_exclusion() {
                 "Multiple writers active"
             );
 
-            *guard = i as i32;
+            *guard = i32::try_from(i).expect("test slot fits in i32");
             thread::sleep(Duration::from_millis(1));
 
             writer_active.store(false, Ordering::SeqCst);
@@ -269,7 +269,7 @@ fn mr_temporal_consistency_no_deadlock() {
             if i % 3 == 0 {
                 // Writer
                 let mut guard = write_blocking(&lock, &cx);
-                *guard = i as i32;
+                *guard = i32::try_from(i).expect("test slot fits in i32");
                 completed_ops.fetch_add(1, Ordering::SeqCst);
             } else {
                 // Reader

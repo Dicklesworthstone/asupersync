@@ -51,21 +51,15 @@ use asupersync::grpc::ResponseStream;
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::{Metadata, Streaming};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
-struct NoopWaker;
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-fn make_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+fn make_waker() -> &'static Waker {
+    Waker::noop()
 }
 
 fn drain<T: Send + Unpin>(stream: &mut ResponseStream<T>) -> Vec<Result<T, Status>> {
     let waker = make_waker();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(waker);
     let mut out = Vec::new();
     loop {
         match Pin::new(&mut *stream).poll_next(&mut cx) {
@@ -252,7 +246,7 @@ fn cancel_during_drain_discards_remaining_items_and_surfaces_terminal_status() {
     }
 
     let waker = make_waker();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(waker);
     match Pin::new(&mut stream).poll_next(&mut cx) {
         Poll::Ready(Some(Ok(value))) => assert_eq!(value, 0),
         other => panic!("expected first buffered item before cancel, got {other:?}"),
@@ -307,7 +301,7 @@ fn close_yields_graceful_none_terminator_after_buffered_items() {
     // Final Ready(None) is consumed by `drain` returning, not stored
     // in the Vec; assert by polling once more and observing None.
     let waker = make_waker();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(waker);
     match Pin::new(&mut stream).poll_next(&mut cx) {
         Poll::Ready(None) => {}
         other => panic!("graceful close must yield Ready(None), got {other:?}"),
@@ -328,7 +322,7 @@ fn finish_after_partial_drain_still_appends_trailer_after_remaining_items() {
 
     // Consumer polls the first 3 items.
     let waker = make_waker();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(waker);
     let mut early = Vec::new();
     for _ in 0..3 {
         match Pin::new(&mut stream).poll_next(&mut cx) {
@@ -379,7 +373,9 @@ fn finish_terminal_metadata_is_observable_after_drain() {
         .expect("trailing x-tenant must round-trip");
     match tenant {
         asupersync::grpc::MetadataValue::Ascii(s) => assert_eq!(s, "acme"),
-        other => panic!("x-tenant must be ASCII, got {other:?}"),
+        other @ asupersync::grpc::MetadataValue::Binary(_) => {
+            panic!("x-tenant must be ASCII, got {other:?}");
+        }
     }
 }
 
@@ -516,7 +512,7 @@ fn trailer_ordering_matrix_logs_evidence() {
             stream.push(Ok(value)).expect("push");
         }
         let waker = make_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         match Pin::new(&mut stream).poll_next(&mut cx) {
             Poll::Ready(Some(Ok(value))) => assert_eq!(value, 0),
             other => panic!("expected first drained item before cancel, got {other:?}"),
