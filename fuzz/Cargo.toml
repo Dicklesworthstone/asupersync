@@ -1967,6 +1967,14 @@ test = false
 doc = false
 bench = false
 
+# Shared filesystem cursor fuzzer for cloned File handles.
+[[bin]]
+name = "fs_file_arc_concurrent_access"
+path = "fuzz_targets/fs_file_arc_concurrent_access.rs"
+test = false
+doc = false
+bench = false
+
 # io_uring user_data encoding boundary and completion-tracking fuzzer.
 [[bin]]
 name = "fs_uring_user_data_overflow"

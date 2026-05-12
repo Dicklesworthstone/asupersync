@@ -1,452 +1,240 @@
-//! Fuzz target for src/fs/file.rs Arc<File> concurrent access data races.
+//! Fuzz shared filesystem cursor behavior through the public `File` API.
 //!
-//! **CRITICAL GAP ADDRESSED**: Existing fs_uring.rs covers io_uring SQE submission
-//! but lacks coverage of Arc<std::fs::File> concurrent access patterns in async polls.
-//!
-//! **VULNERABILITY SURFACE**: Arc<File> unsafe mutable access without synchronization:
-//! - poll_read: Arc::as_ptr(&self.inner).cast_mut() -> &mut File
-//! - poll_write: Arc::as_ptr(&self.inner).cast_mut() -> &mut File
-//! - poll_seek: Arc::as_ptr(&self.inner).cast_mut() -> &mut File
-//!
-//! **DATA RACE CONDITIONS**:
-//! 1. Multiple tasks share same File via Arc (intended design)
-//! 2. No mutex/synchronization around unsafe mutable access
-//! 3. Concurrent poll_* calls create race on file descriptor state
-//! 4. File position, buffer state, internal metadata can be corrupted
-//!
-//! **ORACLE**: ThreadSanitizer (TSan) detects data races during execution.
-//! Must run with RUSTFLAGS="-Zsanitizer=thread" to catch races.
-//!
-//! **STATEFUL FUZZING**: Multiple async tasks, shared file state, timing-dependent.
+//! `std::fs::File::try_clone` handles share the underlying OS cursor. This
+//! target creates several asupersync `File` wrappers from cloned standard
+//! handles, interleaves read/write/seek polls across them, and checks those
+//! polls against a single shared-cursor model. It keeps the original Arc/File
+//! race seam covered without depending on private `File::inner` access.
 
 #![no_main]
-#![allow(clippy::too_many_lines)]
 
 use arbitrary::Arbitrary;
 use asupersync::fs::File;
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use libfuzzer_sys::fuzz_target;
-use std::io::SeekFrom;
+use std::io::{self, SeekFrom};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
-use tempfile::{tempdir, TempDir};
-use std::collections::VecDeque;
+use tempfile::{TempDir, tempdir};
 
-const MAX_OPERATIONS: usize = 50; // Reasonable for exec/s in concurrent scenarios
-const MAX_BUFFER_SIZE: usize = 4096; // Reasonable file I/O size
-const MAX_FILE_SIZE: usize = 16384; // Small files for focused race testing
+const MAX_HANDLES: usize = 8;
+const MAX_INITIAL_LEN: usize = 4096;
+const MAX_OPERATIONS: usize = 64;
+const MAX_IO_LEN: usize = 1024;
+const MAX_SEEK_ABS: u64 = 16_384;
+const MAX_FILE_LEN: u64 = 32_768;
+
+#[derive(Debug, Arbitrary)]
+struct SharedFileCase {
+    initial_len: u16,
+    handle_count: u8,
+    operations: Vec<FileOperation>,
+}
 
 #[derive(Debug, Clone, Arbitrary)]
 struct FileOperation {
-    op_type: FileOpType,
-    buffer_size: u16,    // 0-65535 -> bounded to MAX_BUFFER_SIZE
-    seek_pos: SeekPos,   // Seek position for operations
-    concurrent_tasks: u8, // 1-8 tasks operating concurrently
+    handle: u8,
+    action: FileAction,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+enum FileAction {
+    Read { len: u16 },
+    Write { len: u16, byte: u8 },
+    Seek { position: SeekPosition },
+    Flush,
 }
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
-enum FileOpType {
-    Read,
-    Write,
-    Seek,
-    ReadWrite, // Concurrent read+write
-    SeekRead,  // Seek then read
-    SeekWrite, // Seek then write
-    Mixed,     // Random mix of operations
+enum SeekPosition {
+    Start(u16),
+    End(i16),
+    Current(i16),
 }
 
-#[derive(Debug, Clone, Copy, Arbitrary)]
-enum SeekPos {
-    Start,
-    End,
-    Current(i16), // Relative seek -32768 to 32767
-    Absolute(u16), // Absolute position 0-65535
+struct SharedFileHarness {
+    _temp_dir: TempDir,
+    files: Vec<File>,
 }
 
-// Mock waker for testing poll operations without full async runtime
-struct MockWaker;
-
-impl MockWaker {
-    fn new() -> Waker {
-        use std::task::{RawWaker, RawWakerVTable};
-
-        fn noop(_: *const ()) {}
-        fn clone(_: *const ()) -> RawWaker {
-            RawWaker::new(std::ptr::null(), &VTABLE)
-        }
-
-        const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-        let raw_waker = RawWaker::new(std::ptr::null(), &VTABLE);
-        unsafe { Waker::from_raw(raw_waker) }
-    }
+#[derive(Debug, Clone)]
+struct SharedCursorModel {
+    len: u64,
+    cursor: u64,
 }
 
-struct FileTestHarness {
-    _temp_dir: TempDir, // Keep alive for cleanup
-    file: Arc<File>,
-    initial_content: Vec<u8>,
-}
-
-impl FileTestHarness {
-    fn new(file_size: usize) -> std::io::Result<Self> {
-        let temp_dir = tempdir()?;
-        let file_path = temp_dir.path().join("fuzz_test_file");
-
-        // Create initial file content
-        let initial_content: Vec<u8> = (0..file_size)
-            .map(|i| (i % 256) as u8)
-            .collect();
-        std::fs::write(&file_path, &initial_content)?;
-
-        // Create async File handle
-        let std_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&file_path)?;
-
-        let file = File::from_std(std_file);
-        let arc_file = Arc::new(file);
-
-        Ok(Self {
-            _temp_dir: temp_dir,
-            file: arc_file,
-            initial_content,
-        })
+impl SharedCursorModel {
+    fn new(len: u64) -> Self {
+        Self { len, cursor: 0 }
     }
 
-    fn execute_operation(&self, op: &FileOperation) -> Result<OperationResult, String> {
-        let buffer_size = (op.buffer_size as usize).min(MAX_BUFFER_SIZE).max(1);
-        let task_count = op.concurrent_tasks.max(1).min(8) as usize;
+    fn observe_read(&mut self, requested: usize, actual: usize) {
+        let available = self.len.saturating_sub(self.cursor) as usize;
+        let expected = requested.min(available);
+        assert_eq!(
+            actual, expected,
+            "shared file cursor read length diverged from model"
+        );
+        self.cursor = self.cursor.saturating_add(actual as u64);
+    }
 
-        match op.op_type {
-            FileOpType::Read => self.concurrent_read(buffer_size, task_count),
-            FileOpType::Write => self.concurrent_write(buffer_size, task_count),
-            FileOpType::Seek => self.concurrent_seek(&op.seek_pos, task_count),
-            FileOpType::ReadWrite => self.concurrent_read_write(buffer_size, task_count),
-            FileOpType::SeekRead => self.seek_then_read(&op.seek_pos, buffer_size, task_count),
-            FileOpType::SeekWrite => self.seek_then_write(&op.seek_pos, buffer_size, task_count),
-            FileOpType::Mixed => self.mixed_operations(&op.seek_pos, buffer_size, task_count),
+    fn observe_write(&mut self, requested: usize, actual: usize) {
+        assert!(
+            actual <= requested,
+            "file poll_write returned more bytes than requested"
+        );
+        self.cursor = self.cursor.saturating_add(actual as u64);
+        self.len = self.len.max(self.cursor);
+        assert!(
+            self.len <= MAX_FILE_LEN + MAX_IO_LEN as u64,
+            "fuzz file grew past bounded model length"
+        );
+    }
+
+    fn expected_seek(&self, position: SeekPosition) -> Result<u64, ()> {
+        let next = match position {
+            SeekPosition::Start(pos) => i128::from(u64::from(pos).min(MAX_SEEK_ABS)),
+            SeekPosition::End(offset) => i128::from(self.len) + i128::from(offset),
+            SeekPosition::Current(offset) => i128::from(self.cursor) + i128::from(offset),
+        };
+
+        if next < 0 {
+            Err(())
+        } else {
+            Ok(u64::try_from(next).expect("non-negative seek target should fit u64"))
         }
     }
 
-    fn concurrent_read(&self, buffer_size: usize, task_count: usize) -> Result<OperationResult, String> {
-        let mut results = Vec::new();
-
-        for task_id in 0..task_count {
-            let file_clone = Arc::clone(&self.file);
-            let result = self.single_read_task(file_clone, buffer_size, task_id);
-            results.push(result);
-        }
-
-        Ok(OperationResult { results })
-    }
-
-    fn concurrent_write(&self, buffer_size: usize, task_count: usize) -> Result<OperationResult, String> {
-        let mut results = Vec::new();
-
-        for task_id in 0..task_count {
-            let file_clone = Arc::clone(&self.file);
-            let write_data: Vec<u8> = (0..buffer_size)
-                .map(|i| ((task_id * 17 + i) % 256) as u8)
-                .collect();
-            let result = self.single_write_task(file_clone, write_data, task_id);
-            results.push(result);
-        }
-
-        Ok(OperationResult { results })
-    }
-
-    fn concurrent_seek(&self, seek_pos: &SeekPos, task_count: usize) -> Result<OperationResult, String> {
-        let mut results = Vec::new();
-
-        for task_id in 0..task_count {
-            let file_clone = Arc::clone(&self.file);
-            let pos = self.resolve_seek_position(seek_pos, task_id);
-            let result = self.single_seek_task(file_clone, pos, task_id);
-            results.push(result);
-        }
-
-        Ok(OperationResult { results })
-    }
-
-    fn concurrent_read_write(&self, buffer_size: usize, task_count: usize) -> Result<OperationResult, String> {
-        let mut results = Vec::new();
-        let half_tasks = (task_count + 1) / 2;
-
-        // First half: readers
-        for task_id in 0..half_tasks {
-            let file_clone = Arc::clone(&self.file);
-            let result = self.single_read_task(file_clone, buffer_size, task_id);
-            results.push(result);
-        }
-
-        // Second half: writers
-        for task_id in half_tasks..task_count {
-            let file_clone = Arc::clone(&self.file);
-            let write_data: Vec<u8> = (0..buffer_size)
-                .map(|i| ((task_id * 23 + i) % 256) as u8)
-                .collect();
-            let result = self.single_write_task(file_clone, write_data, task_id);
-            results.push(result);
-        }
-
-        Ok(OperationResult { results })
-    }
-
-    fn seek_then_read(&self, seek_pos: &SeekPos, buffer_size: usize, task_count: usize) -> Result<OperationResult, String> {
-        let mut results = Vec::new();
-
-        for task_id in 0..task_count {
-            let file_clone = Arc::clone(&self.file);
-            let pos = self.resolve_seek_position(seek_pos, task_id);
-
-            // Seek first
-            let seek_result = self.single_seek_task(file_clone.clone(), pos, task_id);
-            results.push(seek_result);
-
-            // Then read
-            let read_result = self.single_read_task(file_clone, buffer_size, task_id);
-            results.push(read_result);
-        }
-
-        Ok(OperationResult { results })
-    }
-
-    fn seek_then_write(&self, seek_pos: &SeekPos, buffer_size: usize, task_count: usize) -> Result<OperationResult, String> {
-        let mut results = Vec::new();
-
-        for task_id in 0..task_count {
-            let file_clone = Arc::clone(&self.file);
-            let pos = self.resolve_seek_position(seek_pos, task_id);
-            let write_data: Vec<u8> = (0..buffer_size)
-                .map(|i| ((task_id * 31 + i) % 256) as u8)
-                .collect();
-
-            // Seek first
-            let seek_result = self.single_seek_task(file_clone.clone(), pos, task_id);
-            results.push(seek_result);
-
-            // Then write
-            let write_result = self.single_write_task(file_clone, write_data, task_id);
-            results.push(write_result);
-        }
-
-        Ok(OperationResult { results })
-    }
-
-    fn mixed_operations(&self, seek_pos: &SeekPos, buffer_size: usize, task_count: usize) -> Result<OperationResult, String> {
-        let mut results = Vec::new();
-
-        for task_id in 0..task_count {
-            let file_clone = Arc::clone(&self.file);
-
-            // Task 0,3,6: read, Task 1,4,7: write, Task 2,5: seek
-            match task_id % 3 {
-                0 => {
-                    let result = self.single_read_task(file_clone, buffer_size, task_id);
-                    results.push(result);
-                }
-                1 => {
-                    let write_data: Vec<u8> = (0..buffer_size)
-                        .map(|i| ((task_id * 41 + i) % 256) as u8)
-                        .collect();
-                    let result = self.single_write_task(file_clone, write_data, task_id);
-                    results.push(result);
-                }
-                2 => {
-                    let pos = self.resolve_seek_position(seek_pos, task_id);
-                    let result = self.single_seek_task(file_clone, pos, task_id);
-                    results.push(result);
-                }
-                _ => unreachable!(),
+    fn observe_seek(&mut self, position: SeekPosition, result: io::Result<u64>) {
+        match (self.expected_seek(position), result) {
+            (Ok(expected), Ok(actual)) => {
+                assert_eq!(actual, expected, "shared file seek position diverged");
+                self.cursor = actual;
             }
-        }
-
-        Ok(OperationResult { results })
-    }
-
-    fn single_read_task(&self, file: Arc<File>, buffer_size: usize, task_id: usize) -> TaskResult {
-        let mut file_pin = Pin::new(file.as_ref());
-        let mut buffer = vec![0u8; buffer_size];
-        let mut read_buf = ReadBuf::new(&mut buffer);
-        let waker = MockWaker::new();
-        let mut context = Context::from_waker(&waker);
-
-        match file_pin.as_mut().poll_read(&mut context, &mut read_buf) {
-            Poll::Ready(Ok(())) => TaskResult {
-                task_id,
-                success: true,
-                bytes_processed: read_buf.filled().len(),
-                error_msg: None,
-            },
-            Poll::Ready(Err(e)) => TaskResult {
-                task_id,
-                success: false,
-                bytes_processed: 0,
-                error_msg: Some(format!("Read error: {e}")),
-            },
-            Poll::Pending => TaskResult {
-                task_id,
-                success: false,
-                bytes_processed: 0,
-                error_msg: Some("Read pending (unexpected in blocking mode)".to_string()),
-            },
-        }
-    }
-
-    fn single_write_task(&self, file: Arc<File>, data: Vec<u8>, task_id: usize) -> TaskResult {
-        let mut file_pin = Pin::new(file.as_ref());
-        let waker = MockWaker::new();
-        let mut context = Context::from_waker(&waker);
-
-        match file_pin.as_mut().poll_write(&mut context, &data) {
-            Poll::Ready(Ok(n)) => TaskResult {
-                task_id,
-                success: true,
-                bytes_processed: n,
-                error_msg: None,
-            },
-            Poll::Ready(Err(e)) => TaskResult {
-                task_id,
-                success: false,
-                bytes_processed: 0,
-                error_msg: Some(format!("Write error: {e}")),
-            },
-            Poll::Pending => TaskResult {
-                task_id,
-                success: false,
-                bytes_processed: 0,
-                error_msg: Some("Write pending (unexpected in blocking mode)".to_string()),
-            },
-        }
-    }
-
-    fn single_seek_task(&self, file: Arc<File>, pos: SeekFrom, task_id: usize) -> TaskResult {
-        let mut file_pin = Pin::new(file.as_ref());
-        let waker = MockWaker::new();
-        let mut context = Context::from_waker(&waker);
-
-        match file_pin.as_mut().poll_seek(&mut context, pos) {
-            Poll::Ready(Ok(position)) => TaskResult {
-                task_id,
-                success: true,
-                bytes_processed: position as usize,
-                error_msg: None,
-            },
-            Poll::Ready(Err(e)) => TaskResult {
-                task_id,
-                success: false,
-                bytes_processed: 0,
-                error_msg: Some(format!("Seek error: {e}")),
-            },
-            Poll::Pending => TaskResult {
-                task_id,
-                success: false,
-                bytes_processed: 0,
-                error_msg: Some("Seek pending (unexpected in blocking mode)".to_string()),
-            },
-        }
-    }
-
-    fn resolve_seek_position(&self, seek_pos: &SeekPos, task_id: usize) -> SeekFrom {
-        match seek_pos {
-            SeekPos::Start => SeekFrom::Start(0),
-            SeekPos::End => SeekFrom::End(0),
-            SeekPos::Current(offset) => SeekFrom::Current(i64::from(*offset)),
-            SeekPos::Absolute(pos) => {
-                let abs_pos = (*pos as usize + task_id * 17) % self.initial_content.len().max(1);
-                SeekFrom::Start(abs_pos as u64)
+            (Err(()), Err(_)) => {}
+            (Err(()), Ok(actual)) => {
+                panic!("negative seek unexpectedly succeeded at position {actual}");
+            }
+            (Ok(expected), Err(error)) => {
+                panic!("valid seek to {expected} unexpectedly failed: {error}");
             }
         }
     }
 }
 
-#[derive(Debug)]
-struct OperationResult {
-    results: Vec<TaskResult>,
-}
-
-#[derive(Debug)]
-struct TaskResult {
-    task_id: usize,
-    success: bool,
-    bytes_processed: usize,
-    error_msg: Option<String>,
-}
-
-fuzz_target!(|operations: Vec<FileOperation>| {
-    if operations.len() > MAX_OPERATIONS {
-        return;
-    }
-
-    let file_size = MAX_FILE_SIZE / 4; // Start with smaller files for focused testing
-    let harness = match FileTestHarness::new(file_size) {
-        Ok(h) => h,
-        Err(_) => return, // Skip if file creation fails
+fuzz_target!(|case: SharedFileCase| {
+    let initial_len = usize::from(case.initial_len).min(MAX_INITIAL_LEN);
+    let handle_count = usize::from(case.handle_count.clamp(1, MAX_HANDLES as u8));
+    let mut harness = match create_shared_files(initial_len, handle_count) {
+        Ok(harness) => harness,
+        Err(_) => return,
     };
+    let files = &mut harness.files;
+    let mut model = SharedCursorModel::new(initial_len as u64);
 
-    for (op_index, operation) in operations.iter().enumerate() {
-        let result = harness.execute_operation(operation);
+    if case.operations.is_empty() {
+        let actual = poll_read_once(&mut files[0], 1).expect("empty-case read should succeed");
+        model.observe_read(1, actual);
+    }
 
-        match result {
-            Ok(op_result) => {
-                // Validate that at least some operations succeeded
-                let success_count = op_result.results.iter().filter(|r| r.success).count();
-                let total_count = op_result.results.len();
-
-                // In a correctly synchronized implementation, most operations should succeed
-                // Data races might cause spurious failures
-                if total_count > 0 && success_count == 0 {
-                    // All operations failed - could indicate severe corruption
-                    panic!(
-                        "POTENTIAL RACE CORRUPTION: All {} operations failed for op {}: {:#?}",
-                        total_count, op_index, op_result.results
-                    );
-                }
-
-                // Check for suspicious patterns that might indicate races
-                let unique_positions: std::collections::HashSet<usize> = op_result.results
-                    .iter()
-                    .filter(|r| r.success)
-                    .map(|r| r.bytes_processed)
-                    .collect();
-
-                // For seek operations, having identical positions from concurrent seeks
-                // might indicate a race condition (or might be legitimate)
-                if matches!(operation.op_type, FileOpType::Seek | FileOpType::SeekRead | FileOpType::SeekWrite) {
-                    if unique_positions.len() == 1 && operation.concurrent_tasks > 1 {
-                        // This could be legitimate if all tasks seek to the same position,
-                        // or could indicate a race where only one seek "wins"
-                        // TSan would detect the actual race, this is just a heuristic
-                    }
-                }
+    for operation in case.operations.iter().take(MAX_OPERATIONS) {
+        let handle = usize::from(operation.handle) % files.len();
+        match operation.action {
+            FileAction::Read { len } => {
+                let requested = usize::from(len).min(MAX_IO_LEN);
+                let actual = poll_read_once(&mut files[handle], requested)
+                    .expect("poll_read on fuzz file should succeed");
+                model.observe_read(requested, actual);
             }
-            Err(e) => {
-                // Operation setup failed - skip this operation
-                continue;
+            FileAction::Write { len, byte } => {
+                let requested = usize::from(len).min(MAX_IO_LEN);
+                let actual = poll_write_once(&mut files[handle], requested, byte)
+                    .expect("poll_write on fuzz file should succeed");
+                model.observe_write(requested, actual);
+            }
+            FileAction::Seek { position } => {
+                let result = poll_seek_once(&mut files[handle], position);
+                model.observe_seek(position, result);
+            }
+            FileAction::Flush => {
+                poll_flush_once(&mut files[handle]).expect("poll_flush should succeed");
             }
         }
     }
 
-    // Final invariant: the file should still be in a valid state
-    // Try a simple read to ensure the file descriptor is not corrupted
-    let final_file_clone = Arc::clone(&harness.file);
-    let mut buffer = vec![0u8; 64];
-    let mut read_buf = ReadBuf::new(&mut buffer);
-    let waker = MockWaker::new();
-    let mut context = Context::from_waker(&waker);
-    let mut file_pin = Pin::new(final_file_clone.as_ref());
-
-    match file_pin.as_mut().poll_read(&mut context, &mut read_buf) {
-        Poll::Ready(Ok(())) => {
-            // File is still readable - good
-        }
-        Poll::Ready(Err(e)) => {
-            panic!("CORRUPTION: Final file read failed after concurrent operations: {}", e);
-        }
-        Poll::Pending => {
-            // Unexpected but not necessarily a race
-        }
+    for file in files {
+        poll_flush_once(file).expect("final poll_flush should succeed");
     }
 });
+
+fn create_shared_files(initial_len: usize, handle_count: usize) -> io::Result<SharedFileHarness> {
+    let temp_dir = tempdir()?;
+    let file_path = temp_dir.path().join("shared_cursor_fuzz.bin");
+    let initial_content: Vec<u8> = (0..initial_len)
+        .map(|index| u8::try_from(index % 251).expect("bounded byte"))
+        .collect();
+    std::fs::write(&file_path, initial_content)?;
+
+    let base = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&file_path)?;
+    let mut files = Vec::with_capacity(handle_count);
+    for _ in 0..handle_count {
+        files.push(File::from_std(base.try_clone()?));
+    }
+
+    Ok(SharedFileHarness {
+        _temp_dir: temp_dir,
+        files,
+    })
+}
+
+fn poll_read_once(file: &mut File, requested: usize) -> io::Result<usize> {
+    let mut buffer = vec![0u8; requested];
+    let mut read_buf = ReadBuf::new(&mut buffer);
+    let waker = Waker::noop().clone();
+    let mut context = Context::from_waker(&waker);
+
+    match Pin::new(file).poll_read(&mut context, &mut read_buf) {
+        Poll::Ready(Ok(())) => Ok(read_buf.filled().len()),
+        Poll::Ready(Err(error)) => Err(error),
+        Poll::Pending => panic!("phase-0 file poll_read should not park"),
+    }
+}
+
+fn poll_write_once(file: &mut File, requested: usize, byte: u8) -> io::Result<usize> {
+    let data = vec![byte; requested];
+    let waker = Waker::noop().clone();
+    let mut context = Context::from_waker(&waker);
+
+    match Pin::new(file).poll_write(&mut context, &data) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("phase-0 file poll_write should not park"),
+    }
+}
+
+fn poll_seek_once(file: &mut File, position: SeekPosition) -> io::Result<u64> {
+    let seek_from = match position {
+        SeekPosition::Start(pos) => SeekFrom::Start(u64::from(pos).min(MAX_SEEK_ABS)),
+        SeekPosition::End(offset) => SeekFrom::End(i64::from(offset)),
+        SeekPosition::Current(offset) => SeekFrom::Current(i64::from(offset)),
+    };
+    let waker = Waker::noop().clone();
+    let mut context = Context::from_waker(&waker);
+
+    match Pin::new(file).poll_seek(&mut context, seek_from) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("phase-0 file poll_seek should not park"),
+    }
+}
+
+fn poll_flush_once(file: &mut File) -> io::Result<()> {
+    let waker = Waker::noop().clone();
+    let mut context = Context::from_waker(&waker);
+
+    match Pin::new(file).poll_flush(&mut context) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("phase-0 file poll_flush should not park"),
+    }
+}
