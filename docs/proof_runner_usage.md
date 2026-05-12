@@ -129,6 +129,64 @@ LANES=$(./scripts/proof_runner.py --suggest-lanes --touched-files $(git diff --n
 br close <bead-id> --reason "Completed. Proof: supplemental lib-tests passed (broad check blocked by peer lint debt)."
 ```
 
+## Disk-Pressure Closeouts
+
+When local disk pressure affects an `rch` proof, keep the remote verdict separate
+from local artifact handling. A closeout must capture these fields before it
+claims proof coverage:
+
+- `command`: exact command that was run.
+- `worker_or_local_path`: worker identifier when `rch` reports one, otherwise
+  the local fallback path used for a non-`rch` proof.
+- `remote_exit`: remote exit code or pass/fail footer if observed; use `unknown`
+  when the command timed out before a verdict.
+- `first_unrelated_blocker`: first unrelated file/error that stopped a broad
+  gate, or `none`.
+- `artifact_status`: `retrieved`, `retrieval_failed:<path or reason>`,
+  `not_requested`, or `not_available`.
+- `process_status`: whether any `rch`, Cargo, or helper process remains running.
+
+Use this interpretation table:
+
+| Situation | Closeout rule |
+|-----------|---------------|
+| Remote pass plus artifact retrieval failure | You may cite the remote proof as passed only if the remote pass/fail line or exit status was visible. State that local artifact retrieval failed separately, including the path or filesystem that filled. |
+| Timeout before verdict | Do not claim proof success. Report `remote_exit=unknown`, the last visible phase, and whether any process remains running. |
+| Timeout after pass footer | You may cite the visible pass footer, but still record the timeout and artifact status separately. |
+| Local fallback | Label it as supplemental/local evidence, not as the original broad `rch` proof. Include the fallback command/path. |
+| Cleanup requires deletion | Do not delete caches, `/tmp`, `/dev/shm`, target dirs, logs, or artifacts without explicit user permission. Report the cleanup need as a blocker or next action. |
+
+Acceptable closeout language:
+
+```
+Completed. Proof: `rch exec -- env -u CARGO_TARGET_DIR cargo fmt --check`
+showed remote exit 0 on worker `rch-a`; artifact_status=retrieval_failed:/dev/shm
+full; process_status=no rch/cargo process remains running. This proves rustfmt
+passed remotely, but not that artifacts were retrieved locally.
+```
+
+```
+Completed with supplemental proof only. Broad clippy timed out before verdict:
+remote_exit=unknown; first_unrelated_blocker=none observed; artifact_status=not_available;
+process_status=no rch/cargo process remains running. Local fallback `git diff --check`
+passed.
+```
+
+Misleading closeout language:
+
+```
+All validation passed; only artifact retrieval failed.
+```
+
+This omits the command, remote exit, artifact status, and process status.
+
+```
+Clippy passed after timeout.
+```
+
+This is only accurate when a pass footer or remote exit status was visible before
+the timeout; otherwise the verdict is unknown.
+
 ## Error Handling
 
 Exit codes:
