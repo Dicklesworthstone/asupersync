@@ -68,14 +68,14 @@
 //!     (would lose nanosecond precision at the storage level
 //!     — sub-ms sleeps would be impossible even with a fast
 //!     time getter),
-//!   - changed `poll_with_time(now)` to use `now / 1ms_tick
-//!     >= deadline / 1ms_tick` (would round both sides to
+//!   - changed `poll_with_time(now)` to compare `now / 1ms_tick`
+//!     with `deadline / 1ms_tick` (would round both sides to
 //!     1ms ticks, eliminating the sub-ms fast path),
 //!   - increased `LEVEL0_RESOLUTION_NS` to 10ms (would multiply
 //!     the worst-case over-sleep by 10x),
 //!   - removed the existing tolerance test (would let a
 //!     regression in resolution slip through),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -338,14 +338,8 @@ fn timer_wheel_level_count_is_four() {
 mod behavioral {
     use asupersync::time::Sleep;
     use asupersync::types::Time;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
+    use std::task::Poll;
     use std::time::Duration;
-
-    fn noop_waker() -> std::task::Waker {
-        std::task::Waker::noop().clone()
-    }
 
     #[test]
     fn sleep_with_500us_deadline_is_ready_when_polled_past() {
@@ -355,7 +349,7 @@ mod behavioral {
         // up the Sleep's deadline at the data-structure
         // level.
         let now = Time::ZERO;
-        let mut sleep = Sleep::after(now, Duration::from_micros(500));
+        let sleep = Sleep::after(now, Duration::from_micros(500));
 
         // Poll with now slightly past the deadline (600us in).
         let past = Time::from_nanos(600_000); // 600us
@@ -431,7 +425,7 @@ mod behavioral {
 
         // And ready 1ns later.
         let after_1ns = Time::from_nanos(1);
-        let mut sleep = Sleep::after(now, Duration::from_nanos(1));
+        let sleep = Sleep::after(now, Duration::from_nanos(1));
         let result = sleep.poll_with_time(after_1ns);
         assert_eq!(
             result,

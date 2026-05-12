@@ -16,17 +16,15 @@
 //!      starting from a RANDOM index:
 //!
 //!      a. **Fast path** (line 4142-4165): scans
-//!         `self.fast_stealers` (other workers' LocalQueues).
-//!         Start index is `self.rng.next_usize(len)` — a fresh
-//!         random index per call. Iteration is
-//!         `(start + i) % len` (circular). Each call attempts
-//!         `len` victims at most.
+//!      `self.fast_stealers` (other workers' LocalQueues). Start
+//!      index is `self.rng.next_usize(len)` — a fresh random index
+//!      per call. Iteration is `(start + i) % len` (circular). Each
+//!      call attempts `len` victims at most.
 //!
 //!      b. **Slow path** (line 4172-...): scans `self.stealers`
-//!         (other workers' PriorityScheduler heaps) for ready-
-//!         lane theft. Same random-start circular pattern.
-//!         Uses `try_lock` so contended victims are skipped
-//!         without blocking.
+//!      (other workers' PriorityScheduler heaps) for ready-lane
+//!      theft. Same random-start circular pattern. Uses `try_lock`
+//!      so contended victims are skipped without blocking.
 //!
 //!      The random `start` per call ensures that worker A is
 //!      EQUALLY likely to probe worker A+1, A+2, … A-1 (mod
@@ -70,7 +68,7 @@
 //!   - replaced DetRng with a non-deterministic source
 //!     (would break replay tests but not the load
 //!     distribution itself),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -91,7 +89,9 @@ fn try_steal_body(source: &str) -> &str {
     // try_steal is long; slice up to the next sibling fn.
     let after = &source[start + fn_marker.len()..];
     let next_fn_offset = after
-        .find("\n    pub(crate) fn ")
+        .find("\n    #[doc(hidden)]\n    #[cfg(feature = \"test-internals\")]\n    pub fn steal_once_for_test")
+        .or_else(|| after.find("\n    #[doc(hidden)]\n    pub fn steal_once_for_test"))
+        .or_else(|| after.find("\n    pub(crate) fn "))
         .or_else(|| after.find("\n    pub fn "))
         .or_else(|| after.find("\n    fn "))
         .unwrap_or(after.len().min(20000));
@@ -100,56 +100,52 @@ fn try_steal_body(source: &str) -> &str {
 
 #[test]
 fn try_steal_fast_path_uses_random_start_index() {
-    // Pin AUDIT-CRITICAL: the fast-path victim probe starts at
-    // a RANDOM index per call. A regression that replaced
-    // `self.rng.next_usize(len)` with `self.id.0 + 1` (or
-    // any function of worker id) would create the hotspot.
+    // Pin AUDIT-CRITICAL: each victim segment starts at a RANDOM
+    // index per call. A regression that replaced the random start
+    // with `self.id.0 + 1` (or any function of worker id) would
+    // create the hotspot.
     let source = read_three_lane_source();
     let body = try_steal_body(&source);
 
-    assert!(
-        body.contains("let start = self.rng.next_usize(len);"),
-        "REGRESSION: try_steal no longer uses \
-         `let start = self.rng.next_usize(len)` for the start \
-         index. Without this, the victim probe order becomes \
-         deterministic per worker (e.g. always probe worker+1 \
-         first) — re-introducing the hotspot the operator \
-         flagged.\n\nfn body:\n{body}",
-    );
-
-    // The body must contain the random-start invocation TWICE
-    // (once for fast_stealers, once for the slow-path
-    // stealers). A regression that kept only one would leave
-    // the OTHER path with a hotspot.
-    let count = body.matches("self.rng.next_usize(len)").count();
-    assert!(
-        count >= 2,
-        "REGRESSION: try_steal has only {count} call(s) to \
-         self.rng.next_usize(len); expected ≥ 2 (one for the \
-         fast-path fast_stealers scan, one for the slow-path \
-         stealers scan). A path without random start has the \
-         hotspot.",
-    );
+    let random_start_pins = [
+        "let start = self.rng.next_usize(preferred_len);",
+        "let start = self.rng.next_usize(remote_len);",
+        "let start = self.rng.next_usize(segment_len);",
+    ];
+    for pin in &random_start_pins {
+        assert!(
+            body.contains(pin),
+            "REGRESSION: try_steal no longer contains `{pin}`. \
+             Each preferred/remote locality segment must start at \
+             a random index; otherwise that segment regresses to a \
+             deterministic victim-order hotspot.\n\nfn body:\n{body}",
+        );
+    }
 }
 
 #[test]
 fn try_steal_iterates_circularly_via_modulo() {
-    // Pin: the iteration is `(start + i) % len`, NOT
-    // `start..len` or `0..len`. Without modulo, the scan
-    // would only cover a suffix and miss workers with index
-    // < start.
+    // Pin: each segment uses circular indexing, NOT `start..len`
+    // or `0..len`. Without modulo, the scan would only cover a
+    // suffix and miss victims with index < start.
     let source = read_three_lane_source();
     let body = try_steal_body(&source);
 
-    assert!(
-        body.contains("let idx = (start + i) % len;"),
-        "REGRESSION: try_steal no longer uses circular \
-         indexing `(start + i) % len`. A non-circular scan \
-         (e.g. `start..len`) would skip workers with index < \
-         start — biasing the victim distribution and possibly \
-         leaving idle workers with full queues unsatisfied.\n\n\
-         fn body:\n{body}",
-    );
+    let circular_index_pins = [
+        "let idx = (start + i) % preferred_len;",
+        "let idx = preferred_len + (start + i) % remote_len;",
+        "let idx = segment_start + (start + i) % segment_len;",
+    ];
+    for pin in &circular_index_pins {
+        assert!(
+            body.contains(pin),
+            "REGRESSION: try_steal no longer contains circular \
+             indexing `{pin}`. A non-circular segment scan would \
+             skip victims before the random start, biasing the \
+             distribution and possibly leaving idle workers with \
+             full queues unsatisfied.\n\nfn body:\n{body}",
+        );
+    }
 }
 
 #[test]
@@ -339,8 +335,7 @@ fn try_steal_does_not_call_steal_on_self() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let window = &source[window_start..safe_end];
 
@@ -363,21 +358,28 @@ fn try_steal_does_not_call_steal_on_self() {
 
 #[test]
 fn try_steal_iterates_at_most_len_times() {
-    // Pin: the for loop is `for i in 0..len`, ensuring at
-    // most `len` victims are probed. A regression to a longer
-    // loop (e.g. `0..len*2`) would let the same victim be
+    // Pin: each segment loop is bounded by that segment's length,
+    // ensuring each victim in the segment is probed at most once.
+    // A regression to a longer loop would let the same victim be
     // probed twice, wasting CPU under contention.
     let source = read_three_lane_source();
     let body = try_steal_body(&source);
 
-    assert!(
-        body.contains("for i in 0..len {"),
-        "REGRESSION: try_steal loop is no longer `for i in \
-         0..len`. The bounded length guarantees the scan \
-         visits each victim at most once. A different bound \
-         could re-probe contended victims (waste) or skip \
-         some (incomplete coverage).\n\nfn body:\n{body}",
-    );
+    let bounded_loop_pins = [
+        "for i in 0..preferred_len {",
+        "for i in 0..remote_len {",
+        "for i in 0..segment_len {",
+    ];
+    for pin in &bounded_loop_pins {
+        assert!(
+            body.contains(pin),
+            "REGRESSION: try_steal no longer contains bounded \
+             segment loop `{pin}`. The segment-length bound \
+             guarantees the scan visits each segment victim at \
+             most once; a different bound could re-probe \
+             contended victims or skip some.\n\nfn body:\n{body}",
+        );
+    }
 }
 
 // ─── Behavioral end-to-end pin (gated on test-internals) ────────────
