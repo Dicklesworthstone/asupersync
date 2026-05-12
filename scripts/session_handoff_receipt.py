@@ -340,10 +340,13 @@ def stale_in_progress(
             continue
         age_hours = (now_ts - updated).total_seconds() / 3600
         if age_hours >= stale_after_hours:
+            issue_id = issue.get("id")
+            if not isinstance(issue_id, str) or not issue_id:
+                continue
             stale.append(
                 {
-                    "id": issue.get("id", ""),
-                    "assignee": issue.get("assignee", ""),
+                    "id": issue_id,
+                    "assignee": str(issue.get("assignee", "")),
                     "updated_at": issue.get("updated_at", ""),
                     "age_hours": round(age_hours, 2),
                 }

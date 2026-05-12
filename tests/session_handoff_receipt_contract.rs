@@ -264,6 +264,32 @@ fn stale_in_progress_no_proof_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn stale_in_progress_missing_id_is_not_reopened() {
+    let receipt = receipt_json("stale_in_progress_missing_id.json");
+    assert_eq!(next_action_category(&receipt), "blocked");
+    assert_eq!(
+        receipt["next_action"]["reason"].as_str(),
+        Some("no actionable ready bead or proof lane was found")
+    );
+    assert!(
+        receipt["active_bead_ids"]["stale_in_progress"]
+            .as_array()
+            .expect("stale_in_progress must be array")
+            .is_empty(),
+        "malformed stale rows without ids must not become reclaim candidates"
+    );
+}
+
+#[test]
+fn stale_in_progress_missing_id_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "stale_in_progress_missing_id.json",
+        "stale_in_progress_missing_id_expected.json",
+        "stale-in-progress missing-id handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn epic_only_ready_queue_is_not_claimed() {
     let receipt = receipt_json("epic_only_ready.json");
     assert_eq!(next_action_category(&receipt), "blocked");
