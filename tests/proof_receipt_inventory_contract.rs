@@ -167,6 +167,30 @@ fn duplicate_current_matches_full_output_golden() {
 }
 
 #[test]
+fn covered_draft_helpers_emit_review_cue_instead_of_canonical_status() {
+    let receipt = receipt_json("covered_draft.json");
+    let row = helper(&receipt, "proof-runner-execute-receipt-draft");
+
+    assert_eq!(row["classification"].as_str(), Some("draft"));
+    assert_eq!(receipt["classification_counts"]["draft"].as_u64(), Some(1));
+
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    assert!(cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("draft-helper")
+            && cue["helper_id"].as_str() == Some("proof-runner-execute-receipt-draft")
+    }));
+}
+
+#[test]
+fn covered_draft_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "covered_draft.json",
+        "covered_draft_expected.json",
+        "proof receipt inventory covered-draft golden changed; update only after reviewing draft-helper actionability semantics",
+    );
+}
+
+#[test]
 fn missing_contract_and_fixture_are_actionable() {
     let receipt = receipt_json("redaction_and_missing_contract.json");
     let row = helper(&receipt, "operator-token-audit-receipt");

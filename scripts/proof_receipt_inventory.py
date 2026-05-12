@@ -188,12 +188,12 @@ def classify_row(row: dict[str, Any], canonical: dict[str, Any], active_count: i
         return "missing-contract-test"
     if not row["fixture_root"]:
         return "missing-fixture-root"
+    if is_draft(row):
+        return "draft"
     if row["helper_id"] == canonical["helper_id"]:
         return "canonical"
     if active_count > 1:
         return "duplicate-capability"
-    if is_draft(row):
-        return "draft"
     return "covered"
 
 
@@ -274,6 +274,16 @@ def review_cues(rows: list[dict[str, Any]], capabilities: list[dict[str, Any]]) 
                     "helper_id": row["helper_id"],
                     "superseded_by": row["superseded_by"],
                     "recommendation": "route future fixes to the superseding helper and avoid citing this one as canonical",
+                }
+            )
+        elif row["classification"] == "draft":
+            cues.append(
+                {
+                    "kind": "draft-helper",
+                    "severity": "medium",
+                    "capability_id": row["capability_id"],
+                    "helper_id": row["helper_id"],
+                    "recommendation": "finish or retire this draft before citing it as canonical",
                 }
             )
         elif row["classification"] in {"missing-contract-test", "missing-fixture-root"}:
