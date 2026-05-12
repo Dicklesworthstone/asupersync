@@ -82,7 +82,7 @@
 //!     wake / unpark / re-poll,
 //!   - introduced an "anti-cheat token bucket" that refilled
 //!     on a timer instead of being a hard one-shot quota,
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;

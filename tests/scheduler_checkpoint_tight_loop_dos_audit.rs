@@ -129,7 +129,7 @@
 //!   - changed Budget::default() to have a deadline (would
 //!     break the "unconfigured task has no time bound"
 //!     property — surprising behavioral change),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -154,8 +154,7 @@ fn checkpoint_fast_path_uses_read_lock_only_no_yield() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -254,8 +253,7 @@ fn checkpoint_does_not_call_consume_poll_per_invocation() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -373,8 +371,7 @@ fn checkpoint_slow_path_publishes_cancel_via_release_on_exhaustion() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 

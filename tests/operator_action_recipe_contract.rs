@@ -24,14 +24,13 @@ fn run_proof_runner(args: &[&str]) -> Output {
 
 fn proof_runner_json(args: &[&str]) -> Value {
     let output = run_proof_runner(args);
-    if !output.status.success() {
-        panic!(
-            "proof runner failed: {}\nstdout: {}\nstderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "proof runner failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("proof runner output not JSON: {error}\noutput: {stdout}"))
