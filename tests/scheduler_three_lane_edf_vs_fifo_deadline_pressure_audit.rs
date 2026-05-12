@@ -30,8 +30,8 @@
 //!      pressure**: the governor (obligation/lyapunov.rs:599
 //!      `LyapunovGovernor::suggest`) computes a deadline
 //!      component:
-//!        deadline_component =
-//!          w_deadline_pressure × snapshot.deadline_pressure
+//!      deadline_component =
+//!      w_deadline_pressure × snapshot.deadline_pressure
 //!      where `deadline_pressure ≈ Σ max(0, 1 − (deadline −
 //!      now)/D₀)` over tasks within D₀=1s of their deadline.
 //!      As tasks get closer to deadline, pressure grows. When
@@ -99,7 +99,7 @@
 //!   - removed multi-worker dispatch (single worker becomes
 //!     sole bottleneck, full deadline-miss risk for any
 //!     long-running FIFO task on the only worker),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -147,8 +147,7 @@ fn meet_deadlines_phase2_local_pops_timed_before_cancel() {
         let safe_end = source
             .char_indices()
             .map(|(i, _)| i)
-            .filter(|&i| i <= window_end)
-            .last()
+            .rfind(|&i| i <= window_end)
             .unwrap_or(window_end);
         let body = &source[abs..safe_end];
         if body.contains("local.pop_timed_only_with_hint(rng_hint, now)") {
