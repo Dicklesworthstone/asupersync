@@ -84,7 +84,7 @@ fn decode_compressed_flag_with_zero_length_is_legal() {
         msg.compressed,
         "compressed flag must round-trip — flag=1 means compressed=true",
     );
-    assert_eq!(msg.data.len(), 0, "length=0 frame produces empty data",);
+    assert_eq!(msg.data.len(), 0, "length=0 frame produces empty data");
     assert_eq!(
         buf.len(),
         0,
