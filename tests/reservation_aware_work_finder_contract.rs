@@ -111,6 +111,24 @@ fn empty_queue_skips_peer_dirty_fuzz_target_and_recommends_mock_scan() {
 }
 
 #[test]
+fn dirty_rename_target_blocks_candidate_surface() {
+    let receipt = finder_json("rename_dirty_target.json");
+    let renamed = candidate(&receipt, "mock-code-finder:renamed-target");
+    let blocker = &renamed["blockers"][0];
+
+    assert_eq!(renamed["status"].as_str(), Some("blocked"));
+    assert_eq!(blocker["kind"].as_str(), Some("dirty-unattributed-path"));
+    assert_eq!(
+        blocker["path"].as_str(),
+        Some("tests/fixtures/reservation_aware_work_finder/new_candidate.json")
+    );
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("mock-code-finder:safe-script")
+    );
+}
+
+#[test]
 fn clean_workspace_selects_highest_priority_fallback_candidate() {
     let receipt = finder_json("clean_workspace_candidates.json");
 
@@ -267,5 +285,47 @@ print(json.dumps({
     assert_eq!(
         receipt["entries"][0]["path"].as_str(),
         Some("fuzz/Cargo.toml")
+    );
+}
+
+#[test]
+fn live_probe_expands_porcelain_rename_source_and_target_paths() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import reservation_aware_work_finder as finder
+
+entries = finder.parse_status_lines(
+    "R  tests/old_fixture.json -> tests/fixtures/reservation_aware_work_finder/new_candidate.json\n"
+)
+print(json.dumps({"entries": entries}, sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run live probe rename expansion check");
+    assert!(
+        output.status.success(),
+        "python rename probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value = serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    let entries = receipt["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["status"].as_str(), Some("R "));
+    assert_eq!(entries[0]["path"].as_str(), Some("tests/old_fixture.json"));
+    assert_eq!(
+        entries[1]["path"].as_str(),
+        Some("tests/fixtures/reservation_aware_work_finder/new_candidate.json")
     );
 }

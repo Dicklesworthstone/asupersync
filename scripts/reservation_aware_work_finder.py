@@ -207,12 +207,12 @@ def dirty_entries(source: dict[str, Any]) -> list[dict[str, Any]]:
     for item in rows if isinstance(rows, list) else []:
         if not isinstance(item, dict):
             continue
-        path = normalize_path(str(item.get("path") or ""))
-        if path:
+        status = str(item.get("status") or "")
+        for path in status_paths(status, str(item.get("path") or "")):
             entries.append(
                 {
                     "path": path,
-                    "status": str(item.get("status") or ""),
+                    "status": status,
                     "owner": str(item.get("owner") or ""),
                 }
             )
@@ -498,8 +498,19 @@ def parse_status_lines(raw: str) -> list[dict[str, str]]:
     entries = []
     for line in raw.splitlines():
         if len(line) >= 4:
-            entries.append({"status": line[:2], "path": line[3:]})
+            status = line[:2]
+            for path in status_paths(status, line[3:]):
+                entries.append({"status": status, "path": path})
     return entries
+
+
+def status_paths(status: str, path: str) -> list[str]:
+    path = path.strip()
+    if not path:
+        return []
+    if ("R" in status or "C" in status) and " -> " in path:
+        return [normalize_path(part) for part in path.split(" -> ", 1) if part.strip()]
+    return [normalize_path(path)]
 
 
 def live_probe(

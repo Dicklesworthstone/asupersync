@@ -1,0 +1,39 @@
+{
+  "agent_mail": {
+    "reservations": [],
+    "status": "fixture"
+  },
+  "beads": {
+    "ready": [],
+    "status": "fixture"
+  },
+  "dirty_tree": {
+    "entries": [
+      {
+        "path": "tests/old_fixture.json -> tests/fixtures/reservation_aware_work_finder/new_candidate.json",
+        "status": "R "
+      }
+    ],
+    "status": "ok"
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "mock-code-finder:renamed-target",
+      "lane": "mock-code-finder",
+      "paths": [
+        "tests/fixtures/reservation_aware_work_finder/new_candidate.json"
+      ],
+      "priority": 1,
+      "title": "Inspect renamed fixture target"
+    },
+    {
+      "candidate_id": "mock-code-finder:safe-script",
+      "lane": "mock-code-finder",
+      "paths": [
+        "scripts/reservation_aware_work_finder.py"
+      ],
+      "priority": 2,
+      "title": "Inspect reservation-aware finder script"
+    }
+  ]
+}
