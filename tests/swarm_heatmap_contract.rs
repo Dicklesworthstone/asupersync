@@ -60,6 +60,55 @@ fn script_exists_and_help_is_non_mutating() {
 }
 
 #[test]
+fn live_probe_preserves_porcelain_status_columns_for_unstaged_paths() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("swarm_heatmap", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Completed:
+    stdout = " M scripts/closeout_verifier.py \n"
+
+module.subprocess.run = lambda *args, **kwargs: Completed()
+status, raw = module.run_text(pathlib.Path("."), ["git", "status", "--porcelain=v1"], 1.0)
+entries = module.parse_status_lines(raw if status == "ok" else "")
+print(json.dumps({"status": status, "raw": raw, "entries": entries}))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .output()
+        .expect("run swarm heatmap live probe parser smoke");
+    assert!(
+        output.status.success(),
+        "parser smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parser smoke JSON");
+    assert_eq!(parsed["status"].as_str(), Some("ok"));
+    assert_eq!(
+        parsed["raw"].as_str(),
+        Some(" M scripts/closeout_verifier.py ")
+    );
+    assert_eq!(parsed["entries"][0]["status"].as_str(), Some(" M"));
+    assert_eq!(
+        parsed["entries"][0]["path"].as_str(),
+        Some("scripts/closeout_verifier.py ")
+    );
+}
+
+#[test]
 fn overlapping_reservations_are_visible_and_stable() {
     let heatmap = heatmap_json("overlapping_reservations.json");
     let overlap = &heatmap["reservations"]["overlaps"][0];
