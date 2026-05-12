@@ -53,7 +53,7 @@
 //!   - had `decode` busy-spin on partial input
 //!   - had `decode_eof` swallow trailing bytes silently
 //!   - had the io::Error→GrpcError mapping change class
-//! would all be caught here.
+//!     would all be caught here.
 
 use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::codec::Decoder;
