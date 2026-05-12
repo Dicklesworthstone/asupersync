@@ -418,6 +418,57 @@ fn proof_runner_blocks_peer_active_reservation_from_snapshot() {
 }
 
 #[test]
+fn proof_runner_blocks_peer_directory_reservation_from_snapshot() {
+    let snapshot = write_reservation_snapshot(
+        r#"{
+          "reservations": [
+            {
+              "path_pattern": "tests/fixtures/proof_runner",
+              "agent_name": "TopazGoose",
+              "expires_ts": "2999-01-01T00:00:00Z",
+              "exclusive": true
+            }
+          ]
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let output = run_proof_runner(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "tests/fixtures/proof_runner/new.log",
+        "--reservation-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ])
+    .expect("proof runner should execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let result = output_json(&output);
+    let record = &result["validation_frontier_record"];
+    assert_eq!(
+        record["error_class"].as_str(),
+        Some("file_reservation_conflict")
+    );
+    assert_eq!(
+        result["reservation_check"]["classifications"][0]["classification"].as_str(),
+        Some("peer-active")
+    );
+    assert_eq!(
+        result["reservation_check"]["classifications"][0]["path"].as_str(),
+        Some("tests/fixtures/proof_runner/new.log")
+    );
+    assert_eq!(
+        result["reservation_check"]["classifications"][0]["path_pattern"].as_str(),
+        Some("tests/fixtures/proof_runner")
+    );
+}
+
+#[test]
 fn proof_runner_allows_owned_and_expired_reservations() {
     let snapshot = write_reservation_snapshot(
         r#"{

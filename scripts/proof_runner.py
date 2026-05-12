@@ -810,16 +810,35 @@ class AgentMailChecker:
         }
 
     def _first_matching_file(self, pattern: str, file_paths: List[str]) -> Optional[str]:
-        normalized_pattern = pattern.removeprefix("./")
+        normalized_pattern = self._normalize_reservation_path(pattern)
         for file_path in file_paths:
-            normalized_file = file_path.removeprefix("./")
-            if (
-                normalized_file == normalized_pattern
-                or fnmatch.fnmatchcase(normalized_file, normalized_pattern)
-                or fnmatch.fnmatchcase(normalized_pattern, normalized_file)
-            ):
+            normalized_file = self._normalize_reservation_path(file_path)
+            if self._paths_overlap(normalized_pattern, normalized_file):
                 return normalized_file
         return None
+
+    def _normalize_reservation_path(self, path: str) -> str:
+        return path.replace("\\", "/").removeprefix("./").rstrip("/")
+
+    def _paths_overlap(self, pattern: str, file_path: str) -> bool:
+        if not pattern or not file_path:
+            return False
+        if (
+            file_path == pattern
+            or fnmatch.fnmatchcase(file_path, pattern)
+            or fnmatch.fnmatchcase(pattern, file_path)
+        ):
+            return True
+        pattern_is_glob = self._has_glob_magic(pattern)
+        file_is_glob = self._has_glob_magic(file_path)
+        return (
+            not pattern_is_glob and file_path.startswith(f"{pattern}/")
+        ) or (
+            not file_is_glob and pattern.startswith(f"{file_path}/")
+        )
+
+    def _has_glob_magic(self, path: str) -> bool:
+        return any(char in path for char in "*?[")
 
     def _is_expired(self, expires_ts: Any) -> bool:
         if not expires_ts:
@@ -834,7 +853,7 @@ class AgentMailChecker:
         return expires_at <= datetime.now(timezone.utc)
 
     def _is_tracker_path(self, path: str) -> bool:
-        return path in {".beads/issues.jsonl", ".beads/beads.db"} or path.startswith(".beads/")
+        return path in {".beads", ".beads/issues.jsonl", ".beads/beads.db"} or path.startswith(".beads/")
 
     def _summary(
         self,
