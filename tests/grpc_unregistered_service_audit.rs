@@ -5,14 +5,13 @@
 //! expect gRPC status codes and won't properly parse HTTP error responses.
 
 use asupersync::bytes::Bytes;
-use asupersync::grpc::server::{Server, err};
+use asupersync::grpc::server::Server;
 use asupersync::grpc::service::{
     MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler,
 };
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::{Metadata, Request, Response};
 use asupersync::test_utils::run_test_with_cx;
-use std::sync::Arc;
 
 // Mock service for testing
 #[derive(Debug, Clone)]
@@ -72,7 +71,7 @@ fn test_dispatch_with_unregistered_service_handler() {
     // path-based routing, we simulate the behavior by testing the dispatch
     // with a handler that returns UNIMPLEMENTED.
 
-    run_test_with_cx(|cx| async move {
+    run_test_with_cx(|_cx| async move {
         let server = Server::builder().build();
 
         let request = Request::with_metadata(Bytes::from("test"), Metadata::new());
