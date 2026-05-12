@@ -179,6 +179,31 @@ fn peer_reservation_matches_full_output_golden() {
 }
 
 #[test]
+fn directory_reservation_blocks_child_path_staging() {
+    let receipt = receipt_json("directory_reservation.json");
+    let row = row(&receipt, "src/security/secret.rs");
+
+    assert_eq!(row["classification"].as_str(), Some("peer-owned"));
+    assert_eq!(row["owner"].as_str(), Some("BoldPlateau"));
+    assert_eq!(
+        row["evidence"]["reservation_path_pattern"].as_str(),
+        Some("src/security")
+    );
+    assert_eq!(
+        row["staging_guidance"]["decision"].as_str(),
+        Some("do-not-stage")
+    );
+}
+
+#[test]
+fn directory_reservation_matches_full_output_golden() {
+    assert_receipt_output_matches_golden(
+        "directory_reservation.json",
+        "directory_reservation_expected.json",
+    );
+}
+
+#[test]
 fn self_reservation_allows_pathspec_staging() {
     let receipt = receipt_json("self_reservation.json");
     let row = row(&receipt, "scripts/dirty_tree_ownership_receipt.py");

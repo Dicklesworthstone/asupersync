@@ -1,0 +1,36 @@
+{
+  "agent_mail": {
+    "available": true,
+    "messages": [],
+    "reservations": [
+      {
+        "agent_name": "BoldPlateau",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:56:00Z",
+        "path_pattern": "src/security",
+        "reason": "asupersync-2s1ozt"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "issues": [
+      {
+        "description": "Fix src/security/secret.rs and src/security/tag.rs timing equality.",
+        "id": "asupersync-2s1ozt",
+        "status": "in_progress",
+        "title": "Security equality hardening"
+      }
+    ],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": "src/security/secret.rs",
+        "status": " M"
+      }
+    ],
+    "status": "ok"
+  }
+}
