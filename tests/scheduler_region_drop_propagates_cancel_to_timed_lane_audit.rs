@@ -86,7 +86,7 @@
 //!   - removed the `fast_cancel.store(true, Release)` from
 //!     request_cancel_with_budget (would let the task's
 //!     subsequent checkpoint miss the cancel),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -297,8 +297,7 @@ fn request_cancel_with_budget_sets_fast_cancel_release() {
         let safe_end = task_record
             .char_indices()
             .map(|(i, _)| i)
-            .filter(|&i| i <= window_end)
-            .last()
+            .rfind(|&i| i <= window_end)
             .unwrap_or(window_end);
         let body = &task_record[start..safe_end];
 
