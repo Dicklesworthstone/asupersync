@@ -83,6 +83,8 @@ pub mod otlp_compression_audit_test;
 pub mod otlp_compression_negotiation_audit_test;
 pub mod otlp_dst_clock_jump_audit_test;
 #[cfg(test)]
+pub mod otlp_empty_key_attribute_audit_test;
+#[cfg(test)]
 pub mod otlp_graceful_shutdown_audit_test;
 #[cfg(test)]
 pub mod otlp_high_frequency_span_audit_test;
