@@ -19,8 +19,8 @@
 //!         `cx.waker().wake_by_ref()`, returns `Poll::Pending`.
 //!       - Second poll: sets `completed = true`, returns
 //!         `Poll::Ready(())`.
-//!     Two-poll sequence: Pending+wake → Ready. Always
-//!     yields the worker for at least one dispatch cycle.
+//!         Two-poll sequence: Pending+wake → Ready. Always
+//!         yields the worker for at least one dispatch cycle.
 //!
 //!   - **`Sleep::after(now, Duration::ZERO)`** (time/sleep.
 //!     rs:260):
@@ -29,8 +29,8 @@
 //!       - First poll: `poll_with_time(now)` checks
 //!         `now >= self.deadline` (now == deadline → true),
 //!         sets `completed = true`, returns `Poll::Ready(())`.
-//!     One-poll sequence: Ready immediately. Does NOT yield
-//!     the worker.
+//!         One-poll sequence: Ready immediately. Does NOT yield
+//!         the worker.
 //!
 //!   Observable difference at the scheduler level:
 //!     - yield_now: 2 polls per use, +1 ready_dispatches
@@ -122,17 +122,17 @@
 //!   - changed yield_now to skip the wake_by_ref (would
 //!     return Pending forever — task hangs),
 //!   - changed yield_now to return Ready on first poll
-//:     (would not yield — equivalent to sleep(0)),
+//!     (would not yield — equivalent to sleep(0)),
 //!   - changed sleep(0) to register a timer + Pending
 //!     (would conflate with yield_now's behavior — extra
 //!     timer-driver overhead for nothing),
 //!   - changed Sleep::after to NOT use saturating_add_nanos
-//:     (Duration::ZERO might overflow or wrap — undefined
+//!     (Duration::ZERO might overflow or wrap — undefined
 //!     behavior at the boundary),
 //!   - removed yield_now entirely (would lose the
 //!     cooperative-yield primitive — apps would have to
 //!     compose ad-hoc Pending+wake patterns),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -299,8 +299,7 @@ fn sleep_state_does_not_register_timer_for_already_past_deadline() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -367,8 +366,7 @@ fn sleep_with_positive_duration_routes_through_timer_driver() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -581,9 +579,7 @@ fn behavior_yield_now_and_sleep_zero_have_different_poll_counts() {
         match Pin::new(&mut yield_fut).poll(&mut cx1) {
             Poll::Ready(()) => break,
             Poll::Pending => {
-                if yield_polls > 10 {
-                    panic!("yield_now took >10 polls — broken");
-                }
+                assert!(yield_polls <= 10, "yield_now took >10 polls — broken");
             }
         }
     }
@@ -598,9 +594,7 @@ fn behavior_yield_now_and_sleep_zero_have_different_poll_counts() {
         match Pin::new(&mut sleep_fut).poll(&mut cx2) {
             Poll::Ready(()) => break,
             Poll::Pending => {
-                if sleep_polls > 10 {
-                    panic!("sleep(0) took >10 polls — broken");
-                }
+                assert!(sleep_polls <= 10, "sleep(0) took >10 polls — broken");
             }
         }
     }
