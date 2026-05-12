@@ -117,7 +117,7 @@
 //!     cancel_acknowledged (would either prematurely
 //!     acknowledge inside a mask, breaking the protocol,
 //:     OR never acknowledge — priority inversion),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -142,8 +142,7 @@ fn checkpoint_fast_path_early_return_gated_on_not_cancelled_and_not_exhausted() 
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -174,8 +173,7 @@ fn checkpoint_fast_path_reads_cancel_via_acquire_load() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -208,8 +206,7 @@ fn checkpoint_slow_path_runs_same_call_when_cancel_observed() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -239,8 +236,7 @@ fn checkpoint_slow_path_acknowledges_cancel_when_unmasked() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -270,8 +266,7 @@ fn checkpoint_slow_path_returns_err_via_check_cancel_from_values() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -364,8 +359,7 @@ fn checkpoint_slow_path_emits_cancel_evidence_for_observability() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -442,6 +436,10 @@ enum MockResult {
 fn mock_checkpoint(inner: &mut MockCxInner) -> MockResult {
     // Fast path: read-only check.
     let cancelled = inner.fast_cancel.load(Ordering::Acquire);
+    assert_eq!(
+        inner.cancel_requested, cancelled,
+        "mock cancel_requested must mirror fast_cancel"
+    );
     if !cancelled {
         return MockResult::Ok;
     }
