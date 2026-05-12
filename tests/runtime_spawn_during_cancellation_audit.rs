@@ -82,7 +82,7 @@
 //!   - removed the existing
 //!     cancel_request_should_prevent_new_spawns in-crate
 //!     test (would let regressions slip through CI),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -180,22 +180,23 @@ fn create_task_maps_admission_closed_to_spawn_error_region_closed() {
          failures — and the rollback path may not fire.",
     );
 
-    // The rollback (remove_task) MUST happen before the
+    // The rollback (recycle_task) MUST happen before the
     // error return.
     let admission_pos = source
         .find("AdmissionError::Closed => SpawnError::RegionClosed(region),")
         .expect("admission match arm");
     let pre_admission = &source[..admission_pos];
 
-    // The 200 chars preceding the match arm should contain
-    // the rollback `remove_task` call.
+    // The chars preceding the match arm should contain the
+    // rollback `recycle_task` call. recycle_task removes the
+    // partial task record and returns the slot to the pool.
     let rollback_window_start = pre_admission.len().saturating_sub(500);
     let rollback_window = &pre_admission[rollback_window_start..];
 
     assert!(
-        rollback_window.contains("self.remove_task(task_id)"),
+        rollback_window.contains("self.recycle_task(task_id)"),
         "REGRESSION: create_task no longer calls \
-         self.remove_task(task_id) before returning \
+         self.recycle_task(task_id) before returning \
          SpawnError::RegionClosed. Without rollback, a \
          partial task record is left in the task table — \
          observable as a leaked task in diagnostics.\n\n\
