@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres")]
-
 //! Audit test for PostgreSQL prepared statement cache behavior.
 //!
 //! PostgreSQL wire protocol requirement: "When a statement is prepared once and
@@ -9,6 +7,8 @@
 //!
 //! CRITICAL REQUIREMENT: Cache reuse reduces Parse/Describe/Sync round-trips for
 //! repeated SQL strings, providing significant performance benefits.
+
+#![cfg(feature = "postgres")]
 
 use asupersync::cx::Cx;
 use asupersync::database::{PgConnection, PgError};
