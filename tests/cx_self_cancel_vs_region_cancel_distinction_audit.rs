@@ -18,10 +18,10 @@
 //!   - `fn cancel_self` → ZERO hits
 //!   - `Scope::cancel` (no method on Scope named `cancel`)
 //!     — Scope's public methods are region_id, budget,
-//!       spawn, spawn_task, spawn_local, spawn_blocking,
-//!       region, region_with_budget, join, race, hedge,
-//!       race_all, join_all, defer_sync, defer_async
-//!       (cf. src/cx/scope.rs).
+//!     spawn, spawn_task, spawn_local, spawn_blocking,
+//!     region, region_with_budget, join, race, hedge,
+//!     race_all, join_all, defer_sync, defer_async
+//!     (cf. src/cx/scope.rs).
 //!
 //! Instead, the cancel surface is:
 //!
