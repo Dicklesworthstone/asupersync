@@ -104,12 +104,12 @@ fn simulate_scheduler_performance(
         // Simulate performance impact based on parameters
         let performance_factor = if enable_autotuner {
             // Better parameters improve performance
-            let batch_efficiency = if current_batch_size >= 4 && current_batch_size <= 16 {
+            let batch_efficiency = if (4..=16).contains(&current_batch_size) {
                 1.0
             } else {
                 0.8
             };
-            let handoff_efficiency = if current_handoff_limit >= 2 && current_handoff_limit <= 8 {
+            let handoff_efficiency = if (2..=8).contains(&current_handoff_limit) {
                 1.0
             } else {
                 0.9
