@@ -48,18 +48,13 @@
 //!
 //!   5. **Deadline-aware behavior is achieved cooperatively**:
 //!      asupersync's deadline guarantees come from FIVE
-//!      MECHANISMS already audited and pinned:
-//!        a. Cooperative budget (poll_quota / cost_quota /
-//!           deadline) — bounds task runtime.
-//!        b. Lyapunov governor — anticipates deadline
-//!           pressure and switches to MeetDeadlines
-//!           SchedulingSuggestion.
-//!        c. EDF lane priority — Timed > Cancel > Ready
-//!           under MeetDeadlines (three_lane.rs:3401).
-//!        d. Multi-worker dispatch — free workers pick up
-//!           EDF tasks in parallel.
-//!        e. timed_fairness_limit — bounded EDF-vs-FIFO
-//!           interleaving even under sustained pressure.
+//!      MECHANISMS already audited and pinned: cooperative
+//!      budget (poll_quota / cost_quota / deadline), the
+//!      Lyapunov governor's MeetDeadlines suggestion, EDF lane
+//!      priority (Timed > Cancel > Ready under MeetDeadlines),
+//!      multi-worker dispatch, and timed_fairness_limit's
+//!      bounded EDF-vs-FIFO interleaving even under sustained
+//!      pressure.
 //!      None of these depend on OS thread priority.
 //!
 //!   6. **User extension point exists**: if a specific
@@ -108,7 +103,7 @@
 //!     errors (would mask permission failures and produce
 //!     confusing behavior — RT was requested but not
 //!     applied),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
