@@ -67,7 +67,7 @@
 //!   - made `flush()` non-trivial (suggesting state to drain),
 //!   - changed the loop's exhaustion path from immediate Err
 //!     to a fall-through that pushed the batch onto a queue,
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -89,7 +89,7 @@ fn otlp_struct_body(source: &str) -> &str {
 
 fn send_otlp_protobuf_body(source: &str) -> &str {
     // Look for the `send_otlp_protobuf` async fn body.
-    let marker = "send_otlp_protobuf";
+    let marker = "pub async fn send_otlp_protobuf(";
     let mut pos = source.find(marker).expect("send_otlp_protobuf must exist");
     // Find the `{` opening the body. It may be on a different
     // line than the marker (multi-line signature).
