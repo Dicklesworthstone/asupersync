@@ -1,3 +1,9 @@
+//! Differential coverage for the K=1 RaptorQ decoder path.
+//!
+//! The tests compare asupersync's inactivation decoder against the
+//! `raptorq` crate for one-symbol source blocks plus repair-symbol
+//! recovery paths.
+
 use std::collections::BTreeSet;
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
