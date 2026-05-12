@@ -175,14 +175,11 @@ fn server_streaming_partial_buffer_decodes_remaining_after_more_arrives() {
     let mut decoder = StreamCodec::new(ProstCodec::new());
 
     // Drain whatever frames are completable from the partial buffer.
-    loop {
-        match decoder
-            .decode_message(&mut partial)
-            .expect("partial decode")
-        {
-            Some(msg) => received.push(msg),
-            None => break,
-        }
+    while let Some(msg) = decoder
+        .decode_message(&mut partial)
+        .expect("partial decode")
+    {
+        received.push(msg);
     }
     let half_count = received.len();
     assert!(
@@ -350,18 +347,20 @@ fn conformance_grpc_streaming_ordering_matrix_logs_fingerprints() {
     let cancel_split_at = cancel_like_wire.len() / 3;
     let mut cancel_buf = BytesMut::from(&cancel_like_wire[..cancel_split_at]);
     let cancel_tail = cancel_like_wire[cancel_split_at..].to_vec();
-    let mut first_decoder = StreamCodec::new(ProstCodec::new());
-    let mut cancel_like_received = decode_available(
-        &mut first_decoder,
-        &mut cancel_buf,
-        "decode cancel-like prefix",
-    );
-    let cancellation_point = cancel_like_received.len();
-    assert!(
-        cancellation_point < cancel_like_send.len(),
-        "cancel-like split must stop mid-stream before full delivery"
-    );
-    drop(first_decoder);
+    let (mut cancel_like_received, cancellation_point) = {
+        let mut first_decoder = StreamCodec::new(ProstCodec::new());
+        let cancel_like_received = decode_available(
+            &mut first_decoder,
+            &mut cancel_buf,
+            "decode cancel-like prefix",
+        );
+        let cancellation_point = cancel_like_received.len();
+        assert!(
+            cancellation_point < cancel_like_send.len(),
+            "cancel-like split must stop mid-stream before full delivery"
+        );
+        (cancel_like_received, cancellation_point)
+    };
     cancel_buf.extend_from_slice(&cancel_tail);
     let mut resumed_decoder = StreamCodec::new(ProstCodec::new());
     cancel_like_received.extend(decode_available(

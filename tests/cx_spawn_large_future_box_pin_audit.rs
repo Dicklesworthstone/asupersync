@@ -78,12 +78,12 @@
 //!        - The wrapped-future construction.
 //!        - The Box::pin call (which moves bytes from stack
 //!          to heap).
-//!      Even for a 100KB future, the spawn-time stack
-//!      pressure is bounded by the future's inline size —
-//!      and the compiler can often place the future
-//!      directly on the heap-bound location via copy
-//!      elision (especially in release builds with
-//!      optimizations).
+//!          Even for a 100KB future, the spawn-time stack
+//!          pressure is bounded by the future's inline size —
+//!          and the compiler can often place the future
+//!          directly on the heap-bound location via copy
+//!          elision (especially in release builds with
+//!          optimizations).
 //!
 //! Verdict: **SOUND**. Large futures (100KB+) are boxed
 //! transparently at spawn time. The worker stack holds only
@@ -120,7 +120,7 @@
 //!     and made it a generic StoredTask<F> (would require
 //!     monomorphization at the scheduler boundary —
 //!     incompatible with the heterogeneous task table),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -219,8 +219,7 @@ fn local_stored_task_new_calls_box_pin() {
     let start = source.find(impl_marker).expect("LocalStoredTask impl");
     let next_impl = source[start + impl_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + impl_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + impl_marker.len() + o);
     let impl_body = &source[start..next_impl];
 
     let count = impl_body.matches("future: Box::pin(future),").count();
@@ -369,6 +368,7 @@ impl Future for LargeFuture {
 }
 
 #[test]
+#[allow(clippy::large_stack_arrays)]
 fn large_future_box_pin_produces_fixed_size_handle() {
     // Behavioral pin: regardless of LargeFuture's 100KB
     // inline size, the Pin<Box<dyn Future>> handle is a
@@ -419,6 +419,7 @@ fn large_future_box_pin_produces_fixed_size_handle() {
 }
 
 #[test]
+#[allow(clippy::large_stack_arrays)]
 fn many_large_futures_boxed_simultaneously_each_separately_heap_allocated() {
     // Behavioral pin: build 10 large futures (1MB total
     // heap), all boxed simultaneously. Each lives on the
