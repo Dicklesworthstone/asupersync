@@ -22,7 +22,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::http::h3_native::{
-    H3ConnectionConfig, H3EndpointRole, H3Frame, H3QpackMode, H3Settings,
+    H3ConnectionConfig, H3EndpointRole, H3Frame, H3NativeError, H3QpackMode, H3Settings,
 };
 use asupersync::net::quic_core::{QUIC_VARINT_MAX, decode_varint, encode_varint};
 
@@ -110,7 +110,7 @@ fuzz_target!(|input: H3VarintFuzzInput| {
     };
 
     let operation_count = input.operations.len() as u64;
-    let _ = test_varint_roundtrip_consistency(operation_count);
+    observe_varint_roundtrip_consistency(operation_count, "operation count");
     test_malformed_varint_rejection(operation_count as u8);
 
     for operation in input.operations {
@@ -189,16 +189,22 @@ fn test_frame_type_varint(
         buf.push(effective_frame_type as u8);
     } else {
         // Use proper encoding but with potentially problematic value
-        let _ = encode_varint(effective_frame_type, &mut buf);
+        if !observe_encode_varint(effective_frame_type, &mut buf, "frame type") {
+            return;
+        }
     }
 
     // Add frame length and dummy payload
     let limited_payload_size = (payload_size as usize).min(MAX_FRAME_PAYLOAD_SIZE);
-    let _ = encode_varint(limited_payload_size as u64, &mut buf);
+    assert!(observe_encode_varint(
+        limited_payload_size as u64,
+        &mut buf,
+        "frame payload length"
+    ));
     buf.resize(buf.len() + limited_payload_size, 0x41);
 
     // Test decoding - should not panic
-    let _ = H3Frame::decode(&buf, config);
+    observe_h3_frame_decode(&buf, config, "frame type test");
 }
 
 fn test_frame_length_mismatch(
@@ -209,10 +215,12 @@ fn test_frame_length_mismatch(
     let mut buf = Vec::new();
 
     // Use DATA frame (type 0x0) as a simple test case
-    let _ = encode_varint(0x0, &mut buf);
+    assert!(observe_encode_varint(0x0, &mut buf, "data frame type"));
 
     // Encode declared length (potentially mismatched)
-    let _ = encode_varint(declared_length, &mut buf);
+    if !observe_encode_varint(declared_length, &mut buf, "declared frame length") {
+        return;
+    }
 
     // Add actual payload (may not match declared length)
     let limited_payload = if actual_payload.len() > MAX_FRAME_PAYLOAD_SIZE {
@@ -223,7 +231,7 @@ fn test_frame_length_mismatch(
     buf.extend_from_slice(limited_payload);
 
     // Test decoding - should handle length mismatches gracefully
-    let _ = H3Frame::decode(&buf, config);
+    observe_h3_frame_decode(&buf, config, "frame length mismatch");
 }
 
 fn test_settings_varint_pairs(
@@ -234,7 +242,7 @@ fn test_settings_varint_pairs(
     let mut buf = Vec::new();
 
     // SETTINGS frame type (0x4)
-    let _ = encode_varint(0x4, &mut buf);
+    assert!(observe_encode_varint(0x4, &mut buf, "settings frame type"));
 
     let mut payload = Vec::new();
     for (i, pair) in settings_pairs.iter().enumerate() {
@@ -262,7 +270,9 @@ fn test_settings_varint_pairs(
             // Manually add malformed varint for setting ID
             payload.push(0x80); // Start of 2-byte varint but truncated
         } else {
-            let _ = encode_varint(effective_id, &mut payload);
+            if !observe_encode_varint(effective_id, &mut payload, "settings id") {
+                return;
+            }
         }
 
         if pair.corrupt_value {
@@ -270,17 +280,23 @@ fn test_settings_varint_pairs(
             payload.push(0xC0); // Start of 4-byte varint but truncated
             payload.push(0xFF);
         } else {
-            let _ = encode_varint(pair.value, &mut payload);
+            if !observe_encode_varint(pair.value, &mut payload, "settings value") {
+                return;
+            }
         }
     }
 
     // Encode payload length
-    let _ = encode_varint(payload.len() as u64, &mut buf);
+    assert!(observe_encode_varint(
+        payload.len() as u64,
+        &mut buf,
+        "settings payload length"
+    ));
     buf.extend_from_slice(&payload);
 
     // Test both raw settings parsing and frame parsing
-    let _ = H3Settings::decode_payload(&payload);
-    let _ = H3Frame::decode(&buf, config);
+    observe_h3_settings_decode(&payload, "settings payload");
+    observe_h3_frame_decode(&buf, config, "settings frame");
 }
 
 fn test_stream_id_varint(
@@ -298,10 +314,16 @@ fn test_stream_id_varint(
         StreamIdFrameType::MaxPushId => 0xD,
     };
 
-    let _ = encode_varint(frame_type, &mut buf);
+    assert!(observe_encode_varint(
+        frame_type,
+        &mut buf,
+        "stream-id frame type"
+    ));
 
     let mut payload = Vec::new();
-    let _ = encode_varint(stream_id, &mut payload);
+    if !observe_encode_varint(stream_id, &mut payload, "stream id payload") {
+        return;
+    }
 
     // Add extra payload for PushPromise (requires field block)
     if matches!(frame_variant, StreamIdFrameType::PushPromise) {
@@ -313,11 +335,15 @@ fn test_stream_id_varint(
         payload.extend_from_slice(limited_extra);
     }
 
-    let _ = encode_varint(payload.len() as u64, &mut buf);
+    assert!(observe_encode_varint(
+        payload.len() as u64,
+        &mut buf,
+        "stream-id payload length"
+    ));
     buf.extend_from_slice(&payload);
 
     // Test decoding
-    let _ = H3Frame::decode(&buf, config);
+    observe_h3_frame_decode(&buf, config, "stream-id frame");
 }
 
 fn test_datagram_quarter_stream_id(
@@ -329,7 +355,7 @@ fn test_datagram_quarter_stream_id(
     let mut buf = Vec::new();
 
     // DATAGRAM frame type (0x30)
-    let _ = encode_varint(0x30, &mut buf);
+    assert!(observe_encode_varint(0x30, &mut buf, "datagram frame type"));
 
     let mut frame_payload = Vec::new();
 
@@ -337,7 +363,13 @@ fn test_datagram_quarter_stream_id(
         // Create truncated varint for quarter_stream_id
         frame_payload.push(0x80); // Start of multi-byte varint but incomplete
     } else {
-        let _ = encode_varint(quarter_stream_id, &mut frame_payload);
+        if !observe_encode_varint(
+            quarter_stream_id,
+            &mut frame_payload,
+            "datagram quarter stream id",
+        ) {
+            return;
+        }
     }
 
     // Add datagram payload
@@ -348,11 +380,15 @@ fn test_datagram_quarter_stream_id(
     };
     frame_payload.extend_from_slice(limited_payload);
 
-    let _ = encode_varint(frame_payload.len() as u64, &mut buf);
+    assert!(observe_encode_varint(
+        frame_payload.len() as u64,
+        &mut buf,
+        "datagram payload length"
+    ));
     buf.extend_from_slice(&frame_payload);
 
     // Test decoding
-    let _ = H3Frame::decode(&buf, config);
+    observe_h3_frame_decode(&buf, config, "datagram frame");
 }
 
 fn test_raw_malformed_frame(config: &H3ConnectionConfig, raw_bytes: &[u8]) {
@@ -363,22 +399,23 @@ fn test_raw_malformed_frame(config: &H3ConnectionConfig, raw_bytes: &[u8]) {
         raw_bytes
     };
 
-    let _ = H3Frame::decode(limited_bytes, config);
+    observe_h3_frame_decode(limited_bytes, config, "raw malformed frame");
 }
 
 /// Test varint roundtrip consistency in H3 context
-fn test_varint_roundtrip_consistency(value: u64) -> bool {
+fn observe_varint_roundtrip_consistency(value: u64, context: &str) {
     let mut buf = Vec::new();
-    if encode_varint(value, &mut buf).is_err() {
-        return true; // Encode failure is acceptable for out-of-range values
+    if !observe_encode_varint(value, &mut buf, context) {
+        return;
     }
 
     match decode_varint(&buf) {
         Ok((decoded, len)) => {
             // Should decode to same value and consume entire buffer
-            decoded == value && len == buf.len()
+            assert_eq!(decoded, value, "{context}: decoded value mismatch");
+            assert_eq!(len, buf.len(), "{context}: decoder left encoded bytes");
         }
-        Err(_) => false, // Decode should not fail if encode succeeded
+        Err(error) => panic!("{context}: decode failed after successful encode: {error:?}"),
     }
 }
 
@@ -392,9 +429,130 @@ fn test_malformed_varint_rejection(first_byte: u8) {
     ];
 
     for seq in &malformed_sequences {
-        let result = decode_varint(seq);
-        // All should either succeed or fail consistently
-        // The key invariant is no panics
-        let _ = result;
+        match decode_varint(seq) {
+            Ok((decoded, len)) => {
+                assert!(
+                    matches!(len, 1 | 2 | 4 | 8),
+                    "malformed-prefix probe decoded with invalid varint length {len}"
+                );
+                assert!(
+                    len <= seq.len(),
+                    "malformed-prefix probe consumed past input length"
+                );
+                observe_varint_roundtrip_consistency(decoded, "malformed-prefix decoded value");
+            }
+            Err(_) => {
+                assert!(
+                    seq.len() < expected_varint_len(seq[0]),
+                    "varint decoder rejected a complete malformed-prefix probe"
+                );
+            }
+        }
+    }
+}
+
+fn observe_encode_varint(value: u64, out: &mut Vec<u8>, context: &str) -> bool {
+    let before_len = out.len();
+    match encode_varint(value, out) {
+        Ok(()) => {
+            let written = out.len() - before_len;
+            assert_eq!(
+                written,
+                expected_varint_len(out[before_len]),
+                "{context}: encoded varint length did not match prefix bits"
+            );
+            assert!(
+                matches!(written, 1 | 2 | 4 | 8),
+                "{context}: encoded invalid varint length {written}"
+            );
+
+            let encoded = &out[before_len..];
+            match decode_varint(encoded) {
+                Ok((decoded, consumed)) => {
+                    assert_eq!(
+                        decoded, value,
+                        "{context}: encoded varint roundtrip mismatch"
+                    );
+                    assert_eq!(
+                        consumed, written,
+                        "{context}: decoded varint consumed unexpected byte count"
+                    );
+                }
+                Err(error) => panic!("{context}: encoded varint failed to decode: {error:?}"),
+            }
+            true
+        }
+        Err(_) => {
+            assert_eq!(
+                out.len(),
+                before_len,
+                "{context}: failed varint encode mutated output"
+            );
+            assert!(
+                value > QUIC_VARINT_MAX,
+                "{context}: encode rejected in-range varint value {value}"
+            );
+            false
+        }
+    }
+}
+
+fn expected_varint_len(first_byte: u8) -> usize {
+    match first_byte >> 6 {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    }
+}
+
+fn observe_h3_frame_decode(input: &[u8], config: &H3ConnectionConfig, context: &str) {
+    match H3Frame::decode(input, config) {
+        Ok((_, consumed)) => {
+            assert!(consumed > 0, "{context}: decoded frame consumed no bytes");
+            assert!(
+                consumed <= input.len(),
+                "{context}: decoded frame consumed past input length"
+            );
+        }
+        Err(error) => observe_h3_error(&error, context),
+    }
+}
+
+fn observe_h3_settings_decode(payload: &[u8], context: &str) {
+    match H3Settings::decode_payload(payload) {
+        Ok(settings) => {
+            let mut encoded = Vec::new();
+            match settings.encode_payload(&mut encoded) {
+                Ok(()) => {}
+                Err(error) => panic!("{context}: decoded settings failed to re-encode: {error:?}"),
+            }
+        }
+        Err(error) => observe_h3_error(&error, context),
+    }
+}
+
+fn observe_h3_error(error: &H3NativeError, context: &str) {
+    match error {
+        H3NativeError::FrameTooLarge {
+            payload_size,
+            max_size,
+        } => assert!(
+            payload_size > max_size,
+            "{context}: FrameTooLarge without oversized payload"
+        ),
+        H3NativeError::ConcurrentStreamLimitExceeded { active, limit } => assert!(
+            active >= limit,
+            "{context}: stream limit error without an exhausted limit"
+        ),
+        H3NativeError::UnexpectedEof
+        | H3NativeError::InvalidFrame(_)
+        | H3NativeError::DuplicateSetting(_)
+        | H3NativeError::InvalidSettingValue(_)
+        | H3NativeError::ControlProtocol(_)
+        | H3NativeError::StreamProtocol(_)
+        | H3NativeError::QpackPolicy(_)
+        | H3NativeError::InvalidRequestPseudoHeader(_)
+        | H3NativeError::InvalidResponsePseudoHeader(_) => {}
     }
 }
