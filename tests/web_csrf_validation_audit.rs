@@ -67,7 +67,7 @@ where
             .extensions
             .get_typed::<Session>()
             .expect("session middleware injects Session");
-        Response::new((self.0)(&session), Vec::<u8>::new())
+        Response::new((self.0)(session), Vec::<u8>::new())
     }
 }
 
