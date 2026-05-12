@@ -126,14 +126,25 @@ proptest! {
         let abort_count = ((acquire_count as f64) * abort_ratio) as usize;
 
         // Commit first commit_count
-        for i in 0..commit_count.min(acquire_count) {
-            ctx.commit(tokens[i], Time::from_nanos(2000 + i as u64 * 1000));
+        for (i, token) in tokens
+            .iter()
+            .copied()
+            .enumerate()
+            .take(commit_count.min(acquire_count))
+        {
+            ctx.commit(token, Time::from_nanos(2000 + i as u64 * 1000));
         }
 
         // Abort next abort_count (avoiding overlap with commits)
-        for i in commit_count..(commit_count + abort_count).min(acquire_count) {
+        for (i, token) in tokens
+            .iter()
+            .copied()
+            .enumerate()
+            .take((commit_count + abort_count).min(acquire_count))
+            .skip(commit_count)
+        {
             ctx.abort(
-                tokens[i],
+                token,
                 Time::from_nanos(3000 + i as u64 * 1000),
                 ObligationAbortReason::Cancel
             );
@@ -191,8 +202,8 @@ proptest! {
 
         // Resolve some obligations
         let resolve_count = ((obligation_count as f64) * resolve_ratio).floor() as usize;
-        for i in 0..resolve_count {
-            ctx.commit(tokens[i], Time::from_nanos(2000 + i as u64 * 1000));
+        for (i, token) in tokens.iter().copied().enumerate().take(resolve_count) {
+            ctx.commit(token, Time::from_nanos(2000 + i as u64 * 1000));
         }
 
         let stats = ctx.stats();
