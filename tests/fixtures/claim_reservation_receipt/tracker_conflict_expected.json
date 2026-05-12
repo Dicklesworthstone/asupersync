@@ -15,14 +15,14 @@
     {
       "allowed_now": true,
       "command": "file_reservation_paths(project_key='/data/projects/asupersync', agent_name='TopazGoose', paths=[\".beads/issues.jsonl\", \".beads/beads.db\"], ttl_seconds=3600, exclusive=true)",
-      "mutates": false,
+      "mutates": true,
       "step": 2,
       "tool": "Agent Mail"
     },
     {
       "allowed_now": true,
       "command": "file_reservation_paths(project_key='/data/projects/asupersync', agent_name='TopazGoose', paths=[\"scripts/claim_reservation_receipt.py\", \"tests/claim_reservation_receipt_contract.rs\", \"tests/fixtures/claim_reservation_receipt/*.json\"], ttl_seconds=3600, exclusive=true)",
-      "mutates": false,
+      "mutates": true,
       "step": 3,
       "tool": "Agent Mail"
     },

@@ -280,7 +280,7 @@ def command_sequence(
                 f"project_key={project_key!r}, agent_name={agent_name!r}, "
                 f"paths={tracker}, ttl_seconds=3600, exclusive=true)"
             ),
-            "mutates": False,
+            "mutates": True,
             "allowed_now": True,
         },
         {
@@ -291,7 +291,7 @@ def command_sequence(
                 f"project_key={project_key!r}, agent_name={agent_name!r}, "
                 f"paths={planned}, ttl_seconds=3600, exclusive=true)"
             ),
-            "mutates": False,
+            "mutates": True,
             "allowed_now": True,
         },
         {

@@ -255,6 +255,28 @@ fn receipt_command_sequence_stays_non_destructive_and_rch_free() {
         .filter_map(|command| command["command"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    let reservation_steps = receipt["planned_commands"]
+        .as_array()
+        .expect("planned commands")
+        .iter()
+        .filter(|command| {
+            command["command"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("file_reservation_paths(")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reservation_steps.len(),
+        2,
+        "receipt should model tracker and implementation reservations separately"
+    );
+    assert!(
+        reservation_steps
+            .iter()
+            .all(|command| command["mutates"].as_bool() == Some(true)),
+        "Agent Mail file reservation steps must be marked mutating because they create reservation records"
+    );
     for forbidden in [
         "git branch",
         "git checkout -b",
