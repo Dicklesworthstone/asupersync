@@ -71,7 +71,7 @@
 //!   - changed the dispatcher's `pop` to NOT lazy-skip stale
 //!     entries (would surface tombstones as duplicate
 //!     dispatches),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
