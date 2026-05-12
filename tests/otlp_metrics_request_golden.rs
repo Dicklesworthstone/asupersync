@@ -18,7 +18,6 @@
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Test data structure representing an OTLP metrics export request.
 /// This mirrors the actual OTLP protobuf structure but in a
@@ -178,20 +177,20 @@ fn create_edge_case_otlp_request() -> OtlpMetricsRequest {
             ("service.version".to_string(), "unknown".to_string()),
             // Test Unicode and special characters
             ("custom.label".to_string(), "测试 with 🚀 emoji".to_string()),
-            ("empty.value".to_string(), "".to_string()),
+            ("empty.value".to_string(), String::new()),
         ]
         .into(),
         scope_metrics: vec![ScopeMetrics {
             scope: InstrumentationScope {
                 name: "edge-test".to_string(),
-                version: "".to_string(),
+                version: String::new(),
             },
             metrics: vec![
                 // Counter with zero value
                 Metric {
                     name: "zero.counter".to_string(),
-                    description: "".to_string(),
-                    unit: "".to_string(),
+                    description: String::new(),
+                    unit: String::new(),
                     data: MetricData::Counter {
                         data_points: vec![NumberDataPoint {
                             attributes: HashMap::new(),
@@ -431,7 +430,7 @@ fn test_otlp_empty_metrics_request() {
         scope_metrics: vec![ScopeMetrics {
             scope: InstrumentationScope {
                 name: "empty".to_string(),
-                version: "".to_string(),
+                version: String::new(),
             },
             metrics: vec![], // No metrics
         }],
