@@ -78,7 +78,7 @@
 //!     and could cause use-after-free on FD operations),
 //!   - removed `shutdown_on_drop` so peers don't see a clean
 //!     teardown,
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
