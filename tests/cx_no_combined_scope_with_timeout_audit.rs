@@ -344,9 +344,8 @@ fn scope_with_budget_macro_documented() {
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct MockTime(u64);
@@ -467,12 +466,6 @@ fn behavioral_law_timeout_min_for_nested_timeouts() {
     assert_eq!(combined3, outer);
 }
 
-/// Trivial waker for integration test.
-struct NullWake;
-impl Wake for NullWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 /// Mock TimeoutFuture: drives an inner Pending forever
 /// future and fires TimedOut when synthetic time has
 /// passed.
@@ -499,8 +492,8 @@ impl Future for MockTimeoutFuture {
 
 #[test]
 fn behavioral_timeout_future_eventually_fires() {
-    let waker = Waker::from(Arc::new(NullWake));
-    let mut ctx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
     let f = MockTimeoutFuture {
         completed: AtomicBool::new(false),
         fired: AtomicU64::new(0),
