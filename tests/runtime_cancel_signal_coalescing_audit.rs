@@ -30,7 +30,7 @@
 //!      guard.fast_cancel.store(true, Release);
 //!      ```
 //!      `cancel_requested = true` and
-//:      `fast_cancel.store(true)` are both idempotent —
+//!      `fast_cancel.store(true)` are both idempotent —
 //!      setting an already-true value is a no-op for the
 //!      reader. No observability change after the first
 //!      call's publish.
@@ -46,9 +46,9 @@
 //!        return false.
 //!      - **`Created`/`Running`**: transition to
 //!        CancelRequested, increment cancel_epoch, return
-//:        true (NEWLY cancelled).
-//!      Only the FIRST call from a non-cancelling state
-//:      returns true; all others return false.
+//!        true (NEWLY cancelled).
+//!        Only the FIRST call from a non-cancelling state
+//!        returns true; all others return false.
 //!
 //!   4. **Reason strengthening preserves the strongest
 //!      attribution** (task.rs:557, 573, 600):
@@ -69,17 +69,17 @@
 //!      deadline/poll_quota/cost_quota, MAX on priority.
 //!      Multiple cancel signals with different cleanup
 //!      budgets converge on the TIGHTEST budget — never
-//:      relax.
+//!      relax.
 //!
 //!   6. **`cancel_epoch` increments only on first transition**
 //!      (task.rs:621-624): the epoch counter increments when
 //!      the task moves from Created/Running to CancelRequested.
 //!      Subsequent strengthen-only calls do NOT increment.
 //!      This is what makes "first cancel observed" countable
-//:      for metrics.
+//!      for metrics.
 //!
 //!   7. **Bool return distinguishes new-cancel from redundant**
-//:      (task.rs:560, 587, 614 → false; 616+ → true): the
+//!      (task.rs:560, 587, 614 → false; 616+ → true): the
 //!      `cancel_request` higher-level walk in state.rs uses
 //!      this bool to decide whether to schedule the task on
 //!      the cancel lane:
@@ -99,7 +99,7 @@
 //!      cancel sources (state.cancel_request, deadline
 //!      monitor, region close) flow through this method.
 //!      Coalescing is enforced at this single chokepoint —
-//:      no parallel uncoalesced path.
+//!      no parallel uncoalesced path.
 //!
 //! Verdict: **SOUND**. 100 cancel signals on the same task
 //! produce 1 state transition + 99 strengthen-only updates.
@@ -123,11 +123,11 @@
 //!   - changed combine to e.g. AVERAGE budgets instead of
 //!     MEET (would relax constraints under repeated cancel),
 //!   - removed the cancel_epoch increment guard (would let
-//:     the epoch grow unboundedly under coalesced cancels),
+//!     the epoch grow unboundedly under coalesced cancels),
 //!   - introduced a parallel cancel-publish path that
 //!     bypasses request_cancel_with_budget (would lose the
-//:     coalescing chokepoint),
-//! would all be caught by the structural pins below.
+//!     coalescing chokepoint),
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -153,8 +153,7 @@ fn request_cancel_with_budget_returns_false_when_task_already_terminal() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -209,8 +208,7 @@ fn state_match_arms_strengthen_existing_reason_for_already_cancelling_states() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -257,8 +255,7 @@ fn state_match_arms_combine_budgets_via_meet_for_tightest_constraint() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -289,8 +286,7 @@ fn state_match_arms_for_cancelling_states_return_false_not_true() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -327,8 +323,7 @@ fn cancel_epoch_increments_only_on_first_transition_to_cancel_requested() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
