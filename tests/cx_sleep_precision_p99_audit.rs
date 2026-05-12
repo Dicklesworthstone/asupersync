@@ -66,7 +66,7 @@
 //!     (1ms).
 //!   - Driver pump cost is O(active timers), not O(time).
 //!   - Worker dispatch is sub-ms via
-//:     parker.unpark/cancel-lane priority.
+//!     parker.unpark/cancel-lane priority.
 //!
 //! No bead filed. The 1ms wheel resolution is intentional —
 //! it balances precision (1ms is plenty for typical
@@ -90,7 +90,7 @@
 //!     (O(N) per pump — pathological for many timers),
 //!   - changed Sleep::poll to NOT use now >= deadline (lost
 //!     inclusive boundary — flaky 1-tick-late wakes),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -210,8 +210,7 @@ fn timer_driver_synchronizes_wheel_before_register() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
