@@ -421,15 +421,8 @@ fn block_on_documented_as_production_future_driver() {
 // ── Behavioral pins ─────────────────────────────────────
 
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
-
-/// Trivial waker for behavioral mock.
-struct NullWake;
-impl Wake for NullWake {
-    fn wake(self: Arc<Self>) {}
-}
+use std::task::{Context, Poll, Waker};
 
 /// Mock production runtime: block_on takes a Future and
 /// returns F::Output.
@@ -437,13 +430,13 @@ struct MockRuntime;
 
 impl MockRuntime {
     fn block_on<F: Future>(&self, future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NullWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         let mut pinned = std::pin::pin!(future);
         loop {
             match pinned.as_mut().poll(&mut cx) {
                 Poll::Ready(out) => return out,
-                Poll::Pending => continue,
+                Poll::Pending => {}
             }
         }
     }
