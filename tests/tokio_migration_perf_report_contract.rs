@@ -129,6 +129,13 @@ fn repo_path(path: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
+fn path_has_extension(path: &str, expected_extension: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected_extension))
+}
+
 fn load_contract() -> PerfReportContract {
     let text = std::fs::read_to_string(repo_path(CONTRACT_PATH))
         .expect("perf report contract should exist");
@@ -243,8 +250,14 @@ fn report_cards_link_to_shadow_workloads_and_include_required_fields() {
         for field in &required_fields {
             assert!(row.get(field).is_some(), "missing field {field}: {row}");
         }
-        assert!(card.artifact_paths.report_jsonl.ends_with(".jsonl"));
-        assert!(card.artifact_paths.summary_json.ends_with(".json"));
+        assert!(path_has_extension(
+            &card.artifact_paths.report_jsonl,
+            "jsonl"
+        ));
+        assert!(path_has_extension(
+            &card.artifact_paths.summary_json,
+            "json"
+        ));
         assert!(card.exact_command.contains(&card.source_shadow_scenario_id));
     }
 }
