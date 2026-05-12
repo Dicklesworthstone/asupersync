@@ -146,6 +146,14 @@ fn active_reservation_blocks_closeout() {
 }
 
 #[test]
+fn active_reservation_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "missing_reservation_release.json",
+        "missing_reservation_release_expected.json",
+    );
+}
+
+#[test]
 fn missing_master_sync_is_reported_with_git_command_evidence() {
     let report = report("missing_master_sync.json");
     let master = row(&report, "master_synced");
