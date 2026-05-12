@@ -81,7 +81,11 @@ fn call_context_is_expired_at_exact_deadline() {
         "is_expired_at(deadline + 1ns) must be true",
     );
     assert!(
-        !cx.is_expired_at(deadline - Duration::from_nanos(1)),
+        !cx.is_expired_at(
+            deadline
+                .checked_sub(Duration::from_nanos(1))
+                .expect("deadline is at least 1ns after now"),
+        ),
         "is_expired_at(deadline - 1ns) must be false",
     );
 }
@@ -104,7 +108,9 @@ fn call_context_remaining_returns_none_for_expired() {
          to short-circuit",
     );
     // Before the deadline — remaining must be Some.
-    let before = deadline - Duration::from_millis(5);
+    let before = deadline
+        .checked_sub(Duration::from_millis(5))
+        .expect("deadline is at least 5ms after now");
     assert!(
         cx.remaining_at(before).is_some(),
         "remaining_at(before deadline) must be Some",
@@ -254,11 +260,7 @@ fn format_then_parse_grpc_timeout_round_trips() {
         let parsed = parse_grpc_timeout(&formatted).expect("format/parse must round-trip");
         // Allow lossy round-trip — format quantizes to gRPC
         // timeout units. The error must be small.
-        let diff = if parsed >= original {
-            parsed - original
-        } else {
-            original - parsed
-        };
+        let diff = parsed.abs_diff(original);
         assert!(
             diff <= Duration::from_micros(1)
                 || diff <= original.div_f64(1000.0).max(Duration::from_micros(100)),

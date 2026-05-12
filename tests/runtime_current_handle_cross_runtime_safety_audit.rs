@@ -337,7 +337,6 @@ fn cross_runtime_handle_test_uses_is_none_assertion() {
 // ── Behavioral pins ─────────────────────────────────────
 
 use std::cell::RefCell;
-use std::sync::Arc;
 
 #[derive(Clone)]
 struct MockRuntimeHandle {
@@ -412,7 +411,7 @@ fn behavioral_does_not_panic_outside_runtime() {
     // The most important behavioral pin: outside any
     // asupersync runtime context, the function does NOT
     // panic. It returns None.
-    let panic_result = std::panic::catch_unwind(|| mock_current_handle());
+    let panic_result = std::panic::catch_unwind(mock_current_handle);
 
     assert!(
         panic_result.is_ok(),

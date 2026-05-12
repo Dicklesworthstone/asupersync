@@ -120,9 +120,9 @@
 //!   - swapped `Scope::spawn` and `Scope::spawn_local`
 //!     bounds (would let users accidentally spawn !Send
 //!     futures into the global stealable queue),
-//! would all be caught by the structural pins below or by
-//! the compile-time positive/negative checks (which prove
-//! the type bounds are load-bearing).
+//!     would all be caught by the structural pins below or by
+//!     the compile-time positive/negative checks (which prove
+//!     the type bounds are load-bearing).
 
 use std::path::PathBuf;
 
@@ -145,8 +145,7 @@ fn scope_spawn_requires_send_on_future_closure_and_output() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let where_section = &source[start..safe_end];
 
@@ -190,8 +189,7 @@ fn scope_spawn_task_repeats_the_send_bounds() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let where_section = &source[start..safe_end];
 
@@ -217,8 +215,7 @@ fn scope_spawn_registered_repeats_the_send_bounds() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let where_section = &source[start..safe_end];
 
@@ -246,8 +243,7 @@ fn scope_spawn_local_intentionally_drops_send_on_closure_and_future() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let where_section = &source[start..safe_end];
 
@@ -335,8 +331,7 @@ fn local_stored_task_intentionally_drops_send_in_trait_object() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= local_window_end)
-        .last()
+        .rfind(|&i| i <= local_window_end)
         .unwrap_or(local_window_end);
     let local_section = &source[local_pos..safe_end];
 
@@ -395,8 +390,7 @@ fn scope_spawn_blocking_requires_send_on_closure_and_output() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let where_section = &source[start..safe_end];
 
