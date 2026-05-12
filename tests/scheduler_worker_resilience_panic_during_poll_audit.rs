@@ -49,7 +49,7 @@
 //!   4. **No production panic!/abort/exit in three_lane.rs**:
 //!      a grep over `src/runtime/scheduler/three_lane.rs`
 //!      finds `panic!` calls only inside `#[cfg(test)]` test
-//:      fixtures. No production path on the dispatch/execute
+//!      fixtures. No production path on the dispatch/execute
 //!      hot path can crash the worker thread.
 //!
 //!   5. **PoisonError-tolerant lock acquisition**: every
@@ -99,8 +99,8 @@
 //!   - The awaiter's `poll` returns Poll::Ready with
 //!     Outcome::Panicked, which the parent's await chain
 //!     observes — same path as Ok, Err, Cancelled.
-//! There is no separate "panic propagation channel" — panics
-//! are first-class values in the Outcome ADT.
+//!     There is no separate "panic propagation channel" — panics
+//!     are first-class values in the Outcome ADT.
 //!
 //! A regression that:
 //!   - replaced the inner catch_unwind with a `?`-style
@@ -120,7 +120,7 @@
 //!   - moved per-task state into worker-level fields that
 //!     persist across execute() calls (would let
 //!     corruption from one panic leak into the next task),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -153,8 +153,7 @@ fn run_loop_continues_after_execute_returns() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -248,8 +247,7 @@ fn execute_inner_catch_unwind_does_not_propagate_payload_to_caller() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -293,8 +291,7 @@ fn no_production_panic_or_abort_calls_in_three_lane() {
     let safe_pre_test_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= pre_test_end)
-        .last()
+        .rfind(|&i| i <= pre_test_end)
         .unwrap_or(pre_test_end);
     let pre_test = &source[..safe_pre_test_end];
 
@@ -467,9 +464,7 @@ fn freestanding_catch_unwind_loop_survives_repeated_panics() {
     // task panics during its "poll" call.
     for i in 0_u32..10 {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if i % 2 == 1 {
-                panic!("simulated panic in task {i}");
-            }
+            assert!(i % 2 != 1, "simulated panic in task {i}");
             i
         }));
         // Mirror the production Err arm: convert payload to
