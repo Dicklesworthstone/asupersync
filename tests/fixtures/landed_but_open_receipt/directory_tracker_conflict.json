@@ -1,0 +1,41 @@
+{
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-aj7lx3.11",
+        "title": "[observability] Redacted cross-agent timeline receipt",
+        "status": "in_progress"
+      }
+    ]
+  },
+  "git": {
+    "commits": [
+      {
+        "hash": "17896bafc1234567",
+        "created_ts": "2026-05-08T05:31:00Z",
+        "subject": "[br-asupersync-aj7lx3.11] add redacted timeline receipt",
+        "body": "Validation: rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract passed 6 tests."
+      }
+    ]
+  },
+  "agent_mail": {
+    "messages": [
+      {
+        "id": 2779,
+        "from": "CopperSpring",
+        "thread_id": "asupersync-aj7lx3.11",
+        "subject": "[asupersync-aj7lx3.11] Code shipped",
+        "created_ts": "2026-05-08T05:33:22Z",
+        "body_md": "Proof passed for asupersync-aj7lx3.11 with remote success."
+      }
+    ],
+    "reservations": [
+      {
+        "agent_name": "VioletLark",
+        "path_pattern": ".beads",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T06:40:00Z"
+      }
+    ]
+  }
+}

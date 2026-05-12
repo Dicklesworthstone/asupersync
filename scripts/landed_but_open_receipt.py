@@ -19,6 +19,7 @@ from typing import Any
 
 SCHEMA_VERSION = "landed-but-open-receipt-v1"
 TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db"}
+TRACKER_DIRS = {".beads"}
 BEAD_RE = re.compile(r"\basupersync-[a-z0-9]+(?:\.\d+)?\b")
 PROOF_MARKERS = (
     "validation",
@@ -153,15 +154,35 @@ def row_pattern(row: dict[str, Any]) -> str:
     return ""
 
 
+def normalize_path(path: str) -> str:
+    normalized = path.replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.rstrip("/")
+
+
+def has_glob_magic(path: str) -> bool:
+    return any(char in path for char in "*?[")
+
+
+def paths_overlap(left: str, right: str) -> bool:
+    left = normalize_path(left)
+    right = normalize_path(right)
+    if not left or not right:
+        return False
+    if left == right or fnmatch.fnmatchcase(right, left) or fnmatch.fnmatchcase(left, right):
+        return True
+    left_is_glob = has_glob_magic(left)
+    right_is_glob = has_glob_magic(right)
+    return (not left_is_glob and right.startswith(f"{left}/")) or (
+        not right_is_glob and left.startswith(f"{right}/")
+    )
+
+
 def overlaps_tracker_path(pattern: str) -> bool:
     if not pattern:
         return False
-    return any(
-        pattern == tracker_path
-        or fnmatch.fnmatchcase(tracker_path, pattern)
-        or fnmatch.fnmatchcase(pattern, tracker_path)
-        for tracker_path in TRACKER_PATHS
-    )
+    return any(paths_overlap(pattern, tracker_path) for tracker_path in TRACKER_PATHS | TRACKER_DIRS)
 
 
 def reservation_rows(source: dict[str, Any]) -> list[dict[str, Any]]:
