@@ -113,7 +113,7 @@
 //!     during teardown,
 //!   - removed the inline tests pinning the None-outside-
 //!     context behavior would let regressions slip,
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
