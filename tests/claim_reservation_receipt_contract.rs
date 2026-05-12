@@ -195,12 +195,48 @@ fn implementation_reservation_conflict_blocks_claim_sequence() {
 }
 
 #[test]
+fn implementation_directory_reservation_conflict_blocks_claim_sequence() {
+    let receipt = receipt(
+        "implementation_directory_conflict.json",
+        "clean_git_status.json",
+    );
+
+    assert_eq!(
+        receipt["recommended_next_action"].as_str(),
+        Some("wait-for-implementation-reservation")
+    );
+    assert_eq!(
+        receipt["preflight"]["reservation"]["implementation"]["status"].as_str(),
+        Some("blocked")
+    );
+    assert_eq!(
+        receipt["preflight"]["reservation"]["implementation"]["conflicts"][0]["path"].as_str(),
+        Some("tests/fixtures/claim_reservation_receipt/*.json")
+    );
+    assert_eq!(
+        receipt["preflight"]["reservation"]["implementation"]["conflicts"][0]["path_pattern"]
+            .as_str(),
+        Some("tests/fixtures/claim_reservation_receipt")
+    );
+}
+
+#[test]
 fn implementation_conflict_output_matches_full_reviewed_golden() {
     assert_output_matches_golden(
         "implementation_conflict.json",
         "clean_git_status.json",
         "implementation_conflict_expected.json",
         "claim/reservation implementation-conflict receipt changed; update the golden only after reviewing wait-for-implementation-reservation semantics",
+    );
+}
+
+#[test]
+fn implementation_directory_conflict_output_matches_full_reviewed_golden() {
+    assert_output_matches_golden(
+        "implementation_directory_conflict.json",
+        "clean_git_status.json",
+        "implementation_directory_conflict_expected.json",
+        "claim/reservation directory-conflict receipt changed; update the golden only after reviewing directory-reservation semantics",
     );
 }
 

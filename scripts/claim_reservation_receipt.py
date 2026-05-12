@@ -62,7 +62,19 @@ def parse_time(value: str) -> Optional[datetime]:
 
 
 def path_matches(pattern: str, path: str) -> bool:
-    return pattern == path or fnmatch.fnmatchcase(path, pattern) or fnmatch.fnmatchcase(pattern, path)
+    pattern = pattern.strip().replace("\\", "/")
+    path = path.strip().replace("\\", "/")
+    if not pattern or not path:
+        return False
+    pattern_dir = pattern.rstrip("/")
+    path_dir = path.rstrip("/")
+    return (
+        pattern == path
+        or fnmatch.fnmatchcase(path, pattern)
+        or fnmatch.fnmatchcase(pattern, path)
+        or path_dir.startswith(pattern_dir + "/")
+        or pattern_dir.startswith(path_dir + "/")
+    )
 
 
 def first_match(pattern: str, paths: Iterable[str]) -> Optional[str]:

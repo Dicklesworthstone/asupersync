@@ -1,0 +1,10 @@
+{
+  "reservations": [
+    {
+      "agent": "CopperSpring",
+      "exclusive": true,
+      "expires_ts": "2999-01-01T00:00:00Z",
+      "path_pattern": "tests/fixtures/claim_reservation_receipt"
+    }
+  ]
+}
