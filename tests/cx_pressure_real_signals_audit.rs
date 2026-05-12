@@ -27,8 +27,8 @@
 //!      `platform::process_rss_bytes()` reads
 //!        - Linux: VmRSS from `/proc/self/status`
 //!        - macOS/BSD: `getrusage(RUSAGE_SELF).ru_maxrss`
-//!      Max via `RLIMIT_AS` (or `/proc/meminfo`'s `MemTotal`
-//!      when rlimit is `RLIM_INFINITY`).
+//!          Max via `RLIMIT_AS` (or `/proc/meminfo`'s `MemTotal`
+//!          when rlimit is `RLIM_INFINITY`).
 //!
 //!   2. **File descriptors** (resource_monitor.rs:1183):
 //!      real platform read of FD count + ulimit.
@@ -54,8 +54,8 @@
 //!     resource axes (resource_monitor.rs:402-410).
 //!   - `system_pressure.set_headroom(max_level.to_headroom())`
 //:     publishes the headroom (resource_monitor.rs:380):
-//!       None=1.0, Light=0.75, Moderate=0.5, Heavy=0.25,
-//!       Emergency=0.0.
+//!     None=1.0, Light=0.75, Moderate=0.5, Heavy=0.25,
+//!     Emergency=0.0.
 //!   - `Cx::pressure()` returns the Arc<SystemPressure> handle
 //:     so callers can read the headroom via atomic load.
 //!
@@ -102,7 +102,7 @@
 //!     call (would freeze SystemPressure at its initial
 //!     value — effectively a stub even though OS signals
 //!     are still being read),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
