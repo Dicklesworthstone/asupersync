@@ -1,5 +1,5 @@
-#![cfg(feature = "cli")]
 //! Golden snapshot for doctor health report text formatting.
+#![cfg(feature = "cli")]
 
 use asupersync::cli::doctor::{CoreDiagnosticsFixture, core_diagnostics_report_bundle};
 use insta::assert_snapshot;
