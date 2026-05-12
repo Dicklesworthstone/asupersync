@@ -22,13 +22,14 @@
 //!     hit.
 //!
 //! Audit conclusion: **all `.allow_anonymous()` usages in `src/`
-//! are inside `#[cfg(test)]` modules in
-//! `src/grpc/reflection.rs`.** No production-shipped src/ code
-//! enables anonymous reflection. The grep boundary holds.
+//! are inside `#[cfg(test)]` code in `src/grpc/reflection.rs` or
+//! file-level `#![cfg(test)]` audit harnesses.** No
+//! production-shipped src/ code enables anonymous reflection. The
+//! grep boundary holds.
 //!
 //! This test is a CI-grep regression pin: it scans every `.rs`
 //! file under `src/` and asserts that the only `.allow_anonymous()`
-//! call sites live inside test cfg modules in the file that
+//! call sites live inside test-only cfg code or the file that
 //! defines the API. A future PR that added
 //! `ReflectionService::new().allow_anonymous()` to a non-test
 //! module would break this test and force an intentional
@@ -100,22 +101,20 @@ fn find_production_allow_anonymous_lines(src: &str) -> Vec<(usize, String)> {
 
         // Track brace depth crudely — good enough for cfg(test) module
         // detection in well-formatted Rust.
-        let opens = raw_line.matches('{').count() as i32;
-        let closes = raw_line.matches('}').count() as i32;
+        let opens =
+            i32::try_from(raw_line.matches('{').count()).expect("line brace count fits in i32");
+        let closes =
+            i32::try_from(raw_line.matches('}').count()).expect("line brace count fits in i32");
 
         // Detect entry into #[cfg(test)] mod tests { ... }. Cheap
         // heuristic: lines containing both `cfg(test)` and `mod` (or
         // a preceding `#[cfg(test)]` attribute followed by `mod`).
         let entering_test_mod = line.contains("cfg(test)") && raw_line.contains("mod ");
         let prev_line_has_test_attr = idx > 0
-            && src
-                .lines()
-                .nth(idx - 1)
-                .map(|prev| {
-                    let p = prev.trim();
-                    p == "#[cfg(test)]" || p.starts_with("#[cfg(test)]")
-                })
-                .unwrap_or(false);
+            && src.lines().nth(idx - 1).is_some_and(|prev| {
+                let p = prev.trim();
+                p == "#[cfg(test)]" || p.starts_with("#[cfg(test)]")
+            });
         let entering_test_mod_via_prev_attr = prev_line_has_test_attr && line.starts_with("mod ");
 
         if entering_test_mod || entering_test_mod_via_prev_attr {
@@ -168,6 +167,13 @@ fn find_production_allow_anonymous_lines(src: &str) -> Vec<(usize, String)> {
     out
 }
 
+fn is_file_level_test_only(src: &str) -> bool {
+    src.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == "#![cfg(test)]" || trimmed.starts_with("#![cfg(test,")
+    })
+}
+
 #[test]
 fn no_production_src_call_to_allow_anonymous() {
     // Pin (tick #157): the auditable grep boundary. Every
@@ -202,6 +208,9 @@ fn no_production_src_call_to_allow_anonymous() {
             Ok(c) => c,
             Err(_) => continue,
         };
+        if is_file_level_test_only(&content) {
+            continue;
+        }
         if !content.contains(".allow_anonymous()") {
             continue;
         }

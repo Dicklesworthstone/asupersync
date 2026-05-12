@@ -4,7 +4,6 @@
 //! from transport errors and do not trigger infinite retry loops.
 
 use asupersync::messaging::kafka::KafkaError;
-use std::time::Duration;
 
 #[test]
 fn test_authentication_error_classification() {
@@ -250,17 +249,17 @@ fn test_rdkafka_error_mapping_simulation() {
 #[test]
 fn audit_fix_summary() {
     println!("KAFKA SASL AUTHENTICATION AUDIT SUMMARY:");
-    println!("");
+    println!();
     println!("VULNERABILITY: Malformed SASL auth responses trigger credential retry loops");
     println!("  - rdkafka errors mapped to KafkaError::Broker (retryable)");
     println!("  - retry_immediate_send() retries auth failures 3 times");
     println!("  - Wastes resources, delays error reporting, masks transport issues");
-    println!("");
+    println!();
     println!("FIX IMPLEMENTED:");
     println!("  1. Added KafkaError::Authentication variant");
     println!("  2. Authentication errors marked as non-retryable/non-transient");
     println!("  3. Enhanced error mapping to detect auth-related error messages");
     println!("  4. Malformed SASL responses now fail fast with clear error");
-    println!("");
+    println!();
     println!("IMPACT: Prevents credential retry storms, improves error clarity");
 }

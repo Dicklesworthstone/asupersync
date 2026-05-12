@@ -195,11 +195,16 @@ fn known_eprintln_at_server_rs_156_does_not_log_body_content() {
 
     // The known-clean format string. A regression that altered it
     // to log body content would surface here.
+    let argument_marker = format!("{}{}", '{', '}');
+    let debug_marker = format!("{}:?{}", '{', '}');
+    let cleanup_log_format = format!(
+        "Cleaned up {argument_marker} idle streams on connection {argument_marker}: {debug_marker}"
+    );
     assert!(
-        server_rs.contains("Cleaned up {} idle streams on connection {}: {:?}"),
+        server_rs.contains(&cleanup_log_format),
         "the known-clean eprintln! at server.rs:156 must keep its \
          metadata-only format string. A regression that added \
-         {{body:?}} or {{payload:?}} to the format args would be a \
+         body or payload fields to the format args would be a \
          body-logging violation.",
     );
     // And the body/payload tokens must NOT appear within ~10 lines
