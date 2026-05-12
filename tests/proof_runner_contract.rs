@@ -183,6 +183,83 @@ fn classify_fixture(fixture: &str, command: &str, touched_files: &[&str]) -> Val
     proof_runner_json(&args)
 }
 
+fn proof_runner_disk_preflight_result(root_free_bytes: u64, dev_shm_free_bytes: u64) -> Value {
+    let snapshot = write_json_fixture(&json!({
+        "root": {
+            "path": "/",
+            "available": true,
+            "free_bytes": root_free_bytes,
+            "total_bytes": 4_194_304_u64,
+            "used_bytes": 2_097_152_u64
+        },
+        "dev_shm": {
+            "path": "/dev/shm",
+            "available": true,
+            "free_bytes": dev_shm_free_bytes,
+            "total_bytes": 4_194_304_u64,
+            "used_bytes": 2_097_152_u64
+        }
+    }));
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    proof_runner_json(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--skip-dirty-check",
+        "--disk-preflight-snapshot",
+        snapshot_path,
+        "--disk-min-free-bytes",
+        "1048576",
+        "--disk-dev-shm-min-free-bytes",
+        "1048576",
+        "--output",
+        "json",
+    ])
+}
+
+fn assert_low_disk_guidance(disk: &Value, classification: &str) {
+    assert_eq!(disk["classification"].as_str(), Some(classification));
+    assert_eq!(
+        disk["recommendation"].as_str(),
+        Some("use_disk_safe_proof_path")
+    );
+    assert_eq!(
+        disk["guidance"]["preferred_next_action"].as_str(),
+        Some(
+            "rerun with env -u CARGO_TARGET_DIR or capture an artifact-free proof receipt; do not delete files automatically"
+        )
+    );
+    assert_eq!(
+        disk["guidance"]["cargo_target_dir_guidance"].as_str(),
+        Some("prefer env -u CARGO_TARGET_DIR")
+    );
+    assert_eq!(
+        disk["guidance"]["proof_receipt_guidance"].as_str(),
+        Some("prefer artifact-free proof receipt")
+    );
+    assert_eq!(
+        disk["guidance"]["cleanup_permission_record"].as_str(),
+        Some("cleanup requires explicit user permission")
+    );
+    assert_eq!(
+        disk["guidance"]["cleanup_requires_explicit_user_permission"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        disk["guidance"]["automatic_cleanup_performed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        disk["guidance"]["deletion_command_recommended"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        disk["custom_target_dir_validation_permitted"].as_bool(),
+        Some(false)
+    );
+}
+
 #[test]
 fn proof_runner_script_exists_and_is_executable() {
     assert!(
@@ -858,6 +935,57 @@ fn proof_runner_dry_run_and_suggestions_do_not_require_build_slot_snapshot() {
             .expect("suggestions array")
             .contains(&Value::String("rustfmt-check".to_string()))
     );
+}
+
+#[test]
+fn proof_runner_disk_preflight_classifies_healthy_root_and_dev_shm() {
+    let result = proof_runner_disk_preflight_result(2_097_152, 2_097_152);
+    assert_eq!(result["preflight_passed"].as_bool(), Some(true));
+    assert_eq!(result["recommendation"].as_str(), Some("proceed"));
+
+    let disk = &result["disk_pressure_preflight"];
+    assert_eq!(
+        disk["schema_version"].as_str(),
+        Some("proof-runner-disk-pressure-v1")
+    );
+    assert_eq!(disk["source"].as_str(), Some("fixture"));
+    assert_eq!(disk["classification"].as_str(), Some("healthy"));
+    assert_eq!(
+        disk["guidance"]["preferred_next_action"].as_str(),
+        Some("run requested proof lane as planned")
+    );
+    assert_eq!(
+        disk["guidance"]["cleanup_requires_explicit_user_permission"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        disk["guidance"]["automatic_cleanup_performed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        disk["guidance"]["deletion_command_recommended"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        disk["custom_target_dir_validation_permitted"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn proof_runner_disk_preflight_classifies_low_root_space() {
+    let result = proof_runner_disk_preflight_result(1, 2_097_152);
+    assert_eq!(result["preflight_passed"].as_bool(), Some(true));
+    assert_eq!(result["recommendation"].as_str(), Some("use_supplemental"));
+    assert_low_disk_guidance(&result["disk_pressure_preflight"], "low-root-space");
+}
+
+#[test]
+fn proof_runner_disk_preflight_classifies_low_dev_shm_space() {
+    let result = proof_runner_disk_preflight_result(2_097_152, 1);
+    assert_eq!(result["preflight_passed"].as_bool(), Some(true));
+    assert_eq!(result["recommendation"].as_str(), Some("use_supplemental"));
+    assert_low_disk_guidance(&result["disk_pressure_preflight"], "low-dev-shm-space");
 }
 
 #[test]

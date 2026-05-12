@@ -27,6 +27,9 @@ SHELL_CONTROL_TOKENS = (";", "&", "|", "<", ">", "`", "$(")
 RCH_OUTCOME_SCHEMA_VERSION = "proof-runner-rch-outcome-v1"
 PROOF_CONSOLE_REPORT_SCHEMA_VERSION = "proof-console-report-v1"
 RELEASE_PROOF_PACK_SCHEMA_VERSION = "release-proof-pack-v1"
+DISK_PRESSURE_SCHEMA_VERSION = "proof-runner-disk-pressure-v1"
+DEFAULT_DISK_MIN_FREE_BYTES = 1_073_741_824
+DEFAULT_DEV_SHM_MIN_FREE_BYTES = 268_435_456
 PROOF_STATUS_SNAPSHOT_PATH = "artifacts/proof_status_snapshot_v1.json"
 VALIDATION_FRONTIER_LEDGER_PATH = "artifacts/validation_frontier_ledger_schema_v1.json"
 RELEASE_PROOF_PACK_SOURCE_ARTIFACTS = (
@@ -83,6 +86,132 @@ OPERATOR_ACTION_RECIPE_IDS = (
     "agent-mail-reservation",
     "destructive-command-refusal",
 )
+DISK_HEALTHY_NEXT_ACTION = "run requested proof lane as planned"
+DISK_SAFE_NEXT_ACTION = (
+    "rerun with env -u CARGO_TARGET_DIR or capture an artifact-free proof receipt; "
+    "do not delete files automatically"
+)
+DISK_CLEANUP_PERMISSION_RECORD = "cleanup requires explicit user permission"
+
+
+def _non_negative_int(value: Any) -> int:
+    # Coerce disk fixture fields to non-negative integers.
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def disk_usage_surface(path: str) -> Dict[str, Any]:
+    # Return a normalized disk-usage row for one local path.
+    disk_path = Path(path)
+    if not disk_path.exists():
+        return {
+            "path": path,
+            "available": False,
+            "free_bytes": 0,
+            "total_bytes": 0,
+            "used_bytes": 0,
+        }
+    usage = shutil.disk_usage(disk_path)
+    return {
+        "path": path,
+        "available": True,
+        "free_bytes": int(usage.free),
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+    }
+
+
+def normalize_disk_surface(raw: Any, default_path: str) -> Dict[str, Any]:
+    # Normalize fixture and live disk rows to one schema.
+    row = raw if isinstance(raw, dict) else {}
+    return {
+        "path": str(row.get("path") or default_path),
+        "available": bool(row.get("available", True)),
+        "free_bytes": _non_negative_int(row.get("free_bytes")),
+        "total_bytes": _non_negative_int(row.get("total_bytes")),
+        "used_bytes": _non_negative_int(row.get("used_bytes")),
+    }
+
+
+def disk_pressure_snapshot(snapshot_path: Optional[str] = None) -> Dict[str, Any]:
+    # Load a fixture-backed or live local disk-pressure snapshot.
+    if snapshot_path:
+        raw = json.loads(Path(snapshot_path).read_text())
+        raw_root = raw.get("root", {}) if isinstance(raw, dict) else {}
+        raw_dev_shm = raw.get("dev_shm", {}) if isinstance(raw, dict) else {}
+        return {
+            "source": "fixture",
+            "root": normalize_disk_surface(raw_root, "/"),
+            "dev_shm": normalize_disk_surface(raw_dev_shm, "/dev/shm"),
+        }
+
+    return {
+        "source": "live",
+        "root": disk_usage_surface("/"),
+        "dev_shm": disk_usage_surface("/dev/shm"),
+    }
+
+
+def classify_disk_pressure(
+    command: str,
+    snapshot: Dict[str, Any],
+    min_free_bytes: int,
+    dev_shm_min_free_bytes: int,
+) -> Dict[str, Any]:
+    # Classify local free space and emit non-deleting proof-path guidance.
+    root = snapshot["root"]
+    dev_shm = snapshot["dev_shm"]
+    root_low = root["available"] and root["free_bytes"] < min_free_bytes
+    dev_shm_low = dev_shm["available"] and dev_shm["free_bytes"] < dev_shm_min_free_bytes
+
+    if root_low and dev_shm_low:
+        classification = "low-root-and-dev-shm-space"
+    elif root_low:
+        classification = "low-root-space"
+    elif dev_shm_low:
+        classification = "low-dev-shm-space"
+    else:
+        classification = "healthy"
+
+    command_uses_custom_target_dir = "CARGO_TARGET_DIR=" in command
+    disk_healthy = classification == "healthy"
+    custom_target_dir_permitted = disk_healthy or not command_uses_custom_target_dir
+    if disk_healthy:
+        preferred_next_action = DISK_HEALTHY_NEXT_ACTION
+        cargo_target_dir_guidance = "lane-specific CARGO_TARGET_DIR is acceptable"
+        proof_receipt_guidance = "artifact retrieval may proceed normally"
+        recommendation = "run_requested_proof_lane"
+    else:
+        preferred_next_action = DISK_SAFE_NEXT_ACTION
+        cargo_target_dir_guidance = "prefer env -u CARGO_TARGET_DIR"
+        proof_receipt_guidance = "prefer artifact-free proof receipt"
+        recommendation = "use_disk_safe_proof_path"
+
+    return {
+        "schema_version": DISK_PRESSURE_SCHEMA_VERSION,
+        "source": snapshot["source"],
+        "classification": classification,
+        "thresholds": {
+            "root_min_free_bytes": min_free_bytes,
+            "dev_shm_min_free_bytes": dev_shm_min_free_bytes,
+        },
+        "surfaces": {"root": root, "dev_shm": dev_shm},
+        "command_uses_custom_target_dir": command_uses_custom_target_dir,
+        "custom_target_dir_validation_permitted": custom_target_dir_permitted,
+        "execution_permitted": custom_target_dir_permitted,
+        "recommendation": recommendation,
+        "guidance": {
+            "preferred_next_action": preferred_next_action,
+            "cargo_target_dir_guidance": cargo_target_dir_guidance,
+            "proof_receipt_guidance": proof_receipt_guidance,
+            "cleanup_permission_record": DISK_CLEANUP_PERMISSION_RECORD,
+            "cleanup_requires_explicit_user_permission": True,
+            "automatic_cleanup_performed": False,
+            "deletion_command_recommended": False,
+        },
+    }
 
 
 def canonical_json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -1127,7 +1256,10 @@ class ProofRunner:
         build_slot_snapshot: Optional[str] = None,
         build_slot: str = "proof-runner-rch",
         skip_dirty_check: bool = False,
-        skip_build_slot_check: bool = False
+        skip_build_slot_check: bool = False,
+        disk_preflight_snapshot: Optional[str] = None,
+        disk_min_free_bytes: int = DEFAULT_DISK_MIN_FREE_BYTES,
+        disk_dev_shm_min_free_bytes: int = DEFAULT_DEV_SHM_MIN_FREE_BYTES,
     ):
         self.repo_root = Path(repo_root).resolve()
         self.manifest = ProofLaneManifest()
@@ -1141,6 +1273,9 @@ class ProofRunner:
             skip_build_slot_check
         )
         self.skip_dirty_check = skip_dirty_check
+        self.disk_preflight_snapshot = disk_preflight_snapshot
+        self.disk_min_free_bytes = max(int(disk_min_free_bytes), 0)
+        self.disk_dev_shm_min_free_bytes = max(int(disk_dev_shm_min_free_bytes), 0)
 
     def _repo_json(self, relative_path: str) -> Dict[str, Any]:
         with (self.repo_root / relative_path).open(encoding="utf-8") as handle:
@@ -2101,15 +2236,27 @@ class ProofRunner:
     ) -> Dict[str, Any]:
         """Run preflight analysis and return results."""
         can_proceed, record = self.analyze_preflight(lane_id, touched_files, execute=execute)
+        lane = self.manifest.get_lane(lane_id)
+        command = lane["command"] if lane else ""
+        disk_preflight = classify_disk_pressure(
+            command,
+            disk_pressure_snapshot(self.disk_preflight_snapshot),
+            self.disk_min_free_bytes,
+            self.disk_dev_shm_min_free_bytes,
+        )
+        recommendation = "proceed" if can_proceed else "use_supplemental"
+        if disk_preflight["recommendation"] == "use_disk_safe_proof_path":
+            recommendation = "use_supplemental"
 
         result = {
             "preflight_passed": can_proceed,
             "lane_id": lane_id,
-            "command_would_run": self.manifest.get_lane(lane_id)["command"] if self.manifest.get_lane(lane_id) else "",
+            "command_would_run": command,
             "build_slot_check": self.build_slots.last_check,
             "reservation_check": self.agent_mail.last_check,
+            "disk_pressure_preflight": disk_preflight,
             "validation_frontier_record": record,
-            "recommendation": "proceed" if can_proceed else "use_supplemental"
+            "recommendation": recommendation
         }
 
         return result
@@ -2350,6 +2497,23 @@ def main():
         action="store_true",
         help="Skip build-slot admission checks; intended only for non-rch fixtures"
     )
+    parser.add_argument(
+        "--disk-preflight-snapshot",
+        default="",
+        help="JSON snapshot of local disk pressure for fixture-backed checks"
+    )
+    parser.add_argument(
+        "--disk-min-free-bytes",
+        type=int,
+        default=DEFAULT_DISK_MIN_FREE_BYTES,
+        help="Minimum acceptable free bytes on / before preferring disk-safe proofs"
+    )
+    parser.add_argument(
+        "--disk-dev-shm-min-free-bytes",
+        type=int,
+        default=DEFAULT_DEV_SHM_MIN_FREE_BYTES,
+        help="Minimum acceptable free bytes on /dev/shm before preferring disk-safe proofs"
+    )
 
     args = parser.parse_args()
 
@@ -2360,7 +2524,10 @@ def main():
             build_slot_snapshot=args.build_slot_snapshot,
             build_slot=args.build_slot,
             skip_dirty_check=args.skip_dirty_check,
-            skip_build_slot_check=args.skip_build_slot_check
+            skip_build_slot_check=args.skip_build_slot_check,
+            disk_preflight_snapshot=args.disk_preflight_snapshot or None,
+            disk_min_free_bytes=args.disk_min_free_bytes,
+            disk_dev_shm_min_free_bytes=args.disk_dev_shm_min_free_bytes,
         )
 
         if args.list_lanes:
@@ -2499,6 +2666,13 @@ def main():
             if result["preflight_passed"]:
                 print(f"✅ Preflight PASSED for lane {args.lane}")
                 print(f"Command: {result['command_would_run']}")
+                disk_preflight = result["disk_pressure_preflight"]
+                if args.execute and not disk_preflight["execution_permitted"]:
+                    guidance = disk_preflight["guidance"]
+                    print("Disk-pressure preflight blocked custom target-dir execution")
+                    print(f"Classification: {disk_preflight['classification']}")
+                    print(f"Next action: {guidance['preferred_next_action']}")
+                    return 1
                 if args.execute:
                     print("Executing...")
                     # Execute the command
