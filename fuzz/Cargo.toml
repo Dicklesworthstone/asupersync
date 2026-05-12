@@ -1358,6 +1358,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_window_update"
+path = "fuzz_targets/h2_window_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_window_update_frame"
 path = "fuzz_targets/h2_window_update_frame.rs"
 test = false
@@ -6046,6 +6053,16 @@ bench = false
 [[bin]]
 name = "h3_varint_frame_fuzzer"
 path = "fuzz_targets/h3_varint_frame_fuzzer.rs"
+test = false
+doc = false
+bench = false
+
+# Oracle-based RegionSnapshot serialization fuzzer for distributed/snapshot.rs
+# Tests round-trip invariants, parser robustness, and boundary conditions.
+# Uses multiple oracle strategies: crash detection, round-trip validation, and invariant checking.
+[[bin]]
+name = "distributed_snapshot_oracle"
+path = "fuzz_targets/distributed_snapshot_oracle.rs"
 test = false
 doc = false
 bench = false
