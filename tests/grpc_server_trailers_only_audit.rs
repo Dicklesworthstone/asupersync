@@ -113,7 +113,7 @@ fn ok_status_with_no_body_encodes_as_trailers_only_shape() {
     assert_eq!(
         decoded.metadata.get("x-cache").and_then(|v| match v {
             MetadataValue::Ascii(s) => Some(s.as_str()),
-            _ => None,
+            MetadataValue::Binary(_) => None,
         }),
         Some("MISS"),
         "trailer-block metadata round-trips",
@@ -169,14 +169,14 @@ fn trailers_only_carries_status_metadata_in_single_frame() {
     assert_eq!(
         decoded_metadata.get("retry-after").and_then(|v| match v {
             MetadataValue::Ascii(s) => Some(s.as_str()),
-            _ => None,
+            MetadataValue::Binary(_) => None,
         }),
         Some("3"),
     );
     assert_eq!(
         decoded_metadata.get("x-trace-id").and_then(|v| match v {
             MetadataValue::Ascii(s) => Some(s.as_str()),
-            _ => None,
+            MetadataValue::Binary(_) => None,
         }),
         Some("abc-123"),
     );
