@@ -183,13 +183,12 @@ fn jetstream_ack_malformed_token_conformance() {
     );
 
     // MUST requirements are non-negotiable
-    if !must_failures.is_empty() {
-        panic!(
-            "CONFORMANCE FAILURE: {} MUST requirements failed: {:?}",
-            must_failures.len(),
-            must_failures.iter().map(|c| c.id).collect::<Vec<_>>()
-        );
-    }
+    assert!(
+        must_failures.is_empty(),
+        "CONFORMANCE FAILURE: {} MUST requirements failed: {:?}",
+        must_failures.len(),
+        must_failures.iter().map(|c| c.id).collect::<Vec<_>>()
+    );
 
     // Calculate conformance score
     let conformance_score = (passed as f64) / (total as f64) * 100.0;

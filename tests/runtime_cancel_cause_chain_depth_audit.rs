@@ -112,7 +112,7 @@
 //!   - changed cause field from Option<Box<Self>> to a
 //!     stack-allocated alternative (would limit chain depth
 //!     by stack size instead of configuration),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -478,24 +478,28 @@ impl MockReason {
         self
     }
 
-    fn truncate(reason: Self, max_depth: usize) -> Self {
-        if max_depth <= 1 || reason.cause.is_none() {
-            Self {
+    fn truncate(mut reason: Self, max_depth: usize) -> Self {
+        let Some(cause) = reason.cause.take() else {
+            return Self {
                 cause: None,
-                truncated: reason.cause.is_some(),
-                truncated_at_depth: if reason.cause.is_some() {
-                    Some(1)
-                } else {
-                    reason.truncated_at_depth
-                },
+                truncated: false,
+                truncated_at_depth: reason.truncated_at_depth,
                 ..reason
-            }
-        } else {
-            let inner = *reason.cause.expect("cause present");
-            Self {
-                cause: Some(Box::new(Self::truncate(inner, max_depth - 1))),
+            };
+        };
+
+        if max_depth <= 1 {
+            return Self {
+                cause: None,
+                truncated: true,
+                truncated_at_depth: Some(1),
                 ..reason
-            }
+            };
+        }
+
+        Self {
+            cause: Some(Box::new(Self::truncate(*cause, max_depth - 1))),
+            ..reason
         }
     }
 }
