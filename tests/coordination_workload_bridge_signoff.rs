@@ -312,7 +312,7 @@ fn execute_fixture_emits_operator_grade_signoff_report() {
         assert!(Path::new(path).exists(), "missing artifact {artifact_key}");
     }
 
-    let rows = rows_by_id(&report);
+    let rows = rows_by_id(report);
     for row_id in [
         "missing_prerequisite_guard",
         "child_evidence_matrix_complete",
