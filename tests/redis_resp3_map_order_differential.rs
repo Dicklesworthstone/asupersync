@@ -1,3 +1,5 @@
+//! Differential checks for RESP3 map ordering and duplicate-key preservation.
+
 use asupersync::messaging::redis::RespValue;
 
 #[test]

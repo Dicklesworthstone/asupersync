@@ -60,18 +60,14 @@
 //!          transitioned
 //!      }
 //!      ```
-//!      Three idempotent properties:
-//!        a. **Closed-state early return**: if already
-//!           Closed, return false without any side effect.
-//!        b. **Reason strengthening**: a new reason is
-//!           merged via `existing.strengthen(&reason)` —
-//!           the higher-severity reason wins. Multiple calls
-//!           with different reasons converge on the same
-//!           strongest reason.
-//!        c. **CAS-only transition**: the Open → Closing
-//!           flip is atomic. Subsequent calls observe
-//!           Closing/Draining/Finalizing/Closed and return
-//!           false (no transition).
+//!      Three idempotent properties matter here:
+//!      closed-state early return, where an already Closed
+//!      region returns false without side effects; reason
+//!      strengthening, where `existing.strengthen(&reason)`
+//!      preserves the higher-severity reason across multiple
+//!      calls; and CAS-only transition, where the Open →
+//!      Closing flip is atomic and later calls observe the
+//!      new state without repeating the transition.
 //!
 //!   3. **Trace event emitted only on the winning transition**
 //!      (region.rs:912-914): `trace_state_change` fires
@@ -82,7 +78,7 @@
 //!
 //!   4. **`strengthen_cancel_reason` is the no-CAS sibling**
 //!      (region.rs:486): used by cancel_request when
-//:      begin_close returns false (region already in
+//!      begin_close returns false (region already in
 //!      non-Open state). It updates the reason via
 //!      `existing.strengthen(&reason)` without attempting
 //!      a state transition. Pairs with begin_close to
@@ -90,7 +86,7 @@
 //!      arrived" case.
 //!
 //!   5. **`cancel_request` first pass uses the strengthening
-//:      branch** (state.rs:2650-2652):
+//!      branch** (state.rs:2650-2652):
 //!      ```ignore
 //!      if region.begin_close(Some(region_reason.clone())) {
 //!          // ... emit RegionCloseBegin trace
@@ -99,7 +95,7 @@
 //!      }
 //!      ```
 //!      The else-branch handles repeated cancel_request
-//:      calls with different reasons — the cancel_reason is
+//!      calls with different reasons — the cancel_reason is
 //!      strengthened even when no state transition fires.
 //!
 //!   6. **Subsequent transitions are also CAS-protected**:
@@ -113,9 +109,9 @@
 //!   7. **`complete_close` enforces structural quiescence**
 //!      (region.rs:952-964): the final transition only
 //!      fires when children/tasks/pending_obligations/
-//:      finalizers are all empty. Idempotency is preserved
+//!      finalizers are all empty. Idempotency is preserved
 //!      via the same CAS — multiple calls during a
-//:      pre-quiescent state all return false.
+//!      pre-quiescent state all return false.
 //!
 //! Verdict: **SOUND**. region.close() is fully idempotent
 //! by construction. The atomic CAS on RegionState (with
@@ -127,7 +123,7 @@
 //!
 //! A regression that:
 //!   - replaced the atomic CAS in transition() with a
-//:     read-then-store pattern (would race; multiple
+//!     read-then-store pattern (would race; multiple
 //!     callers could each "succeed" and emit duplicate
 //!     trace events, mutate state non-deterministically),
 //!   - changed begin_close to OVERWRITE cancel_reason
@@ -137,7 +133,7 @@
 //!     a Closed → Closing transition attempt fire the
 //!     trace event again — duplicate observability),
 //!   - used Relaxed ordering on the CAS instead of AcqRel
-//:     (could observe stale state; cross-thread
+//!     (could observe stale state; cross-thread
 //!     transitions might double-fire),
 //!   - removed the strengthen_cancel_reason branch from
 //!     cancel_request (would silently drop reason
@@ -145,7 +141,7 @@
 //!   - removed the structural-quiescence check in
 //!     complete_close (would close a region with live
 //!     tasks/children — UB),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
