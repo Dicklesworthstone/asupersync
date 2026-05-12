@@ -128,7 +128,7 @@ fn scan_file_for_bad_pattern(content: &str) -> Vec<(usize, String)> {
             .strip_prefix("let mut ")
             .or_else(|| trimmed.strip_prefix("let "))
             .unwrap_or("");
-        let var_name = after_let.split('=').next().map(str::trim).unwrap_or("");
+        let var_name = after_let.split('=').next().map_or("", str::trim);
         if var_name.is_empty() || var_name.starts_with('_') {
             // _-prefixed bindings are typically RAII-only and
             // dropped at end of scope; tolerate (the pattern
@@ -146,8 +146,10 @@ fn scan_file_for_bad_pattern(content: &str) -> Vec<(usize, String)> {
             // Count braces (extremely rough — strings/comments
             // can throw this off, but works for typical Rust
             // code).
-            let opens = follow_line.matches('{').count() as i32;
-            let closes = follow_line.matches('}').count() as i32;
+            let opens =
+                i32::try_from(follow_line.matches('{').count()).expect("brace count fits in i32");
+            let closes =
+                i32::try_from(follow_line.matches('}').count()).expect("brace count fits in i32");
 
             // If a closing brace at depth 0 appears, the bind
             // went out of scope.
@@ -283,14 +285,14 @@ mod scanner_tests {
 
     #[test]
     fn detects_canonical_bad_pattern() {
-        let bad = r#"
+        let bad = r"
 async fn bad_example(&self) {
     let mut state = self.state.lock();
     state.update();
     self.network.send().await;
     state.commit();
 }
-"#;
+";
         let findings = scan_file_for_bad_pattern(bad);
         assert!(
             !findings.is_empty(),
@@ -300,7 +302,7 @@ async fn bad_example(&self) {
 
     #[test]
     fn does_not_flag_expression_block_scoping() {
-        let good = r#"
+        let good = r"
 async fn good_example(&self) {
     let value = {
         let g = self.state.lock();
@@ -308,7 +310,7 @@ async fn good_example(&self) {
     };
     self.network.send(value).await;
 }
-"#;
+";
         let findings = scan_file_for_bad_pattern(good);
         assert!(
             findings.is_empty(),
@@ -318,14 +320,14 @@ async fn good_example(&self) {
 
     #[test]
     fn does_not_flag_explicit_drop_before_await() {
-        let good = r#"
+        let good = r"
 async fn good_example(&self) {
     let mut g = self.state.lock();
     g.do_something();
     drop(g);
     self.network.send().await;
 }
-"#;
+";
         let findings = scan_file_for_bad_pattern(good);
         assert!(
             findings.is_empty(),
@@ -335,7 +337,7 @@ async fn good_example(&self) {
 
     #[test]
     fn does_not_flag_audit_ok_annotation() {
-        let annotated = r#"
+        let annotated = r"
 async fn annotated_example(&self) {
     let mut state = self.state.lock();
     state.update();
@@ -344,7 +346,7 @@ async fn annotated_example(&self) {
     self.network.send().await; // audit-ok-await-lock
     state.commit();
 }
-"#;
+";
         let findings = scan_file_for_bad_pattern(annotated);
         assert!(
             findings.is_empty(),
@@ -358,12 +360,12 @@ async fn annotated_example(&self) {
         // _-prefixed bindings are RAII-only; we don't try to
         // analyze them (false-positive risk too high). This
         // test documents the choice.
-        let raii = r#"
+        let raii = r"
 async fn raii_example(&self) {
     let _g = self.state.lock();
     self.network.send().await;
 }
-"#;
+";
         // We DON'T flag this pattern because the heuristic is
         // not sophisticated enough. Operators who want to be
         // strict about RAII guards should switch to a named
