@@ -202,8 +202,9 @@ fn run_adaptive_batch_contention_case(
     let metrics = worker.preemption_metrics();
     let selected_batch_size = worker
         .adaptive_batch_snapshot_for_test()
-        .map(|snapshot| snapshot.selected_batch_size)
-        .unwrap_or(fixed_batch_size.max(1));
+        .map_or(fixed_batch_size.max(1), |snapshot| {
+            snapshot.selected_batch_size
+        });
     (
         total_dispatched,
         metrics.global_ready_batch_drains,
@@ -2058,10 +2059,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
             &epochs,
             |b, &epochs| {
                 b.iter_batched(
-                    || {
-                        let policy = AdaptiveCancelStreakPolicyBench::new(10);
-                        policy
-                    },
+                    || AdaptiveCancelStreakPolicyBench::new(10),
                     |mut policy| {
                         let start = test_snapshot(100.0, 0.25, 0, 0, 0);
 
@@ -2121,10 +2119,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
     // Benchmark adaptation under different pressure patterns
     group.bench_function("ucb1_pressure_adaptation", |b: &mut criterion::Bencher| {
         b.iter_batched(
-            || {
-                let policy = AdaptiveCancelStreakPolicyBench::new(10);
-                policy
-            },
+            || AdaptiveCancelStreakPolicyBench::new(10),
             |mut policy| {
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                 let pressure_patterns = [

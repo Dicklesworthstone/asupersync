@@ -26,7 +26,6 @@ fn cors_preflight_wildcard_credentials_security_audit() {
     {
         println!("⚠ SKIPPED in debug build: constructor panics on wildcard+credentials");
         println!("✓ This is correct behavior - debug builds reject the configuration");
-        return;
     }
 
     #[cfg(not(debug_assertions))]
