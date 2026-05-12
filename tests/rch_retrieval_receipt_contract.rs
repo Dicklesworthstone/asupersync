@@ -653,6 +653,105 @@ fn local_fallback_matches_full_output_golden() {
 }
 
 #[test]
+fn artifact_free_proof_receipt_covers_success_timeout_and_failure() {
+    let success = receipt_json_with_args(
+        "remote_success.log",
+        None,
+        &["--artifact-free-proof-receipt"],
+    );
+    let success_receipt = &success["artifact_free_proof_receipt"];
+    assert_eq!(
+        success_receipt["schema_version"].as_str(),
+        Some("artifact-free-rch-proof-receipt-v1")
+    );
+    assert_eq!(success_receipt["command"].as_str(), Some(RECEIPT_COMMAND));
+    assert_eq!(
+        success_receipt["log_remote_command"].as_str(),
+        Some("cargo test --test proof_runner_contract -- --nocapture")
+    );
+    assert_eq!(success_receipt["remote_exit_status"].as_i64(), Some(0));
+    assert_eq!(success_receipt["remote_elapsed_ms"].as_u64(), Some(30_721));
+    assert_eq!(
+        success_receipt["artifact_status"].as_str(),
+        Some("retrieved")
+    );
+    assert_eq!(
+        success_receipt["artifact_retrieval"]["completed"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        success_receipt["artifact_retrieval"]["file_count"].as_u64(),
+        Some(1_271)
+    );
+
+    let retrieval_timeout = receipt_json_with_args(
+        "passed_after_retrieval_timeout.log",
+        Some(124),
+        &["--artifact-free-proof-receipt"],
+    );
+    let timeout_receipt = &retrieval_timeout["artifact_free_proof_receipt"];
+    assert_eq!(timeout_receipt["remote_exit_status"].as_i64(), Some(0));
+    assert_eq!(
+        timeout_receipt["decision"].as_str(),
+        Some("pass-with-retrieval-blocker")
+    );
+    assert_eq!(
+        timeout_receipt["artifact_status"].as_str(),
+        Some("retrieval_failed")
+    );
+    assert_eq!(timeout_receipt["wrapper_exit_code"].as_i64(), Some(124));
+    assert_eq!(
+        timeout_receipt["artifact_retrieval"]["partial"].as_bool(),
+        Some(true)
+    );
+
+    let failure = receipt_json_with_args(
+        "remote_failure.log",
+        Some(101),
+        &["--artifact-free-proof-receipt"],
+    );
+    let failure_receipt = &failure["artifact_free_proof_receipt"];
+    assert_eq!(failure_receipt["remote_exit_status"].as_i64(), Some(101));
+    assert_eq!(failure_receipt["remote_elapsed_ms"].as_u64(), Some(83_012));
+    assert_eq!(failure_receipt["decision"].as_str(), Some("failed"));
+    assert_eq!(
+        failure_receipt["artifact_status"].as_str(),
+        Some("not_requested")
+    );
+    assert_eq!(
+        failure_receipt["selected_worker"].as_str(),
+        Some("vmi1152480")
+    );
+}
+
+#[test]
+fn artifact_free_proof_receipt_records_selected_worker_when_reported() {
+    let receipt = receipt_json_with_args(
+        "multistage_target_timeout.log",
+        Some(124),
+        &["--artifact-free-proof-receipt"],
+    );
+    let proof_receipt = &receipt["artifact_free_proof_receipt"];
+
+    assert_eq!(
+        proof_receipt["selected_worker"].as_str(),
+        Some("vmi1153651")
+    );
+    assert_eq!(proof_receipt["remote_exit_status"].as_i64(), Some(0));
+    assert_eq!(
+        proof_receipt["artifact_status"].as_str(),
+        Some("retrieval_failed")
+    );
+    assert!(
+        proof_receipt["closeout_fields"]
+            .as_array()
+            .expect("closeout fields")
+            .iter()
+            .any(|field| field.as_str() == Some("selected_worker"))
+    );
+}
+
+#[test]
 fn helper_declares_it_does_not_run_mutating_commands() {
     let receipt = receipt_json("passed_after_retrieval_timeout.log", Some(124));
 

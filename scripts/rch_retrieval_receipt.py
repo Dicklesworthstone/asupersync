@@ -19,8 +19,14 @@ from typing import Any
 
 SCHEMA_VERSION = "rch-retrieval-receipt-v1"
 LOCAL_FALLBACK_RE = re.compile(r"(?m)(^\[RCH\] local \(|falling back to local)")
-REMOTE_FINISHED_RE = re.compile(r"Remote command finished: exit=(?P<exit>-?\d+)")
-REMOTE_FAILED_RE = re.compile(r"(?m)^\[RCH\] remote .* failed \(exit (?P<exit>-?\d+)\)")
+REMOTE_COMMAND_RE = re.compile(r"(?m)^\s*.*Executing command remotely:\s*(?P<command>.+)$")
+SELECTED_WORKER_RE = re.compile(r"Selected worker:\s*(?P<worker>\S+)")
+REMOTE_FINISHED_RE = re.compile(
+    r"Remote command finished: exit=(?P<exit>-?\d+)(?: in (?P<elapsed_ms>\d+)ms)?"
+)
+REMOTE_FAILED_RE = re.compile(
+    r"(?m)^\[RCH\] remote (?P<worker>\S+) failed \(exit (?P<exit>-?\d+)\)"
+)
 ARTIFACTS_RETRIEVED_RE = re.compile(
     r"Artifacts retrieved in (?P<elapsed_ms>\d+)ms"
     r"(?: \((?P<file_count>\d+) files, (?P<byte_count>\d+) bytes\))?"
@@ -65,6 +71,33 @@ def last_remote_exit(text: str) -> int | None:
     if failure:
         return int(failure.group("exit"))
     return None
+
+
+def remote_command_from_log(text: str) -> str | None:
+    match = REMOTE_COMMAND_RE.search(text)
+    if match:
+        return match.group("command").strip()
+    return None
+
+
+def selected_worker_from_log(text: str) -> str | None:
+    match = SELECTED_WORKER_RE.search(text)
+    if match:
+        return match.group("worker")
+    failure = REMOTE_FAILED_RE.search(text)
+    if failure:
+        return failure.group("worker")
+    return None
+
+
+def remote_elapsed_ms(text: str) -> int | None:
+    matches = list(REMOTE_FINISHED_RE.finditer(text))
+    if not matches:
+        return None
+    elapsed = matches[-1].group("elapsed_ms")
+    if elapsed is None:
+        return None
+    return int(elapsed)
 
 
 def extract_target_dir(command: str) -> str | None:
@@ -397,6 +430,69 @@ def remediation_for(classification: str) -> dict[str, Any]:
     }
 
 
+def artifact_status(markers: dict[str, Any]) -> tuple[str, str]:
+    if markers["retrieval_completed"]:
+        return ("retrieved", "artifact retrieval completed")
+    if markers["retrieval_started"] and not markers["retrieval_completed"]:
+        if markers["timeout_observed"]:
+            return (
+                "retrieval_failed",
+                "artifact retrieval started but the local wrapper timed out or was interrupted",
+            )
+        return (
+            "retrieval_incomplete",
+            "artifact retrieval started but no completion marker was observed",
+        )
+    if markers["remote_failure"]:
+        return ("not_requested", "remote command failed before artifact retrieval")
+    if markers["remote_success"]:
+        return ("not_available", "remote proof passed but no artifact retrieval marker was observed")
+    return ("not_available", "no remote proof verdict was available")
+
+
+def artifact_free_proof_receipt(
+    args: argparse.Namespace, text: str, analysis: dict[str, Any], target_dir: str | None
+) -> dict[str, Any]:
+    markers = analysis["markers"]
+    status, status_reason = artifact_status(markers)
+    return {
+        "schema_version": "artifact-free-rch-proof-receipt-v1",
+        "command": args.command,
+        "log_remote_command": remote_command_from_log(text),
+        "proof_lane": args.proof_lane or "unspecified",
+        "guarantee": args.guarantee or "unspecified",
+        "target_dir": target_dir,
+        "selected_worker": selected_worker_from_log(text),
+        "remote_exit_status": markers["remote_exit_code"],
+        "remote_elapsed_ms": remote_elapsed_ms(text),
+        "wrapper_exit_code": args.wrapper_exit_code,
+        "classification": analysis["classification"],
+        "decision": analysis["decision"],
+        "artifact_status": status,
+        "artifact_status_reason": status_reason,
+        "artifact_retrieval": {
+            "started": markers["retrieval_started"],
+            "completed": markers["retrieval_completed"],
+            "partial": markers["retrieval_partial"],
+            "elapsed_ms": markers["retrieval_elapsed_ms"],
+            "file_count": markers["artifact_file_count"],
+            "byte_count": markers["artifact_bytes"],
+        },
+        "closeout_fields": [
+            "command",
+            "log_remote_command",
+            "selected_worker",
+            "remote_exit_status",
+            "remote_elapsed_ms",
+            "artifact_status",
+            "wrapper_exit_code",
+            "classification",
+            "decision",
+        ],
+        "non_mutating": True,
+    }
+
+
 def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     log_path = Path(args.log)
     text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -432,6 +528,10 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.audit_target_dir:
         receipt["target_dir_audit"] = audit_target_dir(args, analysis, target_dir)
+    if args.artifact_free_proof_receipt:
+        receipt["artifact_free_proof_receipt"] = artifact_free_proof_receipt(
+            args, text, analysis, target_dir
+        )
     return receipt
 
 
@@ -470,6 +570,11 @@ def main() -> int:
         action="append",
         default=[],
         help="Target dir currently in use by another active proof lane; repeatable",
+    )
+    parser.add_argument(
+        "--artifact-free-proof-receipt",
+        action="store_true",
+        help="Emit compact remote proof and artifact-retrieval fields for closeouts",
     )
     parser.add_argument("--generated-at", default="", help="UTC timestamp for deterministic receipts")
     parser.add_argument("--wrapper-exit-code", type=int, help="Local wrapper exit code, if known")
