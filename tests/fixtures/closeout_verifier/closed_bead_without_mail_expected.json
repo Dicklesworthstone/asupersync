@@ -1,0 +1,85 @@
+{
+  "commit": "aaa999bbb",
+  "current_date": "2026-05-10",
+  "fixture_path": "tests/fixtures/closeout_verifier/closed_bead_without_mail.json",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-10T08:35:00Z",
+  "non_mutating": true,
+  "overall_status": "fail",
+  "rows": [
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main",
+        "expected_commit": "aaa999bbb",
+        "observed_commit": "aaa999bbb"
+      },
+      "row_id": "main_pushed",
+      "status": "pass",
+      "summary": "origin/main points at the closeout commit"
+    },
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main origin/master",
+        "expected_commit": "aaa999bbb",
+        "origin_main": "aaa999bbb",
+        "origin_master": "aaa999bbb"
+      },
+      "row_id": "master_synced",
+      "status": "pass",
+      "summary": "origin/master is synced to origin/main at the closeout commit"
+    },
+    {
+      "evidence": {
+        "bead_id": "asupersync-no-mail",
+        "command": "br show asupersync-no-mail --json",
+        "observed_status": "closed"
+      },
+      "row_id": "bead_closed",
+      "status": "pass",
+      "summary": "bead asupersync-no-mail is closed"
+    },
+    {
+      "evidence": {
+        "expected_commit": "aaa999bbb",
+        "matched_message_ids": [],
+        "thread_id": "asupersync-no-mail"
+      },
+      "remediation": "send a closeout message on the slice thread",
+      "row_id": "closeout_mail",
+      "status": "fail",
+      "summary": "no closeout mail found"
+    },
+    {
+      "evidence": {
+        "active_reservations": [],
+        "agent": "GentleCitadel"
+      },
+      "row_id": "reservations_released",
+      "status": "pass",
+      "summary": "no active closeout-owner reservations remain"
+    },
+    {
+      "evidence": {
+        "closeout_validation_reported": true,
+        "mail_mentions_validation": false
+      },
+      "row_id": "validation_reported",
+      "status": "pass",
+      "summary": "validation evidence is reported"
+    }
+  ],
+  "schema_version": "closeout-verifier-v1",
+  "slice_id": "asupersync-no-mail",
+  "slice_mode": "bead-backed",
+  "summary": {
+    "fail": 1,
+    "pass": 5,
+    "warn": 0
+  }
+}

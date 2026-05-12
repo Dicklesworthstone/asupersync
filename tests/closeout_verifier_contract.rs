@@ -199,6 +199,14 @@ fn closed_bead_without_mail_fails_mail_row() {
 }
 
 #[test]
+fn closed_bead_without_mail_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "closed_bead_without_mail.json",
+        "closed_bead_without_mail_expected.json",
+    );
+}
+
+#[test]
 fn code_only_without_bead_gets_tracker_note_instead_of_failure() {
     let report = report("code_only_without_bead.json");
     let note = row(&report, "tracker_reconciliation_note");
