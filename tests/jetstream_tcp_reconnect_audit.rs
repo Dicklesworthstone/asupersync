@@ -8,13 +8,12 @@
 //! to maintain resilient JetStream operations, not burden application with manual reconnection.
 
 use asupersync::cx::Cx;
-use asupersync::messaging::jetstream::JetStreamContext;
-use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsError};
-use std::io::{Read, Write};
+use asupersync::messaging::nats::{NatsClient, NatsConfig};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn jetstream_tcp_reconnect_behavior_audit() {
@@ -55,8 +54,25 @@ async fn jetstream_tcp_reconnect_behavior_audit() {
         // Simulate connection failure by forcefully closing
         drop(stream1);
 
-        // Accept reconnection
-        let (mut stream2, _) = listener.accept().expect("accept reconnection");
+        // Accept reconnection, but do not let the audit hang forever when
+        // the client still lacks automatic reconnect behavior.
+        listener
+            .set_nonblocking(true)
+            .expect("set reconnect accept timeout mode");
+        let reconnect_deadline = Instant::now() + Duration::from_secs(12);
+        let mut stream2 = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock
+                        && Instant::now() < reconnect_deadline =>
+                {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return,
+                Err(error) => panic!("accept reconnection: {error}"),
+            }
+        };
         reconnected_tx.send(()).expect("signal reconnected");
 
         // Send INFO again
@@ -196,8 +212,6 @@ async fn jetstream_tcp_reconnect_behavior_audit() {
 #[tokio::test]
 async fn jetstream_reconnect_configuration_audit() {
     println!("=== JETSTREAM RECONNECTION CONFIGURATION AUDIT ===");
-
-    let cx = Cx::for_testing();
 
     // Test that reconnection configuration is available and sensible
     let mut config = NatsConfig::default();

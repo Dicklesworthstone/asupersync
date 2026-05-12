@@ -109,11 +109,9 @@ fn operation_type_strategy() -> impl Strategy<Value = OperationType> {
         2 => (1u32..=MAX_REGIONS as u32).prop_map(|region| {
             OperationType::CancelRegion { region_id: RegionId::new_for_test(region, 1) }
         }),
-        // Low weight for FinalizeRegion since it's only legal when no obligations pending.
-        // In practice, regions are finalized after explicit drainage.
-        1 => (1u32..=MAX_REGIONS as u32).prop_map(|region| {
-            OperationType::FinalizeRegion { region_id: RegionId::new_for_test(region, 1) }
-        }),
+        // FinalizeRegion legality depends on prior state, so random
+        // scenarios avoid it. Deterministic tests below cover the
+        // finalize-after-drain path explicitly.
         3 => Just(OperationType::CheckInvariant),
     ]
 }
@@ -184,13 +182,12 @@ fn test_conservation_with_dpor(scenario: &ConcurrentScenario) {
         report.total_runs, report.unique_classes
     );
 
-    if report.has_violations() {
-        panic!(
-            "Found conservation violations in {} runs: {:?}",
-            report.violations.len(),
-            report.violation_seeds()
-        );
-    }
+    assert!(
+        !report.has_violations(),
+        "Found conservation violations in {} runs: {:?}",
+        report.violations.len(),
+        report.violation_seeds()
+    );
 }
 
 fn test_conservation_single_schedule(scenario: &ConcurrentScenario) {
@@ -242,7 +239,7 @@ fn run_scenario_in_runtime(
 
                 // Store token for later commit/abort
                 let mut tokens = tokens_by_task.lock().unwrap();
-                let task_tokens = tokens.entry(operation.task_id).or_insert_with(Vec::new);
+                let task_tokens = tokens.entry(operation.task_id).or_default();
                 task_tokens.push(Some(token));
             }
 
