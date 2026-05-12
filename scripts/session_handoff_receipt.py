@@ -359,6 +359,17 @@ def bead_ids(issues: list[dict[str, Any]]) -> list[str]:
     return ids
 
 
+def claimable_ready_ids(issues: list[dict[str, Any]]) -> list[str]:
+    ids = []
+    for issue in issues:
+        if str(issue.get("issue_type") or "") == "epic":
+            continue
+        issue_id = issue.get("id")
+        if isinstance(issue_id, str) and issue_id:
+            ids.append(issue_id)
+    return ids
+
+
 def choose_next_action(
     ready_ids: list[str],
     dirty: list[dict[str, str]],
@@ -433,6 +444,7 @@ def build_receipt(
     ready = extract_issues(source.get("beads", {}).get("ready", []))
     in_progress = extract_issues(source.get("beads", {}).get("in_progress", []))
     ready_ids = bead_ids(ready)
+    claimable_ready = claimable_ready_ids(ready)
     in_progress_ids = bead_ids(in_progress)
     stale_ids = stale_in_progress(in_progress, generated_at, stale_after_hours)
     agent_mail = source.get("agent_mail", {})
@@ -446,7 +458,7 @@ def build_receipt(
     rch = source.get("rch", {})
     branch = str(git.get("branch", ""))
     next_action = choose_next_action(
-        ready_ids,
+        claimable_ready,
         dirty_entries,
         reservations,
         proof_suggestions,

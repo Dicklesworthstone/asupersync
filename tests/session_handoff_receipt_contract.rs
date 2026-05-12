@@ -32,14 +32,13 @@ fn run_receipt(fixture: &str) -> Output {
 
 fn receipt_json(fixture: &str) -> Value {
     let output = run_receipt(fixture);
-    if !output.status.success() {
-        panic!(
-            "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("receipt output not JSON: {error}\noutput: {stdout}"))
@@ -234,6 +233,20 @@ fn stale_in_progress_output_matches_full_reviewed_golden() {
         "stale_in_progress.json",
         "stale_in_progress_expected.json",
         "stale-in-progress handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
+fn epic_only_ready_queue_is_not_claimed() {
+    let receipt = receipt_json("epic_only_ready.json");
+    assert_eq!(next_action_category(&receipt), "blocked");
+    assert_eq!(
+        receipt["next_action"]["reason"].as_str(),
+        Some("no actionable ready bead or proof lane was found")
+    );
+    assert_eq!(
+        receipt["active_bead_ids"]["ready"][0].as_str(),
+        Some("asupersync-lhx6m4")
     );
 }
 
