@@ -4851,6 +4851,15 @@ test = false
 doc = false
 bench = false
 
+# Same-owner mutex acquire fuzzer. Exercises `try_lock`,
+# `try_lock_owned`, and a single pending `lock(&Cx)` poll while a guard is held.
+[[bin]]
+name = "mutex_reentrant_acquire"
+path = "fuzz_targets/mutex_reentrant_acquire.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "sync_semaphore_concurrent_acquire"
 path = "fuzz_targets/sync_semaphore_concurrent_acquire.rs"
