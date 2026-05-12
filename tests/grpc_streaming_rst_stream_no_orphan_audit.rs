@@ -230,7 +230,7 @@ fn rst_stream_status_is_idempotent_on_repeated_poll() {
                     "poll round {poll_round} must surface Cancelled idempotently",
                 );
             }
-            other => panic!("round {poll_round}: expected Cancelled Err, got {other:?}",),
+            other => panic!("round {poll_round}: expected Cancelled Err, got {other:?}"),
         }
     }
 }

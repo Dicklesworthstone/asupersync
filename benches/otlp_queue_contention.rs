@@ -4,9 +4,9 @@
 //! Mutex<VecDeque<T>> to lock-free ArrayQueue<T>.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 // Mock span batch for benchmarking
 #[derive(Clone)]
@@ -77,7 +77,6 @@ mod lock_free {
     #[derive(Debug)]
     pub struct LockFreeQueue<T> {
         queue: ArrayQueue<T>,
-        capacity: usize,
         current_len: AtomicUsize,
         dropped_count: AtomicU64,
     }
@@ -86,7 +85,6 @@ mod lock_free {
         pub fn new(capacity: usize) -> Self {
             Self {
                 queue: ArrayQueue::new(capacity),
-                capacity,
                 current_len: AtomicUsize::new(0),
                 dropped_count: AtomicU64::new(0),
             }
@@ -106,13 +104,11 @@ mod lock_free {
                         self.current_len.fetch_sub(1, Ordering::Relaxed);
                         dropped = true;
 
-                        if let Err(_) = self.queue.push(returned_item) {
+                        if self.queue.push(returned_item).is_err() {
                             return dropped;
                         }
-                    } else {
-                        if let Err(_) = self.queue.push(returned_item) {
-                            return dropped;
-                        }
+                    } else if self.queue.push(returned_item).is_err() {
+                        return dropped;
                     }
                 }
             }
@@ -166,7 +162,9 @@ fn bench_queue_contention(c: &mut Criterion) {
 
                                     // Occasionally dequeue to prevent queue from staying full
                                     if i % 10 == 0 {
-                                        let _ = queue.dequeue();
+                                        if let Some(batch) = queue.dequeue() {
+                                            black_box((batch.id, batch.data.len()));
+                                        }
                                     }
                                 }
                             })
@@ -176,6 +174,7 @@ fn bench_queue_contention(c: &mut Criterion) {
                     for handle in handles {
                         handle.join().unwrap();
                     }
+                    black_box(queue.len());
                 });
             },
         );
@@ -200,7 +199,9 @@ fn bench_queue_contention(c: &mut Criterion) {
 
                                     // Occasionally dequeue to prevent queue from staying full
                                     if i % 10 == 0 {
-                                        let _ = queue.dequeue();
+                                        if let Some(batch) = queue.dequeue() {
+                                            black_box((batch.id, batch.data.len()));
+                                        }
                                     }
                                 }
                             })
@@ -210,6 +211,7 @@ fn bench_queue_contention(c: &mut Criterion) {
                     for handle in handles {
                         handle.join().unwrap();
                     }
+                    black_box(queue.len());
                 });
             },
         );
