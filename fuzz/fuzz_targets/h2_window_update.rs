@@ -17,7 +17,7 @@ use asupersync::bytes::Bytes;
 use asupersync::http::h2::{
     connection::Connection,
     error::{ErrorCode, H2Error},
-    frame::{DataFrame, Frame, FrameHeader, HeadersFrame, WindowUpdateFrame},
+    frame::{DataFrame, Frame, HeadersFrame, SettingsFrame, WindowUpdateFrame},
     settings::Settings,
 };
 
@@ -35,8 +35,6 @@ struct H2WindowUpdateSequence {
 struct ConnectionSetup {
     /// Whether this is a client or server connection
     is_client: bool,
-    /// Custom initial window sizes
-    initial_connection_window: Option<i32>,
     /// Settings to apply
     settings: CustomSettings,
 }
@@ -79,10 +77,19 @@ enum H2Operation {
     /// Reset a stream (affects window calculations)
     ResetStream {
         stream_id: StreamId,
-        error_code: ErrorCode,
+        error_code: ResetErrorCode,
     },
     /// Check connection state and windows
     InspectWindows,
+}
+
+#[derive(Arbitrary, Debug, Clone, Copy)]
+struct ResetErrorCode(u8);
+
+impl ResetErrorCode {
+    fn as_error_code(self) -> ErrorCode {
+        ErrorCode::from_u32(u32::from(self.0 % 0x0e))
+    }
 }
 
 /// Stream ID with various edge case values
@@ -211,10 +218,10 @@ fuzz_target!(|sequence: H2WindowUpdateSequence| {
 
     // Limit payload sizes to avoid OOM
     for op in &sequence.operations {
-        if let H2Operation::SendData { payload_size, .. } = op {
-            if payload_size.as_usize() > 2_000_000 {
-                return;
-            }
+        if let H2Operation::SendData { payload_size, .. } = op
+            && payload_size.as_usize() > 2_000_000
+        {
+            return;
         }
     }
 
@@ -237,13 +244,9 @@ fn test_window_update_sequence(sequence: &H2WindowUpdateSequence) {
         Connection::server(settings)
     };
 
-    // Set connection to open state (skip handshake for fuzzing)
-    connection.set_state_for_testing(asupersync::http::h2::connection::ConnectionState::Open);
-
-    // Apply custom initial window if specified
-    if let Some(window) = sequence.connection_setup.initial_connection_window {
-        connection.set_recv_window_for_testing(window);
-    }
+    // Complete the public connection handshake path before exercising data and
+    // WINDOW_UPDATE frames. This keeps the harness on the live state machine.
+    let _ = connection.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
 
     // Track opened streams for validation
     let mut opened_streams = std::collections::HashSet::new();
@@ -257,23 +260,31 @@ fn test_window_update_sequence(sequence: &H2WindowUpdateSequence) {
                 // Operation succeeded - check invariants
                 validate_connection_invariants(&connection);
             }
-            Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {
+            Err(H2Error {
+                code: ErrorCode::ProtocolError,
+                ..
+            }) => {
                 // Expected protocol errors (e.g., zero increment WINDOW_UPDATE)
             }
-            Err(H2Error { code: ErrorCode::FlowControlError, .. }) => {
+            Err(H2Error {
+                code: ErrorCode::FlowControlError,
+                ..
+            }) => {
                 // Expected flow control errors (e.g., window overflow)
             }
-            Err(H2Error { code: ErrorCode::StreamClosed, .. }) => {
+            Err(H2Error {
+                code: ErrorCode::StreamClosed,
+                ..
+            }) => {
                 // Expected stream closed errors
             }
             Err(other) => {
-                // Unexpected error - this might indicate a bug
-                if cfg!(fuzzing) {
-                    // In fuzzing mode, don't panic on unexpected errors
-                    // as they might be legitimate edge case handling
-                } else {
-                    panic!("Unexpected error in WINDOW_UPDATE handling: {}", other);
-                }
+                // Other protocol errors are valid outcomes for generated frame
+                // sequences, but they must remain well-formed H2 errors.
+                assert!(
+                    other.is_connection_error() || other.stream_id.is_some(),
+                    "H2 errors should classify connection or stream scope"
+                );
             }
         }
 
@@ -303,7 +314,10 @@ fn test_increment_bounds(increment: u32) {
         assert_eq!(increment, 0, "Zero increment test");
     } else if increment > (i32::MAX as u32) {
         // Increments exceeding i32::MAX should be rejected
-        assert!(i32_result.is_err(), "Oversized increment should not convert to i32");
+        assert!(
+            i32_result.is_err(),
+            "Oversized increment should not convert to i32"
+        );
     } else {
         // Valid increments should convert successfully
         assert!(i32_result.is_ok(), "Valid increment should convert to i32");
@@ -315,36 +329,40 @@ fn test_increment_bounds(increment: u32) {
 
     if new_window_i64 > i64::from(i32::MAX) {
         // Would overflow - this should be detected
-        assert!(new_window_i64 > i64::from(i32::MAX), "Overflow detection test");
+        assert!(
+            new_window_i64 > i64::from(i32::MAX),
+            "Overflow detection test"
+        );
     }
 }
 
 fn test_rfc_compliance(sequence: &H2WindowUpdateSequence) {
     // Test RFC 9113 compliance rules for WINDOW_UPDATE
     for operation in &sequence.operations {
-        match operation {
-            H2Operation::ReceiveWindowUpdate { stream_id, increment } => {
-                let increment_val = increment.as_u32();
-                let stream_id_val = stream_id.as_u32();
+        if let H2Operation::ReceiveWindowUpdate {
+            stream_id,
+            increment,
+        } = operation
+        {
+            let increment_val = increment.as_u32();
+            let stream_id_val = stream_id.as_u32();
 
-                // RFC 9113 §6.9.1: increment of 0 MUST be treated as an error
-                if increment_val == 0 {
-                    if stream_id_val == 0 {
-                        // Connection-level: MUST be connection error
-                        assert_eq!(increment_val, 0, "Zero increment on connection");
-                    } else {
-                        // Stream-level: MUST be stream error
-                        assert_eq!(increment_val, 0, "Zero increment on stream");
-                    }
-                }
-
-                // Stream ID must be valid
-                if stream_id_val > ((1u32 << 31) - 1) {
-                    // Invalid stream ID
-                    assert!(stream_id_val > ((1u32 << 31) - 1), "Invalid stream ID");
+            // RFC 9113 §6.9.1: increment of 0 MUST be treated as an error
+            if increment_val == 0 {
+                if stream_id_val == 0 {
+                    // Connection-level: MUST be connection error
+                    assert_eq!(increment_val, 0, "Zero increment on connection");
+                } else {
+                    // Stream-level: MUST be stream error
+                    assert_eq!(increment_val, 0, "Zero increment on stream");
                 }
             }
-            _ => {}
+
+            // Stream ID must be valid
+            if stream_id_val > ((1u32 << 31) - 1) {
+                // Invalid stream ID
+                assert!(stream_id_val > ((1u32 << 31) - 1), "Invalid stream ID");
+            }
         }
     }
 }
@@ -355,7 +373,10 @@ fn process_operation(
     opened_streams: &mut std::collections::HashSet<u32>,
 ) -> Result<(), H2Error> {
     match operation {
-        H2Operation::OpenStream { stream_id, end_stream } => {
+        H2Operation::OpenStream {
+            stream_id,
+            end_stream,
+        } => {
             let stream_id_val = stream_id.as_u32();
             if stream_id_val == 0 {
                 return Ok(()); // Skip connection-level "streams"
@@ -374,7 +395,11 @@ fn process_operation(
             Ok(())
         }
 
-        H2Operation::SendData { stream_id, payload_size, end_stream } => {
+        H2Operation::SendData {
+            stream_id,
+            payload_size,
+            end_stream,
+        } => {
             let stream_id_val = stream_id.as_u32();
             if stream_id_val == 0 {
                 return Ok(()); // Skip connection-level data
@@ -383,17 +408,16 @@ fn process_operation(
             let payload_len = payload_size.as_usize();
             let payload = Bytes::from(vec![0u8; payload_len]);
 
-            let data_frame = Frame::Data(DataFrame::new(
-                stream_id_val,
-                payload,
-                *end_stream,
-            ));
+            let data_frame = Frame::Data(DataFrame::new(stream_id_val, payload, *end_stream));
 
             connection.process_frame(data_frame)?;
             Ok(())
         }
 
-        H2Operation::ReceiveWindowUpdate { stream_id, increment } => {
+        H2Operation::ReceiveWindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let window_update = Frame::WindowUpdate(WindowUpdateFrame::new(
                 stream_id.as_u32(),
                 increment.as_u32(),
@@ -403,7 +427,10 @@ fn process_operation(
             Ok(())
         }
 
-        H2Operation::SendWindowUpdate { stream_id, increment } => {
+        H2Operation::SendWindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let stream_id_val = stream_id.as_u32();
             let increment_val = increment.as_u32();
 
@@ -415,13 +442,16 @@ fn process_operation(
             Ok(())
         }
 
-        H2Operation::ResetStream { stream_id, error_code } => {
+        H2Operation::ResetStream {
+            stream_id,
+            error_code,
+        } => {
             let stream_id_val = stream_id.as_u32();
             if stream_id_val == 0 {
                 return Ok(()); // Can't reset connection
             }
 
-            connection.reset_stream(stream_id_val, *error_code);
+            connection.reset_stream(stream_id_val, error_code.as_error_code());
             opened_streams.remove(&stream_id_val);
             Ok(())
         }
@@ -435,63 +465,29 @@ fn process_operation(
 }
 
 fn validate_connection_invariants(connection: &Connection) {
-    // Validate basic connection state invariants
-
-    // Window sizes should be within valid range
-    assert!(connection.recv_window() <= i32::MAX, "Receive window within bounds");
-    assert!(connection.send_window() <= i32::MAX, "Send window within bounds");
+    assert!(
+        connection.stream(0).is_none(),
+        "stream 0 must remain connection-level only"
+    );
 
     // Pending operations queue should be finite
     // (This is implicitly tested by not hanging in the fuzzer)
 }
 
 fn build_settings(custom: &CustomSettings) -> Settings {
-    let mut settings = if custom.initial_window_size.is_some() ||
-                          custom.max_concurrent_streams.is_some() ||
-                          custom.header_table_size.is_some() {
-        Settings::default()
-    } else {
-        Settings::default()
-    };
+    let mut settings = Settings::default();
 
     if let Some(window_size) = custom.initial_window_size {
-        settings.set_initial_window_size(window_size);
+        settings.initial_window_size = window_size.min(0x7fff_ffff);
     }
 
     if let Some(max_streams) = custom.max_concurrent_streams {
-        settings.set_max_concurrent_streams(max_streams);
+        settings.max_concurrent_streams = max_streams;
     }
 
     if let Some(table_size) = custom.header_table_size {
-        settings.set_header_table_size(table_size);
+        settings.header_table_size = table_size;
     }
 
     settings
-}
-
-// Helper implementations for testing access (these would need to be added to the actual Connection type)
-impl Connection {
-    #[cfg(fuzzing)]
-    fn set_state_for_testing(&mut self, state: asupersync::http::h2::connection::ConnectionState) {
-        // This would need to be implemented in the actual Connection type
-        // For now, assume we can set the state for testing
-    }
-
-    #[cfg(fuzzing)]
-    fn set_recv_window_for_testing(&mut self, window: i32) {
-        // This would need to be implemented in the actual Connection type
-        // For now, assume we can set the receive window for testing
-    }
-
-    #[cfg(fuzzing)]
-    fn recv_window(&self) -> i32 {
-        // This would need to be implemented to expose the receive window
-        65535 // Default value for testing
-    }
-
-    #[cfg(fuzzing)]
-    fn send_window(&self) -> i32 {
-        // This would need to be implemented to expose the send window
-        65535 // Default value for testing
-    }
 }
