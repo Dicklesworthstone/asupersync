@@ -46,6 +46,19 @@ def normalize_repo_path(path: str) -> str:
     return normalized.rstrip("/")
 
 
+def status_paths(status: str, path: str) -> list[str]:
+    if not path:
+        return []
+    if ("R" in status or "C" in status) and " -> " in path:
+        paths = []
+        for part in path.split(" -> ", 1):
+            normalized = normalize_repo_path(part)
+            if normalized and normalized not in paths:
+                paths.append(normalized)
+        return paths
+    return [path]
+
+
 def paths_overlap(left: str, right: str) -> bool:
     left = normalize_repo_path(left)
     right = normalize_repo_path(right)
@@ -113,11 +126,11 @@ def parse_status_lines(raw: str) -> list[dict[str, str]]:
             continue
         status = line[:2]
         path = line[3:] if len(line) > 3 else ""
-        if path:
+        for expanded_path in status_paths(status, path):
             entries.append(
                 {
                     "status": status,
-                    "path": path,
+                    "path": expanded_path,
                     "cluster": "unknown",
                     "action": "inspect diff and assign owner before validation",
                 }
@@ -258,16 +271,16 @@ def normalize_dirty_entries(source: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path", ""))
-        if not path:
-            continue
-        entries.append(
-            {
-                "status": str(item.get("status", "")),
-                "path": path,
-                "cluster": str(item.get("cluster", "unknown")),
-                "action": str(item.get("action", "")),
-            }
-        )
+        status = str(item.get("status", ""))
+        for expanded_path in status_paths(status, path):
+            entries.append(
+                {
+                    "status": status,
+                    "path": expanded_path,
+                    "cluster": str(item.get("cluster", "unknown")),
+                    "action": str(item.get("action", "")),
+                }
+            )
     return entries
 
 

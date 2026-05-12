@@ -159,6 +159,54 @@ fn dirty_peer_owned_tree_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn dirty_rename_target_expands_source_and_target_paths() {
+    let receipt = receipt_json("dirty_rename_target.json");
+    assert_eq!(next_action_category(&receipt), "avoid-peer-owned-surface");
+    assert_eq!(
+        receipt["next_action"]["path"].as_str(),
+        Some("docs/old-secret.rs")
+    );
+
+    let clusters = receipt["dirty_clusters"]
+        .as_array()
+        .expect("dirty_clusters must be array");
+    let security_cluster = clusters
+        .iter()
+        .find(|cluster| cluster["cluster"].as_str() == Some("peer-owned/security-audit"))
+        .expect("security rename cluster must be present");
+    let paths: Vec<&str> = security_cluster["paths"]
+        .as_array()
+        .expect("cluster paths must be array")
+        .iter()
+        .map(|path| path.as_str().expect("cluster path must be string"))
+        .collect();
+    assert_eq!(paths, vec!["docs/old-secret.rs", "src/security/secret.rs"]);
+    assert!(
+        paths.iter().all(|path| !path.contains(" -> ")),
+        "rename/copy rows must not leak literal arrow paths"
+    );
+
+    let literal_arrow_cluster = clusters
+        .iter()
+        .find(|cluster| cluster["cluster"].as_str() == Some("peer-owned/docs-arrow"))
+        .expect("literal arrow cluster must be present");
+    assert_eq!(
+        literal_arrow_cluster["paths"][0].as_str(),
+        Some("docs/name -> literal.md"),
+        "ordinary non-rename paths containing arrows must be preserved"
+    );
+}
+
+#[test]
+fn dirty_rename_target_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "dirty_rename_target.json",
+        "dirty_rename_target_expected.json",
+        "dirty-rename-target handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn tracker_reservation_conflict_waits_before_claiming() {
     let receipt = receipt_json("tracker_reservation_conflict.json");
     assert_eq!(next_action_category(&receipt), "wait-for-reservation");
@@ -400,5 +448,57 @@ print(json.dumps({
     assert_eq!(
         receipt["entries"][0]["path"].as_str(),
         Some("fuzz/Cargo.toml")
+    );
+}
+
+#[test]
+fn live_fallback_expands_rename_copy_rows_without_touching_literal_arrow_paths() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import session_handoff_receipt as receipt
+
+raw = "\n".join([
+    "R  docs/old.md -> src/security/secret.rs",
+    " M docs/name -> literal.md",
+    "C  ./src/a.rs -> ./src/b.rs",
+])
+print(json.dumps(receipt.parse_status_lines(raw), sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run handoff rename/copy parser probe");
+    assert!(
+        output.status.success(),
+        "python rename/copy probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let entries: Value = serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    let paths: Vec<&str> = entries
+        .as_array()
+        .expect("probe entries must be array")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("entry path must be string"))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "docs/old.md",
+            "src/security/secret.rs",
+            "docs/name -> literal.md",
+            "src/a.rs",
+            "src/b.rs"
+        ]
     );
 }
