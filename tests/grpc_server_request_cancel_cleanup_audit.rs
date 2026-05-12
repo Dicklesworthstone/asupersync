@@ -197,7 +197,7 @@ fn rate_limit_under_layer_cleanup_walks_back_through_acquired_interceptors() {
 
     let mut request = Request::with_metadata(Bytes::new(), Metadata::new());
     let result = layer.intercept_request(&mut request);
-    assert!(result.is_err(), "second layer rejects → overall layer Err",);
+    assert!(result.is_err(), "second layer rejects → overall layer Err");
     assert_eq!(
         limiter.current_count(),
         0,
