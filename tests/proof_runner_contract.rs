@@ -32,14 +32,13 @@ fn run_python_snippet(source: &str) -> Output {
 
 fn proof_runner_json(args: &[&str]) -> Value {
     let output = run_proof_runner(args).expect("proof runner should execute");
-    if !output.status.success() {
-        panic!(
-            "proof runner failed: {}\nstdout: {}\nstderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "proof runner failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("proof runner output not JSON: {error}\noutput: {stdout}"))
@@ -811,6 +810,56 @@ fn proof_runner_dry_run_and_suggestions_do_not_require_build_slot_snapshot() {
 }
 
 #[test]
+fn proof_runner_preserves_git_status_columns_for_unstaged_dirty_paths() {
+    let snippet = r#"
+import importlib.util
+import json
+
+spec = importlib.util.spec_from_file_location("proof_runner", "scripts/proof_runner.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Completed:
+    stdout = " M scripts/proof_runner.py\nA  tests/proof_runner_contract.rs\n?? tests/fixtures/proof_runner/new.log\n"
+
+module.subprocess.run = lambda *args, **kwargs: Completed()
+status = module.GitStatus(".")
+print(json.dumps({
+    "status_lines": status._get_status(),
+    "uncommitted": status.get_uncommitted_files(),
+    "staged": status.get_staged_files(),
+}, sort_keys=True))
+"#;
+    let output = run_python_snippet(snippet);
+    assert!(
+        output.status.success(),
+        "status parser snippet should execute\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).expect("status parser output should be JSON");
+
+    assert_eq!(
+        parsed["status_lines"][0].as_str(),
+        Some(" M scripts/proof_runner.py"),
+        "leading porcelain status column must be preserved for unstaged paths"
+    );
+    assert_eq!(
+        parsed["uncommitted"][0].as_str(),
+        Some("scripts/proof_runner.py")
+    );
+    assert_eq!(
+        parsed["staged"][0].as_str(),
+        Some("tests/proof_runner_contract.rs")
+    );
+    assert_eq!(
+        parsed["uncommitted"][2].as_str(),
+        Some("tests/fixtures/proof_runner/new.log")
+    );
+}
+
+#[test]
 fn proof_runner_emits_validation_frontier_compatible_records() {
     // Test with a known lane to get a proper record structure
     let result = proof_runner_json(&[
@@ -1408,7 +1457,7 @@ fn proof_console_report_maps_explicit_rch_outcome_to_lane_status() {
     let outcome = write_reservation_snapshot(
         r#"{
           "rch_outcome": {
-            "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
             "outcome_class": "pass",
             "decision": "pass",
             "remote_exit_status": 0,

@@ -661,7 +661,9 @@ class GitStatus:
                     cwd=self.repo_root,
                     check=True
                 )
-                self._status_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                self._status_lines = [
+                    line.rstrip() for line in result.stdout.splitlines() if line.strip()
+                ]
             except subprocess.CalledProcessError:
                 self._status_lines = []
         return self._status_lines

@@ -53,7 +53,7 @@
       "lane_id": "clippy-all-targets"
     },
     {
-      "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
       "expected_signal": "warning: nothing to print.",
       "guarantee_ids": [
         "default-production-tokio-free"
@@ -77,7 +77,7 @@
       "lane_id": "fuzz-manifest-smoke"
     },
     {
-      "command": "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
       "expected_signal": "dependency path containing opentelemetry-proto, tonic or tonic-prost, and tokio",
       "guarantee_ids": [
         "fuzz-tokio-quarantine"
@@ -93,7 +93,7 @@
       "lane_id": "lib-tests"
     },
     {
-      "command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
       "expected_signal": "warning: nothing to print.",
       "guarantee_ids": [
         "metrics-production-tokio-free"
@@ -125,7 +125,7 @@
       "lane_id": "rustdoc-api"
     },
     {
-      "command": "rch exec -- cargo fmt --check",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
       "expected_signal": "rustfmt exits 0 or prints exact formatting diffs",
       "guarantee_ids": [
         "rustfmt-frontier"
@@ -133,7 +133,7 @@
       "lane_id": "rustfmt-check"
     },
     {
-      "command": "rch exec -- cargo tree -e normal --workspace -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
       "expected_signal": "tokio paths are limited to documented workspace carve-outs",
       "guarantee_ids": [
         "workspace-tokio-audit"
