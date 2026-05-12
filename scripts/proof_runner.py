@@ -92,6 +92,10 @@ DISK_SAFE_NEXT_ACTION = (
     "do not delete files automatically"
 )
 DISK_CLEANUP_PERMISSION_RECORD = "cleanup requires explicit user permission"
+FALLBACK_RANKING_SCHEMA_VERSION = "proof-runner-fallback-bead-ranking-v1"
+FALLBACK_CARGO_HEAVY_WARNING = (
+    "local disk pressure detected; prefer disk-safe fallback work or an artifact-free proof receipt before Cargo-heavy validation"
+)
 
 
 def _non_negative_int(value: Any) -> int:
@@ -212,6 +216,104 @@ def classify_disk_pressure(
             "deletion_command_recommended": False,
         },
     }
+
+
+def _string_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if value in (None, ""):
+        return []
+    return [str(value)]
+
+
+def fallback_bead_rows_from_snapshot(snapshot_path: str) -> List[Dict[str, Any]]:
+    raw = json.loads(Path(snapshot_path).read_text())
+    if isinstance(raw, list):
+        rows = raw
+    elif isinstance(raw, dict):
+        rows = raw.get("beads") or raw.get("ready") or raw.get("issues") or []
+    else:
+        rows = []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def fallback_validation_text(bead: Dict[str, Any]) -> str:
+    parts = [
+        bead.get("title", ""),
+        bead.get("description", ""),
+        bead.get("command", ""),
+        bead.get("validation_command", ""),
+        bead.get("proof_command", ""),
+    ]
+    parts.extend(_string_list(bead.get("labels")))
+    parts.extend(_string_list(bead.get("validation")))
+    parts.extend(_string_list(bead.get("validation_commands")))
+    parts.extend(_string_list(bead.get("proof_commands")))
+    return " ".join(part for part in parts if part).lower()
+
+
+def fallback_disk_safety(bead: Dict[str, Any]) -> str:
+    explicit = str(bead.get("disk_safety", "")).strip().lower()
+    if explicit in {"disk-safe", "cargo-heavy", "neutral"}:
+        return explicit
+    if bead.get("disk_safe") is True:
+        return "disk-safe"
+    if bead.get("cargo_heavy") is True or bead.get("disk_safe") is False:
+        return "cargo-heavy"
+
+    text = fallback_validation_text(bead)
+    disk_safe_terms = (
+        "artifact-free",
+        "no-artifact",
+        "script-only",
+        "fixture-only",
+        "docs",
+        "documentation",
+        "plan-space",
+    )
+    cargo_heavy_terms = (
+        "rch exec -- cargo",
+        " cargo test",
+        " cargo clippy",
+        " cargo check",
+        " cargo bench",
+        "cargo-heavy",
+    )
+    if any(term in text for term in cargo_heavy_terms):
+        return "cargo-heavy"
+    if any(term in text for term in disk_safe_terms):
+        return "disk-safe"
+    return "neutral"
+
+
+def rank_fallback_beads_for_disk(
+    beads: List[Dict[str, Any]],
+    disk_preflight: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    disk_low = disk_preflight["classification"] != "healthy"
+    class_rank = {"disk-safe": 0, "neutral": 1, "cargo-heavy": 2}
+    ranked = []
+    for input_order, bead in enumerate(beads):
+        disk_safety = fallback_disk_safety(bead)
+        warning = FALLBACK_CARGO_HEAVY_WARNING if disk_low and disk_safety == "cargo-heavy" else ""
+        ranked.append({
+            "id": str(bead.get("id", "")),
+            "title": str(bead.get("title", "")),
+            "priority": _non_negative_int(bead.get("priority", 2)),
+            "input_order": input_order,
+            "eligible": True,
+            "disk_safety": disk_safety,
+            "disk_pressure_warning": warning,
+            "validation_hint": str(
+                bead.get("validation_command")
+                or bead.get("proof_command")
+                or bead.get("command")
+                or ""
+            ),
+        })
+    if disk_low:
+        return sorted(ranked, key=lambda row: (class_rank[row["disk_safety"]], row["input_order"]))
+    return sorted(ranked, key=lambda row: row["input_order"])
 
 
 def canonical_json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -2261,6 +2363,33 @@ class ProofRunner:
 
         return result
 
+
+    def rank_fallback_beads(self, snapshot_path: str) -> Dict[str, Any]:
+        beads = fallback_bead_rows_from_snapshot(snapshot_path)
+        disk_preflight = classify_disk_pressure(
+            "",
+            disk_pressure_snapshot(self.disk_preflight_snapshot),
+            self.disk_min_free_bytes,
+            self.disk_dev_shm_min_free_bytes,
+        )
+        disk_low = disk_preflight["classification"] != "healthy"
+        return {
+            "schema_version": FALLBACK_RANKING_SCHEMA_VERSION,
+            "source": "fixture",
+            "rank_policy": "input-order-when-healthy; disk-safe-neutral-cargo-heavy-when-low",
+            "disk_pressure_preflight": disk_preflight,
+            "warning_wording": FALLBACK_CARGO_HEAVY_WARNING,
+            "summary": {
+                "input_bead_count": len(beads),
+                "disk_pressure_active": disk_low,
+                "cargo_heavy_warning_count": sum(
+                    1 for row in rank_fallback_beads_for_disk(beads, disk_preflight)
+                    if row["disk_pressure_warning"]
+                ),
+            },
+            "ranked_fallback_beads": rank_fallback_beads_for_disk(beads, disk_preflight),
+        }
+
     def suggest_lanes_for_changes(self, touched_files: List[str]) -> List[str]:
         """Suggest appropriate proof lanes based on touched files."""
         suggestions = []
@@ -2386,6 +2515,16 @@ def main():
         "--suggest-lanes",
         action="store_true",
         help="Suggest lanes for the touched files"
+    )
+    parser.add_argument(
+        "--rank-fallback-beads",
+        action="store_true",
+        help="Rank fallback bead candidates using disk pressure"
+    )
+    parser.add_argument(
+        "--fallback-bead-snapshot",
+        default="",
+        help="JSON fixture containing fallback bead candidates"
     )
     parser.add_argument(
         "--execute",
@@ -2538,6 +2677,18 @@ def main():
                 print("Available proof lanes:")
                 for lane in lanes:
                     print(f"  {lane}")
+            return 0
+
+        if args.rank_fallback_beads:
+            if not args.fallback_bead_snapshot:
+                parser.error("--fallback-bead-snapshot is required with --rank-fallback-beads")
+            result = runner.rank_fallback_beads(args.fallback_bead_snapshot)
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                for row in result["ranked_fallback_beads"]:
+                    warning = " warning={}".format(row["disk_pressure_warning"]) if row["disk_pressure_warning"] else ""
+                    print("{} {}{}".format(row["id"], row["disk_safety"], warning))
             return 0
 
         if args.suggest_lanes:

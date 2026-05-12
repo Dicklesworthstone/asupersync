@@ -989,6 +989,104 @@ fn proof_runner_disk_preflight_classifies_low_dev_shm_space() {
 }
 
 #[test]
+fn proof_runner_rank_fallback_beads_prefers_disk_safe_under_pressure() {
+    let fallback = write_json_fixture(&json!({"beads": [
+        {"id": "cargo-heavy", "title": "run clippy frontier", "priority": 1,
+         "validation_command": "rch exec -- cargo clippy -p asupersync --all-targets -- -D warnings"},
+        {"id": "docs-safe", "title": "docs-only policy note", "priority": 2,
+         "disk_safe": true, "validation_command": "python3 scripts/proof_runner.py --suggest-lanes --touched-files docs/proof_runner_usage.md --output json"},
+        {"id": "receipt-safe", "title": "artifact-free receipt fixture", "priority": 1,
+         "disk_safety": "disk-safe", "validation_command": "python3 scripts/rch_retrieval_receipt.py --artifact-free-proof-receipt --rch-log fixture.log --output json"}
+    ]}));
+    let healthy = write_json_fixture(&json!({
+        "root": {"path": "/", "available": true, "free_bytes": 2_097_152_u64, "total_bytes": 4_194_304_u64},
+        "dev_shm": {"path": "/dev/shm", "available": true, "free_bytes": 2_097_152_u64, "total_bytes": 4_194_304_u64}
+    }));
+    let low_root = write_json_fixture(&json!({
+        "root": {"path": "/", "available": true, "free_bytes": 1_u64, "total_bytes": 4_194_304_u64},
+        "dev_shm": {"path": "/dev/shm", "available": true, "free_bytes": 2_097_152_u64, "total_bytes": 4_194_304_u64}
+    }));
+    let low_shm = write_json_fixture(&json!({
+        "root": {"path": "/", "available": true, "free_bytes": 2_097_152_u64, "total_bytes": 4_194_304_u64},
+        "dev_shm": {"path": "/dev/shm", "available": true, "free_bytes": 1_u64, "total_bytes": 4_194_304_u64}
+    }));
+    let fallback_path = fallback.path().to_str().expect("fallback path utf8");
+    let run = |disk_path: &str| {
+        proof_runner_json(&[
+            "--rank-fallback-beads",
+            "--fallback-bead-snapshot",
+            fallback_path,
+            "--disk-preflight-snapshot",
+            disk_path,
+            "--disk-min-free-bytes",
+            "1048576",
+            "--disk-dev-shm-min-free-bytes",
+            "1048576",
+            "--output",
+            "json",
+        ])
+    };
+
+    let healthy_result = run(healthy.path().to_str().expect("healthy path utf8"));
+    let healthy_ids: Vec<&str> = healthy_result["ranked_fallback_beads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(healthy_ids, ["cargo-heavy", "docs-safe", "receipt-safe"]);
+    assert_eq!(
+        healthy_result["summary"]["disk_pressure_active"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        healthy_result["summary"]["cargo_heavy_warning_count"].as_i64(),
+        Some(0)
+    );
+
+    let low_root_result = run(low_root.path().to_str().expect("low root path utf8"));
+    let low_ids: Vec<&str> = low_root_result["ranked_fallback_beads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(low_ids, ["docs-safe", "receipt-safe", "cargo-heavy"]);
+    assert_eq!(
+        low_root_result["disk_pressure_preflight"]["classification"].as_str(),
+        Some("low-root-space")
+    );
+    assert_eq!(
+        low_root_result["summary"]["cargo_heavy_warning_count"].as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        low_root_result["ranked_fallback_beads"][2]["disk_pressure_warning"].as_str(),
+        Some(
+            "local disk pressure detected; prefer disk-safe fallback work or an artifact-free proof receipt before Cargo-heavy validation"
+        )
+    );
+    assert_eq!(
+        low_root_result["ranked_fallback_beads"][2]["eligible"].as_bool(),
+        Some(true)
+    );
+
+    let low_shm_result = run(low_shm.path().to_str().expect("low shm path utf8"));
+    assert_eq!(
+        low_shm_result["disk_pressure_preflight"]["classification"].as_str(),
+        Some("low-dev-shm-space")
+    );
+    assert_eq!(
+        low_shm_result["ranked_fallback_beads"][0]["disk_safety"].as_str(),
+        Some("disk-safe")
+    );
+    assert_eq!(
+        low_shm_result["ranked_fallback_beads"][2]["disk_safety"].as_str(),
+        Some("cargo-heavy")
+    );
+}
+
+#[test]
 fn proof_runner_preserves_git_status_columns_for_unstaged_dirty_paths() {
     let snippet = r#"
 import importlib.util
