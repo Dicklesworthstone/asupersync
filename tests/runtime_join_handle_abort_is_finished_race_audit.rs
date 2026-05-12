@@ -50,24 +50,24 @@
 //!      observes the cancel via checkpoint.
 //!
 //!   2. **`is_finished()` returns based on result-channel
-//:      state** (runtime/task_handle.rs:108-110):
+//!      state** (runtime/task_handle.rs:108-110):
 //!      ```ignore
 //!      pub fn is_finished(&self) -> bool {
 //!          self.terminal_consumed
-//:              || self.receiver.is_ready()
+//!              || self.receiver.is_ready()
 //!              || self.receiver.is_closed()
 //!      }
 //!      ```
 //!      Three conditions, ANY of which signals
-//:      task-finished:
-//!        a. `terminal_consumed` — the handle already took
-//!           the result via join().await.
-//!        b. `receiver.is_ready()` — the wrapping future
-//!           sent the outcome through the channel; the
-//!           result is sitting there waiting.
-//!        c. `receiver.is_closed()` — the sender has been
-//!           dropped (the task's wrapping future completed
-//:           and the result_tx went out of scope).
+//!      task-finished:
+//!      a. `terminal_consumed` — the handle already took
+//!      the result via join().await.
+//!      b. `receiver.is_ready()` — the wrapping future
+//!      sent the outcome through the channel; the result is
+//!      sitting there waiting.
+//!      c. `receiver.is_closed()` — the sender has been
+//!      dropped (the task's wrapping future completed and
+//!      the result_tx went out of scope).
 //!
 //!   3. **Right after abort()**: terminal_consumed = false
 //!      (nothing has consumed yet), receiver.is_ready() =
@@ -84,12 +84,12 @@
 //!      checkpoint frequency.
 //!
 //!   5. **For PARKED tasks** (sleeping on Sleep / channel
-//:      / etc.), the cancel-waker wake propagates the
+//!      / etc.), the cancel-waker wake propagates the
 //!      cancel via CancelLaneWaker (per
 //!      tests/scheduler_cross_thread_cancel_propagation_audit.rs).
 //!      The task wakes, polls, observes cancel via
 //!      checkpoint, and eventually sends through result_tx.
-//:      is_finished() flips after one waker-dispatch cycle.
+//!      is_finished() flips after one waker-dispatch cycle.
 //!
 //! Verdict: **SOUND**. is_finished() returns false right
 //! after abort() — the task hasn't yet observed the cancel.
@@ -99,14 +99,14 @@
 //!
 //! No bead filed. The async semantics is documented and
 //! the structural mechanism (cancel publish vs result-
-//: channel state) is two-stage by design.
+//! channel state) is two-stage by design.
 //!
 //! Note on alternative semantics: a "synchronous abort"
-//: that flipped is_finished() immediately would require
+//! that flipped is_finished() immediately would require
 //! either (a) blocking abort() until the task quiesces
 //! (would block the calling thread arbitrarily — bad), or
-//: (b) lying — claim is_finished even though the task is
-//: still running (would let users access state thats not
+//! (b) lying — claim is_finished even though the task is
+//! still running (would let users access state thats not
 //! actually settled). asupersync chooses the honest
 //! "cancel-request semantics".
 //!
@@ -119,15 +119,15 @@
 //!     (would lie to users — they'd try to take a result
 //!     thats not yet sent),
 //!   - removed the receiver.is_ready() check from
-//:     is_finished (would never see the result-arrived
+//!     is_finished (would never see the result-arrived
 //!     state — perpetual false),
 //!   - removed the receiver.is_closed() check (would miss
 //!     the sender-dropped case — perpetual false even after
 //!     task completion),
 //!   - changed abort() to NOT wake the cancel_waker (parked
 //!     tasks never observe cancel — is_finished stuck
-//:     false forever),
-//! would all be caught by the structural pins below.
+//!     false forever),
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
