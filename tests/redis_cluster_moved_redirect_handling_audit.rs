@@ -84,7 +84,7 @@
 //!   - reused the pooled connection for the redirect target
 //!     (mismatched handshake state — the target may not be
 //!     authenticated against the same DB),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
