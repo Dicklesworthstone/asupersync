@@ -127,6 +127,11 @@ fn clean_closeout_passes_all_required_rows() {
 }
 
 #[test]
+fn clean_closeout_matches_full_output_golden() {
+    assert_output_matches_full_golden("clean_closeout.json", "clean_closeout_expected.json");
+}
+
+#[test]
 fn active_reservation_blocks_closeout() {
     let report = report("missing_reservation_release.json");
     let reservations = row(&report, "reservations_released");
