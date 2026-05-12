@@ -207,6 +207,32 @@ fn missing_contract_and_fixture_are_actionable() {
 }
 
 #[test]
+fn missing_fixture_root_is_actionable_when_contract_exists() {
+    let receipt = receipt_json("missing_fixture_root.json");
+    let row = helper(&receipt, "operator-queue-receipt");
+
+    assert_eq!(row["classification"].as_str(), Some("missing-fixture-root"));
+    assert_eq!(
+        receipt["classification_counts"]["missing-fixture-root"].as_u64(),
+        Some(1)
+    );
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    assert!(cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("missing-fixture-root")
+            && cue["helper_id"].as_str() == Some("operator-queue-receipt")
+    }));
+}
+
+#[test]
+fn missing_fixture_root_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "missing_fixture_root.json",
+        "missing_fixture_root_expected.json",
+        "proof receipt inventory missing-fixture-root golden changed; update only after reviewing fixture-root actionability semantics",
+    );
+}
+
+#[test]
 fn redaction_and_missing_contract_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "redaction_and_missing_contract.json",

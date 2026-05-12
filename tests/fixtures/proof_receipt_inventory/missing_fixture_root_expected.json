@@ -1,0 +1,81 @@
+{
+  "agent": "CoralGorge",
+  "capabilities": [
+    {
+      "active_helper_count": 1,
+      "canonical_helper": "operator-queue-receipt",
+      "capability_id": "operator-queue",
+      "draft_helper_count": 0,
+      "duplicate_active_count": 0,
+      "helper_count": 1,
+      "needs_review": true,
+      "superseded_helper_count": 0
+    }
+  ],
+  "classification_counts": {
+    "missing-fixture-root": 1
+  },
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:45:00Z",
+  "helpers": [
+    {
+      "bead_id": "",
+      "capability_id": "operator-queue",
+      "classification": "missing-fixture-root",
+      "commit": "",
+      "fixture_root": "",
+      "helper_id": "operator-queue-receipt",
+      "owner": "",
+      "script_path": "scripts/operator_queue_receipt.py",
+      "status": "current",
+      "summary": "Operator queue receipt has a contract test but still needs reviewed fixture artifacts.",
+      "superseded_by": "",
+      "test_path": "tests/operator_queue_receipt_contract.rs",
+      "validation": [
+        "python3 -m py_compile scripts/operator_queue_receipt.py",
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_operator_queue cargo test -p asupersync --test operator_queue_receipt_contract"
+      ]
+    }
+  ],
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "repo_path": "/repo",
+  "review_cues": [
+    {
+      "capability_id": "operator-queue",
+      "helper_id": "operator-queue-receipt",
+      "kind": "missing-fixture-root",
+      "recommendation": "add fixture-backed contract coverage before citing this helper",
+      "severity": "medium"
+    }
+  ],
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "live_probe_performed": false,
+    "non_mutating": true,
+    "reads_fixture_only": true
+  },
+  "safety_notes": [
+    "fixture mode reads only the supplied inventory JSON",
+    "receipt does not inspect live Agent Mail, Beads, git, rch, or cargo state",
+    "review cues are advisory and require human or agent coordination before action"
+  ],
+  "schema_version": "proof-receipt-inventory-v1",
+  "source_counts": {
+    "capabilities": 1,
+    "duplicate_capabilities": 0,
+    "helpers": 1,
+    "review_cues": 1,
+    "superseded_helpers": 0
+  }
+}

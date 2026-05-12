@@ -1,0 +1,17 @@
+{
+  "helpers": [
+    {
+      "capability_id": "operator-queue",
+      "fixture_root": "",
+      "helper_id": "operator-queue-receipt",
+      "script_path": "scripts/operator_queue_receipt.py",
+      "status": "current",
+      "summary": "Operator queue receipt has a contract test but still needs reviewed fixture artifacts.",
+      "test_path": "tests/operator_queue_receipt_contract.rs",
+      "validation": [
+        "python3 -m py_compile scripts/operator_queue_receipt.py",
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_operator_queue cargo test -p asupersync --test operator_queue_receipt_contract"
+      ]
+    }
+  ]
+}
