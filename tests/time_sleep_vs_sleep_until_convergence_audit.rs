@@ -92,7 +92,7 @@
 //!     `Sleep::new` (introducing distinct state),
 //!   - changed `Sleep::poll` to register different timer
 //!     handles based on construction path,
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
