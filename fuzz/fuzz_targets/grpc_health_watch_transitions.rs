@@ -12,14 +12,13 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
-use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use asupersync::grpc::health::{HealthError, HealthService, MAX_SERVICE_NAME_LEN, ServingStatus};
-use asupersync::grpc::status::Status;
-use asupersync::grpc::streaming::{Metadata, MetadataValue, Request, Response, Streaming};
+use asupersync::grpc::health::{
+    HealthCheckRequest, HealthCheckResponse, HealthService, MAX_SERVICE_NAME_LEN, ServingStatus,
+};
+use asupersync::grpc::streaming::{Metadata, Request, Streaming};
 
 /// Maximum services and transitions for fuzzer performance
 const MAX_SERVICES: usize = 20;
@@ -45,7 +44,27 @@ struct ServiceSetup {
     /// Service name (may be invalid for edge case testing)
     name: ServiceName,
     /// Initial status
-    status: ServingStatus,
+    status: FuzzServingStatus,
+}
+
+/// Fuzz-local mirror for the external serving status enum.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum FuzzServingStatus {
+    Unknown,
+    Serving,
+    NotServing,
+    ServiceUnknown,
+}
+
+impl From<FuzzServingStatus> for ServingStatus {
+    fn from(status: FuzzServingStatus) -> Self {
+        match status {
+            FuzzServingStatus::Unknown => Self::Unknown,
+            FuzzServingStatus::Serving => Self::Serving,
+            FuzzServingStatus::NotServing => Self::NotServing,
+            FuzzServingStatus::ServiceUnknown => Self::ServiceUnknown,
+        }
+    }
 }
 
 /// Service name patterns for testing various edge cases
@@ -143,10 +162,10 @@ enum StateTransition {
     /// Set a single service status
     SetSingleStatus {
         service: ServiceName,
-        status: ServingStatus,
+        status: FuzzServingStatus,
     },
     /// Set server-wide status
-    SetServerStatus { status: ServingStatus },
+    SetServerStatus { status: FuzzServingStatus },
     /// Clear all statuses
     ClearAll,
     /// Batch status updates
@@ -154,8 +173,8 @@ enum StateTransition {
     /// Transient status (set then immediately change)
     Transient {
         service: ServiceName,
-        intermediate_status: ServingStatus,
-        final_status: ServingStatus,
+        intermediate_status: FuzzServingStatus,
+        final_status: FuzzServingStatus,
     },
 }
 
@@ -163,7 +182,7 @@ enum StateTransition {
 #[derive(Arbitrary, Debug, Clone)]
 struct BatchStatusUpdate {
     service: ServiceName,
-    status: ServingStatus,
+    status: FuzzServingStatus,
 }
 
 /// Watcher configuration for testing streaming behavior
@@ -198,14 +217,10 @@ enum ValidAuthToken {
 }
 
 impl ValidAuthToken {
-    fn as_metadata_value(&self) -> MetadataValue {
+    fn as_metadata_value(&self) -> String {
         match self {
-            ValidAuthToken::Bearer(n) => {
-                MetadataValue::Ascii(format!("Bearer token{}", n).try_into().unwrap())
-            }
-            ValidAuthToken::ApiKey(n) => {
-                MetadataValue::Ascii(format!("ApiKey key{}", n).try_into().unwrap())
-            }
+            ValidAuthToken::Bearer(n) => format!("Bearer token{}", n),
+            ValidAuthToken::ApiKey(n) => format!("ApiKey key{}", n),
         }
     }
 }
@@ -222,19 +237,17 @@ enum InvalidAuthToken {
 }
 
 impl InvalidAuthToken {
-    fn as_metadata_value(&self) -> MetadataValue {
+    fn as_metadata_value(&self) -> String {
         match self {
-            InvalidAuthToken::Empty => MetadataValue::Ascii("".try_into().unwrap()),
-            InvalidAuthToken::WrongFormat => {
-                MetadataValue::Ascii("InvalidFormat".try_into().unwrap())
-            }
-            InvalidAuthToken::Binary => MetadataValue::Binary(vec![0x00, 0x01, 0x02]),
+            InvalidAuthToken::Empty => String::new(),
+            InvalidAuthToken::WrongFormat => "InvalidFormat".to_string(),
+            InvalidAuthToken::Binary => "\0\u{1}\u{2}".to_string(),
         }
     }
 }
 
 /// Polling behavior patterns for testing async stream behavior
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum PollingBehavior {
     /// Poll immediately and continuously
     Immediate,
@@ -247,7 +260,7 @@ enum PollingBehavior {
 }
 
 /// Delay patterns for testing timing sensitivity
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum DelayPattern {
     /// Fixed delay between polls
     Fixed,
@@ -263,7 +276,7 @@ enum ConcurrentOperation {
     /// Concurrent status updates
     ConcurrentUpdates {
         service: ServiceName,
-        updates: Vec<ServingStatus>,
+        updates: Vec<FuzzServingStatus>,
     },
     /// Multiple watchers on same service
     MultipleWatchers {
@@ -282,34 +295,12 @@ enum ConcurrentOperation {
     },
 }
 
-/// Mock health check request
-#[derive(Debug)]
-struct MockHealthCheckRequest {
-    service: String,
-}
-
-/// Mock health check response
-#[derive(Debug, Clone)]
-struct MockHealthCheckResponse {
-    status: ServingStatus,
-}
-
-impl MockHealthCheckResponse {
-    fn new(status: ServingStatus) -> Self {
-        Self { status }
-    }
-}
-
 /// Test waker for controlling async execution
-struct TestWaker {
-    woken: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
+struct TestWaker;
 
 impl TestWaker {
     fn new() -> Self {
-        Self {
-            woken: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+        Self
     }
 
     fn waker(&self) -> Waker {
@@ -335,9 +326,39 @@ impl TestWaker {
 
         unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
     }
+}
 
-    fn was_woken(&self) -> bool {
-        self.woken.load(std::sync::atomic::Ordering::Acquire)
+fn observe_watch_poll<S>(
+    stream: &mut S,
+    cx: &mut Context<'_>,
+    expected_status: Option<ServingStatus>,
+    context: &str,
+) where
+    S: Streaming<Message = HealthCheckResponse> + Unpin,
+{
+    match Pin::new(stream).poll_next(cx) {
+        Poll::Ready(Some(Ok(response))) => {
+            let Some(expected) = expected_status else {
+                panic!(
+                    "{context}: health watch emitted {:?} without an observed transition",
+                    response.status
+                );
+            };
+            assert_eq!(
+                response.status, expected,
+                "{context}: health watch emitted an unexpected status"
+            );
+        }
+        Poll::Ready(Some(Err(status))) => {
+            panic!("{context}: health watch emitted an unexpected stream error: {status:?}");
+        }
+        Poll::Ready(None) => panic!("{context}: health watch stream terminated unexpectedly"),
+        Poll::Pending => {
+            assert!(
+                expected_status.is_none(),
+                "{context}: health watch stayed pending instead of emitting {expected_status:?}"
+            );
+        }
     }
 }
 
@@ -369,7 +390,7 @@ fn test_watch_transitions(scenario: &HealthWatchScenario) {
     // Set up initial services
     for setup in &scenario.initial_services {
         let name = setup.name.as_string();
-        let _ = service.try_set_status(&name, setup.status);
+        let _ = service.try_set_status(&name, setup.status.into());
     }
 
     // Apply state transitions
@@ -395,22 +416,22 @@ fn apply_state_transition(service: &HealthService, transition: &StateTransition)
             status,
         } => {
             let name = svc_name.as_string();
-            let _ = service.try_set_status(&name, *status);
+            let _ = service.try_set_status(&name, (*status).into());
         }
 
         StateTransition::SetServerStatus { status } => {
-            service.set_server_status(*status);
+            service.set_server_status((*status).into());
         }
 
         StateTransition::ClearAll => {
-            service.clear_all();
+            service.clear();
         }
 
         StateTransition::BatchUpdate { updates } => {
             // Apply batch updates in sequence
             let names_and_statuses: Vec<_> = updates
                 .iter()
-                .map(|u| (u.service.as_string(), u.status))
+                .map(|u| (u.service.as_string(), ServingStatus::from(u.status)))
                 .collect();
 
             for (name, status) in names_and_statuses {
@@ -425,8 +446,8 @@ fn apply_state_transition(service: &HealthService, transition: &StateTransition)
         } => {
             let name = svc_name.as_string();
             // Set intermediate status then immediately change to final
-            let _ = service.try_set_status(&name, *intermediate_status);
-            let _ = service.try_set_status(&name, *final_status);
+            let _ = service.try_set_status(&name, (*intermediate_status).into());
+            let _ = service.try_set_status(&name, (*final_status).into());
         }
     }
 }
@@ -444,10 +465,10 @@ fn test_single_watcher(service: &HealthService, setup: &WatcherSetup) {
 
     // Test async watch stream
     let metadata = build_metadata(&setup.auth);
-    let request = create_mock_request(service_name.clone(), metadata);
+    let request = create_health_request(service_name.clone(), metadata);
 
     // Test watch_async
-    let result = futures_lite::future::block_on(service.watch_async(&request));
+    let result = futures::executor::block_on(service.watch_async(&request));
 
     match result {
         Ok(response) => {
@@ -457,41 +478,42 @@ fn test_single_watcher(service: &HealthService, setup: &WatcherSetup) {
             let waker = test_waker.waker();
             let mut cx = Context::from_waker(&waker);
 
-            // Poll for initial status
-            match Pin::new(&mut stream).poll_next(&mut cx) {
-                Poll::Ready(Some(Ok(_response))) => {
-                    // Initial status emitted correctly
-                }
-                Poll::Ready(Some(Err(_))) => {
-                    // Stream error
-                }
-                Poll::Ready(None) => {
-                    // Stream ended unexpectedly
-                }
-                Poll::Pending => {
-                    // Stream pending (shouldn't happen for initial status)
-                }
-            }
+            observe_watch_poll(&mut stream, &mut cx, Some(initial_status), "initial_poll");
 
             // Test subsequent polling based on behavior
             match setup.polling {
                 PollingBehavior::Immediate => {
                     // Poll again immediately
-                    let _ = Pin::new(&mut stream).poll_next(&mut cx);
+                    observe_watch_poll(&mut stream, &mut cx, None, "immediate_poll");
                 }
                 PollingBehavior::OnChange => {
                     // Only poll after making a change
-                    let _ = service.try_set_status(&service_name, ServingStatus::NotServing);
-                    let _ = Pin::new(&mut stream).poll_next(&mut cx);
+                    let changed_to_not_serving = service
+                        .try_set_status(&service_name, ServingStatus::NotServing)
+                        .is_ok()
+                        && initial_status != ServingStatus::NotServing;
+                    observe_watch_poll(
+                        &mut stream,
+                        &mut cx,
+                        changed_to_not_serving.then_some(ServingStatus::NotServing),
+                        "on_change_poll",
+                    );
                 }
-                PollingBehavior::Delayed(_) => {
-                    // Simulate delayed polling
-                    let _ = Pin::new(&mut stream).poll_next(&mut cx);
+                PollingBehavior::Delayed(pattern) => {
+                    // Simulate delayed polling with deterministic extra poll counts.
+                    let poll_count = match pattern {
+                        DelayPattern::Fixed => 1,
+                        DelayPattern::Increasing => 2,
+                        DelayPattern::Decreasing => 3,
+                    };
+                    for _ in 0..poll_count {
+                        observe_watch_poll(&mut stream, &mut cx, None, "delayed_poll");
+                    }
                 }
                 PollingBehavior::Random(count) => {
                     // Random number of polls
                     for _ in 0..(count % 5) {
-                        let _ = Pin::new(&mut stream).poll_next(&mut cx);
+                        observe_watch_poll(&mut stream, &mut cx, None, "random_poll");
                     }
                 }
             }
@@ -509,7 +531,7 @@ fn test_concurrent_streams(scenario: &HealthWatchScenario) {
     // Set up initial services
     for setup in &scenario.initial_services {
         let name = setup.name.as_string();
-        let _ = service.try_set_status(&name, setup.status);
+        let _ = service.try_set_status(&name, setup.status.into());
     }
 
     // Create multiple concurrent watchers
@@ -542,12 +564,12 @@ fn test_auth_enforcement(scenario: &HealthWatchScenario) {
         let metadata = build_metadata(&watcher_setup.auth);
 
         // Test Check method with same metadata
-        let check_request = create_mock_request(service_name.clone(), metadata.clone());
-        let check_result = futures_lite::future::block_on(service.check_async(&check_request));
+        let check_request = create_health_request(service_name.clone(), metadata.clone());
+        let check_result = futures::executor::block_on(service.check_async(&check_request));
 
         // Test Watch method with same metadata
-        let watch_request = create_mock_request(service_name, metadata);
-        let watch_result = futures_lite::future::block_on(service.watch_async(&watch_request));
+        let watch_request = create_health_request(service_name, metadata);
+        let watch_result = futures::executor::block_on(service.watch_async(&watch_request));
 
         // Auth decisions should be consistent
         match (&check_result, &watch_result) {
@@ -577,7 +599,7 @@ fn apply_concurrent_operation(service: &HealthService, op: &ConcurrentOperation)
         } => {
             let name = svc_name.as_string();
             for &status in updates {
-                let _ = service.try_set_status(&name, status);
+                let _ = service.try_set_status(&name, status.into());
             }
         }
 
@@ -644,29 +666,16 @@ fn build_metadata(auth: &AuthSetup) -> Metadata {
             // No auth metadata
         }
         AuthSetup::Valid(valid_token) => {
-            metadata.insert("authorization", valid_token.as_metadata_value());
+            let _ = metadata.insert("authorization", valid_token.as_metadata_value());
         }
         AuthSetup::Invalid(invalid_token) => {
-            metadata.insert("authorization", invalid_token.as_metadata_value());
+            let _ = metadata.insert("authorization", invalid_token.as_metadata_value());
         }
     }
 
     metadata
 }
 
-fn create_mock_request(service: String, metadata: Metadata) -> Request<MockHealthCheckRequest> {
-    let inner = MockHealthCheckRequest { service };
-    Request::from_parts(inner, metadata)
-}
-
-// Mock implementations needed for compilation
-impl HealthService {
-    // These would need to be actual methods in the real implementation
-    async fn check_async(
-        &self,
-        _request: &Request<MockHealthCheckRequest>,
-    ) -> Result<MockHealthCheckResponse, Status> {
-        // Mock implementation
-        Ok(MockHealthCheckResponse::new(ServingStatus::Serving))
-    }
+fn create_health_request(service: String, metadata: Metadata) -> Request<HealthCheckRequest> {
+    Request::with_metadata(HealthCheckRequest::new(service), metadata)
 }
