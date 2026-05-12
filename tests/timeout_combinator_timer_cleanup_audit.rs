@@ -86,7 +86,7 @@
 //!   - added a reference cycle between Sleep and the timer
 //!     driver (would prevent Drop from firing — silent
 //!     leak),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -165,8 +165,7 @@ fn sleep_poll_ready_branch_cancels_timer_immediately() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -394,9 +393,6 @@ impl MockTimer {
     }
     fn cancel(&self, _handle: u64) {
         self.cancel_count.fetch_add(1, Ordering::Relaxed);
-    }
-    fn fire(&self) {
-        self.fired_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
