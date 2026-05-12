@@ -120,23 +120,22 @@
 //!   - changed poll_a_first to a random initial value (would
 //!     break determinism — replay testing breaks),
 //!   - added a thread_local RNG for tiebreaking (would
-//:     introduce non-determinism — would not be replayable),
+//!     introduce non-determinism — would not be replayable),
 //!   - changed the flip to happen on Ready instead of Pending
 //!     (would change the semantics in subtle ways — same-arm
-//:     wins back-to-back are now expected to alternate even
+//!     wins back-to-back are now expected to alternate even
 //!     after a winner is found),
 //!   - introduced an atomic counter for global round-robin
 //!     across instances (would add cross-instance state
 //!     coupling — Select::new behavior depends on prior
-//:     unrelated Selects),
+//!     unrelated Selects),
 //!   - added rand/Random/Time-based tiebreaking (would
 //!     defeat the determinism contract — option c is the
-//:     INCORRECT answer per the operator's framing),
-//! would all be caught by the structural pins below.
+//!     INCORRECT answer per the operator's framing),
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -428,13 +427,7 @@ fn loser_drain_warning_documented_on_select_struct() {
 //     both start left-biased (deterministic per-instance).
 
 fn dummy_waker() -> Waker {
-    struct NoOpWake;
-
-    impl Wake for NoOpWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    Waker::from(Arc::new(NoOpWake))
+    Waker::noop().clone()
 }
 
 /// Tiny mock of the Select pattern with the same alternation
