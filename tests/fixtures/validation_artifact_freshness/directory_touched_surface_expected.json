@@ -1,0 +1,44 @@
+{
+  "artifact": {
+    "decision": "passed",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "touched_files": [
+      "tests/proof_status"
+    ]
+  },
+  "artifact_path": "tests/fixtures/validation_artifact_freshness/directory_touched_surface_artifact.json",
+  "classification": "stale-dirty-overlap",
+  "current": {
+    "dirty_paths": [
+      "tests/proof_status/snapshot.json"
+    ],
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:30:00Z",
+  "markers": {
+    "dirty_external_paths": [],
+    "dirty_touched_overlap": [
+      "tests/proof_status/snapshot.json"
+    ],
+    "has_artifact_head": true,
+    "head_matches": true
+  },
+  "non_mutating": true,
+  "remediation": {
+    "next_steps": [
+      "finish or coordinate the overlapping dirty paths",
+      "rerun the focused proof lane after the overlap is clean"
+    ],
+    "operator_note": "Treat the artifact as stale until the overlapping files are committed or revalidated.",
+    "summary": "dirty files overlap the artifact's touched surface"
+  },
+  "schema_version": "validation-artifact-freshness-v1",
+  "verdict": "stale"
+}

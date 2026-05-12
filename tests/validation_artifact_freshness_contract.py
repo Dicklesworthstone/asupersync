@@ -14,6 +14,7 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures" / "validation_artifact_freshness"
 FIXTURES_REL = "tests/fixtures/validation_artifact_freshness"
 GENERATED_AT = "2026-05-08T05:30:00Z"
 CURRENT_HEAD = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+HELPER_TIMEOUT_SECONDS = 5.0
 
 
 def run_receipt_output(
@@ -39,6 +40,7 @@ def run_receipt_output(
         check=True,
         capture_output=True,
         text=True,
+        timeout=HELPER_TIMEOUT_SECONDS,
     )
 
 
@@ -111,6 +113,27 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
     def test_dirty_overlap_output_matches_full_reviewed_golden(self) -> None:
         output = run_receipt_output("current_artifact.json", "dirty_touched_overlap.json")
         self.assert_output_matches_golden(output, "dirty_touched_overlap_expected.json")
+
+    def test_directory_touched_surface_marks_dirty_child_stale(self) -> None:
+        receipt = run_receipt(
+            "directory_touched_surface_artifact.json",
+            "dirty_directory_child.json",
+        )
+
+        self.assertEqual(receipt["classification"], "stale-dirty-overlap")
+        self.assertEqual(receipt["verdict"], "stale")
+        self.assertEqual(
+            receipt["markers"]["dirty_touched_overlap"],
+            ["tests/proof_status/snapshot.json"],
+        )
+        self.assertEqual(receipt["markers"]["dirty_external_paths"], [])
+
+    def test_directory_touched_surface_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output(
+            "directory_touched_surface_artifact.json",
+            "dirty_directory_child.json",
+        )
+        self.assert_output_matches_golden(output, "directory_touched_surface_expected.json")
 
     def test_peer_dirty_paths_are_external_blockers_not_artifact_staleness(self) -> None:
         receipt = run_receipt("current_artifact.json", "dirty_external_paths.json")

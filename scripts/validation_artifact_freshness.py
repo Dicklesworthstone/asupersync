@@ -16,6 +16,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "validation-artifact-freshness-v1"
+GIT_COMMAND_TIMEOUT_SECONDS = 5.0
 
 
 def utc_now() -> str:
@@ -46,6 +47,7 @@ def repo_head(repo_root: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=GIT_COMMAND_TIMEOUT_SECONDS,
     )
     return result.stdout.strip()
 
@@ -57,6 +59,7 @@ def git_dirty_paths(repo_root: Path) -> list[str]:
         check=True,
         capture_output=True,
         text=True,
+        timeout=GIT_COMMAND_TIMEOUT_SECONDS,
     )
     return parse_status_lines(result.stdout.splitlines())
 
@@ -130,8 +133,23 @@ def artifact_decision(artifact: dict[str, Any]) -> str:
     return ""
 
 
-def normalize_paths(paths: list[str]) -> set[str]:
-    return {path.strip().lstrip("./") for path in paths if path.strip()}
+def normalize_path(path: str) -> str:
+    return path.strip().replace("\\", "/").lstrip("./").rstrip("/")
+
+
+def normalize_paths(paths: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for path in paths:
+        clean = normalize_path(path)
+        if clean:
+            normalized.append(clean)
+    return normalized
+
+
+def paths_overlap(touched_path: str, dirty_path: str) -> bool:
+    if touched_path == dirty_path:
+        return True
+    return dirty_path.startswith(f"{touched_path}/") or touched_path.startswith(f"{dirty_path}/")
 
 
 def classify(
@@ -143,8 +161,10 @@ def classify(
     touched_files = artifact_touched_files(artifact)
     touched = normalize_paths(touched_files)
     dirty = normalize_paths(dirty_paths)
-    dirty_overlap = sorted(touched.intersection(dirty))
-    dirty_external = sorted(dirty.difference(touched))
+    dirty_overlap = sorted(
+        path for path in dirty if any(paths_overlap(surface, path) for surface in touched)
+    )
+    dirty_external = sorted(path for path in dirty if path not in dirty_overlap)
     decision = artifact_decision(artifact)
 
     if not proof_head:
