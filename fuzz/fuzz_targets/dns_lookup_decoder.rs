@@ -10,11 +10,14 @@ use arbitrary::{Arbitrary, Unstructured};
 use asupersync::net::dns::{Resolver, ResolverConfig};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
+use std::io::{ErrorKind, Result as IoResult};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::thread;
 use std::time::Duration;
 
 const MAX_OPT_RDATA_BYTES: usize = 64;
+const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_millis(1_000);
+const DNS_SERVER_MAX_REQUESTS: usize = 2;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzInput {
@@ -52,6 +55,12 @@ enum LookupResult {
     Txt(Vec<String>),
 }
 
+#[derive(Debug)]
+struct DnsServerExchange {
+    sent: usize,
+    expected_len: usize,
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() > 16 * 1024 {
         return;
@@ -70,16 +79,10 @@ fn run_case(input: FuzzInput) {
         Ok(socket) => socket,
         Err(_) => return,
     };
-    if socket
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .is_err()
-    {
+    if socket.set_read_timeout(Some(DNS_LOOKUP_TIMEOUT)).is_err() {
         return;
     }
-    if socket
-        .set_write_timeout(Some(Duration::from_millis(100)))
-        .is_err()
-    {
+    if socket.set_write_timeout(Some(DNS_LOOKUP_TIMEOUT)).is_err() {
         return;
     }
 
@@ -89,18 +92,12 @@ fn run_case(input: FuzzInput) {
     };
 
     let server_input = input.clone();
-    let handle = thread::spawn(move || {
-        let mut buf = [0u8; 512];
-        if let Ok((n, peer)) = socket.recv_from(&mut buf) {
-            let response = build_response(&buf[..n], &server_input);
-            let _ = socket.send_to(&response, peer);
-        }
-    });
+    let handle = thread::spawn(move || serve_dns_requests(socket, &server_input));
 
     let resolver = Resolver::with_config(ResolverConfig {
         nameservers: vec![server_addr],
         cache_enabled: false,
-        timeout: Duration::from_millis(150),
+        timeout: DNS_LOOKUP_TIMEOUT,
         retries: 0,
         ..ResolverConfig::default()
     });
@@ -147,7 +144,11 @@ fn run_case(input: FuzzInput) {
         }
     };
 
-    let _ = handle.join();
+    let exchange_count = observe_server_thread(handle.join());
+    assert!(
+        exchange_count > 0,
+        "fake DNS server should observe at least one resolver query"
+    );
 
     match input.scenario {
         Scenario::ValidAWithOpt => {
@@ -198,6 +199,39 @@ fn run_case(input: FuzzInput) {
             assert!(result.is_err(), "malformed DNS packet should not resolve");
         }
     }
+}
+
+fn serve_dns_requests(socket: UdpSocket, input: &FuzzInput) -> IoResult<Vec<DnsServerExchange>> {
+    let mut exchanges = Vec::with_capacity(DNS_SERVER_MAX_REQUESTS);
+    let mut buf = [0u8; 512];
+
+    for _ in 0..DNS_SERVER_MAX_REQUESTS {
+        match socket.recv_from(&mut buf) {
+            Ok((n, peer)) => {
+                let response = build_response(&buf[..n], input);
+                let expected_len = response.len();
+                let sent = socket.send_to(&response, peer)?;
+                exchanges.push(DnsServerExchange { sent, expected_len });
+            }
+            Err(err) if matches!(err.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => break,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(exchanges)
+}
+
+fn observe_server_thread(join_result: thread::Result<IoResult<Vec<DnsServerExchange>>>) -> usize {
+    let exchanges = join_result
+        .expect("fake DNS server helper thread panicked")
+        .expect("fake DNS server helper should not fail");
+    for exchange in &exchanges {
+        assert_eq!(
+            exchange.sent, exchange.expected_len,
+            "fake DNS server should send the complete response datagram"
+        );
+    }
+    exchanges.len()
 }
 
 fn build_response(request: &[u8], input: &FuzzInput) -> Vec<u8> {
