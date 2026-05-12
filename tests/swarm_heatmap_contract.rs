@@ -126,6 +126,40 @@ fn overlapping_reservations_are_visible_and_stable() {
 }
 
 #[test]
+fn directory_reservation_owns_child_dirty_path_and_blocks_child_surface() {
+    let heatmap = heatmap_json("directory_reservation.json");
+    let dirty = &heatmap["dirty_paths"][0];
+    let stay_off = heatmap["suggested_stay_off_surfaces"]
+        .as_array()
+        .expect("stay-off surfaces");
+    let open_surfaces = heatmap["suggested_open_surfaces"]
+        .as_array()
+        .expect("open surfaces");
+
+    assert_eq!(dirty["path"].as_str(), Some("src/security/secret.rs"));
+    assert_eq!(dirty["classification"].as_str(), Some("peer-owned"));
+    assert_eq!(dirty["owner"].as_str(), Some("BoldPlateau"));
+    assert_eq!(dirty["owner_source"].as_str(), Some("reservation"));
+    assert_eq!(dirty["stay_off"].as_bool(), Some(true));
+    assert!(stay_off.iter().any(|row| {
+        row["path"].as_str() == Some("src/security")
+            && row["holder"].as_str() == Some("BoldPlateau")
+    }));
+    assert!(
+        !open_surfaces
+            .iter()
+            .any(|path| path.as_str() == Some("src/security/secret.rs")),
+        "child candidate surface must not remain open under a peer directory reservation"
+    );
+    assert!(
+        open_surfaces
+            .iter()
+            .any(|path| path.as_str() == Some("src/http")),
+        "unrelated candidate surfaces should stay available"
+    );
+}
+
+#[test]
 fn expired_reservations_do_not_create_stay_off_surfaces() {
     let heatmap = heatmap_json("expired_reservations.json");
 
