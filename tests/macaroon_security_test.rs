@@ -228,11 +228,11 @@ fn test_constant_time_signature_comparison_logic() {
     let sig2 = asupersync::cx::macaroon::MacaroonSignature::from_bytes([0xAA; 32]);
     let sig3 = asupersync::cx::macaroon::MacaroonSignature::from_bytes([0xBB; 32]);
 
-    assert!(sig1 == sig2);
-    assert!(sig1 != sig3);
+    assert_eq!(sig1, sig2);
+    assert_ne!(sig1, sig3);
 
     let mut binary_bad = [0xAA; 32];
     binary_bad[31] = 0xAB;
     let sig4 = asupersync::cx::macaroon::MacaroonSignature::from_bytes(binary_bad);
-    assert!(sig1 != sig4);
+    assert_ne!(sig1, sig4);
 }
