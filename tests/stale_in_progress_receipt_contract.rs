@@ -99,6 +99,56 @@ fn script_exists_and_help_is_non_mutating() {
 }
 
 #[test]
+fn live_probe_preserves_porcelain_status_columns_for_unstaged_paths() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("stale_in_progress_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Completed:
+    stdout = " M .beads/issues.jsonl \n"
+
+module.subprocess.run = lambda *args, **kwargs: Completed()
+status, raw = module.run_text(pathlib.Path("."), ["git", "status", "--porcelain=v1"], 1.0)
+dirty_entries = []
+if status == "ok":
+    for line in raw.splitlines():
+        if len(line) >= 4:
+            dirty_entries.append({"status": line[:2], "path": line[3:]})
+print(json.dumps({"status": status, "raw": raw, "dirty_entries": dirty_entries}))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .output()
+        .expect("run stale receipt live probe parser smoke");
+    assert!(
+        output.status.success(),
+        "parser smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parser smoke JSON");
+    assert_eq!(parsed["status"].as_str(), Some("ok"));
+    assert_eq!(parsed["raw"].as_str(), Some(" M .beads/issues.jsonl "));
+    assert_eq!(parsed["dirty_entries"][0]["status"].as_str(), Some(" M"));
+    assert_eq!(
+        parsed["dirty_entries"][0]["path"].as_str(),
+        Some(".beads/issues.jsonl ")
+    );
+}
+
+#[test]
 fn fresh_active_peer_is_wait_contact_not_stale() {
     let receipt = receipt_json("fresh_active_peer.json");
     let row = first_classification(&receipt);
