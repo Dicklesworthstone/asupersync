@@ -115,7 +115,7 @@ fn metadata_insert_rejects_disallowed_chars_in_key() {
 fn metadata_insert_rejects_empty_key() {
     // Pin (b): empty key rejected.
     let mut metadata = Metadata::new();
-    assert!(!metadata.insert("", "value"), "empty key must be rejected",);
+    assert!(!metadata.insert("", "value"), "empty key must be rejected");
 }
 
 #[test]
