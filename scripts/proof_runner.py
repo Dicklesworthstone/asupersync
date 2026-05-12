@@ -672,13 +672,26 @@ class GitStatus:
         """Check if there are uncommitted changes."""
         return len(self._get_status()) > 0
 
+    def _status_paths(self, line: str) -> List[str]:
+        """Return dirty path endpoints for one git status --short row."""
+        if len(line) < 3:
+            return []
+        status = line[:2]
+        path = line[3:]
+        if ("R" in status or "C" in status) and " -> " in path:
+            paths = []
+            for part in path.split(" -> ", 1):
+                normalized = part.strip().replace("\\", "/").removeprefix("./").rstrip("/")
+                if normalized and normalized not in paths:
+                    paths.append(normalized)
+            return paths
+        return [path] if path else []
+
     def get_uncommitted_files(self) -> List[str]:
         """Get list of uncommitted files."""
         files = []
         for line in self._get_status():
-            if len(line) >= 3:
-                # Git status format: XY filename
-                files.append(line[3:])
+            files.extend(self._status_paths(line))
         return files
 
     def get_staged_files(self) -> List[str]:
@@ -686,7 +699,7 @@ class GitStatus:
         staged = []
         for line in self._get_status():
             if len(line) >= 3 and line[0] != ' ' and line[0] != '?':
-                staged.append(line[3:])
+                staged.extend(self._status_paths(line))
         return staged
 
 

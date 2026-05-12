@@ -871,7 +871,7 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 class Completed:
-    stdout = " M scripts/proof_runner.py\nA  tests/proof_runner_contract.rs\n?? tests/fixtures/proof_runner/new.log\n M tests/fixtures/proof_runner/trailing-space.log \n"
+    stdout = " M scripts/proof_runner.py\nA  tests/proof_runner_contract.rs\n?? tests/fixtures/proof_runner/new.log\n M tests/fixtures/proof_runner/trailing-space.log \nR  src/runtime/old_state.rs -> src/runtime/state.rs\nC  docs/old.md -> docs/new.md\n"
 
 module.subprocess.run = lambda *args, **kwargs: Completed()
 status = module.GitStatus(".")
@@ -917,6 +917,21 @@ print(json.dumps({
         parsed["uncommitted"][3].as_str(),
         Some("tests/fixtures/proof_runner/trailing-space.log ")
     );
+    assert_eq!(
+        parsed["uncommitted"][4].as_str(),
+        Some("src/runtime/old_state.rs")
+    );
+    assert_eq!(
+        parsed["uncommitted"][5].as_str(),
+        Some("src/runtime/state.rs")
+    );
+    assert_eq!(
+        parsed["staged"][1].as_str(),
+        Some("src/runtime/old_state.rs")
+    );
+    assert_eq!(parsed["staged"][2].as_str(), Some("src/runtime/state.rs"));
+    assert_eq!(parsed["staged"][3].as_str(), Some("docs/old.md"));
+    assert_eq!(parsed["staged"][4].as_str(), Some("docs/new.md"));
 }
 
 #[test]
