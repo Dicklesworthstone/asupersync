@@ -44,6 +44,12 @@ enum OpResult {
     SetErr,           // set() failed (already initialized)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Implementation {
+    Asupersync,
+    Std,
+}
+
 /// Test configuration for OnceCell conformance.
 #[derive(Debug, Clone)]
 struct ConformanceTestConfig {
@@ -270,14 +276,86 @@ fn assert_once_cell_conformance(
     }
 
     // Check final state consistency
-    let asupersync_final = asupersync_results.last().map(|r| r.final_value).flatten();
-    let std_final = std_results.last().map(|r| r.final_value).flatten();
+    let asupersync_final = asupersync_results.last().and_then(|r| r.final_value);
+    let std_final = std_results.last().and_then(|r| r.final_value);
 
     assert_eq!(
         asupersync_final, std_final,
         "{}: Final states differ: asupersync={:?}, std={:?}",
         test_name, asupersync_final, std_final
     );
+}
+
+fn observed_result(
+    result: &OnceCellConformanceResult,
+    implementation: Implementation,
+) -> &OpResult {
+    match implementation {
+        Implementation::Asupersync => &result.asupersync_result,
+        Implementation::Std => &result.std_result,
+    }
+}
+
+fn assert_set_vs_init_race_invariants(
+    results: &[OnceCellConformanceResult],
+    implementation: Implementation,
+    test_name: &str,
+) {
+    assert_eq!(
+        results.len(),
+        6,
+        "{test_name}: expected two operation sequences"
+    );
+
+    let mut set_ok = 0;
+    let mut set_err = 0;
+    let mut get_or_init = 0;
+    let mut get = 0;
+
+    for result in results {
+        let observed = observed_result(result, implementation);
+        match &result.operation {
+            ConformanceOp::Set { value } => {
+                assert_eq!(*value, 200, "{test_name}: set value changed");
+                match observed {
+                    OpResult::SetOk => set_ok += 1,
+                    OpResult::SetErr => set_err += 1,
+                    other => panic!("{test_name}: set produced unexpected result {other:?}"),
+                }
+            }
+            ConformanceOp::GetOrInit { init_value } => {
+                assert_eq!(*init_value, 300, "{test_name}: init value changed");
+                assert_eq!(
+                    observed,
+                    &OpResult::InitSuccess(200),
+                    "{test_name}: get_or_init must observe the first successful set"
+                );
+                get_or_init += 1;
+            }
+            ConformanceOp::Get => {
+                assert_eq!(
+                    observed,
+                    &OpResult::GetSome(200),
+                    "{test_name}: final get must observe the first successful set"
+                );
+                get += 1;
+            }
+        }
+
+        assert_eq!(
+            result.final_value,
+            Some(200),
+            "{test_name}: final value must be the first successful set"
+        );
+    }
+
+    assert_eq!(set_ok, 1, "{test_name}: exactly one set should win");
+    assert_eq!(set_err, 1, "{test_name}: exactly one set should lose");
+    assert_eq!(
+        get_or_init, 2,
+        "{test_name}: expected two get_or_init calls"
+    );
+    assert_eq!(get, 2, "{test_name}: expected two get calls");
 }
 
 /// Test basic OnceCell initialization.
@@ -364,7 +442,12 @@ fn conformance_set_vs_init_race() {
     let ctx = OnceCellConformanceContext::new(config);
     let (asupersync_results, std_results) = ctx.run_differential_test();
 
-    assert_once_cell_conformance(&asupersync_results, &std_results, "set_vs_init_race");
+    assert_set_vs_init_race_invariants(
+        &asupersync_results,
+        Implementation::Asupersync,
+        "set_vs_init_race/asupersync",
+    );
+    assert_set_vs_init_race_invariants(&std_results, Implementation::Std, "set_vs_init_race/std");
 }
 
 /// Test multiple get operations after initialization.
@@ -485,7 +568,20 @@ fn conformance_comprehensive_matrix() {
         let ctx = OnceCellConformanceContext::new(config);
         let (asupersync_results, std_results) = ctx.run_differential_test();
 
-        assert_once_cell_conformance(&asupersync_results, &std_results, name);
+        if name == "set_vs_init_race" {
+            assert_set_vs_init_race_invariants(
+                &asupersync_results,
+                Implementation::Asupersync,
+                "set_vs_init_race/asupersync",
+            );
+            assert_set_vs_init_race_invariants(
+                &std_results,
+                Implementation::Std,
+                "set_vs_init_race/std",
+            );
+        } else {
+            assert_once_cell_conformance(&asupersync_results, &std_results, name);
+        }
     }
 }
 

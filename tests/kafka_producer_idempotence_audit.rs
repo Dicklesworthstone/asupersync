@@ -8,6 +8,8 @@
 //! retry behavior cannot be properly validated in tests. Hidden bugs
 //! in retry logic may only surface in production.
 
+#[cfg(not(feature = "kafka"))]
+use asupersync::messaging::kafka::KafkaError;
 use asupersync::messaging::kafka::{KafkaProducer, ProducerConfig};
 use asupersync::test_utils::run_test_with_cx;
 
@@ -36,11 +38,7 @@ fn test_stub_broker_enables_idempotence_config() {
 
 #[cfg(not(feature = "kafka"))]
 #[test]
-fn demonstrate_stub_broker_accepts_duplicates() {
-    use asupersync::messaging::kafka::{lock_stub_broker_for_tests, stub_broker_end_offset};
-
-    let _broker = lock_stub_broker_for_tests();
-
+fn default_feature_integration_send_fails_closed_instead_of_using_stub() {
     run_test_with_cx(|cx| async move {
         let producer = KafkaProducer::new(
             ProducerConfig::default().enable_idempotence(true), // Claims to be idempotent
@@ -49,30 +47,20 @@ fn demonstrate_stub_broker_accepts_duplicates() {
 
         let topic = "idempotence-test";
 
-        // Send the same message twice (simulating retry)
-        let metadata1 = producer
+        let send_result = producer
             .send(&cx, topic, Some(b"key1"), b"message1", None)
-            .await
-            .unwrap();
-        let metadata2 = producer
-            .send(&cx, topic, Some(b"key1"), b"message1", None)
-            .await
-            .unwrap();
+            .await;
 
-        // DEFECT: StubBroker accepts both, gives different offsets
-        assert_eq!(metadata1.offset, 0);
-        assert_eq!(metadata2.offset, 1); // Should be 0 if deduplicated!
-        assert_eq!(stub_broker_end_offset(topic, 0), 2); // Should be 1!
+        assert!(
+            matches!(send_result, Err(KafkaError::FeatureDisabled)),
+            "default-feature integration tests must fail closed instead of silently using stub broker"
+        );
     });
 }
 
 #[cfg(not(feature = "kafka"))]
 #[test]
-fn demonstrate_missing_producer_id_tracking() {
-    use asupersync::messaging::kafka::lock_stub_broker_for_tests;
-
-    let _broker = lock_stub_broker_for_tests();
-
+fn default_feature_integration_send_fails_closed_for_all_producers() {
     run_test_with_cx(|cx| async move {
         // Create two producers with idempotence enabled
         let producer1 = KafkaProducer::new(
@@ -91,23 +79,23 @@ fn demonstrate_missing_producer_id_tracking() {
 
         let topic = "producer-id-test";
 
-        // Each producer should have its own sequence space
-        producer1
+        // Integration tests compile as downstream consumers, so default builds
+        // must not route broker operations to the crate-local stub.
+        let first_send = producer1
             .send(&cx, topic, Some(b"key"), b"from-p1", None)
-            .await
-            .unwrap();
-        producer2
+            .await;
+        let second_send = producer2
             .send(&cx, topic, Some(b"key"), b"from-p2", None)
-            .await
-            .unwrap();
-        producer1
-            .send(&cx, topic, Some(b"key"), b"from-p1-again", None)
-            .await
-            .unwrap();
+            .await;
 
-        // DEFECT: No producer ID separation in StubBroker — real Kafka would
-        // assign different producer IDs, but StubBroker treats all producers
-        // identically.
+        assert!(
+            matches!(first_send, Err(KafkaError::FeatureDisabled)),
+            "producer 1 should hit the default-feature fail-closed boundary"
+        );
+        assert!(
+            matches!(second_send, Err(KafkaError::FeatureDisabled)),
+            "producer 2 should hit the default-feature fail-closed boundary"
+        );
     });
 }
 
@@ -158,7 +146,7 @@ fn audit_kafka_producer_idempotence_implementation() {
         "    dedup_cache: BTreeMap<(u64, String, i32, u64), RecordMetadata>, // recent records"
     );
     println!("}}");
-    println!("");
+    println!();
     println!("impl IdempotentStubBroker {{");
     println!(
         "    fn publish_with_idempotence(&mut self, record: StubBrokerRecord, producer_id: u64, sequence: u64) {{"

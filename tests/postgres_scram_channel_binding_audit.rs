@@ -8,8 +8,6 @@
 //! that the server actually processed the channel binding data. A MITM could
 //! strip channel binding from client-final without detection.
 
-use std::collections::HashMap;
-
 #[test]
 fn test_scram_channel_binding_computation_principle() {
     // Verify the principle of tls-server-end-point computation
@@ -46,7 +44,7 @@ fn test_scram_verify_server_final_only_checks_signature() {
         ("", false),
     ];
 
-    for (server_final, should_pass) in test_cases {
+    for (server_final, _should_pass) in test_cases {
         println!("Testing server_final: '{}'", server_final);
 
         // Note: The actual verify_server_final method is not exposed for fuzzing
@@ -107,7 +105,7 @@ fn audit_scram_channel_binding_server_final_validation() {
     println!("1. Enhanced server-final format with cbind confirmation field");
     println!("2. Different signature computation when channel binding succeeds");
     println!("3. Explicit cbind-success indicator in server-final message");
-    println!("");
+    println!();
     println!("Example fix:");
     println!("```rust");
     println!("fn verify_server_final(&self, server_final: &str) -> Result<(), PgError> {{");

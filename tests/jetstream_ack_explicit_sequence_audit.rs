@@ -102,7 +102,7 @@ fn audit_jetstream_ack_explicit_sequence_tracking() {
     println!("    acked_sequences: BTreeSet<u64>,  // Track acked sequences");
     println!("    max_acked_sequence: Option<u64>, // Highest contiguous ack");
     println!("}}");
-    println!("");
+    println!();
     println!("impl JsMessage {{");
     println!(
         "    pub fn ack(&self, consumer: &mut Consumer, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {{"
