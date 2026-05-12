@@ -70,7 +70,7 @@ def run_text(repo_path: Path, command: list[str], timeout: float) -> tuple[str, 
         return "timeout", ""
     except subprocess.CalledProcessError as error:
         return f"error:{error.returncode}", ""
-    return "ok", output.stdout.strip()
+    return "ok", output.stdout.rstrip("\n")
 
 
 def parse_status_lines(raw: str) -> list[dict[str, str]]:

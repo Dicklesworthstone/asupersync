@@ -103,6 +103,55 @@ fn script_exists_and_help_is_non_mutating() {
 }
 
 #[test]
+fn live_probe_preserves_porcelain_status_columns_for_unstaged_paths() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("proof_artifact_freshness_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Completed:
+    stdout = " M tests/fixtures/proof-artifact/unstaged-path.log \n"
+
+module.subprocess.run = lambda *args, **kwargs: Completed()
+status, raw = module.run_text(pathlib.Path("."), ["git", "status", "--porcelain=v1"], 1.0)
+entries = module.parse_status_lines(raw if status == "ok" else "")
+print(json.dumps({"status": status, "raw": raw, "entries": entries}))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .output()
+        .expect("run proof-artifact live probe parser smoke");
+    assert!(
+        output.status.success(),
+        "parser smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parser smoke JSON");
+    assert_eq!(parsed["status"].as_str(), Some("ok"));
+    assert_eq!(
+        parsed["raw"].as_str(),
+        Some(" M tests/fixtures/proof-artifact/unstaged-path.log ")
+    );
+    assert_eq!(parsed["entries"][0]["status"].as_str(), Some(" M"));
+    assert_eq!(
+        parsed["entries"][0]["path"].as_str(),
+        Some("tests/fixtures/proof-artifact/unstaged-path.log ")
+    );
+}
+
+#[test]
 fn current_clean_artifact_is_citeable() {
     let receipt = receipt_json("current_clean.json");
     let row = first_row(&receipt);
