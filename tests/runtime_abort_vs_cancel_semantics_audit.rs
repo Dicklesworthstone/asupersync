@@ -103,7 +103,7 @@
 //!   - introduced std::process::abort or libc::pthread_cancel
 //!     in the abort path (UB pathway; thread terminates
 //!     without destructor unwinding),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -344,8 +344,7 @@ fn cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
