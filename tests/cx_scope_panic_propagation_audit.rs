@@ -136,13 +136,24 @@
 //!     panic),
 //!   - changed payload_to_string to return a constant
 //!     message (panic-cause attribution lost),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&path).expect("read source file")
+}
+
+fn child_admission_body(source: &str) -> &str {
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
+    let body_end = source[start..]
+        .find("\n    // =========================================================================")
+        .map_or(source.len(), |offset| start + offset);
+    &source[start..body_end]
 }
 
 #[test]
@@ -188,8 +199,7 @@ fn catch_unwind_poll_converts_panic_to_poll_ready_err() {
     let start = source.find(fn_marker).expect("CatchUnwind impl");
     let next_impl = source[start + fn_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + fn_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + fn_marker.len() + o);
     let body = &source[start..next_impl];
 
     assert!(
@@ -216,17 +226,7 @@ fn region_with_budget_converts_thread_result_err_to_outcome_panicked() {
     // Outcome::Panicked(PanicPayload::new(msg)). This is
     // the structural transparency point.
     let source = read("src/cx/scope.rs");
-
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = child_admission_body(&source);
 
     assert!(
         body.contains("Err(payload) => {")
@@ -247,17 +247,7 @@ fn region_with_budget_does_not_convert_panicked_to_cancelled() {
     // with normal cancel and lose supervisor-relevant
     // attribution.
     let source = read("src/cx/scope.rs");
-
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = child_admission_body(&source);
 
     // Search for the panic-to-Cancelled anti-pattern.
     let suspect_conflation = [
@@ -282,17 +272,7 @@ fn region_with_budget_panicked_outcome_triggers_fail_fast_cleanup() {
     // path cancels the child region with FailFast. Without
     // this, sibling tasks orphan — region leak.
     let source = read("src/cx/scope.rs");
-
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = child_admission_body(&source);
 
     assert!(
         body.contains("Outcome::Err(_) | Outcome::Panicked(_) => {")
@@ -440,17 +420,7 @@ fn region_with_budget_does_not_silently_swallow_panic_outcome() {
     // Outcome::Ok or discards it. Either pattern is the
     // operators "swallow" failure mode.
     let source = read("src/cx/scope.rs");
-
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = child_admission_body(&source);
 
     let suspect_swallow = [
         "Outcome::Panicked(_) => Outcome::Ok",
