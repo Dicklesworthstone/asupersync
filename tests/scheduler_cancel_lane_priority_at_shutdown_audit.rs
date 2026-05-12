@@ -82,7 +82,7 @@
 //!     quiescent),
 //!   - removed the `wake_all()` from shutdown (would let
 //!     parked workers sleep forever),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -219,8 +219,7 @@ fn next_task_default_order_is_cancel_then_timed() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -265,8 +264,7 @@ fn next_task_local_lane_default_order_is_cancel_then_timed() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -306,8 +304,7 @@ fn cancel_streak_fairness_check_protects_timed_starvation() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= body_end_window)
-        .last()
+        .rfind(|&i| i <= body_end_window)
         .unwrap_or(body_end_window);
     let body = &source[start..safe_end];
 
@@ -337,8 +334,7 @@ fn drain_phases_double_the_cancel_budget() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= body_end_window)
-        .last()
+        .rfind(|&i| i <= body_end_window)
         .unwrap_or(body_end_window);
     let body = &source[start..safe_end];
 
@@ -379,8 +375,7 @@ fn meet_deadlines_mode_still_dispatches_cancel_periodically() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= body_end_window)
-        .last()
+        .rfind(|&i| i <= body_end_window)
         .unwrap_or(body_end_window);
     let body = &source[start..safe_end];
 
