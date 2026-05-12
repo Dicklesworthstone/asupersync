@@ -75,15 +75,14 @@
 //!
 //!   7. **Anti-monopoly contract is hard, not advisory**:
 //!      a runaway task that ignores the Err from checkpoint
-//:      (e.g., `let _ = cx.checkpoint();`) does NOT escape
-//!      the bound, because:
-//!        a. The slow path ALSO sets the state on CxInner —
-//!           the next checkpoint observes the prior cancel.
-//!        b. The cooperative-scheduling general property
-//!           applies: the task can only run as long as it
-//!           cooperatively returns Pending or Ready. If it
-//!           ignores checkpoint Err and continues, that's
-//!           the user's bug, not a runtime defect.
+//!      (e.g., `let _ = cx.checkpoint();`) does NOT escape
+//!      the bound. The slow path ALSO sets the state on
+//!      CxInner, so the next checkpoint observes the prior
+//!      cancel. The cooperative-scheduling general property
+//!      still applies: the task can only run as long as it
+//!      cooperatively returns Pending or Ready. If it ignores
+//!      checkpoint Err and continues, that's the user's bug,
+//!      not a runtime defect.
 //!
 //! Verdict: **SOUND**. checkpoint() with exhausted budget
 //! forces a yield via Err(Cancelled) → ?-propagation. The
@@ -99,7 +98,7 @@
 //!   - removed the budget_exhaustion → cancel-state publish
 //!     in the slow path (cx.rs:1707-1717) (would let
 //!     subsequent checkpoints observe a stale fast_cancel
-//:     state — the exhaustion would be detected once but
+//!     state — the exhaustion would be detected once but
 //!     not converted into a structural cancel),
 //!   - changed checkpoint to return Ok on exhaustion when
 //!     mask_depth == 0 (would let runaway tasks proceed
@@ -112,9 +111,9 @@
 //!     the mask (would break the mask protocol — masked code
 //!     gets cancelled mid-critical-section),
 //!   - made the slow-path budget_exhaustion check skip the
-//:     fast_cancel.store(Release) (would lose cross-thread
+//!     fast_cancel.store(Release) (would lose cross-thread
 //!     visibility for subsequent checkpoint calls),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -123,6 +122,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&path).expect("read source file")
+}
+
+fn source_window(source: &str, start: usize, len: usize) -> &str {
+    let mut end = start.saturating_add(len).min(source.len());
+    while !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    &source[start..end]
 }
 
 #[test]
@@ -211,14 +218,7 @@ fn checkpoint_slow_path_publishes_self_cancel_on_exhaustion() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 8000);
 
     assert!(
         body.contains("if let Some((reason, _, _)) = &budget_exhaustion {")
@@ -242,14 +242,7 @@ fn checkpoint_slow_path_strengthens_existing_cancel_reason() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 8000);
 
     assert!(
         body.contains("if let Some(existing) = &mut inner.cancel_reason {")
@@ -281,14 +274,7 @@ fn checkpoint_acknowledges_cancel_only_when_mask_depth_zero() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 8000);
 
     assert!(
         body.contains("if inner.cancel_requested && inner.mask_depth == 0 {"),
@@ -375,14 +361,7 @@ fn budget_exhaustion_emits_evidence_via_evidence_sink() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 8000);
 
     assert!(
         body.contains("crate::evidence_sink::emit_budget_evidence("),
@@ -403,14 +382,7 @@ fn budget_exhaustion_emits_cancel_evidence_when_acknowledging() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 8000);
 
     assert!(
         body.contains("crate::evidence_sink::emit_cancel_evidence("),
