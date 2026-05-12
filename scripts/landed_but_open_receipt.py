@@ -9,6 +9,7 @@ evidence needed to decide whether an operator should run it later.
 
 import argparse
 import datetime as dt
+import fnmatch
 import json
 import re
 import sys
@@ -152,6 +153,17 @@ def row_pattern(row: dict[str, Any]) -> str:
     return ""
 
 
+def overlaps_tracker_path(pattern: str) -> bool:
+    if not pattern:
+        return False
+    return any(
+        pattern == tracker_path
+        or fnmatch.fnmatchcase(tracker_path, pattern)
+        or fnmatch.fnmatchcase(pattern, tracker_path)
+        for tracker_path in TRACKER_PATHS
+    )
+
+
 def reservation_rows(source: dict[str, Any]) -> list[dict[str, Any]]:
     agent_mail = source.get("agent_mail", {}) if isinstance(source, dict) else {}
     rows = extract_rows(
@@ -185,7 +197,7 @@ def active_tracker_conflicts(source: dict[str, Any], generated_at: str, agent: s
         if holder == agent:
             continue
         pattern = row_pattern(row)
-        if pattern not in TRACKER_PATHS and str(row.get("path", "")) not in TRACKER_PATHS:
+        if not overlaps_tracker_path(pattern) and not overlaps_tracker_path(str(row.get("path", ""))):
             continue
         expires_ts = str(row.get("expires_ts") or row.get("expires_at") or "")
         expires_at = parse_timestamp(expires_ts)

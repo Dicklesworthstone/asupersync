@@ -165,6 +165,36 @@ fn tracker_conflict_matches_full_output_golden() {
 }
 
 #[test]
+fn glob_tracker_conflict_waits_for_closeout_window() {
+    let receipt = receipt_json("glob_tracker_conflict.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("landed-awaiting-tracker")
+    );
+    assert_eq!(row["decision"].as_str(), Some("wait-for-tracker"));
+    assert_eq!(row["proposed_action"]["allowed_now"].as_bool(), Some(false));
+    assert_eq!(
+        row["evidence"]["tracker_conflicts"][0]["path"].as_str(),
+        Some(".beads/*")
+    );
+    assert_eq!(
+        row["evidence"]["tracker_conflicts"][0]["holder"].as_str(),
+        Some("IndigoField")
+    );
+}
+
+#[test]
+fn glob_tracker_conflict_matches_full_output_golden() {
+    assert_output_matches_golden(
+        "glob_tracker_conflict.json",
+        "glob_tracker_conflict_expected.json",
+        "landed-but-open glob tracker-conflict receipt changed; update the golden only after reviewing tracker reservation overlap semantics",
+    );
+}
+
+#[test]
 fn landed_without_tracker_conflict_is_ready_to_close() {
     let receipt = receipt_json("ready_to_close.json");
     let row = first_row(&receipt);
