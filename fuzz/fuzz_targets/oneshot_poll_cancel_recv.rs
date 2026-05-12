@@ -15,7 +15,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
-use asupersync::types::{RegionId, TaskId};
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
@@ -77,6 +77,10 @@ struct PollCancelTracker {
     polled_after_completion: AtomicUsize,
     values_received: AtomicUsize,
     closed_channels: AtomicUsize,
+    send_attempts: AtomicUsize,
+    send_successes: AtomicUsize,
+    send_disconnects: AtomicUsize,
+    send_cancellations: AtomicUsize,
     use_after_free_detected: AtomicUsize,
 }
 
@@ -88,6 +92,10 @@ impl PollCancelTracker {
             polled_after_completion: AtomicUsize::new(0),
             values_received: AtomicUsize::new(0),
             closed_channels: AtomicUsize::new(0),
+            send_attempts: AtomicUsize::new(0),
+            send_successes: AtomicUsize::new(0),
+            send_disconnects: AtomicUsize::new(0),
+            send_cancellations: AtomicUsize::new(0),
             use_after_free_detected: AtomicUsize::new(0),
         }
     }
@@ -112,16 +120,32 @@ impl PollCancelTracker {
         self.closed_channels.fetch_add(1, Ordering::SeqCst);
     }
 
+    fn record_send_result(&self, result: &Result<(), oneshot::SendError<i32>>) {
+        self.send_attempts.fetch_add(1, Ordering::SeqCst);
+        match result {
+            Ok(()) => {
+                self.send_successes.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(oneshot::SendError::Disconnected(_)) => {
+                self.send_disconnects.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(oneshot::SendError::Cancelled(_)) => {
+                self.send_cancellations.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
     fn record_use_after_free(&self) {
         self.use_after_free_detected.fetch_add(1, Ordering::SeqCst);
     }
 
     fn check_invariants(&self) -> Result<(), String> {
         let polls = self.polls_started.load(Ordering::SeqCst);
-        let cancellations = self.cancellations_observed.load(Ordering::SeqCst);
         let polled_after = self.polled_after_completion.load(Ordering::SeqCst);
-        let values = self.values_received.load(Ordering::SeqCst);
-        let closed = self.closed_channels.load(Ordering::SeqCst);
+        let send_attempts = self.send_attempts.load(Ordering::SeqCst);
+        let send_results = self.send_successes.load(Ordering::SeqCst)
+            + self.send_disconnects.load(Ordering::SeqCst)
+            + self.send_cancellations.load(Ordering::SeqCst);
         let use_after_free = self.use_after_free_detected.load(Ordering::SeqCst);
 
         // Core invariant: no use-after-free should be detected
@@ -137,6 +161,13 @@ impl PollCancelTracker {
             return Err(format!(
                 "More PolledAfterCompletion ({}) than total polls ({})",
                 polled_after, polls
+            ));
+        }
+
+        if send_results != send_attempts {
+            return Err(format!(
+                "Send result accounting mismatch: {} attempts vs {} observed results",
+                send_attempts, send_results
             ));
         }
 
@@ -159,6 +190,7 @@ impl CancellableContext {
         let cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
+            Budget::INFINITE,
         );
         Self {
             cx,
@@ -181,27 +213,29 @@ impl CancellableContext {
     }
 }
 
+type RecvPollFuture = Pin<Box<dyn Future<Output = Result<i32, oneshot::RecvError>> + Send>>;
+
 /// Tracks a receiver with polling and cancellation state
 struct TrackedReceiver {
-    receiver: oneshot::Receiver<i32>,
     sender: Option<oneshot::Sender<i32>>,
     cx_context: CancellableContext,
-    recv_future: Option<Pin<Box<dyn Future<Output = Result<i32, oneshot::RecvError>> + Send>>>,
+    recv_future: Option<RecvPollFuture>,
     completed: Arc<AtomicBool>,
     last_poll_result: Option<Poll<Result<i32, oneshot::RecvError>>>,
     poll_count: usize,
 }
 
 impl TrackedReceiver {
-    fn new(receiver_id: u8, tracker: Arc<PollCancelTracker>) -> Self {
+    fn new(tracker: Arc<PollCancelTracker>) -> Self {
         let (sender, receiver) = oneshot::channel::<i32>();
         let cx_context = CancellableContext::new();
         let completed = Arc::new(AtomicBool::new(false));
         let completed_clone = completed.clone();
-        let cx = cx_context.cx();
+        let cx = cx_context.cx().clone();
 
         let recv_future = Box::pin(async move {
-            let result = receiver.recv(cx).await;
+            let mut receiver = receiver;
+            let result = receiver.recv(&cx).await;
             completed_clone.store(true, Ordering::SeqCst);
 
             match &result {
@@ -217,7 +251,6 @@ impl TrackedReceiver {
         });
 
         Self {
-            receiver,
             sender: Some(sender),
             cx_context,
             recv_future: Some(recv_future),
@@ -237,7 +270,7 @@ impl TrackedReceiver {
                 // If cancelled, the future should return Cancelled on next poll
                 self.completed.store(true, Ordering::SeqCst);
                 let result = Poll::Ready(Err(oneshot::RecvError::Cancelled));
-                self.last_poll_result = Some(result.clone());
+                self.last_poll_result = Some(result);
                 self.recv_future = None;
                 return result;
             }
@@ -251,7 +284,7 @@ impl TrackedReceiver {
                 tracker.record_use_after_free();
             }
 
-            self.last_poll_result = Some(result.clone());
+            self.last_poll_result = Some(result);
 
             if result.is_ready() {
                 self.recv_future = None;
@@ -272,13 +305,7 @@ impl TrackedReceiver {
 
     fn send_value(&mut self, value: i32) -> Result<(), oneshot::SendError<i32>> {
         if let Some(sender) = self.sender.take() {
-            match sender.send(value) {
-                Ok(permit) => {
-                    permit.send(value)?;
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
+            sender.send(self.cx_context.cx(), value)
         } else {
             Err(oneshot::SendError::Disconnected(value))
         }
@@ -287,10 +314,66 @@ impl TrackedReceiver {
     fn is_completed(&self) -> bool {
         self.completed.load(Ordering::SeqCst) || self.recv_future.is_none()
     }
+}
 
-    fn drop_sender(&mut self) {
-        self.sender = None;
+fn observe_send_value_result(
+    receiver_id: u8,
+    had_sender_before_send: bool,
+    was_completed_before_send: bool,
+    was_cancelled_before_send: bool,
+    result: Result<(), oneshot::SendError<i32>>,
+    receiver: &TrackedReceiver,
+    tracker: &PollCancelTracker,
+) -> Result<(), String> {
+    tracker.record_send_result(&result);
+
+    if receiver.sender.is_some() {
+        return Err(format!(
+            "Receiver {} retained a sender after send attempt",
+            receiver_id
+        ));
     }
+
+    match result {
+        Ok(()) => {
+            if !had_sender_before_send {
+                return Err(format!(
+                    "Receiver {} reported a successful send without a sender",
+                    receiver_id
+                ));
+            }
+            if was_completed_before_send {
+                return Err(format!(
+                    "Receiver {} accepted a send after receiver completion",
+                    receiver_id
+                ));
+            }
+        }
+        Err(oneshot::SendError::Disconnected(_)) => {
+            if had_sender_before_send && !was_completed_before_send {
+                return Err(format!(
+                    "Receiver {} disconnected an active send before receiver completion",
+                    receiver_id
+                ));
+            }
+        }
+        Err(oneshot::SendError::Cancelled(_)) => {
+            if !had_sender_before_send {
+                return Err(format!(
+                    "Receiver {} cancelled a send without an available sender",
+                    receiver_id
+                ));
+            }
+            if !was_cancelled_before_send {
+                return Err(format!(
+                    "Receiver {} cancelled send without a cancelled context",
+                    receiver_id
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn noop_waker() -> Waker {
@@ -319,7 +402,7 @@ fn test_poll_cancel_recv_scenario(
 
     // Create initial receivers
     for i in 0..max_receivers {
-        let receiver = TrackedReceiver::new(i, Arc::new(PollCancelTracker::new()));
+        let receiver = TrackedReceiver::new(Arc::new(PollCancelTracker::new()));
         receivers.insert(i, receiver);
     }
 
@@ -334,7 +417,7 @@ fn test_poll_cancel_recv_scenario(
                 if !receivers.contains_key(&id)
                     && receivers.len() < OneshotPollCancelConfig::max_receivers() as usize
                 {
-                    let receiver = TrackedReceiver::new(id, Arc::new(PollCancelTracker::new()));
+                    let receiver = TrackedReceiver::new(Arc::new(PollCancelTracker::new()));
                     receivers.insert(id, receiver);
                 }
             }
@@ -375,7 +458,19 @@ fn test_poll_cancel_recv_scenario(
             PollCancelOperation::SendValue { receiver_id, value } => {
                 let id = *receiver_id % 20;
                 if let Some(receiver) = receivers.get_mut(&id) {
-                    let _ = receiver.send_value(*value); // May fail if already sent/dropped
+                    let had_sender_before_send = receiver.sender.is_some();
+                    let was_completed_before_send = receiver.is_completed();
+                    let was_cancelled_before_send = receiver.cx_context.is_cancelled();
+                    let send_result = receiver.send_value(*value);
+                    observe_send_value_result(
+                        id,
+                        had_sender_before_send,
+                        was_completed_before_send,
+                        was_cancelled_before_send,
+                        send_result,
+                        receiver,
+                        tracker,
+                    )?;
                 }
             }
 
@@ -396,6 +491,12 @@ fn test_poll_cancel_recv_scenario(
                     for i in 0..cycle_count {
                         // Poll
                         let poll1 = receiver.poll(tracker);
+                        if receiver.is_completed() && poll1 == Poll::Pending {
+                            return Err(format!(
+                                "Rapid cycle {}: receiver {} returned Pending after completion",
+                                i, id
+                            ));
+                        }
 
                         // Cancel
                         receiver.cancel();
