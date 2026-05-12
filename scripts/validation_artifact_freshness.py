@@ -67,8 +67,9 @@ def parse_status_lines(lines: list[str]) -> list[str]:
         line = raw.rstrip("\n")
         if len(line) < 4:
             continue
+        status = line[:2]
         path = line[3:]
-        if " -> " in path:
+        if ("R" in status or "C" in status) and " -> " in path:
             path = path.split(" -> ", 1)[1]
         paths.append(path)
     return paths

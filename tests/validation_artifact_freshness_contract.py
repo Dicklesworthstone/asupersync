@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Contract tests for scripts/validation_artifact_freshness.py."""
 
+import importlib.util
 import json
 import subprocess
 import unittest
@@ -48,6 +49,14 @@ def run_receipt(artifact: str, dirty_paths: str = "clean_dirty_paths.json") -> d
 
 def fixture_text(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+def load_script_module():
+    spec = importlib.util.spec_from_file_location("validation_artifact_freshness", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 class ValidationArtifactFreshnessContract(unittest.TestCase):
@@ -115,6 +124,26 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
     def test_external_dirt_output_matches_full_reviewed_golden(self) -> None:
         output = run_receipt_output("current_artifact.json", "dirty_external_paths.json")
         self.assert_output_matches_golden(output, "dirty_external_paths_expected.json")
+
+    def test_git_status_arrow_is_split_only_for_rename_or_copy_rows(self) -> None:
+        module = load_script_module()
+
+        paths = module.parse_status_lines(
+            [
+                " M tests/fixtures/a -> b.log",
+                "R  old/name.log -> new/name.log",
+                "C  source.log -> copy.log",
+            ]
+        )
+
+        self.assertEqual(
+            paths,
+            [
+                "tests/fixtures/a -> b.log",
+                "new/name.log",
+                "copy.log",
+            ],
+        )
 
     def test_missing_head_invalidates_artifact(self) -> None:
         receipt = run_receipt("unbound_artifact.json")
