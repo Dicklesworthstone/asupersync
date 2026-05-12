@@ -83,7 +83,7 @@ fn binary_metadata_round_trips_through_trailer_codec() {
                 "binary round-trip must preserve all 256 byte values exactly",
             );
         }
-        other => panic!("expected Binary value, got {other:?}"),
+        MetadataValue::Ascii(s) => panic!("expected Binary value, got Ascii({s:?})"),
     }
 }
 
@@ -249,7 +249,7 @@ fn ascii_value_with_high_bit_bytes_stripped_at_insert() {
     // insert. The bytes never travel on the wire as part
     // of an ASCII trailer.
     let mut metadata = Metadata::new();
-    let value_with_high_bit: String = (32u8..255u8).map(|b| char::from(b)).collect();
+    let value_with_high_bit: String = (32u8..255u8).map(char::from).collect();
     assert!(metadata.insert("x-mixed", value_with_high_bit.as_str()));
 
     match metadata.get("x-mixed") {
