@@ -33,11 +33,11 @@
 //!      task_budget)` is invoked. This sets:
 //!        - `inner.cancel_requested = true`
 //!        - `inner.fast_cancel.store(true, Release)`
-//!      and records the cleanup budget. **No mid-poll
-//!      interruption happens here** — the task may still be
-//!      mid-execution on a worker thread; the cancel signal is
-//!      a flag the task observes cooperatively at its next
-//!      checkpoint.
+//!          and records the cleanup budget. **No mid-poll
+//!          interruption happens here** — the task may still be
+//!          mid-execution on a worker thread; the cancel signal is
+//!          a flag the task observes cooperatively at its next
+//!          checkpoint.
 //!
 //!   4. **Lane re-routing — lazy promote**: when the cancel
 //!      lane is informed via `inject_cancel` (three_lane.rs:
@@ -106,7 +106,7 @@
 //!     ran tasks to completion before honoring the close
 //!     (would violate close-quiescence by waiting for
 //!     potentially-infinite EDF work),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -188,8 +188,7 @@ fn move_to_cancel_lane_uses_lazy_promote_no_eager_remove_from_timed() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 

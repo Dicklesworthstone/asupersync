@@ -81,7 +81,7 @@
 //!   - removed the mask_depth gate from cancel_acknowledged
 //!     (would prematurely acknowledge cancellation inside a
 //!     mask, breaking the protocol),
-//! would all be caught here AND by the two prior audits.
+//!     would all be caught here AND by the two prior audits.
 //!
 //! This file's pins are deliberately MINIMAL — they cross-
 //! reference the prior audit files for the detailed chain.
@@ -188,8 +188,7 @@ fn cancel_acknowledged_is_gated_on_mask_depth_zero() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 

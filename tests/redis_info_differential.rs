@@ -1,3 +1,5 @@
+//! Differential conformance tests for Redis INFO response parsing.
+
 use std::collections::BTreeMap;
 
 use asupersync::messaging::redis::RespValue;
