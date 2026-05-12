@@ -274,7 +274,7 @@ fn catch_panic_response_does_not_leak_panic_message_to_client() {
     let response_marker = "Response::new(";
     let response_pos = body.find(response_marker).expect("Response::new call");
     let response_end = body[response_pos..]
-        .find(")")
+        .find(')')
         .expect("Response::new close paren");
     let response_call = &body[response_pos..response_pos + response_end];
     assert!(

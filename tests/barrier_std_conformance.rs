@@ -274,8 +274,8 @@ fn assert_barrier_conformance(
         // Both implementations should release the same parties
         let mut asupersync_parties = asupersync_result.asupersync_release_order.clone();
         let mut std_parties = std_result.std_release_order.clone();
-        asupersync_parties.sort();
-        std_parties.sort();
+        asupersync_parties.sort_unstable();
+        std_parties.sort_unstable();
 
         assert_eq!(
             asupersync_parties, std_parties,

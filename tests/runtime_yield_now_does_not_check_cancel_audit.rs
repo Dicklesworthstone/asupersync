@@ -112,17 +112,17 @@
 //!     to capability context — caller now needs Cx in
 //!     scope, breaking yield_now from non-Cx contexts),
 //!   - changed yield_now's Output from `()` to
-//:     `Result<(), Error>` (breaks every existing caller's
+//!     `Result<(), Error>` (breaks every existing caller's
 //!     `.await` ergonomics — `yield_now().await?` instead
 //!     of `yield_now().await`),
 //!   - added a fast_cancel.load inside YieldNow::poll
-//:     (would silently do cancel observation in a primitive
+//!     (would silently do cancel observation in a primitive
 //!     that doesnt return errors — silent swallow if the
 //!     user doesnt also call checkpoint),
 //!   - removed yield_now entirely (would lose the pure-
 //!     yield primitive — apps would have to compose
 //!     ad-hoc Pending+wake patterns),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -158,8 +158,7 @@ fn yield_now_future_output_is_unit_not_result() {
     let start = source.find(impl_marker).expect("YieldNow Future impl");
     let next_impl = source[start + impl_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + impl_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + impl_marker.len() + o);
     let body = &source[start..next_impl];
 
     assert!(
