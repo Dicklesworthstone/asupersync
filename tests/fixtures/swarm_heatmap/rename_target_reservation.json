@@ -1,0 +1,41 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "agents": [
+      {
+        "name": "BoldPlateau",
+        "last_active_ts": "2026-05-10T08:42:00Z"
+      }
+    ],
+    "messages": [
+      {
+        "from": "BoldPlateau",
+        "created_ts": "2026-05-10T08:42:00Z",
+        "subject": "Starting security receipt work",
+        "body_md": "Validation will use CARGO_TARGET_DIR=/tmp/rch_target_boldplateau_security_receipt."
+      }
+    ],
+    "reservations": [
+      {
+        "id": 301,
+        "agent_name": "BoldPlateau",
+        "path_pattern": "src/security",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:10:00Z"
+      }
+    ]
+  },
+  "candidate_surfaces": [
+    "src/security/secret.rs",
+    "src/http"
+  ],
+  "dirty_tree": {
+    "status": "ok",
+    "entries": [
+      {
+        "status": "R ",
+        "path": "docs/old-secret.rs -> src/security/secret.rs"
+      }
+    ]
+  }
+}
