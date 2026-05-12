@@ -150,6 +150,34 @@ fn pathless_epic_ready_queue_falls_through_to_fallback_candidate() {
 }
 
 #[test]
+fn pathless_epic_without_snapshot_uses_default_fallback_catalog() {
+    let receipt = finder_json("epic_queue_default_fallback.json");
+    let epic = candidate(&receipt, "asupersync-lhx6m4");
+    let fallback = candidate(
+        &receipt,
+        "testing-conformance-harnesses:session-handoff-receipt",
+    );
+
+    assert_eq!(epic["status"].as_str(), Some("blocked"));
+    assert_eq!(
+        epic["blockers"][0]["kind"].as_str(),
+        Some("non-shippable-epic")
+    );
+    assert_eq!(fallback["status"].as_str(), Some("ready-fallback"));
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("testing-conformance-harnesses:session-handoff-receipt")
+    );
+    assert!(
+        !fallback["proof_commands"]
+            .as_array()
+            .expect("proof commands")
+            .is_empty(),
+        "default fallback candidates should carry validation expectations"
+    );
+}
+
+#[test]
 fn unapproved_fallback_lane_is_blocked_by_policy() {
     let receipt = finder_json("unapproved_lane.json");
     let candidate = candidate(&receipt, "custom-scan:src");

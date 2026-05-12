@@ -1,0 +1,21 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": []
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": [
+      {
+        "id": "asupersync-lhx6m4",
+        "title": "[idea-wizard] Swarm responsiveness and proof-lane autopilot",
+        "issue_type": "epic",
+        "priority": 1
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  }
+}

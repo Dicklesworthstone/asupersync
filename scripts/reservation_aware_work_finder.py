@@ -25,6 +25,53 @@ APPROVED_FALLBACK_LANES = {
     "testing-golden-artifacts",
     "testing-conformance-harnesses",
 }
+DEFAULT_FALLBACK_CANDIDATES = [
+    {
+        "candidate_id": "testing-conformance-harnesses:session-handoff-receipt",
+        "lane": "testing-conformance-harnesses",
+        "title": "Harden session handoff receipt contracts",
+        "priority": 1,
+        "paths": [
+            "scripts/session_handoff_receipt.py",
+            "tests/session_handoff_receipt_contract.rs",
+            "tests/fixtures/session_handoff_receipt",
+        ],
+        "proof_commands": [
+            "python3 -m py_compile scripts/session_handoff_receipt.py",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_session_handoff cargo test -p asupersync --test session_handoff_receipt_contract",
+        ],
+    },
+    {
+        "candidate_id": "testing-golden-artifacts:proof-receipt-inventory",
+        "lane": "testing-golden-artifacts",
+        "title": "Refresh proof receipt inventory goldens",
+        "priority": 2,
+        "paths": [
+            "scripts/proof_receipt_inventory.py",
+            "tests/proof_receipt_inventory_contract.rs",
+            "tests/fixtures/proof_receipt_inventory",
+        ],
+        "proof_commands": [
+            "python3 -m py_compile scripts/proof_receipt_inventory.py",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract",
+        ],
+    },
+    {
+        "candidate_id": "mock-code-finder:proof-runner-contracts",
+        "lane": "mock-code-finder",
+        "title": "Audit proof runner contracts for placeholder behavior",
+        "priority": 3,
+        "paths": [
+            "scripts/proof_runner.py",
+            "tests/proof_runner_contract.rs",
+            "tests/fixtures/proof_runner",
+        ],
+        "proof_commands": [
+            "python3 -m py_compile scripts/proof_runner.py",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_proof_runner cargo test -p asupersync --test proof_runner_contract",
+        ],
+    },
+]
 FORBIDDEN_COMMAND_TOKENS = [
     "git branch",
     "git checkout -b",
@@ -219,6 +266,8 @@ def candidate_paths(row: dict[str, Any]) -> list[str]:
 
 def fallback_candidates(source: dict[str, Any]) -> list[dict[str, Any]]:
     rows = rows_from(source, ("fallback_lanes", "candidates", "fallback_candidates"))
+    if not rows:
+        rows = DEFAULT_FALLBACK_CANDIDATES
     candidates = []
     for index, row in enumerate(rows):
         lane = str(row.get("lane") or row.get("skill") or "")
