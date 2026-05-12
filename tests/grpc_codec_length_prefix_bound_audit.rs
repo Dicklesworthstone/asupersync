@@ -162,7 +162,7 @@ fn decode_with_partial_buffer_returns_need_more_bytes_only_under_cap() {
     match result {
         Ok(None) => {} // need-more-bytes — correct under-cap path
         other => {
-            panic!("under-cap partial frame must return Ok(None) (need more bytes); got {other:?}",)
+            panic!("under-cap partial frame must return Ok(None) (need more bytes); got {other:?}")
         }
     }
     // The buffer is unchanged — partial-frame state preserved
