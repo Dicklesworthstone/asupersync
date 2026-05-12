@@ -3405,7 +3405,7 @@ mod tests {
             &payload,
             64,
             10,
-            0xBAD5_EED,
+            0x0BAD_5EED,
             ObjectId::new_for_test(0xC0DE),
             2,
         )
