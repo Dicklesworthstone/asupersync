@@ -447,7 +447,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -556,11 +556,6 @@ impl MockTimerDriver {
     }
 }
 
-struct NullWake;
-impl Wake for NullWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 /// Mock Sleep with the same priority order as production:
 /// bound_driver → ambient driver → wall fallback. The
 /// poll body computes deadline via Sleep::after(now, dur)
@@ -644,8 +639,8 @@ fn behavioral_sleep_under_virtual_clock_is_deterministic() {
     // Deadline should be 100ms in virtual time (i.e. 100_000_000 ns).
     assert_eq!(s.deadline, MockTime::from_nanos(100_000_000));
 
-    let waker = Waker::from(Arc::new(NullWake));
-    let mut ctx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
     let mut pinned = unsafe { Pin::new_unchecked(&mut s) };
 
     // First poll: Pending (deadline not reached).
@@ -692,8 +687,8 @@ fn behavioral_advance_to_exact_deadline_makes_sleep_ready() {
     let mut s = MockSleep::new_after(None, Some(Arc::clone(&driver)), Duration::from_nanos(500));
     assert_eq!(s.deadline.0, 500);
 
-    let waker = Waker::from(Arc::new(NullWake));
-    let mut ctx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
     let mut pinned = unsafe { Pin::new_unchecked(&mut s) };
 
     assert!(matches!(pinned.as_mut().poll(&mut ctx), Poll::Pending));
@@ -718,8 +713,8 @@ fn behavioral_sleep_replay_is_deterministic_under_same_advances() {
         let driver = Arc::new(MockTimerDriver::new(virt.clone() as Arc<dyn MockTimeSource>));
         let mut s =
             MockSleep::new_after(None, Some(Arc::clone(&driver)), Duration::from_millis(10));
-        let waker = Waker::from(Arc::new(NullWake));
-        let mut ctx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut ctx = Context::from_waker(waker);
         let mut pinned = unsafe { Pin::new_unchecked(&mut s) };
         let mut out = Vec::new();
 
