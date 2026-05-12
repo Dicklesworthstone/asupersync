@@ -161,16 +161,14 @@ fn handler_error_propagates_unchanged_when_no_replacing_interceptor() {
     let entries = log.lock().unwrap().clone();
     // Every prior layer must have seen its request-side hook
     // AND its error-side hook (in reverse order).
-    let request_hooks: Vec<&String> = entries.iter().filter(|s| s.ends_with("-request")).collect();
-    let error_hooks: Vec<&String> = entries.iter().filter(|s| s.ends_with("-error")).collect();
+    let request_hook_count = entries.iter().filter(|s| s.ends_with("-request")).count();
+    let error_hook_count = entries.iter().filter(|s| s.ends_with("-error")).count();
     assert_eq!(
-        request_hooks.len(),
-        2,
+        request_hook_count, 2,
         "both prior layers ran request-side; got log: {entries:?}",
     );
     assert_eq!(
-        error_hooks.len(),
-        2,
+        error_hook_count, 2,
         "both prior layers ran error-side cleanup; got log: {entries:?}",
     );
     // Reverse-walk pin: the inner (later) interceptor's error

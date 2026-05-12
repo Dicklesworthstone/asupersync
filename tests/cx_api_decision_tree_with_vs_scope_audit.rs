@@ -91,22 +91,22 @@
 //! Verdict: **SOUND**. The five APIs are distinct in
 //! signature and behavior. Documentation per-method is
 //! adequate; consolidated decision tree is now in this
-//: audit's docstring.
+//! audit's docstring.
 //!
 //! No bead filed. The decision tree is documented (here +
 //! per-method docstrings).
 //!
 //! A regression that:
 //!   - removed any of the five methods (would lose a
-//:     useful primitive),
+//!     useful primitive),
 //!   - changed any methods semantics to overlap with
-//:     another (e.g., Cx::scope allocating a new region
+//!     another (e.g., Cx::scope allocating a new region
 //!     conflates with Scope::region),
-//:   - removed the per-method docstrings (would lose user-
+//!   - removed the per-method docstrings (would lose user-
 //!     facing documentation),
 //!   - removed the prior individual-distinction audits
 //!     (this consolidator would lose deep coverage),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 

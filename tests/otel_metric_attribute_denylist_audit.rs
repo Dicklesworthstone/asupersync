@@ -59,7 +59,7 @@
 //!   - broke `MetricsConfig::drop_labels` field name or type,
 //!   - changed the filter from "exact key match" to "always
 //!     keep" (e.g., negated condition),
-//! would all be caught here.
+//!     would all be caught here.
 //!
 //! Note on `MetricsSnapshot`: that path is a fuzz/conformance
 //! synthesis helper; the producer of a snapshot is responsible
