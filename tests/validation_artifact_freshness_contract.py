@@ -135,6 +135,21 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
         )
         self.assert_output_matches_golden(output, "directory_touched_surface_expected.json")
 
+    def test_dirty_rename_source_marks_artifact_stale(self) -> None:
+        receipt = run_receipt("current_artifact.json", "dirty_rename_source.json")
+
+        self.assertEqual(receipt["classification"], "stale-dirty-overlap")
+        self.assertEqual(receipt["verdict"], "stale")
+        self.assertEqual(receipt["markers"]["dirty_touched_overlap"], ["scripts/proof_runner.py"])
+        self.assertEqual(
+            receipt["markers"]["dirty_external_paths"],
+            ["scripts/proof_runner_renamed.py"],
+        )
+
+    def test_dirty_rename_source_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("current_artifact.json", "dirty_rename_source.json")
+        self.assert_output_matches_golden(output, "dirty_rename_source_expected.json")
+
     def test_peer_dirty_paths_are_external_blockers_not_artifact_staleness(self) -> None:
         receipt = run_receipt("current_artifact.json", "dirty_external_paths.json")
 
@@ -163,7 +178,9 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
             paths,
             [
                 "tests/fixtures/a -> b.log",
+                "old/name.log",
                 "new/name.log",
+                "source.log",
                 "copy.log",
             ],
         )

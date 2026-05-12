@@ -71,11 +71,16 @@ def parse_status_lines(lines: list[str]) -> list[str]:
         if len(line) < 4:
             continue
         status = line[:2]
-        path = line[3:]
-        if ("R" in status or "C" in status) and " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        paths.append(path)
+        paths.extend(status_paths(status, line[3:]))
     return paths
+
+
+def status_paths(status: str, path: str) -> list[str]:
+    if not path:
+        return []
+    if ("R" in status or "C" in status) and " -> " in path:
+        return [part for part in path.split(" -> ", 1) if part]
+    return [path]
 
 
 def load_json(path: str) -> Any:
