@@ -34,16 +34,16 @@
 //!   3. **Panic payload converted to Outcome::Panicked**: in
 //!      the Err arm of the catch_unwind match (three_lane.rs:
 //!      4920-4958), the worker:
-//!        a. Captures the panic payload via
-//!           `crate::cx::scope::payload_to_string(&payload)`
-//!           (handles `&'static str` and `String` downcasts).
-//!        b. Wraps in `crate::types::outcome::PanicPayload::
-//!           new(msg)`.
-//!        c. Calls `record.complete(Outcome::Panicked(...))` so
-//!           the task transitions to a terminal Panicked state.
-//!        d. Sets `credit_adaptive_epoch = false` so the
-//!           adaptive cancel-streak policy doesn't learn from
-//!           panic-induced potential drops.
+//!      a. Captures the panic payload via
+//!      `crate::cx::scope::payload_to_string(&payload)`
+//!      (handles `&'static str` and `String` downcasts).
+//!      b. Wraps in `crate::types::outcome::PanicPayload::
+//!      new(msg)`.
+//!      c. Calls `record.complete(Outcome::Panicked(...))` so
+//!      the task transitions to a terminal Panicked state.
+//!      d. Sets `credit_adaptive_epoch = false` so the
+//!      adaptive cancel-streak policy doesn't learn from
+//!      panic-induced potential drops.
 //!
 //!   4. **Waiters woken so parent observes the panic**: the
 //!      worker calls `state.task_completed(task_id)` to gather
@@ -117,7 +117,7 @@
 //!     adaptive policy would receive a fabricated good-reward
 //!     signal from the abrupt potential drop, biasing toward
 //!     longer cancel streaks for the wrong reason),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -216,8 +216,7 @@ fn catch_unwind_err_arm_wakes_dependents_so_parent_observes_panic() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -252,8 +251,7 @@ fn catch_unwind_err_arm_does_not_resume_unwind_or_abort() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -293,8 +291,7 @@ fn catch_unwind_err_arm_disables_adaptive_epoch_credit_on_panic() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -354,8 +351,7 @@ fn task_execution_guard_uses_poison_tolerant_lock_during_unwind() {
     let start = source.find(guard_marker).expect("TaskExecutionGuard Drop");
     let next_impl = source[start + guard_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + guard_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + guard_marker.len() + o);
     let body = &source[start..next_impl];
 
     assert!(
