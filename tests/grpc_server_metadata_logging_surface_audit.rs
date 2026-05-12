@@ -127,7 +127,11 @@ fn no_production_log_macro_references_sensitive_metadata_tokens() {
                 brace_at_test_entry.get_or_insert(current_brace);
             }
 
-            current_brace += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            let open_braces =
+                i32::try_from(line.matches('{').count()).expect("line open-brace count fits i32");
+            let close_braces =
+                i32::try_from(line.matches('}').count()).expect("line close-brace count fits i32");
+            current_brace += open_braces - close_braces;
 
             if let Some(entry_depth) = brace_at_test_entry {
                 if current_brace <= entry_depth {
@@ -238,8 +242,8 @@ fn health_rs_post_fix_does_not_log_token_prefix() {
 
 #[test]
 fn health_rs_keeps_auth_scheme_static_log() {
-    // Pin (a) positive: the post-fix health.rs:236 logs
-    // `auth_scheme = "Bearer"` (a static literal). Verify the
+    // Pin (a) positive: the post-fix health.rs logs
+    // `auth_mode = "BearerToken"` (a static literal). Verify the
     // documented post-fix line is present so a future revert
     // would trip this test.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -247,8 +251,8 @@ fn health_rs_keeps_auth_scheme_static_log() {
         .expect("read src/grpc/health.rs");
 
     assert!(
-        health_rs.contains("auth_scheme = \"Bearer\""),
-        "post-fix health.rs MUST keep the static-literal auth_scheme log; \
+        health_rs.contains("auth_mode = \"BearerToken\""),
+        "post-fix health.rs MUST keep the static-literal auth_mode log; \
          a regression that altered it (e.g. to log token bytes) would trip",
     );
 }
