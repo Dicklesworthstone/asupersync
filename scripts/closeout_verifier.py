@@ -276,7 +276,22 @@ def reservation_released(row_value: dict[str, Any]) -> bool:
     return bool(text_field(row_value, "released_ts", "released_at"))
 
 
-def verify_reservations(closeout: dict[str, Any], agent_mail: dict[str, Any]) -> dict[str, Any]:
+def reservation_active(row_value: dict[str, Any], generated_at: str) -> bool:
+    if reservation_released(row_value):
+        return False
+    expires_ts = text_field(row_value, "expires_ts", "expires_at")
+    if not expires_ts:
+        return True
+    expires_at = parse_timestamp(expires_ts)
+    generated = parse_timestamp(generated_at)
+    return expires_at is None or generated is None or expires_at > generated
+
+
+def verify_reservations(
+    closeout: dict[str, Any],
+    agent_mail: dict[str, Any],
+    generated_at: str,
+) -> dict[str, Any]:
     agent = text_field(closeout, "agent")
     reservations = rows_from(agent_mail, "reservations", "file_reservations")
     owned = [
@@ -284,7 +299,7 @@ def verify_reservations(closeout: dict[str, Any], agent_mail: dict[str, Any]) ->
         for item in reservations
         if not agent or reservation_owner(item) == agent
     ]
-    active = [item for item in owned if not reservation_released(item)]
+    active = [item for item in owned if reservation_active(item, generated_at)]
     status = "pass" if not active else "fail"
     return row(
         "reservations_released",
@@ -353,7 +368,7 @@ def build_report(source: dict[str, Any], *, generated_at: str, fixture_path: str
         verify_master_synced(closeout, git),
         *verify_bead_state(closeout, beads),
         verify_closeout_mail(closeout, agent_mail),
-        verify_reservations(closeout, agent_mail),
+        verify_reservations(closeout, agent_mail, generated_at),
         verify_validation_reported(closeout, agent_mail),
     ]
     return {

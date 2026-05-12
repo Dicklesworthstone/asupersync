@@ -159,6 +159,30 @@ fn active_reservation_matches_full_output_golden() {
 }
 
 #[test]
+fn expired_reservation_does_not_block_closeout() {
+    let report = report("expired_reservation_release.json");
+    let reservations = row(&report, "reservations_released");
+
+    assert_eq!(report["overall_status"].as_str(), Some("pass"));
+    assert_eq!(reservations["status"].as_str(), Some("pass"));
+    assert!(
+        reservations["evidence"]["active_reservations"]
+            .as_array()
+            .expect("active_reservations array")
+            .is_empty(),
+        "expired leases should not be reported as active closeout reservations"
+    );
+}
+
+#[test]
+fn expired_reservation_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "expired_reservation_release.json",
+        "expired_reservation_release_expected.json",
+    );
+}
+
+#[test]
 fn missing_master_sync_is_reported_with_git_command_evidence() {
     let report = report("missing_master_sync.json");
     let master = row(&report, "master_synced");
