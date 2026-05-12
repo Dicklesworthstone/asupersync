@@ -218,3 +218,54 @@ fn helper_declares_no_mutating_side_effects() {
         0
     );
 }
+
+#[test]
+fn live_probe_preserves_unstaged_porcelain_leading_status_space() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import reservation_aware_work_finder as finder
+
+status, raw = finder.run_text(
+    repo,
+    [
+        "python3",
+        "-c",
+        "import sys; sys.stdout.write(' M fuzz/Cargo.toml\\n')",
+    ],
+    2.0,
+)
+print(json.dumps({
+    "entries": finder.parse_status_lines(raw),
+    "raw": raw,
+    "status": status,
+}, sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run live probe whitespace check");
+    assert!(
+        output.status.success(),
+        "python whitespace probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value = serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    assert_eq!(receipt["status"].as_str(), Some("ok"));
+    assert_eq!(receipt["raw"].as_str(), Some(" M fuzz/Cargo.toml"));
+    assert_eq!(receipt["entries"][0]["status"].as_str(), Some(" M"));
+    assert_eq!(
+        receipt["entries"][0]["path"].as_str(),
+        Some("fuzz/Cargo.toml")
+    );
+}
