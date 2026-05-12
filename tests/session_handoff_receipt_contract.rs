@@ -187,6 +187,34 @@ fn tracker_reservation_conflict_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn tracker_directory_reservation_conflict_waits_before_claiming() {
+    let receipt = receipt_json("tracker_directory_reservation_conflict.json");
+    assert_eq!(next_action_category(&receipt), "wait-for-reservation");
+    assert_eq!(
+        receipt["next_action"]["path_pattern"].as_str(),
+        Some(".beads")
+    );
+    assert_eq!(receipt["next_action"]["holder"].as_str(), Some("BlackDove"));
+    let conflicts = receipt["reservation_conflicts"]
+        .as_array()
+        .expect("reservation_conflicts must be array");
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(
+        conflicts[0]["classification"].as_str(),
+        Some("tracker-conflict")
+    );
+}
+
+#[test]
+fn tracker_directory_reservation_conflict_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "tracker_directory_reservation_conflict.json",
+        "tracker_directory_reservation_conflict_expected.json",
+        "tracker-directory-reservation handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn unavailable_agent_mail_is_explicitly_reported() {
     let receipt = receipt_json("no_agent_mail.json");
     assert_eq!(next_action_category(&receipt), "blocked");

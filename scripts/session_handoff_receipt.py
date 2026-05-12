@@ -9,6 +9,7 @@ without requiring a live Agent Mail server or rch daemon.
 
 import argparse
 import datetime as dt
+import fnmatch
 import json
 import subprocess
 import sys
@@ -26,6 +27,7 @@ NEXT_ACTIONS = {
     "blocked",
 }
 TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db"}
+TRACKER_DIRS = {".beads"}
 
 
 def utc_now() -> str:
@@ -35,6 +37,31 @@ def utc_now() -> str:
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def normalize_repo_path(path: str) -> str:
+    normalized = path.replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.rstrip("/")
+
+
+def paths_overlap(left: str, right: str) -> bool:
+    left = normalize_repo_path(left)
+    right = normalize_repo_path(right)
+    if not left or not right:
+        return False
+    if left == right or fnmatch.fnmatchcase(left, right) or fnmatch.fnmatchcase(right, left):
+        return True
+    left_is_glob = any(char in left for char in "*?[")
+    right_is_glob = any(char in right for char in "*?[")
+    return (not left_is_glob and right.startswith(f"{left}/")) or (
+        not right_is_glob and left.startswith(f"{right}/")
+    )
+
+
+def tracker_reservation_path(pattern: str) -> bool:
+    return any(paths_overlap(pattern, path) for path in TRACKER_PATHS | TRACKER_DIRS)
 
 
 def run_json(repo_path: Path, command: list[str], timeout: float) -> tuple[str, Any]:
@@ -310,7 +337,7 @@ def classify_reservations(agent: str, snapshot: dict[str, Any], now: str) -> lis
             classification = "unknown-owner"
         elif holder == agent:
             classification = "owned-active"
-        elif pattern in TRACKER_PATHS:
+        elif tracker_reservation_path(pattern):
             classification = "tracker-conflict"
         else:
             classification = "peer-active"
