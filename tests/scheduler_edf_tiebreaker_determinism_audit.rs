@@ -75,7 +75,7 @@
 //!     on the wraparound branch),
 //!   - removed the doc comment (operators rely on the
 //!     documented contract for predictable scheduling),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
