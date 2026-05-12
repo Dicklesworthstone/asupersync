@@ -1,3 +1,5 @@
+//! Contract test for mock-code-finder stale audit normalization artifacts.
+
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
