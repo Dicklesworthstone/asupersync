@@ -81,19 +81,19 @@ fn parse_compile_target(line: &str) -> (String, String) {
     let crate_start = line
         .find('`')
         .unwrap_or_else(|| panic!("compile line missing crate start: {line}"));
-    let crate_end = line[crate_start + 1..]
-        .find('`')
-        .map(|offset| crate_start + 1 + offset)
-        .unwrap_or_else(|| panic!("compile line missing crate end: {line}"));
+    let crate_end = line[crate_start + 1..].find('`').map_or_else(
+        || panic!("compile line missing crate end: {line}"),
+        |offset| crate_start + 1 + offset,
+    );
     let crate_name = line[crate_start + 1..crate_end].to_string();
-    let target_start = line[crate_end..]
-        .find('(')
-        .map(|offset| crate_end + offset + 1)
-        .unwrap_or_else(|| panic!("compile line missing target start: {line}"));
-    let target_end = line[target_start..]
-        .find(')')
-        .map(|offset| target_start + offset)
-        .unwrap_or_else(|| panic!("compile line missing target end: {line}"));
+    let target_start = line[crate_end..].find('(').map_or_else(
+        || panic!("compile line missing target start: {line}"),
+        |offset| crate_end + offset + 1,
+    );
+    let target_end = line[target_start..].find(')').map_or_else(
+        || panic!("compile line missing target end: {line}"),
+        |offset| target_start + offset,
+    );
     (crate_name, line[target_start..target_end].to_string())
 }
 
@@ -110,18 +110,18 @@ fn parse_code_snippet(
         .lines()
         .find(|line| line.starts_with("error"))
         .unwrap_or_else(|| panic!("fixture missing error line: {snippet}"));
-    let summary = error_line
-        .split_once(": ")
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or_else(|| panic!("error line missing summary: {error_line}"));
+    let summary = error_line.split_once(": ").map_or_else(
+        || panic!("error line missing summary: {error_line}"),
+        |(_, rest)| rest.to_string(),
+    );
     let location_line = snippet
         .lines()
         .find(|line| line.contains("-->"))
         .unwrap_or_else(|| panic!("fixture missing location line: {snippet}"));
-    let location = location_line
-        .split_once("-->")
-        .map(|(_, rest)| rest.trim())
-        .unwrap_or_else(|| panic!("location line missing arrow: {location_line}"));
+    let location = location_line.split_once("-->").map_or_else(
+        || panic!("location line missing arrow: {location_line}"),
+        |(_, rest)| rest.trim(),
+    );
     let mut location_parts = location.split(':');
     let file = location_parts
         .next()

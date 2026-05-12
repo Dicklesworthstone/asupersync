@@ -173,7 +173,7 @@
 //!     frames; the stack would grow monotonically and
 //!     Cx::current() would return stale Cxs from prior
 //!     scopes),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -233,8 +233,7 @@ fn cx_clone_increments_all_three_arc_refcounts() {
     let start = source.find(impl_marker).expect("Cx Clone impl");
     let next_impl = source[start + impl_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + impl_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + impl_marker.len() + o);
     let body = &source[start..next_impl];
 
     assert!(
@@ -514,6 +513,10 @@ impl MockCx {
         self.inner.lock().unwrap().region_id
     }
 
+    fn cancel_requested(&self) -> bool {
+        self.inner.lock().unwrap().cancel_requested
+    }
+
     fn arc_strong_count(&self) -> usize {
         Arc::strong_count(&self.inner)
     }
@@ -535,6 +538,8 @@ fn child_cx_drop_does_not_invalidate_parent_cx_inner() {
 
     assert_eq!(parent.region_id(), 1);
     assert_eq!(child.region_id(), 2);
+    assert!(!parent.cancel_requested(), "parent starts uncancelled");
+    assert!(!child.cancel_requested(), "child starts uncancelled");
     assert_eq!(parent.arc_strong_count(), 1, "parent has fresh Arc");
     assert_eq!(child.arc_strong_count(), 1, "child has fresh Arc");
 
