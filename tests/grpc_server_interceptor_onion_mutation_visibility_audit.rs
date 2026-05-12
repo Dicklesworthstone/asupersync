@@ -282,9 +282,9 @@ fn three_layer_onion_request_mutations_propagate_innerward() {
     }
     impl Interceptor for StampLayer {
         fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
-            for marker in &["x-outer-mark", "x-middle-mark"] {
-                if request.metadata().get(*marker).is_some() {
-                    self.observed_log.lock().unwrap().push(*marker);
+            for &marker in &["x-outer-mark", "x-middle-mark"] {
+                if request.metadata().get(marker).is_some() {
+                    self.observed_log.lock().unwrap().push(marker);
                 }
             }
             let stamp = match self.name {

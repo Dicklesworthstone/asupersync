@@ -35,12 +35,12 @@
 //!   What asupersync provides for fire-and-forget:
 //!
 //!   1. **`TaskHandle` drop without await** (detached at
-//:      the HANDLE level, NOT the region level): the task
+//!      the HANDLE level, NOT the region level): the task
 //!      continues running but remains bound to its parent
 //!      region. When the region closes, the task is
 //!      cancelled.
 //!      - Pinned in
-//:        tests/runtime_join_handle_drop_lifecycle_audit.rs.
+//!        tests/runtime_join_handle_drop_lifecycle_audit.rs.
 //!
 //!   2. **Long-lived top-level tasks**: spawn at the root
 //!      region; the root region only closes when the
@@ -53,7 +53,7 @@
 //!   - **Orphan tasks with no region** — would violate
 //!     "every task owned by exactly one region".
 //!   - **Outlive-parent-region detach** — would violate
-//:     "region close = quiescence".
+//!     "region close = quiescence".
 //!   - **Tokio-style `task::spawn` returning ()** — every
 //!     spawned task in asupersync produces a TaskHandle
 //!     bound to a region.
@@ -68,7 +68,7 @@
 //!      Every spawn anchors to a region.
 //!
 //!   2. **`create_task_record` adds the task to the
-//:      regions task_ids list** (cx/scope.rs):
+//!      regions task_ids list** (cx/scope.rs):
 //!      ```ignore
 //!      if let Some(region) = state.region(self.region) {
 //!          region.add_task(task_id)?;
@@ -84,16 +84,16 @@
 //!      task escapes region close.
 //!
 //!   4. **`can_region_finalize` checks all tasks
-//:      terminal** (state.rs:2785): `all_tasks_done = ...
-//:      task.is_terminal()`. The region cant close until
+//!      terminal** (state.rs:2785): `all_tasks_done = ...
+//!      task.is_terminal()`. The region cant close until
 //!      every owned task reaches a terminal state.
 //!      Detached-outlive-parent would be IMPOSSIBLE under
-//:      this contract.
+//!      this contract.
 //!
 //! Verdict: **SOUND BY DESIGN**. The operators "detached"
 //! framing maps onto a non-existent API. Adding one would
 //! violate two non-negotiable structured-concurrency
-//: invariants from AGENTS.md.
+//! invariants from AGENTS.md.
 //!
 //! No bead filed. The "missing feature" is INTENTIONAL —
 //! the audit pins the structural enforcement that prevents
@@ -107,10 +107,10 @@
 //! A regression that:
 //!   - added `Scope::spawn_detached(...)` returning a unit
 //!     handle that doesnt anchor to a region (would break
-//:     "every task owned by one region" invariant),
+//!     "every task owned by one region" invariant),
 //!   - added `TaskHandle::detach()` that orphans the task
 //!     (would conflate handle-drop semantics with region-
-//:     escape; tokio-style API would conflict with
+//!     escape; tokio-style API would conflict with
 //!     structured concurrency),
 //!   - changed Scope::spawn to skip region.add_task on
 //!     some opt-in flag (silent escape from region tree),
@@ -119,8 +119,8 @@
 //!     live tasks — orphan pathway),
 //!   - introduced a "global detach pool" that holds tasks
 //!     outside any region (would violate the region-tree
-//:     invariant entirely),
-//! would all be caught by the structural pins below.
+//!     invariant entirely),
+//!     would all be caught by the structural pins below.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
