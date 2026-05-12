@@ -104,7 +104,7 @@
 //!   - made the obligation ledger consult `mask_depth`
 //!     when issuing or committing,
 //!   - introduced a second ledger that mask flips between,
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -422,6 +422,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 enum ObligationStatus {
     Issued,
     Committed,
+    #[expect(dead_code, reason = "mock mirrors abort-capable obligation ledger")]
     Aborted,
 }
 
