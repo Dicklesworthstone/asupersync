@@ -106,7 +106,7 @@
 //!     regions),
 //!   - documented Cx::scope as creating a new region (lying
 //:     to users about Phase-0 semantics),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
@@ -139,11 +139,13 @@ fn cx_scope_is_synchronous_returns_scope_static() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("crate::cx::Scope::new(self.region_id(), budget)"),
+        body.contains("crate::cx::Scope::new_with_capability_budget(")
+            && body.contains("self.region_id(),")
+            && body.contains("self.capability_budget(),"),
         "REGRESSION: Cx::scope no longer constructs Scope::\
-         new with the CURRENT region_id. If it now allocates \
-         a new region, the lightweight-handle purpose is \
-         broken.",
+         new_with_capability_budget with the CURRENT region_id. \
+         If it now allocates a new region, the lightweight-\
+         handle purpose is broken.",
     );
 }
 
@@ -220,29 +222,37 @@ fn scope_region_is_async_returns_result_outcome() {
 
 #[test]
 fn scope_region_with_budget_calls_create_child_region_for_arena_alloc() {
-    // Pin (link 2 invariant): Scope::region (via
-    // region_with_budget) calls state.create_child_region
+    // Pin (link 2 invariant): Scope::region (via the
+    // region_with_budget -> region_with_budget_and_priority
+    // -> region_with_child_admission chain) calls
+    // state.create_child_region_with_capability_budget_and_priority
     // — increases the arena by 1. This is the structural
     // distinction from Cx::scope.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 4000).min(source.len());
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
+    let window_end = (start + 12000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("state.create_child_region(self.region, budget)?"),
-        "REGRESSION: Scope::region_with_budget no longer \
-         calls create_child_region. Either the region is \
-         not allocated (scope contract broken) or the \
-         allocation path is silently bypassed.",
+        body.contains("state.create_child_region_with_capability_budget_and_priority(")
+            && body.contains("self.region,")
+            && body.contains("admission.budget,")
+            && body.contains("admission.capability_budget,")
+            && body.contains("admission.priority,"),
+        "REGRESSION: Scope::region child-admission path no \
+         longer calls create_child_region_with_capability_\
+         budget_and_priority. Either the region is not \
+         allocated (scope contract broken) or the allocation \
+         path is silently bypassed.",
     );
 }
 
@@ -254,29 +264,31 @@ fn scope_region_drives_user_closure_via_region_runner_for_quiescence() {
     // RegionRunner equivalent.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
+    let window_end = (start + 12000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
     assert!(
         body.contains("let runner = RegionRunner {"),
-        "REGRESSION: region_with_budget no longer constructs \
-         a RegionRunner. The drop-cancels-region semantic is \
-         lost — region future drops would leak the region.",
+        "REGRESSION: region_with_child_admission no longer \
+         constructs a RegionRunner. The drop-cancels-region \
+         semantic is lost — region future drops would leak \
+         the region.",
     );
 
     assert!(
         body.contains("runner.await"),
-        "REGRESSION: region_with_budget no longer awaits the \
-         RegionRunner. The structured-concurrency wait-for-\
-         children contract is broken.",
+        "REGRESSION: region_with_child_admission no longer \
+         awaits the RegionRunner. The structured-concurrency \
+         wait-for-children contract is broken.",
     );
 }
 
@@ -288,32 +300,33 @@ fn scope_region_advances_state_after_user_closure_completes() {
     // Closed. Cx::scope has no such transition.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
+    let window_end = (start + 12000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
     assert!(
         body.contains("state.advance_region_state(child_region);"),
-        "REGRESSION: region_with_budget no longer advances \
-         the region state after closure completion. The \
-         region stays in transitional state — \
+        "REGRESSION: region_with_child_admission no longer \
+         advances the region state after closure completion. \
+         The region stays in transitional state — \
          close-quiescence broken.",
     );
 
     // The region close awaits quiescence via RegionCloseFuture.
     assert!(
         body.contains("RegionCloseFuture { state: notify }.await;"),
-        "REGRESSION: region_with_budget no longer awaits \
-         RegionCloseFuture. The await would return before \
-         the region actually quiesced — visible regression \
-         for callers expecting children to complete.",
+        "REGRESSION: region_with_child_admission no longer \
+         awaits RegionCloseFuture. The await would return \
+         before the region actually quiesced — visible \
+         regression for callers expecting children to complete.",
     );
 }
 
@@ -325,14 +338,15 @@ fn scope_region_outcome_drives_post_close_action() {
     // Cx::scope has no such outcome handling.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
+    let window_end = (start + 12000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -340,10 +354,10 @@ fn scope_region_outcome_drives_post_close_action() {
         body.contains("Outcome::Ok(_) => {")
             && body.contains("Outcome::Cancelled(reason) => {")
             && body.contains("Outcome::Err(_) | Outcome::Panicked(_) => {"),
-        "REGRESSION: region_with_budget no longer dispatches \
-         on the outcome variants. The cleanup strategy is \
-         conflated — error/panic paths get the same \
-         treatment as Ok.",
+        "REGRESSION: region_with_child_admission no longer \
+         dispatches on the outcome variants. The cleanup \
+         strategy is conflated — error/panic paths get the \
+         same treatment as Ok.",
     );
 }
 

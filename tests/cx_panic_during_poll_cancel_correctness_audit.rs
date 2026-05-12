@@ -88,7 +88,7 @@
 //!      ready when the panicked task transitioned to
 //!      terminal. They're scheduled via `inject_ready_uncounted
 //!      + wake_many` — region cleanup proceeds even if the
-//!      task itself crashed.
+//!        task itself crashed.
 //!
 //!   6. **Worker thread continues** (three_lane.rs:4956): the
 //!      Err arm sets `guard.completed = true`, clears the
@@ -145,7 +145,7 @@
 //!     signals — subtle correctness drift),
 //!   - removed the TaskExecutionGuard safety net (escaping
 //!     panics would leave the task in non-terminal state),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 //!
 //! Cross-reference: this audit complements
 //! tests/scheduler_panic_in_task_isolation_audit.rs (which
@@ -194,8 +194,7 @@ fn worker_panic_path_marks_outcome_panicked_not_cancelled() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -256,8 +255,7 @@ fn worker_panic_path_wakes_dependents_so_parent_observes_panicked() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -290,8 +288,7 @@ fn worker_panic_path_drains_finalizers_for_region_cleanup() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -327,8 +324,7 @@ fn worker_panic_path_does_not_propagate_panic_via_resume_unwind() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -364,8 +360,7 @@ fn worker_panic_disables_credit_adaptive_epoch_to_protect_policy_learning() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -418,8 +413,7 @@ fn panic_payload_carries_message_for_parent_join_observation() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -448,8 +442,7 @@ fn worker_panic_path_releases_state_lock_with_drop_state() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
