@@ -102,8 +102,8 @@
 //!   - changed timed_count to fetch_add(1) AFTER the push
 //!     (would let workers skip a non-empty queue between push
 //!     and counter increment),
-//! would be caught by either the structural or behavioral
-//! pins below.
+//!     would be caught by either the structural or behavioral
+//!     pins below.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
@@ -162,8 +162,7 @@ fn timed_task_ord_impl_reverses_deadline_for_min_heap() {
     let start = source.find(fn_marker).expect("TimedTask Ord impl");
     let next_impl_offset = source[start + fn_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + fn_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + fn_marker.len() + o);
     let body = &source[start..next_impl_offset];
 
     // Multi-line: the reverse `other.deadline.cmp(&self.deadline)`
@@ -311,8 +310,7 @@ fn per_worker_timed_lane_uses_same_reverse_ord_pattern() {
     let start = source.find(fn_marker).expect("TimedEntry Ord impl");
     let next_impl_offset = source[start + fn_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + fn_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + fn_marker.len() + o);
     let body = &source[start..next_impl_offset];
 
     let has_reverse = body.contains("other.deadline.cmp(&self.deadline)")

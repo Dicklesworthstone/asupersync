@@ -229,7 +229,7 @@ fn trailing_metadata_in_streaming_path_round_trips_identically() {
     let decoded = decode_trailers(&unary[FRAME_HEADER_SIZE..]).expect("decode");
     let retry_after = decoded.metadata.get("retry-after").and_then(|v| match v {
         MetadataValue::Ascii(s) => Some(s.as_str()),
-        _ => None,
+        MetadataValue::Binary(_) => None,
     });
     assert_eq!(retry_after, Some("3"));
 }
