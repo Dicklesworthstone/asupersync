@@ -265,8 +265,29 @@ def dirty_entries(source: dict[str, Any]) -> list[dict[str, str]]:
     return entries
 
 
+def normalize_path(path: str) -> str:
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.rstrip("/")
+
+
+def has_glob_magic(path: str) -> bool:
+    return any(char in path for char in "*?[")
+
+
 def path_matches(pattern: str, path: str) -> bool:
-    return pattern == path or fnmatch.fnmatchcase(path, pattern) or fnmatch.fnmatchcase(pattern, path)
+    pattern = normalize_path(pattern)
+    path = normalize_path(path)
+    if not pattern or not path:
+        return False
+    if pattern == path or fnmatch.fnmatchcase(path, pattern) or fnmatch.fnmatchcase(pattern, path):
+        return True
+    pattern_is_glob = has_glob_magic(pattern)
+    path_is_glob = has_glob_magic(path)
+    return (not pattern_is_glob and path.startswith(f"{pattern}/")) or (
+        not path_is_glob and pattern.startswith(f"{path}/")
+    )
 
 
 def dirty_overlaps(touched_files: list[str], entries: list[dict[str, str]]) -> list[dict[str, str]]:

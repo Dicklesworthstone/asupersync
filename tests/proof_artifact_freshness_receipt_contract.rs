@@ -4,8 +4,9 @@
 
 use serde_json::Value;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const SCRIPT_PATH: &str = "scripts/proof_artifact_freshness_receipt.py";
 const FIXTURE_ROOT: &str = "tests/fixtures/proof_artifact_freshness_receipt";
@@ -54,8 +55,9 @@ fn fixture_text(fixture: &str) -> String {
 }
 
 fn first_row(receipt: &Value) -> &Value {
-    receipt["rows"]
-        .as_array()
+    receipt
+        .get("rows")
+        .and_then(Value::as_array)
         .expect("rows must be array")
         .first()
         .expect("fixture should have at least one row")
@@ -123,12 +125,23 @@ status, raw = module.run_text(pathlib.Path("."), ["git", "status", "--porcelain=
 entries = module.parse_status_lines(raw if status == "ok" else "")
 print(json.dumps({"status": status, "raw": raw, "entries": entries}))
 "#;
-    let output = Command::new("python3")
-        .arg("-c")
-        .arg(script)
+    let mut child = Command::new("python3")
+        .arg("-")
         .arg(repo_root().join(SCRIPT_PATH))
         .current_dir(repo_root())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn proof-artifact live probe parser smoke");
+    child
+        .stdin
+        .as_mut()
+        .expect("parser smoke stdin")
+        .write_all(script.as_bytes())
+        .expect("write parser smoke script");
+    let output = child
+        .wait_with_output()
         .expect("run proof-artifact live probe parser smoke");
     assert!(
         output.status.success(),
@@ -236,6 +249,36 @@ fn dirty_surface_overlap_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "dirty_surface_overlap.json",
         "dirty_surface_overlap_expected.json",
+    );
+}
+
+#[test]
+fn directory_touched_surface_overlap_requires_rerun_for_dirty_child() {
+    let receipt = receipt_json("directory_surface_overlap.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("dirty-surface-overlap")
+    );
+    assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+    assert_eq!(row["touched_files"][0].as_str(), Some("tests/proof_status"));
+    assert_eq!(
+        row["evidence"]["dirty_overlaps"][0]["path"].as_str(),
+        Some("tests/proof_status/snapshot.json")
+    );
+    assert_eq!(
+        row["evidence"]["dirty_overlaps"][0]["owner"].as_str(),
+        Some("CoralGorge")
+    );
+    assert_eq!(receipt["summary"]["rerun_required"].as_u64(), Some(1));
+}
+
+#[test]
+fn directory_surface_overlap_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "directory_surface_overlap.json",
+        "directory_surface_overlap_expected.json",
     );
 }
 
