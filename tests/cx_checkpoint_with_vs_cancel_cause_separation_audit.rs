@@ -115,7 +115,7 @@
 //!     leaking into cancel_reason.message),
 //!   - lost the CancelReason.cause chain field,
 //!   - lost the CancelReason.message field,
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
