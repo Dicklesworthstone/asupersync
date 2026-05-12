@@ -37,7 +37,7 @@
 //!   * flipped the `reflection: None` default to `Some(...)`
 //!   * removed the Locked default in `ReflectionService::new()`
 //!   * removed the recursion guard
-//! would force an intentional re-baseline.
+//!     would force an intentional re-baseline.
 
 use asupersync::grpc::{NamedService, ReflectionService, ServerBuilder};
 
