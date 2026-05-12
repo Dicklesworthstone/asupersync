@@ -65,15 +65,14 @@
 //!
 //!   4. **Bounded race window**: between the Acquire load
 //!      and the early Ok return, the fast path does only:
-//!        a. Read budget for exhaustion check (Copy).
-//!        b. Two Relaxed atomic ops (accounting).
-//!        c. Return Ok.
+//!      read budget for exhaustion check (Copy), perform two
+//!      Relaxed atomic ops for accounting, and return Ok.
 //!      The window is sub-microsecond. A cancel arriving
 //!      in this window is observed by the NEXT checkpoint
 //!      (not THIS one).
 //!
 //!   5. **Slow-path write lock serializes concurrent
-//:      operations**: when checkpoint enters the slow path,
+//!      operations**: when checkpoint enters the slow path,
 //!      it acquires `self.inner.write()`. The cancel
 //!      publisher also acquires `self.inner.write()` in
 //!      request_cancel_with_budget. parking_lot's write
@@ -87,8 +86,9 @@
 //!      Release-Acquire pair does NOT make checkpoint
 //!      observe a cancel SET DURING the fast-path window.
 //!      That would require either:
-//:        - A blocking primitive (would slow the hot path).
+//!        - A blocking primitive (would slow the hot path).
 //!        - A polling loop in checkpoint (CPU waste).
+//!
 //!      asupersync chooses the cooperative model: checkpoints
 //!      fire frequently; one-checkpoint delay is acceptable.
 //!
@@ -112,7 +112,7 @@
 //! For STRICT same-call observation, callers can:
 //!   1. Acquire the inner write lock manually before
 //!      checkpoint (would force serialization with the
-//:      publisher).
+//!      publisher).
 //!   2. Use yield_now() between checkpoints in tight loops
 //!      (gives the publisher a chance to grab the lock).
 //!   3. Rely on the cancel waker for parked-task wakeup.
@@ -123,7 +123,7 @@
 //!     entirely — concurrent cancel observation broken),
 //!   - replaced the Acquire load with Relaxed (cross-thread
 //!     visibility no longer guaranteed — observation may
-//:     be permanent miss, not just one-cycle delay),
+//!     be permanent miss, not just one-cycle delay),
 //!   - replaced the Release store with Relaxed (publisher
 //!     may not see the cancel published; same effect as
 //!     above),
@@ -131,13 +131,13 @@
 //!     (concurrent publishes during slow path could race
 //!     and lose updates),
 //!   - introduced a "polling loop" in checkpoint that
-//:     spin-waits for cancel observation (CPU waste; would
+//!     spin-waits for cancel observation (CPU waste; would
 //!     also block other progress on the worker),
 //!   - lost the cancel waker for parked tasks (parked
 //!     tasks would never observe cancel — full
 //!     missed-cancel pathway),
-//! would all be caught by the structural pins below or
-//! by behavioral verification.
+//!     would all be caught by the structural pins below or
+//!     by behavioral verification.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -150,6 +150,14 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+fn source_window(source: &str, start: usize, len: usize) -> &str {
+    let mut end = start.saturating_add(len).min(source.len());
+    while !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    &source[start..end]
+}
+
 #[test]
 fn checkpoint_fast_path_uses_acquire_load_for_cross_thread_visibility() {
     // Pin (link 3): the fast-path cancel observation uses
@@ -160,14 +168,7 @@ fn checkpoint_fast_path_uses_acquire_load_for_cross_thread_visibility() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 4000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 4000);
 
     assert!(
         body.contains("guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire)"),
@@ -221,14 +222,7 @@ fn checkpoint_slow_path_acquires_write_lock_for_serialization() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 8000);
 
     assert!(
         body.contains("let mut inner = self.inner.write();"),
@@ -250,14 +244,7 @@ fn fast_path_keeps_window_minimal_only_relaxed_accounting_after_acquire() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 4000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 4000);
 
     // The accounting is via Relaxed atomic ops — not a
     // write lock.
@@ -299,14 +286,7 @@ fn cancel_publisher_acquires_inner_write_for_cancel_state_publish() {
     let start = source
         .find(fn_marker)
         .expect("request_cancel_with_budget fn");
-    let window_end = (start + 4000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 4000);
 
     assert!(
         body.contains("let mut guard = inner.write();"),
@@ -327,14 +307,7 @@ fn no_polling_loop_in_checkpoint_for_synchronous_cancel_wait() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 8000);
 
     let suspect_polling = [
         "while !cancelled {",
@@ -409,14 +382,7 @@ fn slow_path_re_reads_cancel_requested_under_write_lock() {
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
     let start = source.find(fn_marker).expect("checkpoint fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 8000);
 
     assert!(
         body.contains("inner.cancel_requested,"),
