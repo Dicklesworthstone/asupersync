@@ -128,7 +128,7 @@ fn response_stream_cancel_is_abrupt_discards_buffered_items() {
             assert_eq!(s.code(), Code::Cancelled);
             assert!(s.message().contains("abrupt cancel"));
         }
-        other => panic!("abrupt cancel must surface BEFORE any buffered item — got {other:?}",),
+        other => panic!("abrupt cancel must surface BEFORE any buffered item — got {other:?}"),
     }
 }
 

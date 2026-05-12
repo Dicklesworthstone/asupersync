@@ -235,9 +235,12 @@ fn handler_timeout_enforcement_is_handler_cooperative() {
     assert!(metadata.insert("grpc-timeout", "1m")); // 1 ms
     let cx = CallContext::from_metadata_at(metadata, None, None, now);
     let deadline = cx.deadline().unwrap();
+    let before_deadline = deadline
+        .checked_sub(Duration::from_micros(1))
+        .expect("1ms timeout deadline is after the test instant");
 
     // Pre-deadline → not expired.
-    assert!(!cx.is_expired_at(deadline - Duration::from_micros(1)));
+    assert!(!cx.is_expired_at(before_deadline));
     // At or past deadline → expired.
     assert!(cx.is_expired_at(deadline));
     assert!(cx.is_expired_at(deadline + Duration::from_secs(1)));
@@ -245,10 +248,7 @@ fn handler_timeout_enforcement_is_handler_cooperative() {
     // remaining_at is None for expired deadlines.
     assert!(cx.remaining_at(deadline + Duration::from_secs(1)).is_none());
     // Pre-deadline remaining is Some.
-    assert!(
-        cx.remaining_at(deadline - Duration::from_micros(1))
-            .is_some()
-    );
+    assert!(cx.remaining_at(before_deadline).is_some());
 }
 
 #[test]

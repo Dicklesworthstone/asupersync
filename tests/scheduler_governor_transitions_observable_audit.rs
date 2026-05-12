@@ -73,7 +73,7 @@
 //!     (would let real deadlocks pass without forcing
 //!     drain_obligations — both a correctness AND
 //!     observability regression),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -415,20 +415,19 @@ fn observability_gap_drain_phase_stalled_known_limitation() {
         || body.contains("\"stalled\"")
         || body.contains("\"panic\"");
 
-    if stalled_label_appeared {
-        // Promote: the gap was filled. Update the audit pin to
-        // verify the new wiring (e.g., that stall_detected from
-        // the verdict propagates to this string).
-        panic!(
-            "AUDIT GATE: a stalled-specific action label \
-             appeared in emit_scheduler_evidence_for_suggestion. \
-             The observability gap documented in this audit \
-             test has been filled — UPDATE THIS PIN to verify \
-             the new wiring (verdict.stall_detected → \
-             distinct action label → /metrics counter). The \
-             gap was: DrainPhase::Stalled was previously \
-             collapsed into 'drain_obligations'. New body:\n\
-             {body}"
-        );
-    }
+    // Promote: the gap was filled. Update the audit pin to
+    // verify the new wiring (e.g., that stall_detected from
+    // the verdict propagates to this string).
+    assert!(
+        !stalled_label_appeared,
+        "AUDIT GATE: a stalled-specific action label \
+         appeared in emit_scheduler_evidence_for_suggestion. \
+         The observability gap documented in this audit \
+         test has been filled — UPDATE THIS PIN to verify \
+         the new wiring (verdict.stall_detected → \
+         distinct action label → /metrics counter). The \
+         gap was: DrainPhase::Stalled was previously \
+         collapsed into 'drain_obligations'. New body:\n\
+         {body}"
+    );
 }
