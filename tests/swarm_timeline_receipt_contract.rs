@@ -53,6 +53,38 @@ fn receipt_json(fixture: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
 }
 
+fn receipt_json_from_value(fixture: &Value) -> Value {
+    let fixture_dir = repo_root().join("target/swarm_timeline_receipt_contract");
+    fs::create_dir_all(&fixture_dir).expect("create generated fixture directory");
+    let fixture_path = fixture_dir.join("later_ship_ordering.json");
+    let fixture_body = serde_json::to_vec_pretty(fixture).expect("serialize generated fixture");
+    fs::write(&fixture_path, fixture_body).expect("write generated fixture");
+
+    let output = Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--fixture")
+        .arg(&fixture_path)
+        .arg("--repo-path")
+        .arg(repo_root())
+        .arg("--agent")
+        .arg("CopperSpring")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--output")
+        .arg("json")
+        .current_dir(repo_root())
+        .output()
+        .expect("run swarm timeline receipt with generated fixture");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
 fn receipt_text(fixture: &str) -> String {
     let output = run_receipt(fixture);
     assert!(
@@ -78,7 +110,7 @@ fn assert_output_matches_golden(fixture: &str, expected_fixture: &str, drift_mes
     assert_eq!(actual, expected, "{drift_message}");
 }
 
-fn timeline<'a>(receipt: &'a Value) -> &'a Vec<Value> {
+fn timeline(receipt: &Value) -> &Vec<Value> {
     receipt["timeline"]
         .as_array()
         .expect("timeline must be an array")
@@ -173,6 +205,94 @@ fn unresolved_blocker_and_active_claim_cues_are_emitted() {
         cue["kind"].as_str() == Some("unresolved-blocker")
             && cue["bead_id"].as_str() == Some("asupersync-vddieh")
     }));
+}
+
+#[test]
+fn unresolved_cues_require_ship_after_claim_or_blocker() {
+    let fixture = serde_json::json!({
+        "agent_mail": {
+            "messages": [
+                {
+                    "id": 20,
+                    "from": "CopperSpring",
+                    "thread_id": "asupersync-order1",
+                    "subject": "[asupersync-order1] Starting ordered receipt",
+                    "created_ts": "2026-05-08T05:20:00Z",
+                    "body_md": "Claimed asupersync-order1."
+                },
+                {
+                    "id": 21,
+                    "from": "CopperSpring",
+                    "thread_id": "asupersync-order1",
+                    "subject": "[asupersync-order1] Claiming follow-up after prior commit",
+                    "created_ts": "2026-05-08T05:40:00Z",
+                    "body_md": "Claimed asupersync-order1 after the earlier commit event."
+                },
+                {
+                    "id": 22,
+                    "from": "MossyJaguar",
+                    "thread_id": "asupersync-order2",
+                    "subject": "Blocker: pre-ship validation frontier",
+                    "created_ts": "2026-05-08T05:21:00Z",
+                    "body_md": "asupersync-order2 is blocked before its later ship event."
+                },
+                {
+                    "id": 23,
+                    "from": "MossyJaguar",
+                    "thread_id": "asupersync-order3",
+                    "subject": "Blocker: post-ship validation frontier",
+                    "created_ts": "2026-05-08T05:41:00Z",
+                    "body_md": "asupersync-order3 is blocked after an earlier ship event."
+                }
+            ]
+        },
+        "git": {
+            "commits": [
+                {
+                    "hash": "aaaaaaaaaaaa1111",
+                    "author": "CopperSpring",
+                    "created_ts": "2026-05-08T05:30:00Z",
+                    "subject": "[br-asupersync-order1] ship ordered receipt",
+                    "body": "Validation: rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract passed."
+                },
+                {
+                    "hash": "bbbbbbbbbbbb2222",
+                    "author": "MossyJaguar",
+                    "created_ts": "2026-05-08T05:31:00Z",
+                    "subject": "[br-asupersync-order2] ship validation resolution",
+                    "body": "Validation: rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract passed."
+                },
+                {
+                    "hash": "cccccccccccc3333",
+                    "author": "MossyJaguar",
+                    "created_ts": "2026-05-08T05:32:00Z",
+                    "subject": "[br-asupersync-order3] ship earlier work",
+                    "body": "Validation: rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract passed."
+                }
+            ]
+        }
+    });
+
+    let receipt = receipt_json_from_value(&fixture);
+    let cues = receipt["unresolved_cues"].as_array().expect("cues");
+
+    assert!(cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("active-claim-without-ship")
+            && cue["bead_id"].as_str() == Some("asupersync-order1")
+            && cue["reason"].as_str() == Some("claim has no later ship event in this receipt")
+    }));
+    assert!(cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("unresolved-blocker")
+            && cue["bead_id"].as_str() == Some("asupersync-order3")
+            && cue["reason"].as_str() == Some("blocker has no later ship event in this receipt")
+    }));
+    assert!(
+        !cues.iter().any(|cue| {
+            cue["bead_id"].as_str() == Some("asupersync-order2")
+                && cue["kind"].as_str() == Some("unresolved-blocker")
+        }),
+        "a blocker before a later ship should be resolved"
+    );
 }
 
 #[test]

@@ -251,15 +251,16 @@ def coalesce_events(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
 
 
 def unresolved_cues(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    shipped: set[str] = set()
-    claims: dict[tuple[str, str], dict[str, Any]] = {}
-    blockers: dict[str, dict[str, Any]] = {}
+    ship_indexes: dict[str, list[int]] = {}
+    claims: list[tuple[str, str, dict[str, Any], int]] = []
+    blockers: list[tuple[str, dict[str, Any], int]] = []
     cues: list[dict[str, Any]] = []
 
-    for event in events:
+    for event_index, event in enumerate(events):
         bead_ids = event.get("bead_ids") or []
         if event.get("kind") == "ship":
-            shipped.update(str(bead_id) for bead_id in bead_ids)
+            for bead_id in bead_ids:
+                ship_indexes.setdefault(str(bead_id), []).append(event_index)
             if not event.get("validation"):
                 cues.append(
                     {
@@ -272,13 +273,18 @@ def unresolved_cues(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 )
         elif event.get("kind") == "claim":
             for bead_id in bead_ids:
-                claims[(str(bead_id), str(event.get("agent") or ""))] = event
+                claims.append((str(bead_id), str(event.get("agent") or ""), event, event_index))
         elif event.get("kind") == "block":
             for bead_id in bead_ids:
-                blockers[str(bead_id)] = event
+                blockers.append((str(bead_id), event, event_index))
 
-    for (bead_id, agent), event in sorted(claims.items()):
-        if bead_id not in shipped:
+    def has_later_ship(bead_id: str, event_index: int) -> bool:
+        return any(ship_index > event_index for ship_index in ship_indexes.get(bead_id, []))
+
+    for bead_id, agent, event, event_index in sorted(
+        claims, key=lambda item: (item[0], item[1], str(item[2].get("event_id") or ""))
+    ):
+        if not has_later_ship(bead_id, event_index):
             cues.append(
                 {
                     "kind": "active-claim-without-ship",
@@ -289,8 +295,10 @@ def unresolved_cues(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 }
             )
 
-    for bead_id, event in sorted(blockers.items()):
-        if bead_id not in shipped:
+    for bead_id, event, event_index in sorted(
+        blockers, key=lambda item: (item[0], str(item[1].get("event_id") or ""))
+    ):
+        if not has_later_ship(bead_id, event_index):
             cues.append(
                 {
                     "kind": "unresolved-blocker",
