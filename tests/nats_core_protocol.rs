@@ -55,6 +55,7 @@ mod protocol_parsing {
             assert_eq!(parsed.proto, expected.proto);
             assert_eq!(parsed.max_payload, expected.max_payload);
             assert_eq!(parsed.tls_required, expected.tls_required);
+            assert_eq!(parsed.tls_available, expected.tls_available);
             assert_eq!(parsed.headers, expected.headers);
         }
     }
@@ -479,9 +480,7 @@ mod protocol_parsing {
             let headers_start = frame_str.find("\r\n").expect("first CRLF") + 2;
             let headers = frame_str[headers_start..header_end + 4].to_string();
             let payload_start = header_end + 4;
-            let payload = frame_str[payload_start..payload_start + payload_len]
-                .as_bytes()
-                .to_vec();
+            let payload = frame_str.as_bytes()[payload_start..payload_start + payload_len].to_vec();
 
             return ExpectedMessage {
                 subject,
@@ -630,8 +629,6 @@ mod protocol_parsing {
 
 /// Test NATS protocol handshake sequencing and state transitions.
 mod handshake_protocol {
-    use super::*;
-
     #[test]
     fn info_must_precede_connect() {
         // Test that INFO command must be received before sending CONNECT
@@ -782,8 +779,6 @@ mod handshake_protocol {
 
 /// Test NATS subject and queue group token validation per protocol grammar.
 mod token_validation {
-    use super::*;
-
     #[test]
     fn subject_token_validation() {
         // Test subject token validation per NATS protocol grammar
