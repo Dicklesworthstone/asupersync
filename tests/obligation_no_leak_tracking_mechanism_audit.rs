@@ -405,7 +405,6 @@ enum ObligationState {
     Reserved,
     Committed,
     Aborted,
-    Leaked,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

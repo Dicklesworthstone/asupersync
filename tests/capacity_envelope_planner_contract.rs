@@ -356,7 +356,7 @@ fn load_contract() -> CapacityEnvelopeContract {
     }
 }
 
-fn selected_scenario<'a>(contract: &'a CapacityEnvelopeContract) -> &'a CapacityEnvelopeScenario {
+fn selected_scenario(contract: &CapacityEnvelopeContract) -> &CapacityEnvelopeScenario {
     let selected = std::env::var("ASUPERSYNC_CAPACITY_ENVELOPE_SCENARIO")
         .unwrap_or_else(|_| DEFAULT_SCENARIO_ID.to_string());
     contract

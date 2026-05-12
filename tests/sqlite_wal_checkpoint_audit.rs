@@ -1,5 +1,3 @@
-#![cfg(feature = "sqlite")]
-
 //! Audit test for SQLite WAL mode checkpoint behavior on crash recovery.
 //!
 //! SQLite WAL mode requirement: "All committed transactions are durable and
@@ -8,6 +6,8 @@
 //! CRITICAL REQUIREMENT: When a process crashes after committing transactions
 //! in WAL mode, the WAL frames must be recoverable on next database open.
 //! Data loss indicates missing checkpoint discipline.
+
+#![cfg(feature = "sqlite")]
 
 use asupersync::database::{SqliteConnection, SqliteValue};
 use asupersync::types::{Budget, Outcome, RegionId, TaskId};
