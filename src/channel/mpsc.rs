@@ -329,7 +329,6 @@ impl<T> Sender<T> {
             sender: self,
             cx,
             waiter_token: None,
-            reservation_granted: false,
         }
     }
 
@@ -582,9 +581,6 @@ pub struct Reserve<'a, T> {
     sender: &'a Sender<T>,
     cx: &'a Cx,
     waiter_token: Option<SlabToken>,
-    /// Whether a reservation slot has been granted (reserved counter incremented).
-    /// Used by cleanup_waiter to ensure proper reservation cleanup on cancellation.
-    reservation_granted: bool,
 }
 
 impl<T> Reserve<'_, T> {
@@ -594,44 +590,30 @@ impl<T> Reserve<'_, T> {
                 let mut inner = self.sender.shared.inner.lock();
 
                 if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
-                    // Channel closed. If we had a reservation, clean it up to prevent leaks.
-                    if self.reservation_granted && inner.reserved > 0 {
-                        inner.reserved -= 1;
-                    }
-                    // Remove from slab if still present to avoid stale wakers.
                     inner.send_wakers.remove(token);
                     None
                 } else if inner.send_wakers.remove(token).is_some() {
-                    // We are in the slab. Check if we have a granted reservation.
-                    if self.reservation_granted {
-                        // We have a reservation that needs cleanup
-                        if inner.reserved > 0 {
-                            inner.reserved -= 1;
-                        }
-                        // Since we had a reservation, there should be capacity now.
-                        // Wake the next waiter if any.
+                    // We are in the slab. We haven't been granted a reservation.
+                    // Remove from FIFO queue as well.
+                    if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == token) {
+                        inner.waiter_queue.remove(pos);
+                    }
+                    // CASCADE: A receiver may have freed capacity and woken us,
+                    // but we never polled. Pass the baton to the next waiter.
+                    if inner.has_capacity(self.sender.shared.capacity) {
                         inner.take_next_sender_waker()
                     } else {
-                        // No reservation granted yet. Remove from FIFO queue.
-                        if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == token) {
-                            inner.waiter_queue.remove(pos);
-                        }
-                        // CASCADE: A receiver may have freed capacity and woken us,
-                        // but we never polled. Pass the baton to the next waiter.
-                        if inner.has_capacity(self.sender.shared.capacity) {
-                            inner.take_next_sender_waker()
-                        } else {
-                            None
-                        }
+                        None
                     }
                 } else {
-                    // Stale waiter: not in slab, but check if we still need to clean up reservation.
-                    if self.reservation_granted && inner.reserved > 0 {
-                        inner.reserved -= 1;
-                        // Free slot available, wake next waiter if any.
+                    // Stale waiter: not in slab, channel alive.
+                    // Another agent (e.g., Receiver) removed us from the queue and slab
+                    // to wake us up because capacity was available.
+                    // We are dropping without using that capacity, so we MUST pass the baton
+                    // to the next waiter if there is still capacity, to prevent lost wakeups.
+                    if inner.has_capacity(self.sender.shared.capacity) {
                         inner.take_next_sender_waker()
                     } else {
-                        // No resource ownership to transfer.
                         None
                     }
                 }
@@ -669,7 +651,6 @@ impl<'a, T> Future for Reserve<'a, T> {
 
         if is_first && inner.has_capacity(self.sender.shared.capacity) {
             inner.reserved += 1;
-            self.reservation_granted = true;
             // Remove self from queue
             if let Some(token) = self.waiter_token {
                 // Remove from FIFO queue (should be at front)
