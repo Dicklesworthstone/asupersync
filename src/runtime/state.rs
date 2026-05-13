@@ -4045,11 +4045,7 @@ impl RuntimeState {
 
     #[cfg(test)]
     pub(crate) fn enqueue_finalizing_region_for_test(&mut self, region: RegionId) {
-        if !self
-            .finalizing_regions
-            .iter()
-            .any(|&queued| queued == region)
-        {
+        if !self.finalizing_regions.contains(&region) {
             self.finalizing_regions.push(region);
         }
     }
@@ -8980,12 +8976,10 @@ mod tests {
             "redundant close request reissues only the same live root task",
             first_attempt
                 .first()
-                .map(|entry| format!("{:?}", entry.0))
-                .unwrap_or_else(|| "none".to_string()),
+                .map_or_else(|| "none".to_string(), |entry| format!("{:?}", entry.0)),
             second_attempt
                 .first()
-                .map(|entry| format!("{:?}", entry.0))
-                .unwrap_or_else(|| "none".to_string())
+                .map_or_else(|| "none".to_string(), |entry| format!("{:?}", entry.0))
         );
         let redundant_pending_close = observe(
             &state,
@@ -10909,7 +10903,7 @@ mod tests {
         }
 
         fn tarjan_scc(node_count: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
-            struct Tarjan<'a> {
+            struct Tarjan {
                 adjacency: Vec<Vec<usize>>,
                 index: usize,
                 indices: Vec<Option<usize>>,
@@ -10917,10 +10911,9 @@ mod tests {
                 stack: Vec<usize>,
                 on_stack: Vec<bool>,
                 components: Vec<Vec<usize>>,
-                _phantom: std::marker::PhantomData<&'a ()>,
             }
 
-            impl<'a> Tarjan<'a> {
+            impl Tarjan {
                 fn new(node_count: usize, edges: &[(usize, usize)]) -> Self {
                     let mut adjacency = vec![Vec::new(); node_count];
                     for &(from, to) in edges {
@@ -10934,7 +10927,6 @@ mod tests {
                         stack: Vec::new(),
                         on_stack: vec![false; node_count],
                         components: Vec::new(),
-                        _phantom: std::marker::PhantomData,
                     }
                 }
 
