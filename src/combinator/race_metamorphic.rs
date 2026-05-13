@@ -277,18 +277,9 @@ fn create_test_context(region_id: u32, task_id: u32) -> Cx {
     )
 }
 
-#[derive(Debug)]
-struct TestWaker;
-
-impl std::task::Wake for TestWaker {
-    fn wake(self: Arc<Self>) {
-        // No-op for simple testing
-    }
-}
-
 fn poll_test_future(future: &mut TestFuture) -> Poll<i32> {
-    let waker = Waker::from(Arc::new(TestWaker));
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     Pin::new(future).poll(&mut cx)
 }
 
@@ -433,8 +424,8 @@ fn mr2_panic_isolation(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Simplified race simulation
         let winner_value = loop {
-            let waker = Waker::from(Arc::new(TestWaker));
-            let mut cx = Context::from_waker(&waker);
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
             let mut pinned = Pin::new(&mut futures[winner_index]);
             match pinned.as_mut().poll(&mut cx) {
                 Poll::Ready(val) => break val,
@@ -448,8 +439,8 @@ fn mr2_panic_isolation(
                 future.cancel(CancelReason::race_loser());
                 // Attempt to drain - may panic
                 let _drain_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let waker = Waker::from(Arc::new(TestWaker));
-                    let mut cx = Context::from_waker(&waker);
+                    let waker = Waker::noop();
+                    let mut cx = Context::from_waker(waker);
                     let mut pinned = Pin::new(future);
                     loop {
                         match pinned.as_mut().poll(&mut cx) {
@@ -506,8 +497,8 @@ fn mr3_branch_outcome_consistency(branch_count: usize, winner_index: usize, _see
     while !winner_completed {
         for (i, future) in futures.iter_mut().enumerate() {
             if outcomes[i].is_none() && !future.is_cancelled() {
-                let waker = Waker::from(Arc::new(TestWaker));
-                let mut cx = Context::from_waker(&waker);
+                let waker = Waker::noop();
+                let mut cx = Context::from_waker(waker);
                 let mut pinned = Pin::new(future);
                 match pinned.as_mut().poll(&mut cx) {
                     Poll::Ready(val) => {
@@ -578,8 +569,8 @@ fn mr4_cancel_propagation_consistency(
         let mut any_completed = false;
         for (i, future) in futures.iter_mut().enumerate() {
             if outcomes[i].is_none() && !future.is_cancelled() {
-                let waker = Waker::from(Arc::new(TestWaker));
-                let mut cx = Context::from_waker(&waker);
+                let waker = Waker::noop();
+                let mut cx = Context::from_waker(waker);
                 let mut pinned = Pin::new(future);
                 match pinned.as_mut().poll(&mut cx) {
                     Poll::Ready(val) => {
@@ -612,8 +603,8 @@ fn mr4_cancel_propagation_consistency(
     // Drain all cancelled futures
     for future in &mut futures {
         if future.is_cancelled() {
-            let waker = Waker::from(Arc::new(TestWaker));
-            let mut cx = Context::from_waker(&waker);
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
             let mut pinned = Pin::new(future);
             loop {
                 match pinned.as_mut().poll(&mut cx) {
