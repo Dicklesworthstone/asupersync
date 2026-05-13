@@ -148,7 +148,7 @@ mod tests {
         for scenario in &test_scenarios {
             // Test asupersync resource attribute precedence
             let asupersync_result = match simulate_asupersync_resource_attribute_precedence(
-                &scenario,
+                scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -161,7 +161,7 @@ mod tests {
 
             // Test OpenTelemetry SDK resource attribute precedence
             let opentelemetry_result = match simulate_opentelemetry_resource_attribute_precedence(
-                &scenario,
+                scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -531,7 +531,7 @@ mod tests {
         for scenario in &test_scenarios {
             // Test asupersync span event timestamp ordering
             let asupersync_result = match simulate_asupersync_span_event_timestamp_ordering(
-                &scenario,
+                scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -544,7 +544,7 @@ mod tests {
 
             // Test OpenTelemetry SDK span event timestamp ordering
             let opentelemetry_result = match simulate_opentelemetry_span_event_timestamp_ordering(
-                &scenario,
+                scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -826,7 +826,7 @@ mod tests {
                 ],
                 partial_success_response: PartialSuccessResponse {
                     rejected_log_records: 0, // All records accepted
-                    error_message: "".to_string(),
+                    error_message: String::new(),
                 },
                 expected_dropped_records: vec![], // No records should be dropped
                 expected_retained_records: vec!["auth_001".to_string(), "auth_002".to_string()],
@@ -905,7 +905,7 @@ mod tests {
                 log_batch: vec![], // Empty batch
                 partial_success_response: PartialSuccessResponse {
                     rejected_log_records: 0,
-                    error_message: "".to_string(),
+                    error_message: String::new(),
                 },
                 expected_dropped_records: vec![],
                 expected_retained_records: vec![],
@@ -934,7 +934,7 @@ mod tests {
 
         for scenario in &test_scenarios {
             // Test asupersync export logs partial success handling
-            let asupersync_result = match simulate_asupersync_export_logs_partial_success(&scenario)
+            let asupersync_result = match simulate_asupersync_export_logs_partial_success(scenario)
             {
                 Ok(result) => result,
                 Err(e) => {
@@ -947,7 +947,7 @@ mod tests {
 
             // Test OpenTelemetry SDK export logs partial success handling
             let opentelemetry_result = match simulate_opentelemetry_export_logs_partial_success(
-                &scenario,
+                scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -1015,7 +1015,7 @@ mod tests {
             }
 
             // Verify batch processing behavior
-            if let Err(e) = verify_batch_processing_behavior(&scenario, &asupersync_result) {
+            if let Err(e) = verify_batch_processing_behavior(scenario, &asupersync_result) {
                 panic!(
                     "OTLP-055 FAILED for scenario '{}': Batch processing validation - {}",
                     scenario.name, e
@@ -1272,10 +1272,10 @@ mod tests {
                 span_name: "failed_with_empty_desc".to_string(),
                 span_status: SpanStatusDefinition {
                     status_code: SpanStatusCode::Error,
-                    description: Some("".to_string()), // Empty string
+                    description: Some(String::new()), // Empty string
                 },
                 expected_exported_status_code: 2, // STATUS_CODE_ERROR
-                expected_exported_description: Some("".to_string()),
+                expected_exported_description: Some(String::new()),
                 must_preserve_message: true, // Must preserve even empty strings
                 must_map_status_code_correctly: true,
             },
@@ -1307,7 +1307,7 @@ mod tests {
 
         for scenario in &test_scenarios {
             // Test asupersync span status code mapping
-            let asupersync_result = match simulate_asupersync_span_status_code_mapping(&scenario) {
+            let asupersync_result = match simulate_asupersync_span_status_code_mapping(scenario) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
@@ -1319,7 +1319,7 @@ mod tests {
 
             // Test OpenTelemetry SDK span status code mapping
             let opentelemetry_result = match simulate_opentelemetry_span_status_code_mapping(
-                &scenario,
+                scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
