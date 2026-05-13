@@ -185,6 +185,27 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
             ],
         )
 
+    def test_hidden_repo_paths_keep_leading_dot(self) -> None:
+        module = load_script_module()
+
+        self.assertEqual(module.normalize_path(".beads/issues.jsonl"), ".beads/issues.jsonl")
+        self.assertEqual(module.normalize_path("./.beads/issues.jsonl"), ".beads/issues.jsonl")
+        self.assertEqual(module.normalize_path(r".beads\issues.jsonl/"), ".beads/issues.jsonl")
+
+        receipt = module.classify(
+            {
+                "repo_head": CURRENT_HEAD,
+                "decision": "pass",
+                "touched_files": [".beads/issues.jsonl"],
+            },
+            CURRENT_HEAD,
+            ["beads/issues.jsonl"],
+        )
+
+        self.assertEqual(receipt["classification"], "current-with-external-dirt")
+        self.assertEqual(receipt["markers"]["dirty_touched_overlap"], [])
+        self.assertEqual(receipt["markers"]["dirty_external_paths"], ["beads/issues.jsonl"])
+
     def test_missing_head_invalidates_artifact(self) -> None:
         receipt = run_receipt("unbound_artifact.json")
 

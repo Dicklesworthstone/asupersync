@@ -139,7 +139,10 @@ def artifact_decision(artifact: dict[str, Any]) -> str:
 
 
 def normalize_path(path: str) -> str:
-    return path.strip().replace("\\", "/").lstrip("./").rstrip("/")
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.rstrip("/")
 
 
 def normalize_paths(paths: list[str]) -> list[str]:
