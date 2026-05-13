@@ -4760,6 +4760,7 @@ mod tests {
         /// RFC 9110 allows two formats for Retry-After:
         /// - delay-seconds: number of seconds to delay
         /// - HTTP-date: absolute date when to retry
+        ///
         /// Our implementation uses delay-seconds (preferred for rate limiting).
         #[test]
         fn audit_retry_after_format_rfc9110_compliance() {
