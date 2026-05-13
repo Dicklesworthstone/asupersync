@@ -29,7 +29,7 @@ use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use proptest::prelude::*;
 use std::future::Future;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 // ============================================================================
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn mr1_send_success_exactly_one_receive() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             message_id in 0u64..10000,
             content in "[a-zA-Z0-9]{3,20}",
@@ -273,7 +273,7 @@ mod tests {
     /// **Catches**: Phantom deliveries, inconsistent error propagation
     #[test]
     fn mr2_send_failure_zero_receives() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             message_id in 0u64..1000,
             content in "[a-zA-Z]{2,10}",
@@ -354,7 +354,7 @@ mod tests {
     /// **Catches**: Channel reuse bugs, state reset issues
     #[test]
     fn mr3_receive_exhaustion() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             message_id in 0u64..500,
             content in "[0-9a-f]{4,12}",
@@ -450,7 +450,7 @@ mod tests {
     /// **Catches**: Non-deterministic state, operation side effects
     #[test]
     fn mr4_state_consistency() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             message_id in 0u64..200,
             content in "[A-Z]{2,8}",
@@ -536,7 +536,7 @@ mod tests {
     /// cancellation, receiver dropping, permit usage, and state transitions.
     #[test]
     fn mr_composite_exactly_once_all_scenarios() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
 
         let cx = test_cx();
         let test_message = UniqueMessage::new(42, "composite_test");
