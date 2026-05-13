@@ -20557,7 +20557,7 @@ fn otlp_099_active_span_exclusion_conformance() {
             },
             expected_active_detected: false,
             expected_span_excluded: false,
-            expected_exclusion_reason: "".to_string(),
+            expected_exclusion_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -20579,7 +20579,7 @@ fn otlp_099_active_span_exclusion_conformance() {
             },
             expected_active_detected: false,
             expected_span_excluded: false,
-            expected_exclusion_reason: "".to_string(),
+            expected_exclusion_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -20618,7 +20618,7 @@ fn otlp_099_active_span_exclusion_conformance() {
             },
             expected_active_detected: false,
             expected_span_excluded: false,
-            expected_exclusion_reason: "".to_string(),
+            expected_exclusion_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -20654,25 +20654,31 @@ fn otlp_099_active_span_exclusion_conformance() {
         let reference_result = simulate_reference_active_span_filtering(&scenario);
 
         // Validate individual results
-        validate_active_span_filtering_logic(&asupersync_result).expect(&format!(
-            "Asupersync active span filtering logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_active_span_filtering_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync active span filtering logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_active_span_filtering_logic(&reference_result).expect(&format!(
-            "Reference active span filtering logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_active_span_filtering_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference active span filtering logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_active_span_filtering_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
