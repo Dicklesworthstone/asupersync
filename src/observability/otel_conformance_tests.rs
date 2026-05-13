@@ -12293,7 +12293,7 @@ fn otlp_079_instrumentation_scope_empty_name_conformance() {
         EmptyInstrumentationScopeScenario {
             description: "InstrumentationScope with empty name string".to_string(),
             scope: InstrumentationScopeInfo {
-                name: "".to_string(), // Empty name - should be rejected
+                name: String::new(), // Empty name - should be rejected
                 version: Some("1.0.0".to_string()),
                 schema_url: None,
                 attributes: HashMap::new(),
@@ -12341,7 +12341,7 @@ fn otlp_079_instrumentation_scope_empty_name_conformance() {
         EmptyInstrumentationScopeScenario {
             description: "Multiple InstrumentationScopes with mixed name validity".to_string(),
             scope: InstrumentationScopeInfo {
-                name: "".to_string(),
+                name: String::new(),
                 version: Some("1.0.0".to_string()),
                 schema_url: None,
                 attributes: HashMap::new(),
@@ -12373,7 +12373,7 @@ fn otlp_079_instrumentation_scope_empty_name_conformance() {
         EmptyInstrumentationScopeScenario {
             description: "InstrumentationScope with empty name and no version".to_string(),
             scope: InstrumentationScopeInfo {
-                name: "".to_string(),
+                name: String::new(),
                 version: None, // No version provided
                 schema_url: None,
                 attributes: HashMap::new(),
@@ -12430,25 +12430,31 @@ fn otlp_079_instrumentation_scope_empty_name_conformance() {
         let reference_result = simulate_reference_instrumentation_scope_validation(&scenario);
 
         // Validate individual results
-        validate_instrumentation_scope_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_instrumentation_scope_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_instrumentation_scope_validation_logic(&reference_result).expect(&format!(
-            "Reference validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_instrumentation_scope_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_instrumentation_scope_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -12787,7 +12793,7 @@ fn otlp_080_span_status_message_omission_conformance() {
             span: SpanStatusInfo {
                 name: "test-span-ok-empty-message".to_string(),
                 status_code: StatusCode::Ok,
-                status_message: Some("".to_string()), // Empty message
+                status_message: Some(String::new()), // Empty message
                 trace_id: "12345678901234567890123456789015".to_string(),
                 span_id: "1234567890123459".to_string(),
             },
@@ -12864,25 +12870,31 @@ fn otlp_080_span_status_message_omission_conformance() {
         let reference_result = simulate_reference_span_status_message_processing(&scenario);
 
         // Validate individual results
-        validate_span_status_message_logic(&asupersync_result).expect(&format!(
-            "Asupersync status message logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_span_status_message_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync status message logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_span_status_message_logic(&reference_result).expect(&format!(
-            "Reference status message logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_span_status_message_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference status message logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_span_status_message_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -12950,7 +12962,7 @@ fn simulate_asupersync_span_status_message_processing(
     match scenario.span.status_code {
         StatusCode::Ok => {
             if let Some(ref message) = scenario.span.status_message {
-                if !message.trim().is_empty() {
+                if !message.is_empty() {
                     // Omit non-empty message for OK status per OTLP §6.4
                     processed_message = None;
                     message_omitted = true;
@@ -12970,7 +12982,7 @@ fn simulate_asupersync_span_status_message_processing(
         }
         StatusCode::Unset => {
             if let Some(ref message) = scenario.span.status_message {
-                if !message.trim().is_empty() {
+                if !message.is_empty() {
                     // Omit message for UNSET status (similar to OK)
                     processed_message = None;
                     message_omitted = true;
@@ -12993,7 +13005,7 @@ fn simulate_asupersync_span_status_message_processing(
             processed_message.is_none()
                 || processed_message
                     .as_ref()
-                    .map_or(true, |m| m.trim().is_empty())
+                    .is_none_or(|m| m.trim().is_empty())
         }
     };
 
@@ -13029,7 +13041,7 @@ fn simulate_reference_span_status_message_processing(
     match scenario.span.status_code {
         StatusCode::Ok => {
             if let Some(ref message) = scenario.span.status_message {
-                if !message.trim().is_empty() {
+                if !message.is_empty() {
                     // Omit message for OK status
                     processed_message = None;
                     message_omitted = true;
@@ -13048,7 +13060,7 @@ fn simulate_reference_span_status_message_processing(
         }
         StatusCode::Unset => {
             if let Some(ref message) = scenario.span.status_message {
-                if !message.trim().is_empty() {
+                if !message.is_empty() {
                     // Omit message for UNSET status
                     processed_message = None;
                     message_omitted = true;
@@ -13071,7 +13083,7 @@ fn simulate_reference_span_status_message_processing(
             processed_message.is_none()
                 || processed_message
                     .as_ref()
-                    .map_or(true, |m| m.trim().is_empty())
+                    .is_none_or(|m| m.trim().is_empty())
         }
     };
 
