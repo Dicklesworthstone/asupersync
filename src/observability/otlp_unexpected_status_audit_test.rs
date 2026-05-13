@@ -100,7 +100,7 @@ fn simulate_otlp_retry_classifier(response: &MockHttpResponse) -> Result<(), Moc
                 .map(std::time::Duration::from_secs);
             Err(MockOtlpError::retryable(response.status(), retry_after))
         }
-        502 | 503 | 504 => {
+        502..=504 => {
             // Retryable server errors per OTLP spec
             Err(MockOtlpError::retryable(response.status(), None))
         }
