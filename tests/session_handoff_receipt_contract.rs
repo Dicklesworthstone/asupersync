@@ -366,12 +366,20 @@ fn stale_in_progress_missing_id_output_matches_full_reviewed_golden() {
 }
 
 #[test]
-fn epic_only_ready_queue_is_not_claimed() {
+fn epic_only_ready_queue_routes_to_fallback_selector() {
     let receipt = receipt_json("epic_only_ready.json");
-    assert_eq!(next_action_category(&receipt), "blocked");
+    assert_eq!(next_action_category(&receipt), "proof-only");
     assert_eq!(
         receipt["next_action"]["reason"].as_str(),
-        Some("no actionable ready bead or proof lane was found")
+        Some("ready queue only contains a non-claimable epic; run the fallback work selector")
+    );
+    assert_eq!(
+        receipt["next_action"]["lane"].as_str(),
+        Some("reservation-aware-work-finder")
+    );
+    assert_eq!(
+        receipt["next_action"]["bead_id"].as_str(),
+        Some("asupersync-lhx6m4")
     );
     assert_eq!(
         receipt["active_bead_ids"]["ready"][0].as_str(),
