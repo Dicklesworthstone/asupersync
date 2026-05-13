@@ -13436,6 +13436,12 @@ mod tests {
         // Verify that state snapshot uses the cache (not just scanning)
         let snapshot = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
         let stats = state.read_biased_region_snapshot_stats();
+        crate::assert_with_log!(
+            snapshot.draining_regions == 0,
+            "new runtime state should have no draining regions in its first cached snapshot",
+            0,
+            snapshot.draining_regions
+        );
 
         // After one snapshot, we should have one fallback scan (to populate cache)
         // but cache should be valid for subsequent calls
