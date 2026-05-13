@@ -2971,7 +2971,7 @@ mod tests {
 
             // Verify the guard works in the same task context
             {
-                let _data: &i32 = &*guard;
+                let _data: &i32 = &guard;
                 // guard is !Send so it cannot be moved to another task
             }
 
@@ -3765,11 +3765,11 @@ mod tests {
             let guard = mutex_test.lock(&cx).await.expect("Lock should succeed");
 
             // Verify guard provides both immutable AND mutable access (exclusive)
-            let immutable_ref: &i32 = &*guard; // Deref gives &T
+            let immutable_ref: &i32 = &guard; // Deref gives &T
             println!("  - Guard Deref: &T access ✅ (value: {})", immutable_ref);
 
             let mut guard = guard; // Move to mutable binding
-            let mutable_ref: &mut i32 = &mut *guard; // DerefMut gives &mut T
+            let mutable_ref: &mut i32 = &mut guard; // DerefMut gives &mut T
             *mutable_ref += 1;
             println!(
                 "  - Guard DerefMut: &mut T access ✅ (modified to: {})",
@@ -4914,6 +4914,8 @@ mod tests {
             threshold: f64,
         }
 
+        const CONFIG_THRESHOLD: f64 = 2.75;
+
         impl MultiFieldData {
             fn new() -> Self {
                 Self {
@@ -4923,7 +4925,7 @@ mod tests {
                     metadata: Some("test metadata".to_string()),
                     config: ConfigData {
                         enabled: true,
-                        threshold: 3.14,
+                        threshold: CONFIG_THRESHOLD,
                     },
                 }
             }
@@ -4999,9 +5001,9 @@ mod tests {
             guard.config.enabled
         );
         crate::assert_with_log!(
-            guard.config.threshold == 3.14,
+            guard.config.threshold == CONFIG_THRESHOLD,
             "unmapped nested field remains readable",
-            3.14_f64,
+            CONFIG_THRESHOLD,
             guard.config.threshold
         );
         crate::assert_with_log!(
