@@ -2960,7 +2960,7 @@ mod tests {
 
         // Create a custom context for polling
         let waker = Waker::noop();
-        let mut context = std::task::Context::from_waker(&waker);
+        let mut context = std::task::Context::from_waker(waker);
 
         // Phase 1: Receiver is alive - poll_closed should return Pending
         for i in 1..=5 {
@@ -3547,7 +3547,7 @@ mod tests {
         // Test 1: poll_closed returns Pending when receiver is alive
         let (mut tx, rx) = channel::<i32>();
         let noop_waker = Waker::noop();
-        let mut ctx = Context::from_waker(&noop_waker);
+        let mut ctx = Context::from_waker(noop_waker);
 
         // Receiver is alive, poll_closed should return Pending
         let poll_result = tx.poll_closed(&mut ctx);
@@ -3558,9 +3558,10 @@ mod tests {
             );
         }
 
-        // Verify waker was registered in the inner state
-        let inner_has_waker = tx.inner.lock().waker.is_some();
-        if !inner_has_waker {
+        // Verify the sender-side closed waiter was registered without touching
+        // the receiver's value-ready waiter.
+        let inner_has_sender_waker = tx.inner.lock().sender_waker.is_some();
+        if !inner_has_sender_waker {
             panic!("❌ DEFECT: poll_closed() returned Pending but failed to register waker");
         }
 
@@ -3691,7 +3692,7 @@ mod tests {
         let cx = test_cx();
 
         let noop_waker = Waker::noop();
-        let mut task_ctx = Context::from_waker(&noop_waker);
+        let mut task_ctx = Context::from_waker(noop_waker);
 
         // First poll should return Pending (no value sent yet)
         let first_poll = {
@@ -3750,8 +3751,7 @@ mod tests {
             let receiver_handle = std::thread::spawn(move || {
                 block_on(async {
                     // Create receiver future
-                    let recv_result = rx.recv(&cx).await;
-                    recv_result
+                    rx.recv(&cx).await
                 })
             });
 
@@ -4031,7 +4031,7 @@ mod tests {
 
         // Create polling context
         let waker = Waker::noop();
-        let mut context = std::task::Context::from_waker(&waker);
+        let mut context = std::task::Context::from_waker(waker);
 
         // Phase 1: Initial poll - should return Pending and register waker
         let mut recv_fut = rx.recv(&cx);
@@ -4582,7 +4582,7 @@ mod tests {
 
         let (mut legitimate_sender, legitimate_receiver) = channel::<String>();
         let legitimate_waker = Waker::noop();
-        let mut legitimate_context = Context::from_waker(&legitimate_waker);
+        let mut legitimate_context = Context::from_waker(legitimate_waker);
 
         // Poll before receiver drop - should be Pending
         let before_drop = legitimate_sender.poll_closed(&mut legitimate_context);
@@ -5217,7 +5217,7 @@ mod tests {
         //! 2. SendPermit::send(value: T) moves T again
         //! 3. inner.value = Some(value) stores T in Option<T>
         //! 4. inner.value.take() moves T out to receiver
-        //! No cloning occurs anywhere in the pipeline.
+        //!    No cloning occurs anywhere in the pipeline.
 
         init_test("audit_sender_send_fnonce_bound_types_ownership_transfer");
 
@@ -5242,7 +5242,7 @@ mod tests {
                 self.as_str()
             }
             fn unique_value(&self) -> u64 {
-                self.len() as u64 * 31 + self.bytes().sum::<u8>() as u64
+                self.len() as u64 * 31 + self.bytes().map(u64::from).sum::<u64>()
             }
         }
 
