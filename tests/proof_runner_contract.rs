@@ -1411,6 +1411,55 @@ print(json.dumps({
 }
 
 #[test]
+fn proof_runner_dirty_check_normalizes_touched_file_paths() {
+    let snippet = r#"
+import importlib.util
+import json
+
+spec = importlib.util.spec_from_file_location("proof_runner", "scripts/proof_runner.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+runner = module.ProofRunner(skip_build_slot_check=True)
+runner.git._status_lines = [
+    " M scripts/proof_runner.py",
+    "A  tests/proof_runner_contract.rs",
+]
+can_proceed, record = runner.analyze_preflight(
+    "rustfmt-check",
+    ["./scripts/proof_runner.py", "tests/proof_runner_contract.rs/"],
+)
+print(json.dumps({
+    "can_proceed": can_proceed,
+    "decision": record["decision"],
+    "summary": record["summary"],
+    "uncommitted": runner.git.get_uncommitted_files(),
+    "staged": runner.git.get_staged_files(),
+}, sort_keys=True))
+"#;
+    let output = run_python_snippet(snippet);
+    assert!(
+        output.status.success(),
+        "dirty path normalization snippet should execute\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).expect("normalization output should be JSON");
+
+    assert_eq!(parsed["can_proceed"].as_bool(), Some(true));
+    assert_eq!(parsed["decision"].as_str(), Some("pass"));
+    assert_eq!(
+        parsed["uncommitted"][0].as_str(),
+        Some("scripts/proof_runner.py")
+    );
+    assert_eq!(
+        parsed["staged"][0].as_str(),
+        Some("tests/proof_runner_contract.rs")
+    );
+}
+
+#[test]
 fn proof_runner_emits_validation_frontier_compatible_records() {
     // Test with a known lane to get a proper record structure
     let result = proof_runner_json(&[

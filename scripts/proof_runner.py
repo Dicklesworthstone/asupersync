@@ -239,6 +239,11 @@ def _string_list(value: Any) -> List[str]:
     return [str(value)]
 
 
+def normalize_repo_path(path: str) -> str:
+    """Normalize repo-relative paths for comparisons without stripping filenames."""
+    return str(path).replace("\\", "/").removeprefix("./").rstrip("/")
+
+
 def fallback_bead_rows_from_snapshot(snapshot_path: str) -> List[Dict[str, Any]]:
     raw = json.loads(Path(snapshot_path).read_text())
     if isinstance(raw, list):
@@ -304,7 +309,7 @@ def fallback_touched_files(bead: Dict[str, Any]) -> List[str]:
     for key in ("touched_files", "files", "paths", "source_files", "validation_files"):
         files = _string_list(bead.get(key))
         if files:
-            return [path.removeprefix("./") for path in files if path]
+            return [normalize_repo_path(path) for path in files if path]
     return []
 
 
@@ -661,8 +666,8 @@ def classify_rch_outcome(
     scope = command_scope(command)
     remote_exit = remote_exit_status(log_text)
     blocker = first_cargo_blocker(log_text)
-    touched = {path.removeprefix("./") for path in touched_files}
-    blocker_file = str(blocker["file"]).removeprefix("./")
+    touched = {normalize_repo_path(path) for path in touched_files}
+    blocker_file = normalize_repo_path(str(blocker["file"]))
     wrapper_hang = has_wrapper_retrieval_hang(log_text, remote_exit)
     control_plane = detect_rch_control_plane_inconsistency(log_text)
 
@@ -1035,11 +1040,12 @@ class GitStatus:
         if ("R" in status or "C" in status) and " -> " in path:
             paths = []
             for part in path.split(" -> ", 1):
-                normalized = part.strip().replace("\\", "/").removeprefix("./").rstrip("/")
+                normalized = normalize_repo_path(part.strip())
                 if normalized and normalized not in paths:
                     paths.append(normalized)
             return paths
-        return [path] if path else []
+        normalized = normalize_repo_path(path)
+        return [normalized] if normalized else []
 
     def get_uncommitted_files(self) -> List[str]:
         """Get list of uncommitted files."""
@@ -1191,7 +1197,7 @@ class AgentMailChecker:
         return None
 
     def _normalize_reservation_path(self, path: str) -> str:
-        return path.replace("\\", "/").removeprefix("./").rstrip("/")
+        return normalize_repo_path(path)
 
     def _paths_overlap(self, pattern: str, file_path: str) -> bool:
         if not pattern or not file_path:
@@ -2393,9 +2399,12 @@ class ProofRunner:
 
         # Check for uncommitted changes
         if not self.skip_dirty_check:
+            touched_set = {normalize_repo_path(path) for path in touched_files}
             uncommitted = self.git.get_uncommitted_files()
             if uncommitted:
-                unrelated_files = [f for f in uncommitted if f not in touched_files]
+                unrelated_files = [
+                    f for f in uncommitted if normalize_repo_path(f) not in touched_set
+                ]
                 if unrelated_files:
                     # Has unrelated dirty files - suggest narrow proof
                     supplemental = self._generate_narrow_proof(touched_files, lane)
@@ -2408,9 +2417,12 @@ class ProofRunner:
 
         # Check for staged changes from other agents
         if not self.skip_dirty_check:
+            touched_set = {normalize_repo_path(path) for path in touched_files}
             staged = self.git.get_staged_files()
             if staged:
-                unrelated_staged = [f for f in staged if f not in touched_files]
+                unrelated_staged = [
+                    f for f in staged if normalize_repo_path(f) not in touched_set
+                ]
                 if unrelated_staged:
                     supplemental = self._generate_narrow_proof(touched_files, lane)
                     return False, record.as_blocked_external(
