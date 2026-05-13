@@ -2,10 +2,11 @@
 //!
 //! Provides the server-side infrastructure for hosting gRPC services.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::bytes::Bytes;
@@ -125,13 +126,13 @@ impl ConnectionRegistry {
 
     /// Register a new connection.
     pub fn add_connection(&self, connection_id: String) {
-        let mut connections = self.connections.lock().unwrap();
+        let mut connections = self.connections.lock();
         connections.insert(connection_id, ConnectionState::new());
     }
 
     /// Remove a connection and all its streams.
     pub fn remove_connection(&self, connection_id: &str) {
-        let mut connections = self.connections.lock().unwrap();
+        let mut connections = self.connections.lock();
         connections.remove(connection_id);
     }
 
@@ -145,7 +146,7 @@ impl ConnectionRegistry {
         max_concurrent: u32,
         idle_timeout: Option<Duration>,
     ) -> Result<(), String> {
-        let mut connections = self.connections.lock().unwrap();
+        let mut connections = self.connections.lock();
         let connection = connections
             .get_mut(connection_id)
             .ok_or_else(|| format!("connection not registered: {}", connection_id))?;
@@ -169,7 +170,7 @@ impl ConnectionRegistry {
 
     /// Update stream activity timestamp.
     pub fn update_stream_activity(&self, connection_id: &str, stream_id: u32) {
-        let mut connections = self.connections.lock().unwrap();
+        let mut connections = self.connections.lock();
         if let Some(connection) = connections.get_mut(connection_id) {
             connection.update_stream_activity(stream_id);
         }
@@ -177,7 +178,7 @@ impl ConnectionRegistry {
 
     /// Remove a stream when it completes normally.
     pub fn remove_stream(&self, connection_id: &str, stream_id: u32) {
-        let mut connections = self.connections.lock().unwrap();
+        let mut connections = self.connections.lock();
         if let Some(connection) = connections.get_mut(connection_id) {
             connection.remove_stream(stream_id);
         }
@@ -185,7 +186,7 @@ impl ConnectionRegistry {
 
     /// Get statistics for debugging/monitoring.
     pub fn get_stats(&self) -> (usize, usize) {
-        let connections = self.connections.lock().unwrap();
+        let connections = self.connections.lock();
         let connection_count = connections.len();
         let total_streams: usize = connections
             .values()

@@ -906,13 +906,14 @@ mod tests {
             }
 
             let _ = blocker.entered_tx.send(());
-            let release_rx = blocker
-                .release_rx
-                .lock()
-                .expect("drop blocker mutex poisoned")
-                .take();
+            let release_rx = if let Ok(mut guard) = blocker.release_rx.lock() {
+                guard.take()
+            } else {
+                None
+            };
+
             if let Some(rx) = release_rx {
-                rx.recv().expect("drop blocker release recv");
+                let _ = rx.recv();
             }
         }
     }
