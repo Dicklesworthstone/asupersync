@@ -7052,10 +7052,12 @@ mod tests {
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "OTLP-070 conformance validation failed for scenario: {}",
-                scenario.name
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-070 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
         }
     }
 
@@ -7612,10 +7614,12 @@ mod tests {
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "OTLP-071 conformance validation failed for scenario: {}",
-                scenario.name
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-071 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
         }
     }
 
@@ -8215,10 +8219,12 @@ fn otlp_072_span_corruption_negative_attributes_count_conformance() {
 
         // Validate both implementations are OTLP compliant
         validate_span_corruption_conformance(scenario, &asupersync_result, &reference_result)
-            .expect(&format!(
-                "OTLP-072 conformance validation failed for scenario: {}",
-                scenario.name
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-072 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
     }
 }
 
@@ -8796,10 +8802,12 @@ fn otlp_073_w3c_tracecontext_propagation_client_server_conformance() {
 
         // Validate both implementations are OTLP compliant
         validate_w3c_tracecontext_conformance(scenario, &asupersync_result, &reference_result)
-            .expect(&format!(
-                "OTLP-073 conformance validation failed for scenario: {}",
-                scenario.name
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-073 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
     }
 }
 
@@ -9295,10 +9303,12 @@ fn otlp_074_empty_resource_spans_success_response_conformance() {
 
         // Validate both implementations are OTLP compliant
         validate_empty_resource_spans_conformance(scenario, &asupersync_result, &reference_result)
-            .expect(&format!(
-                "OTLP-074 conformance validation failed for scenario: {}",
-                scenario.name
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-074 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
     }
 }
 
@@ -9923,12 +9933,13 @@ fn otlp_075_span_invalid_duration_dropping_conformance() {
         let reference_result = simulate_reference_span_duration_validation(scenario);
 
         // Validate both implementations are OTLP compliant
-        validate_span_duration_conformance(scenario, &asupersync_result, &reference_result).expect(
-            &format!(
-                "OTLP-075 conformance validation failed for scenario: {}",
-                scenario.name
-            ),
-        );
+        validate_span_duration_conformance(scenario, &asupersync_result, &reference_result)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-075 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
     }
 }
 
