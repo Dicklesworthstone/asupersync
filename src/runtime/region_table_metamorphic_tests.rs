@@ -271,7 +271,7 @@ fn mr_cross_operation_safety() {
 
         // Test with two different operation sequences on identical regions
         let mut table1 = RegionTable::new();
-        let region1_id = table1.create_root(budget.clone(), Time::ZERO);
+        let region1_id = table1.create_root(budget, Time::ZERO);
         let region1 = table1.get(region1_id.arena_index()).unwrap();
 
         let mut table2 = RegionTable::new();
@@ -386,10 +386,7 @@ mod mutation_tests {
         // Simulated mutation: panic on second close
         fn mutated_close_operation(call_count: &mut u32) -> bool {
             *call_count += 1;
-            if *call_count > 1 {
-                // This is the mutation we want our MRs to catch
-                panic!("Double close not allowed!");
-            }
+            assert!(*call_count <= 1, "Double close not allowed!");
             true
         }
 
