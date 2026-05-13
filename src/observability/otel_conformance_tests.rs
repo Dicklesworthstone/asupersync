@@ -17600,25 +17600,31 @@ fn otlp_090_span_name_sanitization_conformance() {
         let reference_result = simulate_reference_span_name_sanitization(&scenario);
 
         // Validate individual results
-        validate_span_name_sanitization_logic(&asupersync_result).expect(&format!(
-            "Asupersync span name sanitization logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_span_name_sanitization_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync span name sanitization logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_span_name_sanitization_logic(&reference_result).expect(&format!(
-            "Reference span name sanitization logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_span_name_sanitization_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference span name sanitization logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_span_name_sanitization_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
