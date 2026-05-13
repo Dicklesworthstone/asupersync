@@ -19278,7 +19278,7 @@ fn otlp_095_duplicate_attribute_key_handling_conformance() {
                 attributes: vec![
                     ("error.message".to_string(), "Initial error".to_string()),
                     ("operation".to_string(), "database_query".to_string()),
-                    ("error.message".to_string(), "".to_string()), // Empty value overwrites
+                    ("error.message".to_string(), String::new()), // Empty value overwrites
                     ("retry.count".to_string(), "3".to_string()),
                 ],
             },
@@ -19286,7 +19286,7 @@ fn otlp_095_duplicate_attribute_key_handling_conformance() {
             expected_duplicate_keys: vec!["error.message".to_string()],
             expected_final_attributes: vec![
                 ("operation".to_string(), "database_query".to_string()),
-                ("error.message".to_string(), "".to_string()), // Last (empty) value kept
+                ("error.message".to_string(), String::new()), // Last (empty) value kept
                 ("retry.count".to_string(), "3".to_string()),
             ],
             expected_otlp_compliant: true,
@@ -19326,25 +19326,31 @@ fn otlp_095_duplicate_attribute_key_handling_conformance() {
         let reference_result = simulate_reference_duplicate_key_handling(&scenario);
 
         // Validate individual results
-        validate_duplicate_key_handling_logic(&asupersync_result).expect(&format!(
-            "Asupersync duplicate key handling logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_duplicate_key_handling_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync duplicate key handling logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_duplicate_key_handling_logic(&reference_result).expect(&format!(
-            "Reference duplicate key handling logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_duplicate_key_handling_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference duplicate key handling logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_duplicate_key_handling_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
