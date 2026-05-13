@@ -18079,25 +18079,31 @@ fn otlp_092_span_timestamp_overflow_conformance() {
         let reference_result = simulate_reference_timestamp_overflow_detection(&scenario);
 
         // Validate individual results
-        validate_timestamp_overflow_detection_logic(&asupersync_result).expect(&format!(
-            "Asupersync timestamp overflow detection logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_timestamp_overflow_detection_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync timestamp overflow detection logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_timestamp_overflow_detection_logic(&reference_result).expect(&format!(
-            "Reference timestamp overflow detection logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_timestamp_overflow_detection_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference timestamp overflow detection logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_timestamp_overflow_detection_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
