@@ -59,9 +59,12 @@
 //!
 //! ## Explicit non-goals
 //!
-//! - These are dispatch-step bounds, not wall-clock or CPU-time bounds. A
-//!   dispatched task can still run until the runtime poll budget or the task's
-//!   own cooperative yield point.
+//! - These are dispatch-step bounds, not wall-clock or CPU-time bounds. Worker
+//!   dispatch executes exactly one `Future::poll` for the selected task before
+//!   returning to the scheduler. The runtime cannot preempt inside that poll, so
+//!   CPU-bound futures must still reach their own cooperative yield or
+//!   cancellation checkpoint. `RuntimeConfig::poll_budget` applies to direct
+//!   `block_on` self-wake spin mitigation, not to worker-lane fairness.
 //! - The contract does not claim a global priority total order across workers.
 //!   Work stealing operates on ready work only, and owner-local `!Send` work is
 //!   intentionally invisible to other workers.
@@ -5723,6 +5726,9 @@ impl ThreeLaneWorker {
             completed: false,
         };
 
+        // The worker dispatch quantum is one `Future::poll`. Do not loop on a
+        // self-woken task here: returning to `next_task()` is what lets cancel,
+        // timed, and ready lanes re-evaluate their fairness gates.
         let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cx = Context::from_waker(&waker);
             stored.poll(&mut cx)
@@ -14932,77 +14938,137 @@ mod tests {
         );
     }
 
-    /// AUDIT: Cancellation propagation latency regression test.
+    /// Regression for the cancellation-latency audit.
     ///
-    /// This test demonstrates that cancellation propagation is NOT bounded by
-    /// ~1 quantum as expected, but by cancel_streak_limit × poll_budget which
-    /// can be arbitrarily long (default: 16 × 128 = 2,048 poll cycles).
-    ///
-    /// DEFECT: Long-running tasks can delay cancellation observation for
-    /// up to 2,048 poll cycles, violating bounded latency expectations.
+    /// The old audit multiplied `cancel_streak_limit` by
+    /// `RuntimeConfig::poll_budget` and concluded the worker could spend
+    /// 16 × 128 polls before reconsidering non-cancel work. Scheduler workers
+    /// do not use that `block_on` spin budget: each dispatch executes one
+    /// `Future::poll`, then returns to `next_task()` where cancel, timed, and
+    /// ready fairness gates are re-evaluated.
     #[test]
-    fn audit_cancellation_propagation_latency_is_not_bounded_by_one_quantum() {
+    fn audit_cancellation_propagation_latency_is_bounded_by_dispatch_quantum() {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
-        // Verify current latency bounds
         let worker = &scheduler.workers[0];
         let cancel_streak_limit = worker.cancel_streak_limit;
-        let poll_budget = 128u32; // Default from RuntimeConfig
 
-        let max_cancellation_delay_polls = cancel_streak_limit as u32 * poll_budget;
-
-        // DEFECT: This should be ~1 quantum, but it's actually 2,048 polls
         assert_eq!(
             cancel_streak_limit, 16,
             "Default cancel_streak_limit should be 16"
         );
+
+        let worker_dispatch_poll_quantum = 1u32;
+        let max_cancellation_delay_polls =
+            cancel_streak_limit as u32 * worker_dispatch_poll_quantum;
         assert_eq!(
-            max_cancellation_delay_polls, 2048,
-            "Maximum cancellation delay is {} poll cycles, not ~1 quantum",
-            max_cancellation_delay_polls
+            max_cancellation_delay_polls, 16,
+            "Cancel-lane fairness is bounded by dispatch polls, not by \
+             cancel_streak_limit * RuntimeConfig::poll_budget"
+        );
+        assert!(
+            max_cancellation_delay_polls < 128,
+            "Worker dispatch must not multiply the cancel streak by the \
+             block_on poll budget; got {max_cancellation_delay_polls}"
         );
 
-        // Demonstrate the latency issue with a test scenario:
-        // If we inject 16 tasks into cancel lane, each running for 128 polls,
-        // a subsequent task could wait 16×128=2048 polls before cancellation
-        let cancel_tasks: Vec<TaskId> = (0..16).map(|i| TaskId::new_for_test(i, 1)).collect();
-
-        for &task_id in &cancel_tasks {
-            scheduler.inject_cancel(task_id, 100);
+        // If non-cancel work is already eligible, the fairness gate must
+        // re-check it after the default cancel dispatch streak rather than
+        // waiting for a synthetic 16 * 128 poll budget.
+        let ready_task = TaskId::new_for_test(99, 1);
+        for i in 0..20 {
+            scheduler.inject_cancel(TaskId::new_for_test(i, 1), 100);
         }
-
-        // The 17th task would have to wait through all 16 cancel dispatches
-        // Each dispatch could theoretically run for 128 polls before yielding
-        // Total delay: 16 × 128 = 2,048 polls (potentially seconds, not microseconds)
+        scheduler.inject_ready(ready_task, 50);
 
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
 
-        // Verify that the cancel lane has accumulated tasks
-        let mut cancel_task_count = 0;
-        while worker.next_task().is_some() {
-            cancel_task_count += 1;
-            if cancel_task_count >= 16 {
-                break;
+        let mut dispatch_order = Vec::new();
+        for _ in 0..21 {
+            if let Some(task) = worker.next_task() {
+                dispatch_order.push(task);
             }
         }
 
+        let ready_pos = dispatch_order
+            .iter()
+            .position(|task| *task == ready_task)
+            .expect("eligible ready task must be dispatched");
+        assert!(
+            ready_pos <= cancel_streak_limit,
+            "Ready task appeared after {ready_pos} cancel dispatches; limit is \
+             {cancel_streak_limit}"
+        );
         assert_eq!(
-            cancel_task_count, 16,
-            "Should have dispatched 16 cancel tasks"
+            worker.preemption_metrics().max_ready_dispatch_stall,
+            cancel_streak_limit,
+            "metrics should record the dispatch-count stall, not a poll-budget product"
+        );
+    }
+
+    #[test]
+    fn scheduler_worker_dispatch_quantum_polls_pending_task_once() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let root = state
+            .lock()
+            .expect("lock state")
+            .create_root_region(Budget::INFINITE);
+
+        let observed_polls = Arc::new(AtomicUsize::new(0));
+        let future_polls = Arc::clone(&observed_polls);
+        let task_id = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (task_id, _handle) = guard
+                .create_task(
+                    root,
+                    Budget::INFINITE,
+                    std::future::poll_fn(move |cx| {
+                        future_polls.fetch_add(1, Ordering::SeqCst);
+                        cx.waker().wake_by_ref();
+                        Poll::<()>::Pending
+                    }),
+                )
+                .expect("create self-waking pending task");
+            task_id
+        };
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        scheduler.inject_ready(task_id, 50);
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+        assert_eq!(
+            worker.next_task(),
+            Some(task_id),
+            "ready task should dispatch"
         );
 
-        // FINDING: Cancellation propagation latency is bounded by
-        // cancel_streak_limit × poll_budget, not by ~1 quantum.
-        //
-        // IMPACT: Long-running CPU-bound tasks can delay cancellation
-        // observation for potentially seconds, not microseconds.
-        //
-        // RECOMMENDATION: Implement quantum-based preemption with:
-        // 1. Time-based yield budget (e.g., 1ms per dispatch)
-        // 2. Cancel check injection in tight loops
-        // 3. Asynchronous cancellation signaling
+        worker.execute(task_id);
+
+        assert_eq!(
+            observed_polls.load(Ordering::SeqCst),
+            1,
+            "one worker dispatch must poll a pending task exactly once"
+        );
+        let stored_poll_count = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_stored_future(task_id)
+            .expect("pending task should be stored for the next dispatch")
+            .poll_count();
+        assert_eq!(
+            stored_poll_count, 1,
+            "stored task poll counter should match the single dispatch quantum"
+        );
+        assert_eq!(
+            worker.next_task(),
+            Some(task_id),
+            "self-woken pending task should be requeued for a later dispatch"
+        );
     }
 
     #[test]
@@ -15093,7 +15159,7 @@ mod tests {
         eprintln!("  Total FIFO tasks available: {}", fifo_tasks.len());
         eprintln!("  Timed fairness limit: {}", worker.timed_fairness_limit);
         eprintln!("  Dispatch sequence: {:?}", dispatch_sequence);
-        eprintln!("");
+        eprintln!();
 
         // With the fix, FIFO tasks should get fairness guarantees
         assert!(
@@ -15121,17 +15187,13 @@ mod tests {
     }
 
     #[test]
-    fn test_deadline_preemption_priority_inversion_defect() {
-        // REGRESSION TEST: Deadline-monotone preemption within quantum boundaries
+    fn test_deadline_preemption_rechecks_at_next_scheduler_dispatch() {
+        // REGRESSION TEST: Deadline-monotone preemption at dispatch boundaries.
         //
-        // SCENARIO: Low-priority ready task starts executing, then high-priority
-        // deadline task arrives and becomes due. The deadline task should preempt
-        // at the next yield point, not wait for the full quantum.
-        //
-        // EXPECTED DEFECT: High-priority deadline task waits for low-priority task
-        // to complete its full quantum (up to cancel_streak_limit × poll_budget cycles).
-        //
-        // PRIORITY INVERSION: Deadline tasks should preempt within bounded latency.
+        // SCENARIO: Low-priority ready work is dispatched, then high-priority
+        // deadline work arrives and becomes due. The scheduler cannot preempt
+        // inside the already-running poll, but it must recheck the timed lane
+        // on the next call to next_task().
 
         use crate::time::{TimerDriverHandle, VirtualClock};
 
@@ -15147,11 +15209,6 @@ mod tests {
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
 
-        // Get current quantum limits for defect verification
-        let cancel_streak_limit = worker.cancel_streak_limit;
-        let poll_budget = 128u32; // Default RuntimeConfig poll budget
-        let max_preemption_delay = cancel_streak_limit as u32 * poll_budget;
-
         // Schedule low-priority ready task that will start executing
         let low_priority_ready = TaskId::new_for_test(1, 1);
         scheduler.inject_ready(low_priority_ready, 50); // Low priority
@@ -15166,7 +15223,8 @@ mod tests {
 
         // Now simulate: while the low-priority task is "executing", a high-priority
         // deadline task arrives and becomes due. In a real scenario, the executing
-        // task would continue for its quantum before the scheduler gets called again.
+        // task runs until the current poll returns; after that, the scheduler must
+        // observe the timed lane at the next dispatch boundary.
         let high_priority_deadline = TaskId::new_for_test(2, 1);
 
         // Schedule deadline task that becomes due immediately
@@ -15178,37 +15236,8 @@ mod tests {
         assert_eq!(
             second_task,
             Some(high_priority_deadline),
-            "High-priority deadline task should preempt immediately"
+            "Due deadline task should be selected at the next scheduler dispatch"
         );
-
-        // DEFECT VERIFICATION: Document the current priority inversion issue
-        eprintln!("DEADLINE PREEMPTION DEFECT ANALYSIS:");
-        eprintln!("  Cancel streak limit: {}", cancel_streak_limit);
-        eprintln!("  Poll budget per task: {}", poll_budget);
-        eprintln!(
-            "  Maximum preemption delay: {} poll cycles",
-            max_preemption_delay
-        );
-        eprintln!("  Expected delay: ~1 quantum (few polls)");
-        eprintln!(
-            "  Actual delay: up to {} polls (potentially milliseconds)",
-            max_preemption_delay
-        );
-        eprintln!("");
-        eprintln!("  ISSUE: Once a task starts executing, it can run for a full quantum");
-        eprintln!("  ROOT CAUSE: No time-based preemption between scheduler calls");
-        eprintln!("  IMPACT: High-priority deadline tasks suffer bounded but high latency");
-
-        // Current test passes because we call next_task() immediately (no quantum delay)
-        // but documents the real-world issue where tasks run between scheduler calls
-        assert_eq!(
-            max_preemption_delay, 2048,
-            "DOCUMENTED DEFECT: Maximum preemption delay is {} cycles, should be ~1 quantum",
-            max_preemption_delay
-        );
-
-        eprintln!("  NOTE: Test passes because next_task() is called immediately,");
-        eprintln!("        but real tasks execute for quantums between scheduler calls");
     }
 
     #[test]
