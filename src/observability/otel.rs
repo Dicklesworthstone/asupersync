@@ -6009,7 +6009,7 @@ pub mod span_semantics {
             })
         }
 
-        pub(crate) fn test_span_snapshot(span: &TestSpan) -> Value {
+        pub fn test_span_snapshot(span: &TestSpan) -> Value {
             json!({
                 "name": span.name,
                 "kind": format!("{:?}", span.kind),
@@ -6083,7 +6083,7 @@ pub mod span_semantics {
             json!({
                 "trace_id": "[ID]",
                 "span_id": "[ID]",
-                "parent_span_id": span.parent_context.as_ref().map(|_| "[ID]").unwrap_or(""),
+                "parent_span_id": span.parent_context.as_ref().map_or("", |_| "[ID]"),
                 "name": span.name,
                 "kind": format!("{:?}", span.kind),
                 "start_time_unix_nano": "[TIMESTAMP]",
@@ -8700,9 +8700,8 @@ mod otlp_wire_format_tests {
 
             // Subsequent updates: apply update sequence with timestamp tracking
             let mut previous_timestamp = initial_timestamp;
-            let mut update_count = 1; // Start at 1 for initial write
-
-            for &update_value in &scenario.update_sequence {
+            for (update_count, &update_value) in scenario.update_sequence.iter().enumerate() {
+                let update_count = update_count + 1; // Start at 1 for the first update after the initial write.
                 let update_timestamp = Instant::now();
 
                 // Verify timestamp ordering (monotonic or equal)
@@ -8716,7 +8715,6 @@ mod otlp_wire_format_tests {
                 // Apply gauge update
                 snapshot.add_gauge(&scenario.gauge_name, scenario.labels.clone(), update_value);
 
-                update_count += 1;
                 previous_timestamp = update_timestamp;
 
                 // Small delay for next update
