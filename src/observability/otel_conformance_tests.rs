@@ -4370,7 +4370,7 @@ mod tests {
         // Verify span and trace IDs are preserved correctly
         let span_id_correct = span_context.span_id.len() == 16; // 8 bytes = 16 hex chars
         let trace_id_correct = span_context.trace_id.len() == 32; // 16 bytes = 32 hex chars
-        let trace_flags_correct = span_context.trace_flags <= 255; // Valid u8 range
+        let trace_flags_correct = matches!(span_context.trace_flags, 0 | 1 | u8::MAX);
 
         // OTLP format compliance
         let otlp_format_compliant = span_id_correct
@@ -54481,7 +54481,7 @@ mod xfail_coverage_tracker {
 
     /// Unique identifier for an XFAIL test case
     #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-    struct XfailTestId {
+    pub struct XfailTestId {
         test_function: String,
         scenario_name: String,
         failure_type: String,
