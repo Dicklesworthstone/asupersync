@@ -24,8 +24,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Mock span with SystemTime-based timing (current defective implementation).
 #[derive(Debug, Clone)]
 pub struct DefectiveSystemTimeSpan {
+    /// Span operation name used in the mock payload.
     pub name: String,
+    /// Wall-clock span start time.
     pub start_time: SystemTime,
+    /// Wall-clock span end time when the span has completed.
     pub end_time: Option<SystemTime>,
 }
 
@@ -59,10 +62,14 @@ impl DefectiveSystemTimeSpan {
 /// Mock span with Instant-based timing (correct implementation).
 #[derive(Debug, Clone)]
 pub struct CorrectInstantSpan {
+    /// Span operation name used in the mock payload.
     pub name: String,
+    /// Monotonic span start instant used for elapsed-time calculation.
     pub start_instant: Instant,
+    /// Monotonic span end instant when the span has completed.
     pub end_instant: Option<Instant>,
-    pub start_time: SystemTime, // For wire format only
+    /// Wall-clock start timestamp used only for OTLP wire-format conversion.
+    pub start_time: SystemTime,
 }
 
 impl CorrectInstantSpan {
@@ -106,7 +113,9 @@ impl CorrectInstantSpan {
 /// Mock DST clock manager for testing backward jumps.
 #[derive(Debug)]
 pub struct MockDstClock {
+    /// Current simulated wall-clock time.
     pub current_time: SystemTime,
+    /// Recorded `(label, before, after)` clock-jump events.
     pub jump_events: Vec<(String, SystemTime, SystemTime)>,
 }
 
