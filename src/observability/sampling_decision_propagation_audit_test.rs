@@ -113,11 +113,7 @@ fn audit_upstream_sampling_decision_honored() {
         0x01 // Sampled (honor upstream)
     } else {
         // Apply local sampler only if upstream is not sampled
-        if local_sampler.sample_child(false) {
-            0x01
-        } else {
-            0x00
-        }
+        u8::from(local_sampler.sample_child(false))
     };
 
     // Create span that honors upstream decision
@@ -206,7 +202,7 @@ fn audit_local_sampling_applies_to_root_spans_only() {
     println!("📊 Case 1: ROOT span - local sampler decision applies");
 
     let root_decision = local_sampler.sample_root("root_operation");
-    let root_flags = if root_decision { 0x01 } else { 0x00 };
+    let root_flags = u8::from(root_decision);
 
     let root_span = OtlpSpan::new_with_flags(
         "root123456789".to_string(),
@@ -230,7 +226,7 @@ fn audit_local_sampling_applies_to_root_spans_only() {
     let parent_sampled = true; // Upstream/parent decision
     let child_decision = local_sampler.sample_child(parent_sampled); // Should return true per W3C
 
-    let child_flags = if child_decision { 0x01 } else { 0x00 };
+    let child_flags = u8::from(child_decision);
 
     let child_span = OtlpSpan::new_with_flags(
         "child123456789".to_string(),
@@ -328,11 +324,7 @@ fn audit_defective_local_override_scenario() {
     // DEFECTIVE BEHAVIOR: Override upstream decision with local sampler
     println!("🚨 Simulating DEFECTIVE behavior: local override of upstream decision");
 
-    let defective_flags = if local_sampler.sample_root("defective_operation") {
-        0x01 // Sample
-    } else {
-        0x00 // Drop - DEFECTIVE: ignores upstream sampled=1
-    };
+    let defective_flags = u8::from(local_sampler.sample_root("defective_operation"));
 
     let defective_span = OtlpSpan::new_with_flags(
         upstream_context.span_id.to_hex(),
