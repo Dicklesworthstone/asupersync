@@ -785,16 +785,24 @@ mod tests {
         Pin::new(fut).poll(&mut cx)
     }
 
-    struct FreshWake;
+    struct FreshWake {
+        wake_count: AtomicUsize,
+    }
 
     impl std::task::Wake for FreshWake {
-        fn wake(self: Arc<Self>) {}
+        fn wake(self: Arc<Self>) {
+            self.wake_count.fetch_add(1, Ordering::Relaxed);
+        }
 
-        fn wake_by_ref(self: &Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wake_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn fresh_waker() -> Waker {
-        Waker::from(Arc::new(FreshWake))
+        Waker::from(Arc::new(FreshWake {
+            wake_count: AtomicUsize::new(0),
+        }))
     }
 
     fn poll_with_waker<F>(fut: &mut F, waker: &Waker) -> Poll<F::Output>
