@@ -1607,7 +1607,7 @@ mod tests {
 
         for scenario in &test_scenarios {
             // Test asupersync trace span kind defaults
-            let asupersync_result = match simulate_asupersync_trace_span_kind_defaults(&scenario) {
+            let asupersync_result = match simulate_asupersync_trace_span_kind_defaults(scenario) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
@@ -1619,7 +1619,7 @@ mod tests {
 
             // Test OpenTelemetry SDK trace span kind defaults
             let opentelemetry_result = match simulate_opentelemetry_trace_span_kind_defaults(
-                &scenario,
+                scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -1683,7 +1683,7 @@ mod tests {
             }
 
             // Verify span kind mapping correctness
-            if let Err(e) = verify_span_kind_mapping(&scenario, &asupersync_result) {
+            if let Err(e) = verify_span_kind_mapping(scenario, &asupersync_result) {
                 panic!(
                     "OTLP-057 FAILED for scenario '{}': Span kind mapping validation - {}",
                     scenario.name, e
@@ -2365,14 +2365,14 @@ mod tests {
                 name: "empty_scope_name".to_string(),
                 scope_metrics: vec![
                     ScopeMetricsInput {
-                        scope_name: "".to_string(),    // Empty name
-                        scope_version: "".to_string(), // Empty version
+                        scope_name: String::new(),    // Empty name
+                        scope_version: String::new(), // Empty version
                         metrics_count: 1,
                         scope_attributes: vec![],
                     },
                     ScopeMetricsInput {
-                        scope_name: "".to_string(),    // Empty name
-                        scope_version: "".to_string(), // Empty version
+                        scope_name: String::new(),    // Empty name
+                        scope_version: String::new(), // Empty version
                         metrics_count: 2,
                         scope_attributes: vec![],
                     },
