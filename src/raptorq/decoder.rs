@@ -5060,9 +5060,9 @@ mod tests {
         let equation = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
         let mut column_states = vec![ColumnState::Active; params.l];
         // Other columns are solved/inactive, leaving only left_col and right_col active
-        for i in 0..params.l {
+        for (i, column_state) in column_states.iter_mut().enumerate() {
             if i != left_col && i != right_col {
-                column_states[i] = ColumnState::Solved;
+                *column_state = ColumnState::Solved;
             }
         }
         DecoderState {
@@ -5084,9 +5084,9 @@ mod tests {
         let equation = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
         let mut column_states = vec![ColumnState::Active; params.l];
         // Other columns are solved/inactive, leaving only left_col and right_col active
-        for i in 0..params.l {
+        for (i, column_state) in column_states.iter_mut().enumerate() {
             if i != left_col && i != right_col {
-                column_states[i] = ColumnState::Solved;
+                *column_state = ColumnState::Solved;
             }
         }
         DecoderState {
@@ -5112,9 +5112,9 @@ mod tests {
             Equation::new(vec![middle_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
         let mut column_states = vec![ColumnState::Active; params.l];
         // Other columns are solved/inactive, leaving only left_col, middle_col, and right_col active
-        for i in 0..params.l {
+        for (i, column_state) in column_states.iter_mut().enumerate() {
             if i != left_col && i != middle_col && i != right_col {
-                column_states[i] = ColumnState::Solved;
+                *column_state = ColumnState::Solved;
             }
         }
         DecoderState {
@@ -5138,9 +5138,9 @@ mod tests {
         let eq_right = Equation::new(vec![right_col], vec![Gf256::ONE]);
         let mut column_states = vec![ColumnState::Active; params.l];
         // Other columns are solved/inactive, leaving only left_col and right_col active
-        for i in 0..params.l {
+        for (i, column_state) in column_states.iter_mut().enumerate() {
             if i != left_col && i != right_col {
-                column_states[i] = ColumnState::Solved;
+                *column_state = ColumnState::Solved;
             }
         }
         DecoderState {
@@ -5168,9 +5168,9 @@ mod tests {
         let eq_mix = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
         let mut column_states = vec![ColumnState::Active; params.l];
         // Other columns are solved/inactive, leaving only left_col and right_col active
-        for i in 0..params.l {
+        for (i, column_state) in column_states.iter_mut().enumerate() {
             if i != left_col && i != right_col {
-                column_states[i] = ColumnState::Solved;
+                *column_state = ColumnState::Solved;
             }
         }
         DecoderState {
@@ -5202,9 +5202,9 @@ mod tests {
         };
         let mut column_states = vec![ColumnState::Active; params.l];
         // Other columns are solved/inactive, leaving only left_col and right_col active
-        for i in 0..params.l {
+        for (i, column_state) in column_states.iter_mut().enumerate() {
             if i != left_col && i != right_col {
-                column_states[i] = ColumnState::Solved;
+                *column_state = ColumnState::Solved;
             }
         }
         DecoderState {
@@ -5242,9 +5242,9 @@ mod tests {
 
         let mut column_states = vec![ColumnState::Active; params.l];
         // Only the specified range of columns should be active
-        for i in 0..params.l {
+        for (i, column_state) in column_states.iter_mut().enumerate() {
             if i < start_col || i >= start_col + width {
-                column_states[i] = ColumnState::Solved;
+                *column_state = ColumnState::Solved;
             }
         }
 
@@ -5276,9 +5276,9 @@ mod tests {
 
         let mut column_states = vec![ColumnState::Active; params.l];
         // Only the specified range of columns should be active
-        for i in 0..params.l {
+        for (i, column_state) in column_states.iter_mut().enumerate() {
             if i < start_col || i >= start_col + width {
-                column_states[i] = ColumnState::Solved;
+                *column_state = ColumnState::Solved;
             }
         }
 
