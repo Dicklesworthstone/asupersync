@@ -2902,7 +2902,7 @@ mod tests {
                     // For delta temporality, reset counters after collection
                     drop(data); // Release read lock
                     if let Ok(mut data) = metric_data_clone.lock() {
-                        for (_, value) in data.iter_mut() {
+                        for value in data.values_mut() {
                             *value = 0.0; // Reset for delta temporality
                         }
                     }
@@ -3049,19 +3049,9 @@ mod tests {
         // In delta temporality, each snapshot should represent a complete
         // state at the moment of collection, with no partial updates
 
-        for snapshot in snapshots {
-            // Check that snapshot values are reasonable
-            for value in snapshot.values() {
-                // Partial updates might manifest as unexpected fractional values
-                // or impossible intermediate states
-                if value.fract() != 0.0 && *value < 1.0 {
-                    // Suspicious fractional value that might indicate partial update
-                    continue; // Allow for legitimate fractional metrics
-                }
-            }
-        }
-
-        true // All snapshots appear to be complete
+        snapshots
+            .iter()
+            .all(|snapshot| snapshot.values().all(|value| value.is_finite()))
     }
 
     /// Validate concurrent snapshot conformance
@@ -3364,8 +3354,8 @@ mod tests {
                 name: "empty_scope_names_merge".to_string(),
                 duplicate_scopes: vec![
                     ScopeDataPoints {
-                        scope_name: "".to_string(),    // Empty name
-                        scope_version: "".to_string(), // Empty version
+                        scope_name: String::new(),    // Empty name
+                        scope_version: String::new(), // Empty version
                         data_points: vec![DataPoint {
                             metric_name: "anonymous_metric_1".to_string(),
                             value: 10.0,
@@ -3374,8 +3364,8 @@ mod tests {
                         scope_attributes: vec![],
                     },
                     ScopeDataPoints {
-                        scope_name: "".to_string(),    // Empty name (same as above)
-                        scope_version: "".to_string(), // Empty version (same as above)
+                        scope_name: String::new(),    // Empty name (same as above)
+                        scope_version: String::new(), // Empty version (same as above)
                         data_points: vec![DataPoint {
                             metric_name: "anonymous_metric_2".to_string(),
                             value: 20.0,
@@ -3564,7 +3554,7 @@ mod tests {
         let mut total_data_points = 0;
         let mut scope_merging_occurred = false;
 
-        for (_, group) in &scope_groups {
+        for group in scope_groups.values() {
             if group.len() > 1 {
                 scope_merging_occurred = true;
             }
