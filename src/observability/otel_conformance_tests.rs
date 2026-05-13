@@ -4185,7 +4185,7 @@ mod tests {
                     trace_flags: 1,
                 },
                 expected_parent_span_id_set: false, // No parent for root span
-                expected_parent_span_id: "".to_string(),
+                expected_parent_span_id: String::new(),
                 should_preserve_trace_context: true,
                 should_indicate_remote_origin: true,
             },
@@ -4227,7 +4227,7 @@ mod tests {
                     trace_flags: 1,
                 },
                 expected_parent_span_id_set: false, // Zero parent treated as no parent
-                expected_parent_span_id: "".to_string(),
+                expected_parent_span_id: String::new(),
                 should_preserve_trace_context: true,
                 should_indicate_remote_origin: true,
             },
@@ -4683,17 +4683,17 @@ mod tests {
                 name: "empty_event_names".to_string(),
                 span_events: vec![
                     SpanEventInfo {
-                        name: "".to_string(), // Empty name
+                        name: String::new(), // Empty name
                         timestamp_unix_nano: 1_640_995_600_000_000_000,
                         attributes: vec![("type".to_string(), "first".to_string())],
                     },
                     SpanEventInfo {
-                        name: "".to_string(), // Same empty name
+                        name: String::new(), // Same empty name
                         timestamp_unix_nano: 1_640_995_601_000_000_000,
                         attributes: vec![("type".to_string(), "second".to_string())],
                     },
                     SpanEventInfo {
-                        name: "".to_string(), // Same empty name again
+                        name: String::new(), // Same empty name again
                         timestamp_unix_nano: 1_640_995_602_000_000_000,
                         attributes: vec![("type".to_string(), "third".to_string())],
                     },
@@ -4832,7 +4832,7 @@ mod tests {
         // Check for duplicate names preservation
         let event_names: Vec<&String> = scenario.span_events.iter().map(|e| &e.name).collect();
         let unique_names: std::collections::HashSet<&String> =
-            event_names.iter().cloned().collect();
+            event_names.iter().copied().collect();
         let duplicate_names_preserved = event_names.len() >= unique_names.len();
 
         // Verify timestamps are preserved
