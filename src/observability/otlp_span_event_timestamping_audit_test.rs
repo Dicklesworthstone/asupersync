@@ -43,7 +43,7 @@ impl MockSpanEvent {
 
     fn new_with_monotonic_offset(name: &str, base_instant: Instant, offset: Duration) -> Self {
         // Convert monotonic time to SystemTime for storage (correct approach)
-        let monotonic_time = base_instant + offset;
+        let _monotonic_time = base_instant + offset;
         let system_time = SystemTime::now(); // This approximation has issues, but demonstrates intent
 
         Self {
@@ -233,7 +233,7 @@ fn audit_ntp_clock_adjustment_scenario() {
 
     // **MONOTONIC APPROACH** would prevent this
     println!("📊 Monotonic approach would prevent regression:");
-    let instant_base = Instant::now();
+    let _instant_base = Instant::now();
 
     let event1_offset = Duration::from_millis(0);
     let event2_offset = Duration::from_millis(1); // Always increasing

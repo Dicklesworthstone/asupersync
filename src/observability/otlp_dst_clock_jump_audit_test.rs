@@ -131,14 +131,14 @@ impl MockDstClock {
     }
 
     /// Create a span that experiences a clock jump during its lifetime
-    fn create_span_with_dst_jump(&mut self, name: &str) -> (SystemTime, SystemTime, SystemTime) {
+    fn create_span_with_dst_jump(&mut self, _name: &str) -> (SystemTime, SystemTime, SystemTime) {
         let start_time = self.current_time;
 
         // Simulate some time passing
         self.current_time += Duration::from_millis(100);
 
         // DST transition happens
-        let (before_jump, after_jump) = self.simulate_dst_fall_back();
+        let (before_jump, _after_jump) = self.simulate_dst_fall_back();
 
         // Span ends after clock jump
         self.current_time += Duration::from_millis(100);
@@ -204,7 +204,7 @@ fn audit_dst_backward_jump_span_duration() {
     println!("📊 Testing correct Instant implementation:");
 
     // Simulate the same scenario with Instant-based timing
-    let start_instant = Instant::now();
+    let _start_instant = Instant::now();
     let mut correct_span = CorrectInstantSpan::new("http_request");
 
     // Simulate time passing (Instant is monotonic, unaffected by DST)

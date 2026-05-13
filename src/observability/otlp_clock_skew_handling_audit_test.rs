@@ -99,7 +99,7 @@ impl MockClockSkewSpan {
     }
 
     fn duration_nanos(&self) -> Option<u64> {
-        if let Some(end_time) = self.end_time {
+        if self.end_time.is_some() {
             let (start_nano, end_nano) = self.to_otlp_timestamps();
             Some(end_nano.saturating_sub(start_nano))
         } else {
