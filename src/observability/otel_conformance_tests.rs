@@ -14851,7 +14851,7 @@ fn otlp_084_span_attribute_empty_key_validation_conformance() {
                 trace_id: "trace-12345678901234567890123456789012".to_string(),
                 attributes: vec![
                     AttributeKeyValue {
-                        key: "".to_string(),
+                        key: String::new(),
                         value: "some-value".to_string(),
                     }, // Empty key - violation
                     AttributeKeyValue {
@@ -14921,7 +14921,7 @@ fn otlp_084_span_attribute_empty_key_validation_conformance() {
                 trace_id: "trace-45678901234567890123456789012345".to_string(),
                 attributes: vec![
                     AttributeKeyValue {
-                        key: "".to_string(),
+                        key: String::new(),
                         value: "value1".to_string(),
                     }, // Empty key #1
                     AttributeKeyValue {
@@ -14929,7 +14929,7 @@ fn otlp_084_span_attribute_empty_key_validation_conformance() {
                         value: "value2".to_string(),
                     },
                     AttributeKeyValue {
-                        key: "".to_string(),
+                        key: String::new(),
                         value: "value3".to_string(),
                     }, // Empty key #2
                 ],
@@ -15037,22 +15037,28 @@ fn otlp_084_span_attribute_empty_key_validation_conformance() {
         let reference_result = simulate_reference_attribute_key_validation(&scenario);
 
         // Validate individual results
-        validate_attribute_key_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync attribute key validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_attribute_key_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync attribute key validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_attribute_key_validation_logic(&reference_result).expect(&format!(
-            "Reference attribute key validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_attribute_key_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference attribute key validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_attribute_key_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -15557,22 +15563,28 @@ fn otlp_085_span_link_empty_span_id_validation_conformance() {
         let reference_result = simulate_reference_span_link_validation(&scenario);
 
         // Validate individual results
-        validate_span_link_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync span link validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_span_link_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync span link validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_span_link_validation_logic(&reference_result).expect(&format!(
-            "Reference span link validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_span_link_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference span link validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_span_link_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -16080,22 +16092,28 @@ fn otlp_086_span_attribute_array_truncation_conformance() {
         let reference_result = simulate_reference_array_truncation(&scenario);
 
         // Validate individual results
-        validate_array_truncation_logic(&asupersync_result).expect(&format!(
-            "Asupersync array truncation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_array_truncation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync array truncation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_array_truncation_logic(&reference_result).expect(&format!(
-            "Reference array truncation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_array_truncation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference array truncation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_array_truncation_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
