@@ -3609,10 +3609,7 @@ mod tests {
         let state = ResourceProbeState::new("fake-linux/x86_64");
 
         for attempt in 0..9 {
-            let error = std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("transient probe failure {attempt}"),
-            );
+            let error = std::io::Error::other(format!("transient probe failure {attempt}"));
             state.record_probe_failure(
                 ResourceProbe::LoadAvg1MinScaled,
                 ResourceProbeFallback::OmitMeasurement,
