@@ -300,7 +300,7 @@ mod metamorphic_initialization_idempotence {
                     let cell = Arc::new(OnceCell::new());
 
                     // Try get_or_init with different functions sequentially
-                    for (_i, &value) in values.iter().enumerate() {
+                    for &value in &values {
                         let result = cell.get_or_init(|| async { value }).await;
                         global_state.record_observed_value(*result);
                     }
@@ -401,7 +401,7 @@ mod metamorphic_concurrent_convergence {
             // Test multiple readers
             for i in 0..num_readers {
                 let reader = TestReader::new(i as u32, Arc::clone(&global_state));
-                let _ = reader.read_value(&*cell).await;
+                let _ = reader.read_value(&cell).await;
             }
         });
 
@@ -569,7 +569,7 @@ mod metamorphic_value_immutability {
             // Test many sequential readers
             for i in 0..config.num_readers {
                 let reader = TestReader::new(i as u32, Arc::clone(&global_state));
-                let _ = reader.read_value(&*cell).await;
+                let _ = reader.read_value(&cell).await;
             }
         });
 
@@ -607,7 +607,7 @@ mod comprehensive_once_cell_metamorphic_tests {
             // MR6: Multiple readers should see immutable value
             for i in 0..num_readers {
                 let reader = TestReader::new(i as u32, Arc::clone(&global_state));
-                let _ = reader.read_value(&*cell).await;
+                let _ = reader.read_value(&cell).await;
             }
 
             // MR5: Verify final state is stable
