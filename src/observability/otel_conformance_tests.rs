@@ -20985,7 +20985,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
             },
             expected_cross_trace_detected: true,
             expected_span_accepted: true, // Should NOT reject cross-trace SERVER spans
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -21009,7 +21009,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
             },
             expected_cross_trace_detected: false,
             expected_span_accepted: true,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -21032,7 +21032,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
             },
             expected_cross_trace_detected: false,
             expected_span_accepted: true,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -21060,7 +21060,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
             },
             expected_cross_trace_detected: true,
             expected_span_accepted: true,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -21087,7 +21087,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
             },
             expected_cross_trace_detected: true,
             expected_span_accepted: true,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -21118,7 +21118,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
             },
             expected_cross_trace_detected: true,
             expected_span_accepted: true,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -21134,25 +21134,31 @@ fn otlp_100_cross_trace_server_span_conformance() {
         let reference_result = simulate_reference_cross_trace_validation(&scenario);
 
         // Validate individual results
-        validate_cross_trace_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync cross-trace validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_cross_trace_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync cross-trace validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_cross_trace_validation_logic(&reference_result).expect(&format!(
-            "Reference cross-trace validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_cross_trace_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference cross-trace validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_cross_trace_validation_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
