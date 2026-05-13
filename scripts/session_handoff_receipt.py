@@ -56,7 +56,8 @@ def status_paths(status: str, path: str) -> list[str]:
             if normalized and normalized not in paths:
                 paths.append(normalized)
         return paths
-    return [path]
+    normalized = normalize_repo_path(path)
+    return [normalized] if normalized else []
 
 
 def paths_overlap(left: str, right: str) -> bool:

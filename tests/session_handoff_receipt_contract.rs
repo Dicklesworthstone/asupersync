@@ -494,6 +494,54 @@ print(json.dumps({
 }
 
 #[test]
+fn live_fallback_normalizes_non_rename_dirty_paths() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import session_handoff_receipt as receipt
+
+raw = "\n".join([
+    " M ./src/channel/mod.rs",
+    "?? ./tests/fixtures/session_handoff_receipt/",
+])
+print(json.dumps(receipt.parse_status_lines(raw), sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run handoff non-rename normalization probe");
+    assert!(
+        output.status.success(),
+        "python non-rename normalization probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let entries: Value = serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    let paths: Vec<&str> = entries
+        .as_array()
+        .expect("probe entries must be array")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("entry path must be string"))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "src/channel/mod.rs",
+            "tests/fixtures/session_handoff_receipt"
+        ]
+    );
+}
+
+#[test]
 fn live_fallback_expands_rename_copy_rows_without_touching_literal_arrow_paths() {
     let probe = r#"
 import json
