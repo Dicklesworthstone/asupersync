@@ -5299,16 +5299,17 @@ mod tests {
         #[test]
         fn mr_window_update_consumption_roundtrip() {
             proptest!(|(increment in 1u32..=1000)| {
-                let mut conn = open_connection_server();
+                let mut conn = open_connection_client();
+                let headers = vec![
+                    Header::new(":method", "POST"),
+                    Header::new(":path", "/upload"),
+                    Header::new(":scheme", "https"),
+                    Header::new(":authority", "example.com"),
+                ];
+                let stream_id = conn.open_stream(headers, false).expect("stream opens");
+                let _ = conn.next_frame().expect("initial HEADERS frame");
 
-                // Need to create a stream for DATA frames
-                let _ = match conn.streams.get_or_create(1) {
-                    Ok(_) => (),
-                    Err(_) => return Ok(()),
-                };
-                let stream_id = 1u32;
-
-                let initial_window = conn.recv_window();
+                let initial_window = conn.send_window();
 
                 // Step 1: Apply WINDOW_UPDATE
                 let update_frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, increment));
@@ -5316,20 +5317,25 @@ mod tests {
                     return Ok(());
                 }
 
-                let after_update = conn.recv_window();
+                let after_update = conn.send_window();
                 prop_assert_eq!(after_update, initial_window + increment as i32);
 
-                // Step 2: Consume equivalent amount via DATA frame (if reasonable size)
-                if increment <= 1000 {
-                    let data = vec![0u8; increment as usize];
-                    let data_frame = DataFrame::new(stream_id, data.into(), false);
-                    if conn.process_frame(Frame::Data(data_frame)).is_ok() {
-                        let final_window = conn.recv_window();
-                        prop_assert_eq!(final_window, initial_window,
-                            "Round-trip: update {} then consume {} must return to initial window {} (got {})",
-                            increment, increment, initial_window, final_window);
+                // Step 2: Send equivalent DATA bytes through the outbound flow-control path.
+                let data = Bytes::from(vec![0u8; increment as usize]);
+                prop_assert!(
+                    conn.send_data(stream_id, data, false).is_ok(),
+                    "DATA should queue on an open stream"
+                );
+                match conn.next_frame() {
+                    Some(Frame::Data(frame)) => {
+                        prop_assert_eq!(frame.data.len(), increment as usize);
                     }
+                    other => prop_assert!(false, "expected DATA frame after queueing, got {other:?}"),
                 }
+                let final_window = conn.send_window();
+                prop_assert_eq!(final_window, initial_window,
+                    "Round-trip: update {} then consume {} must return to initial window {} (got {})",
+                    increment, increment, initial_window, final_window);
             });
         }
 
@@ -5383,13 +5389,14 @@ mod tests {
             let large_increment = 0x7FFF_FFFF; // i32::MAX as u32
             let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, large_increment));
 
-            // This should either succeed or fail gracefully, never panic
-            let result = conn.process_frame(frame);
-
-            // If it succeeds, the window should not exceed i32::MAX
-            if result.is_ok() {
-                assert!(conn.send_window() <= i32::MAX);
-            }
+            // This should fail gracefully without mutating the flow-control window.
+            let err = conn
+                .process_frame(frame)
+                .expect_err("overflowing WINDOW_UPDATE must fail gracefully");
+            let default_window = i32::try_from(settings::DEFAULT_INITIAL_WINDOW_SIZE)
+                .expect("default window fits i32");
+            assert_eq!(err.code, ErrorCode::FlowControlError);
+            assert_eq!(conn.send_window(), default_window);
         }
     }
 }
