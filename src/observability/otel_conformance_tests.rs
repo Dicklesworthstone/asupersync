@@ -5032,21 +5032,21 @@ mod tests {
                     SpanLinkInfo {
                         trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), // Foreign trace 1
                         span_id: "1111111111111111".to_string(),
-                        trace_state: "".to_string(),
+                        trace_state: String::new(),
                         attributes: vec![],
                         is_foreign_trace: true,
                     },
                     SpanLinkInfo {
                         trace_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(), // Foreign trace 2
                         span_id: "2222222222222222".to_string(),
-                        trace_state: "".to_string(),
+                        trace_state: String::new(),
                         attributes: vec![],
                         is_foreign_trace: true,
                     },
                     SpanLinkInfo {
                         trace_id: "11111111111111111111111111111111".to_string(), // Same trace (not foreign)
                         span_id: "3333333333333333".to_string(),
-                        trace_state: "".to_string(),
+                        trace_state: String::new(),
                         attributes: vec![],
                         is_foreign_trace: false,
                     },
@@ -5061,7 +5061,7 @@ mod tests {
                 span_links: vec![SpanLinkInfo {
                     trace_id: "00000000000000001111111111111111".to_string(), // Contains zero bytes
                     span_id: "0000111100001111".to_string(),
-                    trace_state: "".to_string(),
+                    trace_state: String::new(),
                     attributes: vec![],
                     is_foreign_trace: true,
                 }],
@@ -5089,7 +5089,7 @@ mod tests {
                 span_links: vec![SpanLinkInfo {
                     trace_id: "DeAdBeEfCaFeBAbeDeAdBeEfCaFeBAbe".to_string(), // Mixed case
                     span_id: "CaFeBAbeDeAdBeEf".to_string(),
-                    trace_state: "".to_string(),
+                    trace_state: String::new(),
                     attributes: vec![],
                     is_foreign_trace: true,
                 }],
@@ -5121,7 +5121,7 @@ mod tests {
                 span_links: vec![SpanLinkInfo {
                     trace_id: "abcdef1234567890abcdef1234567891".to_string(), // Very similar but foreign
                     span_id: "1234567890abcdef".to_string(),
-                    trace_state: "".to_string(),
+                    trace_state: String::new(),
                     attributes: vec![],
                     is_foreign_trace: true,
                 }],
@@ -5440,7 +5440,7 @@ mod tests {
                     },
                     GrpcErrorInfo {
                         error_code: GrpcErrorCode::Ok, // Success after retries
-                        error_message: "".to_string(),
+                        error_message: String::new(),
                         should_retry: false,
                         retry_attempt: 3,
                     },
@@ -5507,7 +5507,7 @@ mod tests {
                     },
                     GrpcErrorInfo {
                         error_code: GrpcErrorCode::Ok,
-                        error_message: "".to_string(),
+                        error_message: String::new(),
                         should_retry: false,
                         retry_attempt: 3,
                     },
@@ -5574,7 +5574,7 @@ mod tests {
                     },
                     GrpcErrorInfo {
                         error_code: GrpcErrorCode::Ok,
-                        error_message: "".to_string(),
+                        error_message: String::new(),
                         should_retry: false,
                         retry_attempt: 2,
                     },
@@ -5588,7 +5588,7 @@ mod tests {
                 name: "immediate_success_no_retry".to_string(),
                 error_sequence: vec![GrpcErrorInfo {
                     error_code: GrpcErrorCode::Ok,
-                    error_message: "".to_string(),
+                    error_message: String::new(),
                     should_retry: false,
                     retry_attempt: 1,
                 }],
@@ -5988,7 +5988,7 @@ mod tests {
                 name: "unset_status_omit_field".to_string(),
                 span_status_info: SpanStatusInfo {
                     status_code: SpanStatusFieldCode::Unset,
-                    status_message: "".to_string(),
+                    status_message: String::new(),
                     is_explicitly_set: false,
                 },
                 expected_status_field_omitted: true, // MUST omit for UNSET
@@ -6021,7 +6021,7 @@ mod tests {
                 name: "unset_status_with_empty_message".to_string(),
                 span_status_info: SpanStatusInfo {
                     status_code: SpanStatusFieldCode::Unset,
-                    status_message: "".to_string(),
+                    status_message: String::new(),
                     is_explicitly_set: false,
                 },
                 expected_status_field_omitted: true, // Still omit even with empty message
@@ -6032,7 +6032,7 @@ mod tests {
                 name: "error_status_empty_message".to_string(),
                 span_status_info: SpanStatusInfo {
                     status_code: SpanStatusFieldCode::Error,
-                    status_message: "".to_string(), // Empty message but ERROR status
+                    status_message: String::new(), // Empty message but ERROR status
                     is_explicitly_set: true,
                 },
                 expected_status_field_omitted: false, // Include even with empty message
@@ -6043,7 +6043,7 @@ mod tests {
                 name: "ok_status_empty_message".to_string(),
                 span_status_info: SpanStatusInfo {
                     status_code: SpanStatusFieldCode::Ok,
-                    status_message: "".to_string(), // Empty message but OK status
+                    status_message: String::new(), // Empty message but OK status
                     is_explicitly_set: true,
                 },
                 expected_status_field_omitted: false, // Include even with empty message
@@ -6054,7 +6054,7 @@ mod tests {
                 name: "unset_default_constructor".to_string(),
                 span_status_info: SpanStatusInfo {
                     status_code: SpanStatusFieldCode::Unset,
-                    status_message: "".to_string(),
+                    status_message: String::new(),
                     is_explicitly_set: false, // Default constructor value
                 },
                 expected_status_field_omitted: true, // Default should be omitted
