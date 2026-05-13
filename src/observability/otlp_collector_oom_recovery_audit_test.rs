@@ -308,7 +308,7 @@ fn audit_collector_oom_recovery() {
             .iter()
             .any(|(_, result)| result.contains("oom_retry_reducing"))
     );
-    assert!(correct_attempts.last().unwrap().1 == "success");
+    assert_eq!(correct_attempts.last().unwrap().1, "success");
 
     println!("✅ CORRECT: Multiple attempts with progressive size reduction");
 
@@ -334,7 +334,7 @@ fn audit_current_error_classification() {
     // Simulate the current classification logic
     fn classify_server_error(status: u16) -> &'static str {
         match status {
-            502 | 503 | 504 => "retryable",
+            502..=504 => "retryable",
             500..=599 => "non_retryable_batch_dropped", // Current defective behavior
             _ => "other",
         }
@@ -496,13 +496,7 @@ fn audit_proposed_graceful_degradation_solution() {
                 let max_attempts = 6; // Allow up to 6 size reductions (100→1)
 
                 loop {
-                    let batch: Vec<MockSpan> = remaining_spans
-                        .iter()
-                        .take(current_batch_size)
-                        .cloned()
-                        .collect();
-
-                    let request_body = vec![0u8; 100 + (batch.len() * 50)]; // Mock serialization
+                    let request_body = vec![0u8; 100 + (current_batch_size * 50)]; // Mock serialization
                     let response = self.collector.handle_request(&request_body);
 
                     match response.status {
