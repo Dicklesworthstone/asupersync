@@ -10402,9 +10402,9 @@ fn otlp_076_self_referential_span_dropping_conformance() {
                 name: "edge_case_empty_span_ids".to_string(),
                 span_relationship_data: vec![
                     SpanHierarchyInfo {
-                        span_id: "".to_string(), // Empty span ID
+                        span_id: String::new(), // Empty span ID
                         trace_id: "trace_empty".to_string(),
-                        parent_span_id: Some("".to_string()), // Empty parent span ID - self-referential
+                        parent_span_id: Some(String::new()), // Empty parent span ID - self-referential
                         is_self_referential: true,
                         is_valid_hierarchy: false,
                         hierarchy_type: HierarchyType::SelfReferential,
@@ -10529,10 +10529,12 @@ fn otlp_076_self_referential_span_dropping_conformance() {
 
         // Validate both implementations are OTLP compliant
         validate_self_referential_span_conformance(scenario, &asupersync_result, &reference_result)
-            .expect(&format!(
-                "OTLP-076 conformance validation failed for scenario: {}",
-                scenario.name
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-076 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
     }
 }
 
@@ -11071,7 +11073,7 @@ fn otlp_077_producer_span_messaging_system_attribute_conformance() {
                 span_id: "producer_empty_system".to_string(),
                 trace_id: "trace_empty_system".to_string(),
                 span_kind: SpanKind::Producer,
-                messaging_system: Some("".to_string()), // Empty string - treated as missing
+                messaging_system: Some(String::new()), // Empty string - treated as missing
                 other_messaging_attributes: vec![],
                 is_valid_producer: false,
                 validation_action: ValidationAction::WarnOrDrop,
@@ -11202,10 +11204,12 @@ fn otlp_077_producer_span_messaging_system_attribute_conformance() {
 
         // Validate both implementations are OTLP compliant
         validate_producer_messaging_conformance(scenario, &asupersync_result, &reference_result)
-            .expect(&format!(
-                "OTLP-077 conformance validation failed for scenario: {}",
-                scenario.name
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-077 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
     }
 }
 
@@ -11284,7 +11288,7 @@ fn simulate_asupersync_producer_messaging_validation(
             let has_valid_messaging_system = span
                 .messaging_system
                 .as_ref()
-                .map_or(false, |system| !system.is_empty());
+                .is_some_and(|system| !system.is_empty());
 
             if !has_valid_messaging_system {
                 // Missing messaging.system - implementation choice: warn or drop
@@ -11341,7 +11345,7 @@ fn simulate_reference_producer_messaging_validation(
             let has_valid_messaging_system = span
                 .messaging_system
                 .as_ref()
-                .map_or(false, |system| !system.is_empty());
+                .is_some_and(|system| !system.is_empty());
 
             if !has_valid_messaging_system {
                 // Reference implementation should also handle missing messaging.system
@@ -11800,7 +11804,7 @@ fn otlp_078_consumer_span_messaging_operation_conformance() {
                 span_id: "consumer_empty_system".to_string(),
                 trace_id: "trace_empty_system".to_string(),
                 span_kind: SpanKind::Consumer,
-                messaging_system: Some("".to_string()), // Empty string - treated as no system
+                messaging_system: Some(String::new()), // Empty string - treated as no system
                 messaging_operation: None,
                 other_messaging_attributes: vec![],
                 expected_messaging_operation: None,
@@ -11933,10 +11937,12 @@ fn otlp_078_consumer_span_messaging_operation_conformance() {
 
         // Validate both implementations are OTLP compliant
         validate_consumer_operation_conformance(scenario, &asupersync_result, &reference_result)
-            .expect(&format!(
-                "OTLP-078 conformance validation failed for scenario: {}",
-                scenario.name
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "OTLP-078 conformance validation failed for scenario: {}: {err}",
+                    scenario.name
+                )
+            });
     }
 }
 
