@@ -66,10 +66,10 @@ mod tests {
         test_attributes.insert("version".to_string(), "1.2.3".to_string());
 
         // **INVALID**: Empty key with non-empty value (should be filtered)
-        test_attributes.insert("".to_string(), "should-be-rejected".to_string());
+        test_attributes.insert(String::new(), "should-be-rejected".to_string());
 
         // **INVALID**: Non-empty key with empty value (should be filtered)
-        test_attributes.insert("empty_value_key".to_string(), "".to_string());
+        test_attributes.insert("empty_value_key".to_string(), String::new());
 
         eprintln!("\n📊 Input attributes:");
         for (key, value) in &test_attributes {
@@ -204,7 +204,7 @@ mod tests {
         let mut malformed_attributes = HashMap::new();
 
         // Scenario: Service attempts to send malformed telemetry with an empty key.
-        malformed_attributes.insert("".to_string(), "secret-value".to_string());
+        malformed_attributes.insert(String::new(), "secret-value".to_string());
         malformed_attributes.insert("service.name".to_string(), "my-service".to_string());
 
         let result = current_ordered_proto_attributes(&malformed_attributes);
