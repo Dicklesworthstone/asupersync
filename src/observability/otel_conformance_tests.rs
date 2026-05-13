@@ -20225,25 +20225,31 @@ fn otlp_098_span_event_timestamp_validation_conformance() {
         let reference_result = simulate_reference_span_event_validation(&scenario);
 
         // Validate individual results
-        validate_span_event_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync span event validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_span_event_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync span event validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_span_event_validation_logic(&reference_result).expect(&format!(
-            "Reference span event validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_span_event_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference span event validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_span_event_validation_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
