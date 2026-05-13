@@ -5327,6 +5327,12 @@ mod tests {
                 crate::bytes::Bytes::from_static(b"stream-request"),
                 Metadata::new(),
             );
+            crate::assert_with_log!(
+                request.get_ref().as_ref() == b"stream-request",
+                "Server streaming lifecycle must start from the request payload",
+                true,
+                request.get_ref().as_ref() == b"stream-request"
+            );
 
             // Phase 1: Initial response headers would be sent here
             // (application/grpc content-type, etc.)
@@ -5342,8 +5348,8 @@ mod tests {
             let mut completion_metadata = Metadata::new();
             completion_metadata.insert("x-response-count", "3");
             completion_metadata.insert("x-processing-time", "142ms");
-            completion_metadata.insert("grpc-status", "0"); // OK
             completion_metadata.insert("grpc-message", "stream completed successfully");
+            completion_metadata.insert("grpc-status", "0"); // OK
 
             // AUDIT VERIFICATION: Complete streaming response structure
             crate::assert_with_log!(
@@ -5372,6 +5378,13 @@ mod tests {
                     .iter()
                     .take(grpc_status_pos)
                     .any(|(key, _)| key.starts_with("x-"));
+
+                crate::assert_with_log!(
+                    custom_trailer_exists,
+                    "custom trailers must be emitted before grpc-status",
+                    true,
+                    custom_trailer_exists
+                );
 
                 crate::assert_with_log!(
                     grpc_status_pos == trailer_headers.len() - 1,
