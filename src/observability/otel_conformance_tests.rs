@@ -16430,7 +16430,7 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 span_id: "span-12345678".to_string(),
                 trace_id: "trace-12345678901234567890123456789012".to_string(),
                 status_code: ErrorSpanStatusCode::Error,
-                status_description: Some("".to_string()), // Empty description
+                status_description: Some(String::new()), // Empty description
             },
             expected_status_preserved: true,
             expected_final_status: ErrorSpanStatusCode::Error,
@@ -16475,7 +16475,7 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 span_id: "span-45678901".to_string(),
                 trace_id: "trace-45678901234567890123456789012345".to_string(),
                 status_code: ErrorSpanStatusCode::Ok,
-                status_description: Some("".to_string()),
+                status_description: Some(String::new()),
             },
             expected_status_preserved: true,
             expected_final_status: ErrorSpanStatusCode::Ok,
@@ -16490,7 +16490,7 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 span_id: "span-56789012".to_string(),
                 trace_id: "trace-56789012345678901234567890123456".to_string(),
                 status_code: ErrorSpanStatusCode::Unset,
-                status_description: Some("".to_string()),
+                status_description: Some(String::new()),
             },
             expected_status_preserved: true,
             expected_final_status: ErrorSpanStatusCode::Unset,
@@ -16520,7 +16520,7 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 span_id: "span-78901234".to_string(),
                 trace_id: "trace-78901234567890123456789012345678".to_string(),
                 status_code: ErrorSpanStatusCode::Error,
-                status_description: Some("".to_string()),
+                status_description: Some(String::new()),
             },
             expected_status_preserved: false, // Violation case
             expected_final_status: ErrorSpanStatusCode::Ok, // Incorrectly demoted
@@ -16555,22 +16555,28 @@ fn otlp_087_span_error_status_preservation_conformance() {
         let reference_result = simulate_reference_error_status_handling(&scenario);
 
         // Validate individual results
-        validate_error_status_handling_logic(&asupersync_result).expect(&format!(
-            "Asupersync error status handling logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_error_status_handling_logic(&asupersync_result, &scenario).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync error status handling logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_error_status_handling_logic(&reference_result).expect(&format!(
-            "Reference error status handling logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_error_status_handling_logic(&reference_result, &scenario).unwrap_or_else(|err| {
+            panic!(
+                "Reference error status handling logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_error_status_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -16711,20 +16717,21 @@ fn simulate_asupersync_error_status_handling(
         }
     }
 
-    // Check validation correctness
-    let validation_correct = status_preserved == scenario.expected_status_preserved
-        && final_status == scenario.expected_final_status
-        && silent_demotion_detected == scenario.expected_silent_demotion
-        && description_handling == scenario.expected_description_handling;
-
-    let validation_applied = true; // Always apply ERROR status validation
-
     // OTLP compliance: must never silently demote ERROR status
     let otlp_compliant = if scenario.span.status_code == ErrorSpanStatusCode::Error {
         !silent_demotion_detected && final_status == ErrorSpanStatusCode::Error
     } else {
         true // Non-ERROR statuses are compliant
     };
+
+    // Check validation correctness
+    let validation_correct = status_preserved == scenario.expected_status_preserved
+        && final_status == scenario.expected_final_status
+        && silent_demotion_detected == scenario.expected_silent_demotion
+        && description_handling == scenario.expected_description_handling
+        && otlp_compliant == scenario.expected_otlp_compliant;
+
+    let validation_applied = true; // Always apply ERROR status validation
 
     ErrorStatusHandlingResult {
         status_preserved,
@@ -16810,20 +16817,21 @@ fn simulate_reference_error_status_handling(
         }
     }
 
-    // Check validation correctness
-    let validation_correct = status_preserved == scenario.expected_status_preserved
-        && final_status == scenario.expected_final_status
-        && silent_demotion_detected == scenario.expected_silent_demotion
-        && description_handling == scenario.expected_description_handling;
-
-    let validation_applied = true;
-
     // OTLP compliance
     let otlp_compliant = if scenario.span.status_code == ErrorSpanStatusCode::Error {
         !silent_demotion_detected && final_status == ErrorSpanStatusCode::Error
     } else {
         true
     };
+
+    // Check validation correctness
+    let validation_correct = status_preserved == scenario.expected_status_preserved
+        && final_status == scenario.expected_final_status
+        && silent_demotion_detected == scenario.expected_silent_demotion
+        && description_handling == scenario.expected_description_handling
+        && otlp_compliant == scenario.expected_otlp_compliant;
+
+    let validation_applied = true;
 
     ErrorStatusHandlingResult {
         status_preserved,
@@ -16846,7 +16854,10 @@ fn simulate_reference_error_status_handling(
 }
 
 /// Verify ERROR status handling logic
-fn validate_error_status_handling_logic(result: &ErrorStatusHandlingResult) -> Result<(), String> {
+fn validate_error_status_handling_logic(
+    result: &ErrorStatusHandlingResult,
+    scenario: &ErrorStatusScenario,
+) -> Result<(), String> {
     if !result.validation_correct {
         return Err("ERROR status handling logic is incorrect".to_string());
     }
@@ -16855,13 +16866,16 @@ fn validate_error_status_handling_logic(result: &ErrorStatusHandlingResult) -> R
         return Err("ERROR status validation should be applied for span processing".to_string());
     }
 
-    // Check OTLP-087 compliance
-    if !result.otlp_compliant {
+    // Check OTLP-087 compliance, allowing scenarios that intentionally model a violation.
+    if result.otlp_compliant != scenario.expected_otlp_compliant {
         return Err("ERROR status handling is not OTLP-087 compliant".to_string());
     }
 
-    // Critical check: ERROR status must never be silently demoted
-    if result.original_status == ErrorSpanStatusCode::Error && result.silent_demotion_detected {
+    // Critical check: ERROR status must never be silently demoted unexpectedly.
+    if result.original_status == ErrorSpanStatusCode::Error
+        && result.silent_demotion_detected
+        && !scenario.expected_silent_demotion
+    {
         return Err("CRITICAL VIOLATION: ERROR status was silently demoted".to_string());
     }
 
