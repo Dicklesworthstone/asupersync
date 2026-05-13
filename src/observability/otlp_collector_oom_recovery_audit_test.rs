@@ -24,8 +24,11 @@ use std::sync::{Arc, Mutex};
 /// Mock HTTP response for testing collector behavior.
 #[derive(Debug, Clone)]
 pub struct MockHttpResponse {
+    /// HTTP status returned by the mock collector.
     pub status: u16,
+    /// Response headers returned by the mock collector.
     pub headers: Vec<(String, String)>,
+    /// Response body returned by the mock collector.
     pub body: Vec<u8>,
 }
 
@@ -54,8 +57,11 @@ impl MockHttpResponse {
 /// Mock collector that tracks batch sizes and simulates OOM on large batches.
 #[derive(Debug)]
 pub struct MockOomCollector {
-    pub received_requests: Arc<Mutex<Vec<usize>>>, // Track batch sizes
-    pub oom_threshold: usize,                      // Bytes threshold for OOM
+    /// Batch sizes observed by the collector.
+    pub received_requests: Arc<Mutex<Vec<usize>>>,
+    /// Request-body byte threshold above which the collector simulates OOM.
+    pub oom_threshold: usize,
+    /// Number of requests handled by the collector.
     pub request_count: Arc<Mutex<usize>>,
 }
 
@@ -102,8 +108,11 @@ impl MockOomCollector {
 /// Mock OTLP exporter for testing OOM recovery behavior.
 #[derive(Debug)]
 pub struct MockOomRecoveryExporter {
+    /// Collector receiving serialized OTLP batches.
     pub collector: MockOomCollector,
-    pub attempts: Arc<Mutex<Vec<(usize, String)>>>, // (batch_size, result)
+    /// Ordered `(batch_size, result)` audit log for export attempts.
+    pub attempts: Arc<Mutex<Vec<(usize, String)>>>,
+    /// Current candidate span batch size.
     pub current_batch_size: usize,
 }
 
@@ -222,7 +231,9 @@ impl MockOomRecoveryExporter {
 /// Mock span for testing.
 #[derive(Debug, Clone)]
 pub struct MockSpan {
+    /// Span name used by the mock payload.
     pub name: String,
+    /// Span identifier used by the mock payload.
     pub span_id: u64,
 }
 
