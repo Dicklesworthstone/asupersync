@@ -26,13 +26,20 @@ def utc_now() -> str:
 
 
 def normalize_path(path: str, root: Path) -> str:
-    p = Path(path)
+    p = Path(path.strip())
     if not p.is_absolute():
-        return p.as_posix().lstrip("./")
+        return strip_leading_current_dir(p.as_posix())
     try:
         return p.relative_to(root).as_posix()
     except ValueError:
         return p.as_posix()
+
+
+def strip_leading_current_dir(path: str) -> str:
+    normalized = path.strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def load_json(path: Path) -> Any:
@@ -68,7 +75,7 @@ def load_llvm_cov_totals(path: Path) -> tuple[int, int]:
 
 def starts_with_any(path: str, prefixes: list[str]) -> bool:
     for prefix in prefixes:
-        normalized = prefix.lstrip("./")
+        normalized = strip_leading_current_dir(prefix)
         if path.startswith(normalized):
             return True
     return False
