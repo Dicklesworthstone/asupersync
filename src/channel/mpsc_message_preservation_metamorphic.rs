@@ -37,7 +37,7 @@ use crate::util::DetRng;
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 // ============================================================================
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn mr1_send_order_independence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 2usize..10,
             message_count in 3usize..8,
@@ -259,7 +259,7 @@ mod tests {
     /// **Catches**: Race conditions, state corruption during interleaving
     #[test]
     fn mr2_interleaved_send_recv_equivalence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 3usize..8,
             message_count in 2usize..6,
@@ -329,6 +329,15 @@ mod tests {
                 }
             }
 
+            while sent_count < message_count {
+                let msg = &messages[sent_count];
+                block_on(async {
+                    let permit = tx_interleaved.reserve(&cx).await.unwrap();
+                    permit.send(msg.clone()).unwrap();
+                });
+                sent_count += 1;
+            }
+
             // Receive any remaining messages
             while interleaved_received.len() < sent_count {
                 match block_on(rx_interleaved.recv(&cx)) {
@@ -367,7 +376,7 @@ mod tests {
     /// **Catches**: Batch operation bugs, streaming consistency issues
     #[test]
     fn mr3_batch_vs_streaming_equivalence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 4usize..10,
             message_count in 2usize..7,
@@ -469,7 +478,7 @@ mod tests {
     /// **Catches**: Capacity-dependent message loss, buffer overflow bugs
     #[test]
     fn mr4_capacity_independence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             message_count in 2usize..6,
             content_prefix in "[a-z]{2,5}",
@@ -546,7 +555,7 @@ mod tests {
     /// **Catches**: reserved-slot leaks, duplicated commits, slot/message loss
     #[test]
     fn mr5_reservation_slot_permutation_preserves_commutative_outcome() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             message_count in 2usize..8,
             seed in any::<u64>(),
@@ -615,7 +624,7 @@ mod tests {
     /// **Catches**: partition fan-out loss, duplicate delivery, aggregation gaps
     #[test]
     fn mr7_decomposition_into_partitions_preserves_total_count() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             message_count in 2usize..10,
             partition_count in 1usize..5,
@@ -666,7 +675,7 @@ mod tests {
     /// vary capacity. All should preserve the complete message set.
     #[test]
     fn mr_composite_full_preservation() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
 
         // Deterministic test case for full verification
         let messages = vec![
