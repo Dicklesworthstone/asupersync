@@ -2642,7 +2642,7 @@ mod tests {
 
     /// Verify merging behavior consistency between implementations
     fn validate_merging_behavior_consistency(
-        scenario: &InstrumentationScopeMergingScenario,
+        _scenario: &InstrumentationScopeMergingScenario,
         asupersync_result: &ScopeMergingResult,
         reference_result: &ScopeMergingResult,
     ) -> Result<(), String> {
@@ -2952,7 +2952,6 @@ mod tests {
         // Reference implementation should also use proper synchronization
         let metric_data = Arc::new(RwLock::new(HashMap::<String, f64>::new()));
         let operations_completed = Arc::new(AtomicUsize::new(0));
-        let failed_operations = Arc::new(AtomicUsize::new(0));
         let snapshots = Arc::new(std::sync::Mutex::new(Vec::<HashMap<String, f64>>::new()));
         let metric_types_len = scenario.metric_types.len();
 
@@ -5223,7 +5222,7 @@ mod tests {
     ) -> SpanLinkExportResult {
         // Simulate our OTLP exporter behavior for foreign trace links
         let mut all_trace_ids_preserved = true;
-        let mut no_normalization_applied = true;
+        let no_normalization_applied = true;
         let mut case_preserved = true;
 
         for link in &scenario.span_links {
@@ -37872,7 +37871,7 @@ mod otlp_122_tests {
     fn validate_otlp_131_scenario(scenario: &Otlp131Scenario) -> bool {
         println!("OTLP-131: Testing scenario '{}'", scenario.name);
 
-        let mut should_accept = true; // Per OTLP §6.2.5, colons in keys are permitted
+        let should_accept = true; // Per OTLP §6.2.5, colons in keys are permitted
 
         // Validate the attributes according to OTLP spec
         for (attr_key, attr_value) in &scenario.attributes {
@@ -38522,7 +38521,7 @@ mod otlp_122_tests {
     }
 
     /// Validate that spaces in attribute values are preserved verbatim
-    fn validate_space_preservation(value: &str, attr_key: &str) -> SpacePreservationResult {
+    fn validate_space_preservation(value: &str, _attr_key: &str) -> SpacePreservationResult {
         let original_space_count = value.matches(' ').count();
         let space_positions: Vec<usize> = value.match_indices(' ').map(|(pos, _)| pos).collect();
 
@@ -39187,7 +39186,7 @@ mod otlp_122_tests {
     }
 
     /// Validate that UTF-8 characters (including emoji) are encoded correctly
-    fn validate_utf8_encoding(value: &str, attr_key: &str) -> Utf8ValidationResult {
+    fn validate_utf8_encoding(value: &str, _attr_key: &str) -> Utf8ValidationResult {
         // Check if string is valid UTF-8
         let is_valid_utf8 = std::str::from_utf8(value.as_bytes()).is_ok();
 
@@ -40143,7 +40142,7 @@ mod otlp_122_tests {
         fn export_span_via_otlp(span_data: &SpanData) -> Result<ExportedSpanData, String> {
             // Simulate our actual OTLP exporter logic
             // In real implementation, this would go through the full OTLP export pipeline
-            let mut exported_attributes = span_data.attributes.clone();
+            let exported_attributes = span_data.attributes.clone();
 
             // CRITICAL: Our exporter must preserve ALL Kafka message attributes
             // This is where the actual bug would be caught if our exporter
@@ -53417,8 +53416,7 @@ fn otlp_158_kinesis_consumer_shard_id_conformance() {
                         );
                 }
 
-                // Valid shard ID found
-                let shard_id = shard_id.trim().to_string();
+                // Valid shard ID found; final value is extracted below.
             }
             Some(_) => {
                 return KinesisConsumerShardIdValidationResult::Invalid(
@@ -53887,8 +53885,7 @@ fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
                         );
                 }
 
-                // Valid delivery stream name found
-                let delivery_stream_name = delivery_stream_name.trim().to_string();
+                // Valid delivery stream name found; final value is extracted below.
             }
             Some(_) => {
                 return KinesisFirehoseProducerValidationResult::Invalid(
@@ -54382,8 +54379,7 @@ fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
                         );
                 }
 
-                // Valid queue name found
-                let queue_name = queue_name.trim().to_string();
+                // Valid queue name found; final value is extracted below.
             }
             Some(_) => {
                 return AzureServiceBusProducerValidationResult::Invalid(
