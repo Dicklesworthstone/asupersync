@@ -389,7 +389,7 @@ fn audit_resumption_data_integrity_and_ordering() {
         ),
     ];
 
-    for (i, (service, operation, attrs)) in expected_data.iter().enumerate() {
+    for (i, (_service, operation, attrs)) in expected_data.iter().enumerate() {
         let spans = vec![OtlpSpan {
             span_id: format!("integrity-span-{}", i),
             name: operation.to_string(),
@@ -430,7 +430,7 @@ fn audit_resumption_data_integrity_and_ordering() {
         );
 
         let span = &batch.spans[0];
-        let (expected_service, expected_operation, expected_attrs) = &expected_data[i];
+        let (_expected_service, expected_operation, expected_attrs) = &expected_data[i];
 
         assert_eq!(span.name, *expected_operation, "Span name preserved");
         assert_eq!(
