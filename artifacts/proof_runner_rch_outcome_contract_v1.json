@@ -15,6 +15,7 @@
     "outcome_class",
     "decision",
     "first_blocker",
+    "control_plane",
     "touched_files",
     "summary"
   ],
@@ -30,7 +31,8 @@
     "pass",
     "failed_local",
     "blocked_external",
-    "wrapper_hang_after_remote_exit"
+    "wrapper_hang_after_remote_exit",
+    "rch-control-plane-inconsistent"
   ],
   "fixtures": [
     {
@@ -56,6 +58,11 @@
     {
       "path": "tests/fixtures/proof_runner/external_blocker.log",
       "expected_outcome_class": "blocked_external",
+      "expected_decision": "blocked-external"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/rch_control_plane_inconsistent_enable_not_found.log",
+      "expected_outcome_class": "rch-control-plane-inconsistent",
       "expected_decision": "blocked-external"
     }
   ],

@@ -1495,6 +1495,7 @@ fn proof_runner_rch_outcome_contract_names_required_fixtures() {
         "tests/fixtures/proof_runner/cargo_error.log",
         "tests/fixtures/proof_runner/wrapper_hang_after_remote_exit.log",
         "tests/fixtures/proof_runner/external_blocker.log",
+        "tests/fixtures/proof_runner/rch_control_plane_inconsistent_enable_not_found.log",
     ] {
         assert!(
             fixture_names.contains(required),
@@ -1515,6 +1516,7 @@ fn proof_runner_rch_outcome_contract_names_required_fixtures() {
         "outcome_class",
         "decision",
         "first_blocker",
+        "control_plane",
     ] {
         assert!(
             required_outcome_fields.contains(required),
@@ -1663,6 +1665,56 @@ fn proof_runner_extracts_external_blocker_file_and_line() {
     assert_eq!(
         result["validation_frontier_record"]["first_failure"]["line"].as_i64(),
         Some(15747)
+    );
+}
+
+#[test]
+fn proof_runner_classifies_rch_control_plane_inconsistency() {
+    let result = classify_fixture(
+        "rch_control_plane_inconsistent_enable_not_found.log",
+        "rch workers enable vmi1153651",
+        &["scripts/proof_runner.py"],
+    );
+    let outcome = &result["rch_outcome"];
+
+    assert_eq!(
+        outcome["outcome_class"].as_str(),
+        Some("rch-control-plane-inconsistent")
+    );
+    assert_eq!(outcome["decision"].as_str(), Some("blocked-external"));
+    assert_eq!(outcome["remote_exit_status"].as_i64(), None);
+    assert_eq!(
+        outcome["control_plane"]["classification"].as_str(),
+        Some("rch-control-plane-inconsistent")
+    );
+    assert_eq!(
+        outcome["control_plane"]["worker"].as_str(),
+        Some("vmi1153651")
+    );
+    assert_eq!(outcome["control_plane"]["action"].as_str(), Some("enable"));
+    assert_eq!(
+        outcome["control_plane"]["listed_healthy"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        outcome["control_plane"]["probed_healthy"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        outcome["control_plane"]["recommendation"].as_str(),
+        Some("continue repo work if validation does not depend on this worker")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["decision"].as_str(),
+        Some("blocked-external")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["error_class"].as_str(),
+        Some("rch-control-plane-inconsistent")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["first_failure"]["file"].as_str(),
+        Some("rch-control-plane")
     );
 }
 

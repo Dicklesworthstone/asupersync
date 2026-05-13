@@ -46,6 +46,7 @@ PROOF_CONSOLE_ALLOWED_RCH_OUTCOMES = {
     "failed_local",
     "blocked_coordination",
     "wrapper_hang_after_remote_exit",
+    "rch-control-plane-inconsistent",
     "cancelled",
 }
 TRACKER_STATUS_BUCKETS = (
@@ -69,6 +70,17 @@ WRAPPER_RETRIEVAL_HANG_HINTS = (
     "stalled while retrieving",
     "wrapper timed out",
     "wrapper stalled",
+)
+RCH_CONTROL_PLANE_INCONSISTENT_CLASS = "rch-control-plane-inconsistent"
+RCH_CONTROL_PLANE_CONTINUE_RECOMMENDATION = (
+    "continue repo work if validation does not depend on this worker"
+)
+RCH_WORKER_ENABLE_RE = re.compile(
+    r"\brch\s+workers\s+(?P<action>enable|disable|probe)\s+(?P<worker>[A-Za-z0-9_.-]+)"
+)
+RCH_WORKER_NOT_FOUND_RE = re.compile(
+    r"worker(?:\s+|[-_])not(?:\s+|[-_])found(?::|\s)+(?:worker\s+)?(?P<worker>[A-Za-z0-9_.-]+)?",
+    re.IGNORECASE,
 )
 OPERATOR_ACTION_RECIPE_SCHEMA_VERSION = "operator-action-recipe-v1"
 OPERATOR_ACTION_RECIPE_PROOF_COMMAND = (
@@ -546,6 +558,62 @@ def has_wrapper_retrieval_hang(log_text: str, remote_exit: Optional[int]) -> boo
     return any(hint in lowered for hint in WRAPPER_RETRIEVAL_HANG_HINTS)
 
 
+def default_rch_control_plane() -> Dict[str, Any]:
+    """Return the neutral control-plane receipt embedded in every rch outcome."""
+    return {
+        "classification": "none",
+        "worker": "",
+        "action": "",
+        "action_error": "",
+        "listed_healthy": False,
+        "probed_healthy": False,
+        "recommendation": "",
+    }
+
+
+def detect_rch_control_plane_inconsistency(log_text: str) -> Optional[Dict[str, Any]]:
+    """Detect list/probe healthy evidence that disagrees with an action failure."""
+    lowered = log_text.lower()
+    not_found = RCH_WORKER_NOT_FOUND_RE.search(log_text)
+    if not not_found:
+        return None
+
+    command_matches = list(RCH_WORKER_ENABLE_RE.finditer(log_text))
+    command_match = command_matches[-1] if command_matches else None
+    worker = (
+        (command_match.group("worker") if command_match else "")
+        or (not_found.group("worker") or "")
+    )
+    if not worker:
+        return None
+
+    action = command_match.group("action") if command_match else "control-plane-action"
+    listed_healthy = bool(
+        re.search(
+            rf'"(?:name|worker|host)"\s*:\s*"{re.escape(worker)}"[\s\S]*?'
+            r'"(?:status|health)"\s*:\s*"(?:healthy|ready|online|available)"',
+            log_text,
+            re.IGNORECASE,
+        )
+    )
+    probed_healthy = (
+        f"workers probe {worker}".lower() in lowered
+        and any(token in lowered for token in ("healthy", "reachable", "available", "online"))
+    )
+    if not (listed_healthy or probed_healthy):
+        return None
+
+    return {
+        "classification": RCH_CONTROL_PLANE_INCONSISTENT_CLASS,
+        "worker": worker,
+        "action": action,
+        "action_error": not_found.group(0).strip(),
+        "listed_healthy": listed_healthy,
+        "probed_healthy": probed_healthy,
+        "recommendation": RCH_CONTROL_PLANE_CONTINUE_RECOMMENDATION,
+    }
+
+
 def classify_rch_outcome(
     command: str,
     log_text: str,
@@ -558,8 +626,23 @@ def classify_rch_outcome(
     touched = {path.removeprefix("./") for path in touched_files}
     blocker_file = str(blocker["file"]).removeprefix("./")
     wrapper_hang = has_wrapper_retrieval_hang(log_text, remote_exit)
+    control_plane = detect_rch_control_plane_inconsistency(log_text)
 
-    if wrapper_hang:
+    if control_plane:
+        outcome_class = RCH_CONTROL_PLANE_INCONSISTENT_CLASS
+        decision = "blocked-external"
+        summary = (
+            "rch worker control-plane disagrees with list/probe evidence; "
+            f"{RCH_CONTROL_PLANE_CONTINUE_RECOMMENDATION}"
+        )
+        blocker = {
+            "file": "rch-control-plane",
+            "line": 0,
+            "column": 0,
+            "message": control_plane["action_error"],
+            "raw": control_plane["action_error"],
+        }
+    elif wrapper_hang:
         outcome_class = "wrapper_hang_after_remote_exit"
         decision = "pass" if remote_exit == 0 else "blocked-external"
         summary = "rch wrapper retrieval stalled after remote command result was known"
@@ -585,6 +668,7 @@ def classify_rch_outcome(
         "decision": decision,
         "first_blocker": blocker,
         "touched_files": touched_files,
+        "control_plane": control_plane or default_rch_control_plane(),
         "summary": summary,
     }
 
