@@ -5229,7 +5229,7 @@ mod tests {
 
             // Simulate trailer construction for cancellation
             let mut cancellation_trailers = Metadata::new();
-            cancellation_trailers.insert("grpc-status", &status_code.to_string());
+            cancellation_trailers.insert("grpc-status", status_code.to_string());
             cancellation_trailers.insert("grpc-message", status_message);
 
             // AUDIT VERIFICATION: Cancellation trailers must still follow ordering
