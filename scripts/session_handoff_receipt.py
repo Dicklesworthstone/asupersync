@@ -435,22 +435,22 @@ def choose_next_action(
     agent_mail_available: bool,
     branch: str,
 ) -> dict[str, Any]:
-    conflicts = [
+    hard_conflicts = [
         row
         for row in reservations
-        if row["classification"] in {"peer-active", "tracker-conflict", "unknown-owner"}
+        if row["classification"] in {"tracker-conflict", "unknown-owner"}
     ]
     if branch and branch != "main":
         return {
             "category": "blocked",
             "reason": "current branch is not main",
         }
-    if conflicts:
+    if hard_conflicts:
         return {
             "category": "wait-for-reservation",
-            "reason": "active peer or tracker reservation conflict",
-            "path_pattern": conflicts[0]["path_pattern"],
-            "holder": conflicts[0]["holder"],
+            "reason": "active tracker or unknown-owner reservation conflict",
+            "path_pattern": hard_conflicts[0]["path_pattern"],
+            "holder": hard_conflicts[0]["holder"],
         }
     if dirty:
         peer_dirty = [

@@ -20,7 +20,7 @@
     "category": "wait-for-reservation",
     "holder": "BlackDove",
     "path_pattern": ".beads",
-    "reason": "active peer or tracker reservation conflict"
+    "reason": "active tracker or unknown-owner reservation conflict"
   },
   "proof_suggestions": [],
   "rch": {

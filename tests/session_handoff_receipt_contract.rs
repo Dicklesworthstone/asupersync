@@ -388,6 +388,40 @@ fn epic_only_ready_queue_routes_to_fallback_selector() {
 }
 
 #[test]
+fn source_peer_reservation_epic_only_routes_to_fallback_selector() {
+    let receipt = receipt_json("source_peer_reservation_epic_only.json");
+    assert_eq!(next_action_category(&receipt), "proof-only");
+    assert_eq!(
+        receipt["next_action"]["lane"].as_str(),
+        Some("reservation-aware-work-finder")
+    );
+    assert_eq!(
+        receipt["next_action"]["bead_id"].as_str(),
+        Some("asupersync-lhx6m4")
+    );
+
+    let conflicts = receipt["reservation_conflicts"]
+        .as_array()
+        .expect("reservation_conflicts must be array");
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["classification"].as_str(), Some("peer-active"));
+    assert_eq!(
+        conflicts[0]["path_pattern"].as_str(),
+        Some("src/grpc/server.rs")
+    );
+    assert_eq!(conflicts[0]["holder"].as_str(), Some("CalmSummit"));
+}
+
+#[test]
+fn source_peer_reservation_epic_only_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "source_peer_reservation_epic_only.json",
+        "source_peer_reservation_epic_only_expected.json",
+        "source-peer-reservation epic-only handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn receipt_has_required_top_level_shape() {
     let receipt = receipt_json("clean_tree.json");
     for field in [
