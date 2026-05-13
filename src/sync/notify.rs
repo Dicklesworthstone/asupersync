@@ -2833,8 +2833,13 @@ mod tests {
         );
 
         // Verify no other waiters woke up
-        for i in (notify_count + 1)..N {
-            let should_be_pending = poll_once(&mut waiters[i]).is_pending();
+        for (i, waiter) in waiters
+            .iter_mut()
+            .enumerate()
+            .take(N)
+            .skip(notify_count + 1)
+        {
+            let should_be_pending = poll_once(waiter).is_pending();
             assert!(
                 should_be_pending,
                 "Waiter {} should still be pending after single notify_one()",
@@ -3237,7 +3242,7 @@ mod tests {
                     }
 
                     // Create a counting waker that increments on wake
-                    let counting_waker = CountingWaker::new(wakeup_count_clone.clone());
+                    let counting_waker = CountingWaker::from_counter(wakeup_count_clone.clone());
                     let mut counting_cx = Context::from_waker(&counting_waker);
 
                     // Re-poll with counting waker to replace the no-op waker
@@ -3757,7 +3762,7 @@ mod tests {
     }
 
     impl CountingWaker {
-        fn new(counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Waker {
+        fn from_counter(counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Waker {
             Waker::from(std::sync::Arc::new(Self { counter }))
         }
     }
@@ -4333,7 +4338,7 @@ mod tests {
                             use std::task::{Context, Waker};
 
                             let noop_waker = Waker::noop();
-                            let mut ctx = Context::from_waker(&noop_waker);
+                            let mut ctx = Context::from_waker(noop_waker);
                             Pin::as_mut(&mut notified_fut).poll(&mut ctx)
                         };
 
@@ -4405,7 +4410,7 @@ mod tests {
                             use std::task::{Context, Waker};
 
                             let noop_waker = Waker::noop();
-                            let mut ctx = Context::from_waker(&noop_waker);
+                            let mut ctx = Context::from_waker(noop_waker);
                             Pin::as_mut(&mut notified_fut).poll(&mut ctx)
                         };
 
@@ -4461,17 +4466,15 @@ mod tests {
                 let mut second_notified = Box::pin(notify3.notified());
 
                 // This poll should return Pending - no new notification since stored one was consumed
-                let second_poll_result = {
+                {
                     use std::future::Future;
                     use std::pin::Pin;
                     use std::task::{Context, Waker};
 
                     let noop_waker = Waker::noop();
-                    let mut ctx = Context::from_waker(&noop_waker);
+                    let mut ctx = Context::from_waker(noop_waker);
                     Pin::as_mut(&mut second_notified).poll(&mut ctx)
-                };
-
-                second_poll_result
+                }
             })
         });
 
@@ -5267,7 +5270,7 @@ mod tests {
             let mut fut = notify.notified();
 
             // Poll it once to register as a waiter
-            let waker = std::task::Waker::noop().clone();
+            let waker = noop_waker();
             let mut cx = std::task::Context::from_waker(&waker);
             let poll_result = std::pin::Pin::new(&mut fut).poll(&mut cx);
 
@@ -5319,7 +5322,7 @@ mod tests {
 
         // Create a new future - this should consume the stored notification
         let mut new_fut = notify.notified();
-        let waker = std::task::Waker::noop().clone();
+        let waker = noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         let poll_result = std::pin::Pin::new(&mut new_fut).poll(&mut cx);
 
@@ -5342,7 +5345,7 @@ mod tests {
             // Create and drop a future
             {
                 let mut fut = notify.notified();
-                let waker = std::task::Waker::noop().clone();
+                let waker = noop_waker();
                 let mut cx = std::task::Context::from_waker(&waker);
                 let _ = std::pin::Pin::new(&mut fut).poll(&mut cx); // Register as waiter
                 // Drop without notification
@@ -5363,7 +5366,7 @@ mod tests {
             }
 
             let mut new_fut = notify.notified();
-            let waker = std::task::Waker::noop().clone();
+            let waker = noop_waker();
             let mut cx = std::task::Context::from_waker(&waker);
             let poll_result = std::pin::Pin::new(&mut new_fut).poll(&mut cx);
 
@@ -5398,6 +5401,9 @@ mod tests {
 
         let barrier = Arc::new(std::sync::Barrier::new(3)); // 2 workers + 1 coordinator
 
+        const CONCURRENT_WORKER_ITERATIONS: usize = 50;
+        const CONCURRENT_WORKERS: usize = 2;
+
         // Worker 1: Creates and drops futures rapidly
         let notify1 = Arc::clone(&notify_concurrent);
         let barrier1 = Arc::clone(&barrier);
@@ -5405,9 +5411,9 @@ mod tests {
         let handle1 = thread::spawn(move || {
             barrier1.wait(); // Wait for coordination
 
-            for _ in 0..50 {
+            for _ in 0..CONCURRENT_WORKER_ITERATIONS {
                 let mut fut = notify1.notified();
-                let waker = std::task::Waker::noop().clone();
+                let waker = noop_waker();
                 let mut cx = std::task::Context::from_waker(&waker);
                 let _ = std::pin::Pin::new(&mut fut).poll(&mut cx);
                 // Drop future without notification
@@ -5425,14 +5431,14 @@ mod tests {
         let handle2 = thread::spawn(move || {
             barrier2.wait(); // Wait for coordination
 
-            for _ in 0..50 {
+            for _ in 0..CONCURRENT_WORKER_ITERATIONS {
                 thread::sleep(Duration::from_micros(50));
 
                 notify2.notify_one(); // May find waiters or store notification
 
                 // Try to create a new waiter and see if it works
                 let mut fut = notify2.notified();
-                let waker = std::task::Waker::noop().clone();
+                let waker = noop_waker();
                 let mut cx = std::task::Context::from_waker(&waker);
                 let poll_result = std::pin::Pin::new(&mut fut).poll(&mut cx);
 
@@ -5477,9 +5483,9 @@ mod tests {
         );
 
         crate::assert_with_log!(
-            final_success_count == 150, // 50 drops + 50 notifies + 50 consumptions
+            final_success_count == CONCURRENT_WORKER_ITERATIONS * CONCURRENT_WORKERS,
             "Expected number of successful operations",
-            150,
+            CONCURRENT_WORKER_ITERATIONS * CONCURRENT_WORKERS,
             final_success_count
         );
 
