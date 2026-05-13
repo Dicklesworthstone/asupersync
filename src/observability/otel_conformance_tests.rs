@@ -19662,7 +19662,7 @@ fn otlp_097_degenerate_histogram_validation_conformance() {
             },
             expected_degenerate_detected: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_otlp_compliant: true,
         },
         DegenerateHistogramScenario {
@@ -19682,7 +19682,7 @@ fn otlp_097_degenerate_histogram_validation_conformance() {
             },
             expected_degenerate_detected: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_otlp_compliant: true,
         },
         DegenerateHistogramScenario {
@@ -19701,7 +19701,7 @@ fn otlp_097_degenerate_histogram_validation_conformance() {
             },
             expected_degenerate_detected: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_otlp_compliant: true,
         },
         DegenerateHistogramScenario {
@@ -19757,25 +19757,31 @@ fn otlp_097_degenerate_histogram_validation_conformance() {
         let reference_result = simulate_reference_histogram_validation(&scenario);
 
         // Validate individual results
-        validate_histogram_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync histogram validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_histogram_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync histogram validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_histogram_validation_logic(&reference_result).expect(&format!(
-            "Reference histogram validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_histogram_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference histogram validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_histogram_validation_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
