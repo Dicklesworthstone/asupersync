@@ -8633,11 +8633,11 @@ mod otlp_wire_format_tests {
         use std::thread;
         use std::time::Instant;
 
-        /// OTLP-051 conformance test: when exporter sees a span with gauge metrics,
-        /// it MUST handle first-write semantics correctly:
-        /// - Gauge value initialization (first write sets initial value)
-        /// - Subsequent updates (updates change value correctly)
-        /// - Timestamp ordering (later updates have monotonic/equal timestamps)
+        // OTLP-051 conformance test: when exporter sees a span with gauge metrics,
+        // it MUST handle first-write semantics correctly:
+        // - Gauge value initialization (first write sets initial value)
+        // - Subsequent updates (updates change value correctly)
+        // - Timestamp ordering (later updates have monotonic/equal timestamps)
 
         // Create test scenario structure
         struct GaugeFirstWriteScenario {

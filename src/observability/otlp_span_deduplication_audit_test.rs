@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 /// Mock span for testing end() call deduplication behavior.
 #[derive(Debug, Clone)]

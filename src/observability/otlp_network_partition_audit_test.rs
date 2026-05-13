@@ -17,7 +17,7 @@
 #![allow(dead_code)]
 
 use crate::observability::otlp_trace_exporter::{
-    ExportError, LoadSheddingStats, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
+    ExportError, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
 use std::sync::{
     Arc,

@@ -20,9 +20,6 @@
 #![cfg(test)]
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
-
 /// Mock OTLP ExportTraceServiceResponse with partial success.
 #[derive(Debug, Clone)]
 pub struct MockOtlpResponse {

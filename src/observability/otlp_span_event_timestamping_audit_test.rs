@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Mock span event for testing timestamp behavior.
 #[derive(Debug, Clone)]

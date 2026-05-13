@@ -2033,9 +2033,8 @@ mod tests {
             }
 
             // Enforce 256-byte entry size limit
-            current_entries.retain(|(vendor, value)| {
-                vendor.len() + value.len() + 1 <= 256 // Include '=' separator
-            });
+            // The W3C limit includes the '=' separator.
+            current_entries.retain(|(vendor, value)| vendor.len() + value.len() < 256);
 
             // Simulate propagation (entries should remain stable)
             // In real implementation, this would involve serialization/deserialization
@@ -2068,7 +2067,7 @@ mod tests {
             w3c_compliant: current_entries.len() <= 32
                 && current_entries
                     .iter()
-                    .all(|(vendor, value)| vendor.len() + value.len() + 1 <= 256),
+                    .all(|(vendor, value)| vendor.len() + value.len() < 256),
             max_entry_size_enforced: true,
             max_entries_enforced: current_entries.len() <= 32,
         }
@@ -2092,7 +2091,7 @@ mod tests {
             }
 
             // Enforce 256-byte entry size limit
-            current_entries.retain(|(vendor, value)| vendor.len() + value.len() + 1 <= 256);
+            current_entries.retain(|(vendor, value)| vendor.len() + value.len() < 256);
         }
 
         let entries_preserved = !overflow_occurred
@@ -2117,7 +2116,7 @@ mod tests {
             w3c_compliant: current_entries.len() <= 32
                 && current_entries
                     .iter()
-                    .all(|(vendor, value)| vendor.len() + value.len() + 1 <= 256),
+                    .all(|(vendor, value)| vendor.len() + value.len() < 256),
             max_entry_size_enforced: true,
             max_entries_enforced: current_entries.len() <= 32,
         }

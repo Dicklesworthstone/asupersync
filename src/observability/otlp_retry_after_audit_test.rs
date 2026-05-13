@@ -13,8 +13,6 @@
 
 #![cfg(test)]
 
-use std::time::Duration;
-
 /// **AUDIT TEST**: Verify OTLP exporter honors Retry-After header from 429 responses.
 ///
 /// **SCENARIO**: Collector returns 429 with Retry-After: 30.
