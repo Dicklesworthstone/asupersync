@@ -95,7 +95,7 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
     let terminal = loop {
         match stored.poll(&mut task_cx) {
             Poll::Ready(outcome) => break outcome,
-            Poll::Pending => continue,
+            Poll::Pending => {}
         }
     };
     assert!(
