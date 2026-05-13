@@ -202,11 +202,7 @@ fn audit_otlp_metrics_collection_interval_configuration() {
 
         let mut accurate_count = 0;
         for actual_interval in &actual_intervals {
-            let diff = if *actual_interval > expected {
-                *actual_interval - expected
-            } else {
-                expected - *actual_interval
-            };
+            let diff = actual_interval.abs_diff(expected);
 
             if diff <= tolerance {
                 accurate_count += 1;
