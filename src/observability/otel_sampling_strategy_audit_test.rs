@@ -136,7 +136,7 @@ fn audit_parent_based_always_on_sampling_strategy() {
         1000000000,
         1000001000,
         vec![("test_case".to_string(), "parent_sampled".to_string())],
-        if parent_sampled_decision { 0x01 } else { 0x00 },
+        u8::from(parent_sampled_decision),
     ));
 
     // Test Case 2: Parent span says DON'T SAMPLE (should honor)
@@ -180,7 +180,7 @@ fn audit_parent_based_always_on_sampling_strategy() {
         1000002000,
         1000003000,
         vec![("test_case".to_string(), "root_always_on".to_string())],
-        if root_decision { 0x01 } else { 0x00 },
+        u8::from(root_decision),
     ));
 
     // Export test batch
