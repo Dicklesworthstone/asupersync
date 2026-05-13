@@ -111,7 +111,7 @@ impl OtlpCircuitBreaker {
     /// Record failure - may open circuit.
     pub fn record_failure(&self, status_code: u16) -> bool {
         // Only count specific server errors that indicate collector failure
-        let should_count = matches!(status_code, 502 | 503 | 504);
+        let should_count = matches!(status_code, 502..=504);
 
         if !should_count {
             return false;
@@ -237,7 +237,10 @@ fn audit_otlp_circuit_breaker_consecutive_failures() {
                 println!("   Request {}: FAILED ({})", request_id, status_code);
                 let circuit_opened = circuit_breaker.record_failure(status_code);
                 if circuit_opened {
-                    println!("     🚨 CIRCUIT OPENED after {} failures", circuit_breaker.failure_count());
+                    println!(
+                        "     🚨 CIRCUIT OPENED after {} failures",
+                        circuit_breaker.failure_count()
+                    );
                 }
             }
         }
@@ -248,8 +251,14 @@ fn audit_otlp_circuit_breaker_consecutive_failures() {
     // **CIRCUIT BREAKER EFFECTIVENESS ANALYSIS**
     println!("📊 Circuit breaker effectiveness:");
     println!("   Total requests attempted: {}", total_requests);
-    println!("   Requests blocked by circuit breaker: {}", blocked_requests);
-    println!("   Requests that reached collector: {}", failing_collector.request_count());
+    println!(
+        "   Requests blocked by circuit breaker: {}",
+        blocked_requests
+    );
+    println!(
+        "   Requests that reached collector: {}",
+        failing_collector.request_count()
+    );
     println!("   Circuit state: {:?}", circuit_breaker.state());
 
     // **CURRENT IMPLEMENTATION ANALYSIS** (NO CIRCUIT BREAKER)
@@ -264,7 +273,10 @@ fn audit_otlp_circuit_breaker_consecutive_failures() {
     if circuit_breaker.state() == CircuitState::Open {
         println!("✅ CIRCUIT BREAKER: Successfully opened after failures");
         println!("✅ COLLECTOR PROTECTION: Stops hammering failing service");
-        assert!(blocked_requests > 0, "Circuit breaker should block requests when open");
+        assert!(
+            blocked_requests > 0,
+            "Circuit breaker should block requests when open"
+        );
     } else {
         println!("❌ NO CIRCUIT PROTECTION: Continues hammering collector");
     }
@@ -382,7 +394,6 @@ fn audit_resource_waste_without_circuit_breaker() {
             let circuit_opened = circuit_breaker.record_failure(503);
             if circuit_opened {
                 println!("   Circuit breaker opened after {} attempts", cb_attempts);
-                break;
             }
         } else {
             cb_blocked += 1;
@@ -393,17 +404,34 @@ fn audit_resource_waste_without_circuit_breaker() {
 
     println!("📊 Circuit breaker protection comparison:");
     println!("   HTTP attempts WITH circuit breaker: {}", cb_attempts);
-    println!("   HTTP attempts WITHOUT circuit breaker: {}", total_attempts);
+    println!(
+        "   HTTP attempts WITHOUT circuit breaker: {}",
+        total_attempts
+    );
     println!("   Requests blocked (spans preserved): {}", cb_blocked);
-    println!("   Resource waste reduction: {:.1}%",
-            (1.0 - cb_attempts as f64 / total_attempts as f64) * 100.0);
+    println!(
+        "   Resource waste reduction: {:.1}%",
+        (1.0 - cb_attempts as f64 / total_attempts as f64) * 100.0
+    );
 
     // **RESOURCE IMPACT ANALYSIS**
     println!("📊 Resource impact analysis:");
-    println!("   CPU cycles saved: ~{}x fewer HTTP attempts", total_attempts / cb_attempts.max(1));
-    println!("   Network bandwidth saved: ~{}x fewer requests", total_attempts / cb_attempts.max(1));
-    println!("   Collector load reduced: ~{}x fewer requests", total_attempts / cb_attempts.max(1));
-    println!("   Data preservation opportunity: {} span batches", cb_spans_preserved);
+    println!(
+        "   CPU cycles saved: ~{}x fewer HTTP attempts",
+        total_attempts / cb_attempts.max(1)
+    );
+    println!(
+        "   Network bandwidth saved: ~{}x fewer requests",
+        total_attempts / cb_attempts.max(1)
+    );
+    println!(
+        "   Collector load reduced: ~{}x fewer requests",
+        total_attempts / cb_attempts.max(1)
+    );
+    println!(
+        "   Data preservation opportunity: {} span batches",
+        cb_spans_preserved
+    );
 
     // **PRODUCTION IMPACT ESTIMATE**
     println!("📊 Production impact estimate (1000 spans/sec, 5min outage):");
@@ -414,12 +442,27 @@ fn audit_resource_waste_without_circuit_breaker() {
     let production_attempts_with_cb = 5; // Just until circuit opens
 
     println!("   Spans generated: {}", total_production_spans);
-    println!("   HTTP attempts without circuit breaker: {}", production_attempts_no_cb);
-    println!("   HTTP attempts with circuit breaker: {}", production_attempts_with_cb);
-    println!("   Network requests saved: {}", production_attempts_no_cb - production_attempts_with_cb);
+    println!(
+        "   HTTP attempts without circuit breaker: {}",
+        production_attempts_no_cb
+    );
+    println!(
+        "   HTTP attempts with circuit breaker: {}",
+        production_attempts_with_cb
+    );
+    println!(
+        "   Network requests saved: {}",
+        production_attempts_no_cb - production_attempts_with_cb
+    );
 
-    assert!(cb_attempts < total_attempts, "Circuit breaker should reduce attempts");
-    assert!(cb_blocked > 0, "Circuit breaker should block requests when open");
+    assert!(
+        cb_attempts < total_attempts,
+        "Circuit breaker should reduce attempts"
+    );
+    assert!(
+        cb_blocked > 0,
+        "Circuit breaker should block requests when open"
+    );
 
     println!("✅ RESOURCE WASTE ANALYSIS COMPLETE");
     println!("🚨 FINDING: Circuit breaker prevents massive resource waste");
