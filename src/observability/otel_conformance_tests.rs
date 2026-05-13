@@ -17132,22 +17132,32 @@ fn otlp_088_internal_span_same_trace_validation_conformance() {
         let reference_result = simulate_reference_internal_trace_validation(&scenario);
 
         // Validate individual results
-        validate_internal_trace_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync internal trace validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_internal_trace_validation_logic(&asupersync_result, &scenario).unwrap_or_else(
+            |err| {
+                panic!(
+                    "Asupersync internal trace validation logic failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            },
+        );
 
-        validate_internal_trace_validation_logic(&reference_result).expect(&format!(
-            "Reference internal trace validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_internal_trace_validation_logic(&reference_result, &scenario).unwrap_or_else(
+            |err| {
+                panic!(
+                    "Reference internal trace validation logic failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            },
+        );
 
         // Validate implementation consistency
         validate_internal_trace_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -17276,19 +17286,20 @@ fn simulate_asupersync_internal_trace_validation(
         same_trace_parent_found = true; // No parent constraint
     }
 
-    // Check validation correctness
-    let validation_correct = validation_success == scenario.expected_validation_success
-        && cross_trace_violation_detected == scenario.expected_cross_trace_violation
-        && same_trace_parent_found == scenario.expected_same_trace_parent;
-
-    let validation_applied = true; // Always apply cross-trace validation
-
     // OTLP compliance: INTERNAL spans must not cross traces
     let otlp_compliant = if scenario.span.kind == InternalSpanKind::Internal {
-        !cross_trace_violation_detected
+        validation_success && !cross_trace_violation_detected
     } else {
         true // Non-INTERNAL spans are not subject to this constraint
     };
+
+    // Check validation correctness
+    let validation_correct = validation_success == scenario.expected_validation_success
+        && cross_trace_violation_detected == scenario.expected_cross_trace_violation
+        && same_trace_parent_found == scenario.expected_same_trace_parent
+        && otlp_compliant == scenario.expected_otlp_compliant;
+
+    let validation_applied = true; // Always apply cross-trace validation
 
     InternalTraceValidationResult {
         validation_success,
@@ -17369,19 +17380,20 @@ fn simulate_reference_internal_trace_validation(
         same_trace_parent_found = true;
     }
 
-    // Check validation correctness
-    let validation_correct = validation_success == scenario.expected_validation_success
-        && cross_trace_violation_detected == scenario.expected_cross_trace_violation
-        && same_trace_parent_found == scenario.expected_same_trace_parent;
-
-    let validation_applied = true;
-
     // OTLP compliance
     let otlp_compliant = if scenario.span.kind == InternalSpanKind::Internal {
-        !cross_trace_violation_detected
+        validation_success && !cross_trace_violation_detected
     } else {
         true
     };
+
+    // Check validation correctness
+    let validation_correct = validation_success == scenario.expected_validation_success
+        && cross_trace_violation_detected == scenario.expected_cross_trace_violation
+        && same_trace_parent_found == scenario.expected_same_trace_parent
+        && otlp_compliant == scenario.expected_otlp_compliant;
+
+    let validation_applied = true;
 
     InternalTraceValidationResult {
         validation_success,
@@ -17406,6 +17418,7 @@ fn simulate_reference_internal_trace_validation(
 /// Verify INTERNAL span cross-trace validation logic
 fn validate_internal_trace_validation_logic(
     result: &InternalTraceValidationResult,
+    scenario: &InternalSpanTraceScenario,
 ) -> Result<(), String> {
     if !result.validation_correct {
         return Err("INTERNAL span cross-trace validation logic is incorrect".to_string());
@@ -17417,9 +17430,15 @@ fn validate_internal_trace_validation_logic(
         );
     }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
+    // Check OTLP compliance, allowing scenarios that intentionally model violations.
+    if scenario.expected_otlp_compliant && !result.otlp_compliant {
         return Err("INTERNAL span cross-trace validation is not OTLP compliant".to_string());
+    }
+
+    if !scenario.expected_otlp_compliant && result.validation_success {
+        return Err(
+            "Expected invalid INTERNAL span trace relationship passed validation".to_string(),
+        );
     }
 
     // Critical check: cross-trace violations must be detected for INTERNAL spans
