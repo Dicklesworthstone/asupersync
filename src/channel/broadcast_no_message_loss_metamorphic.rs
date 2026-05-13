@@ -29,7 +29,7 @@ use crate::lab::{LabConfig, LabRuntime};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 // ============================================================================
@@ -108,10 +108,7 @@ impl FastReceiverHarness {
     ) -> Result<usize, SendError<BroadcastMessage>> {
         let mut total_receivers = 0;
         for msg in messages {
-            match self.send_message(cx, msg.clone()) {
-                Ok(count) => total_receivers = count,
-                Err(e) => return Err(e),
-            }
+            total_receivers = self.send_message(cx, msg.clone())?;
         }
         Ok(total_receivers)
     }
@@ -154,7 +151,7 @@ mod tests {
 
     #[test]
     fn mr1_fast_receiver_preservation() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 3usize..8,
             receiver_count in 2usize..5,
@@ -245,7 +242,7 @@ mod tests {
     /// **Catches**: Receiver scaling bugs, shared state corruption
     #[test]
     fn mr2_receiver_count_independence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 4usize..8,
             message_count in 2usize..5,
@@ -324,7 +321,7 @@ mod tests {
     /// **Catches**: Rate-dependent message loss, timing-sensitive bugs
     #[test]
     fn mr3_send_rate_independence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 3usize..6,
             message_count in 2usize..4, // Keep small for timing tests
@@ -396,7 +393,7 @@ mod tests {
     /// **Catches**: Subscription timing bugs, initialization races
     #[test]
     fn mr4_subscription_timing_independence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 4usize..8,
             pre_messages in 1usize..3,
@@ -483,7 +480,7 @@ mod tests {
     /// receivers, varied send patterns, and subscription timing variations.
     #[test]
     fn mr_composite_complete_preservation() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
 
         let cx = test_cx();
         let messages = vec![
@@ -536,7 +533,7 @@ mod validation_tests {
     /// Validate that the harness correctly identifies fast vs slow receiver scenarios
     #[test]
     fn validate_fast_receiver_harness() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         let cx = test_cx();
         let mut harness = FastReceiverHarness::new(3, 2);
 
@@ -572,7 +569,7 @@ mod validation_tests {
     /// Validate that capacity constraints are properly handled
     #[test]
     fn validate_capacity_constraints() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         let cx = test_cx();
 
         // Test with capacity exactly matching message count (boundary condition)
