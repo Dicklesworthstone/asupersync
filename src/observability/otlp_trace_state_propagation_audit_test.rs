@@ -297,8 +297,7 @@ fn audit_otlp_trace_state_vendor_opacity() {
 
         let compliant_preserves_exact = compliant_serialized
             .get("trace_state")
-            .map(|ts| ts.contains(original_value))
-            .unwrap_or(false);
+            .is_some_and(|ts| ts.contains(original_value));
 
         if current_preserves_exact {
             println!("     ✅ CURRENT: Preserves exact vendor value");
