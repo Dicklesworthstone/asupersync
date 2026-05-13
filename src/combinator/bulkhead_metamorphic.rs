@@ -420,8 +420,8 @@ fn mr2_rejection_accuracy(
     let metrics_rejections = metrics.total_rejected;
 
     // **MR2 Verification**: Rejection counts should match exactly
-    let accuracy_maintained = actual_rejections == expected_rejections as u32
-        && metrics_rejections == actual_rejections as u64;
+    let accuracy_maintained =
+        actual_rejections == expected_rejections && metrics_rejections == actual_rejections as u64;
 
     crate::assert_with_log!(
         accuracy_maintained,
