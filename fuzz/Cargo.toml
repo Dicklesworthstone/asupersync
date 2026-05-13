@@ -6106,3 +6106,14 @@ path = "fuzz_targets/distributed_snapshot_oracle.rs"
 test = false
 doc = false
 bench = false
+
+# Oracle-based gRPC codec hardening fuzzer with strong oracles
+# Tests round-trip invariants, differential behavior against reference implementation,
+# and deep state consistency. Implements oracle hierarchy: reference impl, round-trip,
+# boundary validation, and crash detection for comprehensive codec validation.
+[[bin]]
+name = "grpc_codec_oracle_hardening"
+path = "fuzz_targets/grpc_codec_oracle_hardening.rs"
+test = false
+doc = false
+bench = false
