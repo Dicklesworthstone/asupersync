@@ -96,6 +96,7 @@ FALLBACK_RANKING_SCHEMA_VERSION = "proof-runner-fallback-bead-ranking-v1"
 FALLBACK_CARGO_HEAVY_WARNING = (
     "local disk pressure detected; prefer disk-safe fallback work or an artifact-free proof receipt before Cargo-heavy validation"
 )
+AUTOPILOT_PLAN_SCHEMA_VERSION = "proof-runner-autopilot-plan-v1"
 
 
 def _non_negative_int(value: Any) -> int:
@@ -2390,6 +2391,32 @@ class ProofRunner:
             "ranked_fallback_beads": rank_fallback_beads_for_disk(beads, disk_preflight),
         }
 
+    def autopilot_proof_plan(
+        self,
+        touched_files: List[str],
+        fallback_snapshot_path: str,
+    ) -> Dict[str, Any]:
+        fallback_ranking = self.rank_fallback_beads(fallback_snapshot_path)
+        ranked_fallbacks = fallback_ranking["ranked_fallback_beads"]
+        selected_fallback = ranked_fallbacks[0] if ranked_fallbacks else None
+        return {
+            "schema_version": AUTOPILOT_PLAN_SCHEMA_VERSION,
+            "mode": "dry-run",
+            "touched_files": touched_files,
+            "suggested_lanes": self.suggest_lanes_for_changes(touched_files),
+            "disk_pressure_preflight": fallback_ranking["disk_pressure_preflight"],
+            "fallback_ranking": fallback_ranking,
+            "selected_fallback_bead": selected_fallback,
+            "decision": "use_fallback_bead" if selected_fallback else "no_fallback_candidate",
+            "no_mutation": {
+                "executes_proof_commands": False,
+                "mutates_beads": False,
+                "mutates_agent_mail": False,
+                "deletes_files": False,
+                "requires_explicit_cleanup_permission": True,
+            },
+        }
+
     def suggest_lanes_for_changes(self, touched_files: List[str]) -> List[str]:
         """Suggest appropriate proof lanes based on touched files."""
         suggestions = []
@@ -2520,6 +2547,11 @@ def main():
         "--rank-fallback-beads",
         action="store_true",
         help="Rank fallback bead candidates using disk pressure"
+    )
+    parser.add_argument(
+        "--autopilot-proof-plan",
+        action="store_true",
+        help="Build a dry-run proof plan from touched files, disk pressure, and fallback candidates"
     )
     parser.add_argument(
         "--fallback-bead-snapshot",
@@ -2689,6 +2721,19 @@ def main():
                 for row in result["ranked_fallback_beads"]:
                     warning = " warning={}".format(row["disk_pressure_warning"]) if row["disk_pressure_warning"] else ""
                     print("{} {}{}".format(row["id"], row["disk_safety"], warning))
+            return 0
+
+        if args.autopilot_proof_plan:
+            if not args.fallback_bead_snapshot:
+                parser.error("--fallback-bead-snapshot is required with --autopilot-proof-plan")
+            result = runner.autopilot_proof_plan(args.touched_files, args.fallback_bead_snapshot)
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                selected = result["selected_fallback_bead"] or {}
+                print("decision={}".format(result["decision"]))
+                print("selected_fallback_bead={}".format(selected.get("id", "")))
+                print("disk_pressure={}".format(result["disk_pressure_preflight"]["classification"]))
             return 0
 
         if args.suggest_lanes:
