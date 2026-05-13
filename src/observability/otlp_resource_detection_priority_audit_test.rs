@@ -85,15 +85,20 @@ impl Drop for ResourceEnvGuard {
 /// Mock OTLP resource for testing priority behavior.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MockOtlpResource {
+    /// Final resource attributes after priority resolution.
     pub attributes: HashMap<String, String>,
+    /// Source category assigned by the mock builder.
     pub source: ResourceSource,
 }
 
 /// Source of resource attributes for priority tracking.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResourceSource {
+    /// Attributes supplied directly by application code.
     Programmatic,
+    /// Attributes loaded from `OTEL_RESOURCE_ATTRIBUTES`.
     Environment,
+    /// Default resource attributes supplied by the SDK.
     Defaults,
 }
 

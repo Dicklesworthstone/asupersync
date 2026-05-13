@@ -27,11 +27,13 @@ pub struct MockOtlpResponse {
     body: Option<ExportTraceServiceResponseBody>,
 }
 
+/// Mock OTLP trace export response body.
 #[derive(Debug, Clone)]
 pub struct ExportTraceServiceResponseBody {
     partial_success: Option<ExportPartialSuccess>,
 }
 
+/// Mock OTLP partial-success payload.
 #[derive(Debug, Clone)]
 pub struct ExportPartialSuccess {
     rejected_spans: i64,
