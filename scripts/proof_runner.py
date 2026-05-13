@@ -1074,6 +1074,12 @@ class AgentMailChecker:
             "classifications": []
         }
 
+    def snapshot_status(self) -> Dict[str, Any]:
+        """Return top-level reservation snapshot configuration metadata."""
+        if self.reservation_snapshot:
+            return {"source": "snapshot", "enabled": True}
+        return {"source": self.last_check["source"], "enabled": False}
+
     def check_file_reservations(self, file_paths: List[str]) -> Tuple[bool, List[Dict[str, Any]]]:
         """
         Check if any files have active reservations.
@@ -2506,10 +2512,7 @@ class ProofRunner:
             ),
             "disk_pressure_preflight": disk_preflight,
             "warning_wording": FALLBACK_CARGO_HEAVY_WARNING,
-            "reservation_snapshot": {
-                "source": self.agent_mail.last_check["source"],
-                "enabled": self.agent_mail.reservation_snapshot is not None,
-            },
+            "reservation_snapshot": self.agent_mail.snapshot_status(),
             "summary": {
                 "input_bead_count": len(beads),
                 "disk_pressure_active": disk_low,

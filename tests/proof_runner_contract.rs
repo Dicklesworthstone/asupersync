@@ -1172,6 +1172,65 @@ fn proof_runner_rank_fallback_beads_demotes_peer_reserved_candidates() {
 }
 
 #[test]
+fn proof_runner_rank_fallback_beads_reports_fileless_reservation_snapshot() {
+    let fallback = write_json_fixture(&json!({"beads": [
+        {"id": "fileless-safe", "title": "fileless fixture work", "priority": 1,
+         "disk_safety": "disk-safe"}
+    ]}));
+    let reservations = write_reservation_snapshot(
+        r#"{
+          "reservations": [
+            {
+              "path_pattern": "scripts/proof_runner.py",
+              "agent_name": "TopazGoose",
+              "expires_ts": "2999-01-01T00:00:00Z",
+              "exclusive": true
+            }
+          ]
+        }"#,
+    );
+    let fallback_path = fallback.path().to_str().expect("fallback path utf8");
+    let reservation_path = reservations.path().to_str().expect("reservation path utf8");
+    let result = proof_runner_json(&[
+        "--rank-fallback-beads",
+        "--fallback-bead-snapshot",
+        fallback_path,
+        "--reservation-snapshot",
+        reservation_path,
+        "--agent-name",
+        "FrostyAspen",
+        "--output",
+        "json",
+    ]);
+
+    assert_eq!(
+        result["reservation_snapshot"]["enabled"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        result["reservation_snapshot"]["source"].as_str(),
+        Some("snapshot")
+    );
+    assert_eq!(
+        result["summary"]["reservation_demotion_count"].as_i64(),
+        Some(0)
+    );
+    assert_eq!(
+        result["summary"]["reservation_hard_block_count"].as_i64(),
+        Some(0)
+    );
+
+    let ranked = &result["ranked_fallback_beads"][0];
+    assert_eq!(ranked["id"].as_str(), Some("fileless-safe"));
+    assert_eq!(ranked["eligible"].as_bool(), Some(true));
+    assert_eq!(ranked["touched_files"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        ranked["reservation_overlaps"].as_array().map(Vec::len),
+        Some(0)
+    );
+}
+
+#[test]
 fn proof_runner_autopilot_plan_combines_lanes_disk_and_fallbacks() {
     let fallback = write_json_fixture(&json!({"beads": [
         {"id": "cargo-heavy", "title": "run clippy frontier", "priority": 1,
