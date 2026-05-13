@@ -17834,25 +17834,31 @@ fn otlp_091_span_attribute_count_capping_conformance() {
         let reference_result = simulate_reference_attribute_count_capping(&scenario);
 
         // Validate individual results
-        validate_attribute_count_capping_logic(&asupersync_result).expect(&format!(
-            "Asupersync attribute count capping logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_attribute_count_capping_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync attribute count capping logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_attribute_count_capping_logic(&reference_result).expect(&format!(
-            "Reference attribute count capping logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_attribute_count_capping_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference attribute count capping logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_attribute_count_capping_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
