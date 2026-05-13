@@ -101,8 +101,7 @@ impl MockHttpRequest {
 
     fn is_compressed(&self) -> bool {
         self.get_header("content-encoding")
-            .map(|encoding| encoding == "gzip")
-            .unwrap_or(false)
+            .is_some_and(|encoding| encoding == "gzip")
     }
 }
 
@@ -130,9 +129,11 @@ impl MockOtlpHttpExporter {
     }
 
     fn export_spans(&self, spans: &[u8]) -> Result<(), String> {
-        let mut attempt = self.attempt_count.lock().unwrap();
-        *attempt += 1;
-        let attempt_number = *attempt;
+        let attempt_number = {
+            let mut attempt = self.attempt_count.lock().unwrap();
+            *attempt += 1;
+            *attempt
+        };
 
         // Determine compression based on config and attempt
         let use_compression = if attempt_number == 1 {
