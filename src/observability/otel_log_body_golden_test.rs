@@ -11,6 +11,11 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    #[allow(clippy::approx_constant)]
+    const FLOAT_PI_GOLDEN: f64 = 3.141_59;
+    #[allow(clippy::approx_constant)]
+    const FLOAT_NEGATIVE_E_GOLDEN: f64 = -2.718_28;
+
     /// Assert a golden file test for serialized AnyValue protobuf output.
     fn assert_golden_log_body(test_name: &str, body_value: &LogRecordBodyValue) {
         let golden_path =
@@ -78,7 +83,7 @@ mod tests {
 
     #[test]
     fn log_body_float_golden() {
-        let body = LogRecordBodyValue::Float(3.14159);
+        let body = LogRecordBodyValue::Float(FLOAT_PI_GOLDEN);
         assert_golden_log_body("float_pi", &body);
     }
 
@@ -94,7 +99,7 @@ mod tests {
 
     #[test]
     fn log_body_empty_string_golden() {
-        let body = LogRecordBodyValue::String("".to_string());
+        let body = LogRecordBodyValue::String(String::new());
         assert_golden_log_body("string_empty", &body);
     }
 
@@ -112,15 +117,18 @@ mod tests {
                 "string_simple",
                 LogRecordBodyValue::String("hello".to_string()),
             ),
-            ("string_empty", LogRecordBodyValue::String("".to_string())),
+            ("string_empty", LogRecordBodyValue::String(String::new())),
             ("int_zero", LogRecordBodyValue::Int(0)),
             ("int_positive", LogRecordBodyValue::Int(42)),
             ("int_negative", LogRecordBodyValue::Int(-100)),
             ("int_max", LogRecordBodyValue::Int(i64::MAX)),
             ("int_min", LogRecordBodyValue::Int(i64::MIN)),
             ("float_zero", LogRecordBodyValue::Float(0.0)),
-            ("float_positive", LogRecordBodyValue::Float(3.14159)),
-            ("float_negative", LogRecordBodyValue::Float(-2.71828)),
+            ("float_positive", LogRecordBodyValue::Float(FLOAT_PI_GOLDEN)),
+            (
+                "float_negative",
+                LogRecordBodyValue::Float(FLOAT_NEGATIVE_E_GOLDEN),
+            ),
             ("bool_true", LogRecordBodyValue::Bool(true)),
             ("bool_false", LogRecordBodyValue::Bool(false)),
             (
