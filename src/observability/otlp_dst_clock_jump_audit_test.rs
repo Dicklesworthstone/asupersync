@@ -88,11 +88,8 @@ impl CorrectInstantSpan {
 
     /// CORRECT: Uses Instant.duration_since() for monotonic timing
     fn duration(&self) -> Option<Duration> {
-        if let Some(end_instant) = self.end_instant {
-            Some(end_instant.duration_since(self.start_instant))
-        } else {
-            None
-        }
+        self.end_instant
+            .map(|end_instant| end_instant.duration_since(self.start_instant))
     }
 
     fn duration_nanos(&self) -> Option<u64> {
@@ -271,11 +268,7 @@ fn audit_otlp_timestamp_conversion_accuracy() {
     println!("   Wire format duration: {:?}", wire_duration);
 
     // Should be approximately equal (within timing precision)
-    let duration_diff = if wire_duration > monotonic_duration {
-        wire_duration - monotonic_duration
-    } else {
-        monotonic_duration - wire_duration
-    };
+    let duration_diff = wire_duration.abs_diff(monotonic_duration);
 
     assert!(duration_diff < Duration::from_millis(1));
 
