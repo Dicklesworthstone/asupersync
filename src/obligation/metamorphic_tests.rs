@@ -33,21 +33,36 @@ fn rid(n: u32) -> RegionId {
 pub enum ScheduledOp {
     /// Acquire an obligation, returning a token
     Acquire {
+        /// Obligation resource kind to acquire.
         kind: ObligationKind,
+        /// Task that owns the acquired obligation.
         task: TaskId,
+        /// Region that bounds the obligation lifecycle.
         region: RegionId,
+        /// Logical acquisition time recorded in the ledger.
         time: Time,
     },
     /// Commit a previously acquired token (by acquire index)
-    CommitByIndex { acquire_index: usize, time: Time },
+    CommitByIndex {
+        /// Index of the earlier acquire operation whose token should commit.
+        acquire_index: usize,
+        /// Logical commit time recorded in the ledger.
+        time: Time,
+    },
     /// Abort a previously acquired token (by acquire index)
     AbortByIndex {
+        /// Index of the earlier acquire operation whose token should abort.
         acquire_index: usize,
+        /// Abort reason recorded for the obligation.
         reason: ObligationAbortReason,
+        /// Logical abort time recorded in the ledger.
         time: Time,
     },
     /// Mark a region as finalized (closed)
-    FinalizeRegion { region: RegionId },
+    FinalizeRegion {
+        /// Region whose pending obligations should be finalized.
+        region: RegionId,
+    },
 }
 
 #[cfg(test)]
