@@ -1332,7 +1332,6 @@ mod tests {
             enabled: true,
             max_evaluations: Some(4),
             max_counterexample_events: Some(1),
-            ..MinimizationSection::default()
         };
         scenario.faults = vec![
             FaultEvent {
