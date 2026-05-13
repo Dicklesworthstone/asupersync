@@ -122,7 +122,7 @@ impl ExecutionContext {
                 } => {
                     if let Some(slot) = self.acquired_tokens.get_mut(*acquire_index) {
                         if let Some(token) = slot.take() {
-                            let _ = self.ledger.abort(token, *time, reason.clone());
+                            let _ = self.ledger.abort(token, *time, *reason);
                         }
                     }
                 }
