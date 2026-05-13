@@ -1087,6 +1087,91 @@ fn proof_runner_rank_fallback_beads_prefers_disk_safe_under_pressure() {
 }
 
 #[test]
+fn proof_runner_rank_fallback_beads_demotes_peer_reserved_candidates() {
+    let fallback = write_json_fixture(&json!({"beads": [
+        {"id": "reserved-safe", "title": "reserved fixture work", "priority": 1,
+         "disk_safety": "disk-safe", "touched_files": ["scripts/proof_runner.py"]},
+        {"id": "open-safe", "title": "open fixture work", "priority": 1,
+         "disk_safety": "disk-safe", "touched_files": ["tests/proof_runner_contract.rs"]},
+        {"id": "tracker-hard", "title": "tracker bookkeeping", "priority": 1,
+         "disk_safety": "disk-safe", "touched_files": [".beads/issues.jsonl"]}
+    ]}));
+    let reservations = write_reservation_snapshot(
+        r#"{
+          "reservations": [
+            {
+              "path_pattern": "scripts/proof_runner.py",
+              "agent_name": "TopazGoose",
+              "expires_ts": "2999-01-01T00:00:00Z",
+              "exclusive": true
+            },
+            {
+              "path_pattern": ".beads/issues.jsonl",
+              "agent_name": "TopazGoose",
+              "expires_ts": "2999-01-01T00:00:00Z",
+              "exclusive": true
+            }
+          ]
+        }"#,
+    );
+    let fallback_path = fallback.path().to_str().expect("fallback path utf8");
+    let reservation_path = reservations.path().to_str().expect("reservation path utf8");
+    let result = proof_runner_json(&[
+        "--rank-fallback-beads",
+        "--fallback-bead-snapshot",
+        fallback_path,
+        "--reservation-snapshot",
+        reservation_path,
+        "--agent-name",
+        "FrostyAspen",
+        "--output",
+        "json",
+    ]);
+
+    let ids: Vec<&str> = result["ranked_fallback_beads"]
+        .as_array()
+        .expect("ranked fallback beads")
+        .iter()
+        .map(|row| row["id"].as_str().expect("bead id"))
+        .collect();
+    assert_eq!(ids, ["open-safe", "reserved-safe", "tracker-hard"]);
+    assert_eq!(
+        result["summary"]["reservation_demotion_count"].as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        result["summary"]["reservation_hard_block_count"].as_i64(),
+        Some(1)
+    );
+
+    let reserved = &result["ranked_fallback_beads"][1];
+    assert_eq!(reserved["id"].as_str(), Some("reserved-safe"));
+    assert_eq!(reserved["eligible"].as_bool(), Some(true));
+    assert_eq!(reserved["reservation_demoted"].as_bool(), Some(true));
+    assert_eq!(
+        reserved["reservation_overlaps"][0]["classification"].as_str(),
+        Some("peer-active")
+    );
+    assert_eq!(
+        reserved["reservation_overlaps"][0]["holder"].as_str(),
+        Some("TopazGoose")
+    );
+    assert_eq!(
+        reserved["reservation_overlaps"][0]["path"].as_str(),
+        Some("scripts/proof_runner.py")
+    );
+
+    let tracker = &result["ranked_fallback_beads"][2];
+    assert_eq!(tracker["id"].as_str(), Some("tracker-hard"));
+    assert_eq!(tracker["eligible"].as_bool(), Some(false));
+    assert_eq!(tracker["reservation_hard_blocked"].as_bool(), Some(true));
+    assert_eq!(
+        tracker["reservation_blocker"]["classification"].as_str(),
+        Some("tracker-only")
+    );
+}
+
+#[test]
 fn proof_runner_autopilot_plan_combines_lanes_disk_and_fallbacks() {
     let fallback = write_json_fixture(&json!({"beads": [
         {"id": "cargo-heavy", "title": "run clippy frontier", "priority": 1,

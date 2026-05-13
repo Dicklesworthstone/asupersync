@@ -299,9 +299,19 @@ def fallback_disk_safety(bead: Dict[str, Any]) -> str:
     return "neutral"
 
 
+def fallback_touched_files(bead: Dict[str, Any]) -> List[str]:
+    """Return the declared file surface for one fallback bead candidate."""
+    for key in ("touched_files", "files", "paths", "source_files", "validation_files"):
+        files = _string_list(bead.get(key))
+        if files:
+            return [path.removeprefix("./") for path in files if path]
+    return []
+
+
 def rank_fallback_beads_for_disk(
     beads: List[Dict[str, Any]],
     disk_preflight: Dict[str, Any],
+    reservation_checker: Optional["AgentMailChecker"] = None,
 ) -> List[Dict[str, Any]]:
     disk_low = disk_preflight["classification"] != "healthy"
     class_rank = {"disk-safe": 0, "neutral": 1, "cargo-heavy": 2}
@@ -309,14 +319,36 @@ def rank_fallback_beads_for_disk(
     for input_order, bead in enumerate(beads):
         disk_safety = fallback_disk_safety(bead)
         warning = FALLBACK_CARGO_HEAVY_WARNING if disk_low and disk_safety == "cargo-heavy" else ""
+        touched_files = fallback_touched_files(bead)
+        reservation_overlaps = []
+        if reservation_checker and touched_files:
+            reservation_checker.check_file_reservations(touched_files)
+            reservation_overlaps = list(reservation_checker.last_check["classifications"])
+        peer_overlaps = [
+            row for row in reservation_overlaps
+            if row["classification"] == "peer-active"
+        ]
+        hard_overlaps = [
+            row for row in reservation_overlaps
+            if row["classification"] in {"tracker-only", "unknown-owner", "unavailable"}
+        ]
         ranked.append({
             "id": str(bead.get("id", "")),
             "title": str(bead.get("title", "")),
             "priority": _non_negative_int(bead.get("priority", 2)),
             "input_order": input_order,
-            "eligible": True,
+            "eligible": not hard_overlaps,
             "disk_safety": disk_safety,
             "disk_pressure_warning": warning,
+            "touched_files": touched_files,
+            "reservation_overlaps": reservation_overlaps,
+            "reservation_demoted": bool(peer_overlaps),
+            "reservation_hard_blocked": bool(hard_overlaps),
+            "reservation_warning": (
+                f"peer-active reservation overlaps {peer_overlaps[0]['path']} held by {peer_overlaps[0]['holder']}"
+                if peer_overlaps else ""
+            ),
+            "reservation_blocker": hard_overlaps[0] if hard_overlaps else None,
             "validation_hint": str(
                 bead.get("validation_command")
                 or bead.get("proof_command")
@@ -324,9 +356,15 @@ def rank_fallback_beads_for_disk(
                 or ""
             ),
         })
+    def sort_key(row: Dict[str, Any]) -> Tuple[int, int, int, int]:
+        disk_rank = class_rank[row["disk_safety"]] if disk_low else 0
+        hard_rank = 1 if row["reservation_hard_blocked"] else 0
+        peer_rank = 1 if row["reservation_demoted"] else 0
+        return (hard_rank, disk_rank, peer_rank, row["input_order"])
+
     if disk_low:
-        return sorted(ranked, key=lambda row: (class_rank[row["disk_safety"]], row["input_order"]))
-    return sorted(ranked, key=lambda row: row["input_order"])
+        return sorted(ranked, key=sort_key)
+    return sorted(ranked, key=sort_key)
 
 
 def canonical_json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -2458,21 +2496,37 @@ class ProofRunner:
             self.disk_dev_shm_min_free_bytes,
         )
         disk_low = disk_preflight["classification"] != "healthy"
+        ranked_beads = rank_fallback_beads_for_disk(beads, disk_preflight, self.agent_mail)
         return {
             "schema_version": FALLBACK_RANKING_SCHEMA_VERSION,
             "source": "fixture",
-            "rank_policy": "input-order-when-healthy; disk-safe-neutral-cargo-heavy-when-low",
+            "rank_policy": (
+                "input-order-when-healthy; disk-safe-neutral-cargo-heavy-when-low; "
+                "peer-active reservation overlaps demote; tracker/unknown reservations hard-block"
+            ),
             "disk_pressure_preflight": disk_preflight,
             "warning_wording": FALLBACK_CARGO_HEAVY_WARNING,
+            "reservation_snapshot": {
+                "source": self.agent_mail.last_check["source"],
+                "enabled": self.agent_mail.reservation_snapshot is not None,
+            },
             "summary": {
                 "input_bead_count": len(beads),
                 "disk_pressure_active": disk_low,
                 "cargo_heavy_warning_count": sum(
-                    1 for row in rank_fallback_beads_for_disk(beads, disk_preflight)
+                    1 for row in ranked_beads
                     if row["disk_pressure_warning"]
                 ),
+                "reservation_demotion_count": sum(
+                    1 for row in ranked_beads
+                    if row["reservation_demoted"]
+                ),
+                "reservation_hard_block_count": sum(
+                    1 for row in ranked_beads
+                    if row["reservation_hard_blocked"]
+                ),
             },
-            "ranked_fallback_beads": rank_fallback_beads_for_disk(beads, disk_preflight),
+            "ranked_fallback_beads": ranked_beads,
         }
 
     def autopilot_proof_plan(
