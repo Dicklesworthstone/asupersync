@@ -340,12 +340,10 @@ impl CancellationTracer {
             return CancellationTraceId::new(); // Return dummy ID
         }
 
-        // Sample based on configured rate
-        if self.config.sample_rate < 1.0 {
-            let hash = self.hash_entity(&root_entity);
-            if self.sample_unit_interval(hash) > self.config.sample_rate {
-                return CancellationTraceId::new(); // Skip this trace
-            }
+        // Sample based on the configured rate.
+        let hash = self.hash_entity(&root_entity);
+        if !self.should_sample_hash(hash) {
+            return CancellationTraceId::new(); // Skip this trace
         }
 
         let trace_id = CancellationTraceId::new();
@@ -746,6 +744,18 @@ impl CancellationTracer {
         hasher.finish()
     }
 
+    fn should_sample_hash(&self, hash: u64) -> bool {
+        let sample_rate = self.config.sample_rate;
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return false;
+        }
+        if sample_rate >= 1.0 {
+            return true;
+        }
+
+        self.sample_unit_interval(hash) < sample_rate
+    }
+
     /// Convert hash to unit interval for sampling.
     fn sample_unit_interval(&self, hash: u64) -> f64 {
         const TWO_POW_53_F64: f64 = 9_007_199_254_740_992.0;
@@ -994,6 +1004,60 @@ mod tests {
         let stats = tracer.stats();
         assert_eq!(stats.traces_collected, 0);
         assert_eq!(stats.steps_recorded, 0);
+    }
+
+    #[test]
+    fn zero_sample_rate_rejects_zero_hash_boundary() {
+        let mut config = CancellationTracerConfig::default();
+        config.sample_rate = 0.0;
+        let tracer = CancellationTracer::new(config);
+
+        assert_eq!(tracer.sample_unit_interval(0), 0.0);
+        assert!(
+            !tracer.should_sample_hash(0),
+            "sample_rate=0.0 must reject even the exact zero-hash boundary"
+        );
+
+        let trace_id = tracer.start_trace(
+            "task-zero-rate".to_string(),
+            EntityType::Task,
+            &CancelReason::user("sampling-disabled"),
+            CancelKind::User,
+        );
+        tracer.record_step(
+            trace_id,
+            "region-zero-rate".to_string(),
+            EntityType::Region,
+            &CancelReason::user("should-not-record"),
+            CancelKind::User,
+            "Closing".to_string(),
+            Some("task-zero-rate".to_string()),
+            true,
+        );
+        tracer.complete_trace(trace_id);
+
+        let stats = tracer.stats();
+        assert_eq!(stats.traces_collected, 0);
+        assert_eq!(stats.steps_recorded, 0);
+        assert!(tracer.completed_traces().is_empty());
+        assert!(tracer.in_progress_traces().is_empty());
+        assert!(tracer.traces_for_entity("task-zero-rate").is_empty());
+    }
+
+    #[test]
+    fn non_finite_sample_rate_rejects_sampling() {
+        let mut config = CancellationTracerConfig::default();
+        config.sample_rate = f64::NAN;
+        let tracer = CancellationTracer::new(config);
+
+        assert!(
+            !tracer.should_sample_hash(0),
+            "non-finite sample rates must fail closed"
+        );
+        assert!(
+            !tracer.should_sample_hash(u64::MAX),
+            "non-finite sample rates must not sample any hash boundary"
+        );
     }
 
     #[test]
