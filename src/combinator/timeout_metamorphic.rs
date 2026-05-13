@@ -612,9 +612,8 @@ mod metamorphic_no_double_cancel {
 
         let summary = run_timeout_test(&config, |global_state| async move {
             // Create multiple overlapping timeout operations
-            let mut operations = (0..3)
-                .map(|i| TestOperation::new(i, 200, Arc::clone(&global_state)))
-                .into_iter();
+            let mut operations =
+                (0..3).map(|i| TestOperation::new(i, 200, Arc::clone(&global_state)));
 
             if let Some(cx) = Cx::current() {
                 let now = cx.now();
