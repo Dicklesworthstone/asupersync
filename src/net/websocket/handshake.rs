@@ -25,7 +25,7 @@
 use crate::util::EntropySource;
 use base64::Engine;
 use sha1::{Digest, Sha1};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 
 /// RFC 6455 GUID for Sec-WebSocket-Accept calculation.
@@ -104,6 +104,30 @@ fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError
         },
         |pos| Ok((&data[..pos], &data[pos..])),
     )
+}
+
+fn insert_unique_header(
+    headers: &mut BTreeMap<String, String>,
+    raw_name: &str,
+    raw_value: &str,
+) -> Result<(), HandshakeError> {
+    let name = raw_name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return Err(HandshakeError::InvalidRequest(
+            "empty HTTP header name".into(),
+        ));
+    }
+
+    match headers.entry(name) {
+        Entry::Vacant(entry) => {
+            entry.insert(raw_value.trim().to_string());
+            Ok(())
+        }
+        Entry::Occupied(entry) => Err(HandshakeError::InvalidRequest(format!(
+            "duplicate HTTP header: {}",
+            entry.key()
+        ))),
+    }
 }
 
 fn validate_url_host(host: &str) -> Result<(), HandshakeError> {
@@ -818,7 +842,7 @@ impl HttpRequest {
                 break;
             }
             if let Some((name, value)) = line.split_once(':') {
-                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                insert_unique_header(&mut headers, name, value)?;
             }
         }
 
@@ -897,7 +921,7 @@ impl HttpResponse {
                 break;
             }
             if let Some((name, value)) = line.split_once(':') {
-                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                insert_unique_header(&mut headers, name, value)?;
             }
         }
 
@@ -1431,6 +1455,26 @@ mod tests {
     }
 
     #[test]
+    fn http_request_parse_rejects_duplicate_handshake_header_names() {
+        let err = HttpRequest::parse(
+            b"GET /chat HTTP/1.1\r\n\
+              Host: example.com\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              Sec-WebSocket-Key: not-the-key\r\n\
+              sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              \r\n",
+        )
+        .expect_err("duplicate singleton handshake headers must be rejected");
+
+        assert!(
+            matches!(err, HandshakeError::InvalidRequest(ref msg) if msg.contains("duplicate HTTP header: sec-websocket-key")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
     fn test_http_response_parse() {
         let response = HttpResponse::parse(
             b"HTTP/1.1 101 Switching Protocols\r\n\
@@ -1458,6 +1502,24 @@ mod tests {
         .expect_err("missing blank line must be treated as an incomplete response");
 
         assert!(matches!(err, HandshakeError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn http_response_parse_rejects_duplicate_handshake_header_names() {
+        let err = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              Sec-WebSocket-Accept: wrong-accept-key\r\n\
+              sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+              \r\n",
+        )
+        .expect_err("duplicate singleton handshake response headers must be rejected");
+
+        assert!(
+            matches!(err, HandshakeError::InvalidRequest(ref msg) if msg.contains("duplicate HTTP header: sec-websocket-accept")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
