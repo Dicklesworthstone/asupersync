@@ -10,7 +10,7 @@ use crate::lab::{LabConfig, LabRuntime};
 use crate::types::{Budget, RegionId, TaskId};
 use crate::util::{ArenaIndex, DetRng};
 use std::future::Future;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use proptest::prelude::*;
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn mr_lagged_count_accuracy() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 2usize..8,
             skip_count in 1u64..20,
@@ -180,7 +180,7 @@ mod tests {
     /// Catches: Receiver cross-contamination, shared state corruption, recovery failures
     #[test]
     fn mr_multiple_lagged_receivers_independence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 2usize..6,
             receiver_count in 2usize..5,
@@ -263,7 +263,7 @@ mod tests {
     /// Catches: Buffer corruption, reference count errors, memory safety issues
     #[test]
     fn mr_dropped_receiver_buffer_integrity() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 3usize..8,
             initial_receivers in 2usize..5,
@@ -357,7 +357,7 @@ mod tests {
     /// Catches: Incorrect back-pressure logic, receiver-dependent send blocking
     #[test]
     fn mr_producer_backpressure_capacity_independence() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 2usize..8,
             slow_receivers in 1usize..4,
@@ -430,7 +430,7 @@ mod tests {
     /// Catches: Late subscriber message loss, ordering inconsistencies, subscription race conditions
     #[test]
     fn mr_subscriber_identity_with_late_subscription() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             initial_subscribers in 1usize..4,
             late_subscribers in 0usize..3,
@@ -627,7 +627,7 @@ mod tests {
     /// Tests that lagged receivers can recover correctly and buffer remains intact
     #[test]
     fn mr_composite_lag_recovery_buffer_integrity() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         proptest!(|(
             capacity in 2usize..6,
             initial_overflow in 1usize..8,
@@ -704,7 +704,7 @@ mod validation_tests {
     /// Validate that the test infrastructure correctly detects lag
     #[test]
     fn validate_lag_detection_infrastructure() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         let cx = test_cx();
         let mut harness = BroadcastTestHarness::new(2, 1);
 
@@ -725,7 +725,7 @@ mod validation_tests {
     /// Validate that multiple receivers work independently
     #[test]
     fn validate_multiple_receivers_infrastructure() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         block_on(async {
             let cx = test_cx();
             let mut harness = BroadcastTestHarness::new(3, 2);
@@ -745,7 +745,7 @@ mod validation_tests {
     /// Validate that dropping receivers works correctly
     #[test]
     fn validate_receiver_dropping_infrastructure() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         block_on(async {
             let cx = test_cx();
             let (sender, receiver) = channel::<u64>(3);
@@ -767,7 +767,7 @@ mod validation_tests {
     /// Validate that back-pressure behavior works as expected
     #[test]
     fn validate_backpressure_infrastructure() {
-        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        let _runtime = Rc::new(LabRuntime::new(LabConfig::default()));
         let cx = test_cx();
         let (sender, _receiver) = channel::<u64>(2);
 
