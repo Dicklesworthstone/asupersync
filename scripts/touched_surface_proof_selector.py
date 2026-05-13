@@ -49,7 +49,10 @@ def string_list(value: Any) -> list[str]:
 
 
 def normalize_path(path: str) -> str:
-    return path.strip().lstrip("./")
+    normalized = path.strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def matches_pattern(path: str, pattern: str) -> bool:

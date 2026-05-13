@@ -229,6 +229,54 @@ fn lane_source_fallback_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn hidden_repo_paths_do_not_match_non_hidden_patterns() {
+    let snippet = r#"
+import importlib.util
+import json
+
+spec = importlib.util.spec_from_file_location(
+    "touched_surface_proof_selector",
+    "scripts/touched_surface_proof_selector.py",
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+print(json.dumps({
+    "hidden_normalized": module.normalize_path(".beads/issues.jsonl"),
+    "leading_segment_normalized": module.normalize_path("./.beads/issues.jsonl"),
+    "matches_hidden_rule": module.matches_pattern(".beads/issues.jsonl", ".beads/**"),
+    "matches_non_hidden_rule": module.matches_pattern(".beads/issues.jsonl", "beads/**"),
+}, sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(snippet)
+        .current_dir(repo_root())
+        .output()
+        .expect("run touched-surface normalization snippet");
+    assert!(
+        output.status.success(),
+        "normalization snippet failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).expect("normalization output must be JSON");
+
+    assert_eq!(
+        parsed["hidden_normalized"].as_str(),
+        Some(".beads/issues.jsonl")
+    );
+    assert_eq!(
+        parsed["leading_segment_normalized"].as_str(),
+        Some(".beads/issues.jsonl")
+    );
+    assert_eq!(parsed["matches_hidden_rule"].as_bool(), Some(true));
+    assert_eq!(parsed["matches_non_hidden_rule"].as_bool(), Some(false));
+}
+
+#[test]
 fn unmatched_paths_fail_with_an_action_item() {
     let receipt = selector_json("unmatched_path.json");
 
