@@ -38,7 +38,10 @@ def as_list(value: Any) -> list[Any]:
 
 
 def normalize_path(path: str) -> str:
-    return path.strip().lstrip("./")
+    normalized = path.strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def normalize_name(value: Any) -> str:
