@@ -79,8 +79,7 @@ impl MockOtlpResponse {
         self.body
             .as_ref()
             .and_then(|b| b.partial_success.as_ref())
-            .map(|ps| ps.rejected_spans)
-            .unwrap_or(0)
+            .map_or(0, |ps| ps.rejected_spans)
     }
 
     fn rejection_reason(&self) -> Option<&str> {
@@ -179,7 +178,9 @@ impl MockPartialSuccessOtlpExporter {
             self.export_log.push(format!("warning_logged: {}", warning));
 
             // Advance pointer only for successfully exported spans
-            let successfully_exported = batch.span_count as i64 - rejected_count;
+            let successfully_exported = i64::try_from(batch.span_count)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(rejected_count);
             if successfully_exported > 0 {
                 self.pointer_advanced = true;
                 self.export_log.push(format!(
