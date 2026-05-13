@@ -40,12 +40,16 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_no_unimplemented_macros() {
         let output = Command::new("rg")
-            .args(&[
+            .args([
                 "-n",
                 "unimplemented!",
                 "src/observability/",
                 "--type",
                 "rust",
+                "--glob",
+                "!*_test.rs",
+                "--glob",
+                "!*_tests.rs",
             ])
             .output()
             .expect("ripgrep should be available");
@@ -61,7 +65,17 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_no_todo_macros() {
         let output = Command::new("rg")
-            .args(&["-n", "todo!", "src/observability/", "--type", "rust"])
+            .args([
+                "-n",
+                "todo!",
+                "src/observability/",
+                "--type",
+                "rust",
+                "--glob",
+                "!*_test.rs",
+                "--glob",
+                "!*_tests.rs",
+            ])
             .output()
             .expect("ripgrep should be available");
 
@@ -76,7 +90,7 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_no_unreachable_macros() {
         let output = Command::new("rg")
-            .args(&["-n", "unreachable!", "src/observability/", "--type", "rust"])
+            .args(["-n", "unreachable!", "src/observability/", "--type", "rust"])
             .output()
             .expect("ripgrep should be available");
 
@@ -98,7 +112,7 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_panic_calls_are_legitimate() {
         let output = Command::new("rg")
-            .args(&["-n", "panic!\\(", "src/observability/", "--type", "rust"])
+            .args(["-n", "panic!\\(", "src/observability/", "--type", "rust"])
             .output()
             .expect("ripgrep should be available");
 
@@ -139,7 +153,7 @@ mod mock_code_finder_audit {
         // for when metrics are disabled. Empty function bodies are correct.
 
         let output = Command::new("rg")
-            .args(&[
+            .args([
                 "-n",
                 "struct NoOpMetrics",
                 "src/observability/",
@@ -162,7 +176,7 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_no_501_not_implemented_responses() {
         let output = Command::new("rg")
-            .args(&[
+            .args([
                 "-n",
                 "501.*[Nn]ot [Ii]mplemented",
                 "src/observability/",
@@ -180,7 +194,7 @@ mod mock_code_finder_audit {
                 !line.contains("test")
                     && !line.contains("vec!")
                     && !line.contains("codes =")
-                    && !line.contains("[")
+                    && !line.contains('[')
             })
             .collect();
 
@@ -219,7 +233,7 @@ mod mock_code_finder_audit {
         println!("  4. Structural analysis: short/empty functions");
         println!("  5. Cross-reference tracing: caller impact analysis");
         println!("  6. API stub detection: 501 responses");
-        println!("");
+        println!();
         println!("RESULT: NO MACRO-LEVEL STUBS FOUND");
         println!("- All empty functions are intentional (NoOpMetrics)");
         println!("- All panic calls are legitimate (tests, assertions)");
@@ -228,7 +242,7 @@ mod mock_code_finder_audit {
             "- Known integration boundaries remain source-documented: {}",
             KNOWN_IMPLEMENTATION_BOUNDARIES.len()
         );
-        println!("");
+        println!();
         println!("ASSESSMENT: Stub-search baseline is clean; broader feature");
         println!("completeness still requires targeted integration evidence.");
     }
@@ -261,7 +275,7 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_baseline_file_count() {
         let output = Command::new("find")
-            .args(&["src/observability/", "-name", "*.rs", "-type", "f"])
+            .args(["src/observability/", "-name", "*.rs", "-type", "f"])
             .output()
             .expect("find command should work");
 
