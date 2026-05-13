@@ -81,6 +81,10 @@ def as_string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item]
 
 
+def redacted_string_list(value: Any, counts: dict[str, int]) -> list[str]:
+    return [redact_text(item, counts) for item in as_string_list(value)]
+
+
 def slug_from_path(path: str) -> str:
     name = Path(path).name
     if name.endswith(".py"):
@@ -141,7 +145,7 @@ def normalize_helper(row: dict[str, Any], counts: dict[str, int]) -> dict[str, A
         "bead_id": as_string(row.get("bead_id")),
         "commit": as_string(row.get("commit") or row.get("commit_hash"))[:12],
         "superseded_by": as_string(row.get("superseded_by")),
-        "validation": as_string_list(row.get("validation") or row.get("validation_commands")),
+        "validation": redacted_string_list(row.get("validation") or row.get("validation_commands"), counts),
         "summary": compact_text(as_string(row.get("summary") or row.get("description")), counts),
     }
 

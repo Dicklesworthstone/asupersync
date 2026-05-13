@@ -31,15 +31,17 @@
       "summary": "Investigates https://example.invalid/proof?[REDACTED_QUERY] with api_key=[REDACTED_SECRET] and bearer [REDACTED_TOKEN]",
       "superseded_by": "",
       "test_path": "",
-      "validation": []
+      "validation": [
+        "python3 scripts/operator_token_audit_receipt.py --api_key=[REDACTED_SECRET] --endpoint https://example.invalid/proof?[REDACTED_QUERY]"
+      ]
     }
   ],
   "redaction_counts": {
     "long_token": 0,
-    "secret": 1,
+    "secret": 2,
     "token": 1,
-    "total": 3,
-    "url_query": 1
+    "total": 5,
+    "url_query": 2
   },
   "repo_path": "/repo",
   "review_cues": [

@@ -247,10 +247,19 @@ fn secret_and_query_text_is_redacted() {
     let serialized = serde_json::to_string(&receipt).expect("serialize receipt");
 
     assert!(!serialized.contains("sk-live-this-should-not-leak"));
+    assert!(!serialized.contains("sk-live-validation-should-not-leak"));
     assert!(!serialized.contains("token=abc123"));
     assert!(!serialized.contains("sig=secret"));
     assert!(serialized.contains("[REDACTED_SECRET]"));
     assert!(serialized.contains("[REDACTED_QUERY]"));
+    let validation = helper(&receipt, "operator-token-audit-receipt")["validation"]
+        .as_array()
+        .expect("validation commands must be array");
+    assert!(validation.iter().any(|command| {
+        let command = command.as_str().unwrap_or("");
+        command.contains("--api_key=[REDACTED_SECRET]")
+            && command.contains("https://example.invalid/proof?[REDACTED_QUERY]")
+    }));
     assert!(
         receipt["redaction_counts"]["secret"].as_u64().unwrap_or(0) >= 1,
         "expected at least one secret redaction"
