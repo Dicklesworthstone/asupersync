@@ -250,21 +250,20 @@ mod integration_tests {
 /// Generate conformance report for documentation.
 #[allow(dead_code)]
 pub fn generate_conformance_report() -> String {
-    format!(
-        "H1 vs H2 Header Decoder Conformance Report\n\
-         ==========================================\n\
-         Pattern: Differential Testing (Pattern 1)\n\
-         Reference: H1 header handling (equivalent behavior)\n\
-         System Under Test: H2 HPACK decoder\n\
-         Oracle: HeaderMap logical equivalence\n\n\
-         Test Coverage:\n\
-         ✓ Single headers\n\
-         ✓ Case insensitive header names\n\
-         ✓ Multiple headers with same name\n\
-         ✓ Special character preservation in values\n\
-         ✓ Empty header sets\n\n\
-         Conformance Status: VERIFIED\n\
-         All test cases demonstrate equivalent behavior between H1 and H2 header processing.\n\
-         Headers are normalized to lowercase names as per HTTP/2 spec while preserving values.\n"
-    )
+    "H1 vs H2 Header Decoder Conformance Report\n\
+     ==========================================\n\
+     Pattern: Differential Testing (Pattern 1)\n\
+     Reference: H1 header handling (equivalent behavior)\n\
+     System Under Test: H2 HPACK decoder\n\
+     Oracle: HeaderMap logical equivalence\n\n\
+     Test Coverage:\n\
+     ✓ Single headers\n\
+     ✓ Case insensitive header names\n\
+     ✓ Multiple headers with same name\n\
+     ✓ Special character preservation in values\n\
+     ✓ Empty header sets\n\n\
+     Conformance Status: VERIFIED\n\
+     All test cases demonstrate equivalent behavior between H1 and H2 header processing.\n\
+     Headers are normalized to lowercase names as per HTTP/2 spec while preserving values.\n"
+        .to_string()
 }
