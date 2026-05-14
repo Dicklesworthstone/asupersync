@@ -25450,7 +25450,7 @@ fn otlp_107_attribute_key_whitespace_validation_conformance() {
             },
             expected_whitespace_keys_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -25465,7 +25465,7 @@ fn otlp_107_attribute_key_whitespace_validation_conformance() {
             },
             expected_whitespace_keys_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -25506,7 +25506,7 @@ fn otlp_107_attribute_key_whitespace_validation_conformance() {
             },
             expected_whitespace_keys_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -25523,25 +25523,31 @@ fn otlp_107_attribute_key_whitespace_validation_conformance() {
         let reference_result = simulate_reference_whitespace_validation(&scenario);
 
         // Validate individual results
-        validate_whitespace_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync whitespace validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_whitespace_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync whitespace validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_whitespace_validation_logic(&reference_result).expect(&format!(
-            "Reference whitespace validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_whitespace_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference whitespace validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_whitespace_validation_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
