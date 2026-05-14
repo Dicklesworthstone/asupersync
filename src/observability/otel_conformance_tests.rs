@@ -46662,7 +46662,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_rejected: false,
-                expected_violation: "".to_string(),
+                expected_violation: String::new(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "amqp_producer_valid_delivery_mode_two_control".to_string(),
@@ -46683,7 +46683,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_rejected: false,
-                expected_violation: "".to_string(),
+                expected_violation: String::new(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "non_amqp_producer_delivery_mode_zero_ignored".to_string(),
@@ -46704,7 +46704,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_rejected: false, // Not AMQP so no validation applied
-                expected_violation: "".to_string(),
+                expected_violation: String::new(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "amqp_consumer_delivery_mode_zero_ignored".to_string(),
@@ -46725,7 +46725,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_rejected: false, // Consumer span so no validation applied
-                expected_violation: "".to_string(),
+                expected_violation: String::new(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "amqp_producer_delivery_mode_zero_mixed_attributes".to_string(),
@@ -46827,7 +46827,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_rejected: false, // Not exact "amqp" so no validation applied
-                expected_violation: "".to_string(),
+                expected_violation: String::new(),
             },
         ];
 
