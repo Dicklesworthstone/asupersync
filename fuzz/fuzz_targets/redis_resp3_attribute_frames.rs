@@ -318,42 +318,35 @@ fn execute_attribute_scenario(scenario: AttributeFrameScenario) {
 
         // Test parsing (expect either success or controlled error)
         let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match RespValue::try_decode_with_limits(&frame_bytes, &limits) {
-                Ok(Some((value, consumed))) => {
-                    // Successful parse - verify invariants
-                    assert!(
-                        consumed <= frame_bytes.len(),
-                        "Consumed more bytes than available"
-                    );
+            let decoded = RespValue::try_decode_with_limits(&frame_bytes, &limits);
+            let result = observe_attribute_decode(&decoded, &frame_bytes, &limits);
 
-                    if let RespValue::Attribute(ref pairs) = value {
+            if let Ok(Some((value, _))) = decoded
+                && let RespValue::Attribute(ref pairs) = value
+            {
+                // Verify attribute-specific invariants
+                assert!(
+                    pairs.len() <= limits.max_array_len,
+                    "Attribute pairs exceed limit"
+                );
+
+                // Test encoding round-trip for valid attributes
+                let encoded = value.encode();
+                if encoded.len() < MAX_INPUT_SIZE {
+                    let encoded_result = RespValue::try_decode_with_limits(&encoded, &limits);
+                    if let ParseResult::Success { .. } =
+                        observe_attribute_decode(&encoded_result, &encoded, &limits)
+                    {
                         // Verify attribute-specific invariants
                         assert!(
-                            pairs.len() <= limits.max_array_len,
-                            "Attribute pairs exceed limit"
+                            matches!(encoded_result, Ok(Some((RespValue::Attribute(_), _)))),
+                            "encoded attribute frame decoded as non-attribute value"
                         );
-
-                        // Test encoding round-trip for valid attributes
-                        let encoded = value.encode();
-                        if encoded.len() < MAX_INPUT_SIZE {
-                            let _ = RespValue::try_decode_with_limits(&encoded, &limits);
-                        }
-                    } else {
-                        // For malformed frames that parse as other types, ensure they're valid
-                    }
-
-                    ParseResult::Success { consumed }
-                }
-                Ok(None) => ParseResult::NeedMoreData,
-                Err(err) => {
-                    // Expected errors for boundary conditions
-                    match err {
-                        RedisError::Protocol(_) => ParseResult::ProtocolError,
-                        RedisError::Io(_) => ParseResult::IoError,
-                        _ => ParseResult::OtherError,
                     }
                 }
             }
+
+            result
         }));
 
         // Verify no panics occurred
@@ -382,7 +375,8 @@ fn execute_attribute_scenario(scenario: AttributeFrameScenario) {
             let partial_result = std::panic::catch_unwind(|| {
                 for chunk_size in 1..=frame_bytes.len().min(10) {
                     for chunk in frame_bytes.chunks(chunk_size) {
-                        let _ = RespValue::try_decode_with_limits(chunk, &limits);
+                        let decoded = RespValue::try_decode_with_limits(chunk, &limits);
+                        observe_attribute_decode(&decoded, chunk, &limits);
                     }
                 }
             });
@@ -392,6 +386,35 @@ fn execute_attribute_scenario(scenario: AttributeFrameScenario) {
                 &frame_bytes[..frame_bytes.len().min(100)]
             );
         }
+    }
+}
+
+fn observe_attribute_decode(
+    result: &Result<Option<(RespValue, usize)>, RedisError>,
+    input: &[u8],
+    limits: &RedisProtocolLimits,
+) -> ParseResult {
+    match result {
+        Ok(Some((value, consumed))) => {
+            assert!(*consumed > 0, "RESP3 attribute decode consumed no bytes");
+            assert!(
+                *consumed <= input.len(),
+                "RESP3 attribute decode consumed more bytes than available"
+            );
+            if let RespValue::Attribute(pairs) = value {
+                assert!(
+                    pairs.len() <= limits.max_array_len,
+                    "Attribute pairs exceed limit"
+                );
+            }
+            ParseResult::Success {
+                consumed: *consumed,
+            }
+        }
+        Ok(None) => ParseResult::NeedMoreData,
+        Err(RedisError::Protocol(_)) => ParseResult::ProtocolError,
+        Err(RedisError::Io(_)) => ParseResult::IoError,
+        Err(_) => ParseResult::OtherError,
     }
 }
 
@@ -426,7 +449,8 @@ fuzz_target!(|data: &[u8]| {
         };
 
         let raw_result = std::panic::catch_unwind(|| {
-            let _ = RespValue::try_decode_with_limits(data, &limits);
+            let decoded = RespValue::try_decode_with_limits(data, &limits);
+            observe_attribute_decode(&decoded, data, &limits);
         });
         assert!(
             raw_result.is_ok(),
