@@ -9913,9 +9913,9 @@ mod tests {
             let mut buf = Vec::new();
             frame
                 .encode(&mut buf)
-                .expect(&format!("encode quarter_stream_id={}", quarter_stream_id));
+                .unwrap_or_else(|_| panic!("encode quarter_stream_id={quarter_stream_id}"));
             let (decoded, consumed) = H3Frame::decode(&buf, &test_config())
-                .expect(&format!("decode quarter_stream_id={}", quarter_stream_id));
+                .unwrap_or_else(|_| panic!("decode quarter_stream_id={quarter_stream_id}"));
             assert_eq!(decoded, frame);
             assert_eq!(consumed, buf.len());
         }
