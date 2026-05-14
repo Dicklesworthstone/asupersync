@@ -503,3 +503,20 @@ opencode.json
 # dir produced by a future smoke runner is auto-ignored without
 # requiring a one-line .gitignore edit per runner.
 /.*-smoke-artifacts/
+
+# Root-level junk patterns added by repo-janitor 2026-05-13.
+# Each of these has a sanctioned home elsewhere in the tree:
+#
+#   /cx_*_benchmark     — built benchmark binaries belong in target/, not at root
+#                         (a 4.2 MB ELF was committed at d006b5302; never again)
+#   /asupersync_*.png   — illustration PNGs are unused; README uses .webp variants
+#   /bead_*.md          — bead-specific notes belong under docs/beads/
+#   /MODES_*.md         — modes-of-reasoning analysis output belongs under docs/analysis/
+#   /perf_scenario_*.md — perf-scenario briefs belong under docs/perf/
+#   /bug_report_*.md    — historical bug reports belong under docs/audits/
+/cx_*_benchmark
+/asupersync_*.png
+/bead_*.md
+/MODES_*.md
+/perf_scenario_*.md
+/bug_report_*.md
