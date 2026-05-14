@@ -3650,10 +3650,9 @@ mod tests {
             let transformed_cx = test_cx();
 
             // Phase 1: Acquire permits on transformed semaphore
-            let acquired_permit = transformed.try_acquire(acquire_count).expect(&format!(
-                "acquire {} permits from {}",
-                acquire_count, initial_permits
-            ));
+            let acquired_permit = transformed.try_acquire(acquire_count).unwrap_or_else(|_| {
+                panic!("acquire {acquire_count} permits from {initial_permits}")
+            });
 
             // Apply cancellation mask between acquire and release
             // This simulates cancellation pressure during the hold period
