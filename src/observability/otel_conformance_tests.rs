@@ -23637,7 +23637,7 @@ mod otlp_105_array_element_type_homogeneity {
             expected_type_mismatch_detected: false,
             expected_mismatched_attributes: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -23660,7 +23660,7 @@ mod otlp_105_array_element_type_homogeneity {
             expected_type_mismatch_detected: false,
             expected_mismatched_attributes: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -23700,7 +23700,7 @@ mod otlp_105_array_element_type_homogeneity {
             expected_type_mismatch_detected: false,
             expected_mismatched_attributes: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -23768,7 +23768,7 @@ mod otlp_105_array_element_type_homogeneity {
             expected_type_mismatch_detected: false,
             expected_mismatched_attributes: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -23784,25 +23784,31 @@ mod otlp_105_array_element_type_homogeneity {
             let reference_result = simulate_reference_array_type_validation(&scenario);
 
             // Validate individual results
-            validate_array_type_validation_logic(&asupersync_result).expect(&format!(
-                "Asupersync array type validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_array_type_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+                panic!(
+                    "Asupersync array type validation logic failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
-            validate_array_type_validation_logic(&reference_result).expect(&format!(
-                "Reference array type validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_array_type_validation_logic(&reference_result).unwrap_or_else(|err| {
+                panic!(
+                    "Reference array type validation logic failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
             // Validate implementation consistency
             validate_array_type_validation_implementation_consistency(
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
             println!("✓ Scenario passed: {}", scenario.description);
         }
@@ -23922,7 +23928,6 @@ mod otlp_105_array_element_type_homogeneity {
             match attribute {
                 ArrayAttribute::Simple(_, _) => {
                     // Simple attributes don't need array homogeneity validation
-                    continue;
                 }
                 ArrayAttribute::Array(key, elements) => {
                     array_attributes_analyzed += 1;
