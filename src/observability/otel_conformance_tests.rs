@@ -28193,7 +28193,7 @@ mod otlp_112_producer_messaging_operation_validation {
             expected_operation_valid: true,
             expected_operation_found: Some("publish".to_string()),
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -28280,7 +28280,7 @@ mod otlp_112_producer_messaging_operation_validation {
             expected_operation_valid: true, // No operation is valid (optional attribute)
             expected_operation_found: None,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -28302,7 +28302,7 @@ mod otlp_112_producer_messaging_operation_validation {
             expected_operation_valid: true, // Not subject to messaging validation
             expected_operation_found: None,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: false, // This validation only applies to messaging spans
             expected_otlp_compliant: true,
@@ -28323,7 +28323,7 @@ mod otlp_112_producer_messaging_operation_validation {
             expected_operation_valid: true, // Not subject to PRODUCER validation
             expected_operation_found: Some("receive".to_string()),
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: false, // This validation only applies to PRODUCER spans
             expected_otlp_compliant: true,
@@ -28337,12 +28337,12 @@ mod otlp_112_producer_messaging_operation_validation {
                 span_kind: MessagingSpanKind::Producer,
                 attributes: vec![
                     ("messaging.system".to_string(), "redis".to_string()),
-                    ("messaging.operation".to_string(), "".to_string()), // Empty operation - invalid
+                    ("messaging.operation".to_string(), String::new()), // Empty operation - invalid
                 ],
             },
             expected_messaging_system_detected: true,
             expected_operation_valid: false,
-            expected_operation_found: Some("".to_string()),
+            expected_operation_found: Some(String::new()),
             expected_span_rejected: true,
             expected_rejection_reason: "PRODUCER span has invalid messaging.operation '' (must be 'publish')".to_string(),
             expected_included_in_export: false,
@@ -28387,7 +28387,7 @@ mod otlp_112_producer_messaging_operation_validation {
             expected_operation_valid: true, // Not subject to PRODUCER validation
             expected_operation_found: Some("publish".to_string()),
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: false, // This validation only applies to PRODUCER spans
             expected_otlp_compliant: true,
@@ -28404,25 +28404,35 @@ mod otlp_112_producer_messaging_operation_validation {
             let reference_result = simulate_reference_producer_messaging_validation(&scenario);
 
             // Validate individual results
-            validate_producer_messaging_validation_logic(&asupersync_result).expect(&format!(
-                "Asupersync producer messaging validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_producer_messaging_validation_logic(&asupersync_result).unwrap_or_else(
+                |error| {
+                    panic!(
+                        "Asupersync producer messaging validation logic failed for scenario: {}: {}",
+                        scenario.description, error
+                    )
+                },
+            );
 
-            validate_producer_messaging_validation_logic(&reference_result).expect(&format!(
-                "Reference producer messaging validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_producer_messaging_validation_logic(&reference_result).unwrap_or_else(
+                |error| {
+                    panic!(
+                        "Reference producer messaging validation logic failed for scenario: {}: {}",
+                        scenario.description, error
+                    )
+                },
+            );
 
             // Validate implementation consistency
             validate_producer_messaging_validation_implementation_consistency(
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
             println!("✓ Scenario passed: {}", scenario.description);
         }
@@ -28527,18 +28537,19 @@ mod otlp_112_producer_messaging_operation_validation {
             }
         }
 
+        // Record messaging.operation whenever present; only PRODUCER spans are
+        // validated against the PRODUCER operation allowlist below.
+        for (key, value) in &scenario.span.attributes {
+            if key == "messaging.operation" {
+                operation_found = Some(value.clone());
+                break;
+            }
+        }
+
         // Only validate PRODUCER spans with messaging.system
         if is_producer_span && messaging_system_detected {
             producer_messaging_spans += 1;
             validation_applied = true;
-
-            // Look for messaging.operation attribute
-            for (key, value) in &scenario.span.attributes {
-                if key == "messaging.operation" {
-                    operation_found = Some(value.clone());
-                    break;
-                }
-            }
 
             match &operation_found {
                 Some(operation) => {
