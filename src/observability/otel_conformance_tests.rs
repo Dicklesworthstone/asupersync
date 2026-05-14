@@ -43452,7 +43452,7 @@ mod otlp_122_tests {
                 span_attributes: vec![
                     (
                         "rpc.service".to_string(),
-                        AnyValue::StringValue("".to_string()),
+                        AnyValue::StringValue(String::new()),
                     ), // Empty service
                     (
                         "rpc.method".to_string(),
@@ -43479,7 +43479,7 @@ mod otlp_122_tests {
                     ),
                     (
                         "rpc.method".to_string(),
-                        AnyValue::StringValue("".to_string()),
+                        AnyValue::StringValue(String::new()),
                     ), // Empty method
                     (
                         "rpc.system".to_string(),
@@ -43693,7 +43693,7 @@ mod otlp_122_tests {
 
                 Self {
                     name: format!("grpc_client_span_{}", scenario.description),
-                    kind: scenario.span_kind.clone(),
+                    kind: scenario.span_kind,
                     instrumentation_scope: InstrumentationScope {
                         name: scenario.instrumentation_scope_name.clone(),
                         version: scenario.instrumentation_scope_version.clone(),
