@@ -15,12 +15,13 @@
 
 use arbitrary::Arbitrary;
 use asupersync::http::h3_native::{
-    H3QpackMode, QpackContext, QpackFieldPlan, qpack_decode_field_section,
+    H3NativeError, H3QpackMode, QpackContext, QpackFieldPlan, qpack_decode_field_section,
     qpack_encode_field_section, qpack_encode_field_section_with_context,
     qpack_plan_to_header_fields, qpack_static_plan_for_request, qpack_static_plan_for_response,
 };
 use asupersync::http::{H3PseudoHeaders, H3RequestHead, H3ResponseHead};
 use libfuzzer_sys::fuzz_target;
+use std::fmt;
 
 /// Maximum number of operations per fuzz iteration
 const MAX_OPERATIONS: usize = 50;
@@ -32,6 +33,10 @@ const MAX_HEADER_LENGTH: usize = 128;
 const MAX_TABLE_CAPACITY: u64 = 4096;
 /// Maximum diagnostic size accepted from graceful integration rejections.
 const MAX_QPACK_DIAGNOSTIC_SIZE: usize = 2048;
+/// Maximum encoded section size expected from normalized fuzz inputs.
+const MAX_QPACK_ENCODED_SECTION_SIZE: usize = 8192;
+/// Maximum decoded field count expected from generated test sections.
+const MAX_QPACK_OBSERVED_FIELDS: usize = MAX_OPERATIONS + MAX_FIELD_PLAN_SIZE + 8;
 
 #[derive(Arbitrary, Debug)]
 struct QpackIntegrationInput {
@@ -149,18 +154,132 @@ fuzz_target!(|input: QpackIntegrationInput| {
 
 fn observe_qpack_integration_result(result: Result<(), Box<dyn std::error::Error>>) {
     if let Err(err) = result {
-        let diagnostic = err.to_string();
-        assert!(
-            !diagnostic.trim().is_empty(),
-            "QPACK integration rejection should include a diagnostic"
-        );
-        assert!(
-            diagnostic.len() <= MAX_QPACK_DIAGNOSTIC_SIZE,
-            "QPACK integration diagnostic size {} exceeds maximum {}",
-            diagnostic.len(),
-            MAX_QPACK_DIAGNOSTIC_SIZE
-        );
+        observe_qpack_rejection("QPACK integration", &err);
     }
+}
+
+fn observe_qpack_rejection(operation: &str, err: impl fmt::Display) {
+    let diagnostic = err.to_string();
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "{operation} rejection should include a diagnostic"
+    );
+    assert!(
+        diagnostic.len() <= MAX_QPACK_DIAGNOSTIC_SIZE,
+        "{operation} diagnostic size {} exceeds maximum {}",
+        diagnostic.len(),
+        MAX_QPACK_DIAGNOSTIC_SIZE
+    );
+}
+
+fn observe_encoded_section(
+    result: Result<Vec<u8>, H3NativeError>,
+    operation: &str,
+) -> Option<Vec<u8>> {
+    match result {
+        Ok(encoded) => {
+            assert!(
+                encoded.len() <= MAX_QPACK_ENCODED_SECTION_SIZE,
+                "{operation} encoded section size {} exceeds maximum {}",
+                encoded.len(),
+                MAX_QPACK_ENCODED_SECTION_SIZE
+            );
+            Some(encoded)
+        }
+        Err(err) => {
+            observe_qpack_rejection(operation, &err);
+            None
+        }
+    }
+}
+
+fn observe_decoded_plan(
+    result: Result<Vec<QpackFieldPlan>, H3NativeError>,
+    operation: &str,
+) -> Option<Vec<QpackFieldPlan>> {
+    match result {
+        Ok(plan) => {
+            assert!(
+                plan.len() <= MAX_QPACK_OBSERVED_FIELDS,
+                "{operation} decoded field count {} exceeds maximum {}",
+                plan.len(),
+                MAX_QPACK_OBSERVED_FIELDS
+            );
+            Some(plan)
+        }
+        Err(err) => {
+            observe_qpack_rejection(operation, &err);
+            None
+        }
+    }
+}
+
+fn observe_header_fields(
+    result: Result<Vec<(String, String)>, H3NativeError>,
+    operation: &str,
+) -> Option<Vec<(String, String)>> {
+    match result {
+        Ok(fields) => {
+            assert!(
+                fields.len() <= MAX_QPACK_OBSERVED_FIELDS,
+                "{operation} field count {} exceeds maximum {}",
+                fields.len(),
+                MAX_QPACK_OBSERVED_FIELDS
+            );
+            for (name, value) in &fields {
+                assert!(
+                    !name.is_empty(),
+                    "{operation} produced an empty header name"
+                );
+                assert!(
+                    !name.contains(['\r', '\n']) && !value.contains(['\r', '\n']),
+                    "{operation} produced a header with line breaks"
+                );
+            }
+            Some(fields)
+        }
+        Err(err) => {
+            observe_qpack_rejection(operation, &err);
+            None
+        }
+    }
+}
+
+fn observe_dynamic_insert(result: Result<u64, &'static str>, operation: &str) -> Option<u64> {
+    match result {
+        Ok(insertion_id) => {
+            assert!(
+                insertion_id <= MAX_OPERATIONS as u64,
+                "{operation} insertion id {insertion_id} exceeds operation budget {MAX_OPERATIONS}"
+            );
+            Some(insertion_id)
+        }
+        Err(err) => {
+            observe_qpack_rejection(operation, err);
+            None
+        }
+    }
+}
+
+fn observe_qpack_table_snapshot(context: &QpackContext) {
+    let table = context.dynamic_table();
+    let table_size = table.size();
+    let table_capacity = table.capacity();
+    let table_len = table.len();
+    let insertion_counter = table.insertion_counter();
+
+    assert!(
+        table_capacity <= MAX_TABLE_CAPACITY as usize,
+        "QPACK dynamic table capacity {table_capacity} exceeds maximum {MAX_TABLE_CAPACITY}"
+    );
+    assert!(
+        table_size <= table_capacity,
+        "QPACK dynamic table size {table_size} exceeds capacity {table_capacity}"
+    );
+    assert!(
+        insertion_counter >= table_len as u64,
+        "QPACK insertion counter {insertion_counter} is below table length {table_len}"
+    );
 }
 
 fn normalize_input(input: &mut QpackIntegrationInput) {
@@ -283,13 +402,17 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
             QpackOperation::EncodeFieldSection { field_plan } => {
                 if let Ok(qpack_plan) = convert_field_plan_to_qpack(field_plan) {
                     // Test encoding with and without context
-                    if let Ok(encoded) = qpack_encode_field_section(&qpack_plan) {
+                    if let Some(encoded) = observe_encoded_section(
+                        qpack_encode_field_section(&qpack_plan),
+                        "QPACK field-section encode without context",
+                    ) {
                         encoded_sections.push(encoded);
                     }
 
-                    if let Ok(encoded_with_ctx) =
-                        qpack_encode_field_section_with_context(&qpack_plan, Some(&qpack_context))
-                    {
+                    if let Some(encoded_with_ctx) = observe_encoded_section(
+                        qpack_encode_field_section_with_context(&qpack_plan, Some(&qpack_context)),
+                        "QPACK field-section encode with context",
+                    ) {
                         encoded_sections.push(encoded_with_ctx);
                     }
                 }
@@ -302,8 +425,14 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
                     .get(*encoded_section_ref as usize % encoded_sections.len().max(1))
                 {
                     // Test decoding in both static-only and dynamic modes
-                    let _ = qpack_decode_field_section(encoded, H3QpackMode::StaticOnly);
-                    let _ = qpack_decode_field_section(encoded, qpack_mode);
+                    observe_decoded_plan(
+                        qpack_decode_field_section(encoded, H3QpackMode::StaticOnly),
+                        "QPACK static-only field-section decode",
+                    );
+                    observe_decoded_plan(
+                        qpack_decode_field_section(encoded, qpack_mode),
+                        "QPACK selected-mode field-section decode",
+                    );
                 }
             }
 
@@ -316,17 +445,27 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
 
             QpackOperation::InsertDynamicEntry { name, value } => {
                 // Test dynamic table insertion
-                let _ = qpack_context.insert_dynamic_entry(name.clone(), value.clone());
+                observe_dynamic_insert(
+                    qpack_context.insert_dynamic_entry(name.clone(), value.clone()),
+                    "QPACK dynamic table insertion",
+                );
             }
 
             QpackOperation::RoundTripTest { field_plan } => {
                 if let Ok(qpack_plan) = convert_field_plan_to_qpack(field_plan) {
                     // Test encoding then decoding for consistency
-                    if let Ok(encoded) = qpack_encode_field_section(&qpack_plan)
-                        && let Ok(decoded_plan) = qpack_decode_field_section(&encoded, qpack_mode)
-                    {
+                    if let Some(encoded) = observe_encoded_section(
+                        qpack_encode_field_section(&qpack_plan),
+                        "QPACK roundtrip encode",
+                    ) && let Some(decoded_plan) = observe_decoded_plan(
+                        qpack_decode_field_section(&encoded, qpack_mode),
+                        "QPACK roundtrip decode",
+                    ) {
                         // Verify round-trip consistency
-                        let _ = qpack_plan_to_header_fields(&decoded_plan, Some(&qpack_context));
+                        observe_header_fields(
+                            qpack_plan_to_header_fields(&decoded_plan, Some(&qpack_context)),
+                            "QPACK roundtrip header-field expansion",
+                        );
                     }
                 }
             }
@@ -336,11 +475,7 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
                 if input.context_config.strict_validation {
                     validate_qpack_context_state(&qpack_context)?;
                 } else {
-                    let table = qpack_context.dynamic_table();
-                    let _ = table.len();
-                    let _ = table.size();
-                    let _ = table.capacity();
-                    let _ = table.insertion_counter();
+                    observe_qpack_table_snapshot(&qpack_context);
                 }
             }
 
@@ -348,7 +483,10 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
                 // Test request header encoding
                 if let Ok(request_head) = create_request_head(request_config) {
                     let plan = qpack_static_plan_for_request(&request_head);
-                    let _ = qpack_encode_field_section(&plan);
+                    observe_encoded_section(
+                        qpack_encode_field_section(&plan),
+                        "QPACK request field-section encode",
+                    );
                 }
             }
 
@@ -356,7 +494,10 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
                 // Test response header encoding
                 if let Ok(response_head) = create_response_head(response_config) {
                     let plan = qpack_static_plan_for_response(&response_head);
-                    let _ = qpack_encode_field_section(&plan);
+                    observe_encoded_section(
+                        qpack_encode_field_section(&plan),
+                        "QPACK response field-section encode",
+                    );
                 }
             }
         }
@@ -521,8 +662,14 @@ fn test_ordering_scenario(
                         })
                         .collect();
 
-                    if let Ok(encoded) = qpack_encode_field_section(&field_plan) {
-                        let _ = qpack_decode_field_section(&encoded, qpack_mode);
+                    if let Some(encoded) = observe_encoded_section(
+                        qpack_encode_field_section(&field_plan),
+                        "QPACK ordering block encode",
+                    ) {
+                        observe_decoded_plan(
+                            qpack_decode_field_section(&encoded, qpack_mode),
+                            "QPACK ordering block decode",
+                        );
                     }
                 } else if scenario.validate_ordering {
                     return Err(qpack_integration_error(format!(
