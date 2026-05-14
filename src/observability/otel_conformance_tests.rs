@@ -41525,7 +41525,7 @@ mod otlp_122_tests {
                 array_values: vec![1.0, 2.5, -3.7, 0.0, 42.42],
                 contains_nan: false,
                 should_reject_entire_array: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Valid f64 array without NaN should be accepted".to_string(),
             },
             NanArrayRejectionScenario {
@@ -41573,7 +41573,7 @@ mod otlp_122_tests {
                 array_values: vec![f64::INFINITY, f64::NEG_INFINITY, 1.0, 2.0],
                 contains_nan: false,
                 should_reject_entire_array: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "f64 array with infinity (no NaN) should be accepted".to_string(),
             },
             NanArrayRejectionScenario {
@@ -41590,7 +41590,7 @@ mod otlp_122_tests {
                 array_values: vec![],
                 contains_nan: false,
                 should_reject_entire_array: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Empty f64 array should be accepted".to_string(),
             },
             NanArrayRejectionScenario {
@@ -41598,7 +41598,7 @@ mod otlp_122_tests {
                 array_values: vec![42.0],
                 contains_nan: false,
                 should_reject_entire_array: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Single valid f64 element array should be accepted".to_string(),
             },
         ];
@@ -41836,7 +41836,7 @@ mod otlp_122_tests {
         println!("Testing NaN detection robustness...");
 
         let robust_test_cases = vec![
-            vec![0.0 / 0.0],                               // Direct NaN creation
+            vec![f64::NAN],                                // Canonical NaN constant
             vec![f64::sqrt(-1.0)],                         // Mathematical NaN
             vec![f64::INFINITY - f64::INFINITY],           // Arithmetic NaN
             vec![1.0, f64::from_bits(0x7FF8000000000001)], // Bit-pattern NaN
