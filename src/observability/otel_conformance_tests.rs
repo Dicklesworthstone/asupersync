@@ -45726,8 +45726,8 @@ mod otlp_122_tests {
     /// the messaging.amqp.delivery_mode attribute MUST be one of {1, 2} where:
     /// - 1 = transient (non-persistent) delivery
     /// - 2 = persistent delivery
-    /// This ensures proper traceability and correlation for AMQP message production
-    /// operations with correct delivery semantics per AMQP specification.
+    ///   This ensures proper traceability and correlation for AMQP message production
+    ///   operations with correct delivery semantics per AMQP specification.
     #[test]
     fn otlp_146_amqp_producer_delivery_mode_conformance() {
         println!("Testing OTLP-146: AMQP producer delivery mode requirement...");
