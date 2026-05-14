@@ -173,7 +173,7 @@ fn assert_no_panic(context: String, f: impl FnOnce()) {
     );
 }
 
-fn parse_reply_subject_checked(reply: &str, context: String) -> Option<(u64, u32)> {
+fn parse_reply_subject_checked(reply: &str, context: &str) -> Option<(u64, u32)> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         parse_js_reply_subject_simulation(reply)
     })) {
@@ -188,6 +188,25 @@ fn preview_bytes(bytes: &[u8]) -> &[u8] {
 
 fn preview_str(value: &str) -> &str {
     value.get(..value.len().min(64)).unwrap_or(value)
+}
+
+fn observe_reply_subject_result(reply: &str, result: Option<(u64, u32)>, context: &str) {
+    if let Some((sequence, delivered)) = result {
+        assert!(
+            reply.starts_with("$JS.ACK."),
+            "accepted reply subject without ACK prefix: {context}"
+        );
+        assert!(
+            reply.split('.').count() >= 9,
+            "accepted reply subject with too few tokens: {context}"
+        );
+        if sequence > 0 {
+            assert!(
+                delivered > 0,
+                "accepted reply subject has sequence but no delivery count: {context}"
+            );
+        }
+    }
 }
 
 fn fuzz_api_response_parsing(json_bytes: &[u8]) {
@@ -236,19 +255,9 @@ fn fuzz_api_response_parsing(json_bytes: &[u8]) {
 
 fn fuzz_reply_subject_parsing(reply: &str) {
     // ASSERTION 1: Sequence number parsing must be monotonic and consistent
-    let result =
-        parse_reply_subject_checked(reply, format!("reply prefix={:?}", preview_str(reply)));
-
-    if let Some((sequence, delivered)) = result {
-        // ASSERTION 1: Sequence numbers should be reasonable values
-        // Sequence should be non-zero for valid messages
-        if sequence > 0 {
-            assert!(
-                delivered > 0,
-                "Delivered count should be > 0 for valid sequence"
-            );
-        }
-    }
+    let context = format!("reply prefix={:?}", preview_str(reply));
+    let result = parse_reply_subject_checked(reply, &context);
+    observe_reply_subject_result(reply, result, &context);
 }
 
 fn fuzz_stream_config_serialization(config: FuzzStreamConfig) {
@@ -327,16 +336,15 @@ fn fuzz_message_sequence_validation(messages: Vec<FuzzMessage>) {
     // Test message parsing for each message
     for msg in &messages {
         if let Some(ref reply) = msg.reply_subject {
-            let _ = parse_reply_subject_checked(
-                reply,
-                format!(
-                    "message subject_prefix={:?} reply_prefix={:?} sequence={} delivered={}",
-                    preview_str(&msg.subject),
-                    preview_str(reply),
-                    msg.sequence,
-                    msg.delivered
-                ),
+            let context = format!(
+                "message subject_prefix={:?} reply_prefix={:?} sequence={} delivered={}",
+                preview_str(&msg.subject),
+                preview_str(reply),
+                msg.sequence,
+                msg.delivered
             );
+            let result = parse_reply_subject_checked(reply, &context);
+            observe_reply_subject_result(reply, result, &context);
         }
 
         // ASSERTION 4: Message size limits
@@ -382,10 +390,9 @@ fn fuzz_edge_case(edge: EdgeCaseVariant) {
         }
 
         EdgeCaseVariant::MalformedReplySubject(malformed) => {
-            let _ = parse_reply_subject_checked(
-                &malformed,
-                format!("malformed reply prefix={:?}", preview_str(&malformed)),
-            );
+            let context = format!("malformed reply prefix={:?}", preview_str(&malformed));
+            let result = parse_reply_subject_checked(&malformed, &context);
+            observe_reply_subject_result(&malformed, result, &context);
         }
 
         EdgeCaseVariant::SubjectWildcards(subjects) => {
@@ -486,7 +493,7 @@ fn fuzz_ack_state_transitions(ack_test: AckTransitionTest) {
 
         // Ack state should never go from true to false
         assert!(
-            !(prev_acked && !acked),
+            !prev_acked || acked,
             "Ack state regressed from {} to {}",
             prev_acked,
             acked
