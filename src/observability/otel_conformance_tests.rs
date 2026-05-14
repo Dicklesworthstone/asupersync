@@ -26522,7 +26522,7 @@ mod otlp_109_nested_array_validation {
             },
             expected_nested_arrays_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -26544,7 +26544,7 @@ mod otlp_109_nested_array_validation {
             },
             expected_nested_arrays_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -26566,7 +26566,7 @@ mod otlp_109_nested_array_validation {
             },
             expected_nested_arrays_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -26590,7 +26590,7 @@ mod otlp_109_nested_array_validation {
             },
             expected_nested_arrays_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -26614,7 +26614,7 @@ mod otlp_109_nested_array_validation {
             },
             expected_nested_arrays_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -26643,7 +26643,7 @@ mod otlp_109_nested_array_validation {
             },
             expected_nested_arrays_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -26658,7 +26658,7 @@ mod otlp_109_nested_array_validation {
             },
             expected_nested_arrays_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -26675,25 +26675,31 @@ mod otlp_109_nested_array_validation {
             let reference_result = simulate_reference_nested_array_validation(&scenario);
 
             // Validate individual results
-            validate_nested_array_validation_logic(&asupersync_result).expect(&format!(
-                "Asupersync nested array validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_nested_array_validation_logic(&asupersync_result).unwrap_or_else(|error| {
+                panic!(
+                    "Asupersync nested array validation logic failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
-            validate_nested_array_validation_logic(&reference_result).expect(&format!(
-                "Reference nested array validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_nested_array_validation_logic(&reference_result).unwrap_or_else(|error| {
+                panic!(
+                    "Reference nested array validation logic failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
             // Validate implementation consistency
             validate_nested_array_validation_implementation_consistency(
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
             println!("✓ Scenario passed: {}", scenario.description);
         }
