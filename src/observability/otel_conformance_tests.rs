@@ -24216,7 +24216,7 @@ mod otlp_106_producer_non_messaging_validation_first {
             },
             expected_messaging_attributes_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true, // Still validate to confirm non-messaging is OK
             expected_otlp_compliant: true,
@@ -24237,7 +24237,7 @@ mod otlp_106_producer_non_messaging_validation_first {
             },
             expected_messaging_attributes_detected: true,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -24259,7 +24259,7 @@ mod otlp_106_producer_non_messaging_validation_first {
             },
             expected_messaging_attributes_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -24281,7 +24281,7 @@ mod otlp_106_producer_non_messaging_validation_first {
             },
             expected_messaging_attributes_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -24300,7 +24300,7 @@ mod otlp_106_producer_non_messaging_validation_first {
             },
             expected_messaging_attributes_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -24320,7 +24320,7 @@ mod otlp_106_producer_non_messaging_validation_first {
             },
             expected_messaging_attributes_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: false, // This validation only applies to PRODUCER spans
             expected_otlp_compliant: true,
@@ -24342,7 +24342,7 @@ mod otlp_106_producer_non_messaging_validation_first {
             },
             expected_messaging_attributes_detected: true, // Has messaging attributes
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -24358,7 +24358,7 @@ mod otlp_106_producer_non_messaging_validation_first {
             },
             expected_messaging_attributes_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -24375,25 +24375,31 @@ mod otlp_106_producer_non_messaging_validation_first {
             let reference_result = simulate_reference_producer_validation(&scenario);
 
             // Validate individual results
-            validate_producer_validation_logic(&asupersync_result).expect(&format!(
-                "Asupersync producer validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_producer_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+                panic!(
+                    "Asupersync producer validation logic failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
-            validate_producer_validation_logic(&reference_result).expect(&format!(
-                "Reference producer validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_producer_validation_logic(&reference_result).unwrap_or_else(|err| {
+                panic!(
+                    "Reference producer validation logic failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
             // Validate implementation consistency
             validate_producer_validation_implementation_consistency(
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
             println!("✓ Scenario passed: {}", scenario.description);
         }
@@ -24623,7 +24629,7 @@ mod otlp_106_producer_non_messaging_validation_first {
         }
 
         // Critical check: messaging attributes detection should match found keys
-        if result.messaging_attributes_detected != !result.messaging_attribute_keys_found.is_empty()
+        if result.messaging_attributes_detected == result.messaging_attribute_keys_found.is_empty()
         {
             return Err(
                 "CRITICAL: Messaging attributes detection doesn't match found keys".to_string(),
