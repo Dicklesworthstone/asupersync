@@ -91,14 +91,12 @@ fn audit_parser_rejects_all_zero_trace_id() {
             zero_trace_id
         );
 
-        if let Err(TraceContextError::InvalidTraceId) = result {
-            // Expected error type
-        } else {
-            panic!(
-                "Expected InvalidTraceId error for all-zero trace_id {}, got: {:?}",
-                zero_trace_id, result
-            );
-        }
+        assert!(
+            matches!(&result, Err(TraceContextError::InvalidTraceId)),
+            "Expected InvalidTraceId error for all-zero trace_id {}, got: {:?}",
+            zero_trace_id,
+            result
+        );
     }
 
     // Verify full W3C context parsing also rejects all-zero trace_id
@@ -129,10 +127,6 @@ fn audit_parser_validates_trace_id_format() {
         ("1234567890abcdefg123567890abcdef", "contains 'g' (not hex)"),
         ("1234567890abcdef 123567890abcdef", "contains space"),
         ("1234567890abcdef-123567890abcdef", "contains dash"),
-        (
-            "1234567890ABCDEF1234567890abcdef",
-            "mixed case (should normalize)",
-        ),
     ];
 
     for (invalid_trace_id, description) in invalid_cases {
@@ -158,14 +152,33 @@ fn audit_parser_validates_trace_id_format() {
 #[test]
 fn audit_valid_trace_id_parsing() {
     let valid_cases = vec![
-        "4bf92f3577b34da6a3ce929d0e0e4736",
-        "1234567890abcdef1234567890abcdef",
-        "abcdef1234567890abcdef1234567890",
-        "ffffffffffffffffffffffffffffffff",  // max value
-        "000000000000000000000000000000001", // minimal non-zero
+        (
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+        ),
+        (
+            "1234567890abcdef1234567890abcdef",
+            "1234567890abcdef1234567890abcdef",
+        ),
+        (
+            "abcdef1234567890abcdef1234567890",
+            "abcdef1234567890abcdef1234567890",
+        ),
+        (
+            "1234567890ABCDEF1234567890abcdef",
+            "1234567890abcdef1234567890abcdef",
+        ),
+        (
+            "ffffffffffffffffffffffffffffffff",
+            "ffffffffffffffffffffffffffffffff",
+        ), // max value
+        (
+            "00000000000000000000000000000001",
+            "00000000000000000000000000000001",
+        ), // minimal non-zero
     ];
 
-    for valid_trace_id in valid_cases {
+    for (valid_trace_id, expected_hex) in valid_cases {
         // Parse trace_id
         let trace_id = TraceId::from_str(valid_trace_id).unwrap_or_else(|err| {
             panic!(
@@ -178,8 +191,8 @@ fn audit_valid_trace_id_parsing() {
         let round_trip = trace_id.to_hex();
         assert_eq!(
             round_trip,
-            valid_trace_id,
-            "Round-trip failed: {} → {} → {}",
+            expected_hex,
+            "Round-trip failed: {} -> {} -> {}",
             valid_trace_id,
             trace_id.to_hex(),
             round_trip
