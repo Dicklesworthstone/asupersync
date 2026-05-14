@@ -22013,7 +22013,7 @@ fn otlp_102_histogram_bounds_validation_conformance() {
             },
             expected_invalid_bounds_detected: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22032,7 +22032,7 @@ fn otlp_102_histogram_bounds_validation_conformance() {
             },
             expected_invalid_bounds_detected: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22051,7 +22051,7 @@ fn otlp_102_histogram_bounds_validation_conformance() {
             },
             expected_invalid_bounds_detected: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22089,7 +22089,7 @@ fn otlp_102_histogram_bounds_validation_conformance() {
             },
             expected_invalid_bounds_detected: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22105,25 +22105,31 @@ fn otlp_102_histogram_bounds_validation_conformance() {
         let reference_result = simulate_reference_bounds_validation(&scenario);
 
         // Validate individual results
-        validate_bounds_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync bounds validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_bounds_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync bounds validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_bounds_validation_logic(&reference_result).expect(&format!(
-            "Reference bounds validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_bounds_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference bounds validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_bounds_validation_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -22205,8 +22211,7 @@ fn simulate_asupersync_bounds_validation(
         // Check for duplicates first
         let mut seen_values = std::collections::HashSet::new();
         for &bound in bounds {
-            if !seen_values.insert(bound as u64) {
-                // Use u64 representation for comparison
+            if !seen_values.insert(bound.to_bits()) {
                 invalid_bounds_detected = true;
                 duplicate_bounds_found.push(bound);
                 bounds_validation_errors.push(format!("Duplicate bound value: {}", bound));
