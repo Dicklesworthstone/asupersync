@@ -22458,7 +22458,7 @@ mod otlp_103_consumer_messaging_operation_validation {
             },
             expected_invalid_operation_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22478,7 +22478,7 @@ mod otlp_103_consumer_messaging_operation_validation {
             },
             expected_invalid_operation_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22498,7 +22498,7 @@ mod otlp_103_consumer_messaging_operation_validation {
             },
             expected_invalid_operation_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22558,7 +22558,7 @@ mod otlp_103_consumer_messaging_operation_validation {
             },
             expected_invalid_operation_detected: false,
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22577,7 +22577,7 @@ mod otlp_103_consumer_messaging_operation_validation {
             },
             expected_invalid_operation_detected: false, // Not validated for non-CONSUMER spans
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_otlp_compliant: true,
         },
@@ -22591,7 +22591,7 @@ mod otlp_103_consumer_messaging_operation_validation {
                 attributes: vec![
                     ("messaging.system".to_string(), "redis".to_string()),
                     ("messaging.destination".to_string(), "stream-1".to_string()),
-                    ("messaging.operation".to_string(), "".to_string()), // Empty value
+                    ("messaging.operation".to_string(), String::new()), // Empty value
                 ],
             },
             expected_invalid_operation_detected: true,
@@ -22612,25 +22612,33 @@ mod otlp_103_consumer_messaging_operation_validation {
             let reference_result = simulate_reference_consumer_operation_validation(&scenario);
 
             // Validate individual results
-            validate_consumer_operation_validation_logic(&asupersync_result).expect(&format!(
-                "Asupersync consumer operation validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_consumer_operation_validation_logic(&asupersync_result).unwrap_or_else(
+                |err| {
+                    panic!(
+                        "Asupersync consumer operation validation logic failed for scenario: {}: {err}",
+                        scenario.description
+                    )
+                },
+            );
 
-            validate_consumer_operation_validation_logic(&reference_result).expect(&format!(
-                "Reference consumer operation validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_consumer_operation_validation_logic(&reference_result).unwrap_or_else(|err| {
+                panic!(
+                    "Reference consumer operation validation logic failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
             // Validate implementation consistency
             validate_consumer_operation_validation_implementation_consistency(
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
             println!("✓ Scenario passed: {}", scenario.description);
         }
@@ -22765,8 +22773,9 @@ mod otlp_103_consumer_messaging_operation_validation {
         let validation_applied = is_consumer_span; // Only apply validation to CONSUMER spans
 
         // OTLP compliance: CONSUMER spans with invalid messaging.operation must be rejected
-        let otlp_compliant = if is_consumer_span && messaging_operation_value.is_some() {
-            let operation = messaging_operation_value.as_ref().unwrap();
+        let otlp_compliant = if let (true, Some(operation)) =
+            (is_consumer_span, messaging_operation_value.as_ref())
+        {
             if VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) {
                 // Valid operation - should be accepted
                 !span_rejected && included_in_export
@@ -22860,8 +22869,10 @@ mod otlp_103_consumer_messaging_operation_validation {
         }
 
         // Critical check: valid operations should be accepted
-        if result.is_consumer_span && result.messaging_operation_value.is_some() {
-            let operation = result.messaging_operation_value.as_ref().unwrap();
+        if let (true, Some(operation)) = (
+            result.is_consumer_span,
+            result.messaging_operation_value.as_ref(),
+        ) {
             if VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str())
                 && result.span_rejected
             {
