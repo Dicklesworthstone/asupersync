@@ -25839,7 +25839,7 @@ fn otlp_108_attribute_key_length_validation_conformance() {
             },
             expected_long_keys_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -25928,7 +25928,7 @@ fn otlp_108_attribute_key_length_validation_conformance() {
             },
             expected_long_keys_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -25941,13 +25941,13 @@ fn otlp_108_attribute_key_length_validation_conformance() {
                 trace_id: "12345678901234567890123456789012".to_string(),
                 span_id: "6789012345678901".to_string(),
                 attributes: vec![
-                    ("".to_string(), "empty_key_value".to_string()), // Empty key
+                    (String::new(), "empty_key_value".to_string()), // Empty key
                     ("valid.key".to_string(), "valid_value".to_string()),
                 ],
             },
             expected_long_keys_detected: vec![],
             expected_span_rejected: false, // Empty key is a different validation issue
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true, // This test only checks length, not emptiness
@@ -25965,7 +25965,7 @@ fn otlp_108_attribute_key_length_validation_conformance() {
             },
             expected_long_keys_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -25980,7 +25980,7 @@ fn otlp_108_attribute_key_length_validation_conformance() {
             },
             expected_long_keys_detected: vec![],
             expected_span_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -26018,25 +26018,31 @@ fn otlp_108_attribute_key_length_validation_conformance() {
         let reference_result = simulate_reference_length_validation(&scenario);
 
         // Validate individual results
-        validate_length_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync length validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_length_validation_logic(&asupersync_result).unwrap_or_else(|error| {
+            panic!(
+                "Asupersync length validation logic failed for scenario: {}: {}",
+                scenario.description, error
+            )
+        });
 
-        validate_length_validation_logic(&reference_result).expect(&format!(
-            "Reference length validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_length_validation_logic(&reference_result).unwrap_or_else(|error| {
+            panic!(
+                "Reference length validation logic failed for scenario: {}: {}",
+                scenario.description, error
+            )
+        });
 
         // Validate implementation consistency
         validate_length_validation_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|error| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {}",
+                scenario.description, error
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -26045,7 +26051,7 @@ fn otlp_108_attribute_key_length_validation_conformance() {
 /// Helper function to create attribute keys of specific lengths for testing
 fn create_key_of_length(length: usize) -> String {
     if length == 0 {
-        return "".to_string();
+        return String::new();
     }
 
     // Create a key that starts with a semantic prefix and fills to exact length
