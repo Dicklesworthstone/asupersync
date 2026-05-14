@@ -41954,13 +41954,14 @@ mod otlp_122_tests {
                 status_code: SpanStatusCode::Unset,
                 expected_protobuf_value: 0,
                 status_message: Some("Debug information".to_string()),
-                description: "UNSET status with message maps to protobuf value 0".to_string(),
+                description: "UNSET status with message maps to protobuf value 0 and omits status"
+                    .to_string(),
             },
             StatusCodeEnumMappingScenario {
                 scenario_name: "ok_status_empty_message".to_string(),
                 status_code: SpanStatusCode::Ok,
                 expected_protobuf_value: 1,
-                status_message: Some("".to_string()),
+                status_message: Some(String::new()),
                 description: "OK status with empty message maps to protobuf value 1".to_string(),
             },
         ];
@@ -41972,7 +41973,7 @@ mod otlp_122_tests {
             let span_data = SpanData {
                 name: format!("status_code_enum_test_{}", scenario.scenario_name),
                 status: SpanStatus {
-                    code: scenario.status_code.clone(),
+                    code: scenario.status_code,
                     message: scenario.status_message.clone(),
                 },
                 ..SpanData::default_for_test()
@@ -41997,30 +41998,42 @@ mod otlp_122_tests {
                 ));
             }
 
-            // Verify status message is properly encoded
-            match (&scenario.status_message, &parsed_status.message) {
-                (Some(expected_msg), Some(parsed_msg)) => {
-                    if expected_msg != parsed_msg {
+            // Verify status message encoding follows OTLP field-presence rules.
+            match scenario.status_code {
+                SpanStatusCode::Unset => {
+                    if let Some(parsed) = &parsed_status.message {
                         return Err(format!(
-                            "Status message encoding failed: expected '{}', got '{}' for '{}'",
-                            expected_msg, parsed_msg, scenario.description
+                            "UNSET status message should be omitted, got '{}' for '{}'",
+                            parsed, scenario.description
                         ));
                     }
                 }
-                (None, None) => {
-                    // Both are None - correct
-                }
-                (Some(expected), None) => {
-                    return Err(format!(
-                        "Status message lost during encoding: expected '{}', got None for '{}'",
-                        expected, scenario.description
-                    ));
-                }
-                (None, Some(parsed)) => {
-                    return Err(format!(
-                        "Unexpected status message in encoding: expected None, got '{}' for '{}'",
-                        parsed, scenario.description
-                    ));
+                SpanStatusCode::Ok | SpanStatusCode::Error => {
+                    match (&scenario.status_message, &parsed_status.message) {
+                        (Some(expected_msg), Some(parsed_msg)) => {
+                            if expected_msg != parsed_msg {
+                                return Err(format!(
+                                    "Status message encoding failed: expected '{}', got '{}' for '{}'",
+                                    expected_msg, parsed_msg, scenario.description
+                                ));
+                            }
+                        }
+                        (None, None) => {
+                            // Both are None - correct
+                        }
+                        (Some(expected), None) => {
+                            return Err(format!(
+                                "Status message lost during encoding: expected '{}', got None for '{}'",
+                                expected, scenario.description
+                            ));
+                        }
+                        (None, Some(parsed)) => {
+                            return Err(format!(
+                                "Unexpected status message in encoding: expected None, got '{}' for '{}'",
+                                parsed, scenario.description
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -42188,7 +42201,7 @@ mod otlp_122_tests {
             let test_span = SpanData {
                 name: format!("enum_consistency_test_{:?}", status_code),
                 status: SpanStatus {
-                    code: status_code.clone(),
+                    code: status_code,
                     message: Some("Test message".to_string()),
                 },
                 ..SpanData::default_for_test()
@@ -42240,7 +42253,7 @@ mod otlp_122_tests {
             let original_span = SpanData {
                 name: "round_trip_test".to_string(),
                 status: SpanStatus {
-                    code: status_code.clone(),
+                    code: status_code,
                     message: Some(message.to_string()),
                 },
                 ..SpanData::default_for_test()
@@ -42279,7 +42292,7 @@ mod otlp_122_tests {
         println!("  - UNSET status code correctly maps to protobuf value 0 (field omitted)");
         println!("  - OK status code correctly maps to protobuf value 1");
         println!("  - ERROR status code correctly maps to protobuf value 2");
-        println!("  - Status message encoding preserved across all status codes");
+        println!("  - Status message encoding and omission rules validated");
         println!("  - OTLP specification enum mapping strictly enforced");
         println!("  - Round-trip encoding consistency validated");
     }
