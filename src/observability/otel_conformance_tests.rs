@@ -37334,6 +37334,8 @@ mod otlp_122_tests {
     mod otlp_late_conformance_types {
         use std::collections::HashMap;
 
+        // These variants mirror OTLP AnyValue protobuf oneof field names.
+        #[allow(clippy::enum_variant_names)]
         #[derive(Debug, Clone, PartialEq)]
         pub(super) enum AnyValue {
             StringValue(String),
