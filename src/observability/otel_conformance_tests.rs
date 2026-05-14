@@ -23005,21 +23005,21 @@ fn otlp_104_u64_attribute_encoding_conformance() {
             expected_final_attributes: vec![
                 EncodedAttribute {
                     key: "service.name".to_string(),
-                    value_type: AnyValueType::StringValue,
+                    value_type: AnyValueType::String,
                     string_value: Some("counter-service".to_string()),
                     int_value: None,
                     uint_value: None,
                 },
                 EncodedAttribute {
                     key: "counter.value".to_string(),
-                    value_type: AnyValueType::UintValue, // Encoded as unsigned
+                    value_type: AnyValueType::Uint, // Encoded as unsigned
                     string_value: None,
                     int_value: None,
                     uint_value: Some(18446744073709551615u64),
                 },
                 EncodedAttribute {
                     key: "operation".to_string(),
-                    value_type: AnyValueType::StringValue,
+                    value_type: AnyValueType::String,
                     string_value: Some("increment".to_string()),
                     int_value: None,
                     uint_value: None,
@@ -23050,21 +23050,21 @@ fn otlp_104_u64_attribute_encoding_conformance() {
             expected_final_attributes: vec![
                 EncodedAttribute {
                     key: "service.name".to_string(),
-                    value_type: AnyValueType::StringValue,
+                    value_type: AnyValueType::String,
                     string_value: Some("metrics-service".to_string()),
                     int_value: None,
                     uint_value: None,
                 },
                 EncodedAttribute {
                     key: "request.count".to_string(),
-                    value_type: AnyValueType::IntValue, // Encoded as signed (fits in i64)
+                    value_type: AnyValueType::Int, // Encoded as signed (fits in i64)
                     string_value: None,
                     int_value: Some(9223372036854775807i64),
                     uint_value: None,
                 },
                 EncodedAttribute {
                     key: "status".to_string(),
-                    value_type: AnyValueType::StringValue,
+                    value_type: AnyValueType::String,
                     string_value: Some("success".to_string()),
                     int_value: None,
                     uint_value: None,
@@ -23090,14 +23090,14 @@ fn otlp_104_u64_attribute_encoding_conformance() {
             expected_final_attributes: vec![
                 EncodedAttribute {
                     key: "byte.count".to_string(),
-                    value_type: AnyValueType::UintValue, // Encoded as unsigned
+                    value_type: AnyValueType::Uint, // Encoded as unsigned
                     string_value: None,
                     int_value: None,
                     uint_value: Some(9223372036854775808u64),
                 },
                 EncodedAttribute {
                     key: "unit".to_string(),
-                    value_type: AnyValueType::StringValue,
+                    value_type: AnyValueType::String,
                     string_value: Some("bytes".to_string()),
                     int_value: None,
                     uint_value: None,
@@ -23128,28 +23128,28 @@ fn otlp_104_u64_attribute_encoding_conformance() {
             expected_final_attributes: vec![
                 EncodedAttribute {
                     key: "memory.total".to_string(),
-                    value_type: AnyValueType::UintValue, // Large - unsigned
+                    value_type: AnyValueType::Uint, // Large - unsigned
                     string_value: None,
                     int_value: None,
                     uint_value: Some(18446744073709551615u64),
                 },
                 EncodedAttribute {
                     key: "memory.available".to_string(),
-                    value_type: AnyValueType::UintValue, // Large - unsigned
+                    value_type: AnyValueType::Uint, // Large - unsigned
                     string_value: None,
                     int_value: None,
                     uint_value: Some(17293822569102704640u64),
                 },
                 EncodedAttribute {
                     key: "memory.used".to_string(),
-                    value_type: AnyValueType::IntValue, // Small - signed (fits in i64)
+                    value_type: AnyValueType::Int, // Small - signed (fits in i64)
                     string_value: None,
                     int_value: Some(1000i64),
                     uint_value: None,
                 },
                 EncodedAttribute {
                     key: "memory.unit".to_string(),
-                    value_type: AnyValueType::StringValue,
+                    value_type: AnyValueType::String,
                     string_value: Some("bytes".to_string()),
                     int_value: None,
                     uint_value: None,
@@ -23176,21 +23176,21 @@ fn otlp_104_u64_attribute_encoding_conformance() {
             expected_final_attributes: vec![
                 EncodedAttribute {
                     key: "retry.count".to_string(),
-                    value_type: AnyValueType::IntValue, // Small - signed
+                    value_type: AnyValueType::Int, // Small - signed
                     string_value: None,
                     int_value: Some(3i64),
                     uint_value: None,
                 },
                 EncodedAttribute {
                     key: "timeout.seconds".to_string(),
-                    value_type: AnyValueType::IntValue, // Small - signed
+                    value_type: AnyValueType::Int, // Small - signed
                     string_value: None,
                     int_value: Some(30i64),
                     uint_value: None,
                 },
                 EncodedAttribute {
                     key: "status.code".to_string(),
-                    value_type: AnyValueType::IntValue, // Small - signed
+                    value_type: AnyValueType::Int, // Small - signed
                     string_value: None,
                     int_value: Some(200i64),
                     uint_value: None,
@@ -23217,21 +23217,21 @@ fn otlp_104_u64_attribute_encoding_conformance() {
             expected_final_attributes: vec![
                 EncodedAttribute {
                     key: "error.count".to_string(),
-                    value_type: AnyValueType::IntValue, // Zero - signed
+                    value_type: AnyValueType::Int, // Zero - signed
                     string_value: None,
                     int_value: Some(0i64),
                     uint_value: None,
                 },
                 EncodedAttribute {
                     key: "warning.count".to_string(),
-                    value_type: AnyValueType::IntValue, // Small - signed
+                    value_type: AnyValueType::Int, // Small - signed
                     string_value: None,
                     int_value: Some(1i64),
                     uint_value: None,
                 },
                 EncodedAttribute {
                     key: "level".to_string(),
-                    value_type: AnyValueType::StringValue,
+                    value_type: AnyValueType::String,
                     string_value: Some("info".to_string()),
                     int_value: None,
                     uint_value: None,
@@ -23251,22 +23251,28 @@ fn otlp_104_u64_attribute_encoding_conformance() {
         let reference_result = simulate_reference_u64_encoding(&scenario);
 
         // Validate individual results
-        validate_u64_encoding_logic(&asupersync_result).expect(&format!(
-            "Asupersync u64 encoding logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_u64_encoding_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync u64 encoding logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_u64_encoding_logic(&reference_result).expect(&format!(
-            "Reference u64 encoding logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_u64_encoding_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference u64 encoding logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_u64_encoding_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {err}",
+                    scenario.description
+                )
+            });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -23303,14 +23309,14 @@ enum AttributeValue {
 /// OTLP AnyValue type variants
 #[derive(Debug, Clone, PartialEq)]
 enum AnyValueType {
-    StringValue,
-    BoolValue,
-    IntValue, // Signed i64
-    DoubleValue,
-    ArrayValue,
-    KvlistValue,
-    BytesValue,
-    UintValue, // Unsigned u64 (for large values > i64::MAX)
+    String,
+    Bool,
+    Int, // Signed i64
+    Double,
+    Array,
+    Kvlist,
+    Bytes,
+    Uint, // Unsigned u64 (for large values > i64::MAX)
 }
 
 /// Encoded attribute representation
@@ -23361,7 +23367,7 @@ fn simulate_asupersync_u64_encoding(
                 // String attributes are always encoded as StringValue
                 final_encoded_attributes.push(EncodedAttribute {
                     key: key.clone(),
-                    value_type: AnyValueType::StringValue,
+                    value_type: AnyValueType::String,
                     string_value: Some(value.clone()),
                     int_value: None,
                     uint_value: None,
@@ -23369,7 +23375,7 @@ fn simulate_asupersync_u64_encoding(
             }
             AttributeValue::U64(key, value) => {
                 // Check if u64 value exceeds i64::MAX
-                if *value > i64::MAX as u64 {
+                if i64::try_from(*value).is_err() {
                     // Large u64 - MUST encode as UintValue (unsigned)
                     large_u64_detected = true;
                     encoding_as_unsigned = true;
@@ -23378,7 +23384,7 @@ fn simulate_asupersync_u64_encoding(
 
                     final_encoded_attributes.push(EncodedAttribute {
                         key: key.clone(),
-                        value_type: AnyValueType::UintValue,
+                        value_type: AnyValueType::Uint,
                         string_value: None,
                         int_value: None,
                         uint_value: Some(*value),
@@ -23390,11 +23396,13 @@ fn simulate_asupersync_u64_encoding(
                     ));
                 } else {
                     // u64 fits in i64 - encode as IntValue (signed)
+                    let signed_value =
+                        i64::try_from(*value).expect("u64 value fits in i64 after range check");
                     final_encoded_attributes.push(EncodedAttribute {
                         key: key.clone(),
-                        value_type: AnyValueType::IntValue,
+                        value_type: AnyValueType::Int,
                         string_value: None,
-                        int_value: Some(*value as i64),
+                        int_value: Some(signed_value),
                         uint_value: None,
                     });
                 }
@@ -23419,10 +23427,10 @@ fn simulate_asupersync_u64_encoding(
         // Check that all large u64 values are encoded as UintValue
         let large_values_correctly_encoded = final_encoded_attributes
             .iter()
-            .filter(|attr| attr.value_type == AnyValueType::UintValue)
+            .filter(|attr| attr.value_type == AnyValueType::Uint)
             .all(|attr| {
                 if let Some(uint_val) = attr.uint_value {
-                    uint_val > i64::MAX as u64
+                    i64::try_from(uint_val).is_err()
                 } else {
                     false
                 }
@@ -23431,7 +23439,7 @@ fn simulate_asupersync_u64_encoding(
         // Check that small u64 values are encoded as IntValue
         let small_values_correctly_encoded = final_encoded_attributes
             .iter()
-            .filter(|attr| attr.value_type == AnyValueType::IntValue)
+            .filter(|attr| attr.value_type == AnyValueType::Int)
             .all(|attr| {
                 if let Some(int_val) = attr.int_value {
                     int_val >= 0 // Should be non-negative when derived from u64
@@ -23486,13 +23494,13 @@ fn validate_u64_encoding_logic(result: &U64EncodingValidationResult) -> Result<(
     // Critical check: large u64 values (> i64::MAX) must be encoded as UintValue
     for attr in &result.final_encoded_attributes {
         if let Some(uint_val) = attr.uint_value {
-            if uint_val <= i64::MAX as u64 {
+            if i64::try_from(uint_val).is_ok() {
                 return Err(format!(
                     "CRITICAL: u64 value {} <= i64::MAX but encoded as UintValue for attribute '{}'",
                     uint_val, attr.key
                 ));
             }
-            if attr.value_type != AnyValueType::UintValue {
+            if attr.value_type != AnyValueType::Uint {
                 return Err(format!(
                     "CRITICAL: Large u64 value {} not encoded as UintValue for attribute '{}'",
                     uint_val, attr.key
