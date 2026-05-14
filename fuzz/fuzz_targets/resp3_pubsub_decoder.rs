@@ -24,7 +24,9 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::messaging::redis::{RespValue, parse_pubsub_event_for_fuzz};
+use asupersync::messaging::redis::{
+    PubSubEvent, RedisError, RespValue, parse_pubsub_event_for_fuzz,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Structure-aware RESP3 pubsub message fuzzing input
@@ -314,18 +316,26 @@ fuzz_target!(|data: &[u8]| {
         && let Ok(resp_bytes) = msg.to_resp_bytes(&mut u)
     {
         // Parse RESP value - should not panic
-        if let Ok(Some((resp_value, _consumed))) = RespValue::try_decode(&resp_bytes) {
+        let decoded = RespValue::try_decode(&resp_bytes);
+        observe_resp_decode(&decoded, &resp_bytes, "structured RESP3 pubsub message");
+        if let Ok(Some((resp_value, _consumed))) = decoded {
             // Parse pubsub event - should be robust against invalid inputs
-            let _ = parse_pubsub_event_for_fuzz(resp_value);
+            observe_pubsub_event_parse(
+                parse_pubsub_event_for_fuzz(resp_value),
+                "structured RESP3 pubsub message",
+            );
         }
     }
 
     // Test 2: Raw byte fuzzing - test parser against completely random input
-    let _ = RespValue::try_decode(data);
+    let decoded = RespValue::try_decode(data);
+    observe_resp_decode(&decoded, data, "raw RESP bytes");
 
     // Test 3: Partial input fuzzing - test incremental parsing
     for i in 1..data.len().min(256) {
-        let _ = RespValue::try_decode(&data[..i]);
+        let partial = &data[..i];
+        let decoded = RespValue::try_decode(partial);
+        observe_resp_decode(&decoded, partial, "partial RESP bytes");
     }
 
     // Test 4: Concatenated inputs - multiple messages back-to-back
@@ -334,11 +344,52 @@ fuzz_target!(|data: &[u8]| {
         let mut combined = Vec::with_capacity(data.len() * 2);
         combined.extend_from_slice(&data[..mid]);
         combined.extend_from_slice(&data[mid..]);
-        if let Ok(Some((first_value, consumed))) = RespValue::try_decode(&combined) {
-            let _ = parse_pubsub_event_for_fuzz(first_value);
+        let decoded = RespValue::try_decode(&combined);
+        observe_resp_decode(&decoded, &combined, "concatenated RESP bytes");
+        if let Ok(Some((first_value, consumed))) = decoded {
+            observe_pubsub_event_parse(
+                parse_pubsub_event_for_fuzz(first_value),
+                "first concatenated pubsub event",
+            );
             if consumed < combined.len() {
-                let _ = RespValue::try_decode(&combined[consumed..]);
+                let remaining = &combined[consumed..];
+                let decoded = RespValue::try_decode(remaining);
+                observe_resp_decode(&decoded, remaining, "remaining concatenated RESP bytes");
             }
         }
     }
 });
+
+fn observe_resp_decode(
+    result: &Result<Option<(RespValue, usize)>, RedisError>,
+    input: &[u8],
+    context: &str,
+) {
+    match result {
+        Ok(Some((_, consumed))) => {
+            assert!(*consumed > 0, "{context} accepted without consuming bytes");
+            assert!(
+                *consumed <= input.len(),
+                "{context} consumed past input boundary"
+            );
+        }
+        Ok(None) => {}
+        Err(error) => observe_redis_parse_error(error, context),
+    }
+}
+
+fn observe_pubsub_event_parse(result: Result<PubSubEvent, RedisError>, context: &str) {
+    match result {
+        Ok(PubSubEvent::Message(_))
+        | Ok(PubSubEvent::Subscription { .. })
+        | Ok(PubSubEvent::Pong(_)) => {}
+        Err(error) => observe_redis_parse_error(&error, context),
+    }
+}
+
+fn observe_redis_parse_error(error: &RedisError, context: &str) {
+    assert!(
+        matches!(error, RedisError::Protocol(_)),
+        "{context} returned non-protocol parser error: {error:?}"
+    );
+}
