@@ -11,10 +11,12 @@
 //! 4. **Cert encoding canonical** - Serialization is deterministic
 //! 5. **Revoked cert fails under new generation** - Generation-based revocation
 
-use crate::cancel::progress_certificate::{ProgressCertificate, ProgressConfig, CertificateVerdict};
+use crate::cancel::progress_certificate::{
+    CertificateVerdict, ProgressCertificate, ProgressConfig,
+};
+use crate::error::Error;
 use crate::lab::runtime::LabRuntime;
 use crate::types::{ObjectId, Time};
-use crate::error::Error;
 use proptest::prelude::*;
 use std::collections::HashMap;
 
@@ -39,7 +41,9 @@ impl CertificateKey {
     pub fn new_for_generation(generation: u64, seed: u64) -> Self {
         // Deterministic key generation for reproducible tests
         let mut private_key = [0u8; 32];
-        let mut state = seed.wrapping_mul(generation).wrapping_add(0x123456789ABCDEF);
+        let mut state = seed
+            .wrapping_mul(generation)
+            .wrapping_add(0x123456789ABCDEF);
 
         for i in 0..32 {
             private_key[i] = (state >> (i % 8)) as u8;
@@ -130,7 +134,11 @@ impl SignedProgressCertificate {
     }
 
     /// Verify the certificate signature against a public key
-    pub fn verify(&self, public_key: &[u8; 32], current_generation: u64) -> Result<(), CertificateError> {
+    pub fn verify(
+        &self,
+        public_key: &[u8; 32],
+        current_generation: u64,
+    ) -> Result<(), CertificateError> {
         // Check if the key generation has been revoked
         if self.key_generation < current_generation {
             return Err(CertificateError::RevokedGeneration {
@@ -147,7 +155,11 @@ impl SignedProgressCertificate {
         }
 
         // Verify signature
-        let expected_signature = Self::compute_signature_with_public_key(&self.canonical_bytes, public_key, self.key_generation);
+        let expected_signature = Self::compute_signature_with_public_key(
+            &self.canonical_bytes,
+            public_key,
+            self.key_generation,
+        );
 
         if expected_signature != self.signature {
             return Err(CertificateError::InvalidSignature);
@@ -204,13 +216,21 @@ impl SignedProgressCertificate {
         bytes.extend_from_slice(&verdict.azuma_bound.to_bits().to_le_bytes());
 
         // Freedman bound (if present)
-        bytes.push(if verdict.freedman_bound.is_some() { 1 } else { 0 });
+        bytes.push(if verdict.freedman_bound.is_some() {
+            1
+        } else {
+            0
+        });
         if let Some(bound) = verdict.freedman_bound {
             bytes.extend_from_slice(&bound.to_bits().to_le_bytes());
         }
 
         // Estimated remaining steps (if present)
-        bytes.push(if verdict.estimated_remaining_steps.is_some() { 1 } else { 0 });
+        bytes.push(if verdict.estimated_remaining_steps.is_some() {
+            1
+        } else {
+            0
+        });
         if let Some(steps) = verdict.estimated_remaining_steps {
             bytes.extend_from_slice(&steps.to_bits().to_le_bytes());
         }
@@ -230,7 +250,11 @@ impl SignedProgressCertificate {
     }
 
     /// Compute signature using public key (for verification)
-    fn compute_signature_with_public_key(data: &[u8], public_key: &[u8; 32], generation: u64) -> Vec<u8> {
+    fn compute_signature_with_public_key(
+        data: &[u8],
+        public_key: &[u8; 32],
+        generation: u64,
+    ) -> Vec<u8> {
         // Simplified HMAC-like signature computation
         let mut signature = Vec::with_capacity(32);
         let generation_bytes = generation.to_le_bytes();
@@ -328,12 +352,8 @@ mod mr1_sign_then_verify {
             let object_id = ObjectId::new_for_test(i);
             let issued_at = Time::from_nanos(i * 1_000_000);
 
-            let signed_cert = SignedProgressCertificate::sign(
-                verdict,
-                &key,
-                object_id,
-                issued_at,
-            ).expect("Signing should succeed");
+            let signed_cert = SignedProgressCertificate::sign(verdict, &key, object_id, issued_at)
+                .expect("Signing should succeed");
 
             let verify_result = signed_cert.verify(key.public_key(), key.generation());
             assert!(verify_result.is_ok(), "Certificate {} should verify", i);
@@ -422,12 +442,9 @@ mod mr2_tampered_cert_fails {
         let object_id = ObjectId::new_for_test(100);
         let issued_at = Time::from_nanos(987654321);
 
-        let signed_cert = SignedProgressCertificate::sign(
-            original_verdict,
-            &key,
-            object_id,
-            issued_at,
-        ).expect("Signing should succeed");
+        let signed_cert =
+            SignedProgressCertificate::sign(original_verdict, &key, object_id, issued_at)
+                .expect("Signing should succeed");
 
         // Create modified verdict
         let mut modified_verdict = signed_cert.verdict().clone();
@@ -444,7 +461,10 @@ mod mr2_tampered_cert_fails {
         };
 
         let verify_result = tampered_cert.verify(key.public_key(), key.generation());
-        assert!(verify_result.is_err(), "Modified verdict should fail verification");
+        assert!(
+            verify_result.is_err(),
+            "Modified verdict should fail verification"
+        );
     }
 }
 
@@ -515,19 +535,12 @@ mod mr3_signature_deterministic {
         let key1 = CertificateKey::new_for_generation(1, 100);
         let key2 = CertificateKey::new_for_generation(2, 100);
 
-        let signed_cert1 = SignedProgressCertificate::sign(
-            verdict.clone(),
-            &key1,
-            object_id,
-            issued_at,
-        ).expect("Signing with key1 should succeed");
+        let signed_cert1 =
+            SignedProgressCertificate::sign(verdict.clone(), &key1, object_id, issued_at)
+                .expect("Signing with key1 should succeed");
 
-        let signed_cert2 = SignedProgressCertificate::sign(
-            verdict,
-            &key2,
-            object_id,
-            issued_at,
-        ).expect("Signing with key2 should succeed");
+        let signed_cert2 = SignedProgressCertificate::sign(verdict, &key2, object_id, issued_at)
+            .expect("Signing with key2 should succeed");
 
         // Different keys should produce different signatures
         assert_ne!(
@@ -603,41 +616,45 @@ mod mr4_cert_encoding_canonical {
         let object_id = ObjectId::new_for_test(777);
         let issued_at = Time::from_nanos(123123123);
 
-        let base_encoding = SignedProgressCertificate::canonical_encode(&base_verdict, object_id, issued_at)
-            .expect("Base encoding should succeed");
+        let base_encoding =
+            SignedProgressCertificate::canonical_encode(&base_verdict, object_id, issued_at)
+                .expect("Base encoding should succeed");
 
         // Test different convergence flag
         let mut different_verdict = base_verdict.clone();
         different_verdict.converging = !different_verdict.converging;
-        let different_encoding = SignedProgressCertificate::canonical_encode(&different_verdict, object_id, issued_at)
-            .expect("Different encoding should succeed");
+        let different_encoding =
+            SignedProgressCertificate::canonical_encode(&different_verdict, object_id, issued_at)
+                .expect("Different encoding should succeed");
 
         assert_ne!(
-            base_encoding,
-            different_encoding,
+            base_encoding, different_encoding,
             "Different convergence should produce different encoding"
         );
 
         // Test different potential
         let mut potential_verdict = base_verdict.clone();
         potential_verdict.initial_potential += 1.0;
-        let potential_encoding = SignedProgressCertificate::canonical_encode(&potential_verdict, object_id, issued_at)
-            .expect("Potential encoding should succeed");
+        let potential_encoding =
+            SignedProgressCertificate::canonical_encode(&potential_verdict, object_id, issued_at)
+                .expect("Potential encoding should succeed");
 
         assert_ne!(
-            base_encoding,
-            potential_encoding,
+            base_encoding, potential_encoding,
             "Different potential should produce different encoding"
         );
 
         // Test different object ID
         let different_object_id = ObjectId::new_for_test(888);
-        let object_encoding = SignedProgressCertificate::canonical_encode(&base_verdict, different_object_id, issued_at)
-            .expect("Object ID encoding should succeed");
+        let object_encoding = SignedProgressCertificate::canonical_encode(
+            &base_verdict,
+            different_object_id,
+            issued_at,
+        )
+        .expect("Object ID encoding should succeed");
 
         assert_ne!(
-            base_encoding,
-            object_encoding,
+            base_encoding, object_encoding,
             "Different object ID should produce different encoding"
         );
     }
@@ -666,21 +683,25 @@ mod mr4_cert_encoding_canonical {
             .expect("Encoding should succeed");
 
         // Verify that encoding is deterministic for the same floating-point values
-        let second_encoding = SignedProgressCertificate::canonical_encode(&verdict, object_id, issued_at)
-            .expect("Second encoding should succeed");
+        let second_encoding =
+            SignedProgressCertificate::canonical_encode(&verdict, object_id, issued_at)
+                .expect("Second encoding should succeed");
 
-        assert_eq!(encoding, second_encoding, "Floating-point encoding should be deterministic");
+        assert_eq!(
+            encoding, second_encoding,
+            "Floating-point encoding should be deterministic"
+        );
 
         // Verify that small differences in floating-point values produce different encodings
         let mut slightly_different = verdict.clone();
         slightly_different.initial_potential = std::f64::consts::PI + 1e-15;
 
-        let different_encoding = SignedProgressCertificate::canonical_encode(&slightly_different, object_id, issued_at)
-            .expect("Different encoding should succeed");
+        let different_encoding =
+            SignedProgressCertificate::canonical_encode(&slightly_different, object_id, issued_at)
+                .expect("Different encoding should succeed");
 
         assert_ne!(
-            encoding,
-            different_encoding,
+            encoding, different_encoding,
             "Small floating-point differences should be preserved in encoding"
         );
     }
@@ -745,12 +766,9 @@ mod mr5_revoked_cert_fails {
 
         // Test generation 5
         let key_gen5 = CertificateKey::new_for_generation(5, 12345);
-        let cert_gen5 = SignedProgressCertificate::sign(
-            verdict.clone(),
-            &key_gen5,
-            object_id,
-            issued_at,
-        ).expect("Signing with gen5 should succeed");
+        let cert_gen5 =
+            SignedProgressCertificate::sign(verdict.clone(), &key_gen5, object_id, issued_at)
+                .expect("Signing with gen5 should succeed");
 
         // Should verify with same generation
         assert!(cert_gen5.verify(key_gen5.public_key(), 5).is_ok());
@@ -760,12 +778,8 @@ mod mr5_revoked_cert_fails {
 
         // But certificates from older keys should fail with newer generation
         let key_gen3 = CertificateKey::new_for_generation(3, 12345);
-        let cert_gen3 = SignedProgressCertificate::sign(
-            verdict,
-            &key_gen3,
-            object_id,
-            issued_at,
-        ).expect("Signing with gen3 should succeed");
+        let cert_gen3 = SignedProgressCertificate::sign(verdict, &key_gen3, object_id, issued_at)
+            .expect("Signing with gen3 should succeed");
 
         // Should fail when verified against newer generation
         let verify_result = cert_gen3.verify(key_gen3.public_key(), 5);
@@ -786,14 +800,10 @@ mod mr5_revoked_cert_fails {
 
         // Create certificates with multiple generations
         let mut certificates = Vec::new();
-        for gen in 1..=5 {
-            let key = CertificateKey::new_for_generation(gen, 54321);
-            let cert = SignedProgressCertificate::sign(
-                verdict.clone(),
-                &key,
-                object_id,
-                issued_at,
-            ).expect(&format!("Signing with gen{} should succeed", gen));
+        for generation in 1..=5 {
+            let key = CertificateKey::new_for_generation(generation, 54321);
+            let cert = SignedProgressCertificate::sign(verdict.clone(), &key, object_id, issued_at)
+                .unwrap_or_else(|_| panic!("Signing with gen{generation} should succeed"));
             certificates.push((cert, key));
         }
 
@@ -801,7 +811,11 @@ mod mr5_revoked_cert_fails {
         let current_generation = 10;
         for (cert, key) in certificates {
             let verify_result = cert.verify(key.public_key(), current_generation);
-            assert!(verify_result.is_err(), "Gen {} should be revoked", key.generation());
+            assert!(
+                verify_result.is_err(),
+                "Gen {} should be revoked",
+                key.generation()
+            );
             assert!(matches!(
                 verify_result.unwrap_err(),
                 CertificateError::RevokedGeneration { .. }
@@ -843,12 +857,8 @@ mod integration_tests {
             let issued_at = Time::from_nanos(1234567890);
 
             // MR1: Sign and verify
-            let signed_cert = SignedProgressCertificate::sign(
-                verdict,
-                &key,
-                object_id,
-                issued_at,
-            ).expect("Signing should succeed");
+            let signed_cert = SignedProgressCertificate::sign(verdict, &key, object_id, issued_at)
+                .expect("Signing should succeed");
 
             assert!(signed_cert.verify(key.public_key(), 1).is_ok());
 
@@ -863,7 +873,8 @@ mod integration_tests {
                 &key,
                 object_id,
                 issued_at,
-            ).expect("Second signing should succeed");
+            )
+            .expect("Second signing should succeed");
             assert_eq!(signed_cert.signature(), signed_cert2.signature());
 
             // MR4: Canonical encoding
@@ -880,7 +891,8 @@ mod integration_tests {
                 &old_key,
                 object_id,
                 issued_at,
-            ).expect("Signing with old key should succeed");
+            )
+            .expect("Signing with old key should succeed");
             assert!(old_cert.verify(old_key.public_key(), 1).is_err()); // Should be revoked
         });
     }
@@ -915,6 +927,9 @@ mod tests {
             .expect("Encoding should succeed");
 
         assert!(!encoding.is_empty(), "Encoding should not be empty");
-        assert!(encoding.len() > 16, "Encoding should contain substantial data");
+        assert!(
+            encoding.len() > 16,
+            "Encoding should contain substantial data"
+        );
     }
 }

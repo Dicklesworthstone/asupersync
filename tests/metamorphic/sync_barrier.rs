@@ -12,8 +12,8 @@ use asupersync::sync::barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
 use proptest::prelude::*;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
@@ -41,10 +41,7 @@ fn block_on<F: Future>(f: F) -> F::Output {
 /// - All parties are released simultaneously when threshold is met
 /// - Release ordering is deterministic across multiple runs with same seed
 #[proptest]
-fn mr_synchronous_release(
-    #[strategy(1u8..=8)] parties: u8,
-    #[strategy(0u64..1000)] seed: u64,
-) {
+fn mr_synchronous_release(#[strategy(1u8..=8)] parties: u8, #[strategy(0u64..1000)] seed: u64) {
     let parties = parties as usize;
     let barrier = Arc::new(Barrier::new(parties));
     let release_order = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -95,10 +92,7 @@ fn mr_synchronous_release(
 /// - Leader selection is deterministic
 /// - Non-leaders correctly observe `is_leader() == false`
 #[proptest]
-fn mr_single_leader_election(
-    #[strategy(1u8..=10)] parties: u8,
-    #[strategy(0u64..1000)] seed: u64,
-) {
+fn mr_single_leader_election(#[strategy(1u8..=10)] parties: u8, #[strategy(0u64..1000)] seed: u64) {
     let parties = parties as usize;
     let barrier = Arc::new(Barrier::new(parties));
     let leader_count = Arc::new(AtomicUsize::new(0));
@@ -265,8 +259,9 @@ fn mr_cyclic_reuse_preserves_counts(
 
             let handle = thread::spawn(move || {
                 let cx: Cx = Cx::for_testing();
-                let result = block_on(barrier.wait(&cx))
-                    .expect(&format!("wait should succeed for party {} in generation {}", party_id, generation_id));
+                let result = block_on(barrier.wait(&cx)).unwrap_or_else(|_| {
+                    panic!("wait should succeed for party {party_id} in generation {generation_id}")
+                });
 
                 if result.is_leader() {
                     generation_leaders.fetch_add(1, Ordering::SeqCst);
@@ -286,16 +281,30 @@ fn mr_cyclic_reuse_preserves_counts(
 
         // Exactly one leader per generation
         let gen_leader_count = generation_leaders.load(Ordering::SeqCst);
-        prop_assert_eq!(gen_leader_count, 1, "exactly one leader in generation {}", generation_id);
+        prop_assert_eq!(
+            gen_leader_count,
+            1,
+            "exactly one leader in generation {}",
+            generation_id
+        );
 
         // Verify leader flags
         let flag_leaders = leader_flags.iter().filter(|&&is_leader| is_leader).count();
-        prop_assert_eq!(flag_leaders, 1, "leader flags should match in generation {}", generation_id);
+        prop_assert_eq!(
+            flag_leaders,
+            1,
+            "leader flags should match in generation {}",
+            generation_id
+        );
     }
 
     // Total leaders should equal number of generations
     let total_leader_count = total_leaders.load(Ordering::SeqCst);
-    prop_assert_eq!(total_leader_count, generations, "total leaders should equal generations");
+    prop_assert_eq!(
+        total_leader_count,
+        generations,
+        "total leaders should equal generations"
+    );
 }
 
 /// BONUS MR: barrier wait result consistency
@@ -308,10 +317,7 @@ fn mr_cyclic_reuse_preserves_counts(
 /// - Result can be cloned and remains equal to original
 /// - Debug formatting is consistent
 #[proptest]
-fn mr_wait_result_consistency(
-    #[strategy(1u8..=4)] parties: u8,
-    #[strategy(0u64..1000)] seed: u64,
-) {
+fn mr_wait_result_consistency(#[strategy(1u8..=4)] parties: u8, #[strategy(0u64..1000)] seed: u64) {
     let parties = parties as usize;
     let barrier = Arc::new(Barrier::new(parties));
 
@@ -335,7 +341,10 @@ fn mr_wait_result_consistency(
             // Test debug formatting
             let debug_str = format!("{:?}", result);
             prop_assert!(!debug_str.is_empty(), "debug string should not be empty");
-            prop_assert!(debug_str.contains("BarrierWaitResult"), "debug should contain type name");
+            prop_assert!(
+                debug_str.contains("BarrierWaitResult"),
+                "debug should contain type name"
+            );
 
             Ok(result)
         });
@@ -343,16 +352,14 @@ fn mr_wait_result_consistency(
     }
 
     // Wait for all parties
-    let results: Vec<Result<BarrierWaitResult, proptest::test_runner::TestCaseError>> =
-        handles
+    let results: Vec<Result<BarrierWaitResult, proptest::test_runner::TestCaseError>> = handles
         .into_iter()
         .map(|h| h.join().expect("thread should succeed"))
         .collect();
 
     // All results should be Ok
-    let barrier_results: Vec<BarrierWaitResult> = results
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let barrier_results: Vec<BarrierWaitResult> =
+        results.into_iter().collect::<Result<Vec<_>, _>>()?;
 
     prop_assert_eq!(barrier_results.len(), parties);
 }
@@ -379,8 +386,14 @@ mod tests {
             block_on(barrier2.wait(&cx))
         });
 
-        let result1 = handle1.join().expect("task1 should succeed").expect("wait1 should succeed");
-        let result2 = handle2.join().expect("task2 should succeed").expect("wait2 should succeed");
+        let result1 = handle1
+            .join()
+            .expect("task1 should succeed")
+            .expect("wait1 should succeed");
+        let result2 = handle2
+            .join()
+            .expect("task2 should succeed")
+            .expect("wait2 should succeed");
 
         // Exactly one leader
         let leader_count = [result1.is_leader(), result2.is_leader()]
