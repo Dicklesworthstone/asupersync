@@ -7362,7 +7362,7 @@ pub mod span_semantics {
             let zero_link = TestSpanLink {
                 trace_id: [0; 16],
                 span_id: [0; 8],
-                trace_state: "".to_string(),
+                trace_state: String::new(),
                 attributes: HashMap::new(),
                 dropped_attributes_count: 0,
                 flags: 0,
@@ -7371,7 +7371,7 @@ pub mod span_semantics {
             let zero_link2 = TestSpanLink {
                 trace_id: [0; 16],
                 span_id: [0; 8],
-                trace_state: "".to_string(),
+                trace_state: String::new(),
                 attributes: HashMap::new(),
                 dropped_attributes_count: 0,
                 flags: 0,

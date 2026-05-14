@@ -74,7 +74,9 @@ mod tests {
     /// **WARNING**: This is only for testing. Real applications should never do this.
     #[allow(unsafe_code)]
     unsafe fn create_invalid_utf8_string() -> String {
-        let invalid_bytes = vec![0x48, 0x65, 0x6c, 0x6c, 0x6f, 0xff, 0x57, 0x6f, 0x72, 0x6c, 0x64];
+        let invalid_bytes = vec![
+            0x48, 0x65, 0x6c, 0x6c, 0x6f, 0xff, 0x57, 0x6f, 0x72, 0x6c, 0x64,
+        ];
         // This is unsafe and breaks String's UTF-8 guarantee
         String::from_utf8_unchecked(invalid_bytes)
     }
@@ -108,7 +110,10 @@ mod tests {
         }
 
         let valid_result = current_ordered_proto_attributes(&valid_attributes);
-        eprintln!("\nValid UTF-8 serialization: {} attributes", valid_result.len());
+        eprintln!(
+            "\nValid UTF-8 serialization: {} attributes",
+            valid_result.len()
+        );
         for attr in &valid_result {
             eprintln!("  '{}' = '{}'", attr.key, attr.value);
         }
@@ -119,8 +124,11 @@ mod tests {
 
         // Note: In safe Rust, we cannot actually create invalid UTF-8 in a String
         // The String type guarantees valid UTF-8, so we test edge cases instead
-        test_attributes.insert("empty_after_filter".to_string(), "".to_string()); // Will be filtered out
-        test_attributes.insert("control_chars".to_string(), "Hello\x00\x01\x1fWorld".to_string());
+        test_attributes.insert("empty_after_filter".to_string(), String::new()); // Will be filtered out
+        test_attributes.insert(
+            "control_chars".to_string(),
+            "Hello\x00\x01\x1fWorld".to_string(),
+        );
         test_attributes.insert("high_unicode".to_string(), "\u{10FFFF}".to_string()); // Valid but high codepoint
 
         eprintln!("\n📋 Edge case attributes:");
@@ -129,7 +137,10 @@ mod tests {
         }
 
         let edge_result = current_ordered_proto_attributes(&test_attributes);
-        eprintln!("\nEdge case serialization: {} attributes", edge_result.len());
+        eprintln!(
+            "\nEdge case serialization: {} attributes",
+            edge_result.len()
+        );
         for attr in &edge_result {
             eprintln!("  '{}' = '{:?}'", attr.key, attr.value);
         }
@@ -149,8 +160,16 @@ mod tests {
         eprintln!("    • No explicit UTF-8 validation before protobuf serialization");
 
         // Verify that normal attributes work correctly
-        assert_eq!(valid_result.len(), 3, "All valid UTF-8 attributes should be serialized");
-        assert_eq!(edge_result.len(), 3, "Non-empty edge case attributes should be serialized"); // empty_after_filter is filtered out
+        assert_eq!(
+            valid_result.len(),
+            3,
+            "All valid UTF-8 attributes should be serialized"
+        );
+        assert_eq!(
+            edge_result.len(),
+            3,
+            "Non-empty edge case attributes should be serialized"
+        ); // empty_after_filter is filtered out
 
         eprintln!("\n🚨 AUDIT FINDINGS:");
         eprintln!("==================");
@@ -184,7 +203,10 @@ mod tests {
         // Demonstrate safe UTF-8 validation
         let valid_utf8_bytes = "Hello, 世界! 🦀".as_bytes();
         let valid_string = String::from_utf8(valid_utf8_bytes.to_vec());
-        assert!(valid_string.is_ok(), "Valid UTF-8 should parse successfully");
+        assert!(
+            valid_string.is_ok(),
+            "Valid UTF-8 should parse successfully"
+        );
 
         let invalid_utf8_bytes = vec![0xff, 0xfe, 0xfd]; // Invalid UTF-8 sequence
         let invalid_string = String::from_utf8(invalid_utf8_bytes);
@@ -198,7 +220,10 @@ mod tests {
         // Test character iteration (the defensive check we could add)
         let test_string = "Test with Unicode: 世界 🌍 \u{1F4A9}".to_string();
         let char_count = test_string.chars().count();
-        assert!(char_count > 0, "Valid UTF-8 should have countable characters");
+        assert!(
+            char_count > 0,
+            "Valid UTF-8 should have countable characters"
+        );
 
         eprintln!("   • Character iteration validation: {} chars", char_count);
         eprintln!("   • This could serve as defensive validation in protobuf conversion");
@@ -254,9 +279,8 @@ mod tests {
         fn validate_utf8_attribute(key: &str, value: &str) -> bool {
             // The chars() method will panic if the string contains invalid UTF-8
             // In a real implementation, we might want to handle this more gracefully
-            match std::panic::catch_unwind(|| {
-                key.chars().count() > 0 && value.chars().count() > 0
-            }) {
+            match std::panic::catch_unwind(|| key.chars().count() > 0 && value.chars().count() > 0)
+            {
                 Ok(result) => result,
                 Err(_) => {
                     // This would only happen if someone used unsafe code to create invalid UTF-8
@@ -277,7 +301,12 @@ mod tests {
         eprintln!("Testing UTF-8 validation on valid attributes:");
         for (key, value) in valid_pairs {
             let is_valid = validate_utf8_attribute(key, value);
-            eprintln!("  '{}' = '{}' → {}", key, value, if is_valid { "✅ VALID" } else { "❌ INVALID" });
+            eprintln!(
+                "  '{}' = '{}' → {}",
+                key,
+                value,
+                if is_valid { "✅ VALID" } else { "❌ INVALID" }
+            );
             assert!(is_valid, "Valid UTF-8 should pass validation");
         }
 
