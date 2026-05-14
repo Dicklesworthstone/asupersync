@@ -6,7 +6,6 @@ use asupersync::net::quic_core::{
     encode_varint as real_encode_varint,
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// QUIC frame fuzz input for comprehensive RFC 9000 frame testing
 #[derive(Debug, Arbitrary)]
@@ -359,10 +358,6 @@ fn test_quic_frame_parsing(data: &[u8]) {
             }
             0x01 => {
                 // PING frames have no payload
-                if !payload.is_empty() {
-                    // Invalid PING frame
-                    return;
-                }
             }
             0x02 | 0x03 => {
                 // ACK frames - test VLQ parsing
@@ -389,11 +384,12 @@ fn test_ack_frame_parsing(data: &[u8], has_ecn: bool) {
     let mut offset = 0;
 
     // Parse largest acknowledged (VLQ)
-    if let Some((largest_acked, consumed)) = parse_vlq(data, offset) {
+    let largest_acked = if let Some((largest_acked, consumed)) = parse_vlq(data, offset) {
         offset += consumed;
+        largest_acked
     } else {
         return;
-    }
+    };
 
     // Parse ACK delay (VLQ)
     if let Some((_, consumed)) = parse_vlq(data, offset) {
@@ -412,7 +408,10 @@ fn test_ack_frame_parsing(data: &[u8], has_ecn: bool) {
         }
 
         // Parse first ACK range (VLQ)
-        if let Some((_, consumed)) = parse_vlq(data, offset) {
+        if let Some((first_range, consumed)) = parse_vlq(data, offset) {
+            if first_range > largest_acked {
+                return;
+            }
             offset += consumed;
         } else {
             return;
@@ -452,7 +451,7 @@ fn test_ack_frame_parsing(data: &[u8], has_ecn: bool) {
             }
 
             // ECN-CE count (VLQ)
-            let _ = parse_vlq(data, offset);
+            observe_vlq_parse(parse_vlq(data, offset), data, offset, "ACK ECN-CE count");
         }
     }
 }
@@ -470,8 +469,8 @@ fn test_stream_frame_parsing(data: &[u8], frame_type: u8) {
         offset += consumed;
 
         // Validate stream ID parity/direction bits
-        let direction = stream_id & 0x01; // 0 = client, 1 = server
-        let stream_type = (stream_id >> 1) & 0x01; // 0 = bidi, 1 = uni
+        let _direction = stream_id & 0x01; // 0 = client, 1 = server
+        let _stream_type = (stream_id >> 1) & 0x01; // 0 = bidi, 1 = uni
 
         // Stream ID should be reasonable
         if stream_id > (1u64 << 60) {
@@ -481,7 +480,7 @@ fn test_stream_frame_parsing(data: &[u8], frame_type: u8) {
         // Check frame type flags
         let has_offset = (frame_type & 0x04) != 0;
         let has_length = (frame_type & 0x02) != 0;
-        let has_fin = (frame_type & 0x01) != 0;
+        let _has_fin = (frame_type & 0x01) != 0;
 
         // Parse offset if present
         if has_offset {
@@ -578,6 +577,20 @@ fn parse_vlq(data: &[u8], offset: usize) -> Option<(u64, usize)> {
             Some((value, 8))
         }
         _ => None,
+    }
+}
+
+fn observe_vlq_parse(result: Option<(u64, usize)>, data: &[u8], offset: usize, context: &str) {
+    if let Some((value, consumed)) = result {
+        assert!(consumed > 0, "{context} accepted without consuming bytes");
+        assert!(
+            offset.saturating_add(consumed) <= data.len(),
+            "{context} consumed past input boundary"
+        );
+        assert!(
+            value <= QUIC_VARINT_MAX,
+            "{context} exceeded QUIC varint max"
+        );
     }
 }
 
@@ -698,23 +711,74 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
         frame.extend_from_slice(&encode_vlq_test(stream_test.stream_id, None));
         test_quic_frame_parsing(&frame);
         exercise_real_quic_core_boundaries(&frame);
+
+        let direction_bit = match &stream_test.expected_direction {
+            StreamDirection::ClientInitiated => 0,
+            StreamDirection::ServerInitiated => 1,
+        };
+        let type_bit = match &stream_test.expected_type {
+            StreamType::Bidirectional => 0,
+            StreamType::Unidirectional => 1,
+        };
+        let canonical_stream_id = (stream_test.stream_id & !0x03) | direction_bit | (type_bit << 1);
+        let mut canonical_frame = vec![0x08];
+        canonical_frame.extend_from_slice(&encode_vlq_test(canonical_stream_id, None));
+        test_quic_frame_parsing(&canonical_frame);
+        exercise_real_quic_core_boundaries(&canonical_frame);
+
+        if let Some(invalid_scenario) = &stream_test.invalid_scenario {
+            let invalid_stream_id = match invalid_scenario {
+                InvalidStreamIdScenario::TooLarge => QUIC_VARINT_MAX,
+                InvalidStreamIdScenario::OutOfOrder => stream_test.stream_id.saturating_sub(4),
+                InvalidStreamIdScenario::ReservedBits => stream_test.stream_id | (1 << 60),
+            };
+            let mut invalid_frame = vec![0x08];
+            invalid_frame.extend_from_slice(&encode_vlq_test(invalid_stream_id, None));
+            test_quic_frame_parsing(&invalid_frame);
+            exercise_real_quic_core_boundaries(&invalid_frame);
+        }
     }
 
     // Test 4: ACK frame range validation
     for ack_test in &input.ack_tests {
-        let mut frame = vec![0x02]; // ACK frame type
-        frame.extend_from_slice(&encode_vlq_test(ack_test.largest_acked, None));
+        let mut frame = vec![if ack_test.ecn_counts.is_some() {
+            0x03
+        } else {
+            0x02
+        }]; // ACK frame type
+        let largest_acked = match &ack_test.invalid_scenario {
+            Some(InvalidAckScenario::DecreasingLargestAcked) => ack_test.largest_acked / 2,
+            _ => ack_test.largest_acked,
+        };
+        frame.extend_from_slice(&encode_vlq_test(largest_acked, None));
         frame.extend_from_slice(&encode_vlq_test(ack_test.ack_delay, None));
         frame.extend_from_slice(&encode_vlq_test(ack_test.ack_ranges.len() as u64, None));
 
         // Add ranges
         for (i, range) in ack_test.ack_ranges.iter().enumerate() {
             if i == 0 {
-                frame.extend_from_slice(&encode_vlq_test(range.length, None));
+                let first_range_len = match &ack_test.invalid_scenario {
+                    Some(InvalidAckScenario::OverlappingRanges) => {
+                        range.length.saturating_add(largest_acked)
+                    }
+                    _ => range.length,
+                };
+                frame.extend_from_slice(&encode_vlq_test(first_range_len, None));
             } else {
-                frame.extend_from_slice(&encode_vlq_test(range.gap, None));
+                let gap = match &ack_test.invalid_scenario {
+                    Some(InvalidAckScenario::InvalidGap) => QUIC_VARINT_MAX,
+                    Some(InvalidAckScenario::OutOfOrderRanges) => 0,
+                    _ => range.gap,
+                };
+                frame.extend_from_slice(&encode_vlq_test(gap, None));
                 frame.extend_from_slice(&encode_vlq_test(range.length, None));
             }
+        }
+
+        if let Some(ecn_counts) = &ack_test.ecn_counts {
+            frame.extend_from_slice(&encode_vlq_test(ecn_counts.ect0_count, None));
+            frame.extend_from_slice(&encode_vlq_test(ecn_counts.ect1_count, None));
+            frame.extend_from_slice(&encode_vlq_test(ecn_counts.ecn_ce_count, None));
         }
 
         test_quic_frame_parsing(&frame);
@@ -727,6 +791,19 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
         test_data.extend_from_slice(&[0x00, 0x01, 0x02]); // Some payload
         test_quic_frame_parsing(&test_data);
         exercise_real_quic_core_boundaries(&test_data);
+
+        if let Some(expected_type) = collision_test.expected_type {
+            let expected_frame = [expected_type, 0x00, 0x01, 0x02];
+            test_quic_frame_parsing(&expected_frame);
+            exercise_real_quic_core_boundaries(&expected_frame);
+        }
+
+        if let Some(reserved_type) = collision_test.reserved_type {
+            let mut reserved_frame = encode_vlq_test(reserved_type as u64, None);
+            reserved_frame.extend_from_slice(&[0x00, 0x01, 0x02]);
+            test_quic_frame_parsing(&reserved_frame);
+            exercise_real_quic_core_boundaries(&reserved_frame);
+        }
     }
 
     // Test 6: Edge case combinations
