@@ -42,13 +42,17 @@ impl MockSystemTime {
 
     /// Create mock time that's significantly behind actual time.
     fn behind_by_minutes(minutes: u64) -> Self {
-        let behind_time = SystemTime::now() - Duration::from_secs(minutes * 60);
+        let behind_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(minutes * 60))
+            .expect("mock clock skew should remain representable");
         Self::new(behind_time)
     }
 
     /// Create mock time before Unix epoch (edge case).
     fn before_epoch() -> Self {
-        let before_epoch = UNIX_EPOCH - Duration::from_secs(3600); // 1 hour before epoch
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(3600))
+            .expect("one hour before Unix epoch should remain representable");
         Self::new(before_epoch)
     }
 
