@@ -68,6 +68,12 @@ impl Default for ServerConfig {
     }
 }
 
+fn next_request_reaches_limit(config: &ServerConfig) -> bool {
+    config
+        .max_requests_per_connection
+        .is_some_and(|max| config.requests_served.saturating_add(1) >= max)
+}
+
 /// HTTP request with Connection header variations
 #[derive(Debug, Clone, Arbitrary)]
 struct TestRequest {
@@ -112,9 +118,7 @@ impl MockConnectionAnalyzer {
         }
 
         // Request limit reached forces close
-        if let Some(max_requests) = self.config.max_requests_per_connection
-            && self.config.requests_served + 1 >= max_requests
-        {
+        if next_request_reaches_limit(&self.config) {
             return true;
         }
 
@@ -404,9 +408,7 @@ fn validate_semantic_rules(
     }
 
     // Rule 2: Request limit forces close
-    if let Some(max_requests) = config.max_requests_per_connection
-        && config.requests_served + 1 >= max_requests
-    {
+    if next_request_reaches_limit(config) {
         assert!(
             decision,
             "Connection should close when request limit reached"
@@ -431,10 +433,7 @@ fn validate_semantic_rules(
 
     // Rule 5: HTTP version defaults when no explicit tokens and server allows
     if config.keep_alive_enabled && !has_close && !has_keep_alive {
-        let request_limit_reached = config
-            .max_requests_per_connection
-            .map(|max| config.requests_served + 1 >= max)
-            .unwrap_or(false);
+        let request_limit_reached = next_request_reaches_limit(config);
 
         if !request_limit_reached {
             assert_eq!(
@@ -596,6 +595,26 @@ mod tests {
         };
 
         assert!(analyzer.should_close_after_request(&req));
+    }
+
+    #[test]
+    fn test_request_limit_handles_extreme_generated_counts() {
+        let mut config = ServerConfig::default();
+        config.max_requests_per_connection = Some(u8::MAX);
+        config.requests_served = u8::MAX;
+
+        assert!(
+            next_request_reaches_limit(&config),
+            "saturated generated counts should reach the configured limit without overflow"
+        );
+
+        config.max_requests_per_connection = Some(0);
+        config.requests_served = 0;
+
+        assert!(
+            next_request_reaches_limit(&config),
+            "zero request limit should force close before serving another request"
+        );
     }
 
     #[test]
