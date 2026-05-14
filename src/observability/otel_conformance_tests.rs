@@ -29523,7 +29523,7 @@ mod otlp_113_negative_metric_scale_validation_second {
             },
             expected_scale_invalid: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -29539,7 +29539,7 @@ mod otlp_113_negative_metric_scale_validation_second {
             },
             expected_scale_invalid: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -29555,7 +29555,7 @@ mod otlp_113_negative_metric_scale_validation_second {
             },
             expected_scale_invalid: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -29572,7 +29572,7 @@ mod otlp_113_negative_metric_scale_validation_second {
             },
             expected_scale_invalid: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -29590,7 +29590,7 @@ mod otlp_113_negative_metric_scale_validation_second {
             },
             expected_scale_invalid: false, // Scale validation doesn't apply to counters
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: false, // Scale validation only applies to histograms
             expected_otlp_compliant: true,
@@ -29608,7 +29608,7 @@ mod otlp_113_negative_metric_scale_validation_second {
             },
             expected_scale_invalid: false, // Scale validation doesn't apply to gauges
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: false, // Scale validation only applies to histograms
             expected_otlp_compliant: true,
@@ -29641,7 +29641,7 @@ mod otlp_113_negative_metric_scale_validation_second {
             },
             expected_scale_invalid: false,
             expected_metric_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -29658,25 +29658,31 @@ mod otlp_113_negative_metric_scale_validation_second {
             let reference_result = simulate_reference_scale_validation(&scenario);
 
             // Validate individual results
-            validate_scale_validation_logic(&asupersync_result).expect(&format!(
-                "Asupersync scale validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_scale_validation_logic(&asupersync_result).unwrap_or_else(|error| {
+                panic!(
+                    "Asupersync scale validation logic failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
-            validate_scale_validation_logic(&reference_result).expect(&format!(
-                "Reference scale validation logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_scale_validation_logic(&reference_result).unwrap_or_else(|error| {
+                panic!(
+                    "Reference scale validation logic failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
             // Validate implementation consistency
             validate_scale_validation_implementation_consistency(
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
             println!("✓ Scenario passed: {}", scenario.description);
         }
@@ -29780,17 +29786,19 @@ mod otlp_113_negative_metric_scale_validation_second {
 
             // Analyze scale parameter
             match scenario.metric.scale {
-                Some(scale) => {
-                    if scale < 0 {
+                Some(scale) => match scale.cmp(&0) {
+                    std::cmp::Ordering::Less => {
                         // Negative scale - OTLP §6 violation
                         negative_scales += 1;
                         scale_invalid = true;
-                    } else if scale == 0 {
+                    }
+                    std::cmp::Ordering::Equal => {
                         zero_scales += 1;
-                    } else {
+                    }
+                    std::cmp::Ordering::Greater => {
                         positive_scales += 1;
                     }
-                }
+                },
                 None => {
                     // No scale specified - acceptable (uses default)
                     missing_scales += 1;
