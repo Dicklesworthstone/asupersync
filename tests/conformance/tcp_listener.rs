@@ -217,12 +217,12 @@ fn test_backlog_parameter_honored() {
         // The listen call should succeed with any reasonable backlog value
         let listener = socket
             .listen(backlog)
-            .expect(&format!("listen with backlog {}", backlog));
+            .unwrap_or_else(|_| panic!("listen with backlog {backlog}"));
         let bound_addr = listener.local_addr().expect("get local addr");
 
         // Verify the listener is functional
         let _client = StdTcpStream::connect(bound_addr)
-            .expect(&format!("connect to listener with backlog {}", backlog));
+            .unwrap_or_else(|_| panic!("connect to listener with backlog {backlog}"));
 
         println!("✓ Backlog {} accepted and listener functional", backlog);
     }
@@ -252,13 +252,17 @@ fn test_bind_port_zero_returns_os_assigned_port() {
     for i in 0..5 {
         let addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
 
-        let socket = TcpSocket::new_v4().expect(&format!("create socket {}", i));
-        socket.bind(addr).expect(&format!("bind socket {}", i));
-        let listener = socket.listen(128).expect(&format!("listen socket {}", i));
+        let socket = TcpSocket::new_v4().unwrap_or_else(|_| panic!("create socket {i}"));
+        socket
+            .bind(addr)
+            .unwrap_or_else(|_| panic!("bind socket {i}"));
+        let listener = socket
+            .listen(128)
+            .unwrap_or_else(|_| panic!("listen socket {i}"));
 
         let bound_addr = listener
             .local_addr()
-            .expect(&format!("get local addr {}", i));
+            .unwrap_or_else(|_| panic!("get local addr {i}"));
 
         // Verify port was assigned (not 0)
         assert_ne!(bound_addr.port(), 0, "OS should assign non-zero port");
@@ -280,7 +284,7 @@ fn test_bind_port_zero_returns_os_assigned_port() {
 
         // Verify the listener is functional
         let _client = StdTcpStream::connect(bound_addr)
-            .expect(&format!("connect to auto-assigned port {}", port));
+            .unwrap_or_else(|_| panic!("connect to auto-assigned port {port}"));
 
         println!("✓ OS assigned port {} for socket {}", port, i);
     }
