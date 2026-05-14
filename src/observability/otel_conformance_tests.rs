@@ -36601,12 +36601,12 @@ mod otlp_122_tests {
                     ),
                     (
                         "condition3".to_string(),
-                        Otlp128AttributeValue::BoolValue(true && false),
-                    ), // false
+                        Otlp128AttributeValue::BoolValue(false),
+                    ),
                     (
                         "condition4".to_string(),
-                        Otlp128AttributeValue::BoolValue(true || false),
-                    ), // true
+                        Otlp128AttributeValue::BoolValue(true),
+                    ),
                 ],
                 true,
                 "Programmatically generated BoolValues must be preserved exactly",
@@ -36706,14 +36706,14 @@ mod otlp_122_tests {
 
         // Test computed boolean values
         let computed_cases = vec![
-            (1 == 1, true, "equality true"),
-            (1 == 2, false, "equality false"),
-            (true && true, true, "logical and true"),
-            (true && false, false, "logical and false"),
-            (false || true, true, "logical or true"),
-            (false || false, false, "logical or false"),
-            (!true, false, "negation of true"),
-            (!false, true, "negation of false"),
+            (true, true, "equality true"),
+            (false, false, "equality false"),
+            (true, true, "logical and true"),
+            (false, false, "logical and false"),
+            (true, true, "logical or true"),
+            (false, false, "logical or false"),
+            (false, false, "negation of true"),
+            (true, true, "negation of false"),
         ];
 
         for (computed, expected, description) in computed_cases {
@@ -36735,15 +36735,12 @@ mod otlp_122_tests {
         let edge_cases = vec![
             // These should all be false and stay false
             (false, "literal false"),
-            (0 == 1, "false from comparison"),
-            (
-                !"non-empty".is_empty(),
-                "false from negated non-empty check",
-            ),
+            (false, "false from comparison"),
+            (false, "false from negated empty check"),
             // These should all be true and stay true
             (true, "literal true"),
-            (1 == 1, "true from comparison"),
-            (!"".is_empty(), "true from negated empty check"),
+            (true, "true from comparison"),
+            (true, "true from negated non-empty check"),
         ];
 
         for (value, description) in edge_cases {
