@@ -3762,7 +3762,11 @@ mod tests {
             "1970-01-01T00:00:42.123456789Z"
         );
         assert_eq!(
-            format_system_time_rfc3339(UNIX_EPOCH - Duration::from_secs(1)),
+            format_system_time_rfc3339(
+                UNIX_EPOCH
+                    .checked_sub(Duration::from_secs(1))
+                    .expect("one-second pre-epoch timestamp should be representable"),
+            ),
             "1969-12-31T23:59:59.000000000Z"
         );
     }
