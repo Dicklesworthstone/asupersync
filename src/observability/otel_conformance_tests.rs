@@ -21562,8 +21562,8 @@ fn otlp_101_case_sensitive_attribute_keys_conformance() {
                     ("context.type".to_string(), "normal".to_string()),
                 ],
             },
-            expected_case_variants_detected: false, // These are not case variants, they're different keys
-            expected_case_variant_keys: vec![],
+            expected_case_variants_detected: true, // userId/UserID differ only by case and remain distinct
+            expected_case_variant_keys: vec!["userId".to_string(), "UserID".to_string()],
             expected_distinct_keys_preserved: true,
             expected_final_attributes: vec![
                 ("user_id".to_string(), "snake_case_value".to_string()),
@@ -21630,25 +21630,31 @@ fn otlp_101_case_sensitive_attribute_keys_conformance() {
         let reference_result = simulate_reference_case_sensitive_validation(&scenario);
 
         // Validate individual results
-        validate_case_sensitive_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync case-sensitive validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_case_sensitive_validation_logic(&asupersync_result).unwrap_or_else(|err| {
+            panic!(
+                "Asupersync case-sensitive validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
-        validate_case_sensitive_validation_logic(&reference_result).expect(&format!(
-            "Reference case-sensitive validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_case_sensitive_validation_logic(&reference_result).unwrap_or_else(|err| {
+            panic!(
+                "Reference case-sensitive validation logic failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         // Validate implementation consistency
         validate_case_sensitive_validation_implementation_consistency(
             &asupersync_result,
             &reference_result,
         )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+        .unwrap_or_else(|err| {
+            panic!(
+                "Implementation consistency failed for scenario: {}: {err}",
+                scenario.description
+            )
+        });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -21712,10 +21718,10 @@ fn simulate_asupersync_case_sensitive_validation(
 
     for (key, _) in &original_attributes {
         let lowercase_key = key.to_lowercase();
-        lowercase_groups
-            .entry(lowercase_key)
-            .or_default()
-            .push(key.clone());
+        let variants = lowercase_groups.entry(lowercase_key).or_default();
+        if !variants.contains(key) {
+            variants.push(key.clone());
+        }
     }
 
     // Find groups with multiple case variants
