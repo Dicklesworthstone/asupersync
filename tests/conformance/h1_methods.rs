@@ -874,7 +874,7 @@ mod tests {
 
         for (method_name, expected_safe, expected_idempotent) in test_cases {
             let method = Method::from_bytes(method_name.as_bytes())
-                .expect(&format!("Method {} should parse", method_name));
+                .unwrap_or_else(|| panic!("Method {method_name} should parse"));
             let props = MethodProperties::for_method(&method);
 
             assert_eq!(
@@ -956,7 +956,7 @@ mod tests {
         for method in methods {
             let method_str = method.as_str();
             let parsed = Method::from_bytes(method_str.as_bytes())
-                .expect(&format!("Method {} should round-trip", method_str));
+                .unwrap_or_else(|| panic!("Method {method_str} should round-trip"));
 
             match (&method, &parsed) {
                 (Method::Extension(a), Method::Extension(b)) => {
@@ -987,7 +987,8 @@ mod tests {
             let method = Method::from_bytes(input.as_bytes());
             match expected {
                 Some(expected_str) => {
-                    let parsed = method.expect(&format!("Method {} should parse", input));
+                    let parsed =
+                        method.unwrap_or_else(|| panic!("Method {input} should parse"));
                     assert_eq!(parsed.as_str(), expected_str);
                 }
                 None => {
