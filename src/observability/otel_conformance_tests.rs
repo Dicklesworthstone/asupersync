@@ -31493,7 +31493,7 @@ mod otlp_117_tests {
         // Empty descriptions should not affect status validation
         let descriptions = vec![
             None,                                    // No description
-            Some("".to_string()),                    // Empty string
+            Some(String::new()),                     // Empty string
             Some("   ".to_string()),                 // Whitespace only
             Some("Valid error message".to_string()), // Valid description
         ];
