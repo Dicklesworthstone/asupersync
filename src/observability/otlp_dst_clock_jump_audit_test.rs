@@ -127,7 +127,9 @@ impl MockDstClock {
     /// Simulate DST "fall back" - clock jumps backward by 1 hour
     fn simulate_dst_fall_back(&mut self) -> (SystemTime, SystemTime) {
         let before_jump = self.current_time;
-        let after_jump = before_jump - Duration::from_secs(3600); // 1 hour backward
+        let after_jump = before_jump
+            .checked_sub(Duration::from_secs(3600))
+            .expect("simulated one-hour DST fall back should remain representable");
 
         self.jump_events
             .push(("DST fall back".to_string(), before_jump, after_jump));
@@ -318,7 +320,9 @@ fn audit_current_test_span_dst_vulnerability() {
 
     // Simulate the current implementation vulnerability
     let before_dst = SystemTime::now();
-    let after_dst_jump = before_dst - Duration::from_secs(3600); // 1 hour back
+    let after_dst_jump = before_dst
+        .checked_sub(Duration::from_secs(3600))
+        .expect("simulated one-hour DST jump should remain representable");
 
     println!("📊 DST vulnerability demonstration:");
     println!("   Span start: {:?}", before_dst);
