@@ -47244,7 +47244,7 @@ mod otlp_122_tests {
                 span_attributes: vec![
                     (
                         "messaging.rabbitmq.destination_routing_key".to_string(),
-                        AnyValue::StringValue("".to_string()),
+                        AnyValue::StringValue(String::new()),
                     ), // Empty
                     (
                         "messaging.system".to_string(),
@@ -47256,7 +47256,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_valid: true, // Empty routing key is valid in RabbitMQ (default exchange)
-                expected_routing_key: Some("".to_string()),
+                expected_routing_key: Some(String::new()),
             },
             RabbitMqProducerRoutingKeyScenario {
                 description: "rabbitmq_producer_non_string_routing_key".to_string(),
