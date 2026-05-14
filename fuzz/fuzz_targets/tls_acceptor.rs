@@ -22,8 +22,7 @@ use std::time::Duration;
 // Import the TLS acceptor and related types
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::tls::{
-    CertificateChain, ClientAuth, PrivateKey, RootCertStore, TlsAcceptor, TlsAcceptorBuilder,
-    TlsError,
+    CertificateChain, PrivateKey, RootCertStore, TlsAcceptor, TlsAcceptorBuilder, TlsError,
 };
 
 /// Maximum input size to prevent timeouts during fuzzing
@@ -185,23 +184,8 @@ impl MockTlsStream {
         }
     }
 
-    fn with_error(mut self) -> Self {
-        self.simulate_error = true;
-        self
-    }
-
     fn with_close(mut self) -> Self {
         self.simulate_close = true;
-        self
-    }
-
-    fn set_readable(mut self, readable: bool) -> Self {
-        self.readable = readable;
-        self
-    }
-
-    fn set_writable(mut self, writable: bool) -> Self {
-        self.writable = writable;
         self
     }
 }
@@ -329,6 +313,43 @@ impl TlsAcceptorShadowModel {
         self.malformed_messages_handled += 1;
     }
 
+    fn record_accept_result(&mut self, result: &Result<(), TlsError>) {
+        match result {
+            Ok(()) => {}
+            Err(TlsError::Timeout(_)) => self.record_timeout(),
+            Err(TlsError::AlpnNegotiationFailed { .. }) => self.record_alpn_failure(),
+            Err(
+                TlsError::Certificate(_)
+                | TlsError::CertificateExpired { .. }
+                | TlsError::CertificateNotYetValid { .. }
+                | TlsError::ChainValidation(_)
+                | TlsError::PinMismatch { .. },
+            ) => self.record_cert_validation_failure(),
+            Err(error) if is_unsupported_cipher_error(error) => {
+                self.record_unsupported_cipher_rejection();
+            }
+            Err(error) if is_early_data_rejection(error) => self.record_early_data_rejection(),
+            Err(
+                TlsError::InvalidDnsName(_)
+                | TlsError::Handshake(_)
+                | TlsError::Configuration(_)
+                | TlsError::FeatureDisabled { .. }
+                | TlsError::Io(_),
+            ) => self.record_handshake_failure(),
+            Err(TlsError::Rustls(_)) => self.record_handshake_failure(),
+        }
+    }
+
+    fn observed_outcomes(&self) -> usize {
+        self.timeouts_detected
+            .saturating_add(self.handshake_failures)
+            .saturating_add(self.alpn_failures)
+            .saturating_add(self.early_data_rejections)
+            .saturating_add(self.cert_validation_failures)
+            .saturating_add(self.unsupported_cipher_rejections)
+            .saturating_add(self.malformed_messages_handled)
+    }
+
     /// Validate that no security violations occurred
     fn validate_security_invariants(&self) -> Result<(), String> {
         if self.panics_detected > 0 {
@@ -436,18 +457,19 @@ fn create_test_acceptor(config: &TlsAcceptorFuzzConfig) -> Result<TlsAcceptor, T
     }
 
     // Configure max fragment size
-    if let Some(size) = config.max_fragment_size {
-        if size >= 512 && size <= 16384 {
-            builder = builder.max_fragment_size(size as usize);
-        }
+    if let Some(size) = config.max_fragment_size
+        && (512..=16384).contains(&size)
+    {
+        builder = builder.max_fragment_size(size as usize);
     }
 
     // Configure handshake timeout
-    if let Some(timeout_ms) = config.handshake_timeout_ms {
-        if timeout_ms > 0 && timeout_ms <= 30000 {
-            // Max 30 seconds for fuzzing
-            builder = builder.handshake_timeout(Duration::from_millis(timeout_ms as u64));
-        }
+    if let Some(timeout_ms) = config.handshake_timeout_ms
+        && timeout_ms > 0
+        && timeout_ms <= 30000
+    {
+        // Max 30 seconds for fuzzing
+        builder = builder.handshake_timeout(Duration::from_millis(timeout_ms as u64));
     }
 
     builder.build()
@@ -528,6 +550,39 @@ fn normalize_fuzz_input(input: &[u8]) -> TlsAcceptorFuzzInput {
     }
 }
 
+fn apply_client_behavior(
+    mut handshake_data: Vec<u8>,
+    behavior: &ClientBehaviorConfig,
+    seed: u64,
+) -> Vec<u8> {
+    if behavior.send_malformed_client_hello {
+        handshake_data = generate_malformed_client_hello(&handshake_data);
+    }
+    if behavior.send_oversized_extensions {
+        let extension_byte = seed.to_le_bytes()[0];
+        handshake_data.extend(std::iter::repeat_n(extension_byte, 512));
+    }
+    if behavior.send_truncated_messages {
+        handshake_data.truncate(handshake_data.len().saturating_div(2));
+    }
+    if behavior.send_unsupported_ciphers_only {
+        handshake_data.extend_from_slice(&[0x00, 0xff, 0x13, 0xff]);
+    }
+    if behavior.attempt_early_data {
+        handshake_data.extend_from_slice(b"early-data");
+    }
+    if behavior.send_post_handshake_data {
+        handshake_data.extend_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x00]);
+    }
+    if behavior.close_during_handshake {
+        handshake_data.truncate(handshake_data.len().min(5));
+    }
+    if handshake_data.len() > MAX_HANDSHAKE_DATA_SIZE {
+        handshake_data.truncate(MAX_HANDSHAKE_DATA_SIZE);
+    }
+    handshake_data
+}
+
 /// Test that TLS acceptor handles the operation without panicking
 fn test_acceptor_operation_no_panic(
     operation: &TlsAcceptorOperation,
@@ -540,7 +595,8 @@ fn test_acceptor_operation_no_panic(
             TlsAcceptorOperation::BasicAccept => {
                 // Test basic accept with minimal valid handshake
                 let stream = MockTlsStream::new(handshake_data.to_vec());
-                let _ = test_accept_sync(acceptor, stream);
+                let result = test_accept_sync(acceptor, stream);
+                shadow_model.record_accept_result(&result);
             }
 
             TlsAcceptorOperation::AcceptMalformedClientHello { client_hello_data } => {
@@ -571,11 +627,19 @@ fn test_acceptor_operation_no_panic(
             }
 
             TlsAcceptorOperation::TestClientCertValidation {
-                present_client_cert: _,
-                cert_is_valid: _,
+                present_client_cert,
+                cert_is_valid,
             } => {
                 // Test client certificate validation logic
-                let stream = MockTlsStream::new(handshake_data.to_vec());
+                let mut data = handshake_data.to_vec();
+                if *present_client_cert {
+                    if *cert_is_valid {
+                        data.extend_from_slice(b"client-cert-valid");
+                    } else {
+                        data.extend_from_slice(b"client-cert-invalid");
+                    }
+                }
+                let stream = MockTlsStream::new(data);
                 let result = test_accept_sync(acceptor, stream);
 
                 if let Err(TlsError::Certificate(_)) = result {
@@ -583,11 +647,14 @@ fn test_acceptor_operation_no_panic(
                 }
             }
 
-            TlsAcceptorOperation::TestHandshakeTimeout {
-                delay_response_ms: _,
-            } => {
+            TlsAcceptorOperation::TestHandshakeTimeout { delay_response_ms } => {
                 // Test timeout behavior by providing no data
-                let stream = MockTlsStream::new(vec![]);
+                let data = if *delay_response_ms > 0 {
+                    Vec::new()
+                } else {
+                    handshake_data.to_vec()
+                };
+                let stream = MockTlsStream::new(data);
                 let result = test_accept_sync(acceptor, stream);
 
                 if let Err(TlsError::Timeout(_)) = result {
@@ -608,11 +675,15 @@ fn test_acceptor_operation_no_panic(
             }
 
             TlsAcceptorOperation::TestPostHandshakeAlerts {
-                alert_type: _,
-                alert_description: _,
+                alert_type,
+                alert_description,
             } => {
                 // Test post-handshake alert handling
-                let stream = MockTlsStream::new(handshake_data.to_vec());
+                let mut data = handshake_data.to_vec();
+                data.extend_from_slice(&[0x15, 0x03, 0x03, 0x00, 0x02]);
+                data.push(*alert_type);
+                data.push(*alert_description);
+                let stream = MockTlsStream::new(data);
                 let result = test_accept_sync(acceptor, stream);
 
                 if result.is_err() {
@@ -620,9 +691,18 @@ fn test_acceptor_operation_no_panic(
                 }
             }
 
-            TlsAcceptorOperation::TestConnectionCloseInHandshake { close_at_stage: _ } => {
+            TlsAcceptorOperation::TestConnectionCloseInHandshake { close_at_stage } => {
                 // Test connection close during handshake
-                let stream = MockTlsStream::new(handshake_data.to_vec()).with_close();
+                let mut data = handshake_data.to_vec();
+                let close_len = match close_at_stage {
+                    HandshakeStage::ClientHello => 5,
+                    HandshakeStage::ServerHello => 9,
+                    HandshakeStage::ServerCertificate => 13,
+                    HandshakeStage::ClientKeyExchange => 17,
+                    HandshakeStage::Finished => data.len(),
+                };
+                data.truncate(data.len().min(close_len));
+                let stream = MockTlsStream::new(data).with_close();
                 let result = test_accept_sync(acceptor, stream);
 
                 if result.is_err() {
@@ -644,10 +724,10 @@ fn test_acceptor_operation_no_panic(
 fn test_accept_sync(acceptor: &TlsAcceptor, stream: MockTlsStream) -> Result<(), TlsError> {
     use std::io::Cursor;
 
-    if let Some(timeout) = acceptor.handshake_timeout() {
-        if timeout.as_millis() > 30000 {
-            return Err(TlsError::Configuration("handshake timeout too long".into()));
-        }
+    if let Some(timeout) = acceptor.handshake_timeout()
+        && timeout.as_millis() > 30000
+    {
+        return Err(TlsError::Configuration("handshake timeout too long".into()));
     }
 
     if stream.read_data.is_empty() {
@@ -712,6 +792,11 @@ fuzz_target!(|data: &[u8]| {
 
     // Create shadow model for tracking security violations
     let mut shadow_model = TlsAcceptorShadowModel::default();
+    let handshake_data = apply_client_behavior(
+        fuzz_input.handshake_data.clone(),
+        &fuzz_input.client_behavior,
+        fuzz_input.seed,
+    );
 
     // Test acceptor creation doesn't panic
     let acceptor =
@@ -736,7 +821,7 @@ fuzz_target!(|data: &[u8]| {
             operation,
             &acceptor,
             &mut shadow_model,
-            &fuzz_input.handshake_data,
+            &handshake_data,
         );
 
         if !operation_successful {
@@ -750,22 +835,9 @@ fuzz_target!(|data: &[u8]| {
         panic!("TLS acceptor security violation: {}", violation);
     }
 
-    // Additional assertion: ensure unsupported cipher suites are rejected properly
-    // This tests that the acceptor gracefully rejects rather than panicking
+    // Every non-panic outcome should correspond to an operation the harness executed.
     assert!(
-        shadow_model.unsupported_cipher_rejections >= 0,
-        "Unsupported cipher rejection count should be non-negative"
-    );
-
-    // Assert that early data is refused when not supported
-    assert!(
-        shadow_model.early_data_rejections >= 0,
-        "Early data rejection count should be non-negative"
-    );
-
-    // Assert that post-handshake alerts are handled cleanly
-    assert!(
-        shadow_model.handshake_failures >= 0,
-        "Handshake failure count should be non-negative"
+        shadow_model.observed_outcomes() <= fuzz_input.operations.len(),
+        "shadow model recorded more outcomes than executed operations"
     );
 });
