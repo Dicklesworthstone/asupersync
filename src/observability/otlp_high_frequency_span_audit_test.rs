@@ -43,54 +43,53 @@ impl HighFrequencySpanBenchmark {
     }
 
     fn run_span_export_benchmark(&self, exporter: Arc<LoadSheddingTraceExporter>) -> Duration {
-        let handles: Vec<_> = (0..self.thread_count)
-            .map(|thread_id| {
-                let barrier = Arc::clone(&self.start_barrier);
-                let counter = Arc::clone(&self.completion_counter);
-                let exporter = Arc::clone(&exporter);
-                let spans_per_thread = self.spans_per_thread;
-                let batch_size = self.batch_size;
+        let mut handles = Vec::with_capacity(self.thread_count);
+        for thread_id in 0..self.thread_count {
+            let barrier = Arc::clone(&self.start_barrier);
+            let counter = Arc::clone(&self.completion_counter);
+            let exporter = Arc::clone(&exporter);
+            let spans_per_thread = self.spans_per_thread;
+            let batch_size = self.batch_size;
 
-                thread::spawn(move || {
-                    // Wait for all threads to be ready
-                    barrier.wait();
-                    let start = Instant::now();
+            handles.push(thread::spawn(move || {
+                // Wait for all threads to be ready
+                barrier.wait();
+                let start = Instant::now();
 
-                    // Generate span batches at high frequency
-                    let batch_count = spans_per_thread / batch_size;
-                    for batch_id in 0..batch_count {
-                        let spans: Vec<OtlpSpan> = (0..batch_size)
-                            .map(|i| OtlpSpan {
-                                span_id: format!("span-{}-{}-{}", thread_id, batch_id, i),
-                                name: "high_frequency_operation".to_string(),
-                                start_time_unix_nano: 1000000000,
-                                end_time_unix_nano: 1000001000,
-                                attributes: vec![
-                                    ("thread_id".to_string(), thread_id.to_string()),
-                                    ("batch_id".to_string(), batch_id.to_string()),
-                                ],
-                                trace_flags: Some(0x01), // Sampled
-                            })
-                            .collect();
+                // Generate span batches at high frequency
+                let batch_count = spans_per_thread / batch_size;
+                for batch_id in 0..batch_count {
+                    let spans: Vec<OtlpSpan> = (0..batch_size)
+                        .map(|i| OtlpSpan {
+                            span_id: format!("span-{}-{}-{}", thread_id, batch_id, i),
+                            name: "high_frequency_operation".to_string(),
+                            start_time_unix_nano: 1000000000,
+                            end_time_unix_nano: 1000001000,
+                            attributes: vec![
+                                ("thread_id".to_string(), thread_id.to_string()),
+                                ("batch_id".to_string(), batch_id.to_string()),
+                            ],
+                            trace_flags: Some(0x01), // Sampled
+                        })
+                        .collect();
 
-                        let batch = SpanBatch {
-                            batch_id: batch_id as u64,
-                            spans,
-                            created_at: Instant::now(),
-                        };
+                    let batch = SpanBatch {
+                        batch_id: batch_id as u64,
+                        spans,
+                        created_at: Instant::now(),
+                    };
 
-                        // **CRITICAL**: This export call hits the mutex-protected queue
-                        if let Err(e) = exporter.export(&batch) {
-                            eprintln!("Export failed: {}", e);
-                        }
+                    // **CRITICAL**: This export call hits the mutex-protected queue
+                    if let Err(e) = exporter.export(&batch) {
+                        eprintln!("Export failed: {}", e);
                     }
+                }
 
-                    let duration = start.elapsed();
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    (thread_id, duration, spans_per_thread)
-                })
-            })
-            .collect();
+                let duration = start.elapsed();
+                counter.fetch_add(1, Ordering::Relaxed);
+                (thread_id, duration, spans_per_thread)
+            }));
+        }
 
         let overall_start = Instant::now();
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
