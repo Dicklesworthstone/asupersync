@@ -1569,13 +1569,22 @@ mod tests {
         governor
             .record_peer_pressure("fresh-peer", 0.40, DegradationLevel::Light)
             .expect("fresh peer report should be accepted");
+        let stale_reported_at = Instant::now()
+            .checked_sub(
+                governor
+                    .config
+                    .peer_pressure_max_age
+                    .checked_mul(2)
+                    .expect("test peer pressure max age should double without overflow"),
+            )
+            .expect("test stale timestamp should be representable");
 
         {
             let mut reports = governor.peer_pressure_reports.lock().unwrap();
             reports
                 .get_mut("stale-peer")
                 .expect("stale peer report should exist before pruning")
-                .reported_at = Instant::now() - governor.config.peer_pressure_max_age * 2;
+                .reported_at = stale_reported_at;
         }
 
         assert_eq!(governor.prune_stale_peer_pressure_reports(), 1);
