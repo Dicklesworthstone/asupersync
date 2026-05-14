@@ -19,7 +19,10 @@
 //! Usage: cargo fuzz run jetstream_ack_subject_splitter
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::messaging::{jetstream::fuzz_parse_js_message, nats::Message};
+use asupersync::messaging::{
+    jetstream::{FuzzJsAckMetadata, fuzz_parse_js_message},
+    nats::Message,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum subject length (reasonable upper bound for NATS subjects)
@@ -489,6 +492,28 @@ fn test_structured_subject_parsing(ack_subject: &AckReplySubject) {
     }
 }
 
+fn observe_ack_subject_parse(
+    result: Option<FuzzJsAckMetadata>,
+    expected_subject: &str,
+    expected_payload_len: usize,
+    context: &str,
+) {
+    if let Some(metadata) = result {
+        assert_eq!(
+            metadata.subject, expected_subject,
+            "{context} changed the source subject"
+        );
+        assert_eq!(
+            metadata.payload_len, expected_payload_len,
+            "{context} changed the source payload length"
+        );
+    }
+}
+
+fn observe_ack_subject_rejection(result: Option<FuzzJsAckMetadata>, context: &str) {
+    assert!(result.is_none(), "{context} unexpectedly parsed");
+}
+
 fn test_boundary_conditions(data: &[u8]) {
     // Test specific boundary patterns
 
@@ -502,7 +527,7 @@ fn test_boundary_conditions(data: &[u8]) {
             payload: Vec::new(),
             reply_to: Some(short_subject.into_owned()),
         };
-        let _ = fuzz_parse_js_message(msg);
+        observe_ack_subject_rejection(fuzz_parse_js_message(msg), "short ACK subject");
     }
 
     // Test exact minimum token count (9 tokens)
@@ -533,7 +558,12 @@ fn test_boundary_conditions(data: &[u8]) {
             payload: Vec::new(),
             reply_to: Some(boundary_subject),
         };
-        let _ = fuzz_parse_js_message(msg);
+        observe_ack_subject_parse(
+            fuzz_parse_js_message(msg),
+            "boundary",
+            0,
+            "minimum-token ACK subject",
+        );
     }
 
     // Test integer overflow scenarios
@@ -553,7 +583,7 @@ fn test_boundary_conditions(data: &[u8]) {
             payload: Vec::new(),
             reply_to: Some(subject.to_string()),
         };
-        let _ = fuzz_parse_js_message(msg);
+        observe_ack_subject_rejection(fuzz_parse_js_message(msg), "overflow ACK subject");
     }
 
     // Test UTF-8 edge cases
@@ -569,6 +599,6 @@ fn test_boundary_conditions(data: &[u8]) {
             payload: Vec::new(),
             reply_to: Some(utf8_subject),
         };
-        let _ = fuzz_parse_js_message(msg);
+        observe_ack_subject_parse(fuzz_parse_js_message(msg), "utf8", 0, "UTF-8 ACK subject");
     }
 }
