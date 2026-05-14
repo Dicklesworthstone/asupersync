@@ -35899,11 +35899,11 @@ mod otlp_122_tests {
 
     #[derive(Debug, Clone)]
     enum Otlp127AttributeValue {
-        StringRegular(String),   // Normal sized string
-        StringLarge(usize),      // Large string (specified by size in bytes)
-        StringExtraLarge(usize), // Extra large string (>10MB)
-        StringMaxAllowed,        // String at maximum allowed size (≤10MB)
-        StringOverLimit,         // String over the limit (>10MB)
+        Regular(String),   // Normal sized string
+        Large(usize),      // Large string (specified by size in bytes)
+        ExtraLarge(usize), // Extra large string (>10MB)
+        MaxAllowed,        // String at maximum allowed size (≤10MB)
+        OverLimit,         // String over the limit (>10MB)
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -35945,7 +35945,7 @@ mod otlp_122_tests {
         // Check each attribute for size violations
         for (attr_name, attr_value) in &scenario.attributes {
             let attribute_size = match attr_value {
-                Otlp127AttributeValue::StringRegular(s) => {
+                Otlp127AttributeValue::Regular(s) => {
                     let size = s.len();
                     println!(
                         "  Found regular string attribute '{}': {} bytes",
@@ -35953,14 +35953,14 @@ mod otlp_122_tests {
                     );
                     size
                 }
-                Otlp127AttributeValue::StringLarge(size) => {
+                Otlp127AttributeValue::Large(size) => {
                     println!(
                         "  Found large string attribute '{}': {} bytes",
                         attr_name, size
                     );
                     *size
                 }
-                Otlp127AttributeValue::StringExtraLarge(size) => {
+                Otlp127AttributeValue::ExtraLarge(size) => {
                     println!(
                         "  Found extra large string attribute '{}': {} bytes",
                         attr_name, size
@@ -35974,7 +35974,7 @@ mod otlp_122_tests {
                     }
                     *size
                 }
-                Otlp127AttributeValue::StringMaxAllowed => {
+                Otlp127AttributeValue::MaxAllowed => {
                     let size = MAX_ATTRIBUTE_SIZE_BYTES;
                     println!(
                         "  Found max-allowed string attribute '{}': {} bytes (at limit)",
@@ -35982,7 +35982,7 @@ mod otlp_122_tests {
                     );
                     size
                 }
-                Otlp127AttributeValue::StringOverLimit => {
+                Otlp127AttributeValue::OverLimit => {
                     let size = MAX_ATTRIBUTE_SIZE_BYTES + 1;
                     println!(
                         "  Found over-limit string attribute '{}': {} bytes (OVER LIMIT)",
@@ -36050,17 +36050,15 @@ mod otlp_122_tests {
                 vec![
                     (
                         "service.name".to_string(),
-                        Otlp127AttributeValue::StringRegular("web-service".to_string()),
+                        Otlp127AttributeValue::Regular("web-service".to_string()),
                     ),
                     (
                         "description".to_string(),
-                        Otlp127AttributeValue::StringRegular(
-                            "A normal length description".to_string(),
-                        ),
+                        Otlp127AttributeValue::Regular("A normal length description".to_string()),
                     ),
                     (
                         "user.id".to_string(),
-                        Otlp127AttributeValue::StringRegular("12345".to_string()),
+                        Otlp127AttributeValue::Regular("12345".to_string()),
                     ),
                 ],
                 Otlp127ValidationResult::Accept,
@@ -36075,15 +36073,15 @@ mod otlp_122_tests {
                 vec![
                     (
                         "large_data".to_string(),
-                        Otlp127AttributeValue::StringLarge(1024 * 1024),
+                        Otlp127AttributeValue::Large(1024 * 1024),
                     ), // 1MB
                     (
                         "medium_data".to_string(),
-                        Otlp127AttributeValue::StringLarge(512 * 1024),
+                        Otlp127AttributeValue::Large(512 * 1024),
                     ), // 512KB
                     (
                         "service.name".to_string(),
-                        Otlp127AttributeValue::StringRegular("service".to_string()),
+                        Otlp127AttributeValue::Regular("service".to_string()),
                     ),
                 ],
                 Otlp127ValidationResult::Accept,
@@ -36096,13 +36094,10 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4738",
                 "00f067aa0ba902b9",
                 vec![
-                    (
-                        "max_data".to_string(),
-                        Otlp127AttributeValue::StringMaxAllowed,
-                    ), // Exactly 10MB
+                    ("max_data".to_string(), Otlp127AttributeValue::MaxAllowed), // Exactly 10MB
                     (
                         "service.name".to_string(),
-                        Otlp127AttributeValue::StringRegular("boundary-test".to_string()),
+                        Otlp127AttributeValue::Regular("boundary-test".to_string()),
                     ),
                 ],
                 Otlp127ValidationResult::Accept,
@@ -36117,11 +36112,11 @@ mod otlp_122_tests {
                 vec![
                     (
                         "service.name".to_string(),
-                        Otlp127AttributeValue::StringRegular("service".to_string()),
+                        Otlp127AttributeValue::Regular("service".to_string()),
                     ),
                     (
                         "oversized_data".to_string(),
-                        Otlp127AttributeValue::StringOverLimit,
+                        Otlp127AttributeValue::OverLimit,
                     ), // 10MB + 1 byte
                 ],
                 Otlp127ValidationResult::Reject,
@@ -36136,7 +36131,7 @@ mod otlp_122_tests {
                 vec![
                     (
                         "huge_payload".to_string(),
-                        Otlp127AttributeValue::StringExtraLarge(50 * 1024 * 1024),
+                        Otlp127AttributeValue::ExtraLarge(50 * 1024 * 1024),
                     ), // 50MB
                 ],
                 Otlp127ValidationResult::Reject,
@@ -36151,15 +36146,15 @@ mod otlp_122_tests {
                 vec![
                     (
                         "acceptable1".to_string(),
-                        Otlp127AttributeValue::StringLarge(5 * 1024 * 1024),
+                        Otlp127AttributeValue::Large(5 * 1024 * 1024),
                     ), // 5MB - OK
                     (
                         "acceptable2".to_string(),
-                        Otlp127AttributeValue::StringLarge(3 * 1024 * 1024),
+                        Otlp127AttributeValue::Large(3 * 1024 * 1024),
                     ), // 3MB - OK
                     (
                         "oversized".to_string(),
-                        Otlp127AttributeValue::StringExtraLarge(15 * 1024 * 1024),
+                        Otlp127AttributeValue::ExtraLarge(15 * 1024 * 1024),
                     ), // 15MB - REJECT
                 ],
                 Otlp127ValidationResult::Reject,
