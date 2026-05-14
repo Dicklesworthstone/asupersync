@@ -48996,7 +48996,7 @@ mod otlp_122_tests {
                 span_attributes: vec![
                     (
                         "messaging.redis.command".to_string(),
-                        AnyValue::StringValue("".to_string()),
+                        AnyValue::StringValue(String::new()),
                     ), // Empty
                     (
                         "messaging.system".to_string(),
