@@ -27086,7 +27086,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 0,
             expected_filtered_by_status: false, // Status should NOT filter export
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27120,7 +27120,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 0,
             expected_filtered_by_status: false,
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27148,7 +27148,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 0,
             expected_filtered_by_status: false,
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27182,7 +27182,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 1,
             expected_filtered_by_status: false,
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27204,7 +27204,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 0,
             expected_filtered_by_status: false,
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27226,7 +27226,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 0,
             expected_filtered_by_status: false,
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27272,7 +27272,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 0,
             expected_filtered_by_status: false,
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27287,7 +27287,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 0,
             expected_filtered_by_status: false,
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27321,7 +27321,7 @@ mod otlp_110_mixed_status_code_batch_export {
             expected_unset_count: 0,
             expected_filtered_by_status: false,
             expected_batch_rejected: false,
-            expected_rejection_reason: "".to_string(),
+            expected_rejection_reason: String::new(),
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27337,25 +27337,31 @@ mod otlp_110_mixed_status_code_batch_export {
             let reference_result = simulate_reference_status_batch_export(&scenario);
 
             // Validate individual results
-            validate_status_batch_export_logic(&asupersync_result).expect(&format!(
-                "Asupersync status batch export logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_status_batch_export_logic(&asupersync_result).unwrap_or_else(|error| {
+                panic!(
+                    "Asupersync status batch export logic failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
-            validate_status_batch_export_logic(&reference_result).expect(&format!(
-                "Reference status batch export logic failed for scenario: {}",
-                scenario.description
-            ));
+            validate_status_batch_export_logic(&reference_result).unwrap_or_else(|error| {
+                panic!(
+                    "Reference status batch export logic failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
             // Validate implementation consistency
             validate_status_batch_export_implementation_consistency(
                 &asupersync_result,
                 &reference_result,
             )
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
             println!("✓ Scenario passed: {}", scenario.description);
         }
