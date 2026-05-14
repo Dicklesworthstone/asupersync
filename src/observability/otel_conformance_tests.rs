@@ -47740,13 +47740,11 @@ mod otlp_122_tests {
                                 );
                             }
                         }
-                        "fanout" => {
-                            if !key.is_empty() {
-                                println!(
-                                    "⚠ Fanout exchange ignores routing key '{}' (consider empty string)",
-                                    key
-                                );
-                            }
+                        "fanout" if !key.is_empty() => {
+                            println!(
+                                "⚠ Fanout exchange ignores routing key '{}' (consider empty string)",
+                                key
+                            );
                         }
                         _ => {
                             // Direct, headers exchanges can use any routing key
