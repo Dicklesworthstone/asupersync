@@ -30193,10 +30193,8 @@ mod otlp_115_tests {
             values: Vec<f64>,
         ) -> Span {
             let mut attributes = HashMap::new();
-            let array_values: Vec<AttributeValue> = values
-                .into_iter()
-                .map(|v| AttributeValue::Double(v))
-                .collect();
+            let array_values: Vec<AttributeValue> =
+                values.into_iter().map(AttributeValue::Double).collect();
             attributes.insert(key.to_string(), AttributeValue::Array(array_values));
 
             Span {
@@ -30216,21 +30214,20 @@ mod otlp_115_tests {
     fn simulate_asupersync_export(scenario: &Otlp115Scenario) -> ValidationResult {
         // Simulate our asupersync exporter's f64::INFINITY validation
         for span in &scenario.spans {
-            for (_, attr_value) in &span.attributes {
+            for attr_value in span.attributes.values() {
                 match attr_value {
-                    AttributeValue::Double(value) => {
+                    AttributeValue::Double(value) if value.is_infinite() => {
                         // f64::INFINITY and f64::NEG_INFINITY cannot be serialized to protobuf
                         // protobuf spec requires finite double values only
-                        if value.is_infinite() {
-                            return ValidationResult::Reject;
-                        }
+                        return ValidationResult::Reject;
                     }
                     AttributeValue::Array(array_values) => {
                         for array_value in array_values {
-                            if let AttributeValue::Double(value) = array_value {
-                                if value.is_infinite() {
+                            match array_value {
+                                AttributeValue::Double(value) if value.is_infinite() => {
                                     return ValidationResult::Reject;
                                 }
+                                _ => {}
                             }
                         }
                     }
@@ -30245,19 +30242,18 @@ mod otlp_115_tests {
         // Simulate reference OTLP exporter behavior
         // Per OTLP spec: protobuf double_value field requires finite values
         for span in &scenario.spans {
-            for (_, attr_value) in &span.attributes {
+            for attr_value in span.attributes.values() {
                 match attr_value {
-                    AttributeValue::Double(value) => {
-                        if value.is_infinite() {
-                            return ValidationResult::Reject;
-                        }
+                    AttributeValue::Double(value) if value.is_infinite() => {
+                        return ValidationResult::Reject;
                     }
                     AttributeValue::Array(array_values) => {
                         for array_value in array_values {
-                            if let AttributeValue::Double(value) = array_value {
-                                if value.is_infinite() {
+                            match array_value {
+                                AttributeValue::Double(value) if value.is_infinite() => {
                                     return ValidationResult::Reject;
                                 }
+                                _ => {}
                             }
                         }
                     }
@@ -30651,7 +30647,7 @@ mod otlp_116_tests {
     fn simulate_asupersync_export(scenario: &Otlp116Scenario) -> ValidationResult {
         // Simulate our asupersync exporter's whitespace-only key validation
         for span in &scenario.spans {
-            for (key, _) in &span.attributes {
+            for key in span.attributes.keys() {
                 // OTLP §6.2.5: attribute keys must be non-empty after trimming
                 if is_whitespace_only_key(key) {
                     return ValidationResult::Reject;
@@ -30665,7 +30661,7 @@ mod otlp_116_tests {
         // Simulate reference OTLP exporter behavior
         // Per OTLP spec §6.2.5: keys must be non-empty after trimming
         for span in &scenario.spans {
-            for (key, _) in &span.attributes {
+            for key in span.attributes.keys() {
                 if is_whitespace_only_key(key) {
                     return ValidationResult::Reject;
                 }
