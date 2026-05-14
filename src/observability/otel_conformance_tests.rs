@@ -40006,7 +40006,7 @@ mod otlp_122_tests {
             let span_data = SpanData {
                 name: scenario.span_name.clone(),
                 status: SpanStatus {
-                    code: scenario.status_code.clone(),
+                    code: scenario.status_code,
                     message: scenario.status_message.clone(),
                 },
                 ..SpanData::default_for_test()
@@ -40298,7 +40298,7 @@ mod otlp_122_tests {
 
             let span_data = SpanData {
                 name: scenario.span_name.clone(),
-                kind: scenario.span_kind.clone(),
+                kind: scenario.span_kind,
                 attributes: span_attributes,
                 ..SpanData::default_for_test()
             };
@@ -40386,7 +40386,7 @@ mod otlp_122_tests {
 
             Ok(ExportedSpanData {
                 name: span_data.name.clone(),
-                kind: span_data.kind.clone(),
+                kind: span_data.kind,
                 attributes: exported_attributes,
             })
         }
