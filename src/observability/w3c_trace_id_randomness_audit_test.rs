@@ -52,6 +52,10 @@ fn trace_id_to_bytes(trace_id: TraceId) -> [u8; 16] {
 
 fn problematic_trace_id_generation() -> TraceId {
     let seed = TEST_SPAN_SEED.fetch_add(1, Ordering::Relaxed);
+    problematic_trace_id_generation_from_seed(seed)
+}
+
+fn problematic_trace_id_generation_from_seed(seed: u64) -> TraceId {
     let hi = problematic_splitmix64(seed);
     let lo = problematic_splitmix64(seed ^ 0x9e37_79b9_7f4a_7c15);
 
@@ -317,14 +321,10 @@ fn audit_prng_state_leakage_vulnerability() {
     println!("   • Generator state MUST be computationally infeasible to recover");
     println!("   • NOT: sequential PRNG with observable patterns");
 
-    // Reset seed to known state
-    TEST_SPAN_SEED.store(1000, Ordering::Relaxed);
-
     // Generate sequence of trace_ids
-    let mut observed_ids = Vec::new();
-    for _ in 0..10 {
-        observed_ids.push(problematic_trace_id_generation());
-    }
+    let observed_ids: Vec<_> = (1000..1010)
+        .map(problematic_trace_id_generation_from_seed)
+        .collect();
 
     println!("📊 Observed trace_id sequence (first 3):");
     for (i, trace_id) in observed_ids.iter().take(3).enumerate() {
@@ -334,13 +334,9 @@ fn audit_prng_state_leakage_vulnerability() {
     // **VULNERABILITY DEMONSTRATION**: Predict next trace_id
     println!("📊 Predictability test:");
 
-    // Reset to same initial state
-    TEST_SPAN_SEED.store(1000, Ordering::Relaxed);
-
-    let mut predicted_ids = Vec::new();
-    for _ in 0..10 {
-        predicted_ids.push(problematic_trace_id_generation());
-    }
+    let predicted_ids: Vec<_> = (1000..1010)
+        .map(problematic_trace_id_generation_from_seed)
+        .collect();
 
     // Check if prediction matches observation
     let matches = observed_ids
