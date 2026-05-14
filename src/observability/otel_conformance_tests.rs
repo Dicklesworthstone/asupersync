@@ -38718,12 +38718,10 @@ mod otlp_122_tests {
         // Per OTLP-132: Attribute values with spaces MUST be preserved verbatim
         let all_spaces_preserved = scenario.attributes.iter().all(|(_, value)| {
             match value {
-                Otlp132AttributeValue::String(s) | Otlp132AttributeValue::StringWithSpaces(s) => {
-                    if s.contains(' ') {
-                        simulate_space_preservation_cycle(s).is_preserved_verbatim
-                    } else {
-                        true // Non-space strings should also be preserved
-                    }
+                Otlp132AttributeValue::String(s) | Otlp132AttributeValue::StringWithSpaces(s)
+                    if s.contains(' ') =>
+                {
+                    simulate_space_preservation_cycle(s).is_preserved_verbatim
                 }
                 _ => true, // Non-string values not under test
             }
@@ -38756,7 +38754,7 @@ mod otlp_122_tests {
         let space_positions: Vec<usize> = value.match_indices(' ').map(|(pos, _)| pos).collect();
 
         // Check for URL encoding patterns
-        let is_url_encoded = value.contains("%20") || value.contains("+");
+        let is_url_encoded = value.contains("%20") || value.contains('+');
 
         // Check for trimming (leading/trailing space removal)
         let is_trimmed = false; // In proper implementation, should check if original != trimmed
@@ -38798,7 +38796,7 @@ mod otlp_122_tests {
 
         let encoded_value = original_value.to_string(); // Perfect preservation for test
         let is_preserved_verbatim = encoded_value == original_value;
-        let no_url_encoding = !encoded_value.contains("%20") && !encoded_value.contains("+");
+        let no_url_encoding = !encoded_value.contains("%20") && !encoded_value.contains('+');
         let no_trimming = encoded_value == original_value; // No leading/trailing space removal
         let spaces_intact =
             encoded_value.matches(' ').count() == original_value.matches(' ').count();
@@ -39043,7 +39041,7 @@ mod otlp_122_tests {
                 "Test value should not contain URL encoding"
             );
             assert!(
-                !original_value.contains("+"),
+                !original_value.contains('+'),
                 "Test value should not contain plus encoding"
             );
 
