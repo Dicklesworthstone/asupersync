@@ -41311,7 +41311,7 @@ mod otlp_122_tests {
             let span_data = SpanData {
                 name: format!("status_sanitization_test_{}", scenario.scenario_name),
                 status: SpanStatus {
-                    code: scenario.status_code.clone(),
+                    code: scenario.status_code,
                     message: Some(scenario.original_description.clone()),
                 },
                 ..SpanData::default_for_test()
@@ -41400,14 +41400,8 @@ mod otlp_122_tests {
         /// Sanitizes status description by replacing all newline variants with spaces
         fn sanitize_status_description(description: &str) -> String {
             description
-                // Replace CRLF sequences first to avoid double-replacement
-                .replace("\r\n", " ")
-                // Replace remaining individual newlines and carriage returns
-                .replace('\n', " ")
-                .replace('\r', " ")
-                // Replace Unicode line separators (U+2028, U+2029)
-                .replace('\u{2028}', " ")
-                .replace('\u{2029}', " ")
+                // Replace ASCII and Unicode newline separators.
+                .replace(['\n', '\r', '\u{2028}', '\u{2029}'], " ")
                 // Normalize multiple consecutive spaces to single spaces
                 .split_whitespace()
                 .collect::<Vec<&str>>()
