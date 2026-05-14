@@ -22,6 +22,9 @@ use libfuzzer_sys::fuzz_target;
 /// Maximum size for FetchResponse to prevent OOM during fuzzing
 const MAX_RESPONSE_SIZE: usize = 256 * 1024;
 
+/// Minimum serialized response size: throttle time, error code, session id, topic count.
+const MIN_FETCH_RESPONSE_SIZE: usize = 4 + 2 + 4 + 4;
+
 /// Maximum number of topics in a single FetchResponse
 const MAX_TOPICS: usize = 100;
 
@@ -407,7 +410,7 @@ impl KafkaFetchResponse {
 
 /// Parse FetchResponse from wire format bytes
 fn parse_fetch_response(data: &[u8]) -> Result<(), String> {
-    if data.len() < 16 {
+    if data.len() < MIN_FETCH_RESPONSE_SIZE {
         return Err("Response too short for header".to_string());
     }
 
@@ -678,6 +681,16 @@ fn parse_record(data: &[u8], mut offset: usize, batch_end: usize) -> Result<usiz
     Ok(record_end)
 }
 
+fn observe_fetch_response_parse(result: Result<(), String>, context: &str) {
+    if let Err(error) = result {
+        assert!(!error.is_empty(), "empty parser diagnostic for {context}");
+        assert!(
+            error.len() <= 128,
+            "oversized parser diagnostic for {context}: {error:?}"
+        );
+    }
+}
+
 fuzz_target!(|fetch_response: KafkaFetchResponse| {
     // Guard against oversized inputs
     if fetch_response.topics.len() > MAX_TOPICS {
@@ -702,7 +715,14 @@ fuzz_target!(|fetch_response: KafkaFetchResponse| {
     }
 
     // Test the parser with structure-aware input
-    let _ = parse_fetch_response(&wire_data);
+    let result = parse_fetch_response(&wire_data);
+    if fetch_response.params.empty_lists && fetch_response.header.throttle_time_ms >= 0 {
+        assert!(
+            result.is_ok(),
+            "empty FetchResponse should parse, got {result:?}"
+        );
+    }
+    observe_fetch_response_parse(result, "full FetchResponse wire data");
 
     // Test with truncated inputs for boundary conditions
     for truncate_at in [
@@ -711,7 +731,11 @@ fuzz_target!(|fetch_response: KafkaFetchResponse| {
         wire_data.len() * 3 / 4,
     ] {
         if truncate_at > 0 && truncate_at < wire_data.len() {
-            let _ = parse_fetch_response(&wire_data[..truncate_at]);
+            let context = format!(
+                "truncated FetchResponse len={} truncate_at={truncate_at}",
+                wire_data.len()
+            );
+            observe_fetch_response_parse(parse_fetch_response(&wire_data[..truncate_at]), &context);
         }
     }
 
@@ -721,7 +745,8 @@ fuzz_target!(|fetch_response: KafkaFetchResponse| {
             if i < wire_data.len() {
                 let mut modified = wire_data.clone();
                 modified[i] = modified[i].wrapping_add(1);
-                let _ = parse_fetch_response(&modified);
+                let context = format!("bitflipped FetchResponse len={} index={i}", wire_data.len());
+                observe_fetch_response_parse(parse_fetch_response(&modified), &context);
             }
         }
     }
