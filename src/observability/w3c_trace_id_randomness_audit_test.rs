@@ -112,7 +112,7 @@ fn audit_trace_id_w3c_randomness_compliance() {
         for (pos, &byte) in bytes.iter().enumerate() {
             *problematic_bytes_freq
                 .entry(pos)
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .entry(byte)
                 .or_insert(0) += 1;
         }
@@ -131,7 +131,7 @@ fn audit_trace_id_w3c_randomness_compliance() {
         for (pos, &byte) in bytes.iter().enumerate() {
             *compliant_bytes_freq
                 .entry(pos)
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .entry(byte)
                 .or_insert(0) += 1;
         }
