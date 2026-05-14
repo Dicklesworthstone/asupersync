@@ -33006,32 +33006,18 @@ mod otlp_120_tests {
         }
     }
 
-    fn simulate_asupersync_export(scenario: &Otlp120Scenario) -> ValidationResult {
+    fn simulate_asupersync_export(_scenario: &Otlp120Scenario) -> ValidationResult {
         // Simulate our asupersync exporter's INTERNAL span validation
         // INTERNAL spans should be accepted regardless of attributes
-        for span_with_scope in &scenario.spans {
-            if span_with_scope.span.kind == SpanKind::Internal {
-                // INTERNAL spans don't require any specific attributes
-                // They should be accepted even with empty attributes
-                // No additional validation needed beyond basic span structure
-                continue;
-            }
-
-            // Other span kinds may have their own validation rules
-            // but this test focuses on INTERNAL spans
-        }
+        // No additional validation needed beyond basic span structure.
+        // Other span kinds may have their own validation rules, but this test focuses on INTERNAL spans.
         ValidationResult::Accept
     }
 
-    fn simulate_reference_export(scenario: &Otlp120Scenario) -> ValidationResult {
+    fn simulate_reference_export(_scenario: &Otlp120Scenario) -> ValidationResult {
         // Simulate reference OTLP exporter behavior
         // Per OTLP spec: INTERNAL spans don't require specific attributes
-        for span_with_scope in &scenario.spans {
-            if span_with_scope.span.kind == SpanKind::Internal {
-                // INTERNAL spans are always valid regardless of attributes
-                continue;
-            }
-        }
+        // INTERNAL spans are always valid regardless of attributes.
         ValidationResult::Accept
     }
 
