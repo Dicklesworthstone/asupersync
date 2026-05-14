@@ -69,9 +69,7 @@ impl MockSpan {
     /// Defective implementation: panics on second call.
     fn end_defective_panic(&mut self) {
         self.end_call_count += 1;
-        if self.end_time.is_some() {
-            panic!("Span already ended!");
-        }
+        assert!(self.end_time.is_none(), "Span already ended!");
         self.end_time = Some(SystemTime::now());
         self.ended_flag = true;
     }
