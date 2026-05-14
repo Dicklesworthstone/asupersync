@@ -40857,11 +40857,11 @@ mod otlp_122_tests {
                 trace_state_data: TraceStateData {
                     raw_value_count: 0,
                     key_value_pairs: vec![],
-                    encoded_string: "".to_string(),
+                    encoded_string: String::new(),
                     is_corrupt: false,
                 },
                 should_reject: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Valid trace_state with zero count should be accepted".to_string(),
             },
             TraceStateCorruptionScenario {
@@ -40877,7 +40877,7 @@ mod otlp_122_tests {
                     is_corrupt: false,
                 },
                 should_reject: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Valid trace_state with positive count should be accepted".to_string(),
             },
             TraceStateCorruptionScenario {
@@ -40897,7 +40897,7 @@ mod otlp_122_tests {
                 trace_state_data: TraceStateData {
                     raw_value_count: -999999,
                     key_value_pairs: vec![],
-                    encoded_string: "".to_string(),
+                    encoded_string: String::new(),
                     is_corrupt: true,
                 },
                 should_reject: true,
@@ -41029,7 +41029,7 @@ mod otlp_122_tests {
                 if trace_state_data.raw_value_count < 0 {
                     return TraceStateValidationResult::Rejected {
                         rejection_reason: format!(
-                            "OTLP-137: Negative trace_state value count {} indicates corrupt data",
+                            "OTLP-137: negative trace_state value count {} indicates corrupt data",
                             trace_state_data.raw_value_count
                         ),
                         raw_count: trace_state_data.raw_value_count,
