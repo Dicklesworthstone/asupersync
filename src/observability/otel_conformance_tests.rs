@@ -44993,7 +44993,7 @@ mod otlp_122_tests {
                 span_attributes: vec![
                     (
                         "messaging.kafka.consumer.group".to_string(),
-                        AnyValue::StringValue("".to_string()),
+                        AnyValue::StringValue(String::new()),
                     ), // Empty group
                     (
                         "messaging.system".to_string(),
