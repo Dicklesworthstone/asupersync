@@ -42332,7 +42332,7 @@ mod otlp_122_tests {
                 },
                 contains_nan_double: false,
                 should_reject_entire_span: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Valid span with normal double values should be accepted".to_string(),
             },
             DoubleValueNanRejectionScenario {
@@ -42394,7 +42394,7 @@ mod otlp_122_tests {
                 },
                 contains_nan_double: false,
                 should_reject_entire_span: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Span with infinity doubles (no NaN) should be accepted".to_string(),
             },
             DoubleValueNanRejectionScenario {
@@ -42449,7 +42449,7 @@ mod otlp_122_tests {
                     ); // This is infinity, not NaN
                     attrs.insert(
                         "zero_division_nan".to_string(),
-                        AnyValue::DoubleValue(0.0 / 0.0),
+                        AnyValue::DoubleValue(f64::NAN),
                     ); // This is NaN
                     attrs
                 },
@@ -42464,7 +42464,7 @@ mod otlp_122_tests {
                 span_attributes: HashMap::new(),
                 contains_nan_double: false,
                 should_reject_entire_span: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Span with no attributes should be accepted".to_string(),
             },
             DoubleValueNanRejectionScenario {
@@ -42481,7 +42481,7 @@ mod otlp_122_tests {
                 },
                 contains_nan_double: false,
                 should_reject_entire_span: false,
-                rejection_reason: "".to_string(),
+                rejection_reason: String::new(),
                 description: "Span with only non-double attributes should be accepted".to_string(),
             },
         ];
@@ -42694,7 +42694,7 @@ mod otlp_122_tests {
             ("direct_nan", f64::NAN),
             ("sqrt_negative", f64::sqrt(-1.0)),
             ("arithmetic_nan", f64::INFINITY - f64::INFINITY),
-            ("zero_div_zero", 0.0 / 0.0),
+            ("zero_div_zero", f64::NAN),
             ("bit_pattern_nan", f64::from_bits(0x7FF8000000000001)),
             ("negative_bit_nan", f64::from_bits(0xFFF8000000000001)),
         ];
