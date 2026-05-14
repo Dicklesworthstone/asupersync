@@ -213,7 +213,9 @@ fn audit_ntp_clock_adjustment_scenario() {
 
     // Event 2: After simulated NTP backward adjustment
     // In reality, this would be SystemTime::now() after NTP moved clock back
-    let timestamp2 = timestamp1 - Duration::from_secs(30); // Simulate 30s backward jump
+    let timestamp2 = timestamp1
+        .checked_sub(Duration::from_secs(30))
+        .expect("simulated 30s backward jump should remain representable");
     span_events.push(("event_2", timestamp2));
     println!(
         "   Event 2 timestamp: {:?} (simulated NTP regression)",
