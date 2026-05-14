@@ -441,10 +441,10 @@ mod trace_event_schema_stability_tests {
         // Test 4.4: All TraceEventKind variants round-trip correctly
         let test_events = create_comprehensive_event_suite();
         for (i, event) in test_events.iter().enumerate() {
-            let serialized =
-                serde_json::to_string(event).expect(&format!("Event {} should serialize", i));
+            let serialized = serde_json::to_string(event)
+                .unwrap_or_else(|_| panic!("Event {i} should serialize"));
             let deserialized: TraceEvent = serde_json::from_str(&serialized)
-                .expect(&format!("Event {} should deserialize", i));
+                .unwrap_or_else(|_| panic!("Event {i} should deserialize"));
 
             assert_eq!(
                 *event, deserialized,
@@ -1087,10 +1087,10 @@ mod trace_event_schema_stability_tests {
 
         // Requirement 4: Verify full serialization round-trip
         for (i, event) in events_with_logical_time.iter().enumerate() {
-            let serialized =
-                serde_json::to_string(event).expect(&format!("Event {} should serialize", i));
+            let serialized = serde_json::to_string(event)
+                .unwrap_or_else(|_| panic!("Event {i} should serialize"));
             let deserialized: TraceEvent = serde_json::from_str(&serialized)
-                .expect(&format!("Event {} should deserialize", i));
+                .unwrap_or_else(|_| panic!("Event {i} should deserialize"));
 
             assert_eq!(
                 *event, deserialized,
