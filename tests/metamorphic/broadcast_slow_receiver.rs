@@ -238,24 +238,18 @@ fn mr2_slow_receiver_triggers_lagged_error_after_bound() {
             let (tx, mut slow_rx) = broadcast::channel::<usize>(scenario.capacity);
             let mut fast_rx = tx.subscribe();
 
-            // Send warmup messages
+            // Send warmup messages and keep both receivers caught up so only
+            // lag_messages contributes to the slow receiver lag oracle.
             for i in 0..scenario.warmup_messages {
                 tx.send(&cx, i).expect("send warmup");
-            }
-
-            // Fast receiver consumes warmup messages
-            for _ in 0..scenario.warmup_messages {
                 fast_rx.recv(&cx).await.expect("fast recv warmup");
+                slow_rx.recv(&cx).await.expect("slow recv warmup");
             }
 
             // MR2.1: Send messages that exceed capacity to cause lag
             let lag_start = scenario.warmup_messages;
             for i in 0..scenario.lag_messages {
                 tx.send(&cx, lag_start + i).expect("send lag messages");
-            }
-
-            // Fast receiver keeps up
-            for _ in 0..scenario.lag_messages {
                 fast_rx.recv(&cx).await.expect("fast recv lag messages");
             }
 
@@ -347,12 +341,10 @@ fn mr3_recovery_after_lagged_resumes_from_latest() {
 
             // MR3.4: Send post-recovery messages and verify they're received correctly
             let recovery_start = total_sent;
-            for i in 0..scenario.recovery_messages {
-                tx.send(&cx, recovery_start + i).expect("send recovery");
-            }
-
             let mut post_recovery = Vec::new();
-            for _ in 0..scenario.recovery_messages {
+            for i in 0..scenario.recovery_messages {
+                let expected = recovery_start + i;
+                tx.send(&cx, expected).expect("send recovery");
                 match slow_rx.recv(&cx).await {
                     Ok(msg) => post_recovery.push(msg),
                     Err(e) => {
@@ -396,26 +388,20 @@ fn mr4_other_receivers_unaffected_by_slow_subscriber() {
                 fast_receivers.push(tx.subscribe());
             }
 
-            // MR4.1: Send messages and let only fast receivers consume
+            // MR4.1: Send messages and keep only fast receivers caught up.
             let total_messages = scenario.warmup_messages + scenario.lag_messages;
+            let mut fast_sequences = vec![Vec::new(); fast_receivers.len()];
             for i in 0..total_messages {
                 tx.send(&cx, i).expect("send message");
-            }
-
-            // Fast receivers consume all messages
-            let mut fast_sequences = Vec::new();
-            for rx in &mut fast_receivers {
-                let mut sequence = Vec::new();
-                for _ in 0..total_messages {
+                for (receiver_idx, rx) in fast_receivers.iter_mut().enumerate() {
                     match rx.recv(&cx).await {
-                        Ok(msg) => sequence.push(msg),
+                        Ok(msg) => fast_sequences[receiver_idx].push(msg),
                         Err(e) => {
                             return Err(proptest::test_runner::TestCaseError::fail(format!(
                                 "Fast receiver should not lag: {:?}", e)));
                         }
                     }
                 }
-                fast_sequences.push(sequence);
             }
 
             // MR4.2: All fast receivers should see same sequence
@@ -442,15 +428,11 @@ fn mr4_other_receivers_unaffected_by_slow_subscriber() {
             // MR4.4: Send additional messages - fast receivers should still work normally
             let additional_start = total_messages;
             for i in 0..3 {
-                tx.send(&cx, additional_start + i).expect("send additional");
-            }
-
-            // Fast receivers should receive additional messages without issues
-            for rx in &mut fast_receivers {
-                for j in 0..3 {
+                let expected = additional_start + i;
+                tx.send(&cx, expected).expect("send additional");
+                for rx in &mut fast_receivers {
                     match rx.recv(&cx).await {
                         Ok(msg) => {
-                            let expected = additional_start + j;
                             prop_assert_eq!(msg, expected,
                                 "Fast receiver should get additional message {} in order", expected);
                         }
@@ -492,10 +474,6 @@ fn mr5_drop_slow_receiver_cleans_backpressure_state() {
             let num_messages = scenario.capacity + 3;
             for i in 0..num_messages {
                 tx.send(&cx, i).expect("send message");
-            }
-
-            // Fast receiver consumes messages
-            for _ in 0..num_messages {
                 fast_rx.recv(&cx).await.expect("fast recv");
             }
 
@@ -593,15 +571,14 @@ fn integration_slow_receiver_complete_workflow() {
         // Phase 2: Create slow receiver and cause lag
         let mut rx_slow = tx.subscribe();
 
-        // Send messages beyond capacity
+        // Send messages beyond capacity while the fast receiver keeps up.
         for i in 3..=8 {
             tx.send(&cx, format!("msg{}", i))
-                .expect(&format!("send {}", i));
-        }
-
-        // Fast receiver keeps up
-        for i in 3..=8 {
-            let msg = rx_fast.recv(&cx).await.expect(&format!("fast recv {}", i));
+                .unwrap_or_else(|_| panic!("send {i}"));
+            let msg = rx_fast
+                .recv(&cx)
+                .await
+                .unwrap_or_else(|_| panic!("fast recv {i}"));
             assert_eq!(msg, format!("msg{}", i));
         }
 
@@ -658,14 +635,12 @@ fn edge_case_single_capacity_channel() {
         let (tx, mut rx_slow) = broadcast::channel::<u32>(1);
         let mut rx_fast = tx.subscribe();
 
-        // Send multiple messages to single-capacity channel
+        // Keep the fast receiver caught up while the slow receiver falls behind.
         for i in 0..5 {
-            tx.send(&cx, i).expect(&format!("send {}", i));
+            tx.send(&cx, i).unwrap_or_else(|_| panic!("send {i}"));
+            let fast_msg = rx_fast.recv(&cx).await.expect("fast recv");
+            assert_eq!(fast_msg, i);
         }
-
-        // Fast receiver gets last message only (others evicted)
-        let fast_msg = rx_fast.recv(&cx).await.expect("fast recv");
-        assert_eq!(fast_msg, 4);
 
         // Slow receiver should be heavily lagged
         let lag_result = rx_slow.recv(&cx).await;
@@ -694,7 +669,8 @@ fn boundary_zero_lag_scenarios() {
 
         // Send exactly capacity messages - should not lag
         for i in 0..capacity {
-            tx.send(&cx, i as u32).expect(&format!("send {}", i));
+            tx.send(&cx, i as u32)
+                .unwrap_or_else(|_| panic!("send {i}"));
         }
 
         // Should receive all without lag
