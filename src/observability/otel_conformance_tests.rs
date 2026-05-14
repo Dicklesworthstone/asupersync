@@ -27721,7 +27721,7 @@ fn otlp_111_invalid_span_time_validation_conformance() {
             },
             expected_time_invalid: false,
             expected_span_dropped: false,
-            expected_drop_reason: "".to_string(),
+            expected_drop_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -27737,7 +27737,7 @@ fn otlp_111_invalid_span_time_validation_conformance() {
             },
             expected_time_invalid: false,
             expected_span_dropped: false,
-            expected_drop_reason: "".to_string(),
+            expected_drop_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -27753,7 +27753,7 @@ fn otlp_111_invalid_span_time_validation_conformance() {
             },
             expected_time_invalid: false,
             expected_span_dropped: false,
-            expected_drop_reason: "".to_string(),
+            expected_drop_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -27770,13 +27770,13 @@ fn otlp_111_invalid_span_time_validation_conformance() {
             },
             expected_time_invalid: false,
             expected_span_dropped: false,
-            expected_drop_reason: "".to_string(),
+            expected_drop_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
         InvalidTimeScenario {
-            description: "Span with end_time = 0 (active span, special handling may apply)"
+            description: "Span with end_time = 0 and nonzero start_time (MUST be dropped)"
                 .to_string(),
             span: TimeSpanInfo {
                 name: "active_span".to_string(),
@@ -27785,10 +27785,10 @@ fn otlp_111_invalid_span_time_validation_conformance() {
                 start_time_unix_nano: 1000000000, // Valid start time
                 end_time_unix_nano: 0,            // Zero end time (active span)
             },
-            expected_time_invalid: false, // Not invalid time-wise (special case)
-            expected_span_dropped: false, // May be handled by OTLP-099 rules instead
-            expected_drop_reason: "".to_string(),
-            expected_included_in_export: true,
+            expected_time_invalid: true,
+            expected_span_dropped: true,
+            expected_drop_reason: "Span start_time (1000000000) > end_time (0)".to_string(),
+            expected_included_in_export: false,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
         },
@@ -27803,7 +27803,7 @@ fn otlp_111_invalid_span_time_validation_conformance() {
             },
             expected_time_invalid: false,
             expected_span_dropped: false,
-            expected_drop_reason: "".to_string(),
+            expected_drop_reason: String::new(),
             expected_included_in_export: true,
             expected_validation_applied: true,
             expected_otlp_compliant: true,
@@ -27837,22 +27837,28 @@ fn otlp_111_invalid_span_time_validation_conformance() {
         let reference_result = simulate_reference_time_validation(&scenario);
 
         // Validate individual results
-        validate_time_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync time validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_time_validation_logic(&asupersync_result).unwrap_or_else(|error| {
+            panic!(
+                "Asupersync time validation logic failed for scenario: {}: {}",
+                scenario.description, error
+            )
+        });
 
-        validate_time_validation_logic(&reference_result).expect(&format!(
-            "Reference time validation logic failed for scenario: {}",
-            scenario.description
-        ));
+        validate_time_validation_logic(&reference_result).unwrap_or_else(|error| {
+            panic!(
+                "Reference time validation logic failed for scenario: {}: {}",
+                scenario.description, error
+            )
+        });
 
         // Validate implementation consistency
         validate_time_validation_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!(
-                "Implementation consistency failed for scenario: {}",
-                scenario.description
-            ));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Implementation consistency failed for scenario: {}: {}",
+                    scenario.description, error
+                )
+            });
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
