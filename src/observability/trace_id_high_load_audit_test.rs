@@ -40,28 +40,27 @@ impl IdGenerationBenchmark {
     }
 
     fn run_context_span_id_benchmark(&self) -> Duration {
-        let handles: Vec<_> = (0..self.thread_count)
-            .map(|thread_id| {
-                let barrier = Arc::clone(&self.start_barrier);
-                let counter = Arc::clone(&self.completion_counter);
-                let ids_per_thread = self.ids_per_thread;
+        let mut handles = Vec::with_capacity(self.thread_count);
+        for thread_id in 0..self.thread_count {
+            let barrier = Arc::clone(&self.start_barrier);
+            let counter = Arc::clone(&self.completion_counter);
+            let ids_per_thread = self.ids_per_thread;
 
-                thread::spawn(move || {
-                    // Wait for all threads to be ready
-                    barrier.wait();
-                    let start = Instant::now();
+            handles.push(thread::spawn(move || {
+                // Wait for all threads to be ready
+                barrier.wait();
+                let start = Instant::now();
 
-                    // Generate IDs at high frequency
-                    for _ in 0..ids_per_thread {
-                        let _id = ContextSpanId::new(); // AtomicU64 implementation
-                    }
+                // Generate IDs at high frequency
+                for _ in 0..ids_per_thread {
+                    let _id = ContextSpanId::new(); // AtomicU64 implementation
+                }
 
-                    let duration = start.elapsed();
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    (thread_id, duration, ids_per_thread)
-                })
-            })
-            .collect();
+                let duration = start.elapsed();
+                counter.fetch_add(1, Ordering::Relaxed);
+                (thread_id, duration, ids_per_thread)
+            }));
+        }
 
         let overall_start = Instant::now();
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -80,28 +79,27 @@ impl IdGenerationBenchmark {
     }
 
     fn run_w3c_span_id_benchmark(&self) -> Duration {
-        let handles: Vec<_> = (0..self.thread_count)
-            .map(|thread_id| {
-                let barrier = Arc::clone(&self.start_barrier);
-                let counter = Arc::clone(&self.completion_counter);
-                let ids_per_thread = self.ids_per_thread;
+        let mut handles = Vec::with_capacity(self.thread_count);
+        for thread_id in 0..self.thread_count {
+            let barrier = Arc::clone(&self.start_barrier);
+            let counter = Arc::clone(&self.completion_counter);
+            let ids_per_thread = self.ids_per_thread;
 
-                thread::spawn(move || {
-                    // Wait for all threads to be ready
-                    barrier.wait();
-                    let start = Instant::now();
+            handles.push(thread::spawn(move || {
+                // Wait for all threads to be ready
+                barrier.wait();
+                let start = Instant::now();
 
-                    // Generate IDs at high frequency
-                    for _ in 0..ids_per_thread {
-                        let _id = W3CSpanId::new_random(); // getrandom implementation
-                    }
+                // Generate IDs at high frequency
+                for _ in 0..ids_per_thread {
+                    let _id = W3CSpanId::new_random(); // getrandom implementation
+                }
 
-                    let duration = start.elapsed();
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    (thread_id, duration, ids_per_thread)
-                })
-            })
-            .collect();
+                let duration = start.elapsed();
+                counter.fetch_add(1, Ordering::Relaxed);
+                (thread_id, duration, ids_per_thread)
+            }));
+        }
 
         let overall_start = Instant::now();
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -120,28 +118,27 @@ impl IdGenerationBenchmark {
     }
 
     fn run_trace_id_benchmark(&self) -> Duration {
-        let handles: Vec<_> = (0..self.thread_count)
-            .map(|thread_id| {
-                let barrier = Arc::clone(&self.start_barrier);
-                let counter = Arc::clone(&self.completion_counter);
-                let ids_per_thread = self.ids_per_thread;
+        let mut handles = Vec::with_capacity(self.thread_count);
+        for thread_id in 0..self.thread_count {
+            let barrier = Arc::clone(&self.start_barrier);
+            let counter = Arc::clone(&self.completion_counter);
+            let ids_per_thread = self.ids_per_thread;
 
-                thread::spawn(move || {
-                    // Wait for all threads to be ready
-                    barrier.wait();
-                    let start = Instant::now();
+            handles.push(thread::spawn(move || {
+                // Wait for all threads to be ready
+                barrier.wait();
+                let start = Instant::now();
 
-                    // Generate IDs at high frequency
-                    for _ in 0..ids_per_thread {
-                        let _id = TraceId::new_random(); // getrandom implementation
-                    }
+                // Generate IDs at high frequency
+                for _ in 0..ids_per_thread {
+                    let _id = TraceId::new_random(); // getrandom implementation
+                }
 
-                    let duration = start.elapsed();
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    (thread_id, duration, ids_per_thread)
-                })
-            })
-            .collect();
+                let duration = start.elapsed();
+                counter.fetch_add(1, Ordering::Relaxed);
+                (thread_id, duration, ids_per_thread)
+            }));
+        }
 
         let overall_start = Instant::now();
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
