@@ -45287,7 +45287,7 @@ mod otlp_122_tests {
 
                 Self {
                     name: format!("kafka_consumer_span_{}", scenario.description),
-                    kind: scenario.span_kind.clone(),
+                    kind: scenario.span_kind,
                     instrumentation_scope: InstrumentationScope {
                         name: scenario.instrumentation_scope_name.clone(),
                         version: scenario.instrumentation_scope_version.clone(),
