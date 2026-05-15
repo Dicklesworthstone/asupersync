@@ -151,6 +151,48 @@ const RFC_MIN_FRAME_SIZE: u32 = 16384; // 2^14
 const RFC_MAX_FRAME_SIZE: u32 = 16777215; // 2^24 - 1
 const RFC_DEFAULT_FRAME_SIZE: u32 = 16384; // 2^14
 
+fn assert_data_frame_error(error: &FrameValidationError, context: &str) {
+    match error {
+        FrameValidationError::FrameSizeExceeded { size, max } => {
+            assert!(
+                size > max,
+                "{}: frame-size error reported non-exceeding frame {} <= {}",
+                context,
+                size,
+                max
+            );
+        }
+        FrameValidationError::InvalidStreamId
+        | FrameValidationError::PaddingExceedsFrame
+        | FrameValidationError::InvalidStreamState => {}
+        FrameValidationError::InvalidMaxFrameSize { value } => {
+            panic!(
+                "{}: accepted SETTINGS_MAX_FRAME_SIZE value {} was rejected",
+                context, value
+            );
+        }
+        FrameValidationError::InvalidFrameSize => {
+            panic!(
+                "{}: generated DATA frame produced a generic invalid-frame-size result",
+                context
+            );
+        }
+    }
+}
+
+fn assert_exact_max_data_result(result: &Result<(), FrameValidationError>) {
+    match result {
+        Ok(()) => {}
+        Err(FrameValidationError::InvalidStreamState) => {}
+        Err(error) => {
+            panic!(
+                "unpadded DATA exactly at SETTINGS_MAX_FRAME_SIZE should not fail with {:?}",
+                error
+            );
+        }
+    }
+}
+
 impl MockH2MaxFrameSizeParser {
     fn new() -> Self {
         Self {
@@ -355,6 +397,12 @@ impl MockH2MaxFrameSizeParser {
 
             // For this specific test, we expect frames up to max_frame_size to succeed
             if frame_size <= self.max_frame_size {
+                if matches!(data_frame_test.payload_size, PayloadSize::AtMaximum)
+                    && data_frame_test.stream_id != 0
+                    && !data_frame_test.properties.padded
+                {
+                    assert_exact_max_data_result(&result);
+                }
                 result?;
             } else {
                 // Frame exceeds limit, should fail
@@ -400,9 +448,7 @@ fuzz_target!(|input: H2MaxFrameSizeInput| {
                     assert!(size > max, "Frame size {} should exceed max {}", size, max);
                     assert_eq!(*max, RFC_MAX_FRAME_SIZE);
                 }
-                Err(_) => {
-                    // Other errors may be acceptable depending on test conditions
-                }
+                Err(error) => assert_data_frame_error(error, "exact max strategy"),
             }
         }
         SettingStrategy::NearMax { offset } => {
@@ -423,9 +469,7 @@ fuzz_target!(|input: H2MaxFrameSizeInput| {
                             target_size, RFC_MIN_FRAME_SIZE
                         );
                     }
-                    Err(_) => {
-                        // Other errors may occur due to test conditions
-                    }
+                    Err(error) => assert_data_frame_error(error, "near max strategy"),
                 }
             } else {
                 // Should be invalid (below minimum)
@@ -450,9 +494,7 @@ fuzz_target!(|input: H2MaxFrameSizeInput| {
                 Err(FrameValidationError::InvalidMaxFrameSize { value }) => {
                     panic!("Progressive frame size update failed at {}", value);
                 }
-                Err(_) => {
-                    // Other errors may be from DATA frame tests
-                }
+                Err(error) => assert_data_frame_error(error, "progressive max strategy"),
             }
         }
     }
@@ -495,8 +537,12 @@ fn test_frame_size_invariants(
                             panic!("Frame at exact maximum size should not be rejected");
                         }
                     }
-                    Err(_) => {
-                        // Other errors may be due to stream state, etc.
+                    Err(FrameValidationError::InvalidStreamState) => {}
+                    Err(error) => {
+                        panic!(
+                            "unpadded frame at exact maximum failed with unexpected error: {:?}",
+                            error
+                        );
                     }
                 }
             }
@@ -525,11 +571,12 @@ fn test_frame_size_invariants(
                     // Expected
                 }
                 Ok(()) => {
-                    // This would be a violation - frames over limit should be rejected
+                    panic!(
+                        "DATA frame total size {} exceeded final max {} but was accepted",
+                        total_size, final_max_frame_size
+                    );
                 }
-                Err(_) => {
-                    // Other errors may mask the size check
-                }
+                Err(error) => assert_data_frame_error(error, "oversized DATA invariant"),
             }
         }
     }
@@ -544,9 +591,7 @@ fn test_frame_size_invariants(
                 Ok(()) => {
                     panic!("DATA frame with stream ID 0 should be rejected");
                 }
-                Err(_) => {
-                    // Other errors may occur first
-                }
+                Err(error) => assert_data_frame_error(error, "stream ID zero invariant"),
             }
         }
     }
