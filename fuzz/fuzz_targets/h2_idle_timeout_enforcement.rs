@@ -167,9 +167,15 @@ fn test_goaway_generation(
     initialize_connection(&mut connection)?;
 
     // Create some streams first
+    let mut setup_streams_created = 0;
     for i in 1..=3 {
         let stream_id = i * 2 + 1; // Odd stream IDs
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        if observe_best_effort_frame_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "GOAWAY setup HEADERS",
+        ) {
+            setup_streams_created += 1;
+        }
     }
 
     // Trigger GOAWAY by sending a malformed frame or other error condition
@@ -201,6 +207,7 @@ fn test_goaway_generation(
         goaway_frames,
         connection_state: connection.state(),
         protocol_error_triggered: protocol_error_result.is_err(),
+        setup_streams_created,
     })
 }
 
@@ -240,7 +247,12 @@ fn test_stream_operations(
 
             if pattern & 0x80 != 0 {
                 // Close stream
-                let _ = send_data_frame(&mut connection, stream_id, &[], true);
+                if !observe_best_effort_frame_result(
+                    send_data_frame(&mut connection, stream_id, &[], true),
+                    "stream close DATA",
+                ) {
+                    errors += 1;
+                }
             }
         }
     }
@@ -511,6 +523,7 @@ struct GoAwayGenerationResult {
     goaway_frames: Vec<GoAwayFrame>,
     connection_state: ConnectionState,
     protocol_error_triggered: bool,
+    setup_streams_created: u32,
 }
 
 #[derive(Debug)]
@@ -559,6 +572,50 @@ struct InterleavedFrameResult {
 
 // Helper functions
 
+fn connection_state_rank(state: ConnectionState) -> u8 {
+    match state {
+        ConnectionState::Handshaking => 0,
+        ConnectionState::Open => 1,
+        ConnectionState::Closing => 2,
+        ConnectionState::Closed => 3,
+    }
+}
+
+fn process_frame_observed(
+    connection: &mut Connection,
+    frame: Frame,
+    context: &str,
+) -> Result<(), H2Error> {
+    let state_before = connection.state();
+    let result = connection.process_frame(frame);
+    let state_after = connection.state();
+
+    match result {
+        Ok(()) => {
+            assert!(
+                connection_state_rank(state_after) >= connection_state_rank(state_before),
+                "{context} regressed connection state from {state_before:?} to {state_after:?}"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn observe_best_effort_frame_result(result: Result<(), H2Error>, context: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            let error_text = format!("{error:?}");
+            assert!(
+                !error_text.is_empty(),
+                "{context} rejected frame with empty debug error"
+            );
+            false
+        }
+    }
+}
+
 fn initialize_connection(connection: &mut Connection) -> Result<(), H2Error> {
     // Send initial SETTINGS frame
     let settings_frame = SettingsFrame::new(vec![
@@ -566,7 +623,11 @@ fn initialize_connection(connection: &mut Connection) -> Result<(), H2Error> {
         Setting::InitialWindowSize(65536),
         Setting::MaxFrameSize(16384),
     ]);
-    let _ = connection.process_frame(Frame::Settings(settings_frame))?;
+    process_frame_observed(
+        connection,
+        Frame::Settings(settings_frame),
+        "initial SETTINGS",
+    )?;
     Ok(())
 }
 
@@ -597,7 +658,7 @@ fn send_headers_frame(
         end_stream,
         true, // end_headers
     );
-    let _ = connection.process_frame(Frame::Headers(headers_frame))?;
+    process_frame_observed(connection, Frame::Headers(headers_frame), "HEADERS frame")?;
     Ok(())
 }
 
@@ -608,14 +669,18 @@ fn send_data_frame(
     end_stream: bool,
 ) -> Result<(), H2Error> {
     let data_frame = DataFrame::new(stream_id, Bytes::copy_from_slice(data), end_stream);
-    let _ = connection.process_frame(Frame::Data(data_frame))?;
+    process_frame_observed(connection, Frame::Data(data_frame), "DATA frame")?;
     Ok(())
 }
 
 fn send_malformed_frame(connection: &mut Connection, _debug_data: &[u8]) -> Result<(), H2Error> {
     // Send a frame with invalid stream ID to trigger protocol error
     let malformed_frame = DataFrame::new(0, Bytes::from("invalid"), false); // Stream ID 0 for DATA frame
-    let _ = connection.process_frame(Frame::Data(malformed_frame))?;
+    process_frame_observed(
+        connection,
+        Frame::Data(malformed_frame),
+        "malformed DATA frame",
+    )?;
     Ok(())
 }
 
@@ -641,13 +706,17 @@ fn create_and_send_frame(
         0x3 => {
             // RST_STREAM
             let rst_frame = RstStreamFrame::new(stream_id, ErrorCode::Cancel);
-            let _ = connection.process_frame(Frame::RstStream(rst_frame))?;
+            process_frame_observed(connection, Frame::RstStream(rst_frame), "RST_STREAM frame")?;
             Ok(())
         }
         0x4 => {
             // SETTINGS
             let settings_frame = SettingsFrame::new(vec![Setting::HeaderTableSize(4096)]);
-            let _ = connection.process_frame(Frame::Settings(settings_frame))?;
+            process_frame_observed(
+                connection,
+                Frame::Settings(settings_frame),
+                "SETTINGS frame",
+            )?;
             Ok(())
         }
         0x5 => {
@@ -664,7 +733,7 @@ fn create_and_send_frame(
                 [0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]
             };
             let ping_frame = PingFrame::new(ping_data);
-            let _ = connection.process_frame(Frame::Ping(ping_frame))?;
+            process_frame_observed(connection, Frame::Ping(ping_frame), "PING frame")?;
             Ok(())
         }
         0x7 => {
@@ -683,7 +752,11 @@ fn create_and_send_frame(
                 return Err(H2Error::protocol("WINDOW_UPDATE increment cannot be zero"));
             }
             let window_update = WindowUpdateFrame::new(stream_id, increment);
-            let _ = connection.process_frame(Frame::WindowUpdate(window_update))?;
+            process_frame_observed(
+                connection,
+                Frame::WindowUpdate(window_update),
+                "WINDOW_UPDATE frame",
+            )?;
             Ok(())
         }
         _ => Ok(()), // Unknown frame type
@@ -731,6 +804,11 @@ fn validate_connection_result(result: Result<ConnectionLifecycleResult, H2Error>
 fn validate_goaway_result(result: Result<GoAwayGenerationResult, H2Error>, _error_code: u8) {
     match result {
         Ok(res) => {
+            assert!(
+                res.setup_streams_created <= 3,
+                "GOAWAY setup created more streams than requested"
+            );
+
             if res.goaway_sent {
                 assert!(
                     !res.goaway_frames.is_empty(),
