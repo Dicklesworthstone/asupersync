@@ -133,6 +133,10 @@ fuzz_target!(|input: Input| {
             err.stream_id, None,
             "RFC 9113 §6.3: PRIORITY on stream 0 is a connection error"
         );
+        assert_eq!(
+            err.message, "PRIORITY frame with stream ID 0",
+            "stream-0 PRIORITY diagnostic changed"
+        );
         return;
     }
 
@@ -144,6 +148,10 @@ fuzz_target!(|input: Input| {
                 err.stream_id,
                 Some(header.stream_id),
                 "RFC 9113 §6.3: PRIORITY size violation is a stream error"
+            );
+            assert_eq!(
+                err.message, "PRIORITY frame must be 5 bytes",
+                "wrong-length PRIORITY diagnostic changed"
             );
         }
         (PayloadShape::WrongLength { .. }, Ok(_)) => {
@@ -203,10 +211,9 @@ fuzz_target!(|input: Input| {
                 Some(header.stream_id),
                 "RFC 9113 §6.3: self-dependency is a stream error, not connection"
             );
-            assert!(
-                err.message.contains("itself") || err.message.contains("self"),
-                "self-dep error message changed: {}",
-                err.message
+            assert_eq!(
+                err.message, "stream cannot depend on itself",
+                "self-dep error message changed"
             );
         }
     }
