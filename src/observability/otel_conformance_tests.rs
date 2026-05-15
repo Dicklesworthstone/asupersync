@@ -52459,12 +52459,11 @@ mod otlp_122_tests {
                     topic_arn,
                     subscription_arn,
                 } => {
-                    if !scenario.should_be_valid {
-                        panic!(
-                            "Expected failure but span was accepted: topic_arn='{}', subscription_arn='{}'",
-                            topic_arn, subscription_arn
-                        );
-                    }
+                    assert!(
+                        scenario.should_be_valid,
+                        "Expected failure but span was accepted: topic_arn='{}', subscription_arn='{}'",
+                        topic_arn, subscription_arn
+                    );
 
                     // Verify ARNs match expected values
                     if !scenario.expected_topic_arn.is_empty()
@@ -52486,12 +52485,11 @@ mod otlp_122_tests {
                     true
                 }
                 AwsSnsConsumerValidationResult::Invalid { violations } => {
-                    if scenario.should_be_valid {
-                        panic!(
-                            "Expected success but span was rejected: violations={:?}",
-                            violations
-                        );
-                    }
+                    assert!(
+                        !scenario.should_be_valid,
+                        "Expected success but span was rejected: violations={:?}",
+                        violations
+                    );
                     true
                 }
                 AwsSnsConsumerValidationResult::NotApplicable { .. } => scenario.should_be_valid,
