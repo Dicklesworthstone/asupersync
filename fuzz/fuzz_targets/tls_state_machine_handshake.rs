@@ -472,7 +472,31 @@ fn fuzz_tls_state_machine(input: TlsStateMachineFuzzInput) {
     }
 }
 
-/// Execute a sequence of operations on the TLS stream
+/// Observe TLS stream read outcomes before continuing to shutdown.
+fn observe_stream_read_result(
+    result: io::Result<()>,
+    filled_len: usize,
+    capacity: usize,
+) -> Result<(), TlsError> {
+    match result {
+        Ok(()) => {
+            assert!(
+                filled_len <= capacity,
+                "TLS stream read filled {filled_len} bytes beyond capacity {capacity}"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "TLS stream read error must be visible"
+            );
+            Err(TlsError::Io(error))
+        }
+    }
+}
+
+/// Execute a sequence of operations on the TLS stream.
 async fn fuzz_stream_operations(
     mut tls_stream: asupersync::tls::TlsStream<MockTlsTransport>,
 ) -> Result<(), TlsError> {
@@ -498,11 +522,11 @@ async fn fuzz_stream_operations(
 
     // Try to read response
     let mut read_buf = vec![0u8; 1024];
-    let _ = poll_fn(|cx| {
-        let mut async_buf = asupersync::io::ReadBuf::new(&mut read_buf);
-        Pin::new(&mut tls_stream).poll_read(cx, &mut async_buf)
-    })
-    .await;
+    let read_capacity = read_buf.len();
+    let mut async_buf = asupersync::io::ReadBuf::new(&mut read_buf);
+    let read_result = poll_fn(|cx| Pin::new(&mut tls_stream).poll_read(cx, &mut async_buf)).await;
+    let filled_len = async_buf.filled().len();
+    observe_stream_read_result(read_result, filled_len, read_capacity)?;
 
     // Attempt graceful shutdown
     poll_fn(|cx| Pin::new(&mut tls_stream).poll_shutdown(cx))
