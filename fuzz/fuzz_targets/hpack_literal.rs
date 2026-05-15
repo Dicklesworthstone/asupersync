@@ -248,7 +248,7 @@ fn test_never_indexed_flag_preservation(
     append_string_encoding(&mut wire_data, &value_encoding);
 
     // Test decoding with HPACK decoder
-    test_hpack_decode_wire_data(&wire_data, ExpectedResult::MaySucceed);
+    test_hpack_decode_wire_data(&wire_data, ExpectedResult::MayFail);
 
     // The key assertion is that never-indexed flag should be preserved through decode
     // In practice, this would require access to decoder internals or a flag in the result
@@ -283,12 +283,12 @@ fn test_indexed_name_path_selection(
 
     // Test decoding - should choose correct path based on index value
     let expected = if index_value == 0 {
-        ExpectedResult::MaySucceed // New name path
+        ExpectedResult::MayFail // New name path with fuzzed string bytes
     } else if index_value > 61 {
         // Beyond static table (61 entries)
         ExpectedResult::ShouldFail // Invalid index
     } else {
-        ExpectedResult::MaySucceed // Valid indexed name
+        ExpectedResult::MayFail // Valid indexed name with fuzzed value bytes
     };
 
     test_hpack_decode_wire_data(&wire_data, expected);
@@ -313,12 +313,12 @@ fn test_huffman_vs_raw_encoding(
     encode_string_with_huffman_flag(&mut wire_data, &value_content, value_huffman);
 
     // Test decoding - should handle both Huffman and raw encodings
-    test_hpack_decode_wire_data(&wire_data, ExpectedResult::MaySucceed);
+    test_hpack_decode_wire_data(&wire_data, ExpectedResult::MayFail);
 
     // Test with mixed encoding (name Huffman, value raw and vice versa)
     if name_huffman != value_huffman {
         // This combination should also work
-        test_hpack_decode_wire_data(&wire_data, ExpectedResult::MaySucceed);
+        test_hpack_decode_wire_data(&wire_data, ExpectedResult::MayFail);
     }
 }
 
@@ -344,12 +344,20 @@ fn test_length_limits_enforcement(name_length: u32, value_length: u32, use_huffm
     wire_data.extend_from_slice(&actual_value_data);
 
     // Test decoding - should reject if lengths exceed MAX_STRING_LENGTH
-    let expected =
-        if name_length > MAX_STRING_LENGTH as u32 || value_length > MAX_STRING_LENGTH as u32 {
-            ExpectedResult::ShouldFail
-        } else {
-            ExpectedResult::MaySucceed
-        };
+    let name_has_full_body = name_length <= 1024;
+    let value_has_full_body = value_length <= 1024;
+    let expected = if name_length == 0
+        || name_length > MAX_STRING_LENGTH as u32
+        || value_length > MAX_STRING_LENGTH as u32
+        || !name_has_full_body
+        || !value_has_full_body
+    {
+        ExpectedResult::ShouldFail
+    } else if use_huffman {
+        ExpectedResult::MayFail
+    } else {
+        ExpectedResult::MaySucceed
+    };
 
     test_hpack_decode_wire_data(&wire_data, expected);
 }
@@ -369,11 +377,18 @@ fn test_oversized_literal_rejection(
         RAW_OCTET_FLAG
     };
 
-    // Encode the oversized length
+    let actual_data_len = actual_data_size as usize;
+    let declared_length = (declared_length as usize)
+        .max(actual_data_len.saturating_add(3))
+        .max(MAX_STRING_LENGTH.saturating_add(1));
+
+    // Encode an oversized/truncated length. test_hpack_decode_raw_string wraps
+    // this as a literal name and appends a one-byte value, so the declaration
+    // must exceed both the fuzzed bytes and that wrapper tail.
     encode_hpack_integer(&mut wire_data, declared_length as u64, 7, flag_byte);
 
     // Provide much less actual data than declared
-    let actual_data = vec![b'z'; actual_data_size as usize];
+    let actual_data = vec![b'z'; actual_data_len];
     wire_data.extend_from_slice(&actual_data);
 
     // This should trigger DECOMPRESSION_FAILED due to length mismatch
@@ -595,9 +610,9 @@ fn encode_hpack_integer(dst: &mut Vec<u8>, mut value: u64, prefix_bits: u8, pref
 
 #[derive(Debug, Clone, Copy)]
 enum ExpectedResult {
-    /// Decoding should succeed
+    /// Decoding must succeed for constructed valid data
     MaySucceed,
-    /// Decoding should fail
+    /// Decoding must fail for constructed invalid data
     ShouldFail,
     /// Either success or failure is acceptable
     MayFail,
@@ -618,17 +633,15 @@ fn test_hpack_decode_wire_data(wire_data: &[u8], expected: ExpectedResult) {
     let result = decoder.decode(&mut data);
 
     match (result, expected) {
-        (Ok(_), ExpectedResult::ShouldFail) => {
-            // This is unexpected - decoder should have failed
-            // But in fuzzing we don't panic, just note the issue
-        }
-        (Err(_), ExpectedResult::MaySucceed) => {
-            // Decoder failed but success was expected
-            // This is normal in fuzzing with malformed input
-        }
-        _ => {
-            // Result matches expectation or is in the "may fail" category
-        }
+        (Ok(headers), ExpectedResult::ShouldFail) => panic!(
+            "HPACK decoder accepted data expected to fail: len={} headers={headers:?}",
+            wire_data.len()
+        ),
+        (Err(error), ExpectedResult::MaySucceed) => panic!(
+            "HPACK decoder rejected data expected to succeed: len={} error={error}",
+            wire_data.len()
+        ),
+        _ => {}
     }
 }
 
