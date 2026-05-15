@@ -50356,7 +50356,7 @@ mod otlp_122_tests {
                     violations.push("messaging.redis.command attribute is empty".to_string());
                     return RedisConsumerValidationResult::Invalid {
                         violations,
-                        invalid_command: Some("".to_string()),
+                        invalid_command: Some(String::new()),
                     };
                 }
                 Some(_) => {
