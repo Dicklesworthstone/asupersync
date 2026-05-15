@@ -50105,7 +50105,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_valid: true, // No command requirement for non-Redis
-                expected_command: "".to_string(),
+                expected_command: String::new(),
             },
             RedisConsumerCommandScenario {
                 description: "redis_producer_no_requirement".to_string(),
