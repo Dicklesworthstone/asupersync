@@ -515,14 +515,18 @@ fn validate_max_frame_size_result(value: u32, result: &Result<(), H2Error>) {
 fn validate_scenario_results(result: &InvalidFrameSizeTestResult) {
     // Test 1: 8192 should be rejected
     assert!(
-        result.test1_correctly_rejected && !result.test1_incorrectly_accepted,
-        "8192 MAX_FRAME_SIZE should be rejected"
+        result.test1_correctly_rejected
+            && !result.test1_incorrectly_accepted
+            && !result.test1_other_error,
+        "8192 MAX_FRAME_SIZE should be rejected with ProtocolError"
     );
 
     // Test 2: 16383 should be rejected
     assert!(
-        result.test2_correctly_rejected && !result.test2_incorrectly_accepted,
-        "16383 MAX_FRAME_SIZE should be rejected"
+        result.test2_correctly_rejected
+            && !result.test2_incorrectly_accepted
+            && !result.test2_other_error,
+        "16383 MAX_FRAME_SIZE should be rejected with ProtocolError"
     );
 
     // Test 3: 16384 should be accepted
@@ -533,14 +537,18 @@ fn validate_scenario_results(result: &InvalidFrameSizeTestResult) {
 
     // Test 4: 1 should be rejected
     assert!(
-        result.test4_correctly_rejected && !result.test4_incorrectly_accepted,
-        "1 MAX_FRAME_SIZE should be rejected"
+        result.test4_correctly_rejected
+            && !result.test4_incorrectly_accepted
+            && !result.test4_other_error,
+        "1 MAX_FRAME_SIZE should be rejected with ProtocolError"
     );
 
     // Test 5: 16777216 should be rejected
     assert!(
-        result.test5_correctly_rejected && !result.test5_incorrectly_accepted,
-        "16777216 MAX_FRAME_SIZE should be rejected"
+        result.test5_correctly_rejected
+            && !result.test5_incorrectly_accepted
+            && !result.test5_other_error,
+        "16777216 MAX_FRAME_SIZE should be rejected with ProtocolError"
     );
 }
 
