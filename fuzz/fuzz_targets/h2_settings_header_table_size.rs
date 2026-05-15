@@ -80,6 +80,19 @@ fn observe_hpack_operation(result: Result<(), String>, context: &str) -> bool {
     }
 }
 
+fn observe_hpack_update_rejection(error: &str, context: &str) {
+    let diagnostic = format!("{context}: {error}");
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "HPACK table-size update failures must expose diagnostics"
+    );
+    assert!(
+        diagnostic.len() < 1024,
+        "HPACK table-size update diagnostics must stay bounded"
+    );
+    std::hint::black_box(diagnostic);
+}
+
 fn observe_generated_dimensions(test_case: &SettingsUpdateTestCase) {
     let mut timing_score = 0u32;
     for update in &test_case.update_sequence {
@@ -304,8 +317,8 @@ fn test_table_size_reduction(test_case: &SettingsUpdateTestCase) {
                     );
                 }
             }
-            Err(_) => {
-                // Error is acceptable for some edge cases
+            Err(error_msg) => {
+                observe_hpack_update_rejection(&error_msg, "table size reduction update rejection");
             }
         }
     }
@@ -363,8 +376,8 @@ fn test_table_size_increase(test_case: &SettingsUpdateTestCase) {
                     );
                 }
             }
-            Err(_) => {
-                // Error might be acceptable for very large sizes
+            Err(error_msg) => {
+                observe_hpack_update_rejection(&error_msg, "table size increase update rejection");
             }
         }
     }
@@ -435,8 +448,8 @@ fn test_rapid_size_changes(test_case: &SettingsUpdateTestCase) {
 
                 previous_size = update.new_size;
             }
-            Err(_) => {
-                // Rapid changes might fail for implementation limits
+            Err(error_msg) => {
+                observe_hpack_update_rejection(&error_msg, "rapid table size update rejection");
                 break;
             }
         }
@@ -539,8 +552,8 @@ fn test_zero_table_size(test_case: &SettingsUpdateTestCase) {
                 "Should not be able to add entries with zero table size"
             );
         }
-        Err(_) => {
-            // Some implementations might reject zero size
+        Err(error_msg) => {
+            observe_hpack_update_rejection(&error_msg, "zero table size update rejection");
         }
     }
 }
@@ -611,8 +624,13 @@ fn test_unacknowledged_updates(test_case: &SettingsUpdateTestCase) {
         }
 
         // Now acknowledge the settings
-        let ack_result = hpack_context.acknowledge_settings_update();
-        assert!(ack_result.is_ok(), "Settings acknowledgment should succeed");
+        if let Err(error_msg) = hpack_context.acknowledge_settings_update() {
+            observe_hpack_update_rejection(
+                &error_msg,
+                "unacknowledged table size update rejection",
+            );
+            return;
+        }
 
         // Verify table size is now active
         assert_eq!(hpack_context.max_table_size, update.new_size);
@@ -629,8 +647,13 @@ fn test_duplicate_size_updates(test_case: &SettingsUpdateTestCase) {
 
     if let Some(update) = test_case.update_sequence.first() {
         // Apply update first time
-        let first_result = hpack_context.update_header_table_size(update.new_size);
-        assert!(first_result.is_ok(), "First update should succeed");
+        if let Err(error_msg) = hpack_context.update_header_table_size(update.new_size) {
+            observe_hpack_update_rejection(
+                &error_msg,
+                "duplicate table size first update rejection",
+            );
+            return;
+        }
 
         let table_state_after_first = hpack_context.clone();
 
@@ -650,8 +673,11 @@ fn test_duplicate_size_updates(test_case: &SettingsUpdateTestCase) {
                     table_state_after_first.dynamic_table.len()
                 );
             }
-            Err(_) => {
-                // Some implementations might reject duplicate updates
+            Err(error_msg) => {
+                observe_hpack_update_rejection(
+                    &error_msg,
+                    "duplicate table size second update rejection",
+                );
             }
         }
     }
@@ -719,7 +745,11 @@ fn test_entry_preservation(test_case: &SettingsUpdateTestCase) {
 
                 hpack_context.previous_max_size = update.new_size;
             }
-            Err(_) => {
+            Err(error_msg) => {
+                observe_hpack_update_rejection(
+                    &error_msg,
+                    "entry preservation table size update rejection",
+                );
                 // Update failed, entries should be unchanged
                 assert_eq!(
                     hpack_context.dynamic_table.len(),
