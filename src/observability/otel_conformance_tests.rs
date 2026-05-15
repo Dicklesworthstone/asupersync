@@ -52675,8 +52675,8 @@ mod otlp_122_tests {
                     // Non-AWS SQS systems exempt from URL preservation requirements
                 ],
                 should_be_valid: true, // Exempt
-                original_queue_url: "".to_string(),
-                expected_preserved_url: "".to_string(),
+                original_queue_url: String::new(),
+                expected_preserved_url: String::new(),
                 path_normalization_expected: false,
             },
             AwsSqsUrlPreservationScenario {
@@ -52690,8 +52690,8 @@ mod otlp_122_tests {
                     // Consumer spans are exempt from producer URL preservation requirements
                 ],
                 should_be_valid: true, // Exempt
-                original_queue_url: "".to_string(),
-                expected_preserved_url: "".to_string(),
+                original_queue_url: String::new(),
+                expected_preserved_url: String::new(),
                 path_normalization_expected: false,
             },
             AwsSqsUrlPreservationScenario {
