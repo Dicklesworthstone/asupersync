@@ -172,6 +172,30 @@ fn build_repair_payload(raw: &[u8], fallback: &[u8], symbol_size: usize) -> Vec<
     payload
 }
 
+fn observe_drop_last_coefficient(columns_len: usize, coefficients: &mut Vec<Gf256>) {
+    let coefficient_len_before = coefficients.len();
+    assert_eq!(
+        columns_len, coefficient_len_before,
+        "repair equation must start with aligned column/coefficient arity"
+    );
+
+    let removed = coefficients.pop();
+    assert!(
+        removed.is_some(),
+        "DropLastCoefficient mutation should remove a repair coefficient"
+    );
+    assert_eq!(
+        coefficients.len() + 1,
+        coefficient_len_before,
+        "DropLastCoefficient mutation should shrink coefficient arity by one"
+    );
+    assert_eq!(
+        columns_len,
+        coefficients.len() + 1,
+        "DropLastCoefficient mutation should leave one unmatched repair column"
+    );
+}
+
 fn build_repair_packets(
     decoder: &InactivationDecoder,
     encoder: &SystematicEncoder,
@@ -201,7 +225,7 @@ fn build_repair_packets(
                 data.extend(std::iter::repeat_n(fill, growth));
             }
             RepairPacketMutation::DropLastCoefficient => {
-                let _ = coefficients.pop();
+                observe_drop_last_coefficient(columns.len(), &mut coefficients);
             }
             RepairPacketMutation::AppendOutOfRangeColumn { extra } => {
                 columns.push(decoder.params().l + usize::from(extra) + 1);
