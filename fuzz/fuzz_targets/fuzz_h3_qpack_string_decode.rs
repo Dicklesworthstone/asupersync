@@ -179,13 +179,16 @@ fn test_fixed_string_canaries() {
     );
 
     let invalid_name_utf8 = literal_name_value_section(&[0xff], b"b");
-    expect_invalid_frame_contains(&invalid_name_utf8, "utf-8");
+    expect_invalid_frame(&invalid_name_utf8, "qpack string is not valid utf-8");
 
     let truncated_name = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0x23, b'a'];
     expect_unexpected_eof(&truncated_name);
 
     let dynamic_post_base = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0x00];
-    expect_qpack_policy_contains(&dynamic_post_base, "post-base");
+    expect_qpack_policy(
+        &dynamic_post_base,
+        "post-base/dynamic qpack line representations not allowed in static-only mode",
+    );
 }
 
 fn literal_name_value_section(name: &[u8], value: &[u8]) -> Vec<u8> {
@@ -228,13 +231,10 @@ fn expect_decode_ok(input: &[u8]) -> Vec<QpackFieldPlan> {
     }
 }
 
-fn expect_invalid_frame_contains(input: &[u8], expected: &str) {
+fn expect_invalid_frame(input: &[u8], expected: &'static str) {
     match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
         Err(H3NativeError::InvalidFrame(message)) => {
-            assert!(
-                message.contains(expected),
-                "InvalidFrame message {message:?} should contain {expected:?}"
-            );
+            assert_eq!(message, expected);
         }
         Ok(decoded) => panic!("expected InvalidFrame({expected}), got {decoded:?}"),
         Err(error) => panic!("expected InvalidFrame({expected}), got {error:?}"),
@@ -249,13 +249,10 @@ fn expect_unexpected_eof(input: &[u8]) {
     }
 }
 
-fn expect_qpack_policy_contains(input: &[u8], expected: &str) {
+fn expect_qpack_policy(input: &[u8], expected: &'static str) {
     match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
         Err(H3NativeError::QpackPolicy(message)) => {
-            assert!(
-                message.contains(expected),
-                "QpackPolicy message {message:?} should contain {expected:?}"
-            );
+            assert_eq!(message, expected);
         }
         Ok(decoded) => panic!("expected QpackPolicy({expected}), got {decoded:?}"),
         Err(error) => panic!("expected QpackPolicy({expected}), got {error:?}"),
