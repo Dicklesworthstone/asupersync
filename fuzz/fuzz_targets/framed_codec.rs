@@ -486,7 +486,12 @@ impl Decoder for PrefixCodec {
             return Ok(None);
         }
 
-        let _ = buf.split_to(2);
+        let header = buf.split_to(2);
+        let consumed_frame_len = u16::from_be_bytes([header[0], header[1]]) as usize;
+        assert_eq!(
+            consumed_frame_len, frame_len,
+            "PrefixCodec consumed a length header that drifted from the parsed frame length",
+        );
         Ok(Some(buf.split_to(frame_len)))
     }
 }
