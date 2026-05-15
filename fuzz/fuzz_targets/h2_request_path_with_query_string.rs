@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length per RFC 7540 §4.1
@@ -36,7 +36,7 @@ enum PathParseResult {
 }
 
 /// HTTP/2 header field per RFC 7540 §6.2
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct HeaderField {
     name: String,
     value: String,
@@ -145,13 +145,13 @@ impl HeaderField {
         }
 
         // Validate URL encoding in query component
-        if let Some(ref query) = query_component {
-            if let Err(decode_error) = validate_url_encoding(query) {
-                return PathParseResult::InvalidEncoding(format!(
-                    "Invalid URL encoding in query: {}",
-                    decode_error
-                ));
-            }
+        if let Some(ref query) = query_component
+            && let Err(decode_error) = validate_url_encoding(query)
+        {
+            return PathParseResult::InvalidEncoding(format!(
+                "Invalid URL encoding in query: {}",
+                decode_error
+            ));
         }
 
         PathParseResult::Valid {
@@ -317,6 +317,14 @@ impl MockH2PathQueryParser {
             return HeadersParseResult::IncompleteFrame;
         }
 
+        let stream_id = ((u32::from(buf[5]) & 0x7F) << 24)
+            | (u32::from(buf[6]) << 16)
+            | (u32::from(buf[7]) << 8)
+            | u32::from(buf[8]);
+        if stream_id == 0 {
+            return HeadersParseResult::InvalidStreamId;
+        }
+
         // Extract payload (skip frame header)
         let payload = &buf[FRAME_HEADER_LEN..];
 
@@ -370,6 +378,12 @@ impl MockH2PathQueryParser {
         // Check for protocol errors in path validation
         if let Some(PathParseResult::ProtocolError(ref msg)) = path_result {
             return HeadersParseResult::ProtocolError(format!("Invalid :path: {}", msg));
+        }
+
+        if let Some(PathParseResult::Empty) = path_result {
+            return HeadersParseResult::ProtocolError(
+                "Empty :path forbidden in HTTP/2 requests".to_string(),
+            );
         }
 
         if let Some(PathParseResult::HasFragment(ref fragment)) = path_result {
@@ -443,39 +457,37 @@ enum ValidPathQuery {
     Asterisk,
 }
 
-impl PathVariant {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for PathVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PathVariant::Valid(valid) => match valid {
-                ValidPathQuery::Simple(path) => format!("/{}", path),
-                ValidPathQuery::WithQuery(path, query) => format!("/{}?{}", path, query),
+                ValidPathQuery::Simple(path) => write!(f, "/{}", path),
+                ValidPathQuery::WithQuery(path, query) => write!(f, "/{}?{}", path, query),
                 ValidPathQuery::WithMultipleParams(path, params) => {
                     let query_string = params
                         .iter()
                         .map(|(k, v)| format!("{}={}", k, v))
                         .collect::<Vec<_>>()
                         .join("&");
-                    format!("/{}?{}", path, query_string)
+                    write!(f, "/{}?{}", path, query_string)
                 }
                 ValidPathQuery::WithEncodedPath(encoded_path, query) => {
-                    format!("/{}?{}", encoded_path, query)
+                    write!(f, "/{}?{}", encoded_path, query)
                 }
                 ValidPathQuery::WithEncodedQuery(path, encoded_query) => {
-                    format!("/{}?{}", path, encoded_query)
+                    write!(f, "/{}?{}", path, encoded_query)
                 }
-                ValidPathQuery::Asterisk => "*".to_string(),
+                ValidPathQuery::Asterisk => f.write_str("*"),
             },
             PathVariant::MultipleQueries(base) => {
-                format!("/{}?query=value?more=data?even=more", base)
+                write!(f, "/{}?query=value?more=data?even=more", base)
             }
-            PathVariant::EncodedQuestions(base) => {
-                format!("/path%3Fencoded/{}", base)
-            }
+            PathVariant::EncodedQuestions(base) => write!(f, "/path%3Fencoded/{}", base),
             PathVariant::WithFragment(path, fragment) => {
-                format!("/{}#{}", path, fragment)
+                write!(f, "/{}#{}", path, fragment)
             }
-            PathVariant::InvalidEncoding(path) => path.clone(),
-            PathVariant::Custom(custom) => custom.clone(),
+            PathVariant::InvalidEncoding(path) => f.write_str(path),
+            PathVariant::Custom(custom) => f.write_str(custom),
         }
     }
 }
@@ -576,7 +588,7 @@ fuzz_target!(|input: FuzzInput| {
     let frame_header = FrameHeader {
         length: encoded_headers.len() as u32,
         frame_type: HEADERS_FRAME_TYPE,
-        flags: END_HEADERS_FLAG,
+        flags: END_HEADERS_FLAG | END_STREAM_FLAG,
         stream_id,
     };
 
@@ -589,7 +601,7 @@ fuzz_target!(|input: FuzzInput| {
     let result = parser.parse_headers_frame(&frame_bytes);
 
     // Validate behavior based on path format and query string handling
-    match result {
+    match &result {
         HeadersParseResult::Valid {
             path_result: Some(path_parse_result),
             ..
@@ -606,6 +618,12 @@ fuzz_target!(|input: FuzzInput| {
 
                     // Test multiple query delimiter handling
                     if input.test_multiple_queries && path_value.matches('?').count() > 1 {
+                        assert!(
+                            has_multiple_query_delimiters,
+                            "multiple literal '?' delimiters should be recorded in query: {}",
+                            path_value
+                        );
+
                         // Should have detected multiple query delimiters
                         if let Some(_query) = &query_component {
                             // Query component should contain additional ? characters
@@ -744,7 +762,7 @@ fuzz_target!(|input: FuzzInput| {
             let expected_path = &path_value[..first_q_pos];
             let expected_query = &path_value[first_q_pos + 1..];
 
-            match result {
+            match &result {
                 HeadersParseResult::Valid {
                     path_result:
                         Some(PathParseResult::Valid {
@@ -797,7 +815,7 @@ fuzz_target!(|input: FuzzInput| {
     ];
 
     for &(full_path, expected_path_part, expected_query_part) in &test_patterns {
-        let mut test_headers = vec![
+        let test_headers = vec![
             HeaderField::new(":method", "GET"),
             HeaderField::new(":scheme", "https"),
             HeaderField::new(":authority", "example.com"),
@@ -808,7 +826,7 @@ fuzz_target!(|input: FuzzInput| {
         let test_frame_header = FrameHeader {
             length: test_encoded.len() as u32,
             frame_type: HEADERS_FRAME_TYPE,
-            flags: END_HEADERS_FLAG,
+            flags: END_HEADERS_FLAG | END_STREAM_FLAG,
             stream_id: 9,
         };
 
@@ -840,9 +858,56 @@ fuzz_target!(|input: FuzzInput| {
                     "RFC 3986 compliance test failed for '{}' - query component",
                     full_path
                 );
+
+                percent_decode(&path_component).unwrap_or_else(|err| {
+                    panic!(
+                        "RFC 3986 compliance path component should be percent-decodable for '{}': {}",
+                        full_path, err
+                    )
+                });
+                if let Some(query) = query_component.as_deref() {
+                    percent_decode(query).unwrap_or_else(|err| {
+                        panic!(
+                            "RFC 3986 compliance query component should be percent-decodable for '{}': {}",
+                            full_path, err
+                        )
+                    });
+                }
             }
-            _ => {
-                // Some test patterns might be rejected due to encoding issues, which is acceptable
+            HeadersParseResult::Valid {
+                path_result: Some(path_parse_result),
+                ..
+            } => {
+                panic!(
+                    "RFC 3986 compliance test produced non-valid path result for '{}': {:?}",
+                    full_path, path_parse_result
+                );
+            }
+            HeadersParseResult::Valid {
+                path_result: None, ..
+            } => {
+                panic!(
+                    "RFC 3986 compliance test lost :path header: '{}'",
+                    full_path
+                );
+            }
+            HeadersParseResult::ProtocolError(msg) => {
+                panic!(
+                    "RFC 3986 compliance test rejected valid query path '{}': {}",
+                    full_path, msg
+                );
+            }
+            HeadersParseResult::IncompleteFrame => {
+                panic!(
+                    "complete RFC 3986 compliance HEADERS frame parsed as incomplete: '{}'",
+                    full_path
+                );
+            }
+            HeadersParseResult::InvalidStreamId => {
+                panic!(
+                    "valid RFC 3986 compliance HEADERS frame reported invalid stream id: '{}'",
+                    full_path
+                );
             }
         }
     }
@@ -858,7 +923,7 @@ fuzz_target!(|input: FuzzInput| {
     ];
 
     for &invalid_pattern in &invalid_patterns {
-        let mut test_headers = vec![
+        let test_headers = vec![
             HeaderField::new(":method", "GET"),
             HeaderField::new(":scheme", "https"),
             HeaderField::new(":authority", "example.com"),
@@ -869,7 +934,7 @@ fuzz_target!(|input: FuzzInput| {
         let test_frame_header = FrameHeader {
             length: test_encoded.len() as u32,
             frame_type: HEADERS_FRAME_TYPE,
-            flags: END_HEADERS_FLAG,
+            flags: END_HEADERS_FLAG | END_STREAM_FLAG,
             stream_id: 11,
         };
 
@@ -885,7 +950,7 @@ fuzz_target!(|input: FuzzInput| {
                 ..
             } => {
                 // Only allow "*" and empty paths in specific contexts
-                if invalid_pattern != "*" && invalid_pattern != "" {
+                if invalid_pattern != "*" && !invalid_pattern.is_empty() {
                     panic!(
                         "CRITICAL SECURITY ISSUE: Invalid path pattern parsed as valid: '{}'",
                         invalid_pattern
@@ -895,8 +960,34 @@ fuzz_target!(|input: FuzzInput| {
             HeadersParseResult::ProtocolError(_) => {
                 // Expected - invalid pattern correctly rejected
             }
-            _ => {
-                // Other results are acceptable (incomplete, etc.)
+            HeadersParseResult::Valid {
+                path_result: Some(path_parse_result),
+                ..
+            } => {
+                panic!(
+                    "invalid path pattern produced non-valid path result instead of protocol error: pattern='{}', result={:?}",
+                    invalid_pattern, path_parse_result
+                );
+            }
+            HeadersParseResult::Valid {
+                path_result: None, ..
+            } => {
+                panic!(
+                    "invalid path pattern lost the :path header: '{}'",
+                    invalid_pattern
+                );
+            }
+            HeadersParseResult::IncompleteFrame => {
+                panic!(
+                    "complete invalid-path HEADERS frame parsed as incomplete: '{}'",
+                    invalid_pattern
+                );
+            }
+            HeadersParseResult::InvalidStreamId => {
+                panic!(
+                    "invalid-path HEADERS frame reported invalid stream id: '{}'",
+                    invalid_pattern
+                );
             }
         }
     }
