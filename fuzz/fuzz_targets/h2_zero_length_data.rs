@@ -206,16 +206,12 @@ fn test_zero_length_data_processing(test_seq: &ZeroLengthDataSequence) {
     for data_frame in &test_seq.data_frames {
         let frame = create_zero_length_data_frame(data_frame);
 
-        match observe_encode(&mut codec, frame, &mut buffer, "zero-length DATA frame") {
-            Ok(encoded_range) => {
-                // Frame should be processed correctly
-                assert_zero_length_data_encoding(&buffer[encoded_range], data_frame);
-            }
-            Err(_diagnostic) => {
-                // Some zero-length DATA frames may be rejected (e.g., on closed streams)
-                // This is acceptable behavior
-            }
-        }
+        let encoded_range =
+            observe_encode(&mut codec, frame, &mut buffer, "zero-length DATA frame")
+                .unwrap_or_else(|diagnostic| {
+                    panic!("synthetic zero-length DATA frame should encode cleanly: {diagnostic}");
+                });
+        assert_zero_length_data_encoding(&buffer[encoded_range], data_frame);
 
         if state.check_infinite_loop() {
             panic!(
@@ -253,19 +249,25 @@ fn test_interleaved_zero_length_data(test_seq: &ZeroLengthDataSequence) {
             .get(i)
             .and_then(|frame| create_interleaved_frame(frame).ok());
         if let Some(frame) = interleaved_frame {
-            encoded_frames +=
-                usize::from(observe_encode(&mut codec, frame, &mut buffer, "interleaved frame").is_ok());
+            encoded_frames += usize::from(
+                observe_encode(&mut codec, frame, &mut buffer, "interleaved frame").is_ok(),
+            );
         }
 
         // Send a zero-length DATA frame if available
         if i < test_seq.data_frames.len() {
-            let data_frame = create_zero_length_data_frame(&test_seq.data_frames[i]);
-            if let Ok(encoded_range) =
-                observe_encode(&mut codec, data_frame, &mut buffer, "interleaved DATA frame")
-            {
-                encoded_frames += 1;
-                assert_zero_length_data_encoding(&buffer[encoded_range], &test_seq.data_frames[i]);
-            }
+            let data_frame = &test_seq.data_frames[i];
+            let encoded_range = observe_encode(
+                &mut codec,
+                create_zero_length_data_frame(data_frame),
+                &mut buffer,
+                "interleaved DATA frame",
+            )
+            .unwrap_or_else(|diagnostic| {
+                panic!("interleaved zero-length DATA frame should encode cleanly: {diagnostic}");
+            });
+            encoded_frames += 1;
+            assert_zero_length_data_encoding(&buffer[encoded_range], data_frame);
         }
 
         if state.check_infinite_loop() {
