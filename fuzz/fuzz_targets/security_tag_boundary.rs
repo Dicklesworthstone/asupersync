@@ -26,7 +26,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::security::key::{AUTH_KEY_SIZE, AuthKey};
+use asupersync::security::key::AuthKey;
 use asupersync::security::tag::{AuthenticationTag, TAG_SIZE};
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
@@ -68,12 +68,21 @@ fn make_symbol(object_id: u128, sbn: u8, esi: u32, kind_bit: bool, payload: Vec<
     Symbol::new(id, payload, kind)
 }
 
+fn bytes_are_zero(bytes: &[u8; TAG_SIZE]) -> bool {
+    bytes.iter().all(|&byte| byte == 0)
+}
+
 fuzz_target!(|case: Case| {
     match case {
         Case::ByteEq { lhs, diff_bit } => {
             // (a) Reflexivity: a tag equals itself regardless of byte content.
             let a = AuthenticationTag::from_bytes(lhs);
             let b = AuthenticationTag::from_bytes(lhs);
+            assert_eq!(
+                a.is_zero(),
+                bytes_are_zero(&lhs),
+                "is_zero disagreed with byte classifier for lhs tag",
+            );
             assert!(
                 a == b,
                 "PartialEq: byte-equal tags compared unequal (bytes={lhs:?})",
@@ -86,6 +95,11 @@ fuzz_target!(|case: Case| {
             let mask = 1u8 << (bit % 8);
             rhs_bytes[byte_idx] ^= mask;
             let rhs = AuthenticationTag::from_bytes(rhs_bytes);
+            assert_eq!(
+                rhs.is_zero(),
+                bytes_are_zero(&rhs_bytes),
+                "is_zero disagreed with byte classifier for single-bit mutation",
+            );
             assert!(
                 a != rhs,
                 "PartialEq: single-bit-diff tags compared equal (bit={bit})",
@@ -93,6 +107,11 @@ fuzz_target!(|case: Case| {
         }
         Case::RoundTrip { bytes } => {
             let tag = AuthenticationTag::from_bytes(bytes);
+            assert_eq!(
+                tag.is_zero(),
+                bytes_are_zero(&bytes),
+                "is_zero disagreed with byte classifier for round-trip tag",
+            );
             assert_eq!(
                 tag.as_bytes(),
                 &bytes,
@@ -137,8 +156,4 @@ fuzz_target!(|case: Case| {
             );
         }
     }
-
-    // Keep AUTH_KEY_SIZE referenced so the import is not removed during
-    // future refactors; the ZeroTagNeverVerifies arm already uses AuthKey.
-    let _ = AUTH_KEY_SIZE;
 });
