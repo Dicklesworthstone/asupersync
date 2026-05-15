@@ -594,6 +594,46 @@ fn observe_vlq_parse(result: Option<(u64, usize)>, data: &[u8], offset: usize, c
     }
 }
 
+fn assert_nonempty_debug<T: core::fmt::Debug>(value: &T, context: &str) {
+    let debug = format!("{value:?}");
+    assert!(
+        !debug.is_empty(),
+        "{context} debug output should not be empty"
+    );
+}
+
+fn observe_decode_result<T, E>(result: Result<T, E>, context: &str)
+where
+    T: core::fmt::Debug,
+    E: core::fmt::Debug,
+{
+    match result {
+        Ok(value) => assert_nonempty_debug(&value, context),
+        Err(error) => assert_nonempty_debug(&error, context),
+    }
+}
+
+fn observe_consuming_decode_result<T, E>(
+    result: Result<(T, usize), E>,
+    input_len: usize,
+    context: &str,
+) where
+    T: core::fmt::Debug,
+    E: core::fmt::Debug,
+{
+    match result {
+        Ok((value, consumed)) => {
+            assert!(consumed > 0, "{context} accepted without consuming bytes");
+            assert!(
+                consumed <= input_len,
+                "{context} consumed {consumed} bytes from {input_len}-byte input"
+            );
+            assert_nonempty_debug(&value, context);
+        }
+        Err(error) => assert_nonempty_debug(&error, context),
+    }
+}
+
 fn synthetic_cid(seed: u8, frame_bytes: &[u8]) -> [u8; 4] {
     let first = frame_bytes.first().copied().unwrap_or(seed);
     [seed, first, frame_bytes.len() as u8, seed ^ first]
@@ -633,26 +673,50 @@ fn build_initial_packet(frame_bytes: &[u8]) -> Vec<u8> {
 }
 
 fn exercise_real_quic_core_boundaries(frame_bytes: &[u8]) {
-    let _ = real_decode_varint(frame_bytes);
-    let _ = TransportParameters::decode(frame_bytes);
+    observe_consuming_decode_result(
+        real_decode_varint(frame_bytes),
+        frame_bytes.len(),
+        "QUIC varint decode",
+    );
+    observe_decode_result(
+        TransportParameters::decode(frame_bytes),
+        "QUIC transport parameter decode",
+    );
 
     let short_packet = build_short_header_packet(frame_bytes);
-    let _ = PacketHeader::decode(&short_packet, 4);
+    observe_consuming_decode_result(
+        PacketHeader::decode(&short_packet, 4),
+        short_packet.len(),
+        "QUIC short packet header decode",
+    );
 
     let initial_packet = build_initial_packet(frame_bytes);
-    let _ = PacketHeader::decode(&initial_packet, 0);
+    observe_consuming_decode_result(
+        PacketHeader::decode(&initial_packet, 0),
+        initial_packet.len(),
+        "QUIC initial packet header decode",
+    );
 }
 
 fn exercise_real_varint_roundtrip(value: u64) {
     if value > QUIC_VARINT_MAX {
         let mut out = Vec::new();
-        let _ = real_encode_varint(value, &mut out);
+        let result = real_encode_varint(value, &mut out);
+        assert!(
+            result.is_err(),
+            "out-of-range QUIC varint should fail to encode"
+        );
         return;
     }
 
     let mut out = Vec::new();
-    if real_encode_varint(value, &mut out).is_ok() {
-        let _ = real_decode_varint(&out);
+    match real_encode_varint(value, &mut out) {
+        Ok(()) => observe_consuming_decode_result(
+            real_decode_varint(&out),
+            out.len(),
+            "QUIC varint roundtrip decode",
+        ),
+        Err(error) => panic!("in-range QUIC varint failed to encode: {error:?}"),
     }
 }
 
