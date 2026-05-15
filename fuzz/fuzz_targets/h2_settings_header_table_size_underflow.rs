@@ -449,9 +449,6 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
     let initial_size = limited_sizes.first().copied().unwrap_or(4096) as usize;
     let mut table = MockDynamicTable::new(initial_size);
 
-    // Track all violations found during the test
-    let mut all_violations = Vec::new();
-
     for (step, &new_size) in limited_sizes.iter().enumerate() {
         let new_size = new_size as usize;
 
@@ -493,13 +490,16 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
 
         // Validate table consistency after each step
         let consistency = table.validate_consistency();
-        all_violations.extend(consistency.violations);
+        assert!(
+            consistency.violations.is_empty(),
+            "Consistency violations after step {step} resizing to {new_size}: {:?}",
+            consistency.violations
+        );
 
         // Check for underflow indicators
         if change_result.underflow_risk {
             // This was a potentially problematic size transition
             // Ensure it didn't break anything
-            assert!(table.validate_consistency().violations.is_empty());
             assert_eq!(table.max_size, new_size);
             assert!(table.current_size <= table.max_size);
         }
@@ -512,13 +512,6 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
         "Final consistency check failed: {:?}",
         final_consistency.violations
     );
-
-    // If we found any violations, they should have been from intermediate states
-    // and we should have recovered by the end
-    if !all_violations.is_empty() {
-        // Log for analysis but don't fail - some intermediate violations might be acceptable
-        // as long as we end in a consistent state
-    }
 
     // Test specific edge cases periodically
     if limited_sizes.len() == 1 {
