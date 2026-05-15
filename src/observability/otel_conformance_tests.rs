@@ -50084,7 +50084,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_valid: false,
-                expected_command: "".to_string(),
+                expected_command: String::new(),
             },
             RedisConsumerCommandScenario {
                 description: "non_redis_consumer_no_requirement".to_string(),
