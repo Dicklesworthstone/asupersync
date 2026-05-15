@@ -12,6 +12,7 @@
 #![no_main]
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::proof::ReplayError;
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 use libfuzzer_sys::fuzz_target;
@@ -97,10 +98,13 @@ fuzz_target!(|data: &[u8]| {
             .proof
             .replay_and_verify(&mutated_received)
             .expect_err("payload-divergent replay must fail verification");
-        assert!(
-            err.to_string().contains("source_payload_hash"),
-            "expected source_payload_hash mismatch, got {err}"
-        );
+        match err {
+            ReplayError::Mismatch { field, .. } => assert_eq!(
+                field, "outcome",
+                "payload-divergent replay should fail on the proof outcome field"
+            ),
+            other => panic!("expected outcome mismatch for payload-divergent replay, got {other}"),
+        }
         assert!(
             mutated_result
                 .proof
@@ -188,7 +192,9 @@ fn build_received(
         received.push(ReceivedSymbol::source(index as u32, data.clone()));
     }
     for esi in (source.len() as u32)..(decoder.params().l as u32) {
-        let (cols, coefs) = decoder.repair_equation(esi);
+        let (cols, coefs) = decoder
+            .repair_equation(esi)
+            .expect("valid fuzz parameters should produce repair equations");
         received.push(ReceivedSymbol::repair(
             esi,
             cols,
