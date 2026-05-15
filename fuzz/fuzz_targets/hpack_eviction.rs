@@ -157,6 +157,8 @@ fn test_never_indexed_literals(config: &HpackEvictionConfig) -> Result<(), Strin
             encode_string(&mut buf, &fuzz_header.name, config.use_huffman);
             encode_string(&mut buf, &fuzz_header.value, config.use_huffman);
 
+            let encoded_header_list_size =
+                Header::new(&fuzz_header.name, &fuzz_header.value).size();
             let mut src = buf.freeze();
             match decoder.decode(&mut src) {
                 Ok(headers) => {
@@ -165,8 +167,13 @@ fn test_never_indexed_literals(config: &HpackEvictionConfig) -> Result<(), Strin
                     assert_eq!(headers[0].name, fuzz_header.name);
                     assert_eq!(headers[0].value, fuzz_header.value);
                 }
-                Err(_) => {
-                    // Failure may occur with malformed strings - acceptable
+                Err(error) => {
+                    if encoded_header_list_size <= config.max_header_list_size as usize {
+                        return Err(format!(
+                            "HPACK decoder rejected in-limit never-indexed header ({} <= {}): {}",
+                            encoded_header_list_size, config.max_header_list_size, error
+                        ));
+                    }
                 }
             }
         }
