@@ -198,7 +198,7 @@ fn assert_goaway_parse_error(
                 error.stream_id
             ));
         }
-        if !error.message.contains("non-zero stream ID") {
+        if error.message != "GOAWAY frame with non-zero stream ID" {
             return Err(format!(
                 "{context}: GOAWAY stream-id diagnostic changed: {}",
                 error.message
@@ -220,7 +220,7 @@ fn assert_goaway_parse_error(
                 error.stream_id
             ));
         }
-        if !error.message.contains("at least 8 bytes") {
+        if error.message != "GOAWAY frame must be at least 8 bytes" {
             return Err(format!(
                 "{context}: GOAWAY size diagnostic changed: {}",
                 error.message
