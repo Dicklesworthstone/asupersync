@@ -51735,7 +51735,7 @@ mod otlp_122_tests {
                     // Missing messaging.aws_sns.topic_arn - should be invalid
                 ],
                 should_be_valid: false,
-                expected_topic_arn: "".to_string(),
+                expected_topic_arn: String::new(),
             },
             AwsSnsProducerScenario {
                 description: "aws_sns_producer_empty_topic_arn".to_string(),
@@ -51744,7 +51744,7 @@ mod otlp_122_tests {
                 span_attributes: vec![
                     (
                         "messaging.aws_sns.topic_arn".to_string(),
-                        AnyValue::StringValue("".to_string()),
+                        AnyValue::StringValue(String::new()),
                     ), // Empty topic ARN
                     (
                         "messaging.system".to_string(),
@@ -51760,7 +51760,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_valid: false,
-                expected_topic_arn: "".to_string(),
+                expected_topic_arn: String::new(),
             },
             AwsSnsProducerScenario {
                 description: "aws_sns_producer_wrong_attribute_type".to_string(),
@@ -51785,7 +51785,7 @@ mod otlp_122_tests {
                     ),
                 ],
                 should_be_valid: false,
-                expected_topic_arn: "".to_string(),
+                expected_topic_arn: String::new(),
             },
             AwsSnsProducerScenario {
                 description: "aws_sns_consumer_span_exempt".to_string(),
@@ -51807,7 +51807,7 @@ mod otlp_122_tests {
                     // Consumer spans are exempt from producer topic ARN requirement
                 ],
                 should_be_valid: true, // Consumer spans don't need producer topic ARN
-                expected_topic_arn: "".to_string(),
+                expected_topic_arn: String::new(),
             },
             AwsSnsProducerScenario {
                 description: "non_aws_sns_messaging_system_exempt".to_string(),
@@ -51829,7 +51829,7 @@ mod otlp_122_tests {
                     // Non-AWS SNS systems exempt from topic ARN requirement
                 ],
                 should_be_valid: true,
-                expected_topic_arn: "".to_string(),
+                expected_topic_arn: String::new(),
             },
             AwsSnsProducerScenario {
                 description: "case_sensitive_messaging_system_check".to_string(),
@@ -51851,7 +51851,7 @@ mod otlp_122_tests {
                     // Case-sensitive check - "AWS_SNS" != "aws_sns"
                 ],
                 should_be_valid: true, // Not exact "aws_sns" so exempt
-                expected_topic_arn: "".to_string(),
+                expected_topic_arn: String::new(),
             },
             AwsSnsProducerScenario {
                 description: "aws_sns_producer_with_subscription_filtering".to_string(),
