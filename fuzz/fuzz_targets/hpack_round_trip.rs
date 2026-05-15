@@ -184,13 +184,10 @@ fn generate_header_name(data: &[u8]) -> String {
             let suffix_bytes = &data[2..2 + suffix_len.min(data.len() - 2)];
             let suffix: String = suffix_bytes
                 .iter()
-                .map(|&b| {
-                    let c = match b % 36 {
-                        0..=25 => (b'a' + (b % 26)) as char,
-                        26..=35 => (b'0' + (b % 10)) as char,
-                        _ => '-',
-                    };
-                    c
+                .map(|&b| match b % 36 {
+                    0..=25 => (b'a' + (b % 26)) as char,
+                    26..=35 => (b'0' + (b % 10)) as char,
+                    _ => '-',
                 })
                 .collect();
 
@@ -258,7 +255,7 @@ fn generate_header_value(data: &[u8]) -> String {
             // Numeric values
             if data.len() >= 4 {
                 let num = u32::from_be_bytes([
-                    data.get(0).copied().unwrap_or(0),
+                    data.first().copied().unwrap_or(0),
                     data.get(1).copied().unwrap_or(0),
                     data.get(2).copied().unwrap_or(0),
                     data.get(3).copied().unwrap_or(0),
@@ -338,15 +335,11 @@ fn round_trip_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder, heade
     let mut encoded_bytes = encoded.freeze();
     let decoded_result = decoder.decode(&mut encoded_bytes);
 
-    // Verify decode succeeded
-    let decoded_headers = match decoded_result {
-        Ok(headers) => headers,
-        Err(_) => {
-            // Decode failure is acceptable for malformed input,
-            // but encoding valid headers should always decode successfully
-            return;
-        }
-    };
+    // Encoding target-generated valid headers must produce a block this
+    // decoder accepts; otherwise the round-trip oracle is silently skipped.
+    let decoded_headers = decoded_result.unwrap_or_else(|error| {
+        panic!("HPACK decode failed after encoding valid headers: {error:?}")
+    });
 
     // Verify round-trip consistency
     assert_eq!(
