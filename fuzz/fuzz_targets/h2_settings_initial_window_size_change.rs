@@ -575,8 +575,11 @@ fuzz_target!(|data: &[u8]| {
                 WindowError::InvalidWindowSize => {
                     // Should happen for invalid input
                 }
-                _ => {
-                    // Other errors are acceptable
+                other => {
+                    panic!(
+                        "Unexpected direct initial-window-size change error: {:?}",
+                        other
+                    );
                 }
             }
         }
