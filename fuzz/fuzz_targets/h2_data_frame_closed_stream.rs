@@ -514,9 +514,19 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
                     ));
                 }
             }
-            Err(_other_error) => {
-                // Other errors are acceptable (flow control, etc.) but document them
-                // as long as no panic occurred
+            Err(other_error) => {
+                observe_data_frame_result(
+                    &connection,
+                    stream_id,
+                    &Err(other_error),
+                    "arbitrary DATA after stream closure",
+                );
+                assert_data_error_matches_frame_state(
+                    &connection,
+                    data_frame,
+                    other_error,
+                    "arbitrary DATA after stream closure",
+                );
             }
             Ok(()) => {
                 // Success is only acceptable if stream wasn't closed
@@ -788,9 +798,65 @@ fn observe_data_frame_result(
                         "{context}: STREAM_CLOSED should be recorded with diagnostics"
                     );
                 }
+                ErrorCode::FrameSizeError | ErrorCode::FlowControlError => {
+                    assert!(
+                        connection
+                            .get_stream_errors()
+                            .iter()
+                            .any(|(id, code, message)| {
+                                *id == stream_id && code == error && !message.is_empty()
+                            }),
+                        "{context}: {error:?} should be recorded with diagnostics"
+                    );
+                }
                 _ => {}
             }
         }
+    }
+}
+
+fn assert_data_error_matches_frame_state(
+    connection: &MockH2Connection,
+    frame: &DataFrame,
+    error: ErrorCode,
+    context: &str,
+) {
+    match error {
+        ErrorCode::ProtocolError => {
+            assert!(
+                frame.stream_id == 0 || !connection.is_connection_active(),
+                "{context}: PROTOCOL_ERROR should be tied to stream 0 or a closed connection"
+            );
+        }
+        ErrorCode::FrameSizeError => {
+            let invalid_padding = frame
+                .padded
+                .is_some_and(|padding_len| padding_len as usize > frame.data.len());
+            assert!(
+                invalid_padding,
+                "{context}: FRAME_SIZE_ERROR should be backed by invalid DATA padding"
+            );
+        }
+        ErrorCode::FlowControlError => {
+            let stream = connection.streams.get(&frame.stream_id).unwrap_or_else(|| {
+                panic!(
+                    "{context}: FLOW_CONTROL_ERROR should reference an existing stream {}",
+                    frame.stream_id
+                )
+            });
+            assert!(
+                frame.flow_control_len_i32() > stream.window_size,
+                "{context}: FLOW_CONTROL_ERROR should be backed by DATA length exceeding the stream window"
+            );
+        }
+        ErrorCode::StreamClosed => {
+            assert_eq!(
+                connection.get_stream_state(frame.stream_id),
+                Some(StreamState::Closed),
+                "{context}: STREAM_CLOSED should reference a closed stream"
+            );
+        }
+        other => panic!("{context}: unexpected DATA error code {other:?}"),
     }
 }
 
