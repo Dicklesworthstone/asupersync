@@ -25,15 +25,13 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::grpc::{
     server::{CallContext, Server, ServerBuilder, parse_grpc_timeout},
     service::{MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler},
-    status::{Code, Status},
-    streaming::{Metadata, Request, Response},
+    status::Status,
+    streaming::Metadata,
 };
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
@@ -117,6 +115,18 @@ impl TimeoutUnit {
             TimeoutUnit::Invalid => "X",
         }
     }
+}
+
+/// Target-local gRPC path classification for generated and fixed edge paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrpcPathClass {
+    Valid,
+    Empty,
+    MissingLeadingSlash,
+    InvalidCharacter,
+    WrongSegmentCount,
+    EmptyService,
+    EmptyMethod,
 }
 
 /// Mock service handler for testing dispatch
@@ -212,8 +222,7 @@ fn test_path_validation(path: Vec<u8>, include_service: bool, malformed_segments
     // Test basic path validation
     let path_str = String::from_utf8_lossy(&path);
 
-    // Valid gRPC paths must start with '/' and follow format: /package.service/method
-    let _is_valid_format = path_str.starts_with('/') && path_str.chars().all(|c| c.is_ascii());
+    let generated_path_class = validate_path_format(&path_str);
 
     // Create various malformed paths for testing
     let test_paths = vec![
@@ -225,17 +234,59 @@ fn test_path_validation(path: Vec<u8>, include_service: bool, malformed_segments
             path_str.to_string()
         },
         // Test edge cases
-        String::new(),                  // Empty path
-        "/".to_string(),                // Root only
-        "no-leading-slash".to_string(), // Missing leading slash
-        "/invalid\0null".to_string(),   // Embedded null
-        "/invalid\npath".to_string(),   // Newline injection
-        "/🦀/rust".to_string(),         // Unicode characters
+        String::new(),                          // Empty path
+        "/".to_string(),                        // Root only
+        "/test.Service/TestMethod".to_string(), // Known valid gRPC method path
+        "no-leading-slash".to_string(),         // Missing leading slash
+        "/invalid\0null".to_string(),           // Embedded null
+        "/invalid\npath".to_string(),           // Newline injection
+        "/🦀/rust".to_string(),                 // Unicode characters
     ];
 
-    for test_path in test_paths {
-        validate_path_format(&test_path);
+    let mut saw_valid_path = false;
+    let mut saw_invalid_path = false;
+
+    for (index, test_path) in test_paths.iter().enumerate() {
+        let path_class = validate_path_format(test_path);
+        let is_valid = matches!(path_class, GrpcPathClass::Valid);
+        saw_valid_path |= is_valid;
+        saw_invalid_path |= !is_valid;
+
+        if index == 0 {
+            assert_eq!(path_class, generated_path_class);
+        }
     }
+
+    assert!(
+        saw_valid_path,
+        "fixed corpus should include a valid gRPC path"
+    );
+    assert!(
+        saw_invalid_path,
+        "fixed corpus should include malformed gRPC paths"
+    );
+    assert_eq!(validate_path_format(""), GrpcPathClass::Empty);
+    assert_eq!(
+        validate_path_format("no-leading-slash"),
+        GrpcPathClass::MissingLeadingSlash
+    );
+    assert_eq!(
+        validate_path_format("/test.Service/TestMethod"),
+        GrpcPathClass::Valid
+    );
+    assert_eq!(validate_path_format("/"), GrpcPathClass::EmptyService);
+    assert_eq!(
+        validate_path_format("/invalid\0null"),
+        GrpcPathClass::InvalidCharacter
+    );
+    assert_eq!(
+        validate_path_format("/invalid\npath"),
+        GrpcPathClass::InvalidCharacter
+    );
+    assert_eq!(
+        validate_path_format("/🦀/rust"),
+        GrpcPathClass::InvalidCharacter
+    );
 }
 
 /// Test grpc-timeout trailer parsing (Assertion 2)
@@ -346,7 +397,13 @@ fn test_streaming_detection(
     let mut metadata = Metadata::new();
     for (key, value) in confusing_headers {
         if !key.is_empty() && !value.is_empty() {
-            metadata.insert(&key, &value);
+            let inserted = metadata.insert(&key, &value);
+            if inserted {
+                assert!(
+                    metadata.get(&key).is_some(),
+                    "inserted confusing header should be retrievable"
+                );
+            }
         }
     }
 
@@ -362,7 +419,7 @@ fn test_deadline_propagation(
 ) {
     let mut metadata = Metadata::new();
     if let Some(ref timeout) = timeout_header {
-        metadata.insert("grpc-timeout", timeout);
+        assert!(metadata.insert("grpc-timeout", timeout));
     }
 
     let default_duration = default_timeout.map(|ms| Duration::from_millis(ms as u64));
@@ -375,9 +432,14 @@ fn test_deadline_propagation(
         (Some(header), _) => {
             // If timeout header present, should parse it (or fail gracefully)
             let parsed = parse_grpc_timeout(header);
-            if parsed.is_some() {
-                // Should have a deadline derived from parsed timeout
-                assert!(call_context.deadline().is_some() || call_context.deadline().is_none());
+            if let Some(parsed_timeout) = parsed {
+                // Bounded valid timeouts should derive a concrete deadline.
+                if parsed_timeout <= Duration::from_secs(3600 * 24 * 365) {
+                    assert!(
+                        call_context.deadline().is_some(),
+                        "bounded grpc-timeout should set a deadline: {header}"
+                    );
+                }
             }
         }
         (None, Some(_)) => {
@@ -395,14 +457,36 @@ fn test_deadline_propagation(
 }
 
 /// Helper function to validate path format
-fn validate_path_format(path: &str) {
-    // Basic gRPC path validation
-    let valid = path.starts_with('/')
-        && path.chars().all(|c| c.is_ascii_graphic() || c == '/')
-        && !path.contains('\0');
+fn validate_path_format(path: &str) -> GrpcPathClass {
+    if path.is_empty() {
+        return GrpcPathClass::Empty;
+    }
 
-    // Don't assert here - just test that validation doesn't panic
-    let _ = valid;
+    if !path.starts_with('/') {
+        return GrpcPathClass::MissingLeadingSlash;
+    }
+
+    if !path.chars().all(|c| c.is_ascii_graphic()) {
+        return GrpcPathClass::InvalidCharacter;
+    }
+
+    let mut segments = path[1..].split('/');
+    let service = segments.next().unwrap_or_default();
+    let method = segments.next().unwrap_or_default();
+
+    if segments.next().is_some() {
+        return GrpcPathClass::WrongSegmentCount;
+    }
+
+    if service.is_empty() {
+        return GrpcPathClass::EmptyService;
+    }
+
+    if method.is_empty() {
+        return GrpcPathClass::EmptyMethod;
+    }
+
+    GrpcPathClass::Valid
 }
 
 /// Test boundary cases for timeout parsing
@@ -448,10 +532,15 @@ fn test_metadata_handling(metadata_pairs: Vec<(String, String)>) {
     for (key, value) in metadata_pairs {
         if !key.is_empty() && !value.is_empty() && key.is_ascii() {
             // Test inserting various metadata
-            metadata.insert(&key, &value);
+            let inserted = metadata.insert(&key, &value);
 
             // Test retrieval
-            let _retrieved = metadata.get(&key);
+            if inserted {
+                assert!(
+                    metadata.get(&key).is_some(),
+                    "inserted metadata key should be retrievable"
+                );
+            }
         }
     }
 
@@ -467,7 +556,7 @@ fn test_raw_timeout_parsing(input: &str) {
     let _result = parse_grpc_timeout(input);
 
     // Test common patterns
-    if input.len() > 0 && input.len() < 20 {
+    if !input.is_empty() && input.len() < 20 {
         // Test with added units
         for unit in ["H", "M", "S", "m", "u", "n"] {
             let test_string = format!("{}{}", input, unit);
