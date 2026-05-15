@@ -627,8 +627,10 @@ fuzz_target!(|input: MaxWindowSizeInput| {
                 );
             }
 
-            _ => {
-                // Other results are acceptable
+            other => {
+                panic!(
+                    "WINDOW_UPDATE on opened stream {stream_id} with increment {update_increment} should apply or overflow, got {other:?}"
+                );
             }
         }
     }
