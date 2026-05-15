@@ -302,8 +302,8 @@ fn test_data_after_rst_stream(stream_id: u32, post_frames: &[PostEndStreamFrame]
                 Err(ref error) if matches_stream_closed_error(error) => {
                     // Expected
                 }
-                Err(_) => {
-                    // Other errors acceptable
+                Err(error) => {
+                    observe_h2_error("DATA after RST_STREAM alternate rejection", &error);
                 }
                 Ok(()) => {
                     panic!("DATA frame incorrectly accepted after RST_STREAM");
