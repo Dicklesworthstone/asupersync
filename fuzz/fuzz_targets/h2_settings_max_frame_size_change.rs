@@ -730,8 +730,17 @@ fuzz_target!(|input: FrameSizeChangeInput| {
 
     let boundary_result = connection.process_frame(&boundary_frame);
     match boundary_result {
-        FrameProcessResult::Accepted { .. } => {
-            // Expected - frame at exact limit should be accepted
+        FrameProcessResult::Accepted {
+            size, limit_used, ..
+        } => {
+            assert_eq!(
+                size, boundary_frame.payload_size,
+                "Accepted boundary frame should preserve payload size"
+            );
+            assert_eq!(
+                limit_used, post_settings_status.current_max_frame_size,
+                "Accepted boundary frame should use the current MAX_FRAME_SIZE"
+            );
         }
         FrameProcessResult::FrameSizeError { .. } => {
             panic!(
@@ -739,7 +748,10 @@ fuzz_target!(|input: FrameSizeChangeInput| {
                 boundary_frame.payload_size
             );
         }
-        _ => {} // Other errors are acceptable
+        other => panic!(
+            "Frame at exact limit {} should be accepted, got {other:?}",
+            boundary_frame.payload_size
+        ),
     }
 
     // Verify no panics occurred during frame size transitions
