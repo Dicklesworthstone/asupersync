@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -215,17 +216,12 @@ struct FrameSizeStats {
     largest_frame_accepted: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum ConnectionState {
+    #[default]
     Active,
     ProtocolError(String),
     Closed,
-}
-
-impl Default for ConnectionState {
-    fn default() -> Self {
-        ConnectionState::Active
-    }
 }
 
 impl MockH2MaxFrameSizeConnection {
@@ -327,12 +323,12 @@ impl MockH2MaxFrameSizeConnection {
 
         // Frame-specific validation
         let validation_result = self.validate_frame_specifics(frame);
-        if let FrameResult::Accepted { .. } = validation_result {
-            if self.config.track_stats {
-                self.stats.frames_processed_valid += 1;
-                if frame.payload_size > self.stats.largest_frame_accepted {
-                    self.stats.largest_frame_accepted = frame.payload_size;
-                }
+        if let FrameResult::Accepted { .. } = validation_result
+            && self.config.track_stats
+        {
+            self.stats.frames_processed_valid += 1;
+            if frame.payload_size > self.stats.largest_frame_accepted {
+                self.stats.largest_frame_accepted = frame.payload_size;
             }
         }
 
@@ -341,25 +337,21 @@ impl MockH2MaxFrameSizeConnection {
 
     fn validate_frame_specifics(&self, frame: &TestFrame) -> FrameResult {
         match frame.frame_type {
-            FrameType::Data => {
-                FrameResult::Accepted {
-                    frame_type: "DATA".to_string(),
-                    size: frame.payload_size,
-                    limit_used: self.current_max_frame_size,
-                }
-            }
+            FrameType::Data => FrameResult::Accepted {
+                frame_type: "DATA".to_string(),
+                size: frame.payload_size,
+                limit_used: self.current_max_frame_size,
+            },
 
-            FrameType::Headers => {
-                FrameResult::Accepted {
-                    frame_type: "HEADERS".to_string(),
-                    size: frame.payload_size,
-                    limit_used: self.current_max_frame_size,
-                }
-            }
+            FrameType::Headers => FrameResult::Accepted {
+                frame_type: "HEADERS".to_string(),
+                size: frame.payload_size,
+                limit_used: self.current_max_frame_size,
+            },
 
             FrameType::Settings => {
                 // SETTINGS frames have fixed 6-byte entries
-                if frame.payload_size % 6 != 0 {
+                if !frame.payload_size.is_multiple_of(6) {
                     return FrameResult::ProtocolError(
                         "SETTINGS frame payload must be multiple of 6 bytes".to_string(),
                     );
@@ -388,9 +380,7 @@ impl MockH2MaxFrameSizeConnection {
             FrameType::Ping => {
                 // PING frames must be exactly 8 bytes
                 if frame.payload_size != 8 {
-                    return FrameResult::ProtocolError(
-                        "PING frame must be 8 bytes".to_string(),
-                    );
+                    return FrameResult::ProtocolError("PING frame must be 8 bytes".to_string());
                 }
                 FrameResult::Accepted {
                     frame_type: "PING".to_string(),
@@ -399,13 +389,11 @@ impl MockH2MaxFrameSizeConnection {
                 }
             }
 
-            _ => {
-                FrameResult::Accepted {
-                    frame_type: format!("{:?}", frame.frame_type),
-                    size: frame.payload_size,
-                    limit_used: self.current_max_frame_size,
-                }
-            }
+            _ => FrameResult::Accepted {
+                frame_type: format!("{:?}", frame.frame_type),
+                size: frame.payload_size,
+                limit_used: self.current_max_frame_size,
+            },
         }
     }
 
@@ -469,6 +457,37 @@ struct ConnectionStatus {
     violation_count: u32,
 }
 
+fn expected_frame_limit_after_settings(
+    settings_result: &SettingsResult,
+    initial_limit: u32,
+) -> u32 {
+    match settings_result {
+        SettingsResult::Accepted { new_size, .. } => *new_size,
+        SettingsResult::ProtocolError { .. } | SettingsResult::ConnectionClosed => initial_limit,
+    }
+}
+
+fn observe_frame_processing_result(result: &FrameResult, phase: &str) {
+    match result {
+        FrameResult::ProtocolError(error) => {
+            assert!(
+                !error.is_empty(),
+                "{phase} protocol error should include a diagnostic"
+            );
+        }
+        FrameResult::ConnectionProtocolError(error) => {
+            assert!(
+                error.contains("PROTOCOL_ERROR"),
+                "{phase} connection protocol error should preserve diagnostic: {error}"
+            );
+        }
+        FrameResult::ConnectionClosed => {}
+        FrameResult::Accepted { .. } | FrameResult::FrameSizeError { .. } => {
+            panic!("{phase} result was already handled: {result:?}");
+        }
+    }
+}
+
 fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
     // Normalize input for reasonable fuzzing bounds
     let mut input = input;
@@ -486,18 +505,17 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
 
     let initial_status = connection.get_current_status();
     assert_eq!(
-        initial_status.current_max_frame_size,
-        input.initial_setup.initial_max_frame_size,
+        initial_status.current_max_frame_size, input.initial_setup.initial_max_frame_size,
         "Initial frame size should match setup"
     );
 
     // Process initial frames with valid frame size
     for frame in &input.initial_frames {
         let result = connection.process_frame(frame);
-        match result {
+        match &result {
             FrameResult::Accepted { limit_used, .. } => {
                 assert_eq!(
-                    limit_used, initial_status.current_max_frame_size,
+                    *limit_used, initial_status.current_max_frame_size,
                     "Initial frames should use initial frame size limit"
                 );
             }
@@ -505,15 +523,15 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
                 frame_size, limit, ..
             } => {
                 assert_eq!(
-                    limit, initial_status.current_max_frame_size,
+                    *limit, initial_status.current_max_frame_size,
                     "Frame size errors should reference current limit"
                 );
                 assert!(
-                    frame_size > limit,
+                    *frame_size > *limit,
                     "Frame size error should only occur when frame exceeds limit"
                 );
             }
-            _ => {} // Other results are acceptable
+            _ => observe_frame_processing_result(&result, "initial frame"),
         }
     }
 
@@ -521,8 +539,10 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
     let settings_result = connection.process_settings_change(&input.invalid_settings_change);
 
     // Verify that below-minimum values are properly rejected
-    if input.invalid_settings_change.new_max_frame_size < 16384 {
-        match settings_result {
+    if input.invalid_settings_change.new_max_frame_size < 16384
+        && connection.config.strict_rfc_validation
+    {
+        match &settings_result {
             SettingsResult::ProtocolError {
                 error,
                 invalid_value,
@@ -539,11 +559,11 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
                     error
                 );
                 assert_eq!(
-                    invalid_value, input.invalid_settings_change.new_max_frame_size,
+                    *invalid_value, input.invalid_settings_change.new_max_frame_size,
                     "Invalid value should match attempted change"
                 );
                 assert_eq!(
-                    current_value, initial_status.current_max_frame_size,
+                    *current_value, initial_status.current_max_frame_size,
                     "Current value should remain unchanged"
                 );
             }
@@ -590,28 +610,32 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
 
     // Attempt to process frames after invalid change
     // These should either be rejected due to connection error or processed with old limit
+    let expected_post_settings_limit = expected_frame_limit_after_settings(
+        &settings_result,
+        initial_status.current_max_frame_size,
+    );
     for frame in &input.post_invalid_frames {
         let result = connection.process_frame(frame);
 
-        match result {
+        match &result {
             FrameResult::ConnectionProtocolError(_) => {
                 // Expected if connection is in error state
             }
             FrameResult::Accepted { limit_used, .. } => {
-                // If somehow still processing, should use original limit
+                // If still processing, use the active limit after the settings result.
                 assert_eq!(
-                    limit_used, initial_status.current_max_frame_size,
-                    "Post-invalid frames should use original limit if processed"
+                    *limit_used, expected_post_settings_limit,
+                    "Post-settings frames should use the active frame size limit if processed"
                 );
             }
             FrameResult::FrameSizeError { limit, .. } => {
-                // Should reference original limit
+                // Should reference the active limit after the settings result.
                 assert_eq!(
-                    limit, initial_status.current_max_frame_size,
-                    "Frame size errors after invalid settings should reference original limit"
+                    *limit, expected_post_settings_limit,
+                    "Frame size errors after settings should reference the active limit"
                 );
             }
-            _ => {} // Other results acceptable
+            _ => observe_frame_processing_result(&result, "post-settings frame"),
         }
     }
 
@@ -620,7 +644,10 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
         match edge_case {
             EdgeCaseTest::ExactMinimumBoundary => {
                 // Test frame at exactly 16384 bytes should be accepted with valid connection
-                if matches!(connection.get_current_status().state, ConnectionState::Active) {
+                let status = connection.get_current_status();
+                if matches!(status.state, ConnectionState::Active)
+                    && status.current_max_frame_size >= 16384
+                {
                     let boundary_frame = TestFrame {
                         frame_type: FrameType::Data,
                         payload_size: 16384,
@@ -635,7 +662,9 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
                     } else if let FrameResult::ConnectionProtocolError(_) = result {
                         // Also acceptable if connection errored
                     } else {
-                        panic!("Frame at minimum size 16384 should be accepted if connection is active");
+                        panic!(
+                            "Frame at minimum size 16384 should be accepted if connection is active"
+                        );
                     }
                 }
             }
@@ -650,11 +679,16 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
 
                 let result = connection.process_settings_change(&invalid_change);
                 match result {
-                    SettingsResult::ProtocolError { .. } => {
+                    SettingsResult::ProtocolError { .. }
+                        if connection.config.strict_rfc_validation =>
+                    {
                         // Expected
                     }
                     SettingsResult::ConnectionClosed => {
                         // Also acceptable if already closed
+                    }
+                    SettingsResult::Accepted { .. } if !connection.config.strict_rfc_validation => {
+                        // Lenient mode may accept out-of-range values.
                     }
                     _ => {
                         panic!("Setting MAX_FRAME_SIZE to 16383 should cause PROTOCOL_ERROR");
@@ -672,7 +706,9 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
     let final_status = connection.get_current_status();
 
     // If invalid settings were attempted, violation count should be > 0
-    if input.invalid_settings_change.new_max_frame_size < 16384 {
+    if input.invalid_settings_change.new_max_frame_size < 16384
+        && connection.config.strict_rfc_validation
+    {
         assert!(
             final_status.violation_count > 0,
             "Should track RFC violations"
