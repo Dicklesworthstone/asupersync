@@ -48,24 +48,17 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::http::h2::connection::{Connection, ConnectionState};
+use asupersync::http::h2::connection::Connection;
 use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
-    FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, HeadersFrame, PrioritySpec, headers_flags,
+    FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, HeadersFrame, SettingsFrame, headers_flags,
     parse_frame,
 };
 use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// Maximum frame payload size for practical testing (16KB)
 const MAX_FRAME_PAYLOAD_SIZE: usize = 16_384;
-
-/// Maximum number of concurrent streams for testing
-const MAX_CONCURRENT_STREAMS: usize = 100;
-
-/// Maximum padding length for testing
-const MAX_PADDING_LENGTH: u8 = 255;
 
 /// HEADERS frame fuzz input configuration
 #[derive(Arbitrary, Debug, Clone)]
@@ -138,22 +131,14 @@ enum TestScenario {
 
 /// Normalize fuzz input to reasonable bounds
 fn normalize_input(input: &mut HeadersFrameFuzz) {
-    // Ensure stream ID is reasonable for testing
-    input.stream_id = input.stream_id.min(u32::MAX);
-
     // Limit header block size
     input.header_block.truncate(MAX_FRAME_PAYLOAD_SIZE);
 
     // Normalize priority dependency to avoid self-dependency
-    if let Some(ref mut priority) = input.priority_info {
-        if priority.dependency == input.stream_id {
-            priority.dependency = input.stream_id.wrapping_add(2);
-        }
-    }
-
-    // Normalize padding configuration
-    if let Some(ref mut padding) = input.padding_config {
-        padding.pad_length = padding.pad_length.min(MAX_PADDING_LENGTH);
+    if let Some(ref mut priority) = input.priority_info
+        && priority.dependency == input.stream_id
+    {
+        priority.dependency = input.stream_id.wrapping_add(2);
     }
 }
 
@@ -209,23 +194,25 @@ fn build_headers_frame(input: &HeadersFrameFuzz) -> Result<Bytes, String> {
     payload.extend_from_slice(&input.header_block);
 
     // Add padding if PADDED flag is set
-    if input.flags.padded {
-        if let Some(ref padding) = input.padding_config {
-            let pad_len = if padding.enforce_boundary {
-                // Ensure padding doesn't exceed available space
-                (padding.pad_length as usize).min(payload.len().saturating_sub(1))
-            } else {
-                // Use raw padding length (may exceed bounds for testing)
-                padding.pad_length as usize
-            };
+    if input.flags.padded
+        && let Some(ref padding) = input.padding_config
+    {
+        let pad_len = if padding.enforce_boundary {
+            // Ensure padding doesn't exceed available space
+            (padding.pad_length as usize).min(payload.len().saturating_sub(1))
+        } else {
+            // Use raw padding length (may exceed bounds for testing)
+            padding.pad_length as usize
+        };
 
-            payload.extend(std::iter::repeat(0u8).take(pad_len));
-        }
+        payload.resize(payload.len() + pad_len, 0);
     }
 
     // Build frame header
     let payload_len = payload.len() as u32;
-    frame_data.put_u24(payload_len);
+    frame_data.put_u8(((payload_len >> 16) & 0xff) as u8);
+    frame_data.put_u8(((payload_len >> 8) & 0xff) as u8);
+    frame_data.put_u8((payload_len & 0xff) as u8);
     frame_data.put_u8(FrameType::Headers as u8);
     frame_data.put_u8(flags);
     frame_data.put_u32(input.stream_id);
@@ -239,7 +226,7 @@ fn build_headers_frame(input: &HeadersFrameFuzz) -> Result<Bytes, String> {
 /// Test HEADERS frame parsing and validation
 fn test_headers_frame(input: &HeadersFrameFuzz) -> Result<HeadersFrame, H2Error> {
     let frame_data = build_headers_frame(input)
-        .map_err(|e| H2Error::protocol(&format!("Frame building failed: {}", e)))?;
+        .map_err(|e| H2Error::protocol(format!("Frame building failed: {}", e)))?;
 
     if frame_data.len() < FRAME_HEADER_SIZE {
         return Err(H2Error::protocol("Frame too short"));
@@ -249,7 +236,7 @@ fn test_headers_frame(input: &HeadersFrameFuzz) -> Result<HeadersFrame, H2Error>
     let header_bytes = &frame_data[..FRAME_HEADER_SIZE];
     let mut header_buf = BytesMut::from(header_bytes);
     let header = FrameHeader::parse(&mut header_buf)
-        .map_err(|e| H2Error::protocol(&format!("Header parsing failed: {}", e)))?;
+        .map_err(|e| H2Error::protocol(format!("Header parsing failed: {}", e)))?;
 
     // Parse frame
     let payload = frame_data.slice(FRAME_HEADER_SIZE..);
@@ -259,10 +246,23 @@ fn test_headers_frame(input: &HeadersFrameFuzz) -> Result<HeadersFrame, H2Error>
     }
 }
 
+fn observe_headers_error(context: &str, error: &H2Error) {
+    assert!(
+        !error.message.trim().is_empty(),
+        "{context}: HEADERS rejection should expose a diagnostic"
+    );
+    assert!(
+        error.message.len() <= 2048,
+        "{context}: HEADERS rejection diagnostic should stay bounded: {} bytes",
+        error.message.len()
+    );
+    std::hint::black_box((context, error.code, error.stream_id, error.message.as_str()));
+}
+
 /// Test concurrent HEADERS frames on the same stream
 fn test_concurrent_headers(stream_id: u32) -> Result<(), H2Error> {
     let mut connection = Connection::server(Settings::default());
-    connection.set_state_for_test(ConnectionState::Open);
+    connection.process_frame(Frame::Settings(SettingsFrame::new(vec![])))?;
 
     // Create first HEADERS frame
     let headers1 = HeadersFrame::new(stream_id, Bytes::from("header-block-1"), false, false);
@@ -275,20 +275,13 @@ fn test_concurrent_headers(stream_id: u32) -> Result<(), H2Error> {
     let headers2 = HeadersFrame::new(stream_id, Bytes::from("header-block-2"), false, true);
     let frame2 = Frame::Headers(headers2);
 
-    // This should trigger STREAM_ERROR for concurrent HEADERS
-    connection.process_frame(frame2).map_err(|e| {
-        // Verify it's the expected stream error
-        if e.code == ErrorCode::StreamError {
-            H2Error::stream(stream_id, ErrorCode::StreamError, "concurrent HEADERS")
-        } else {
-            e
-        }
-    })?;
+    connection.process_frame(frame2)?;
 
     Ok(())
 }
 
-fuzz_target!(|mut input: HeadersFrameFuzz| {
+fuzz_target!(|input: HeadersFrameFuzz| {
+    let mut input = input;
     normalize_input(&mut input);
 
     match input.scenario {
@@ -324,11 +317,11 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
                             }
                         } else {
                             // PRIORITY flag was set but no priority info parsed
-                            assert!(false, "PRIORITY flag set but priority info missing");
+                            panic!("PRIORITY flag set but priority info missing");
                         }
                     }
-                    Err(_) => {
-                        // Parsing failed, which is acceptable for malformed input
+                    Err(error) => {
+                        observe_headers_error("PRIORITY HEADERS parse", &error);
                     }
                 }
             }
@@ -364,6 +357,7 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
                                 // This is expected for invalid padding lengths
                             }
                         }
+                        observe_headers_error("padded HEADERS parse", &e);
                     }
                 }
             }
@@ -386,8 +380,8 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
                     // Verify independence: each flag can be set without the other
                     // This is implicitly tested by the flag combinations in the fuzzer
                 }
-                Err(_) => {
-                    // Frame parsing failed, which is acceptable
+                Err(error) => {
+                    observe_headers_error("flag-independence HEADERS parse", &error);
                 }
             }
         }
@@ -397,10 +391,7 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
             if input.stream_id == 0 {
                 match test_headers_frame(&input) {
                     Ok(_) => {
-                        assert!(
-                            false,
-                            "HEADERS on stream ID 0 should trigger PROTOCOL_ERROR"
-                        );
+                        panic!("HEADERS on stream ID 0 should trigger PROTOCOL_ERROR");
                     }
                     Err(e) => {
                         // Verify it's a protocol error for stream ID 0
@@ -428,14 +419,7 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
                     Ok(_) => {
                         // Concurrent HEADERS was accepted - this might be valid in some states
                     }
-                    Err(e) => {
-                        // Check if it's the expected stream error
-                        if e.code == ErrorCode::StreamError {
-                            // This is the expected behavior for concurrent HEADERS
-                        } else {
-                            // Other errors are also acceptable (e.g., connection-level issues)
-                        }
-                    }
+                    Err(e) => observe_headers_error("concurrent HEADERS parse", &e),
                 }
             }
         }
@@ -455,8 +439,8 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
                         );
                     }
                 }
-                Err(_) => {
-                    // Malformed frame rejected - this is expected and acceptable
+                Err(error) => {
+                    observe_headers_error("malformed HEADERS parse", &error);
                 }
             }
         }
@@ -466,24 +450,24 @@ fuzz_target!(|mut input: HeadersFrameFuzz| {
     if input.stream_id == 0 {
         // Stream ID 0 should always be rejected for HEADERS frames
         match test_headers_frame(&input) {
-            Ok(_) => assert!(false, "Stream ID 0 should be rejected"),
-            Err(_) => {} // Expected
+            Ok(_) => panic!("Stream ID 0 should be rejected"),
+            Err(error) => observe_headers_error("stream-zero HEADERS parse", &error),
         }
     }
 
     // Test padding bounds if PADDED flag is set
-    if input.flags.padded {
-        if let Some(ref padding) = input.padding_config {
-            if !padding.enforce_boundary && padding.pad_length > 200 {
-                // Excessive padding should be rejected
-                match test_headers_frame(&input) {
-                    Ok(_) => {
-                        // Frame was accepted despite large padding - verify it's actually valid
-                    }
-                    Err(_) => {
-                        // Excessive padding was rejected - this is expected
-                    }
-                }
+    if input.flags.padded
+        && let Some(ref padding) = input.padding_config
+        && !padding.enforce_boundary
+        && padding.pad_length > 200
+    {
+        // Excessive padding should be rejected
+        match test_headers_frame(&input) {
+            Ok(_) => {
+                // Frame was accepted despite large padding - verify it's actually valid
+            }
+            Err(error) => {
+                observe_headers_error("excessive-padding HEADERS parse", &error);
             }
         }
     }
