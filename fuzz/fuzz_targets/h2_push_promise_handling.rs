@@ -85,7 +85,7 @@ fuzz_target!(|data: &[u8]| {
     // Test 5: Malformed PUSH_PROMISE frame structure via raw parsing
     {
         // Test the actual frame parsing logic with fuzzed data
-        observe_raw_push_promise_parse(parse_push_promise_from_raw_data(data));
+        observe_raw_push_promise_parse(data, parse_push_promise_from_raw_data(data));
     }
 
     // Test 6: Multiple rapid PUSH_PROMISE frames
@@ -210,7 +210,7 @@ fn observe_process_frame(connection: &mut Connection, frame: Frame, scenario: &s
     let _observed = observe_process_result(connection, frame, scenario);
 }
 
-fn observe_raw_push_promise_parse(result: Result<Frame, H2Error>) {
+fn observe_raw_push_promise_parse(data: &[u8], result: Result<Frame, H2Error>) {
     match result {
         Ok(Frame::PushPromise(push_frame)) => {
             let _stream_id = push_frame.stream_id;
@@ -221,16 +221,35 @@ fn observe_raw_push_promise_parse(result: Result<Frame, H2Error>) {
             panic!("raw PUSH_PROMISE parse returned unexpected frame: {frame:?}");
         }
         Err(error) => {
-            assert_ne!(
+            let expected_message = expected_raw_push_promise_parse_error(data)
+                .expect("raw PUSH_PROMISE parse error must match a deterministic reject");
+            assert_eq!(
                 error.code,
-                ErrorCode::NoError,
-                "raw PUSH_PROMISE parse error used NO_ERROR"
+                ErrorCode::ProtocolError,
+                "raw PUSH_PROMISE parse used wrong error code"
             );
-            assert!(
-                !error.message.trim().is_empty(),
-                "raw PUSH_PROMISE parse error message was empty"
+            assert_eq!(
+                error.message.as_str(),
+                expected_message,
+                "raw PUSH_PROMISE parse used wrong diagnostic"
             );
         }
+    }
+}
+
+fn expected_raw_push_promise_parse_error(data: &[u8]) -> Option<&'static str> {
+    if data.len() < 4 {
+        return Some("PUSH_PROMISE frame too short");
+    }
+
+    let promised_stream_id = ((u32::from(data[0]) & 0x7f) << 24)
+        | (u32::from(data[1]) << 16)
+        | (u32::from(data[2]) << 8)
+        | u32::from(data[3]);
+    if promised_stream_id == 0 {
+        Some("PUSH_PROMISE frame with promised stream ID 0")
+    } else {
+        None
     }
 }
 
@@ -245,6 +264,11 @@ fn observe_push_disabled_rejection(connection: &mut Connection, frame: Frame, sc
             assert!(
                 error.is_connection_error(),
                 "{scenario}: disabled push must be a connection error"
+            );
+            assert_eq!(
+                error.message.as_str(),
+                "push not enabled",
+                "{scenario}: disabled push used wrong diagnostic"
             );
         }
         Ok(result) => panic!("{scenario}: disabled push was accepted: {result:?}"),
