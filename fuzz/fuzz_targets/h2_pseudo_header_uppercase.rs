@@ -358,20 +358,14 @@ fuzz_target!(|data: &[u8]| {
         let mut test_conn = MockUppercaseHeaderConnection::new();
         let test_result = test_conn.validate_header_field_name(1, name, value, *is_pseudo);
 
-        // These should succeed (assuming no other validation issues)
-        match test_result {
-            Ok(_) => {
-                // Good! Verify connection remains healthy
-                assert!(
-                    test_conn.get_connection_state().is_none(),
-                    "Connection should remain healthy for lowercase header '{}'",
-                    name
-                );
-            }
-            Err(_) => {
-                // May fail for other reasons (unknown pseudo-header, etc.), but not for case
-                // This is acceptable since we're focused on case validation
-            }
+        if let Err(error) = test_result {
+            panic!("Lowercase header '{name}' should be accepted, got {error:?}");
         }
+
+        assert!(
+            test_conn.get_connection_state().is_none(),
+            "Connection should remain healthy for lowercase header '{}'",
+            name
+        );
     }
 });
