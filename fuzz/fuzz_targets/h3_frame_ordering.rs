@@ -362,10 +362,22 @@ fuzz_target!(|sequence: H3FrameSequence| {
 
     // Test 1: Frame ordering validation
     let mut validator = FrameOrderingValidator::new();
+    let mut first_pass_valid = 0usize;
+    let mut first_pass_invalid = 0usize;
     for frame in &sequence.frames {
         let h3_frame = frame.to_h3_frame();
-        let _ = validator.validate_frame(&h3_frame, sequence.stream_id);
+        let validation_result = validator.validate_frame(&h3_frame, sequence.stream_id);
+        if observe_frame_order_validation(validation_result, &h3_frame, sequence.stream_id) {
+            first_pass_valid += 1;
+        } else {
+            first_pass_invalid += 1;
+        }
     }
+    assert_eq!(
+        first_pass_valid + first_pass_invalid,
+        sequence.frames.len(),
+        "first-pass frame ordering validation must observe every generated frame"
+    );
 
     // Test 2: Wire format encoding/decoding round-trip
     let encoded_bytes = encode_frame_sequence(&sequence);
@@ -429,3 +441,49 @@ fuzz_target!(|sequence: H3FrameSequence| {
         }
     }
 });
+
+fn observe_frame_order_validation(
+    result: Result<(), String>,
+    frame: &H3Frame,
+    stream_id: u64,
+) -> bool {
+    assert_valid_generated_stream_id(stream_id);
+    match result {
+        Ok(()) => true,
+        Err(reason) => {
+            assert!(
+                !reason.trim().is_empty(),
+                "{} ordering errors must explain the violation",
+                h3_frame_kind(frame)
+            );
+            assert!(
+                reason.len() <= 128,
+                "{} ordering error should stay bounded: {reason}",
+                h3_frame_kind(frame)
+            );
+            false
+        }
+    }
+}
+
+fn assert_valid_generated_stream_id(stream_id: u64) {
+    assert_eq!(
+        stream_id & 0b11,
+        0,
+        "generated stream ID should remain client-initiated bidirectional"
+    );
+}
+
+fn h3_frame_kind(frame: &H3Frame) -> &'static str {
+    match frame {
+        H3Frame::Data(_) => "DATA",
+        H3Frame::Headers(_) => "HEADERS",
+        H3Frame::CancelPush(_) => "CANCEL_PUSH",
+        H3Frame::Settings(_) => "SETTINGS",
+        H3Frame::PushPromise { .. } => "PUSH_PROMISE",
+        H3Frame::Goaway(_) => "GOAWAY",
+        H3Frame::MaxPushId(_) => "MAX_PUSH_ID",
+        H3Frame::Datagram { .. } => "DATAGRAM",
+        H3Frame::Unknown { .. } => "UNKNOWN",
+    }
+}
