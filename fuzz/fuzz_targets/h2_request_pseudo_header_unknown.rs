@@ -198,6 +198,10 @@ impl MockH2PseudoHeaderParser {
         // Validate header ordering (pseudo-headers must come first)
         Self::validate_header_ordering(&headers)?;
 
+        // Validate duplicate pseudo-headers before value/context checks so repeated
+        // known names are reported as duplicate protocol violations.
+        Self::validate_duplicate_pseudo_headers(&headers)?;
+
         // Validate each pseudo-header
         for (name, value) in &headers {
             if name.starts_with(':') {
@@ -377,6 +381,69 @@ impl MockH2PseudoHeaderParser {
         Ok(())
     }
 
+    fn validate_duplicate_pseudo_headers(
+        headers: &[(String, String)],
+    ) -> Result<(), PseudoHeaderValidationError> {
+        for (index, (name, _)) in headers.iter().enumerate() {
+            if !name.starts_with(':') {
+                continue;
+            }
+
+            if headers[index + 1..]
+                .iter()
+                .any(|(other_name, _)| other_name == name)
+            {
+                return Err(PseudoHeaderValidationError::DuplicatePseudoHeader {
+                    name: name.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn generated_pseudo_header(input: &H2UnknownPseudoHeaderInput) -> bool {
+        Self::generate_header_list(input)
+            .iter()
+            .any(|(name, _)| name.starts_with(':'))
+    }
+
+    fn generated_unknown_pseudo_header(input: &H2UnknownPseudoHeaderInput) -> bool {
+        Self::generate_header_list(input)
+            .iter()
+            .any(|(name, _)| Self::is_unknown_pseudo_header_name(name))
+    }
+
+    fn generated_duplicate_pseudo_header(input: &H2UnknownPseudoHeaderInput) -> bool {
+        let headers = Self::generate_header_list(input);
+
+        for (index, (name, _)) in headers.iter().enumerate() {
+            if !name.starts_with(':') {
+                continue;
+            }
+
+            if headers[index + 1..]
+                .iter()
+                .any(|(other_name, _)| other_name == name)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_unknown_pseudo_header_name(name: &str) -> bool {
+        name.starts_with(':') && !Self::is_known_pseudo_header_name(name)
+    }
+
+    fn is_known_pseudo_header_name(name: &str) -> bool {
+        matches!(
+            name,
+            ":method" | ":scheme" | ":authority" | ":path" | ":status"
+        )
+    }
+
     fn validate_pseudo_header(
         name: &str,
         value: &str,
@@ -485,6 +552,38 @@ impl MockH2PseudoHeaderParser {
     }
 }
 
+fn expect_unknown_pseudo_rejection(
+    input: &H2UnknownPseudoHeaderInput,
+    result: &Result<(), PseudoHeaderValidationError>,
+    context: &str,
+) {
+    if MockH2PseudoHeaderParser::generated_unknown_pseudo_header(input) {
+        expect_protocol_rejection(result, context);
+    }
+}
+
+fn expect_protocol_rejection(result: &Result<(), PseudoHeaderValidationError>, context: &str) {
+    match result {
+        Err(error) if is_observed_pseudo_header_protocol_error(error) => {}
+        Err(error) => panic!("{context} rejected with unexpected error: {error:?}"),
+        Ok(()) => panic!("{context} should be rejected"),
+    }
+}
+
+fn is_observed_pseudo_header_protocol_error(error: &PseudoHeaderValidationError) -> bool {
+    matches!(
+        error,
+        PseudoHeaderValidationError::UnknownPseudoHeader { .. }
+            | PseudoHeaderValidationError::WrongContext { .. }
+            | PseudoHeaderValidationError::PseudoInTrailers { .. }
+            | PseudoHeaderValidationError::MalformedPseudoHeader { .. }
+            | PseudoHeaderValidationError::DuplicatePseudoHeader { .. }
+            | PseudoHeaderValidationError::PseudoAfterRegular { .. }
+            | PseudoHeaderValidationError::RequiredPseudoMissing { .. }
+            | PseudoHeaderValidationError::InvalidPseudoValue { .. }
+    )
+}
+
 fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
     // Skip inputs that would cause excessive processing
     if input.regular_headers.len() > 50 {
@@ -495,48 +594,15 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
 
     // Apply test assertions based on the pseudo-header strategy
     match &input.pseudo_header_strategy {
-        PseudoHeaderStrategy::SingleUnknown(unknown) => {
-            // Unknown pseudo-headers should always be rejected per RFC 7540 §8.1.2
-            match &result {
-                Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. }) => {
-                    // Expected: unknown pseudo-header correctly rejected
-                }
-                Err(PseudoHeaderValidationError::PseudoInTrailers { .. }) => {
-                    // Expected: pseudo-header in trailers rejected
-                }
-                Err(PseudoHeaderValidationError::PseudoAfterRegular { .. }) => {
-                    // Expected: pseudo-header ordering violation
-                }
-                Ok(()) => {
-                    panic!(
-                        "Unknown pseudo-header should be rejected: :{}",
-                        unknown.name
-                    );
-                }
-                Err(_) => {
-                    // Other errors may occur due to additional validation
-                }
-            }
+        PseudoHeaderStrategy::SingleUnknown(_) => {
+            // Arbitrary names can alias known pseudo-headers; only actual unknown
+            // pseudo-header names are subject to the unknown-header oracle.
+            expect_unknown_pseudo_rejection(&input, &result, "single unknown pseudo-header");
         }
         PseudoHeaderStrategy::MultipleUnknown(_) => {
-            // Unknown pseudo-headers should always be rejected per RFC 7540 §8.1.2
-            match &result {
-                Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. }) => {
-                    // Expected: unknown pseudo-header correctly rejected
-                }
-                Err(PseudoHeaderValidationError::PseudoInTrailers { .. }) => {
-                    // Expected: pseudo-header in trailers rejected
-                }
-                Err(PseudoHeaderValidationError::PseudoAfterRegular { .. }) => {
-                    // Expected: pseudo-header ordering violation
-                }
-                Ok(()) => {
-                    panic!("Unknown pseudo-header should be rejected");
-                }
-                Err(_) => {
-                    // Other errors may occur due to additional validation
-                }
-            }
+            // The generated set may include known pseudo-header aliases; require a
+            // protocol rejection only when at least one actual unknown is present.
+            expect_unknown_pseudo_rejection(&input, &result, "multiple unknown pseudo-headers");
         }
         PseudoHeaderStrategy::WrongContext(wrong_context) => {
             // Wrong context should be rejected
@@ -562,46 +628,24 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
             }
         }
         PseudoHeaderStrategy::Malformed(_) => {
-            // Malformed pseudo-headers should be rejected
-            match &result {
-                Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. }) => {
-                    // Expected: malformed headers treated as unknown
-                }
-                Err(PseudoHeaderValidationError::MalformedPseudoHeader { .. }) => {
-                    // Expected: malformation detected
-                }
-                Ok(()) => {
-                    panic!("Malformed pseudo-header should be rejected");
-                }
-                Err(_) => {
-                    // Other errors may occur
-                }
+            // Some malformed cases generate ordinary header names such as `foo:foo`;
+            // this target only asserts pseudo-header protocol rejection.
+            if MockH2PseudoHeaderParser::generated_pseudo_header(&input) {
+                expect_protocol_rejection(&result, "malformed pseudo-header");
             }
         }
-        PseudoHeaderStrategy::MixedKnownUnknown { unknown, .. } => {
-            // Should fail due to unknown pseudo-headers
-            if !unknown.is_empty() {
-                assert!(matches!(
-                    &result,
-                    Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. })
-                ));
-            }
+        PseudoHeaderStrategy::MixedKnownUnknown { .. } => {
+            // Known pseudo-headers can fail earlier on context/value checks; any
+            // explicit protocol rejection is acceptable when an actual unknown exists.
+            expect_unknown_pseudo_rejection(&input, &result, "mixed known/unknown pseudo-header");
         }
         PseudoHeaderStrategy::Duplicates { .. } => {
-            // May be rejected for unknown pseudo-header or duplication
-            match &result {
-                Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. }) => {
-                    // Expected: unknown pseudo-header
-                }
-                Err(PseudoHeaderValidationError::DuplicatePseudoHeader { .. }) => {
-                    // Expected: duplicate detection
-                }
-                Ok(()) => {
-                    panic!("Duplicate pseudo-header should be rejected");
-                }
-                Err(_) => {
-                    // Other errors may occur
-                }
+            // The arbitrary pair may be neither unknown nor duplicate; assert only
+            // when the generated scenario actually contains one of those violations.
+            if MockH2PseudoHeaderParser::generated_unknown_pseudo_header(&input)
+                || MockH2PseudoHeaderParser::generated_duplicate_pseudo_header(&input)
+            {
+                expect_protocol_rejection(&result, "duplicate or unknown pseudo-header");
             }
         }
     }
@@ -898,6 +942,41 @@ mod tests {
         assert!(matches!(
             result,
             Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. })
+        ));
+    }
+
+    #[test]
+    fn test_duplicate_known_pseudo_headers_rejected() {
+        let input = H2UnknownPseudoHeaderInput {
+            message_type: MessageType::Request,
+            pseudo_header_strategy: PseudoHeaderStrategy::Duplicates {
+                first: UnknownPseudoHeader {
+                    name: "method".to_string(),
+                    value: "GET".to_string(),
+                    position: HeaderPosition::Before,
+                },
+                second: UnknownPseudoHeader {
+                    name: "method".to_string(),
+                    value: "POST".to_string(),
+                    position: HeaderPosition::Before,
+                },
+            },
+            regular_headers: vec![],
+            test_context: TestContext {
+                stream_id: 1,
+                frame_type: FrameType::Headers,
+                end_headers: true,
+                hpack_context: HpackContext {
+                    table_size: 4096,
+                    use_literal: false,
+                },
+            },
+        };
+
+        let result = MockH2PseudoHeaderParser::validate_headers(&input);
+        assert!(matches!(
+            result,
+            Err(PseudoHeaderValidationError::DuplicatePseudoHeader { .. })
         ));
     }
 
