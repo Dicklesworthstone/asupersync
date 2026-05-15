@@ -306,6 +306,16 @@ const MAX_INITIAL_WINDOW_SIZE: u32 = 2_147_483_647; // 2^31-1
 const MIN_MAX_FRAME_SIZE: u32 = 16_384; // 2^14
 const MAX_MAX_FRAME_SIZE: u32 = 16_777_215; // 2^24-1
 
+fn assert_alternate_rejection_has_context(context: &str, rejection: &ValidationResult) {
+    assert!(
+        matches!(
+            rejection,
+            ValidationResult::ProtocolError(_) | ValidationResult::FrameError(_)
+        ),
+        "{context}: alternate rejection should carry protocol/frame context, got {rejection:?}"
+    );
+}
+
 impl SettingsState {
     fn default() -> Self {
         Self {
@@ -851,8 +861,10 @@ fuzz_target!(|input: H2SettingsInvalidValueInput| {
             Err(ValidationResult::ProtocolError(_)) => {
                 panic!("Frame with only valid settings should not cause protocol error");
             }
-            Err(_) => {
-                // Other errors may occur
+            Err(other) => {
+                panic!(
+                    "Frame with only valid settings should not return alternate validation result: {other:?}"
+                );
             }
         }
     }
@@ -1026,8 +1038,8 @@ fn test_settings_validation_invariants(
                     Err(ValidationResult::ProtocolError(_)) => {
                         // Expected: rejection
                     }
-                    Err(_) => {
-                        // Other errors acceptable
+                    Err(other) => {
+                        assert_alternate_rejection_has_context("ENABLE_PUSH value > 1", other);
                     }
                 }
             }
@@ -1064,8 +1076,11 @@ fn test_settings_validation_invariants(
                     Err(ValidationResult::ProtocolError(_)) => {
                         // Expected: rejection
                     }
-                    Err(_) => {
-                        // Other errors acceptable
+                    Err(other) => {
+                        assert_alternate_rejection_has_context(
+                            "INITIAL_WINDOW_SIZE above maximum",
+                            other,
+                        );
                     }
                 }
             }
@@ -1100,8 +1115,11 @@ fn test_settings_validation_invariants(
                     Err(ValidationResult::ProtocolError(_)) => {
                         // Expected: rejection
                     }
-                    Err(_) => {
-                        // Other errors acceptable
+                    Err(other) => {
+                        assert_alternate_rejection_has_context(
+                            "MAX_FRAME_SIZE outside valid range",
+                            other,
+                        );
                     }
                 }
             }
@@ -1117,8 +1135,8 @@ fn test_settings_validation_invariants(
             Err(ValidationResult::FrameError(FrameErrorType::InvalidStreamId)) => {
                 // Expected: frame error
             }
-            Err(_) => {
-                // Other errors also acceptable
+            Err(other) => {
+                assert_alternate_rejection_has_context("non-zero SETTINGS stream ID", other);
             }
         }
     }
@@ -1134,8 +1152,8 @@ fn test_settings_validation_invariants(
                 Err(ValidationResult::FrameError(FrameErrorType::AckWithPayload)) => {
                     // Expected: frame error
                 }
-                Err(_) => {
-                    // Other errors also acceptable
+                Err(other) => {
+                    assert_alternate_rejection_has_context("SETTINGS ACK with payload", other);
                 }
             }
         }
@@ -1151,8 +1169,8 @@ fn test_settings_validation_invariants(
             Err(ValidationResult::FrameError(FrameErrorType::FrameSizeError)) => {
                 // Expected: frame error
             }
-            Err(_) => {
-                // Other errors also acceptable
+            Err(other) => {
+                assert_alternate_rejection_has_context("SETTINGS frame size", other);
             }
         }
     }
