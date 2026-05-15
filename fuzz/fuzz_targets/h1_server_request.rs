@@ -85,6 +85,18 @@ fn observe_decode_result(result: Result<Option<Request>, HttpError>) {
     }
 }
 
+fn assert_http_error<T>(result: Result<T, HttpError>, expected: HttpError, expected_display: &str) {
+    let Err(err) = result else {
+        panic!("expected HTTP error {expected:?}");
+    };
+    assert_eq!(
+        std::mem::discriminant(&err),
+        std::mem::discriminant(&expected),
+        "expected HTTP error {expected:?}, got {err:?}"
+    );
+    assert_eq!(err.to_string(), expected_display);
+}
+
 fn run_fixed_canaries() {
     let get = expect_complete_request(
         b"GET /health?ready=1 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: fuzz\r\n\r\n",
@@ -142,27 +154,27 @@ fn run_fixed_canaries() {
     );
 
     let malformed_line = decode_once(b"GET  /double-space HTTP/1.1\r\nHost: example.com\r\n\r\n");
-    assert!(
-        matches!(malformed_line, Err(HttpError::BadRequestLine)),
-        "repeated request-line delimiter must reject, got {malformed_line:?}"
+    assert_http_error(
+        malformed_line,
+        HttpError::BadRequestLine,
+        "malformed request line",
     );
 
     let duplicate_content_length =
         decode_once(b"POST /dup HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\na");
-    assert!(
-        matches!(
-            duplicate_content_length,
-            Err(HttpError::DuplicateContentLength)
-        ),
-        "duplicate Content-Length must reject, got {duplicate_content_length:?}"
+    assert_http_error(
+        duplicate_content_length,
+        HttpError::DuplicateContentLength,
+        "duplicate Content-Length",
     );
 
     let ambiguous_body_length = decode_once(
         b"POST /ambiguous HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
     );
-    assert!(
-        matches!(ambiguous_body_length, Err(HttpError::AmbiguousBodyLength)),
-        "Transfer-Encoding plus Content-Length must reject, got {ambiguous_body_length:?}"
+    assert_http_error(
+        ambiguous_body_length,
+        HttpError::AmbiguousBodyLength,
+        "both Content-Length and Transfer-Encoding present",
     );
 
     let headers_too_large = decode_with_limits(
@@ -170,16 +182,18 @@ fn run_fixed_canaries() {
         32,
         256,
     );
-    assert!(
-        matches!(headers_too_large, Err(HttpError::HeadersTooLarge)),
-        "headers over configured limit must reject, got {headers_too_large:?}"
+    assert_http_error(
+        headers_too_large,
+        HttpError::HeadersTooLarge,
+        "header block too large",
     );
 
     let body_too_large =
         decode_with_limits(b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", 256, 4);
-    assert!(
-        matches!(body_too_large, Err(HttpError::BodyTooLarge)),
-        "body over configured limit must reject, got {body_too_large:?}"
+    assert_http_error(
+        body_too_large,
+        HttpError::BodyTooLarge,
+        "body exceeds size limit",
     );
 }
 
