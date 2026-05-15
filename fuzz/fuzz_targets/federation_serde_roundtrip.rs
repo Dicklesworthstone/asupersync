@@ -118,6 +118,89 @@ fn generate_malformed_json_cases(data: &[u8]) -> Vec<Vec<u8>> {
     cases
 }
 
+fn observe_morphism_constraints_fields(constraints: &MorphismConstraints) {
+    let value = serde_json::to_value(constraints)
+        .expect("MorphismConstraints field observer serialization should work");
+    let object = value
+        .as_object()
+        .expect("MorphismConstraints should serialize as a JSON object");
+
+    let allowed_classes = object
+        .get("allowed_classes")
+        .and_then(serde_json::Value::as_array)
+        .expect("allowed_classes should serialize as a JSON array");
+    assert_eq!(
+        allowed_classes.len(),
+        constraints.allowed_classes.len(),
+        "serialized allowed_classes count should match generated set"
+    );
+
+    assert_eq!(
+        object
+            .get("max_expansion_factor")
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::from(constraints.max_expansion_factor)),
+        "serialized max_expansion_factor should match generated field"
+    );
+    assert_eq!(
+        object.get("max_fanout").and_then(serde_json::Value::as_u64),
+        Some(u64::from(constraints.max_fanout)),
+        "serialized max_fanout should match generated field"
+    );
+
+    let roundtrip: MorphismConstraints = serde_json::from_value(value)
+        .expect("MorphismConstraints field observer round-trip should deserialize");
+    assert_eq!(
+        &roundtrip, constraints,
+        "MorphismConstraints field observer round-trip should preserve fields"
+    );
+}
+
+fn observe_leaf_config_fields(leaf_config: &LeafConfig) {
+    let value = serde_json::to_value(leaf_config)
+        .expect("LeafConfig field observer serialization should work");
+    let object = value
+        .as_object()
+        .expect("LeafConfig should serialize as a JSON object");
+
+    let backoff_value = serde_json::to_value(leaf_config.max_reconnect_backoff)
+        .expect("LeafConfig backoff field should serialize");
+    let backoff_roundtrip: std::time::Duration =
+        serde_json::from_value(backoff_value).expect("LeafConfig backoff field should deserialize");
+    assert_eq!(
+        backoff_roundtrip, leaf_config.max_reconnect_backoff,
+        "LeafConfig reconnect backoff should survive field-level serde"
+    );
+
+    assert_eq!(
+        object
+            .get("offline_buffer_limit")
+            .and_then(serde_json::Value::as_u64),
+        Some(leaf_config.offline_buffer_limit),
+        "serialized offline_buffer_limit should match generated field"
+    );
+
+    let nested_constraints: MorphismConstraints = serde_json::from_value(
+        object
+            .get("morphism_constraints")
+            .expect("LeafConfig should serialize morphism_constraints")
+            .clone(),
+    )
+    .expect("LeafConfig nested morphism_constraints should deserialize");
+    assert_eq!(
+        nested_constraints, leaf_config.morphism_constraints,
+        "LeafConfig nested constraints should survive field-level serde"
+    );
+    observe_morphism_constraints_fields(&leaf_config.morphism_constraints);
+
+    let roundtrip: LeafConfig = serde_json::from_value(value)
+        .expect("LeafConfig field observer round-trip should deserialize");
+    assert_eq!(
+        &roundtrip, leaf_config,
+        "LeafConfig field observer round-trip should preserve fields"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     // Guard against excessively large inputs
     if data.len() > 100_000 {
@@ -192,16 +275,10 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 6: Access generated structures without panicking.
     if let Ok(constraints) = MorphismConstraints::arbitrary(&mut Unstructured::new(data)) {
-        // Should be able to access all fields without panicking
-        let _ = constraints.allowed_classes.len();
-        let _ = constraints.max_expansion_factor;
-        let _ = constraints.max_fanout;
+        observe_morphism_constraints_fields(&constraints);
     }
 
     if let Ok(leaf_config) = LeafConfig::arbitrary(&mut Unstructured::new(data)) {
-        // LeafConfig should have reasonable limits and no panics when accessing fields
-        let _ = leaf_config.max_reconnect_backoff;
-        let _ = leaf_config.offline_buffer_limit;
-        let _ = leaf_config.morphism_constraints.allowed_classes.len();
+        observe_leaf_config_fields(&leaf_config);
     }
 });
