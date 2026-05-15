@@ -64,20 +64,20 @@ enum FuzzOperation {
 struct FuzzableSnapshot {
     region_id_index: u32,
     region_id_generation: u32,
-    state: u8,  // Raw state value (may be invalid)
+    state: u8, // Raw state value (may be invalid)
     timestamp_nanos: u64,
     sequence: u64,
     origin_id: u64,
     epoch: u64,
     #[arbitrary(with = arbitrary_bounded_vec::<FuzzableTaskSnapshot>)]
     tasks: Vec<FuzzableTaskSnapshot>,
-    #[arbitrary(with = arbitrary_bounded_vec::<(u32, u32)>)]  // (index, generation) pairs
+    #[arbitrary(with = arbitrary_bounded_vec::<(u32, u32)>)] // (index, generation) pairs
     children: Vec<(u32, u32)>,
     finalizer_count: u32,
     budget: FuzzableBudgetSnapshot,
     #[arbitrary(with = arbitrary_bounded_string)]
     cancel_reason: Option<String>,
-    parent: Option<(u32, u32)>,  // (index, generation)
+    parent: Option<(u32, u32)>, // (index, generation)
     #[arbitrary(with = arbitrary_bounded_metadata)]
     metadata: Vec<u8>,
 }
@@ -86,7 +86,7 @@ struct FuzzableSnapshot {
 struct FuzzableTaskSnapshot {
     task_id_index: u32,
     task_id_generation: u32,
-    state: u8,  // Raw state value
+    state: u8, // Raw state value
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -172,12 +172,14 @@ impl FuzzableSnapshot {
             0 => RegionState::Open,
             1 => RegionState::Closing,
             2 => RegionState::Closed,
-            _ => return None,  // Invalid state, skip round-trip test
+            _ => return None, // Invalid state, skip round-trip test
         };
 
         // Validate string fields are proper UTF-8 for round-trip
-        if let Some(ref reason) = self.cancel_reason {
-            if !reason.is_valid_utf8() { return None; }
+        if let Some(ref reason) = self.cancel_reason
+            && !reason.is_valid_utf8()
+        {
+            return None;
         }
 
         Some(RegionSnapshot {
@@ -187,14 +189,22 @@ impl FuzzableSnapshot {
             sequence: self.sequence,
             origin_id: self.origin_id,
             epoch: self.epoch,
-            tasks: self.tasks.iter().filter_map(|t| t.to_task_snapshot()).collect(),
-            children: self.children.iter()
+            tasks: self
+                .tasks
+                .iter()
+                .filter_map(|t| t.to_task_snapshot())
+                .collect(),
+            children: self
+                .children
+                .iter()
                 .map(|(idx, generation)| RegionId::new_for_test(*idx, *generation))
                 .collect(),
             finalizer_count: self.finalizer_count,
             budget: self.budget.to_budget_snapshot(),
             cancel_reason: self.cancel_reason.clone(),
-            parent: self.parent.map(|(idx, generation)| RegionId::new_for_test(idx, generation)),
+            parent: self
+                .parent
+                .map(|(idx, generation)| RegionId::new_for_test(idx, generation)),
             metadata: self.metadata.clone(),
         })
     }
@@ -211,13 +221,13 @@ impl FuzzableTaskSnapshot {
             2 => asupersync::distributed::snapshot::TaskState::Completed,
             3 => asupersync::distributed::snapshot::TaskState::Cancelled,
             4 => asupersync::distributed::snapshot::TaskState::Panicked,
-            _ => return None,  // Invalid state
+            _ => return None, // Invalid state
         };
 
         Some(TaskSnapshot {
             task_id: TaskId::new_for_test(self.task_id_index, self.task_id_generation),
             state: task_state,
-            priority: Default::default(),  // Use default priority
+            priority: Default::default(), // Use default priority
         })
     }
 }
@@ -249,22 +259,21 @@ fuzz_target!(|op: FuzzOperation| {
     // Bound input size to prevent resource exhaustion
     match &op {
         FuzzOperation::ParseRawBytes { data } if data.len() > MAX_INPUT_SIZE => return,
-        _ => {},
+        _ => {}
     }
 
     match op {
         FuzzOperation::ParseRawBytes { data } => {
             // Crash oracle: parser must never panic on any input
-            let result = std::panic::catch_unwind(|| {
-                let _ = RegionSnapshot::from_bytes(&data);
-            });
-            assert!(result.is_ok(), "RegionSnapshot::from_bytes panicked on input");
-
-            // Test parser invariants on raw bytes
-            test_parser_invariants(&data);
+            let parse_result = std::panic::catch_unwind(|| RegionSnapshot::from_bytes(&data))
+                .expect("RegionSnapshot::from_bytes panicked on input");
+            observe_parser_invariants(&data, &parse_result);
         }
 
-        FuzzOperation::RoundTripTest { snapshot, corruption } => {
+        FuzzOperation::RoundTripTest {
+            snapshot,
+            corruption,
+        } => {
             if let Some(real_snapshot) = snapshot.to_region_snapshot() {
                 test_round_trip_oracle(&real_snapshot, corruption);
             }
@@ -276,16 +285,18 @@ fuzz_target!(|op: FuzzOperation| {
     }
 });
 
-/// Test parser invariants on arbitrary byte inputs
-fn test_parser_invariants(data: &[u8]) {
-    let result = RegionSnapshot::from_bytes(data);
-
+fn observe_parser_invariants(data: &[u8], result: &Result<RegionSnapshot, SnapshotError>) {
     match result {
         Ok(snapshot) => {
             // If parsing succeeded, validate the parsed snapshot invariants
-            assert!(snapshot.sequence <= u64::MAX);
-            assert!(snapshot.origin_id <= u64::MAX);
-            assert!(snapshot.epoch <= u64::MAX);
+            let canonical = snapshot.to_bytes();
+            let reparsed = RegionSnapshot::from_bytes(&canonical)
+                .expect("canonicalized parsed snapshot failed to reparse");
+            assert_eq!(
+                reparsed.to_bytes(),
+                canonical,
+                "parsed snapshot did not have a stable canonical form",
+            );
 
             // Budget fields should be reasonable
             if let Some(deadline) = snapshot.budget.deadline_nanos {
@@ -298,41 +309,47 @@ fn test_parser_invariants(data: &[u8]) {
             }
 
             // Metadata size should be bounded
-            assert!(snapshot.metadata.len() <= MAX_INPUT_SIZE, "Metadata too large");
+            assert!(
+                snapshot.metadata.len() <= MAX_INPUT_SIZE,
+                "Metadata too large"
+            );
 
             // Vector sizes should be reasonable
-            assert!(snapshot.tasks.len() <= MAX_VECTOR_LEN * 10, "Too many tasks");
-            assert!(snapshot.children.len() <= MAX_VECTOR_LEN * 10, "Too many children");
+            assert!(
+                snapshot.tasks.len() <= MAX_VECTOR_LEN * 10,
+                "Too many tasks"
+            );
+            assert!(
+                snapshot.children.len() <= MAX_VECTOR_LEN * 10,
+                "Too many children"
+            );
         }
 
         Err(err) => {
             // Error classification must be consistent and reasonable
             use SnapshotError::*;
             match err {
-                InvalidMagic => {
+                InvalidMagic if data.len() >= 4 => {
                     // Should only occur when first 4 bytes != "SNAP"
-                    if data.len() >= 4 {
-                        assert_ne!(&data[0..4], b"SNAP", "InvalidMagic but magic is correct");
-                    }
+                    assert_ne!(&data[0..4], b"SNAP", "InvalidMagic but magic is correct");
                 }
-                UnsupportedVersion(_) => {
+                InvalidMagic => {}
+                UnsupportedVersion(_) if data.len() >= 5 => {
                     // Should only occur with wrong version after correct magic
-                    if data.len() >= 5 {
-                        assert_eq!(&data[0..4], b"SNAP", "UnsupportedVersion but bad magic");
-                    }
+                    assert_eq!(&data[0..4], b"SNAP", "UnsupportedVersion but bad magic");
                 }
+                UnsupportedVersion(_) => {}
                 InvalidState(state) => {
                     // State values should be out of valid range
-                    assert!(state > 4, "InvalidState but state {} is valid", state);
+                    assert!(*state > 4, "InvalidState but state {} is valid", state);
                 }
                 TrailingBytes(count) => {
                     // Should only occur when extra data remains
-                    assert!(count > 0, "TrailingBytes but count is {}", count);
+                    assert!(*count > 0, "TrailingBytes but count is {}", count);
                 }
                 MetadataTooLarge { len, max } => {
                     // Declared length should exceed maximum
-                    assert!(len > max,
-                           "MetadataTooLarge but {} <= {}", len, max);
+                    assert!(len > max, "MetadataTooLarge but {} <= {}", len, max);
                 }
                 _ => {
                     // Other errors are acceptable
@@ -378,10 +395,9 @@ fn test_round_trip_oracle(snapshot: &RegionSnapshot, corruption: Option<Corrupti
         assert_eq!(reserialized, serialized, "Serialization not deterministic");
     } else {
         // Corruption should be detected (parsing should fail gracefully)
-        if parse_result.is_ok() {
+        if let Ok(restored) = parse_result {
             // Some corruptions might still produce valid snapshots
             // Just ensure no panic occurred and the result is reasonable
-            let restored = parse_result.unwrap();
             test_snapshot_invariants(&restored);
         }
     }
@@ -424,7 +440,7 @@ fn apply_corruption(data: &[u8], corruption: CorruptionPattern) -> Vec<u8> {
             let size_bytes = fake_size.to_be_bytes();
             if corrupted.len() >= 8 {
                 let pos = corrupted.len() - 8;
-                corrupted[pos..pos+4].copy_from_slice(&size_bytes);
+                corrupted[pos..pos + 4].copy_from_slice(&size_bytes);
             }
         }
     }
@@ -450,35 +466,32 @@ fn test_boundary_conditions(pattern: &BoundaryPattern) {
         }
         BoundaryPattern::LargeVectors => {
             // Test with crafted large vector size fields
-            let mut data = b"SNAP\x02".to_vec();  // Magic + version
-            data.extend_from_slice(&[0u8; 32]);  // Some valid fields
+            let mut data = b"SNAP\x02".to_vec(); // Magic + version
+            data.extend_from_slice(&[0u8; 32]); // Some valid fields
             data.extend_from_slice(&(u32::MAX).to_be_bytes()); // Large task count
             data
         }
         BoundaryPattern::UnicodeEdgeCases => {
             // Test with various Unicode edge cases
             let mut data = b"SNAP\x02".to_vec();
-            data.extend_from_slice(&[0u8; 64]);  // Valid prefix
-            data.push(1);  // Has cancel_reason
-            data.extend_from_slice(&(16u32).to_be_bytes());  // String length
+            data.extend_from_slice(&[0u8; 64]); // Valid prefix
+            data.push(1); // Has cancel_reason
+            data.extend_from_slice(&(16u32).to_be_bytes()); // String length
             // Add problematic UTF-8 sequences
             data.extend_from_slice(&[
-                0xFF, 0xFE,  // BOM-like
-                0xC0, 0x80,  // Overlong encoding
-                0xED, 0xA0, 0x80,  // UTF-16 surrogate
-                0xF4, 0x90, 0x80, 0x80,  // Beyond Unicode range
-                0x00, 0x01, 0x02, 0x03,  // Control chars
-                0x7F, 0x80, 0x81, 0x82,  // Boundary cases
+                0xFF, 0xFE, // BOM-like
+                0xC0, 0x80, // Overlong encoding
+                0xED, 0xA0, 0x80, // UTF-16 surrogate
+                0xF4, 0x90, 0x80, 0x80, // Beyond Unicode range
+                0x00, 0x01, 0x02, 0x03, // Control chars
+                0x7F, 0x80, 0x81, 0x82, // Boundary cases
             ]);
             data
         }
     };
 
     // Test that boundary conditions don't cause panics
-    let result = std::panic::catch_unwind(|| {
-        let _ = RegionSnapshot::from_bytes(&test_data);
-    });
-    assert!(result.is_ok(), "Boundary pattern {:?} caused panic", pattern);
-
-    test_parser_invariants(&test_data);
+    let parse_result = std::panic::catch_unwind(|| RegionSnapshot::from_bytes(&test_data))
+        .unwrap_or_else(|_| panic!("Boundary pattern {:?} caused panic", pattern));
+    observe_parser_invariants(&test_data, &parse_result);
 }
