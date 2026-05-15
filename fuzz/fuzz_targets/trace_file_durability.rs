@@ -96,9 +96,7 @@ fn test_write_read_roundtrip(operations: &[FuzzOperation]) {
     // Test with different compression modes
     let compression_modes = vec![
         CompressionMode::None,
-        #[cfg(feature = "trace-compression")]
         CompressionMode::Lz4 { level: 1 },
-        #[cfg(feature = "trace-compression")]
         CompressionMode::Auto,
     ];
 
@@ -107,10 +105,10 @@ fn test_write_read_roundtrip(operations: &[FuzzOperation]) {
 
         // Write phase
         let config = TraceFileConfig::default().with_compression(compression);
-        if write_trace_operations(&operations, &temp_path, &config).is_ok() {
+        if write_trace_operations(operations, &temp_path, &config).is_ok() {
             // Read phase - verify round-trip integrity
             if let Ok(mut reader) = TraceReader::open(&temp_path) {
-                verify_trace_integrity(&mut reader, &operations);
+                verify_trace_integrity(&mut reader, operations);
             }
         }
 
@@ -145,36 +143,32 @@ fn test_interruption_resilience(operations: &[FuzzOperation]) {
 }
 
 fn test_compression_durability(_operations: &[FuzzOperation]) {
-    #[cfg(feature = "trace-compression")]
-    {
-        // Test compression edge cases with different levels
-        let compression_levels = vec![-1, 0, 1, 8, 16];
+    // Test compression edge cases with different levels.
+    let compression_levels = vec![-1, 0, 1, 8, 16];
 
-        for level in compression_levels {
-            let temp_path = get_temp_path();
-            let config =
-                TraceFileConfig::default().with_compression(CompressionMode::Lz4 { level });
+    for level in compression_levels {
+        let temp_path = get_temp_path();
+        let config = TraceFileConfig::default().with_compression(CompressionMode::Lz4 { level });
 
-            // Create a simple trace with compression
-            let simple_ops = vec![
-                FuzzOperation::WriteMetadata(TraceMetadata::new(12345)),
-                FuzzOperation::WriteEvent(ReplayEvent::RngSeed { seed: 42 }),
-                FuzzOperation::FinishWriter,
-            ];
+        // Create a simple trace with compression.
+        let simple_ops = vec![
+            FuzzOperation::WriteMetadata(TraceMetadata::new(12345)),
+            FuzzOperation::WriteEvent(ReplayEvent::RngSeed { seed: 42 }),
+            FuzzOperation::FinishWriter,
+        ];
 
-            if write_trace_operations(&simple_ops, &temp_path, &config).is_ok() {
-                // Verify compressed data can be read back correctly
-                if let Ok(mut reader) = TraceReader::open(&temp_path) {
-                    // Read all events to verify decompression integrity
-                    while let Ok(Some(_event)) = reader.read_event() {
-                        // Continue reading
-                    }
+        if write_trace_operations(&simple_ops, &temp_path, &config).is_ok() {
+            // Verify compressed data can be read back correctly.
+            if let Ok(mut reader) = TraceReader::open(&temp_path) {
+                // Read all events to verify decompression integrity.
+                while let Ok(Some(_event)) = reader.read_event() {
+                    // Continue reading.
                 }
             }
-
-            // Cleanup
-            let _ = fs::remove_file(&temp_path);
         }
+
+        // Cleanup
+        let _ = fs::remove_file(&temp_path);
     }
 }
 
@@ -182,20 +176,20 @@ fn test_metadata_consistency(operations: &[FuzzOperation]) {
     let temp_path = get_temp_path();
     let config = TraceFileConfig::default();
 
-    if write_trace_operations(operations, &temp_path, &config).is_ok() {
-        if let Ok(reader) = TraceReader::open(&temp_path) {
-            // Verify metadata consistency
-            let expected_events = count_expected_events(operations);
-            let actual_count = reader.event_count();
+    if write_trace_operations(operations, &temp_path, &config).is_ok()
+        && let Ok(reader) = TraceReader::open(&temp_path)
+    {
+        // Verify metadata consistency
+        let expected_events = count_expected_events(operations);
+        let actual_count = reader.event_count();
 
-            // Event count should match what was written (within reason for fuzzing)
-            if expected_events <= 100 && actual_count <= 100 {
-                assert_eq!(
-                    expected_events, actual_count,
-                    "Event count mismatch: expected {} got {}",
-                    expected_events, actual_count
-                );
-            }
+        // Event count should match what was written (within reason for fuzzing)
+        if expected_events <= 100 && actual_count <= 100 {
+            assert_eq!(
+                expected_events, actual_count,
+                "Event count mismatch: expected {} got {}",
+                expected_events, actual_count
+            );
         }
     }
 
@@ -283,7 +277,7 @@ fn write_trace_operations(
             }
             FuzzOperation::WriteEvent(event) => {
                 if metadata_written {
-                    let _ = trace_writer.write_event(event);
+                    trace_writer.write_event(event)?;
                 }
             }
             FuzzOperation::FlushWriter => {
@@ -332,10 +326,25 @@ fn verify_trace_integrity(reader: &mut TraceReader, operations: &[FuzzOperation]
 }
 
 fn count_expected_events(operations: &[FuzzOperation]) -> u64 {
-    operations
-        .iter()
-        .filter(|op| matches!(op, FuzzOperation::WriteEvent(_)))
-        .count() as u64
+    let mut metadata_written = false;
+    let mut expected_events = 0;
+
+    for op in operations {
+        match op {
+            FuzzOperation::WriteMetadata(_) if !metadata_written => {
+                metadata_written = true;
+            }
+            FuzzOperation::WriteEvent(_) if metadata_written => {
+                expected_events += 1;
+            }
+            FuzzOperation::FinishWriter | FuzzOperation::Interrupt | FuzzOperation::CorruptFile => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    expected_events
 }
 
 fn get_temp_path() -> PathBuf {
