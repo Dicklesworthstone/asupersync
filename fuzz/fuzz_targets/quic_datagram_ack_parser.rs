@@ -16,7 +16,8 @@ use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::net::quic_native::transport::{
-    AckRange, PacketNumberSpace, QuicTransportMachine, SentPacketMeta,
+    AckEvent, AckRange, PacketNumberSpace, QuicConnectionState, QuicTransportMachine,
+    SentPacketMeta, TransportError,
 };
 
 #[derive(Debug, Arbitrary)]
@@ -58,13 +59,13 @@ struct FuzzSentPacket {
 }
 
 impl FuzzAckRange {
-    fn to_ack_range(self) -> Option<AckRange> {
+    fn into_ack_range(self) -> Option<AckRange> {
         AckRange::new(self.largest, self.smallest)
     }
 }
 
 impl FuzzSentPacket {
-    fn to_sent_packet_meta(self) -> SentPacketMeta {
+    fn into_sent_packet_meta(self) -> SentPacketMeta {
         let space = match self.space_variant % 3 {
             0 => PacketNumberSpace::Initial,
             1 => PacketNumberSpace::Handshake,
@@ -82,6 +83,52 @@ impl FuzzSentPacket {
     }
 }
 
+fn observe_transport_transition(context: &str, result: Result<(), TransportError>) {
+    if let Err(error) = result {
+        panic!("{context}: QUIC transport transition failed: {error:?}");
+    }
+}
+
+fn drive_transport_to_established(transport: &mut QuicTransportMachine) {
+    assert_eq!(
+        transport.state(),
+        QuicConnectionState::Idle,
+        "fresh QUIC transport should start idle"
+    );
+    observe_transport_transition("begin handshake", transport.begin_handshake());
+    assert_eq!(
+        transport.state(),
+        QuicConnectionState::Handshaking,
+        "begin_handshake did not enter handshaking state"
+    );
+    observe_transport_transition("mark established", transport.on_established());
+    assert_eq!(
+        transport.state(),
+        QuicConnectionState::Established,
+        "on_established did not enter established state"
+    );
+}
+
+fn observe_ack_event(
+    context: &str,
+    event: &AckEvent,
+    sent_packet_count: usize,
+    bytes_in_flight_before_ack: u64,
+) {
+    assert!(
+        event.acked_packets.saturating_add(event.lost_packets) <= sent_packet_count,
+        "{context}: ACK summary counted more packets than were sent"
+    );
+    assert!(
+        event.acked_bytes <= bytes_in_flight_before_ack,
+        "{context}: ACK summary counted more acked bytes than were in flight"
+    );
+    assert!(
+        event.lost_bytes <= bytes_in_flight_before_ack,
+        "{context}: ACK summary counted more lost bytes than were in flight"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
     let fuzz_data: FuzzAckData = match u.arbitrary() {
@@ -93,9 +140,7 @@ fuzz_target!(|data: &[u8]| {
     let mut transport = QuicTransportMachine::new();
 
     // Establish the connection to enable packet processing
-    if transport.on_established().is_err() {
-        return;
-    }
+    drive_transport_to_established(&mut transport);
 
     // Convert space variant to actual packet number space
     let space = match fuzz_data.space_variant % 3 {
@@ -105,10 +150,12 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Pre-populate some sent packets to make ACK processing more meaningful
+    let sent_packet_count = fuzz_data.sent_packets.len();
     for sent_packet in fuzz_data.sent_packets {
-        let packet_meta = sent_packet.to_sent_packet_meta();
+        let packet_meta = sent_packet.into_sent_packet_meta();
         transport.on_packet_sent(packet_meta);
     }
+    let bytes_in_flight_before_ack = transport.bytes_in_flight();
 
     // Fuzz the ACK processing based on the chosen method
     match fuzz_data.method {
@@ -120,11 +167,17 @@ fuzz_target!(|data: &[u8]| {
                 .collect();
 
             // Fuzz on_ack_received
-            let _ack_event = transport.on_ack_received(
+            let ack_event = transport.on_ack_received(
                 space,
                 &limited_packet_numbers,
                 fuzz_data.ack_delay_micros,
                 fuzz_data.now_micros,
+            );
+            observe_ack_event(
+                "packet-number ACK processing",
+                &ack_event,
+                sent_packet_count,
+                bytes_in_flight_before_ack,
             );
         }
         AckMethod::Ranges(ranges) => {
@@ -132,15 +185,21 @@ fuzz_target!(|data: &[u8]| {
             let ack_ranges: Vec<AckRange> = ranges
                 .into_iter()
                 .take(1000) // Limit ranges to prevent excessive processing
-                .filter_map(|r| r.to_ack_range())
+                .filter_map(|r| r.into_ack_range())
                 .collect();
 
             // Fuzz on_ack_ranges
-            let _ack_event = transport.on_ack_ranges(
+            let ack_event = transport.on_ack_ranges(
                 space,
                 &ack_ranges,
                 fuzz_data.ack_delay_micros,
                 fuzz_data.now_micros,
+            );
+            observe_ack_event(
+                "range ACK processing",
+                &ack_event,
+                sent_packet_count,
+                bytes_in_flight_before_ack,
             );
         }
     }
