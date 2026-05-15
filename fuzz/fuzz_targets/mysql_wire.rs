@@ -142,7 +142,7 @@ fn test_packet_header_parsing(header: [u8; 4], expected_sequence: u8) {
         assert_eq!(decoded_seq, expected_sequence);
         assert!(decoded_len <= MAX_PACKET_SIZE);
     } else {
-        expect_protocol_err(result, "sequence mismatch");
+        expect_sequence_mismatch_err(result, expected_sequence, header[3]);
     }
 }
 
@@ -394,12 +394,16 @@ fn assert_observable_mysql_error(error: &MySqlError) {
     assert!(!rendered.is_empty());
 }
 
-fn expect_protocol_err<T>(result: Result<T, MySqlError>, expected: &str) {
+fn expect_sequence_mismatch_err<T>(
+    result: Result<T, MySqlError>,
+    expected_seq: u8,
+    actual_seq: u8,
+) {
     match result {
         Err(MySqlError::Protocol(message)) => {
-            assert!(
-                message.contains(expected),
-                "protocol error {message:?} did not contain {expected:?}"
+            assert_eq!(
+                message,
+                format!("packet sequence mismatch: expected {expected_seq}, got {actual_seq}")
             );
         }
         Err(other) => panic!("expected protocol error, got {other:?}"),
@@ -413,9 +417,10 @@ fn test_fixed_real_seam_regressions() {
     assert_eq!(len, MAX_PACKET_SIZE);
     assert_eq!(seq, 0x07);
 
-    expect_protocol_err(
+    expect_sequence_mismatch_err(
         fuzz_decode_packet_header([0x01, 0x00, 0x00, 0x02], 0x01),
-        "sequence mismatch",
+        0x01,
+        0x02,
     );
 
     let single_byte_ok = ok_packet_with_affected_rows(&[0xFA]);
