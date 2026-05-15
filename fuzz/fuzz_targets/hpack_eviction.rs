@@ -110,6 +110,7 @@ fn test_header_list_size_eviction(config: &HpackEvictionConfig) -> Result<(), St
     for fuzz_header in &config.headers {
         total_headers.push(Header::new(&fuzz_header.name, &fuzz_header.value));
     }
+    let encoded_header_list_size: usize = total_headers.iter().map(Header::size).sum();
 
     let mut buf = BytesMut::new();
     encoder.encode(&total_headers, &mut buf);
@@ -126,8 +127,13 @@ fn test_header_list_size_eviction(config: &HpackEvictionConfig) -> Result<(), St
                 small_limit
             );
         }
-        Err(_) => {
-            // Failure is acceptable if headers exceed limit
+        Err(error) => {
+            if encoded_header_list_size <= small_limit {
+                return Err(format!(
+                    "HPACK decoder rejected in-limit encoded header list ({} <= {}): {}",
+                    encoded_header_list_size, small_limit, error
+                ));
+            }
         }
     }
 
