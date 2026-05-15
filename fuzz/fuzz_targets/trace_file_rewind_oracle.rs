@@ -24,10 +24,11 @@
 //!
 //! Archetype: stateful (shadow model = the first-pass event vector).
 
-use asupersync::trace::file::{CompressionMode, TraceFileConfig, TraceReader, TraceWriter};
+use asupersync::trace::file::{
+    CompressionMode, TraceFileConfig, TraceFileError, TraceReader, TraceWriter,
+};
 use asupersync::trace::replay::{CompactTaskId, ReplayEvent, TraceMetadata};
 use libfuzzer_sys::fuzz_target;
-use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Upper bound on generated events per fuzz iteration. Keeps exec/s above the
@@ -36,6 +37,26 @@ const MAX_EVENTS: usize = 128;
 
 /// Upper bound on input bytes. Guards against OOM and per-iter timeouts.
 const MAX_INPUT: usize = 64 * 1024;
+
+fn observe_writer_result(context: &str, result: Result<(), TraceFileError>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(TraceFileError::Io(_))
+        | Err(TraceFileError::Serialize(_))
+        | Err(TraceFileError::Compression(_))
+        | Err(TraceFileError::AlreadyFinished)
+        | Err(TraceFileError::MetadataNotWritten)
+        | Err(TraceFileError::MetadataAlreadyWritten)
+        | Err(TraceFileError::MetadataCorrupt) => false,
+        Err(error) => panic!("{context} returned unexpected trace writer error: {error:?}"),
+    }
+}
+
+fn expect_file_rewind(context: &str, result: Result<(), TraceFileError>) {
+    if let Err(error) = result {
+        panic!("{context} failed on a file-backed TraceReader: {error:?}");
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 || data.len() > MAX_INPUT {
@@ -54,8 +75,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Build a valid trace on a per-iteration tempfile because TraceWriter
     // owns its Write half (only Path-based constructors are public). We
-    // reopen via TraceReader on an in-memory Cursor of the same bytes to
-    // keep the rewind/re-read oracle running against a seekable backing.
+    // reopen via TraceReader::open on the same tempfile so the rewind/re-read
+    // oracle runs against the production path-based reader.
     //
     // Filename includes a per-iter atomic counter + the process PID so
     // parallel fuzz workers don't collide in /tmp. We remove the file on
@@ -92,7 +113,10 @@ fuzz_target!(|data: &[u8]| {
         0,
         0,
     ]);
-    if writer.write_metadata(&TraceMetadata::new(seed)).is_err() {
+    if !observe_writer_result(
+        "rewind metadata write",
+        writer.write_metadata(&TraceMetadata::new(seed)),
+    ) {
         return;
     }
 
@@ -107,25 +131,20 @@ fuzz_target!(|data: &[u8]| {
             ReplayEvent::task_scheduled(CompactTaskId((i as u64) << 32), i as u64)
         } else {
             ReplayEvent::TimeAdvanced {
-                from: i as u64,
-                to: (i as u64).saturating_add(1),
+                from_nanos: i as u64,
+                to_nanos: (i as u64).saturating_add(1),
             }
         };
-        if writer.write_event(&event).is_err() {
+        if !observe_writer_result("rewind event write", writer.write_event(&event)) {
             return;
         }
     }
-    if writer.finish().is_err() {
+    if !observe_writer_result("rewind finish", writer.finish()) {
         return;
     }
 
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-
     // ---- Pass 1: baseline read-all ----
-    let mut reader = match TraceReader::from_reader(Cursor::new(bytes.clone())) {
+    let mut reader = match TraceReader::open(&path) {
         Ok(r) => r,
         Err(_) => return,
     };
@@ -144,7 +163,7 @@ fuzz_target!(|data: &[u8]| {
     );
 
     // ---- Pass 2: partial-read(k1) → rewind → read-all ----
-    let mut reader2 = match TraceReader::from_reader(Cursor::new(bytes.clone())) {
+    let mut reader2 = match TraceReader::open(&path) {
         Ok(r) => r,
         Err(_) => return,
     };
@@ -162,11 +181,9 @@ fuzz_target!(|data: &[u8]| {
         "prefix read diverged from pass-1 prefix before rewind"
     );
 
-    if reader2.rewind().is_err() {
-        // Rewind MAY fail on a non-seekable reader; Cursor is seekable, so
-        // this branch is a bug — flag loudly rather than silently returning.
-        panic!("rewind failed on a Cursor-backed TraceReader");
-    }
+    // Rewind MAY fail on a non-seekable reader; TraceReader::open is seekable, so this
+    // branch is a bug — flag loudly rather than silently returning.
+    expect_file_rewind("first rewind", reader2.rewind());
     assert_eq!(
         reader2.events_read(),
         0,
@@ -187,9 +204,7 @@ fuzz_target!(|data: &[u8]| {
     );
 
     // ---- Pass 3: rewind-again → partial-read(k2) must match pass-1 prefix ----
-    if reader2.rewind().is_err() {
-        panic!("second rewind failed on Cursor-backed TraceReader");
-    }
+    expect_file_rewind("second rewind", reader2.rewind());
     let mut tail: Vec<ReplayEvent> = Vec::with_capacity(k2);
     for _ in 0..k2 {
         match reader2.read_event() {
