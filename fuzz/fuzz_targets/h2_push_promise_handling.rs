@@ -85,22 +85,7 @@ fuzz_target!(|data: &[u8]| {
     // Test 5: Malformed PUSH_PROMISE frame structure via raw parsing
     {
         // Test the actual frame parsing logic with fuzzed data
-        let frame_result = parse_push_promise_from_raw_data(data);
-
-        // Should handle malformed frames gracefully (parse error or valid frame)
-        match frame_result {
-            Ok(frame) => {
-                // Successfully parsed - validate it doesn't cause issues
-                if let Frame::PushPromise(push_frame) = frame {
-                    let _stream_id = push_frame.stream_id;
-                    let _promised_id = push_frame.promised_stream_id;
-                    let _headers = &push_frame.header_block;
-                }
-            }
-            Err(_) => {
-                // Parse error is acceptable for malformed input
-            }
-        }
+        observe_raw_push_promise_parse(parse_push_promise_from_raw_data(data));
     }
 
     // Test 6: Multiple rapid PUSH_PROMISE frames
@@ -186,7 +171,10 @@ fn observe_process_result(
     let result = connection.process_frame(frame);
     let after_state = connection.state();
 
-    if matches!(before_state, ConnectionState::Open | ConnectionState::Closing) {
+    if matches!(
+        before_state,
+        ConnectionState::Open | ConnectionState::Closing
+    ) {
         assert!(
             !matches!(after_state, ConnectionState::Handshaking),
             "{scenario}: connection regressed to handshaking"
@@ -220,6 +208,30 @@ fn observe_process_result(
 
 fn observe_process_frame(connection: &mut Connection, frame: Frame, scenario: &str) {
     let _observed = observe_process_result(connection, frame, scenario);
+}
+
+fn observe_raw_push_promise_parse(result: Result<Frame, H2Error>) {
+    match result {
+        Ok(Frame::PushPromise(push_frame)) => {
+            let _stream_id = push_frame.stream_id;
+            let _promised_id = push_frame.promised_stream_id;
+            let _headers = &push_frame.header_block;
+        }
+        Ok(frame) => {
+            panic!("raw PUSH_PROMISE parse returned unexpected frame: {frame:?}");
+        }
+        Err(error) => {
+            assert_ne!(
+                error.code,
+                ErrorCode::NoError,
+                "raw PUSH_PROMISE parse error used NO_ERROR"
+            );
+            assert!(
+                !error.message.trim().is_empty(),
+                "raw PUSH_PROMISE parse error message was empty"
+            );
+        }
+    }
 }
 
 fn observe_push_disabled_rejection(connection: &mut Connection, frame: Frame, scenario: &str) {
