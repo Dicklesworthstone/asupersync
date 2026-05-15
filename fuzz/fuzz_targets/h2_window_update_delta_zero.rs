@@ -373,6 +373,21 @@ fn assert_live_h2_error(
     assert_eq!(error.code, expected_code);
     assert_eq!(error.stream_id, expected_stream_id);
     assert_eq!(error.message.as_str(), expected_message);
+
+    assert!(
+        error.is_connection_error() == expected_stream_id.is_none(),
+        "H2 WINDOW_UPDATE error level changed: {error}"
+    );
+    let expected_display = if let Some(stream_id) = expected_stream_id {
+        format!("HTTP/2 stream {stream_id} error ({expected_code}): {expected_message}")
+    } else {
+        format!("HTTP/2 connection error ({expected_code}): {expected_message}")
+    };
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "H2 WINDOW_UPDATE error display changed"
+    );
 }
 
 fn assert_live_window_update_delta_zero() {
