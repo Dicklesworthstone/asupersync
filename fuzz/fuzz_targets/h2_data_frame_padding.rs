@@ -88,7 +88,10 @@ fuzz_target!(|data: &[u8]| {
         match result {
             Ok(frame) => {
                 // Test the parsing of our constructed frame
-                let _parse_result = validate_data_frame_padding(&frame);
+                observe_padding_validation_result(
+                    validate_data_frame_padding(&frame),
+                    "single-byte padded DATA frame validation",
+                );
             }
             Err(error) => {
                 observe_h2_parse_error(&error, "single-byte padded DATA frame");
@@ -131,8 +134,10 @@ fuzz_target!(|data: &[u8]| {
         if data.len() >= 256 {
             let result = create_padded_data_frame(&data[256..], 255, 1);
             if let Ok(frame) = result {
-                let _parse_result = validate_data_frame_padding(&frame);
-                // Should handle max padding correctly
+                observe_padding_validation_result(
+                    validate_data_frame_padding(&frame),
+                    "maximum-padding DATA frame validation",
+                );
             }
         }
     }
@@ -159,25 +164,18 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 7: Padding length exceeds payload (should be PROTOCOL_ERROR)
     if data.len() >= 2 {
-        let payload_data = &data[1..];
-        let pad_length = (payload_data.len() as u8).saturating_add(1); // One more than available
+        let available_payload_len = (data.len() - 1).min(254);
+        let payload_data = &data[1..=available_payload_len];
+        let pad_length =
+            u8::try_from(payload_data.len() + 1).expect("payload length capped below u8::MAX");
 
-        let result = create_padded_data_frame(payload_data, pad_length, 1);
-        if let Ok(frame) = result {
-            let parse_result = validate_data_frame_padding(&frame);
-            // Should fail with PROTOCOL_ERROR
-            match parse_result {
-                Err(H2Error {
-                    code: ErrorCode::ProtocolError,
-                    ..
-                }) => {
-                    // Expected - padding exceeds data length
-                }
-                _ => {
-                    // Unexpected - should have failed
-                }
-            }
-        }
+        let parse_result = parse_raw_padded_data_payload(payload_data, pad_length, 1);
+        assert_padding_exceeds_payload(
+            parse_result,
+            pad_length,
+            payload_data.len(),
+            "padding length exceeds DATA payload",
+        );
     }
 
     // Test 8: Multiple DATA frames with different padding
@@ -192,8 +190,14 @@ fuzz_target!(|data: &[u8]| {
 
         // Both should be independent
         if let (Ok(frame1), Ok(frame2)) = (frame1_result, frame2_result) {
-            let _result1 = validate_data_frame_padding(&frame1);
-            let _result2 = validate_data_frame_padding(&frame2);
+            observe_padding_validation_result(
+                validate_data_frame_padding(&frame1),
+                "first independent padded DATA frame validation",
+            );
+            observe_padding_validation_result(
+                validate_data_frame_padding(&frame2),
+                "second independent padded DATA frame validation",
+            );
         }
     }
 
@@ -232,7 +236,10 @@ fuzz_target!(|data: &[u8]| {
 
                 let result = create_padded_data_frame(payload, pad_length, 1);
                 if let Ok(frame) = result {
-                    let _parse_result = validate_data_frame_padding(&frame);
+                    observe_padding_validation_result(
+                        validate_data_frame_padding(&frame),
+                        "boundary-size padded DATA frame validation",
+                    );
                 }
             }
         }
@@ -249,6 +256,49 @@ fn observe_h2_parse_error(error: &H2Error, context: &str) {
         !error.message.trim().is_empty(),
         "{context}: parse error message was empty"
     );
+}
+
+fn observe_padding_validation_result(result: Result<Frame, H2Error>, context: &str) {
+    match result {
+        Ok(Frame::Data(data_frame)) => {
+            assert_ne!(
+                data_frame.stream_id, 0,
+                "{context}: DATA validation accepted stream 0"
+            );
+        }
+        Ok(frame) => panic!("{context}: validation returned non-DATA frame {frame:?}"),
+        Err(error) => observe_h2_parse_error(&error, context),
+    }
+}
+
+fn assert_padding_exceeds_payload(
+    result: Result<Frame, H2Error>,
+    pad_length: u8,
+    available_payload_len: usize,
+    context: &str,
+) {
+    assert!(
+        usize::from(pad_length) > available_payload_len,
+        "{context}: test setup did not make pad length exceed payload"
+    );
+
+    match result {
+        Err(
+            error @ H2Error {
+                code: ErrorCode::ProtocolError,
+                ..
+            },
+        ) => {
+            observe_h2_parse_error(&error, context);
+            assert!(
+                error.message.contains("padding exceeds"),
+                "{context}: ProtocolError did not identify padding overflow: {}",
+                error.message
+            );
+        }
+        Err(error) => panic!("{context}: expected ProtocolError, got {error:?}"),
+        Ok(frame) => panic!("{context}: malformed padded DATA parsed as {frame:?}"),
+    }
 }
 
 /// Parse DATA frame with specified padding flag
@@ -293,6 +343,27 @@ fn create_padded_data_frame(
     };
 
     // Parse the constructed frame to test the parser
+    parse_frame(&header, payload.freeze())
+}
+
+/// Parse a PADDED DATA frame whose payload already contains the pad-length byte
+/// and data bytes, without appending the claimed padding tail.
+fn parse_raw_padded_data_payload(
+    app_data_without_padding: &[u8],
+    pad_length: u8,
+    stream_id: u32,
+) -> Result<Frame, H2Error> {
+    let mut payload = BytesMut::new();
+    payload.put_u8(pad_length);
+    payload.extend_from_slice(app_data_without_padding);
+
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: DATA_FRAME_TYPE,
+        flags: data_flags::PADDED,
+        stream_id,
+    };
+
     parse_frame(&header, payload.freeze())
 }
 
