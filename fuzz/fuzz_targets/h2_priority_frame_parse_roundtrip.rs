@@ -72,8 +72,18 @@ enum PayloadShape {
     Arbitrary { bytes: [u8; 5] },
 }
 
+fn dependency_from_priority_payload(payload: &Bytes) -> u32 {
+    assert_eq!(
+        payload.len(),
+        5,
+        "PRIORITY dependency oracle only applies to 5-byte payloads"
+    );
+    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) & 0x7FFF_FFFF
+}
+
 fuzz_target!(|input: Input| {
-    if matches!(&input.payload, PayloadShape::WrongLength { padding } if padding.len() > MAX_INPUT_LEN) {
+    if matches!(&input.payload, PayloadShape::WrongLength { padding } if padding.len() > MAX_INPUT_LEN)
+    {
         return;
     }
 
@@ -153,14 +163,16 @@ fuzz_target!(|input: Input| {
             // 4. Round-trip: encode → parse must be a fixed point on
             //    well-formed inputs.
             let mut encoded = BytesMut::with_capacity(9 + 5);
-            frame.encode(&mut encoded).expect("encode of just-parsed frame must succeed");
+            frame
+                .encode(&mut encoded)
+                .expect("encode of just-parsed frame must succeed");
             assert!(
                 encoded.len() >= 9 + 5,
                 "encoded PRIORITY frame must be at least header(9) + payload(5)"
             );
             let mut header_buf = BytesMut::from(&encoded[..]);
-            let parsed_header = FrameHeader::parse(&mut header_buf)
-                .expect("re-parse of own header must succeed");
+            let parsed_header =
+                FrameHeader::parse(&mut header_buf).expect("re-parse of own header must succeed");
             assert_eq!(parsed_header.length, 5);
             assert_eq!(parsed_header.frame_type, FrameType::Priority as u8);
             assert_eq!(parsed_header.stream_id, frame.stream_id);
@@ -175,6 +187,12 @@ fuzz_target!(|input: Input| {
         (_, Err(err)) => {
             // Only legitimate error on a 5-byte payload is the
             // self-dependency check.
+            let dependency = dependency_from_priority_payload(&payload);
+            assert_eq!(
+                dependency, header.stream_id,
+                "PRIORITY parser rejected non-self-dependency payload: dependency={dependency}, stream_id={}",
+                header.stream_id
+            );
             assert_eq!(
                 err.code,
                 ErrorCode::ProtocolError,
