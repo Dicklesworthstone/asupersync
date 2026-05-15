@@ -178,10 +178,9 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
                     // Expected for invalid indices
                     if test_index == 0 {
                         // Index 0 should always fail
-                        assert!(
-                            error.to_string().contains("invalid index 0"),
-                            "Index 0 error message unexpected: {}",
-                            error
+                        assert_eq!(
+                            error.message, "invalid index 0",
+                            "index-zero error message changed"
                         );
                     } else if test_index <= STATIC_TABLE_SIZE {
                         // Static indices should not fail unless there's a bug
@@ -208,7 +207,7 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
     if input.test_size_update && dynamic_entries_added > 0 {
         // After size update, re-test a dynamic index to ensure proper re-mapping
         let test_dynamic_index = STATIC_TABLE_SIZE + 1;
-        let post_update_result = test_index_lookup(&decoder, test_dynamic_index);
+        let post_update_result = test_index_lookup(&mut decoder, test_dynamic_index);
 
         // Result should be consistent with the new table state
         match post_update_result {
@@ -252,10 +251,9 @@ fn assert_compression_error(error: H2Error, expected_message: &str) {
         ErrorCode::CompressionError,
         "expected compression error, got {error}"
     );
-    assert!(
-        error.message.contains(expected_message),
-        "expected error message containing {expected_message:?}, got {:?}",
-        error.message
+    assert_eq!(
+        error.message, expected_message,
+        "compression error message changed"
     );
 }
 
