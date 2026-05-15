@@ -625,7 +625,9 @@ impl MockSettingsTransitionConnection {
 
             // If limit is positive, try to process pending streams
             if self.settings.max_concurrent_streams > 0 {
-                let _ = self.process_pending_streams(self.settings.max_concurrent_streams);
+                let processed =
+                    self.process_pending_streams(self.settings.max_concurrent_streams)?;
+                self.stats.pending_streams_processed += processed as u32;
             }
 
             Ok(())
@@ -813,6 +815,99 @@ fn observe_close_stream_result(
     }
 }
 
+fn observe_settings_frame_result(result: Result<(), ErrorCode>, context: &str) {
+    if let Err(error) = result {
+        panic!("{context}: SETTINGS frame failed: {error:?}");
+    }
+}
+
+fn observe_stream_creation_result(
+    conn: &MockSettingsTransitionConnection,
+    normalized_id: u32,
+    active_before: usize,
+    pending_before: usize,
+    result: Result<(), ErrorCode>,
+    context: &str,
+) {
+    let active_after = conn.active_stream_count();
+    let pending_after = conn.pending_streams.len();
+
+    match result {
+        Ok(()) => {
+            if conn.settings.max_concurrent_streams == 0 {
+                assert_eq!(
+                    active_after, active_before,
+                    "{context}: zero-limit stream creation changed active stream count"
+                );
+                assert!(
+                    pending_after > pending_before,
+                    "{context}: zero-limit stream creation did not queue a pending stream"
+                );
+                assert!(
+                    conn.pending_streams
+                        .iter()
+                        .any(|pending| pending.stream_id == normalized_id),
+                    "{context}: queued stream did not preserve normalized stream id"
+                );
+            } else {
+                assert!(
+                    conn.streams.contains_key(&normalized_id)
+                        || conn
+                            .pending_streams
+                            .iter()
+                            .any(|pending| pending.stream_id == normalized_id),
+                    "{context}: successful stream creation left no stream or pending request"
+                );
+                assert!(
+                    active_after <= conn.settings.max_concurrent_streams as usize
+                        || active_before >= conn.settings.max_concurrent_streams as usize,
+                    "{context}: successful stream creation exceeded max concurrent streams"
+                );
+            }
+        }
+        Err(ErrorCode::RefusedStream) => {
+            let limit = conn.settings.max_concurrent_streams as usize;
+            assert!(
+                conn.settings.max_concurrent_streams > 0,
+                "{context}: zero-limit stream creation should queue rather than refuse"
+            );
+            assert!(
+                active_before >= limit,
+                "{context}: RefusedStream occurred before the active stream limit"
+            );
+            assert_eq!(
+                active_after, active_before,
+                "{context}: refused stream creation changed active stream count"
+            );
+            assert_eq!(
+                pending_after, pending_before,
+                "{context}: refused stream creation changed pending stream count"
+            );
+        }
+        Err(error) => panic!("{context}: unexpected stream creation error: {error:?}"),
+    }
+}
+
+fn observe_attempt_stream_creation(
+    conn: &mut MockSettingsTransitionConnection,
+    stream_id: u32,
+    headers: Vec<(String, String)>,
+    context: &str,
+) {
+    let normalized_id = conn.normalize_stream_id(stream_id);
+    let active_before = conn.active_stream_count();
+    let pending_before = conn.pending_streams.len();
+    let result = conn.attempt_stream_creation(stream_id, headers);
+    observe_stream_creation_result(
+        conn,
+        normalized_id,
+        active_before,
+        pending_before,
+        result,
+        context,
+    );
+}
+
 #[derive(Debug, Clone)]
 pub struct TransitionResults {
     pub settings_history: Vec<SettingsHistoryEntry>,
@@ -926,7 +1021,10 @@ fuzz_target!(|input: SettingsTransitionInput| {
                 }
 
                 let settings_frame = SettingsFrame::new(settings_vec);
-                let _ = conn.handle_settings_frame(&settings_frame);
+                observe_settings_frame_result(
+                    conn.handle_settings_frame(&settings_frame),
+                    "initial phase additional SETTINGS",
+                );
             }
             InitialPhaseOperation::WaitDuration { duration_ms } => {
                 let duration = cap_u16(*duration_ms, 2000); // Max 2 seconds
@@ -1030,7 +1128,12 @@ fuzz_target!(|input: SettingsTransitionInput| {
 
                 for i in 0..count {
                     let stream_id = base_id + (i as u32 * 2);
-                    let _ = conn.attempt_stream_creation(stream_id, vec![]);
+                    observe_attempt_stream_creation(
+                        &mut conn,
+                        stream_id,
+                        vec![],
+                        &format!("post-transition batch stream {i}"),
+                    );
                 }
 
                 // Should not exceed the limit
@@ -1073,7 +1176,10 @@ fuzz_target!(|input: SettingsTransitionInput| {
                     let limit = cap_u8(limit, 100);
                     let settings =
                         SettingsFrame::new(vec![Setting::MaxConcurrentStreams(limit as u32)]);
-                    let _ = conn.handle_settings_frame(&settings);
+                    observe_settings_frame_result(
+                        conn.handle_settings_frame(&settings),
+                        "rapid MAX_CONCURRENT_STREAMS change",
+                    );
 
                     // Verify state consistency after each change
                     assert!(
@@ -1084,16 +1190,32 @@ fuzz_target!(|input: SettingsTransitionInput| {
             }
             EdgeCaseTest::ConcurrentStreamCreationAndLimitChange => {
                 // Simulate concurrent operations
-                let _ = conn.attempt_stream_creation(1001, vec![]);
+                observe_attempt_stream_creation(
+                    &mut conn,
+                    1001,
+                    vec![],
+                    "concurrent pre-settings stream creation",
+                );
                 let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(5)]);
-                let _ = conn.handle_settings_frame(&settings);
-                let _ = conn.attempt_stream_creation(1003, vec![]);
+                observe_settings_frame_result(
+                    conn.handle_settings_frame(&settings),
+                    "concurrent stream creation limit change",
+                );
+                observe_attempt_stream_creation(
+                    &mut conn,
+                    1003,
+                    vec![],
+                    "concurrent post-settings stream creation",
+                );
             }
             EdgeCaseTest::LimitDecreaseAfterIncrease { final_limit } => {
                 let final_limit = cap_u8(*final_limit, new_limit);
                 let settings =
                     SettingsFrame::new(vec![Setting::MaxConcurrentStreams(final_limit as u32)]);
-                let _ = conn.handle_settings_frame(&settings);
+                observe_settings_frame_result(
+                    conn.handle_settings_frame(&settings),
+                    "limit decrease after increase",
+                );
 
                 // Verify no streams were forcibly closed
                 // (Existing streams should be allowed to continue)
@@ -1101,15 +1223,24 @@ fuzz_target!(|input: SettingsTransitionInput| {
             EdgeCaseTest::ZeroDelayTransition => {
                 // Test immediate transition back to zero and then non-zero
                 let zero_settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
-                let _ = conn.handle_settings_frame(&zero_settings);
+                observe_settings_frame_result(
+                    conn.handle_settings_frame(&zero_settings),
+                    "zero-delay transition to zero",
+                );
 
                 let non_zero_settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(1)]);
-                let _ = conn.handle_settings_frame(&non_zero_settings);
+                observe_settings_frame_result(
+                    conn.handle_settings_frame(&non_zero_settings),
+                    "zero-delay transition back to non-zero",
+                );
             }
             _ => {
                 // Other edge cases
                 let test_settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(2)]);
-                let _ = conn.handle_settings_frame(&test_settings);
+                observe_settings_frame_result(
+                    conn.handle_settings_frame(&test_settings),
+                    "generic edge-case settings update",
+                );
             }
         }
     }
