@@ -50,6 +50,9 @@ const MAX_FUZZ_INPUT_SIZE: usize = 32_000;
 /// Maximum decoded output size for safety.
 const MAX_DECODED_OUTPUT_SIZE: usize = 128_000;
 
+const DEFAULT_JSON_BODY_LIMIT: usize = 10 * 1024 * 1024;
+const DEFAULT_FORM_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
 /// Web request extraction test scenarios.
 #[derive(Arbitrary, Debug, Clone)]
 struct WebExtractFuzzInput {
@@ -247,11 +250,15 @@ fn test_individual_extractors(request: &Request) -> Result<(), String> {
         }
         Err(err) => {
             // Invariant 2: Required fields return 400 when missing
-            if err.message.contains("no path parameters") {
+            if request.path_params.is_empty() {
                 assert_eq!(
                     err.status,
                     StatusCode::BAD_REQUEST,
                     "Missing path parameters should return 400 Bad Request"
+                );
+                assert_eq!(
+                    err.message, "no path parameters found",
+                    "Missing path parameters should use the source-backed diagnostic"
                 );
             }
         }
@@ -296,11 +303,19 @@ fn test_individual_extractors(request: &Request) -> Result<(), String> {
             }
             Err(err) => {
                 // Invariant 5: Content-Type mismatch returns 415
-                if err.message.contains("expected application/json") {
+                if err.status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+                    let content_type = request
+                        .header("content-type")
+                        .expect("JSON extractor mismatch path has Content-Type");
                     assert_eq!(
                         err.status,
                         StatusCode::UNSUPPORTED_MEDIA_TYPE,
                         "JSON Content-Type mismatch should return 415"
+                    );
+                    assert_eq!(
+                        err.message,
+                        format!("expected application/json, got {content_type}"),
+                        "JSON Content-Type mismatch should use the source-backed diagnostic"
                     );
                 }
                 // JSON parsing errors should be descriptive
@@ -331,14 +346,19 @@ fn test_individual_extractors(request: &Request) -> Result<(), String> {
             }
             Err(err) => {
                 // Invariant 5: Content-Type mismatch returns 415
-                if err
-                    .message
-                    .contains("expected application/x-www-form-urlencoded")
-                {
+                if err.status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+                    let content_type = request
+                        .header("content-type")
+                        .expect("Form extractor mismatch path has Content-Type");
                     assert_eq!(
                         err.status,
                         StatusCode::UNSUPPORTED_MEDIA_TYPE,
                         "Form Content-Type mismatch should return 415"
+                    );
+                    assert_eq!(
+                        err.message,
+                        format!("expected application/x-www-form-urlencoded, got {content_type}"),
+                        "Form Content-Type mismatch should use the source-backed diagnostic"
                     );
                 }
                 // Form parsing errors should be descriptive
@@ -374,9 +394,14 @@ fn test_body_size_limits(request: &mut Request) -> Result<(), String> {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "Oversized JSON should return 413 Payload Too Large"
             );
-            assert!(
-                err.message.contains("JSON body too large"),
-                "Error message should indicate JSON size limit exceeded"
+            assert_eq!(
+                err.message,
+                format!(
+                    "JSON body too large: {} bytes (limit {})",
+                    large_json.len(),
+                    DEFAULT_JSON_BODY_LIMIT
+                ),
+                "JSON body-size rejection should use the source-backed diagnostic"
             );
         }
     }
@@ -398,9 +423,14 @@ fn test_body_size_limits(request: &mut Request) -> Result<(), String> {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "Oversized form should return 413 Payload Too Large"
             );
-            assert!(
-                err.message.contains("form body too large"),
-                "Error message should indicate form size limit exceeded"
+            assert_eq!(
+                err.message,
+                format!(
+                    "form body too large: {} bytes (limit {})",
+                    large_form.len(),
+                    DEFAULT_FORM_BODY_LIMIT
+                ),
+                "Form body-size rejection should use the source-backed diagnostic"
             );
         }
     }
@@ -456,9 +486,9 @@ fn test_content_type_mismatches(request: &mut Request) -> Result<(), String> {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "Wrong Content-Type for JSON should return 415"
             );
-            assert!(
-                err.message.contains("expected application/json"),
-                "Error should mention expected Content-Type"
+            assert_eq!(
+                err.message, "expected application/json, got text/plain",
+                "JSON Content-Type mismatch should use the source-backed diagnostic"
             );
         }
     }
@@ -480,10 +510,9 @@ fn test_content_type_mismatches(request: &mut Request) -> Result<(), String> {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "Wrong Content-Type for form should return 415"
             );
-            assert!(
-                err.message
-                    .contains("expected application/x-www-form-urlencoded"),
-                "Error should mention expected Content-Type"
+            assert_eq!(
+                err.message, "expected application/x-www-form-urlencoded, got application/json",
+                "Form Content-Type mismatch should use the source-backed diagnostic"
             );
         }
     }
