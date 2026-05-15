@@ -484,19 +484,11 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
         if header.length > available_payload {
             // Should handle incomplete frames gracefully
             let payload = frame_bytes.slice(9..);
-            let result = PushPromiseFrame::parse(&header, Bytes::copy_from_slice(payload));
-
-            // May fail or succeed depending on how much data is available
-            // Key requirement: should not panic or cause memory safety issues
-            match result {
-                Ok(_) => {
-                    // If parsing succeeded despite length mismatch, that's acceptable
-                    // as long as no memory safety issues occurred
-                }
-                Err(_) => {
-                    // Error is expected for malformed frames
-                }
-            }
+            observe_push_promise_parse(
+                &header,
+                Bytes::copy_from_slice(payload),
+                "malformed PUSH_PROMISE length",
+            );
         }
     }
 
@@ -522,20 +514,7 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
         let mut parse_empty = empty_frame.clone();
         if let Ok(header) = FrameHeader::parse(&mut parse_empty) {
             let payload = parse_empty.freeze();
-            let result = PushPromiseFrame::parse(&header, payload);
-
-            // Should handle empty header blocks gracefully
-            match result {
-                Ok(frame) => {
-                    assert!(
-                        frame.header_block.is_empty(),
-                        "Empty header block should be preserved"
-                    );
-                }
-                Err(_) => {
-                    // Error is acceptable for edge cases
-                }
-            }
+            observe_push_promise_parse(&header, payload, "empty PUSH_PROMISE header block");
         }
     }
 });
