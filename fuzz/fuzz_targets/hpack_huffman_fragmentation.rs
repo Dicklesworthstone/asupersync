@@ -214,8 +214,8 @@ fn test_round_trip_consistency(test_string: &str, as_name: bool) {
     literal_encoder.encode(std::slice::from_ref(&header), &mut literal_dst);
 
     // Both should decode to the same result
-    let huffman_decoded = decode_headers(&huffman_dst);
-    let literal_decoded = decode_headers(&literal_dst);
+    let huffman_decoded = decode_headers(&huffman_dst, "huffman round-trip block");
+    let literal_decoded = decode_headers(&literal_dst, "literal round-trip block");
 
     assert_eq!(
         huffman_decoded, literal_decoded,
@@ -243,7 +243,7 @@ fn test_encoder_fragmentation(test_string: &str) {
         encoder.encode(&[header], &mut dst);
 
         // The encoded block should be decodable
-        let decoded = decode_headers(&dst);
+        let decoded = decode_headers(&dst, "single-header fragmentation block");
         assert_eq!(decoded.len(), 1, "Should decode one header");
 
         // Encoded block should not be empty (huffman encoding should produce output)
@@ -278,7 +278,7 @@ fn test_multi_fragment_encoding(pattern: &FragmentationPattern) {
     encoder.encode(&headers, &mut dst);
 
     // Decode and verify
-    let decoded = decode_headers(&dst);
+    let decoded = decode_headers(&dst, "multi-fragment header block");
     assert_eq!(
         decoded.len(),
         headers.len(),
@@ -322,7 +322,7 @@ fn build_single_fragment_string(fragment: &StringFragment) -> String {
     result
 }
 
-fn decode_headers(encoded: &BytesMut) -> Vec<Header> {
+fn decode_headers(encoded: &BytesMut, scenario: &str) -> Vec<Header> {
     let mut decoder = HpackDecoder::new();
     let mut data = Bytes::copy_from_slice(encoded);
 
@@ -335,10 +335,6 @@ fn decode_headers(encoded: &BytesMut) -> Vec<Header> {
             );
             headers
         }
-        Err(_) => {
-            // If decode fails, return empty vec - this is acceptable for malformed input
-            // The fuzzer should find cases where valid input fails to decode
-            Vec::new()
-        }
+        Err(error) => panic!("{scenario}: encoder-generated HPACK block failed to decode: {error}"),
     }
 }
