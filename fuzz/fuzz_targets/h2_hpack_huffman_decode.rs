@@ -9,6 +9,7 @@ use asupersync::http::h2::{H2Error, HpackDecoder};
 
 const MAX_HUFFMAN_BYTES: usize = 8 * 1024;
 const STATIC_NAME_INDEX: usize = 16; // accept-encoding
+const STRING_LENGTH_EXCEEDS_BUFFER: &str = "string length exceeds buffer";
 
 #[derive(Arbitrary, Debug)]
 struct HuffmanDecodeInput {
@@ -89,7 +90,15 @@ fn assert_known_truncated_eos_prefix_errors() {
 fn assert_length_error(result: Result<(), H2Error>) {
     let err = result.expect_err("truncated Huffman byte sequence must be rejected");
     assert_eq!(err.code, ErrorCode::CompressionError);
-    assert_eq!(err.message, "string length exceeds buffer");
+    assert_eq!(err.message, STRING_LENGTH_EXCEEDS_BUFFER);
+    assert!(
+        err.is_connection_error(),
+        "HPACK string length errors should be connection-level: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        format!("HTTP/2 connection error (COMPRESSION_ERROR): {STRING_LENGTH_EXCEEDS_BUFFER}")
+    );
 }
 
 fn encode_integer(dst: &mut BytesMut, value: usize, prefix_bits: u8, prefix: u8) {
