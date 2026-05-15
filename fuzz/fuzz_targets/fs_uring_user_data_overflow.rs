@@ -27,6 +27,7 @@ use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_OPERATIONS: usize = 1000; // Reasonable for exec/s
+const OVERFLOW_PROBE_ALLOCATIONS: usize = 10;
 const USER_DATA_KIND_SHIFT: u32 = 56;
 const USER_DATA_SEQUENCE_MASK: u64 = (1u64 << USER_DATA_KIND_SHIFT) - 1;
 
@@ -159,6 +160,22 @@ struct CompletionStats {
     duplicate_completions: usize,
 }
 
+fn count_user_data_collisions(user_data: &[u64]) -> usize {
+    let allocation_count = user_data.len();
+    let mut sorted_user_data = user_data.to_vec();
+    sorted_user_data.sort_unstable();
+    sorted_user_data.dedup();
+    allocation_count - sorted_user_data.len()
+}
+
+fn assert_decode_matches_kind(user_data: u64, expected_kind: OpKind, context: &str) {
+    assert_eq!(
+        OpKind::decode(user_data),
+        Some(expected_kind),
+        "{context} decoded as unexpected OpKind for user_data 0x{user_data:016x}"
+    );
+}
+
 fn execute_scenario(
     allocator: &MockUserDataAllocator,
     scenario: UserDataScenario,
@@ -173,9 +190,21 @@ fn execute_scenario(
         UserDataScenario::PostOverflow => {
             allocator.set_counter(u64::MAX - 5);
             // Allocate a few to cause overflow
-            for _ in 0..10 {
-                let _ = allocator.allocate_user_data(op.op_kind);
+            let mut warmup_user_data = Vec::with_capacity(OVERFLOW_PROBE_ALLOCATIONS);
+            for _ in 0..OVERFLOW_PROBE_ALLOCATIONS {
+                let user_data = allocator.allocate_user_data(op.op_kind);
+                assert_decode_matches_kind(
+                    user_data,
+                    op.op_kind,
+                    "post-overflow warmup allocation",
+                );
+                warmup_user_data.push(user_data);
             }
+            let warmup_collision_count = count_user_data_collisions(&warmup_user_data);
+            assert!(
+                warmup_collision_count <= 1,
+                "post-overflow warmup produced {warmup_collision_count} user_data collisions"
+            );
             // This allocation will have wrapped counter
             allocator.allocate_user_data(op.op_kind)
         }
@@ -288,25 +317,20 @@ fuzz_target!(|operations: Vec<UserDataOperation>| {
     let mut overflow_user_data = Vec::new();
 
     // Allocate operations that will cause overflow
-    for i in 0..10 {
+    for _ in 0..OVERFLOW_PROBE_ALLOCATIONS {
         let user_data = allocator.allocate_user_data(OpKind::Read);
         overflow_user_data.push(user_data);
 
         // Verify that wrapped values don't decode to None unexpectedly
-        let decoded = OpKind::decode(user_data);
-        if decoded.is_none() {
-            panic!(
-                "OVERFLOW DECODE FAILURE: user_data 0x{:016x} (iteration {}) failed to decode after counter overflow",
-                user_data, i
-            );
-        }
+        assert_decode_matches_kind(user_data, OpKind::Read, "overflow boundary allocation");
     }
 
     // Check for collisions in post-overflow user_data
-    let overflow_allocation_count = overflow_user_data.len();
-    overflow_user_data.sort_unstable();
-    overflow_user_data.dedup();
-    let _overflow_collision_count = overflow_allocation_count - overflow_user_data.len();
+    let overflow_collision_count = count_user_data_collisions(&overflow_user_data);
+    assert!(
+        overflow_collision_count <= 1,
+        "overflow probe produced {overflow_collision_count} user_data collisions"
+    );
 
     // Phase 5: Test sequence.max(1) behavior at overflow boundary
     allocator.set_counter(0); // Simulate post-overflow wrap to 0
