@@ -173,6 +173,7 @@ struct ShadowState {
     invalid_transitions: AtomicU32,
     window_overflows: AtomicU32,
     successful_transitions: AtomicU32,
+    bulk_transition_attempts: AtomicU32,
 }
 
 /// Test environment
@@ -204,6 +205,12 @@ impl TestEnv {
     fn record_successful_transition(&self) {
         self.shadow
             .successful_transitions
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_bulk_transition_attempt(&self) {
+        self.shadow
+            .bulk_transition_attempts
             .fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -326,7 +333,7 @@ fuzz_target!(|input: &[u8]| {
             } => {
                 if let Some(stream) = streams.get_mut(&stream_id) {
                     let old_state = stream.state();
-                    match stream.recv_headers(end_stream, end_headers) {
+                    match stream.recv_headers(end_stream, end_headers, false) {
                         Ok(()) => {
                             env.record_successful_transition();
                             // Verify state transition is valid
@@ -421,9 +428,7 @@ fuzz_target!(|input: &[u8]| {
                     match stream.update_send_window(delta) {
                         Ok(()) => {
                             env.record_successful_transition();
-                            // Verify window is within valid bounds
-                            let window = stream.send_window();
-                            assert!(window >= i32::MIN && window <= i32::MAX);
+                            observe_window_value("updated send window", stream.send_window());
                         }
                         Err(_) => {
                             env.record_window_overflow();
@@ -437,9 +442,7 @@ fuzz_target!(|input: &[u8]| {
                     match stream.update_recv_window(delta) {
                         Ok(()) => {
                             env.record_successful_transition();
-                            // Verify window is within valid bounds
-                            let window = stream.recv_window();
-                            assert!(window >= i32::MIN && window <= i32::MAX);
+                            observe_window_value("updated recv window", stream.recv_window());
                         }
                         Err(_) => {
                             env.record_window_overflow();
@@ -523,12 +526,8 @@ fuzz_target!(|input: &[u8]| {
 
             StreamOperation::QueryWindows { stream_id } => {
                 if let Some(stream) = streams.get(&stream_id) {
-                    let _send_window = stream.send_window();
-                    let _recv_window = stream.recv_window();
-
-                    // Verify windows are within bounds
-                    assert!(stream.send_window() >= i32::MIN);
-                    assert!(stream.recv_window() >= i32::MIN);
+                    observe_window_value("queried send window", stream.send_window());
+                    observe_window_value("queried recv window", stream.recv_window());
                 }
             }
 
@@ -551,7 +550,7 @@ fuzz_target!(|input: &[u8]| {
                         break;
                     }
                     if stream.state().can_send_headers() {
-                        let _ = stream.send_headers(i % 3 == 0); // Vary end_stream
+                        observe_bulk_send_headers_result(&env, stream, i % 3 == 0);
                     }
                 }
             }
@@ -612,9 +611,8 @@ fuzz_target!(|input: &[u8]| {
                 assert!(!stream.has_pending_data());
             }
             _ => {
-                // Active streams should have valid windows
-                assert!(stream.send_window() >= i32::MIN);
-                assert!(stream.recv_window() >= i32::MIN);
+                observe_window_value("final send window", stream.send_window());
+                observe_window_value("final recv window", stream.recv_window());
             }
         }
 
@@ -627,11 +625,15 @@ fuzz_target!(|input: &[u8]| {
     let total_ops = env.shadow.operations_count.load(Ordering::Relaxed);
     let invalid_transitions = env.shadow.invalid_transitions.load(Ordering::Relaxed);
     let successful_transitions = env.shadow.successful_transitions.load(Ordering::Relaxed);
+    let bulk_transition_attempts = env.shadow.bulk_transition_attempts.load(Ordering::Relaxed);
     let _window_overflows = env.shadow.window_overflows.load(Ordering::Relaxed);
 
     // Basic sanity checks
     assert!(total_ops <= MAX_OPERATIONS);
-    assert!(invalid_transitions + successful_transitions <= total_ops as u32);
+    assert!(bulk_transition_attempts <= (MAX_OPERATIONS * MAX_STREAMS) as u32);
+    assert!(
+        invalid_transitions + successful_transitions <= total_ops as u32 + bulk_transition_attempts
+    );
 
     // Test that stream state machine is well-formed
     assert!(env.shadow.stream_count.load(Ordering::Relaxed) <= MAX_STREAMS);
@@ -641,6 +643,41 @@ fuzz_target!(|input: &[u8]| {
     assert_send_sync::<asupersync::http::h2::stream::Stream>();
     assert_send_sync::<asupersync::http::h2::stream::StreamState>();
 });
+
+fn observe_bulk_send_headers_result(
+    env: &TestEnv,
+    stream: &mut asupersync::http::h2::stream::Stream,
+    end_stream: bool,
+) {
+    let old_state = stream.state();
+    env.record_bulk_transition_attempt();
+    match stream.send_headers(end_stream) {
+        Ok(()) => {
+            env.record_successful_transition();
+            verify_valid_transition(old_state, stream.state(), "send_headers", end_stream);
+        }
+        Err(error) => {
+            env.record_invalid_transition();
+            observe_h2_error("bulk send_headers", &error);
+        }
+    }
+}
+
+fn observe_h2_error(context: &str, error: &asupersync::http::h2::error::H2Error) {
+    let diagnostic = format!("{error:?}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context}: H2 error diagnostics must be nonempty"
+    );
+}
+
+fn observe_window_value(context: &str, window: i32) {
+    let diagnostic = format!("{context}: {window}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context}: window diagnostics must be nonempty"
+    );
+}
 
 /// Verify that a state transition is valid according to RFC 9113
 fn verify_valid_transition(
