@@ -397,28 +397,30 @@ fn multi_round_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder, head
         }
 
         let mut encoded_bytes = encoded.freeze();
-        if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
-            // Verify round-trip consistency
+        let decoded_headers = decoder.decode(&mut encoded_bytes).unwrap_or_else(|error| {
+            panic!("Round {round}: HPACK decode failed after encoding valid headers: {error:?}")
+        });
+
+        // Verify round-trip consistency
+        assert_eq!(
+            round_headers.len(),
+            decoded_headers.len(),
+            "Round {} header count mismatch",
+            round
+        );
+
+        for (orig, decoded) in round_headers.iter().zip(decoded_headers.iter()) {
             assert_eq!(
-                round_headers.len(),
-                decoded_headers.len(),
-                "Round {} header count mismatch",
+                orig.name.to_lowercase(),
+                decoded.name.to_lowercase(),
+                "Round {} header name mismatch",
                 round
             );
-
-            for (orig, decoded) in round_headers.iter().zip(decoded_headers.iter()) {
-                assert_eq!(
-                    orig.name.to_lowercase(),
-                    decoded.name.to_lowercase(),
-                    "Round {} header name mismatch",
-                    round
-                );
-                assert_eq!(
-                    orig.value, decoded.value,
-                    "Round {} header value mismatch for '{}'",
-                    round, orig.name
-                );
-            }
+            assert_eq!(
+                orig.value, decoded.value,
+                "Round {} header value mismatch for '{}'",
+                round, orig.name
+            );
         }
     }
 }
@@ -450,25 +452,26 @@ fn sensitive_headers_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder
 
     // Decode and verify
     let mut encoded_bytes = encoded.freeze();
-    if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
-        assert_eq!(
-            sensitive_headers.len(),
-            decoded_headers.len(),
-            "Sensitive headers count mismatch"
-        );
+    let decoded_headers = decoder.decode(&mut encoded_bytes).unwrap_or_else(|error| {
+        panic!("HPACK decode failed after encoding sensitive headers: {error:?}")
+    });
+    assert_eq!(
+        sensitive_headers.len(),
+        decoded_headers.len(),
+        "Sensitive headers count mismatch"
+    );
 
-        for (orig, decoded) in sensitive_headers.iter().zip(decoded_headers.iter()) {
-            assert_eq!(
-                orig.name.to_lowercase(),
-                decoded.name.to_lowercase(),
-                "Sensitive header name mismatch"
-            );
-            assert_eq!(
-                orig.value, decoded.value,
-                "Sensitive header value mismatch for '{}'",
-                orig.name
-            );
-        }
+    for (orig, decoded) in sensitive_headers.iter().zip(decoded_headers.iter()) {
+        assert_eq!(
+            orig.name.to_lowercase(),
+            decoded.name.to_lowercase(),
+            "Sensitive header name mismatch"
+        );
+        assert_eq!(
+            orig.value, decoded.value,
+            "Sensitive header value mismatch for '{}'",
+            orig.name
+        );
     }
 }
 
@@ -656,31 +659,33 @@ fn test_large_header_round_trip(
 
     // Decode headers
     let mut encoded_bytes = encoded.freeze();
-    if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
-        // Verify round-trip consistency
-        assert_eq!(
-            headers.len(),
-            decoded_headers.len(),
-            "Large header count mismatch"
-        );
+    let decoded_headers = decoder.decode(&mut encoded_bytes).unwrap_or_else(|error| {
+        panic!("HPACK decode failed after encoding large valid headers: {error:?}")
+    });
 
-        for (orig, decoded) in headers.iter().zip(decoded_headers.iter()) {
-            assert_eq!(
-                orig.name.to_lowercase(),
-                decoded.name.to_lowercase(),
-                "Large header name mismatch: '{}' vs '{}'",
-                orig.name,
-                decoded.name
-            );
-            assert_eq!(
-                orig.value,
-                decoded.value,
-                "Large header value mismatch for '{}': lengths {} vs {}",
-                orig.name,
-                orig.value.len(),
-                decoded.value.len()
-            );
-        }
+    // Verify round-trip consistency
+    assert_eq!(
+        headers.len(),
+        decoded_headers.len(),
+        "Large header count mismatch"
+    );
+
+    for (orig, decoded) in headers.iter().zip(decoded_headers.iter()) {
+        assert_eq!(
+            orig.name.to_lowercase(),
+            decoded.name.to_lowercase(),
+            "Large header name mismatch: '{}' vs '{}'",
+            orig.name,
+            decoded.name
+        );
+        assert_eq!(
+            orig.value,
+            decoded.value,
+            "Large header value mismatch for '{}': lengths {} vs {}",
+            orig.name,
+            orig.value.len(),
+            decoded.value.len()
+        );
     }
 }
 
