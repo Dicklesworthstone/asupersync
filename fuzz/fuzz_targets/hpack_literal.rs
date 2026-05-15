@@ -312,8 +312,19 @@ fn test_huffman_vs_raw_encoding(
     // Encode value
     encode_string_with_huffman_flag(&mut wire_data, &value_content, value_huffman);
 
-    // Test decoding - should handle both Huffman and raw encodings
-    test_hpack_decode_wire_data(&wire_data, ExpectedResult::MayFail);
+    // Raw, syntactically valid literal names and values are constructed as a
+    // complete header field and must decode. Arbitrary Huffman bytes may not
+    // be valid Huffman data, and invalid raw names/values may be rejected.
+    let expected = if !name_huffman
+        && !value_huffman
+        && valid_raw_header_name(&name_content)
+        && valid_raw_header_value(&value_content)
+    {
+        ExpectedResult::MaySucceed
+    } else {
+        ExpectedResult::MayFail
+    };
+    test_hpack_decode_wire_data(&wire_data, expected);
 
     // Test with mixed encoding (name Huffman, value raw and vice versa)
     if name_huffman != value_huffman {
@@ -515,6 +526,39 @@ fn encode_string_with_length(wire_data: &mut Vec<u8>, length: u32, use_huffman: 
 fn encode_raw_string(wire_data: &mut Vec<u8>, content: &[u8]) {
     encode_hpack_integer(wire_data, content.len() as u64, 7, RAW_OCTET_FLAG);
     wire_data.extend_from_slice(content);
+}
+
+fn valid_raw_header_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.iter().enumerate().all(|(i, &byte)| {
+            matches!(
+                byte,
+                b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            ) || (byte == b':' && i == 0)
+        })
+}
+
+fn valid_raw_header_value(value: &[u8]) -> bool {
+    std::str::from_utf8(value).is_ok()
+        && !value
+            .iter()
+            .any(|byte| matches!(*byte, b'\0' | b'\r' | b'\n'))
 }
 
 fn encode_dynamic_table_size_update(dst: &mut Vec<u8>, size: usize) {
