@@ -28,13 +28,13 @@ struct WindowUpdateFuzz {
 #[derive(Arbitrary, Debug)]
 enum WindowUpdateOperation {
     /// Parse WINDOW_UPDATE frame from raw bytes
-    ParseRaw { data: Vec<u8> },
+    Raw { data: Vec<u8> },
     /// Parse WINDOW_UPDATE with specific stream_id and increment
-    ParseStructured { stream_id: u32, increment: u32 },
+    Structured { stream_id: u32, increment: u32 },
     /// Parse multiple WINDOW_UPDATE frames
-    ParseMultiple { frames: Vec<WindowUpdateFrameData> },
+    Multiple { frames: Vec<WindowUpdateFrameData> },
     /// Parse truncated WINDOW_UPDATE frame
-    ParseTruncated {
+    Truncated {
         complete_frame: WindowUpdateFrameData,
         truncate_at: u8,
     },
@@ -238,7 +238,7 @@ fuzz_target!(|input: WindowUpdateFuzz| {
 
 fn test_window_update_operation(operation: WindowUpdateOperation) {
     match operation {
-        WindowUpdateOperation::ParseRaw { mut data } => {
+        WindowUpdateOperation::Raw { mut data } => {
             // Limit size to prevent memory exhaustion
             if data.len() > 1024 {
                 data.truncate(1024);
@@ -272,7 +272,7 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
             }
         }
 
-        WindowUpdateOperation::ParseStructured {
+        WindowUpdateOperation::Structured {
             stream_id,
             increment,
         } => {
@@ -307,7 +307,7 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
             }
         }
 
-        WindowUpdateOperation::ParseMultiple { frames } => {
+        WindowUpdateOperation::Multiple { frames } => {
             let limited_frames: Vec<_> = frames.into_iter().take(MAX_FRAMES).collect();
             let mut combined_data = Vec::new();
 
@@ -363,7 +363,7 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
             }
         }
 
-        WindowUpdateOperation::ParseTruncated {
+        WindowUpdateOperation::Truncated {
             complete_frame,
             truncate_at,
         } => {
@@ -941,7 +941,9 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
             let h2_frame = WindowUpdateFrame::new(clamped_stream_id, clamped_increment);
 
             let mut encoded_buf = BytesMut::new();
-            h2_frame.encode(&mut encoded_buf);
+            h2_frame
+                .encode(&mut encoded_buf)
+                .expect("reserved-bit WINDOW_UPDATE frame should encode");
 
             // Parse the encoded frame and verify reserved bit is clear
             let mut buf = encoded_buf;
@@ -1026,7 +1028,9 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
 fn construct_window_update_frame(stream_id: u32, increment: u32) -> Vec<u8> {
     let frame = WindowUpdateFrame::new(stream_id, increment);
     let mut buf = BytesMut::new();
-    frame.encode(&mut buf);
+    frame
+        .encode(&mut buf)
+        .expect("constructed WINDOW_UPDATE frame should encode");
     buf.to_vec()
 }
 
@@ -1068,37 +1072,57 @@ fn verify_window_update_consistency(stream_id: u32, increment: u32) {
 fn verify_window_update_error_consistency(err: &H2Error, header: &FrameHeader, payload: &Bytes) {
     match err.code {
         ErrorCode::FrameSizeError => {
-            // Should occur for invalid payload length
-            if payload.len() != WINDOW_UPDATE_PAYLOAD_SIZE {
-                assert!(
-                    err.message.contains("4 bytes"),
-                    "Frame size error should mention 4 bytes"
-                );
-            }
+            assert_ne!(
+                payload.len(),
+                WINDOW_UPDATE_PAYLOAD_SIZE,
+                "FrameSizeError is only expected for invalid WINDOW_UPDATE payload length"
+            );
+            assert!(
+                err.message.contains("4 bytes"),
+                "Frame size error should mention 4 bytes"
+            );
         }
         ErrorCode::ProtocolError => {
-            // Check if connection-level zero increment
-            if header.stream_id == 0 && err.is_connection_error() {
+            assert_eq!(
+                payload.len(),
+                WINDOW_UPDATE_PAYLOAD_SIZE,
+                "ProtocolError is only expected for 4-byte WINDOW_UPDATE payloads"
+            );
+            let increment = ((u32::from(payload[0]) & 0x7f) << 24)
+                | (u32::from(payload[1]) << 16)
+                | (u32::from(payload[2]) << 8)
+                | u32::from(payload[3]);
+            assert_eq!(
+                increment, 0,
+                "ProtocolError is only expected for zero WINDOW_UPDATE increments"
+            );
+            assert!(
+                err.message.contains("zero increment"),
+                "Protocol error should mention zero increment"
+            );
+            if header.stream_id == 0 {
                 assert!(
-                    err.message.contains("zero increment"),
-                    "Protocol error should mention zero increment"
+                    err.is_connection_error(),
+                    "Connection-level zero increment must be a connection error"
                 );
-            } else if header.stream_id > 0 && !err.is_connection_error() {
-                // Stream-level zero increment
+            } else {
+                assert!(
+                    !err.is_connection_error(),
+                    "Stream-level zero increment must be a stream error"
+                );
                 assert_eq!(
-                    err.stream_id.unwrap(),
-                    header.stream_id,
+                    err.stream_id,
+                    Some(header.stream_id),
                     "Error stream ID should match header"
-                );
-                assert!(
-                    err.message.contains("zero increment"),
-                    "Stream error should mention zero increment"
                 );
             }
         }
-        _ => {
-            // Other errors might be acceptable depending on input
-        }
+        _ => panic!(
+            "unexpected WINDOW_UPDATE parse error {:?} for header {:?} and payload length {}",
+            err.code,
+            header,
+            payload.len()
+        ),
     }
 }
 
@@ -1107,7 +1131,9 @@ fn test_window_update_reencode(stream_id: u32, increment: u32) {
     let frame = WindowUpdateFrame::new(stream_id, increment);
 
     let mut encoded_buf = BytesMut::new();
-    frame.encode(&mut encoded_buf);
+    frame
+        .encode(&mut encoded_buf)
+        .expect("re-encoded WINDOW_UPDATE frame should encode");
 
     // Re-parse the encoded frame
     let mut buf = encoded_buf;
