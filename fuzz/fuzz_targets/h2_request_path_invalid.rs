@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length per RFC 9113
@@ -13,50 +13,8 @@ const HEADERS_FRAME_TYPE: u8 = 0x1;
 const END_HEADERS_FLAG: u8 = 0x4;
 const END_STREAM_FLAG: u8 = 0x1;
 
-/// HTTP/2 error codes per RFC 9113 §7
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-enum Http2ErrorCode {
-    NoError = 0x0,
-    ProtocolError = 0x1,
-    InternalError = 0x2,
-    FlowControlError = 0x3,
-    SettingsTimeout = 0x4,
-    StreamClosed = 0x5,
-    FrameSizeError = 0x6,
-    RefusedStream = 0x7,
-    Cancel = 0x8,
-    CompressionError = 0x9,
-    ConnectError = 0xa,
-    EnhanceYourCalm = 0xb,
-    InadequateSecurity = 0xc,
-    Http11Required = 0xd,
-}
-
-/// HTTP/2 pseudo-header names per RFC 9113 §8.3
-#[derive(Debug, Clone, PartialEq)]
-enum PseudoHeader {
-    Method,    // :method
-    Path,      // :path
-    Scheme,    // :scheme
-    Authority, // :authority
-    Status,    // :status (response only)
-}
-
-impl PseudoHeader {
-    fn name(&self) -> &'static str {
-        match self {
-            PseudoHeader::Method => ":method",
-            PseudoHeader::Path => ":path",
-            PseudoHeader::Scheme => ":scheme",
-            PseudoHeader::Authority => ":authority",
-            PseudoHeader::Status => ":status",
-        }
-    }
-}
-
 /// HTTP/2 header field per RFC 9113 §6.2
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct HeaderField {
     name: String,
     value: String,
@@ -69,14 +27,6 @@ impl HeaderField {
             name: name.to_string(),
             value: value.to_string(),
             sensitive: false,
-        }
-    }
-
-    fn new_sensitive(name: &str, value: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            value: value.to_string(),
-            sensitive: true,
         }
     }
 
@@ -312,7 +262,6 @@ enum HeadersParseResult {
         end_headers: bool,
     },
     ProtocolError(String),
-    FrameSizeError,
     IncompleteFrame,
     InvalidStreamId,
     CompressionError,
@@ -366,7 +315,7 @@ impl MockH2HeadersParser {
         // Decode HPACK headers
         let headers = match self.hpack_decoder.decode_headers(payload) {
             Ok(h) => h,
-            Err(e) => return HeadersParseResult::CompressionError,
+            Err(_) => return HeadersParseResult::CompressionError,
         };
 
         // Validate pseudo-headers per RFC 9113 §8.3
@@ -516,24 +465,24 @@ enum ValidPath {
     Asterisk,                  // "*" (for OPTIONS)
 }
 
-impl PathVariant {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for PathVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PathVariant::Valid(valid) => match valid {
-                ValidPath::Root => "/".to_string(),
-                ValidPath::Simple(path) => format!("/{}", path),
-                ValidPath::WithQuery(path, query) => format!("/{}?{}", path, query),
-                ValidPath::Asterisk => "*".to_string(),
+                ValidPath::Root => f.write_str("/"),
+                ValidPath::Simple(path) => write!(f, "/{}", path),
+                ValidPath::WithQuery(path, query) => write!(f, "/{}?{}", path, query),
+                ValidPath::Asterisk => f.write_str("*"),
             },
             PathVariant::WithControlChars(base) => {
                 // Inject control characters
-                format!("/{}\x00\x01\x02{}", base, base)
+                write!(f, "/{}\x00\x01\x02{}", base, base)
             }
             PathVariant::WithCrlf(base) => {
                 // Inject CRLF sequences
-                format!("/path\r\n{}\n\rmore", base)
+                write!(f, "/path\r\n{}\n\rmore", base)
             }
-            PathVariant::Custom(path) => path.clone(),
+            PathVariant::Custom(path) => f.write_str(path),
         }
     }
 }
@@ -623,7 +572,7 @@ fuzz_target!(|input: FuzzInput| {
     let result = parser.parse_headers_frame(&frame_bytes);
 
     // Validate behavior based on :path content
-    match result {
+    match &result {
         HeadersParseResult::Valid {
             headers: parsed_headers,
             ..
@@ -671,6 +620,11 @@ fuzz_target!(|input: FuzzInput| {
                 .iter()
                 .find(|h| h.name == ":path")
                 .expect("Parsed headers should contain :path");
+            assert_eq!(
+                path_header.value.as_str(),
+                path_value.as_str(),
+                "Parsed :path value should match encoded input"
+            );
 
             if input.include_forbidden_chars || input.include_crlf {
                 panic!("Forbidden characters should have been rejected");
@@ -715,10 +669,6 @@ fuzz_target!(|input: FuzzInput| {
             }
         }
 
-        HeadersParseResult::FrameSizeError => {
-            // Expected for oversized frames
-        }
-
         HeadersParseResult::IncompleteFrame => {
             // Expected for truncated data
         }
@@ -734,8 +684,8 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // CORE ASSERTION: Forbidden characters in :path must be rejected
-    if (input.include_forbidden_chars || input.include_crlf || input.make_path_empty) {
-        match result {
+    if input.include_forbidden_chars || input.include_crlf || input.make_path_empty {
+        match &result {
             HeadersParseResult::ProtocolError(_) => {
                 // Expected - good!
             }
@@ -749,9 +699,16 @@ fuzz_target!(|input: FuzzInput| {
                     path_value
                 );
             }
-            _ => {
-                // Other errors (frame size, incomplete, compression) are acceptable
-                // as long as it doesn't parse as valid
+            other => {
+                panic!(
+                    "Invalid :path should reject as ProtocolError for a locally encoded HEADERS frame: \
+                     forbidden_chars={}, crlf={}, empty={}, path={:?}, result={:?}",
+                    input.include_forbidden_chars,
+                    input.include_crlf,
+                    input.make_path_empty,
+                    path_value,
+                    other
+                );
             }
         }
     }
@@ -768,7 +725,7 @@ fuzz_target!(|input: FuzzInput| {
     ];
 
     for &attack_pattern in &attack_patterns {
-        let mut attack_headers = vec![
+        let attack_headers = vec![
             HeaderField::new(":method", "GET"),
             HeaderField::new(":path", attack_pattern),
             HeaderField::new(":scheme", "https"),
@@ -798,8 +755,12 @@ fuzz_target!(|input: FuzzInput| {
             HeadersParseResult::ProtocolError(_) => {
                 // Expected - attack pattern correctly rejected
             }
-            _ => {
-                // Other errors are acceptable (frame corruption, etc.)
+            other => {
+                panic!(
+                    "Attack pattern in locally encoded :path should reject as ProtocolError: \
+                     pattern={:?}, result={:?}",
+                    attack_pattern, other
+                );
             }
         }
     }
