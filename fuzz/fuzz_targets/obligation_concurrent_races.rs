@@ -2,8 +2,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::{
-    obligation::ledger::ObligationLedger,
-    record::{ObligationAbortReason, ObligationKind},
+    obligation::ledger::{LedgerError, ObligationLedger, ObligationToken},
+    record::{ObligationAbortReason, ObligationKind, ObligationState},
     types::{ObligationId, RegionId, TaskId, Time},
     util::ArenaIndex,
 };
@@ -136,6 +136,69 @@ impl SharedFuzzState {
 
     fn get_region(&self, index: u8) -> RegionId {
         self.region_pool[index as usize % self.region_pool.len()]
+    }
+}
+
+fn observe_try_commit(
+    ledger: &mut ObligationLedger,
+    token: ObligationToken,
+    time: Time,
+    context: &str,
+) {
+    match ledger.try_commit(token, time) {
+        Ok(_duration) => {}
+        Err(error) => panic!("{context}: try_commit failed unexpectedly: {error:?}"),
+    }
+}
+
+fn observe_try_abort(
+    ledger: &mut ObligationLedger,
+    token: ObligationToken,
+    time: Time,
+    reason: ObligationAbortReason,
+    context: &str,
+) {
+    match ledger.try_abort(token, time, reason) {
+        Ok(_duration) => {}
+        Err(error) => panic!("{context}: try_abort failed unexpectedly: {error:?}"),
+    }
+}
+
+fn observe_try_abort_by_id(
+    ledger: &mut ObligationLedger,
+    id: ObligationId,
+    time: Time,
+    reason: ObligationAbortReason,
+    context: &str,
+) {
+    match ledger.try_abort_by_id(id, time, reason) {
+        Ok(_duration) => {}
+        Err(LedgerError::AlreadyResolved { obligation, state }) => {
+            assert_eq!(
+                obligation, id,
+                "{context}: already-resolved error reported a different obligation"
+            );
+            assert!(
+                !matches!(state, ObligationState::Reserved),
+                "{context}: already-resolved error carried a reserved state"
+            );
+        }
+        Err(LedgerError::NotFound { obligation }) => {
+            assert_eq!(
+                obligation, id,
+                "{context}: not-found error reported a different obligation"
+            );
+        }
+        Err(LedgerError::RegionFinalized { region, obligation }) => {
+            assert_eq!(
+                obligation, id,
+                "{context}: finalized-region error reported a different obligation"
+            );
+            assert!(
+                ledger.is_region_finalized(region),
+                "{context}: finalized-region error named a non-finalized region"
+            );
+        }
     }
 }
 
@@ -309,7 +372,7 @@ fn execute_operation(shared_state: &SharedFuzzState, operation: &Operation) {
                     token_snapshot.region,
                     time,
                 ) {
-                    let _ = ledger.try_commit(token, time);
+                    observe_try_commit(&mut ledger, token, time, "operation commit");
                 }
             }
         }
@@ -333,7 +396,7 @@ fn execute_operation(shared_state: &SharedFuzzState, operation: &Operation) {
                     token_snapshot.region,
                     time,
                 ) {
-                    let _ = ledger.try_abort(token, time, reason);
+                    observe_try_abort(&mut ledger, token, time, reason, "operation abort");
                 }
             }
         }
@@ -354,7 +417,7 @@ fn execute_operation(shared_state: &SharedFuzzState, operation: &Operation) {
                 // Use the race-tolerant surface so malformed input that
                 // repeats an already-resolved ID does not become a trivial
                 // fuzzer crash; an internal panic still escapes.
-                let _ = ledger.try_abort_by_id(id, time, reason);
+                observe_try_abort_by_id(&mut ledger, id, time, reason, "operation abort by id");
             }
         }
 
@@ -413,7 +476,7 @@ fn setup_wraparound_test(ledger: &mut ObligationLedger, _start_index: u32) {
     // Try to acquire enough obligations to approach wraparound
     for _ in 0..100 {
         if let Ok(token) = ledger.try_acquire(ObligationKind::SendPermit, task, region, time) {
-            let _ = ledger.try_commit(token, time);
+            observe_try_commit(ledger, token, time, "wraparound setup commit");
         } else {
             break;
         }
