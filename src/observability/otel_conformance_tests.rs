@@ -53005,20 +53005,20 @@ mod otlp_122_tests {
                     // Missing messaging.kinesis.stream_name - should be invalid
                 ],
                 should_be_valid: false,
-                expected_stream_name: "".to_string(),
+                expected_stream_name: String::new(),
             },
             KinesisProducerScenario {
                 description: "kinesis_producer_empty_stream_name".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "kinesis".to_string(),
                 span_attributes: vec![
-                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue("".to_string())), // Empty stream name
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue(String::new())), // Empty stream name
                     ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
                     ("messaging.destination.name".to_string(), AnyValue::StringValue("test-stream".to_string())),
                     ("messaging.operation".to_string(), AnyValue::StringValue("put_record".to_string())),
                 ],
                 should_be_valid: false,
-                expected_stream_name: "".to_string(),
+                expected_stream_name: String::new(),
             },
             KinesisProducerScenario {
                 description: "kinesis_producer_wrong_attribute_type".to_string(),
@@ -53031,7 +53031,7 @@ mod otlp_122_tests {
                     ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
                 ],
                 should_be_valid: false,
-                expected_stream_name: "".to_string(),
+                expected_stream_name: String::new(),
             },
             KinesisProducerScenario {
                 description: "kinesis_consumer_span_exempt".to_string(),
@@ -53044,7 +53044,7 @@ mod otlp_122_tests {
                     // Consumer spans are exempt from producer stream name requirement
                 ],
                 should_be_valid: true, // Consumer spans don't need producer stream name
-                expected_stream_name: "".to_string(),
+                expected_stream_name: String::new(),
             },
             KinesisProducerScenario {
                 description: "non_kinesis_messaging_system_exempt".to_string(),
@@ -53057,7 +53057,7 @@ mod otlp_122_tests {
                     // Non-Kinesis systems exempt from stream name requirement
                 ],
                 should_be_valid: true,
-                expected_stream_name: "".to_string(),
+                expected_stream_name: String::new(),
             },
             KinesisProducerScenario {
                 description: "case_sensitive_messaging_system_check".to_string(),
@@ -53070,7 +53070,7 @@ mod otlp_122_tests {
                     // Case-sensitive check - "KINESIS" != "kinesis"
                 ],
                 should_be_valid: true, // Not exact "kinesis" so exempt
-                expected_stream_name: "".to_string(),
+                expected_stream_name: String::new(),
             },
             KinesisProducerScenario {
                 description: "kinesis_producer_with_enhanced_fan_out".to_string(),
