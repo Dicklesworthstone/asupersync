@@ -657,14 +657,30 @@ fuzz_target!(|input: MaxFrameSizeDecreaseInput| {
                     };
 
                     let result = connection.process_frame(&boundary_frame);
-                    if let FrameResult::Accepted { .. } = result {
-                        // Expected
-                    } else if let FrameResult::ConnectionProtocolError(_) = result {
-                        // Also acceptable if connection errored
-                    } else {
-                        panic!(
-                            "Frame at minimum size 16384 should be accepted if connection is active"
-                        );
+                    match result {
+                        FrameResult::Accepted {
+                            ref frame_type,
+                            size,
+                            limit_used,
+                        } => {
+                            assert_eq!(
+                                frame_type, "DATA",
+                                "minimum-boundary frame should stay a DATA frame"
+                            );
+                            assert_eq!(
+                                size, 16384,
+                                "minimum-boundary frame should preserve its exact size"
+                            );
+                            assert_eq!(
+                                limit_used, status.current_max_frame_size,
+                                "minimum-boundary frame should use the active limit"
+                            );
+                        }
+                        other => {
+                            panic!(
+                                "Frame at minimum size 16384 should be accepted if connection is active, got {other:?}"
+                            );
+                        }
                     }
                 }
             }
