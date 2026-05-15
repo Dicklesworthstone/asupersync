@@ -28,7 +28,9 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::messaging::nats::{fuzz_parse_nats_hmsg_frame, fuzz_parse_nats_server_info};
+use asupersync::messaging::nats::{
+    NatsError, fuzz_parse_nats_hmsg_frame, fuzz_parse_nats_server_info,
+};
 
 const MAX_INPUT: usize = 64 * 1024;
 
@@ -47,7 +49,10 @@ fn assert_fixed_oracles() {
     assert!(info.headers);
     assert_eq!(info.nonce.as_deref(), Some("abc"));
 
-    assert!(fuzz_parse_nats_server_info("[]").is_err());
+    assert_nats_protocol_error(
+        fuzz_parse_nats_server_info("[]"),
+        "malformed INFO JSON from server: expected object",
+    );
     assert!(fuzz_parse_nats_server_info(r#"{"server_id":"truncated\u12"}"#).is_err());
 
     let headers = b"NATS/1.0\r\nStatus: 503\r\nDescription: No Responders\r\n\r\n";
@@ -79,10 +84,17 @@ fn assert_fixed_oracles() {
             .expect("incomplete HMSG should wait for more bytes")
             .is_none()
     );
-    assert!(
-        fuzz_parse_nats_hmsg_frame(b"HMSG s 1 8 4\r\nNATS/1.0\r\n\r\n\r\n", MAX_INPUT).is_err()
+    assert_nats_protocol_error(
+        fuzz_parse_nats_hmsg_frame(b"HMSG s 1 8 4\r\nNATS/1.0\r\n\r\n\r\n", MAX_INPUT),
+        "invalid HMSG lengths: header_len=8, total_len=4",
     );
-    assert!(fuzz_parse_nats_hmsg_frame(&frame, 1).is_err());
+    assert_nats_protocol_error(
+        fuzz_parse_nats_hmsg_frame(&frame, 1),
+        &format!(
+            "HMSG total length {} exceeds maximum (1 bytes)",
+            headers.len() + payload.len()
+        ),
+    );
 }
 
 fn build_hmsg_frame(
@@ -114,6 +126,19 @@ fn assert_visible_parse_error(error: &impl std::fmt::Display, context: &str) {
         !error.to_string().is_empty(),
         "{context} parser errors should remain observable"
     );
+}
+
+fn assert_nats_protocol_error<T>(result: Result<T, NatsError>, expected: &str) {
+    let Err(err) = result else {
+        panic!("parser accepted input that should fail with: {expected}");
+    };
+    let display = err.to_string();
+
+    let NatsError::Protocol(message) = err else {
+        panic!("expected NATS protocol error, got {err:?}");
+    };
+    assert_eq!(message, expected);
+    assert_eq!(display, format!("NATS protocol error: {expected}"));
 }
 
 fn observe_info_json(json: &str) {
