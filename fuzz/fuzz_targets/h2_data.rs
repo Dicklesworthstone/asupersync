@@ -693,8 +693,11 @@ fn test_single_edge_case(
                             "Empty payload should result in empty data"
                         );
                     }
-                    Err(_) => {
-                        return Err("Valid empty payload should not be rejected".to_string());
+                    Err(error) => {
+                        observe_h2_error("empty DATA parse", &error, Some(1));
+                        return Err(format!(
+                            "Valid empty payload should not be rejected: {error}"
+                        ));
                     }
                 }
             }
@@ -727,8 +730,11 @@ fn test_single_edge_case(
                         "Data should contain only the non-padded portion"
                     );
                 }
-                Err(_) => {
-                    return Err("Valid maximum padding should not be rejected".to_string());
+                Err(error) => {
+                    observe_h2_error("maximum DATA padding parse", &error, Some(1));
+                    return Err(format!(
+                        "Valid maximum padding should not be rejected: {error}"
+                    ));
                 }
             }
         }
@@ -763,8 +769,13 @@ fn test_oversized_data_frames(_connection: &mut Connection) -> Result<(), String
                 "Large frame should preserve payload size"
             );
         }
-        Err(_) => {
-            // Some other validation failed
+        Err(error) => {
+            observe_h2_error("oversized DATA parse", &error, Some(1));
+            assert_eq!(
+                error.code,
+                ErrorCode::FrameSizeError,
+                "oversized DATA parse rejection should be a frame-size error"
+            );
         }
     }
 
@@ -774,7 +785,6 @@ fn test_oversized_data_frames(_connection: &mut Connection) -> Result<(), String
 /// Test flow control invariants.
 fn test_flow_control_invariants(connection: &mut Connection) -> Result<(), String> {
     // Test that multiple DATA frames decrement window correctly
-    let initial_window = connection.recv_window();
     let payload = vec![0x42u8; 1000];
 
     // Create a stream first
@@ -785,24 +795,16 @@ fn test_flow_control_invariants(connection: &mut Connection) -> Result<(), Strin
     // Send DATA frame
     let data_frame = Frame::Data(DataFrame::new(1, Bytes::copy_from_slice(&payload), false));
 
-    match connection.process_frame(data_frame) {
-        Ok(_) => {
-            let final_window = connection.recv_window();
-            // Invariant 5: Flow-control credit consumed atomically
-            assert!(
-                final_window <= initial_window,
-                "Flow control window should decrease"
-            );
-            let decrease = initial_window - final_window;
-            assert!(
-                decrease >= payload.len() as i32,
-                "Window decrease should be at least payload size"
-            );
-        }
-        Err(_) => {
-            // Frame might be rejected for other reasons (e.g., closed stream)
-        }
-    }
+    let window_before = connection.recv_window();
+    let data_result = connection.process_frame(data_frame);
+    observe_data_process_result(
+        connection,
+        1,
+        false,
+        payload.len(),
+        window_before,
+        data_result,
+    );
 
     Ok(())
 }
@@ -830,22 +832,16 @@ fn test_stream_state_transitions(connection: &mut Connection) -> Result<(), Stri
         true,
     ));
 
-    match connection.process_frame(data_frame) {
-        Ok(_) => {
-            // Invariant 2: END_STREAM on stream in OPEN moves to HALF_CLOSED
-            if let Some(stream) = connection.stream(stream_id) {
-                let state = stream.state();
-                assert!(
-                    matches!(state, StreamState::HalfClosedRemote | StreamState::Closed),
-                    "END_STREAM should transition to half-closed or closed, got {:?}",
-                    state
-                );
-            }
-        }
-        Err(_) => {
-            // Frame processing failed for some reason
-        }
-    }
+    let window_before = connection.recv_window();
+    let data_result = connection.process_frame(data_frame);
+    observe_data_process_result(
+        connection,
+        stream_id,
+        true,
+        b"hello".len(),
+        window_before,
+        data_result,
+    );
 
     Ok(())
 }
