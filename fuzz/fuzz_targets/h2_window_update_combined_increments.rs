@@ -305,7 +305,7 @@ fn assert_live_combined_window_updates() {
         .expect_err("connection WINDOW_UPDATE above the maximum should fail");
     assert_eq!(err.code, ErrorCode::FlowControlError);
     assert_eq!(err.stream_id, None);
-    assert!(err.message.contains("connection window overflow"));
+    assert_eq!(err.message.as_str(), "connection window overflow");
 
     let mut stream_connection = open_live_connection();
     stream_connection
@@ -339,7 +339,7 @@ fn assert_live_combined_window_updates() {
         .expect_err("stream WINDOW_UPDATE above the maximum should fail");
     assert_eq!(err.code, ErrorCode::FlowControlError);
     assert_eq!(err.stream_id, Some(1));
-    assert!(err.message.contains("window size overflow"));
+    assert_eq!(err.message.as_str(), "window size overflow");
 }
 
 #[cfg(test)]
