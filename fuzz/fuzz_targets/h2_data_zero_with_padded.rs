@@ -91,10 +91,8 @@ impl LiveH2DataParser {
     }
 }
 
-fn is_zero_length_padded_protocol_error(msg: &str) -> bool {
-    msg.contains("PADDED DATA frame with no padding length")
-        || msg.contains("PADDED flag set but payload length is 0")
-        || msg.contains("no room for Pad Length field")
+fn is_exact_zero_length_padded_protocol_error(msg: &str) -> bool {
+    msg == "PADDED DATA frame with no padding length"
 }
 
 #[derive(Arbitrary, Debug)]
@@ -251,7 +249,7 @@ fuzz_target!(|input: FuzzInput| {
             if input.set_padded_flag && payload_length == 0 {
                 // This is the EXACT case we're testing - should always be a protocol error
                 assert!(
-                    is_zero_length_padded_protocol_error(msg),
+                    is_exact_zero_length_padded_protocol_error(msg),
                     "Expected specific protocol error for zero-length PADDED frame, got: {}",
                     msg
                 );
@@ -286,7 +284,7 @@ fuzz_target!(|input: FuzzInput| {
             DataFrameResult::ProtocolError(msg) => {
                 // Expected - verify it's the right kind of protocol error
                 assert!(
-                    is_zero_length_padded_protocol_error(msg),
+                    is_exact_zero_length_padded_protocol_error(msg),
                     "Wrong protocol error message for zero-length PADDED: {}",
                     msg
                 );
