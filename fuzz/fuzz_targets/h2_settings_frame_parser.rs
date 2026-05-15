@@ -336,10 +336,10 @@ fn verify_settings_invariants(
                     return Err("INITIAL_WINDOW_SIZE exceeds maximum".into());
                 }
             }
-            Setting::MaxFrameSize(value) => {
-                if *value < MIN_MAX_FRAME_SIZE || *value > MAX_FRAME_SIZE {
-                    return Err("MAX_FRAME_SIZE out of bounds".into());
-                }
+            Setting::MaxFrameSize(value)
+                if *value < MIN_MAX_FRAME_SIZE || *value > MAX_FRAME_SIZE =>
+            {
+                return Err("MAX_FRAME_SIZE out of bounds".into());
             }
             _ => {
                 // Other parameters have no specific constraints in parsing
@@ -395,7 +395,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(scenario) = SettingsFrameScenario::arbitrary(&mut u) {
         match std::panic::catch_unwind(|| execute_settings_scenario(scenario)) {
             Ok(Ok(())) => assert_visible_debug("SETTINGS scenario outcome", &"ok"),
-            Ok(Err(err)) => assert_visible_debug("SETTINGS scenario error", &err),
+            Ok(Err(err)) => panic!("SETTINGS scenario assertion failed: {err}"),
             Err(_) => panic!("SETTINGS scenario execution panicked"),
         }
     }
