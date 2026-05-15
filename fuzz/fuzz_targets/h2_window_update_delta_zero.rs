@@ -17,7 +17,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::http::h2::{
-    Connection, ErrorCode, Frame, Settings,
+    Connection, ErrorCode, Frame, H2Error, Settings,
     frame::{SettingsFrame, WindowUpdateFrame as LiveWindowUpdateFrame},
 };
 use libfuzzer_sys::fuzz_target;
@@ -353,22 +353,39 @@ fn open_live_connection() -> Connection {
     connection
 }
 
+fn assert_live_h2_error(
+    error: &H2Error,
+    expected_code: ErrorCode,
+    expected_stream_id: Option<u32>,
+    expected_message: &str,
+) {
+    assert_eq!(error.code, expected_code);
+    assert_eq!(error.stream_id, expected_stream_id);
+    assert_eq!(error.message.as_str(), expected_message);
+}
+
 fn assert_live_window_update_delta_zero() {
     let mut connection = open_live_connection();
 
     let err = connection
         .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(0, 0)))
         .expect_err("connection-level zero WINDOW_UPDATE should fail");
-    assert_eq!(err.code, ErrorCode::ProtocolError);
-    assert_eq!(err.stream_id, None);
-    assert!(err.message.contains("WINDOW_UPDATE with zero increment"));
+    assert_live_h2_error(
+        &err,
+        ErrorCode::ProtocolError,
+        None,
+        "WINDOW_UPDATE with zero increment",
+    );
 
     let err = connection
         .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(1, 0)))
         .expect_err("stream-level zero WINDOW_UPDATE should fail");
-    assert_eq!(err.code, ErrorCode::ProtocolError);
-    assert_eq!(err.stream_id, Some(1));
-    assert!(err.message.contains("WINDOW_UPDATE with zero increment"));
+    assert_live_h2_error(
+        &err,
+        ErrorCode::ProtocolError,
+        Some(1),
+        "WINDOW_UPDATE with zero increment",
+    );
 
     connection
         .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(0, 1)))
@@ -380,9 +397,12 @@ fn assert_live_window_update_delta_zero() {
             i32::MAX as u32,
         )))
         .expect_err("connection-level WINDOW_UPDATE overflow should fail");
-    assert_eq!(err.code, ErrorCode::FlowControlError);
-    assert_eq!(err.stream_id, None);
-    assert!(err.message.contains("connection window overflow"));
+    assert_live_h2_error(
+        &err,
+        ErrorCode::FlowControlError,
+        None,
+        "connection window overflow",
+    );
 
     let err = connection
         .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(
@@ -390,9 +410,12 @@ fn assert_live_window_update_delta_zero() {
             (i32::MAX as u32) + 1,
         )))
         .expect_err("oversized WINDOW_UPDATE should fail");
-    assert_eq!(err.code, ErrorCode::FlowControlError);
-    assert_eq!(err.stream_id, None);
-    assert!(err.message.contains("window increment too large"));
+    assert_live_h2_error(
+        &err,
+        ErrorCode::FlowControlError,
+        None,
+        "window increment too large",
+    );
 }
 
 #[cfg(test)]
