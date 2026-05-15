@@ -16,6 +16,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use asupersync::bytes::BytesMut;
+use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{FRAME_HEADER_SIZE, FrameHeader};
 use libfuzzer_sys::fuzz_target;
 
@@ -53,13 +54,20 @@ fuzz_target!(|data: &[u8]| {
                 "FrameHeader::parse error diagnostics must be non-empty"
             );
             if data.len() < FRAME_HEADER_SIZE {
+                assert_eq!(
+                    error.code,
+                    ErrorCode::ProtocolError,
+                    "short frame-header input should be a protocol error"
+                );
                 assert!(
-                    diagnostic.contains("Incomplete")
-                        || diagnostic.contains("incomplete")
-                        || diagnostic.contains("Insufficient")
-                        || diagnostic.contains("insufficient")
-                        || diagnostic.contains("header"),
-                    "short frame-header input should expose a short-read diagnostic: {diagnostic}"
+                    error.is_connection_error(),
+                    "short frame-header input should be a connection-level error"
+                );
+                assert_eq!(error.stream_id, None);
+                assert_eq!(error.message, "insufficient bytes for frame header");
+                assert_eq!(
+                    diagnostic,
+                    "HTTP/2 connection error (PROTOCOL_ERROR): insufficient bytes for frame header"
                 );
             }
         }
