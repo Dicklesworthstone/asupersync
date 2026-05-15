@@ -14,6 +14,10 @@ const MISSING_STREAM_ID: u32 = 9;
 const MAX_INBOUND_OPS: usize = 24;
 const MAX_OUTBOUND_OPS: usize = 24;
 
+fn validated_increment_delta(increment: u32) -> i32 {
+    i32::try_from(increment).expect("validated WINDOW_UPDATE increment must fit i32")
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 struct H2ConnectionWindowUpdateFuzzInput {
     inbound_ops: Vec<InboundWindowUpdate>,
@@ -175,7 +179,10 @@ fn apply_inbound_update(connection: &mut Connection, op: &InboundWindowUpdate) {
 
             let received = result.expect("valid connection update should succeed");
             assert!(received.is_none());
-            assert_eq!(connection.send_window(), before + op.increment as i32);
+            assert_eq!(
+                connection.send_window(),
+                before + validated_increment_delta(op.increment)
+            );
         }
         InboundTarget::ActiveStream => {
             let before = connection
@@ -237,7 +244,7 @@ fn apply_inbound_update(connection: &mut Connection, op: &InboundWindowUpdate) {
                     .stream(ACTIVE_STREAM_ID)
                     .expect("active stream must still exist")
                     .send_window(),
-                before + op.increment as i32
+                before + validated_increment_delta(op.increment)
             );
         }
         InboundTarget::IdleStream => {
@@ -299,7 +306,10 @@ fn apply_outbound_update(
             }
 
             result.expect("valid outbound connection increment should succeed");
-            assert_eq!(connection.recv_window(), before + op.increment as i32);
+            assert_eq!(
+                connection.recv_window(),
+                before + validated_increment_delta(op.increment)
+            );
             expected_frames.push((0, op.increment));
         }
         OutboundTarget::ActiveStream => {
@@ -357,7 +367,7 @@ fn apply_outbound_update(
                     .stream(ACTIVE_STREAM_ID)
                     .expect("active stream must still exist")
                     .recv_window(),
-                before + op.increment as i32
+                before + validated_increment_delta(op.increment)
             );
             expected_frames.push((ACTIVE_STREAM_ID, op.increment));
         }
