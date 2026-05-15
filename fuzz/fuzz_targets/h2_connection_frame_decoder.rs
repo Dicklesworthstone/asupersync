@@ -21,6 +21,10 @@ use libfuzzer_sys::fuzz_target;
 
 const MAX_FRAME_SEQUENCE_LEN: usize = 50;
 const MAX_PAYLOAD_SIZE: usize = 8192;
+const PENDING_OP_FLOOD_LIMIT: usize = 10_000;
+const MAX_FLOOD_FRAMES: usize = PENDING_OP_FLOOD_LIMIT + 5;
+const MIN_FLOW_CONTROL_WINDOW: i64 = -(1_i64 << 31);
+const MAX_FLOW_CONTROL_WINDOW: i64 = (1_i64 << 31) - 1;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum ConnectionType {
@@ -39,7 +43,7 @@ enum TestScenario {
     FloodAttack {
         conn_type: ConnectionType,
         flood_frame_type: FloodFrameType,
-        count: u8,
+        count: u16,
     },
     /// Test window management edge cases
     WindowStress {
@@ -59,7 +63,7 @@ struct RawFrame {
     payload: Vec<u8>,
 }
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum FloodFrameType {
     Ping,
     Settings,
@@ -158,9 +162,14 @@ fn fuzz_raw_frame_sequence(conn_type: ConnectionType, frames: Vec<RawFrame>) {
     }
 }
 
-fn fuzz_flood_attack(conn_type: ConnectionType, flood_frame_type: FloodFrameType, count: u8) {
+fn fuzz_flood_attack(conn_type: ConnectionType, flood_frame_type: FloodFrameType, count: u16) {
     let mut connection = create_connection(conn_type);
-    let flood_count = (count as usize + 1).min(15_000); // Test up to flood protection limits
+    let flood_count = (usize::from(count) + 1).min(MAX_FLOOD_FRAMES);
+    let expects_pending_op_flood = matches!(
+        flood_frame_type,
+        FloodFrameType::Ping | FloodFrameType::Settings
+    ) && flood_count > PENDING_OP_FLOOD_LIMIT + 1;
+    let mut observed_pending_op_flood = false;
 
     // Create flood frame based on type
     let create_flood_frame = |i: usize| -> Option<Frame> {
@@ -210,15 +219,30 @@ fn fuzz_flood_attack(conn_type: ConnectionType, flood_frame_type: FloodFrameType
                 Err(h2_error) => {
                     // Check if flood protection kicked in
                     if h2_error.code == ErrorCode::EnhanceYourCalm {
+                        observed_pending_op_flood = true;
                         // Expected flood protection - test passed
                         break;
                     }
-                    // Other errors are also acceptable - just stop flooding
+                    assert!(
+                        !(matches!(
+                            flood_frame_type,
+                            FloodFrameType::Ping | FloodFrameType::Settings
+                        ) && i > PENDING_OP_FLOOD_LIMIT),
+                        "{flood_frame_type:?} flood past pending-op limit must fail with \
+                         ENHANCE_YOUR_CALM, got {:?}: {} at iteration {i}",
+                        h2_error.code,
+                        h2_error.message
+                    );
                     break;
                 }
             }
         }
     }
+
+    assert!(
+        !expects_pending_op_flood || observed_pending_op_flood,
+        "{flood_frame_type:?} flood with {flood_count} frames must reach ENHANCE_YOUR_CALM"
+    );
 }
 
 fn fuzz_window_stress(conn_type: ConnectionType, window_ops: Vec<WindowOperation>) {
@@ -244,14 +268,16 @@ fn fuzz_window_stress(conn_type: ConnectionType, window_ops: Vec<WindowOperation
             match result {
                 Ok(_) => {
                     // Validate connection window integrity
-                    let send_window = connection.send_window();
-                    let recv_window = connection.recv_window();
+                    let send_window = i64::from(connection.send_window());
+                    let recv_window = i64::from(connection.recv_window());
 
                     // Windows should be bounded and not overflow
-                    assert!(send_window >= -(1 << 31)); // Lower bound
-                    assert!(recv_window >= -(1 << 31)); // Lower bound
-                    assert!(send_window <= (1 << 31) - 1); // Upper bound
-                    assert!(recv_window <= (1 << 31) - 1); // Upper bound
+                    assert!(
+                        (MIN_FLOW_CONTROL_WINDOW..=MAX_FLOW_CONTROL_WINDOW).contains(&send_window)
+                    );
+                    assert!(
+                        (MIN_FLOW_CONTROL_WINDOW..=MAX_FLOW_CONTROL_WINDOW).contains(&recv_window)
+                    );
                 }
                 Err(_) => {
                     // Window update errors are acceptable (e.g., overflow, invalid stream)
