@@ -169,15 +169,7 @@ fn test_resource_exhaustion_protection(input: &FrameSplitterInput) {
 
         match decode_single_frame(&mut codec, malicious_frame) {
             Err(e) => {
-                // Should reject excessive lengths appropriately
-                let error_msg = format!("{e}");
-                assert!(
-                    error_msg.contains("frame length")
-                        || error_msg.contains("max")
-                        || error_msg.contains("overflow")
-                        || error_msg.contains("invalid"),
-                    "Should reject length overflow with descriptive error"
-                );
+                assert_length_delimited_rejection(&e);
             }
             Ok(Some(frame)) => {
                 // If successful, length must have been within configured limits
@@ -192,6 +184,31 @@ fn test_resource_exhaustion_protection(input: &FrameSplitterInput) {
             }
         }
     }
+}
+
+fn assert_length_delimited_rejection(error: &std::io::Error) {
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::InvalidData,
+        "LengthDelimitedCodec should reject adversarial frame lengths as InvalidData"
+    );
+
+    let message = error.to_string();
+    assert!(
+        matches!(
+            message.as_str(),
+            "length exceeds i64"
+                | "length adjustment exceeds i64"
+                | "length overflow"
+                | "negative frame length"
+                | "length exceeds usize"
+                | "frame length exceeds max_frame_length"
+                | "frame length overflow"
+                | "num_skip exceeds total frame length"
+                | "header length (offset + length_field_length) overflows usize"
+        ),
+        "unexpected LengthDelimitedCodec rejection: {message}"
+    );
 }
 
 /// Property 4: State machine handles fragmentation correctly
