@@ -246,7 +246,12 @@ fn test_window_update_sequence(sequence: &H2WindowUpdateSequence) {
 
     // Complete the public connection handshake path before exercising data and
     // WINDOW_UPDATE frames. This keeps the harness on the live state machine.
-    let _ = connection.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
+    let handshake_result =
+        connection.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
+    assert!(
+        handshake_result.is_ok(),
+        "empty SETTINGS handshake should be accepted: {handshake_result:?}"
+    );
 
     // Track opened streams for validation
     let mut opened_streams = std::collections::HashSet::new();
@@ -458,7 +463,12 @@ fn process_operation(
 
         H2Operation::InspectWindows => {
             // Just check that we can query connection state without panicking
-            let _ = connection.has_pending_frames();
+            let has_pending = connection.has_pending_frames();
+            assert_eq!(
+                connection.has_pending_frames(),
+                has_pending,
+                "pending-frame query should be stable"
+            );
             Ok(())
         }
     }
