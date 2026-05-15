@@ -31,9 +31,9 @@
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
-use asupersync::http::h2::H2Error;
 use asupersync::http::h2::connection::FrameCodec;
 use asupersync::http::h2::frame::{Frame, FrameHeader};
+use asupersync::http::h2::{ErrorCode, H2Error};
 use libfuzzer_sys::fuzz_target;
 use std::sync::OnceLock;
 
@@ -337,6 +337,17 @@ fn assert_fixed_decode_canaries() {
         "complete extension frames should be consumed and ignored"
     );
 
+    assert_complete_frame_decode_error(
+        frame_bytes(1, 0x04, 0x01, 0, b"\0"),
+        ErrorCode::FrameSizeError,
+        "SETTINGS ACK with non-zero length",
+    );
+    assert_complete_frame_decode_error(
+        frame_bytes(7, 0x06, 0, 0, b"1234567"),
+        ErrorCode::FrameSizeError,
+        "PING frame must be 8 bytes",
+    );
+
     let mut oversized = frame_bytes(17, 0, 0, 1, &[]);
     let mut codec = FrameCodec::new();
     codec.set_max_frame_size(16);
@@ -344,6 +355,26 @@ fn assert_fixed_decode_canaries() {
     assert!(
         oversized.is_empty(),
         "oversized-frame rejection should consume the parsed header"
+    );
+}
+
+fn assert_complete_frame_decode_error(
+    mut bytes: BytesMut,
+    expected_code: ErrorCode,
+    expected_message: &str,
+) {
+    let mut codec = FrameCodec::new();
+    let error = observe_decode(&mut codec, &mut bytes)
+        .expect_err("complete malformed H2 frame should fail at decode boundary");
+    assert_eq!(error.code, expected_code);
+    assert_eq!(error.message.as_str(), expected_message);
+    assert!(
+        error.stream_id.is_none(),
+        "codec boundary canary should be a connection error: {error:?}"
+    );
+    assert!(
+        bytes.is_empty(),
+        "complete malformed H2 frame should be consumed before parser error"
     );
 }
 
