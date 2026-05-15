@@ -59,6 +59,7 @@ use libfuzzer_sys::fuzz_target;
 
 /// Maximum frame payload size for practical testing (16KB)
 const MAX_FRAME_PAYLOAD_SIZE: usize = 16_384;
+const STREAM_ID_MASK: u32 = 0x7fff_ffff;
 
 /// HEADERS frame fuzz input configuration
 #[derive(Arbitrary, Debug, Clone)]
@@ -133,13 +134,19 @@ enum TestScenario {
 fn normalize_input(input: &mut HeadersFrameFuzz) {
     // Limit header block size
     input.header_block.truncate(MAX_FRAME_PAYLOAD_SIZE);
+    input.stream_id = wire_stream_id(input.stream_id);
 
     // Normalize priority dependency to avoid self-dependency
-    if let Some(ref mut priority) = input.priority_info
-        && priority.dependency == input.stream_id
-    {
-        priority.dependency = input.stream_id.wrapping_add(2);
+    if let Some(ref mut priority) = input.priority_info {
+        priority.dependency = wire_stream_id(priority.dependency);
+        if priority.dependency == input.stream_id {
+            priority.dependency = wire_stream_id(input.stream_id.wrapping_add(1));
+        }
     }
+}
+
+fn wire_stream_id(stream_id: u32) -> u32 {
+    stream_id & STREAM_ID_MASK
 }
 
 /// Build a HEADERS frame from fuzz configuration
@@ -215,7 +222,7 @@ fn build_headers_frame(input: &HeadersFrameFuzz) -> Result<Bytes, String> {
     frame_data.put_u8((payload_len & 0xff) as u8);
     frame_data.put_u8(FrameType::Headers as u8);
     frame_data.put_u8(flags);
-    frame_data.put_u32(input.stream_id);
+    frame_data.put_u32(wire_stream_id(input.stream_id));
 
     // Add payload
     frame_data.extend_from_slice(&payload);
@@ -311,7 +318,8 @@ fuzz_target!(|input: HeadersFrameFuzz| {
 
                                 // Dependency should not be self-referencing
                                 assert_ne!(
-                                    priority.dependency, input.stream_id,
+                                    priority.dependency,
+                                    wire_stream_id(input.stream_id),
                                     "PRIORITY dependency cannot reference itself"
                                 );
                             }
@@ -388,7 +396,7 @@ fuzz_target!(|input: HeadersFrameFuzz| {
 
         TestScenario::StreamIdValidation => {
             // Assertion 4: HEADERS on Stream ID 0 triggers PROTOCOL_ERROR
-            if input.stream_id == 0 {
+            if wire_stream_id(input.stream_id) == 0 {
                 match test_headers_frame(&input) {
                     Ok(_) => {
                         panic!("HEADERS on stream ID 0 should trigger PROTOCOL_ERROR");
@@ -413,9 +421,10 @@ fuzz_target!(|input: HeadersFrameFuzz| {
 
         TestScenario::ConcurrentHeaders => {
             // Assertion 5: concurrent HEADERS on same stream triggers STREAM_ERROR
-            if input.stream_id > 0 && input.stream_id % 2 == 1 {
+            let stream_id = wire_stream_id(input.stream_id);
+            if stream_id > 0 && stream_id % 2 == 1 {
                 // Client-initiated stream
-                match test_concurrent_headers(input.stream_id) {
+                match test_concurrent_headers(stream_id) {
                     Ok(_) => {
                         // Concurrent HEADERS was accepted - this might be valid in some states
                     }
@@ -429,7 +438,7 @@ fuzz_target!(|input: HeadersFrameFuzz| {
             match test_headers_frame(&input) {
                 Ok(headers_frame) => {
                     // Frame was successfully parsed - verify basic invariants
-                    assert_eq!(headers_frame.stream_id, input.stream_id);
+                    assert_eq!(headers_frame.stream_id, wire_stream_id(input.stream_id));
 
                     // If PRIORITY flag was set, priority info should be present
                     if input.flags.priority {
@@ -447,7 +456,7 @@ fuzz_target!(|input: HeadersFrameFuzz| {
     }
 
     // Global invariants that should always hold
-    if input.stream_id == 0 {
+    if wire_stream_id(input.stream_id) == 0 {
         // Stream ID 0 should always be rejected for HEADERS frames
         match test_headers_frame(&input) {
             Ok(_) => panic!("Stream ID 0 should be rejected"),
@@ -576,14 +585,18 @@ mod tests {
                 pad_length: 10,
                 enforce_boundary: true,
             }),
-            padding_config: None,
-            header_block: b"header-block-with-padding".to_vec(),
+            header_block: b"x".to_vec(),
             scenario: TestScenario::PaddingValidation,
         };
 
-        let _result = test_headers_frame(&input);
-        // Result can be either Ok or Err depending on whether padding is valid
-        // The test verifies that the padding length validation is working
+        match test_headers_frame(&input) {
+            Ok(_) => panic!("HEADERS padding overflow should be rejected"),
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::ProtocolError);
+                assert_eq!(error.stream_id, None);
+                assert_eq!(error.message, "HEADERS frame padding exceeds data length");
+            }
+        }
     }
 
     #[test]
@@ -611,9 +624,7 @@ mod tests {
                     assert_eq!(frame.end_stream, *end_stream);
                     assert_eq!(frame.end_headers, *end_headers);
                 }
-                Err(_) => {
-                    // Frame parsing may fail for other reasons, which is acceptable
-                }
+                Err(error) => panic!("flag-independent HEADERS frame should parse: {error:?}"),
             }
         }
     }
