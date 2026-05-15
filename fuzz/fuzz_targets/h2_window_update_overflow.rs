@@ -14,10 +14,10 @@
 
 #![no_main]
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::bytes::Bytes;
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{FrameHeader, WindowUpdateFrame, parse_frame};
-use asupersync::http::h2::{Frame, FrameType, H2Error};
+use asupersync::http::h2::{Frame, H2Error};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
@@ -169,7 +169,7 @@ fuzz_target!(|data: &[u8]| {
         match parse_result {
             Ok(Frame::WindowUpdate(window_frame)) => {
                 // Successfully parsed - validate the delta
-                let delta = window_frame.window_size_increment;
+                let delta = window_frame.increment;
                 let _result = validate_delta_value(delta);
             }
             Err(_) => {
@@ -228,7 +228,9 @@ fuzz_target!(|data: &[u8]| {
             match validate_window_update(&frame, current_window) {
                 Ok(new_window) => {
                     current_window = new_window;
-                    if current_window >= MAX_WINDOW_SIZE - (small_delta as i32) {
+                    let small_delta_i32 =
+                        i32::try_from(small_delta).expect("small delta modulo 10000 fits i32");
+                    if current_window >= MAX_WINDOW_SIZE - small_delta_i32 {
                         break; // Stop before certain overflow
                     }
                 }
@@ -248,10 +250,10 @@ fuzz_target!(|data: &[u8]| {
 });
 
 /// Create a WINDOW_UPDATE frame with specified delta and stream ID
-fn create_window_update_frame(window_size_increment: u32, stream_id: u32) -> Frame {
+fn create_window_update_frame(increment: u32, stream_id: u32) -> Frame {
     let window_frame = WindowUpdateFrame {
         stream_id,
-        window_size_increment,
+        increment,
     };
     Frame::WindowUpdate(window_frame)
 }
@@ -260,7 +262,7 @@ fn create_window_update_frame(window_size_increment: u32, stream_id: u32) -> Fra
 fn validate_window_update(frame: &Frame, current_window: i32) -> Result<i32, H2Error> {
     match frame {
         Frame::WindowUpdate(window_frame) => {
-            let delta = window_frame.window_size_increment;
+            let delta = window_frame.increment;
 
             // RFC 9113: WINDOW_UPDATE with increment of 0 is PROTOCOL_ERROR
             if delta == 0 {
@@ -270,12 +272,12 @@ fn validate_window_update(frame: &Frame, current_window: i32) -> Result<i32, H2E
             }
 
             // Check for overflow: current + delta > 2^31 - 1
-            let new_window = current_window.saturating_add(delta as i32);
-            if new_window > MAX_WINDOW_SIZE || (current_window > MAX_WINDOW_SIZE - (delta as i32)) {
+            let delta_i32 = checked_delta_i32(delta)?;
+            if current_window > MAX_WINDOW_SIZE - delta_i32 {
                 return Err(H2Error::flow_control("Window size would exceed maximum"));
             }
 
-            Ok(new_window)
+            Ok(current_window + delta_i32)
         }
         _ => Err(H2Error::protocol("Expected WINDOW_UPDATE frame")),
     }
@@ -302,7 +304,7 @@ fn validate_delta_value(delta: u32) -> Result<(), H2Error> {
 fn parse_window_update_from_raw(data: &[u8]) -> Result<Frame, H2Error> {
     // Create frame header for WINDOW_UPDATE
     let header = FrameHeader {
-        length: std::cmp::min(data.len() as u32, 4), // WINDOW_UPDATE payload is exactly 4 bytes
+        length: u32::try_from(data.len().min(4)).expect("WINDOW_UPDATE payload cap fits u32"),
         frame_type: WINDOW_UPDATE_FRAME_TYPE,
         flags: 0,     // WINDOW_UPDATE has no flags
         stream_id: 1, // Default to stream 1, actual stream ID doesn't affect parsing
@@ -312,10 +314,17 @@ fn parse_window_update_from_raw(data: &[u8]) -> Result<Frame, H2Error> {
     parse_frame(&header, Bytes::copy_from_slice(data))
 }
 
+fn checked_delta_i32(delta: u32) -> Result<i32, H2Error> {
+    i32::try_from(delta).map_err(|_| H2Error::flow_control("WINDOW_UPDATE increment too large"))
+}
+
 /// Test arithmetic overflow scenarios directly
+#[cfg(test)]
 fn test_overflow_scenarios(base_window: i32, delta: u32) -> bool {
     // Test various overflow detection methods
-    let delta_i32 = delta as i32;
+    let Ok(delta_i32) = i32::try_from(delta) else {
+        return true;
+    };
 
     // Method 1: Saturating add
     let saturated = base_window.saturating_add(delta_i32);
