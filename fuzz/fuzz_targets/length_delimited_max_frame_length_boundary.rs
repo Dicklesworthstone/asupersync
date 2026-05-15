@@ -278,11 +278,10 @@ fuzz_target!(|input: FuzzInput| {
                     "Way oversized frame should return InvalidData error"
                 );
 
-                // Verify error message mentions max_frame_length
-                let error_msg = e.to_string();
-                assert!(
-                    error_msg.contains("max_frame_length") || error_msg.contains("frame length"),
-                    "Error message should mention frame length limit"
+                assert_eq!(
+                    e.to_string(),
+                    "frame length exceeds max_frame_length",
+                    "way oversized frame used wrong diagnostic"
                 );
             }
         }
