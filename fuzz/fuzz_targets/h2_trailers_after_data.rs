@@ -90,7 +90,7 @@ fn normalize_stream_id(raw: u32) -> u32 {
     if id == 0 {
         id = 1;
     }
-    if id % 2 == 0 {
+    if id.is_multiple_of(2) {
         id = id.saturating_add(1);
     } // Make odd (client-initiated)
     id
@@ -190,10 +190,37 @@ fn assert_trailer_accepted(
 fn assert_h2_error(
     result: Result<Option<ReceivedFrame>, H2Error>,
     expected: ErrorCode,
+    expected_stream_id: Option<u32>,
+    expected_message: &str,
     context: &str,
 ) {
     let err = result.expect_err(context);
     assert_eq!(err.code, expected, "{context}: unexpected error {err:?}");
+    assert_eq!(
+        err.stream_id, expected_stream_id,
+        "{context}: unexpected stream id for {err:?}"
+    );
+    assert_eq!(
+        err.message, expected_message,
+        "{context}: unexpected message for {err:?}"
+    );
+    assert_eq!(
+        err.is_connection_error(),
+        expected_stream_id.is_none(),
+        "{context}: unexpected connection/stream classification for {err:?}"
+    );
+
+    let expected_display = match expected_stream_id {
+        Some(stream_id) => {
+            format!("HTTP/2 stream {stream_id} error ({expected}): {expected_message}")
+        }
+        None => format!("HTTP/2 connection error ({expected}): {expected_message}"),
+    };
+    assert_eq!(
+        err.to_string(),
+        expected_display,
+        "{context}: unexpected display text for {err:?}"
+    );
 }
 
 fn run_arbitrary_sequence(sequence: &FrameSequence) {
@@ -281,6 +308,8 @@ fn run_targeted_scenario(scenario: &StreamScenario) {
             assert_h2_error(
                 conn.process_frame(trailer_headers_frame(stream_id, &valid_trailers, true)),
                 ErrorCode::StreamClosed,
+                Some(stream_id),
+                "cannot receive headers in current state",
                 "trailers after END_STREAM DATA must be rejected",
             );
         }
@@ -296,6 +325,8 @@ fn run_targeted_scenario(scenario: &StreamScenario) {
             assert_h2_error(
                 conn.process_frame(trailer_headers_frame(stream_id, &valid_trailers, true)),
                 ErrorCode::StreamClosed,
+                Some(stream_id),
+                "cannot receive headers in current state",
                 "duplicate trailers after remote close must be rejected",
             );
         }
@@ -307,6 +338,8 @@ fn run_targeted_scenario(scenario: &StreamScenario) {
             assert_h2_error(
                 conn.process_frame(trailer_headers_frame(stream_id, &valid_trailers, false)),
                 ErrorCode::ProtocolError,
+                Some(stream_id),
+                "trailers MUST have END_STREAM (RFC 9113 \u{00a7}8.1) \u{2014} server received second HEADERS without END_STREAM",
                 "server-side trailers without END_STREAM must be rejected",
             );
         }
@@ -318,6 +351,8 @@ fn run_targeted_scenario(scenario: &StreamScenario) {
             assert_h2_error(
                 conn.process_frame(trailer_headers_frame(stream_id, &bad_trailers, true)),
                 ErrorCode::ProtocolError,
+                Some(stream_id),
+                "trailers section MUST NOT contain pseudo-header fields (RFC 9113 \u{00a7}8.1)",
                 "trailers with pseudo-headers must be rejected",
             );
         }
