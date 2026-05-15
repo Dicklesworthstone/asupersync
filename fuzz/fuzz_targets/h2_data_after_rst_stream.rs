@@ -54,6 +54,10 @@ impl DataFrame {
     fn payload_len(&self) -> usize {
         self.payload.len()
     }
+
+    fn payload_len_i32(&self) -> i32 {
+        i32::try_from(self.payload_len()).unwrap_or(i32::MAX)
+    }
 }
 
 /// Mock RST_STREAM frame for testing
@@ -148,12 +152,12 @@ impl MockDataAfterRstConnection {
             }
             Some(StreamState::Open | StreamState::HalfClosedLocal) => {
                 // Normal processing - update flow control
+                let payload_len = frame.payload_len_i32();
                 if let Some(window) = self.stream_flow_windows.get_mut(&frame.stream_id) {
-                    *window = window.saturating_sub(frame.payload_len() as i32);
+                    *window = window.saturating_sub(payload_len);
                 }
-                self.connection_flow_window = self
-                    .connection_flow_window
-                    .saturating_sub(frame.payload_len() as i32);
+                self.connection_flow_window =
+                    self.connection_flow_window.saturating_sub(payload_len);
                 true // Frame processed normally
             }
             Some(StreamState::HalfClosedRemote) => {
@@ -184,9 +188,31 @@ impl MockDataAfterRstConnection {
     }
 }
 
+fn is_valid_client_stream_id(stream_id: u32) -> bool {
+    stream_id != 0 && !stream_id.is_multiple_of(2)
+}
+
+fn observe_invalid_client_stream_id(stream_id: u32) {
+    assert!(
+        stream_id == 0 || stream_id.is_multiple_of(2),
+        "Invalid client stream IDs should be zero or even"
+    );
+    std::hint::black_box(stream_id);
+}
+
+fn observe_modeled_stream_states(error_code: u32) {
+    std::hint::black_box([
+        StreamState::HalfClosedLocal,
+        StreamState::HalfClosedRemote,
+        StreamState::Closed,
+        StreamState::ResetRemote(error_code),
+    ]);
+}
+
 fuzz_target!(|input: DataAfterRstStreamInput| {
-    // Skip invalid stream IDs (must be non-zero, client streams are odd)
-    if input.stream_id == 0 || input.stream_id % 2 == 0 {
+    // Invalid client stream IDs (zero or even) stay visible to the oracle.
+    if !is_valid_client_stream_id(input.stream_id) {
+        observe_invalid_client_stream_id(input.stream_id);
         return;
     }
 
@@ -198,9 +224,10 @@ fuzz_target!(|input: DataAfterRstStreamInput| {
 
     // Create the stream initially
     conn.create_stream(input.stream_id);
+    observe_modeled_stream_states(input.rst_error_code);
 
     let rst_frame = RstStreamFrame::new(input.stream_id, input.rst_error_code);
-    let data_frame = DataFrame::new(input.stream_id, input.data_flags, data_payload);
+    let data_frame = DataFrame::new(input.stream_id, input.data_flags, data_payload.clone());
 
     match input.sequence_variant % 4 {
         0 => {
@@ -246,6 +273,10 @@ fuzz_target!(|input: DataAfterRstStreamInput| {
             assert!(
                 !processed,
                 "END_STREAM DATA after RST_STREAM must be discarded"
+            );
+            assert!(
+                end_stream_data.end_stream(),
+                "Scenario 3 should exercise the END_STREAM DATA path"
             );
         }
         3 => {
