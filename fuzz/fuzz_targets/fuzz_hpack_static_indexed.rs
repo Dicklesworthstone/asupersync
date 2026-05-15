@@ -17,7 +17,10 @@
 //!    that stay within static-table bounds must still match the expected entry.
 
 use arbitrary::Arbitrary;
-use asupersync::{bytes::Bytes, http::h2::hpack::Decoder};
+use asupersync::{
+    bytes::Bytes,
+    http::h2::{ErrorCode, H2Error, hpack::Decoder},
+};
 use libfuzzer_sys::fuzz_target;
 
 const STATIC_TABLE: &[(&str, &str)] = &[
@@ -158,10 +161,7 @@ fn verify_invalid_indices_rejected(invalid_indices: &[u16]) {
 
         let mut invalid_bytes = Bytes::from(encode_indexed(index));
         let invalid_result = decoder.decode(&mut invalid_bytes);
-        assert!(
-            invalid_result.is_err(),
-            "invalid static-table index {index} decoded successfully",
-        );
+        assert_invalid_index_error(index, invalid_result);
 
         let mut recovery_bytes = Bytes::from(encode_indexed(RECOVERY_INDEX));
         let recovery_headers = decoder
@@ -181,6 +181,32 @@ fn verify_invalid_indices_rejected(invalid_indices: &[u16]) {
             recovery_bytes.is_empty(),
             "recovery decode left unread bytes after invalid-index rejection",
         );
+    }
+}
+
+fn assert_invalid_index_error<T>(index: usize, result: Result<T, H2Error>) {
+    let Err(err) = result else {
+        panic!("invalid static-table index {index} decoded successfully");
+    };
+    let expected = expected_invalid_index_message(index);
+
+    assert_eq!(err.code, ErrorCode::CompressionError);
+    assert_eq!(err.message, expected);
+    assert!(
+        err.is_connection_error(),
+        "HPACK indexed-header errors should be connection-level: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        format!("HTTP/2 connection error (COMPRESSION_ERROR): {expected}")
+    );
+}
+
+fn expected_invalid_index_message(index: usize) -> &'static str {
+    if index == 0 {
+        "invalid index 0"
+    } else {
+        "invalid dynamic index"
     }
 }
 
