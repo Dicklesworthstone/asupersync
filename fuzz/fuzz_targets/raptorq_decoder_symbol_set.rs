@@ -304,6 +304,30 @@ fn validate_decode_success(decoded: &DecodeResult, k: usize, symbol_size: usize)
     );
 }
 
+fn observe_drop_last_coefficient(columns_len: usize, coeffs: &mut Vec<Gf256>) {
+    let coefficient_len_before = coeffs.len();
+    assert_eq!(
+        columns_len, coefficient_len_before,
+        "repair equation must start with aligned column/coefficient arity"
+    );
+
+    let removed = coeffs.pop();
+    assert!(
+        removed.is_some(),
+        "DropLastCoefficient mutation should remove a repair coefficient"
+    );
+    assert_eq!(
+        coeffs.len() + 1,
+        coefficient_len_before,
+        "DropLastCoefficient mutation should shrink coefficient arity by one"
+    );
+    assert_eq!(
+        columns_len,
+        coeffs.len() + 1,
+        "DropLastCoefficient mutation should leave one unmatched repair column"
+    );
+}
+
 /// Build a ReceivedSymbol from adversarial configuration
 fn build_received_symbol(
     decoder: &InactivationDecoder,
@@ -429,7 +453,7 @@ fn build_received_symbol(
 
             match mutation {
                 RepairPacketMutation::DropLastCoefficient => {
-                    let _ = coeffs.pop();
+                    observe_drop_last_coefficient(cols.len(), &mut coeffs);
                 }
                 RepairPacketMutation::AppendOutOfRangeColumn { extra } => {
                     cols.push(decoder.params().l + usize::from(*extra) + 1);
