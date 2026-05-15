@@ -121,6 +121,11 @@ fuzz_target!(|input: IdentityTransferRequest| {
         return;
     }
 
+    // Current H1 codec support is intentionally strict: only chunked
+    // Transfer-Encoding is accepted, so normalized identity variants must
+    // reject deterministically instead of being treated as generic noise.
+    test_identity_rejected_as_unsupported();
+
     // Test identity transfer encoding handling
     test_identity_pass_through(&input);
 
@@ -130,6 +135,45 @@ fuzz_target!(|input: IdentityTransferRequest| {
     // Test edge cases and malformed identity claims
     test_identity_edge_cases(&input);
 });
+
+/// Test that the current HTTP/1 codec rejects identity transfer coding exactly.
+fn test_identity_rejected_as_unsupported() {
+    use asupersync::bytes::BytesMut;
+    use asupersync::codec::Decoder;
+    use asupersync::http::h1::codec::{Http1Codec, HttpError};
+
+    for transfer_encoding in [
+        TransferEncodingVariant::Identity,
+        TransferEncodingVariant::IdentityMixedCase,
+        TransferEncodingVariant::IdentityWithWhitespace,
+        TransferEncodingVariant::IdentityWithOthers,
+    ] {
+        let variant_label = transfer_encoding.as_str();
+        let request = IdentityTransferRequest {
+            method: HttpMethod::Post,
+            uri: "/identity".to_string(),
+            version: HttpVersion::Http11,
+            prefix_headers: Vec::new(),
+            transfer_encoding,
+            suffix_headers: Vec::new(),
+            body: b"identity body".to_vec(),
+            include_content_length: false,
+        };
+        let request_bytes = build_identity_request(&request);
+        let mut buffer = BytesMut::from(&request_bytes[..]);
+        let mut codec = Http1Codec::new();
+
+        match codec.decode(&mut buffer) {
+            Err(HttpError::BadTransferEncoding) => {}
+            other => {
+                panic!(
+                    "Transfer-Encoding {variant_label:?} must reject as BadTransferEncoding, \
+                     got {other:?}"
+                );
+            }
+        }
+    }
+}
 
 /// Test that identity transfer encoding passes data through unchanged
 fn test_identity_pass_through(request: &IdentityTransferRequest) {
