@@ -933,7 +933,7 @@ fn test_error_injection_and_recovery(
 }
 
 fn test_framed_read_advanced_scenarios<R>(
-    _framed_read: &mut FramedRead<R, BytesCodec>,
+    framed_read: &mut FramedRead<R, BytesCodec>,
     _operations: &[CodecOperation],
 ) where
     R: AsyncRead + Unpin,
@@ -941,10 +941,36 @@ fn test_framed_read_advanced_scenarios<R>(
     // Advanced framed read testing would require an async runtime
     // For now, we can test the structure and basic invariants
 
-    // Test getters don't panic
-    let _ = _framed_read.get_ref();
-    let _ = _framed_read.decoder();
-    let _ = _framed_read.read_buffer();
+    // Test getters expose a stable fresh structure.
+    let reader_ptr = framed_read.get_ref() as *const R;
+
+    let decoder_debug = format!("{:?}", framed_read.decoder());
+    assert!(
+        !decoder_debug.is_empty(),
+        "FramedRead decoder debug output should not be empty"
+    );
+
+    let read_buffer = framed_read.read_buffer();
+    assert!(
+        read_buffer.is_empty(),
+        "fresh FramedRead buffer should be empty"
+    );
+    assert!(
+        read_buffer.capacity() <= MAX_MEMORY_BYTES,
+        "fresh FramedRead buffer capacity exceeded fuzz memory envelope"
+    );
+
+    let reader_mut_ptr = framed_read.get_mut() as *mut R as *const R;
+    assert_eq!(
+        reader_mut_ptr, reader_ptr,
+        "FramedRead immutable and mutable reader getters should expose the same reader"
+    );
+
+    let decoder_debug_after_mut_getter = format!("{:?}", framed_read.decoder_mut());
+    assert_eq!(
+        decoder_debug_after_mut_getter, decoder_debug,
+        "FramedRead decoder getters should expose stable decoder state"
+    );
 }
 
 fn execute_operation(codec: &mut BytesCodec, buffer: &mut BytesMut, operation: &CodecOperation) {
@@ -1156,11 +1182,12 @@ fn verify_buffer_post_operation_invariants(buffer: &BytesMut) {
 
 fn verify_buffer_management_invariants(buffer: &BytesMut) {
     // Verify buffer management operations maintain consistency
-    assert!(buffer.len() <= buffer.capacity());
-    assert!(buffer.capacity() <= MAX_BUFFER_SIZE * 2);
+    let len = buffer.len();
+    let capacity = buffer.capacity();
+    let is_empty = buffer.is_empty();
 
-    // Test that buffer can still be used for operations
-    let _ = buffer.len();
-    let _ = buffer.capacity();
-    let _ = buffer.is_empty();
+    assert!(len <= capacity);
+    assert!(capacity <= MAX_BUFFER_SIZE * 2);
+    assert_eq!(is_empty, len == 0);
+    assert_eq!(is_empty, buffer.as_ref().is_empty());
 }
