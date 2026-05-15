@@ -326,6 +326,8 @@ struct SetupOutcomeObserver {
     settings_updates: u32,
     settings_streams_affected: u32,
     settings_negative_deltas: u32,
+    exhaustion_data_results: u32,
+    exhaustion_window_updates: u32,
     metadata_digest: u64,
 }
 
@@ -449,6 +451,178 @@ impl SetupOutcomeObserver {
                 .saturating_sub(effective_window_size(result.old_window_size)),
             "Settings window delta should match old/new sizes"
         );
+    }
+
+    fn observe_exhaustion_data_result(
+        &mut self,
+        stream_id: u32,
+        data_size: u32,
+        result: &DataTransmissionResult,
+        connection: &MockInitialWindowZeroConnection,
+    ) {
+        self.exhaustion_data_results += 1;
+        self.mix(0xb00 | u64::from(stream_id));
+        self.mix(u64::from(data_size));
+        match result {
+            DataTransmissionResult::Success {
+                bytes_sent,
+                stream_window_after,
+                connection_window_after,
+            } => {
+                assert_eq!(
+                    *bytes_sent, data_size,
+                    "Exhaustion DATA success should send the requested bytes"
+                );
+                let stream_state = connection
+                    .streams
+                    .get(&stream_id)
+                    .expect("successful exhaustion DATA requires a live stream");
+                assert_eq!(
+                    stream_state.send_window, *stream_window_after,
+                    "Exhaustion DATA success should report the live stream window"
+                );
+                assert_eq!(
+                    connection.connection_window, *connection_window_after,
+                    "Exhaustion DATA success should report the live connection window"
+                );
+                let recorded = connection
+                    .transmission_results
+                    .last()
+                    .expect("successful exhaustion DATA should be recorded");
+                assert!(
+                    recorded.successful,
+                    "Successful exhaustion DATA should append a successful record"
+                );
+                assert_eq!(recorded.stream_id, stream_id);
+                assert_eq!(recorded.data_size, data_size);
+            }
+            DataTransmissionResult::FlowControlBlocked {
+                attempted_size,
+                stream_window,
+                connection_window,
+            } => {
+                assert_eq!(
+                    *attempted_size, data_size,
+                    "Blocked exhaustion DATA should report the requested size"
+                );
+                let requested_window = effective_window_size(data_size);
+                assert!(
+                    *stream_window < requested_window
+                        || *connection_window < requested_window
+                        || i32::try_from(data_size).is_err(),
+                    "Blocked exhaustion DATA should reflect insufficient credit"
+                );
+                let recorded = connection
+                    .transmission_results
+                    .last()
+                    .expect("blocked exhaustion DATA should be recorded");
+                assert!(
+                    !recorded.successful,
+                    "Blocked exhaustion DATA should append a blocked record"
+                );
+                assert_eq!(recorded.stream_id, stream_id);
+                assert_eq!(recorded.data_size, data_size);
+            }
+            DataTransmissionResult::EmptyFrame => {
+                assert_eq!(data_size, 0, "Only zero-sized DATA should be empty");
+            }
+            DataTransmissionResult::StreamClosed => {
+                let stream_state = connection
+                    .streams
+                    .get(&stream_id)
+                    .expect("closed exhaustion DATA should reference a tracked stream");
+                assert!(
+                    stream_state.closed,
+                    "StreamClosed exhaustion DATA should reference a closed stream"
+                );
+            }
+            DataTransmissionResult::StreamNotFound => {
+                assert!(
+                    !connection.streams.contains_key(&stream_id),
+                    "StreamNotFound exhaustion DATA should reference an absent stream"
+                );
+            }
+        }
+    }
+
+    fn observe_exhaustion_window_update_result(
+        &mut self,
+        stream_id: u32,
+        increment: u32,
+        result: &WindowUpdateProcessResult,
+        connection: &MockInitialWindowZeroConnection,
+    ) {
+        self.exhaustion_window_updates += 1;
+        self.mix(0xc00 | u64::from(stream_id));
+        self.mix(u64::from(increment));
+        let recorded = connection
+            .window_update_results
+            .last()
+            .expect("exhaustion WINDOW_UPDATE should append a record");
+        assert_eq!(recorded.target_stream, stream_id);
+        assert_eq!(recorded.increment, increment);
+
+        match result {
+            WindowUpdateProcessResult::Success {
+                old_window,
+                new_window,
+                target,
+            } => {
+                assert!(increment > 0, "Successful WINDOW_UPDATE requires credit");
+                assert!(
+                    *new_window >= *old_window,
+                    "Successful WINDOW_UPDATE should not reduce a window"
+                );
+                assert!(recorded.successful);
+                match target {
+                    WindowUpdateTarget::Connection => {
+                        assert_eq!(stream_id, 0);
+                        assert_eq!(
+                            connection.connection_window, *new_window,
+                            "Connection WINDOW_UPDATE should report the live connection window"
+                        );
+                    }
+                    WindowUpdateTarget::Stream(target_stream_id) => {
+                        assert_eq!(*target_stream_id, stream_id);
+                        let stream_state = connection
+                            .streams
+                            .get(&stream_id)
+                            .expect("successful stream WINDOW_UPDATE requires a live stream");
+                        assert_eq!(
+                            stream_state.send_window, *new_window,
+                            "Stream WINDOW_UPDATE should report the live stream window"
+                        );
+                    }
+                }
+            }
+            WindowUpdateProcessResult::WindowOverflow { .. } => {
+                assert!(increment > 0, "Overflow WINDOW_UPDATE requires credit");
+                assert!(!recorded.successful);
+                assert_eq!(
+                    recorded.error_code,
+                    Some(0x3),
+                    "Overflow WINDOW_UPDATE should record FLOW_CONTROL_ERROR"
+                );
+            }
+            WindowUpdateProcessResult::ZeroIncrement => {
+                assert_eq!(increment, 0);
+                assert!(!recorded.successful);
+                assert_eq!(
+                    recorded.error_code,
+                    Some(0x1),
+                    "Zero WINDOW_UPDATE should record PROTOCOL_ERROR"
+                );
+            }
+            WindowUpdateProcessResult::StreamNotFound => {
+                assert_ne!(stream_id, 0);
+                assert!(increment > 0);
+                assert!(
+                    !connection.streams.contains_key(&stream_id),
+                    "StreamNotFound WINDOW_UPDATE should reference an absent stream"
+                );
+                assert!(!recorded.successful);
+            }
+        }
     }
 
     fn assert_consistent(&self) {
@@ -1200,7 +1374,13 @@ fuzz_target!(|input: InitialWindowZeroInput| {
                             };
                             let create_result = connection.create_stream(sid);
                             observer.observe_stream_creation(sid, &create_result, &connection);
-                            let _ = connection.attempt_data_transmission(sid, *size, false);
+                            let result = connection.attempt_data_transmission(sid, *size, false);
+                            observer.observe_exhaustion_data_result(
+                                sid,
+                                *size,
+                                &result,
+                                &connection,
+                            );
                         }
                         ExhaustionStep::WindowUpdate {
                             stream_id,
@@ -1215,7 +1395,13 @@ fuzz_target!(|input: InitialWindowZeroInput| {
                                 let create_result = connection.create_stream(sid);
                                 observer.observe_stream_creation(sid, &create_result, &connection);
                             }
-                            let _ = connection.process_window_update(sid, *increment);
+                            let result = connection.process_window_update(sid, *increment);
+                            observer.observe_exhaustion_window_update_result(
+                                sid,
+                                *increment,
+                                &result,
+                                &connection,
+                            );
                         }
                         ExhaustionStep::SettingsChange { new_window_size } => {
                             let settings_result = connection.process_settings(*new_window_size);
