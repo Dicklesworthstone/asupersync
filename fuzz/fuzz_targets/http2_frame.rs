@@ -36,7 +36,7 @@
 #![no_main]
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
     FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, data_flags, parse_frame, settings_flags,
 };
@@ -92,6 +92,19 @@ fn run_parser_contract_canaries() {
     assert_window_update_zero_increment_rejected();
 }
 
+fn assert_h2_error_shape(err: &H2Error, code: ErrorCode, stream_id: Option<u32>, message: &str) {
+    assert_eq!(err.code, code);
+    assert_eq!(err.stream_id, stream_id);
+    assert_eq!(err.message, message);
+    assert_eq!(err.is_connection_error(), stream_id.is_none());
+
+    let expected_display = match stream_id {
+        Some(stream_id) => format!("HTTP/2 stream {stream_id} error ({code}): {message}"),
+        None => format!("HTTP/2 connection error ({code}): {message}"),
+    };
+    assert_eq!(err.to_string(), expected_display);
+}
+
 fn assert_valid_data_frame_canary() {
     let payload = Bytes::from_static(b"hello");
     let header = FrameHeader {
@@ -145,7 +158,12 @@ fn assert_settings_ack_with_payload_rejected() {
 
     let err = parse_frame(&header, payload)
         .expect_err("SETTINGS ACK carrying a payload must be rejected");
-    assert_eq!(err.code, ErrorCode::FrameSizeError);
+    assert_h2_error_shape(
+        &err,
+        ErrorCode::FrameSizeError,
+        None,
+        "SETTINGS ACK with non-zero length",
+    );
 }
 
 fn assert_ping_on_stream_rejected() {
@@ -159,7 +177,12 @@ fn assert_ping_on_stream_rejected() {
 
     let err =
         parse_frame(&header, payload).expect_err("PING with non-zero stream ID must be rejected");
-    assert_eq!(err.code, ErrorCode::ProtocolError);
+    assert_h2_error_shape(
+        &err,
+        ErrorCode::ProtocolError,
+        None,
+        "PING frame with non-zero stream ID",
+    );
 }
 
 fn assert_window_update_zero_increment_rejected() {
@@ -173,8 +196,12 @@ fn assert_window_update_zero_increment_rejected() {
 
     let err = parse_frame(&header, payload)
         .expect_err("WINDOW_UPDATE with a zero increment must be rejected");
-    assert_eq!(err.code, ErrorCode::ProtocolError);
-    assert_eq!(err.stream_id, Some(3));
+    assert_h2_error_shape(
+        &err,
+        ErrorCode::ProtocolError,
+        Some(3),
+        "WINDOW_UPDATE with zero increment",
+    );
 }
 
 fn observe_parse_result(header: &FrameHeader, payload: Bytes) {
