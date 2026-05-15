@@ -104,10 +104,7 @@ fn exercise_roundtrip_and_partial(input: &FuzzInput, encode_limit: usize, decode
         let result = encoder.encode(message.clone(), &mut frame);
 
         if payload.len() > encode_limit {
-            assert!(
-                matches!(result, Err(GrpcError::MessageTooLarge)),
-                "payload larger than encode limit must fail closed"
-            );
+            expect_message_too_large(result);
             continue;
         }
 
@@ -118,10 +115,7 @@ fn exercise_roundtrip_and_partial(input: &FuzzInput, encode_limit: usize, decode
                 GrpcCodec::with_message_size_limits(encode_limit, decode_limit);
             let decode_result =
                 observe_framing_decode(&mut rejecting_decoder, &mut oversized_decode_buf);
-            assert!(
-                matches!(decode_result, Err(GrpcError::MessageTooLarge)),
-                "payload larger than decode limit must fail closed"
-            );
+            expect_message_too_large(decode_result);
             continue;
         }
 
@@ -193,10 +187,7 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
 
             let result = observe_framing_decode(&mut codec, &mut buf);
             if payload.len() > decode_limit {
-                assert!(
-                    matches!(result, Err(GrpcError::MessageTooLarge)),
-                    "over-limit invalid compression flag should fail on length before flag validation"
-                );
+                expect_message_too_large(result);
                 assert_eq!(
                     buf.len(),
                     frame_len,
@@ -218,7 +209,7 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
             buf.put_u32(capped_len);
 
             let result = observe_framing_decode(&mut codec, &mut buf);
-            assert!(matches!(result, Err(GrpcError::MessageTooLarge)));
+            expect_message_too_large(result);
         }
         MalformedFrame::TruncatedPayload {
             compressed,
@@ -312,10 +303,7 @@ fn assert_fixed_decode_canaries() {
     let mut oversized_invalid = BytesMut::new();
     encode_frame(2, 3, b"bad", &mut oversized_invalid);
     let mut codec = GrpcCodec::with_max_size(2);
-    assert!(matches!(
-        observe_framing_decode(&mut codec, &mut oversized_invalid),
-        Err(GrpcError::MessageTooLarge)
-    ));
+    expect_message_too_large(observe_framing_decode(&mut codec, &mut oversized_invalid));
     assert_eq!(oversized_invalid.as_ref(), b"\x02\0\0\0\x03bad");
 
     let mut incomplete_invalid_header = BytesMut::from(&[2, 0, 0][..]);
@@ -339,28 +327,42 @@ fn assert_fixed_decode_canaries() {
     oversized.put_u8(0);
     oversized.put_u32(3);
     let mut codec = GrpcCodec::with_max_size(2);
-    assert!(matches!(
-        observe_framing_decode(&mut codec, &mut oversized),
-        Err(GrpcError::MessageTooLarge)
-    ));
+    expect_message_too_large(observe_framing_decode(&mut codec, &mut oversized));
     assert_eq!(oversized.as_ref(), b"\0\0\0\0\x03");
+}
+
+fn expect_message_too_large<T>(result: Result<T, GrpcError>) {
+    let Err(error) = result else {
+        panic!("expected MessageTooLarge error");
+    };
+    assert!(
+        matches!(&error, GrpcError::MessageTooLarge),
+        "expected MessageTooLarge error, got {error:?}"
+    );
+    assert_eq!(error.to_string(), "message too large");
 }
 
 fn expect_invalid_compression_flag(
     result: Result<Option<GrpcMessage>, GrpcError>,
     invalid_flag: u8,
 ) {
-    match result {
-        Err(GrpcError::Protocol(message)) => {
+    let Err(error) = result else {
+        panic!("expected invalid compression flag Protocol error");
+    };
+    let display = error.to_string();
+
+    match error {
+        GrpcError::Protocol(message) => {
             assert_eq!(
                 message,
                 format!("invalid gRPC compression flag: {invalid_flag}")
             );
+            assert_eq!(
+                display,
+                format!("protocol error: invalid gRPC compression flag: {invalid_flag}")
+            );
         }
-        Ok(decoded) => {
-            panic!("expected invalid compression flag Protocol error, got decoded {decoded:?}");
-        }
-        Err(error) => {
+        error => {
             panic!("expected invalid compression flag Protocol error, got {error:?}");
         }
     }
