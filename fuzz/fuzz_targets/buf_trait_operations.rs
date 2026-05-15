@@ -8,8 +8,8 @@
 //! The goal is to catch boundary violations, endianness bugs, and panic
 //! conditions in buffer access patterns.
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct BufOpSequence {
@@ -128,23 +128,33 @@ fuzz_target!(|input: &[u8]| {
 fn test_buf_operations(data: &[u8], operations: &[BufReadOperation]) {
     use asupersync::bytes::{Buf, Bytes};
 
-    let mut buf = Bytes::from(data.to_vec());
-    let original_len = buf.len();
+    let mut buf = Bytes::from(data.to_vec()).reader();
+    let original_len = data.len();
 
     for operation in operations {
         // Only proceed if we have enough bytes remaining
         let required_bytes = match operation {
             BufReadOperation::GetU8 | BufReadOperation::GetI8 => 1,
-            BufReadOperation::GetU16 | BufReadOperation::GetU16Le
-            | BufReadOperation::GetI16 | BufReadOperation::GetI16Le => 2,
-            BufReadOperation::GetU32 | BufReadOperation::GetU32Le
-            | BufReadOperation::GetI32 | BufReadOperation::GetI32Le
-            | BufReadOperation::GetF32 | BufReadOperation::GetF32Le => 4,
-            BufReadOperation::GetU64 | BufReadOperation::GetU64Le
-            | BufReadOperation::GetI64 | BufReadOperation::GetI64Le
-            | BufReadOperation::GetF64 | BufReadOperation::GetF64Le => 8,
-            BufReadOperation::GetU128 | BufReadOperation::GetU128Le
-            | BufReadOperation::GetI128 | BufReadOperation::GetI128Le => 16,
+            BufReadOperation::GetU16
+            | BufReadOperation::GetU16Le
+            | BufReadOperation::GetI16
+            | BufReadOperation::GetI16Le => 2,
+            BufReadOperation::GetU32
+            | BufReadOperation::GetU32Le
+            | BufReadOperation::GetI32
+            | BufReadOperation::GetI32Le
+            | BufReadOperation::GetF32
+            | BufReadOperation::GetF32Le => 4,
+            BufReadOperation::GetU64
+            | BufReadOperation::GetU64Le
+            | BufReadOperation::GetI64
+            | BufReadOperation::GetI64Le
+            | BufReadOperation::GetF64
+            | BufReadOperation::GetF64Le => 8,
+            BufReadOperation::GetU128
+            | BufReadOperation::GetU128Le
+            | BufReadOperation::GetI128
+            | BufReadOperation::GetI128Le => 16,
             BufReadOperation::Advance { cnt } => *cnt,
             BufReadOperation::CopyToSlice { len } | BufReadOperation::GetSlice { len } => *len,
         };
@@ -156,7 +166,7 @@ fn test_buf_operations(data: &[u8], operations: &[BufReadOperation]) {
         match operation {
             BufReadOperation::GetU8 => {
                 let val = buf.get_u8();
-                assert!(val <= 255);
+                let _ = std::hint::black_box(val);
             }
             BufReadOperation::GetI8 => {
                 let _val = buf.get_i8();
@@ -258,16 +268,26 @@ fn test_buf_mut_operations(operations: &[BufWriteOperation]) {
         // Check if we have enough space
         let required_space = match operation {
             BufWriteOperation::PutU8 { .. } | BufWriteOperation::PutI8 { .. } => 1,
-            BufWriteOperation::PutU16 { .. } | BufWriteOperation::PutU16Le { .. }
-            | BufWriteOperation::PutI16 { .. } | BufWriteOperation::PutI16Le { .. } => 2,
-            BufWriteOperation::PutU32 { .. } | BufWriteOperation::PutU32Le { .. }
-            | BufWriteOperation::PutI32 { .. } | BufWriteOperation::PutI32Le { .. }
-            | BufWriteOperation::PutF32 { .. } | BufWriteOperation::PutF32Le { .. } => 4,
-            BufWriteOperation::PutU64 { .. } | BufWriteOperation::PutU64Le { .. }
-            | BufWriteOperation::PutI64 { .. } | BufWriteOperation::PutI64Le { .. }
-            | BufWriteOperation::PutF64 { .. } | BufWriteOperation::PutF64Le { .. } => 8,
-            BufWriteOperation::PutU128 { .. } | BufWriteOperation::PutU128Le { .. }
-            | BufWriteOperation::PutI128 { .. } | BufWriteOperation::PutI128Le { .. } => 16,
+            BufWriteOperation::PutU16 { .. }
+            | BufWriteOperation::PutU16Le { .. }
+            | BufWriteOperation::PutI16 { .. }
+            | BufWriteOperation::PutI16Le { .. } => 2,
+            BufWriteOperation::PutU32 { .. }
+            | BufWriteOperation::PutU32Le { .. }
+            | BufWriteOperation::PutI32 { .. }
+            | BufWriteOperation::PutI32Le { .. }
+            | BufWriteOperation::PutF32 { .. }
+            | BufWriteOperation::PutF32Le { .. } => 4,
+            BufWriteOperation::PutU64 { .. }
+            | BufWriteOperation::PutU64Le { .. }
+            | BufWriteOperation::PutI64 { .. }
+            | BufWriteOperation::PutI64Le { .. }
+            | BufWriteOperation::PutF64 { .. }
+            | BufWriteOperation::PutF64Le { .. } => 8,
+            BufWriteOperation::PutU128 { .. }
+            | BufWriteOperation::PutU128Le { .. }
+            | BufWriteOperation::PutI128 { .. }
+            | BufWriteOperation::PutI128Le { .. } => 16,
             BufWriteOperation::PutSlice { data } => data.len(),
         };
 
@@ -301,7 +321,8 @@ fn test_buf_mut_operations(operations: &[BufWriteOperation]) {
             BufWriteOperation::PutF64 { val } => buf.put_f64(*val),
             BufWriteOperation::PutF64Le { val } => buf.put_f64_le(*val),
             BufWriteOperation::PutSlice { data } => {
-                if data.len() <= 1024 {  // Limit slice size
+                if data.len() <= 1024 {
+                    // Limit slice size
                     buf.put_slice(data);
                 }
             }
@@ -319,22 +340,17 @@ fn test_roundtrip_operations(write_ops: &[BufWriteOperation], read_ops: &[BufRea
     // Write data
     let mut write_buf = BytesMut::with_capacity(64 * 1024);
 
-    for write_op in write_ops.iter().take(20) {  // Limit to prevent timeout
+    for write_op in write_ops.iter().take(20) {
+        // Limit to prevent timeout
         match write_op {
-            BufWriteOperation::PutU8 { val } => {
-                if write_buf.remaining_mut() >= 1 {
-                    write_buf.put_u8(*val);
-                }
+            BufWriteOperation::PutU8 { val } if write_buf.remaining_mut() >= 1 => {
+                write_buf.put_u8(*val);
             }
-            BufWriteOperation::PutU32 { val } => {
-                if write_buf.remaining_mut() >= 4 {
-                    write_buf.put_u32(*val);
-                }
+            BufWriteOperation::PutU32 { val } if write_buf.remaining_mut() >= 4 => {
+                write_buf.put_u32(*val);
             }
-            BufWriteOperation::PutU64Le { val } => {
-                if write_buf.remaining_mut() >= 8 {
-                    write_buf.put_u64_le(*val);
-                }
+            BufWriteOperation::PutU64Le { val } if write_buf.remaining_mut() >= 8 => {
+                write_buf.put_u64_le(*val);
             }
             // Add other operations as needed for round-trip testing
             _ => {}
@@ -342,26 +358,20 @@ fn test_roundtrip_operations(write_ops: &[BufWriteOperation], read_ops: &[BufRea
     }
 
     // Read data back
-    let mut read_buf = write_buf.freeze();
+    let mut read_buf = write_buf.freeze().reader();
 
     for read_op in read_ops.iter().take(10) {
         match read_op {
-            BufReadOperation::GetU8 => {
-                if read_buf.remaining() >= 1 {
-                    let _val = read_buf.get_u8();
-                }
+            BufReadOperation::GetU8 if read_buf.remaining() >= 1 => {
+                let _val = read_buf.get_u8();
             }
-            BufReadOperation::GetU32 => {
-                if read_buf.remaining() >= 4 {
-                    let _val = read_buf.get_u32();
-                }
+            BufReadOperation::GetU32 if read_buf.remaining() >= 4 => {
+                let _val = read_buf.get_u32();
             }
-            BufReadOperation::GetU64Le => {
-                if read_buf.remaining() >= 8 {
-                    let _val = read_buf.get_u64_le();
-                }
+            BufReadOperation::GetU64Le if read_buf.remaining() >= 8 => {
+                let _val = read_buf.get_u64_le();
             }
             _ => {}
         }
     }
-});
+}
