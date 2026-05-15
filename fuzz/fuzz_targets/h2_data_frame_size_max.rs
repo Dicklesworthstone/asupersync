@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 /// Default SETTINGS_MAX_FRAME_SIZE per RFC 7540 §6.5.2
@@ -196,12 +196,6 @@ struct MockH2FrameParser {
 }
 
 impl MockH2FrameParser {
-    fn new() -> Self {
-        Self {
-            max_frame_size: DEFAULT_MAX_FRAME_SIZE,
-        }
-    }
-
     fn with_max_frame_size(max_frame_size: u32) -> Result<Self, FrameError> {
         if max_frame_size > MAX_FRAME_SIZE_LIMIT {
             return Err(FrameError::FrameSizeError);
@@ -323,8 +317,9 @@ fuzz_target!(|input: FuzzInput| {
         Err(_) => return, // Invalid max frame size
     };
 
-    // Calculate target frame size based on variant
-    let target_size = match input.size_variant {
+    // Calculate target frame payload size based on variant. For PADDED DATA, this
+    // includes the one-byte pad-length field as part of the frame payload.
+    let target_payload_size = match input.size_variant {
         SizeVariant::AtLimit => max_frame_size,
         SizeVariant::OneBelowLimit => max_frame_size.saturating_sub(1),
         SizeVariant::OneOverLimit => max_frame_size.saturating_add(1),
@@ -332,9 +327,6 @@ fuzz_target!(|input: FuzzInput| {
         SizeVariant::Zero => 0,
         SizeVariant::Random(size) => size & 0x00FF_FFFF, // Clamp to 24-bit max
     };
-
-    // Create DATA payload of target size
-    let data_payload = vec![0x42u8; target_size as usize];
 
     // Ensure stream ID is non-zero (required for DATA frames)
     let stream_id = if input.stream_id == 0 {
@@ -348,11 +340,22 @@ fuzz_target!(|input: FuzzInput| {
         padded: input.padded,
     };
 
+    // Create DATA bytes so the encoded frame payload length matches the selected
+    // boundary. PADDED DATA spends one payload byte on Pad Length even when the
+    // actual pad length is zero.
+    let data_len = if flags.padded {
+        target_payload_size.saturating_sub(1)
+    } else {
+        target_payload_size
+    };
+    let data_payload = vec![0x42u8; data_len as usize];
+
     // Create DATA frame
     let frame = match DataFrame::new(stream_id, data_payload, flags) {
         Ok(f) => f,
         Err(_) => return, // Frame creation failed
     };
+    let actual_payload_size = frame.header.length;
 
     let mut encoded = frame.encode();
 
@@ -370,7 +373,7 @@ fuzz_target!(|input: FuzzInput| {
     let parse_result = parser.parse_frame(&encoded);
 
     // Assertions about expected behavior
-    match parse_result {
+    match &parse_result {
         Ok(parsed_frame) => {
             // Frame should only parse successfully if:
             // 1. Size <= max_frame_size
@@ -378,7 +381,7 @@ fuzz_target!(|input: FuzzInput| {
             // 3. Complete frame present
 
             assert!(
-                target_size <= max_frame_size,
+                actual_payload_size <= max_frame_size,
                 "Oversized frame should not parse successfully"
             );
             assert!(
@@ -406,7 +409,7 @@ fuzz_target!(|input: FuzzInput| {
         Err(FrameError::FrameSizeError) => {
             // Should only get this error for oversized frames
             assert!(
-                target_size > max_frame_size || input.corrupt_length,
+                actual_payload_size > max_frame_size || input.corrupt_length,
                 "Frame size error should only occur for oversized frames"
             );
         }
@@ -438,11 +441,12 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // Additional boundary testing for off-by-one errors
-    if target_size == max_frame_size.saturating_sub(1) {
+    if actual_payload_size == max_frame_size.saturating_sub(1) {
         // This exact case (max_frame_size - 1) should always parse successfully
         // if the frame is complete and not corrupted
-        if !input.corrupt_length && encoded.len() >= FRAME_HEADER_LEN + target_size as usize {
-            match parse_result {
+        if !input.corrupt_length && encoded.len() >= FRAME_HEADER_LEN + actual_payload_size as usize
+        {
+            match &parse_result {
                 Ok(_) => {
                     // Expected - frame at limit-1 should parse
                 }
@@ -459,9 +463,9 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // Test that frames exactly at limit parse (if not corrupted)
-    if target_size == max_frame_size && !input.corrupt_length {
+    if actual_payload_size == max_frame_size && !input.corrupt_length {
         // Should parse successfully unless padding is invalid
-        if let Err(e) = parse_result {
+        if let Err(e) = &parse_result {
             assert!(
                 matches!(e, FrameError::InvalidPadding | FrameError::IncompleteFrame),
                 "Frame at exact max_frame_size limit failed unexpectedly: {:?}",
@@ -471,10 +475,10 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // Test that frames over limit definitely fail (unless incomplete prevents reaching size check)
-    if target_size > max_frame_size && !input.corrupt_length {
+    if actual_payload_size > max_frame_size && !input.corrupt_length {
         // Should get FrameSizeError unless frame is incomplete
         if encoded.len() >= FRAME_HEADER_LEN {
-            match parse_result {
+            match &parse_result {
                 Err(FrameError::FrameSizeError) => {
                     // Expected
                 }
