@@ -100,7 +100,10 @@ fuzz_target!(|case: Case| {
             continue;
         };
         let value = canonicalize_ascii_value(&entry.value);
-        let _ = metadata.insert(key, value);
+        assert!(
+            metadata.insert(key.clone(), value),
+            "canonicalized ASCII metadata key {key:?} should be accepted",
+        );
     }
     for entry in case.binary.iter().take(MAX_METADATA) {
         let Some(key) = canonicalize_key(&entry.key, true) else {
@@ -112,7 +115,10 @@ fuzz_target!(|case: Case| {
             .copied()
             .take(MAX_VALUE)
             .collect::<Vec<u8>>();
-        let _ = metadata.insert_bin(key, Bytes::from(truncated));
+        assert!(
+            metadata.insert_bin(key.clone(), Bytes::from(truncated)),
+            "canonicalized binary metadata key {key:?} should be accepted",
+        );
     }
 
     // ---- Encode ----
