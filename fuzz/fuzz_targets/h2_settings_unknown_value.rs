@@ -956,6 +956,7 @@ fn exercise_production_settings_value_validation(
         let err =
             parse_result.expect_err("production SETTINGS parser must reject non-zero stream IDs");
         assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.message, "SETTINGS frame with non-zero stream ID");
         return;
     }
 
@@ -963,6 +964,7 @@ fn exercise_production_settings_value_validation(
         let err = parse_result
             .expect_err("production SETTINGS parser must reject ACK frames with payload");
         assert_eq!(err.code, ErrorCode::FrameSizeError);
+        assert_eq!(err.message, "SETTINGS ACK with non-zero length");
         return;
     }
 
@@ -986,7 +988,8 @@ fn exercise_production_settings_value_validation(
             assert!(
                 invalid_settings
                     .iter()
-                    .any(|entry| entry.expected_error_code == err.code),
+                    .any(|entry| entry.expected_error_code == err.code
+                        && entry.expected_message == err.message),
                 "production SETTINGS parser rejected with unexpected error {:?}; invalid settings: {:?}",
                 err,
                 invalid_settings
@@ -1000,6 +1003,7 @@ struct ProductionInvalidSetting {
     setting_id: u16,
     value: u32,
     expected_error_code: ErrorCode,
+    expected_message: &'static str,
 }
 
 fn production_invalid_settings(
@@ -1014,25 +1018,31 @@ fn production_invalid_settings(
                 &setting.setting_id,
                 &setting.invalid_value_strategy,
             );
-            production_invalid_setting(setting_id, value).map(|expected_error_code| {
-                ProductionInvalidSetting {
-                    setting_id,
-                    value,
-                    expected_error_code,
-                }
+            production_invalid_setting(setting_id, value).map(|expected| ProductionInvalidSetting {
+                setting_id,
+                value,
+                expected_error_code: expected.0,
+                expected_message: expected.1,
             })
         })
         .collect()
 }
 
-fn production_invalid_setting(setting_id: u16, value: u32) -> Option<ErrorCode> {
+fn production_invalid_setting(setting_id: u16, value: u32) -> Option<(ErrorCode, &'static str)> {
     match setting_id {
-        SETTINGS_ENABLE_PUSH if value > 1 => Some(ErrorCode::ProtocolError),
-        SETTINGS_INITIAL_WINDOW_SIZE if value > MAX_INITIAL_WINDOW_SIZE => {
-            Some(ErrorCode::FlowControlError)
-        }
+        SETTINGS_ENABLE_PUSH if value > 1 => Some((
+            ErrorCode::ProtocolError,
+            "SETTINGS_ENABLE_PUSH must be 0 or 1",
+        )),
+        SETTINGS_INITIAL_WINDOW_SIZE if value > MAX_INITIAL_WINDOW_SIZE => Some((
+            ErrorCode::FlowControlError,
+            "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum",
+        )),
         SETTINGS_MAX_FRAME_SIZE if !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&value) => {
-            Some(ErrorCode::ProtocolError)
+            Some((
+                ErrorCode::ProtocolError,
+                "SETTINGS_MAX_FRAME_SIZE out of bounds",
+            ))
         }
         _ => None,
     }
