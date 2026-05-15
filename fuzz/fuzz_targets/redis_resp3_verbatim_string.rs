@@ -7,6 +7,10 @@ use asupersync::messaging::redis::{RedisError, RedisProtocolLimits, RespValue};
 
 const MAX_BULK_LEN: usize = 8 * 1024;
 const MAX_PAYLOAD_LEN: usize = 8 * 1024;
+const VERBATIM_SEPARATOR_ERROR: &str =
+    "verbatim string missing 3-byte format separator (':' at offset 3)";
+const VERBATIM_FORMAT_UTF8_ERROR: &str = "invalid UTF-8 in verbatim format";
+const VERBATIM_TRAILING_CRLF_ERROR: &str = "verbatim string missing trailing CRLF";
 
 #[derive(Debug, Arbitrary)]
 struct VerbatimStringCase {
@@ -99,10 +103,7 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
         VerbatimScenario::MissingSeparator => {
             let wire = encode_raw_verbatim(label, &payload, body_len, b';', b"\r\n");
             let result = RespValue::try_decode_with_limits(&wire, &limits);
-            assert!(matches!(
-                result,
-                Err(RedisError::Protocol(message)) if message.contains("separator")
-            ));
+            assert_protocol_error(result, VERBATIM_SEPARATOR_ERROR);
         }
         VerbatimScenario::ShortLabel => {
             let payload = sanitize_short_label_payload(payload);
@@ -114,10 +115,7 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
                 b"\r\n",
             );
             let result = RespValue::try_decode_with_limits(&wire, &limits);
-            assert!(matches!(
-                result,
-                Err(RedisError::Protocol(message)) if message.contains("separator")
-            ));
+            assert_protocol_error(result, VERBATIM_SEPARATOR_ERROR);
         }
         VerbatimScenario::LongLabel => {
             let wire = encode_raw_verbatim(
@@ -128,10 +126,7 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
                 b"\r\n",
             );
             let result = RespValue::try_decode_with_limits(&wire, &limits);
-            assert!(matches!(
-                result,
-                Err(RedisError::Protocol(message)) if message.contains("separator")
-            ));
+            assert_protocol_error(result, VERBATIM_SEPARATOR_ERROR);
         }
         VerbatimScenario::InvalidUtf8Label(raw_label) => {
             let raw_label = sanitize_non_utf8_label(raw_label);
@@ -146,19 +141,13 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
                 b"\r\n",
             );
             let result = RespValue::try_decode_with_limits(&wire, &limits);
-            assert!(matches!(
-                result,
-                Err(RedisError::Protocol(message)) if message.contains("invalid UTF-8")
-            ));
+            assert_protocol_error(result, VERBATIM_FORMAT_UTF8_ERROR);
         }
         VerbatimScenario::WrongTrailer(trailer) => {
             let trailer = sanitize_wrong_trailer(trailer);
             let wire = encode_raw_verbatim(label, &payload, body_len, b':', &trailer);
             let result = RespValue::try_decode_with_limits(&wire, &limits);
-            assert!(matches!(
-                result,
-                Err(RedisError::Protocol(message)) if message.contains("trailing CRLF")
-            ));
+            assert_protocol_error(result, VERBATIM_TRAILING_CRLF_ERROR);
         }
         VerbatimScenario::OverLimit { extra } => {
             let declared_len = max_bulk_len
@@ -166,13 +155,22 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
                 .saturating_add(usize::from(extra % 128));
             let wire = encode_raw_verbatim(label, &payload, declared_len, b':', b"\r\n");
             let result = RespValue::try_decode_with_limits(&wire, &limits);
-            assert!(matches!(
-                result,
-                Err(RedisError::Protocol(message))
-                    if message.contains("verbatim length")
-                        && message.contains("exceeds maximum")
-            ));
+            let expected = format!("verbatim length {declared_len} exceeds maximum {max_bulk_len}");
+            assert_protocol_error(result, &expected);
         }
+    }
+}
+
+fn assert_protocol_error(
+    result: Result<Option<(RespValue, usize)>, RedisError>,
+    expected_message: &str,
+) {
+    match result {
+        Err(RedisError::Protocol(message)) => {
+            assert_eq!(message, expected_message);
+        }
+        Err(error) => panic!("expected protocol error {expected_message:?}, got {error:?}"),
+        Ok(decoded) => panic!("expected protocol error {expected_message:?}, got {decoded:?}"),
     }
 }
 
