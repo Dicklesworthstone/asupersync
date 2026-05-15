@@ -687,6 +687,71 @@ fn cap_u32(value: u32, max: u32) -> u32 {
     value.min(max)
 }
 
+fn expect_frame_ok(result: Result<(), ErrorCode>, context: &str) {
+    match result {
+        Ok(()) => {}
+        Err(error) => panic!("{context} should be accepted, got {error:?}"),
+    }
+}
+
+fn observe_zero_limit_stream_refusal(
+    conn: &mut MockZeroMaxConcurrentConnection,
+    stream_id: u32,
+    payload: Vec<u8>,
+    context: &str,
+) -> u32 {
+    assert_eq!(
+        conn.settings.max_concurrent_streams, 0,
+        "{context} should run while MAX_CONCURRENT_STREAMS is zero"
+    );
+
+    let active_before = conn.active_stream_count();
+    match conn.attempt_stream_creation(stream_id, payload) {
+        Ok(()) => panic!("{context} should be refused while MAX_CONCURRENT_STREAMS is zero"),
+        Err(ErrorCode::RefusedStream) => {}
+        Err(error) => panic!(
+            "{context} should fail with REFUSED_STREAM while MAX_CONCURRENT_STREAMS is zero, got {error:?}"
+        ),
+    }
+
+    assert_eq!(
+        conn.active_stream_count(),
+        active_before,
+        "{context} must not create an active stream after refusal"
+    );
+    1
+}
+
+fn observe_recovery_stream_attempt(
+    conn: &mut MockZeroMaxConcurrentConnection,
+    stream_id: u32,
+    context: &str,
+) {
+    let active_before = conn.active_stream_count();
+    let zero_limit = conn.settings.max_concurrent_streams == 0;
+    match conn.attempt_stream_creation(stream_id, vec![]) {
+        Ok(()) => {
+            assert!(
+                !zero_limit,
+                "{context} unexpectedly created a stream while MAX_CONCURRENT_STREAMS is zero"
+            );
+            assert_eq!(
+                conn.active_stream_count(),
+                active_before + 1,
+                "{context} successful creation should add exactly one active stream"
+            );
+        }
+        Err(ErrorCode::RefusedStream | ErrorCode::ProtocolError) => {
+            assert_eq!(
+                conn.active_stream_count(),
+                active_before,
+                "{context} failed creation must not change active stream count"
+            );
+        }
+        Err(error) => panic!("{context} failed with unexpected error {error:?}"),
+    }
+}
+
 fuzz_target!(|input: ZeroMaxConcurrentInput| {
     let side = if input.is_client {
         Side::Client
@@ -718,18 +783,27 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
         match operation {
             InitialConnectionOperation::SendZeroMaxConcurrentSettings => {
                 let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
-                let _ = conn.handle_settings_frame(&settings);
+                expect_frame_ok(
+                    conn.handle_settings_frame(&settings),
+                    "initial zero MAX_CONCURRENT_STREAMS SETTINGS",
+                );
             }
             InitialConnectionOperation::SendSettingsAck => {
                 let settings_ack = SettingsFrame::ack();
-                let _ = conn.handle_settings_frame(&settings_ack);
+                expect_frame_ok(
+                    conn.handle_settings_frame(&settings_ack),
+                    "initial SETTINGS ACK",
+                );
             }
             InitialConnectionOperation::SendPing { data: _ } => {
-                let _ = conn.process_non_stream_frame("PING", 0);
+                expect_frame_ok(conn.process_non_stream_frame("PING", 0), "initial PING");
             }
             InitialConnectionOperation::SendWindowUpdate { increment } => {
                 let _increment = cap_u32(*increment, 0x7fff_ffff);
-                let _ = conn.process_non_stream_frame("WINDOW_UPDATE", 0);
+                expect_frame_ok(
+                    conn.process_non_stream_frame("WINDOW_UPDATE", 0),
+                    "initial WINDOW_UPDATE",
+                );
             }
             InitialConnectionOperation::SendOtherSettings {
                 header_table_size,
@@ -745,7 +819,10 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
                 ];
 
                 let settings = SettingsFrame::new(settings_vec);
-                let _ = conn.handle_settings_frame(&settings);
+                expect_frame_ok(
+                    conn.handle_settings_frame(&settings),
+                    "initial non-stream SETTINGS update",
+                );
             }
         }
     }
@@ -762,15 +839,12 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
             } => {
                 let payload_size = cap_u16(*payload_size, 1024);
                 let payload = vec![0u8; payload_size as usize];
-                let result = conn.attempt_stream_creation(*stream_id, payload);
-
-                // Should be blocked with zero limit
-                if result.is_err() {
-                    blocked_attempts += 1;
-                } else {
-                    // This is a violation - stream created with zero limit
-                    panic!("Stream creation should be blocked when max_concurrent_streams=0");
-                }
+                blocked_attempts += observe_zero_limit_stream_refusal(
+                    &mut conn,
+                    *stream_id,
+                    payload,
+                    "standard HEADERS stream creation",
+                );
             }
             StreamCreationAttempt::HeadersWithPriority {
                 stream_id,
@@ -778,28 +852,50 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
                 weight: _,
                 exclusive: _,
             } => {
-                let result = conn.attempt_stream_creation(*stream_id, vec![]);
-                if result.is_err() {
-                    blocked_attempts += 1;
-                }
+                blocked_attempts += observe_zero_limit_stream_refusal(
+                    &mut conn,
+                    *stream_id,
+                    vec![],
+                    "priority HEADERS stream creation",
+                );
             }
             StreamCreationAttempt::MalformedHeaders {
                 stream_id,
                 invalid_payload,
             } => {
                 let payload = invalid_payload.iter().take(512).cloned().collect();
-                let _ = conn.attempt_stream_creation(*stream_id, payload);
+                blocked_attempts += observe_zero_limit_stream_refusal(
+                    &mut conn,
+                    *stream_id,
+                    payload,
+                    "malformed HEADERS stream creation",
+                );
             }
             StreamCreationAttempt::ReservedBitStream { stream_id } => {
-                let _ = conn.attempt_stream_creation(*stream_id | 0x8000_0000, vec![]);
+                blocked_attempts += observe_zero_limit_stream_refusal(
+                    &mut conn,
+                    *stream_id | 0x8000_0000,
+                    vec![],
+                    "reserved-bit stream creation",
+                );
             }
             StreamCreationAttempt::OrphanedContinuation { stream_id, payload } => {
                 let payload = payload.iter().take(256).cloned().collect();
-                let _ = conn.attempt_stream_creation(*stream_id, payload);
+                blocked_attempts += observe_zero_limit_stream_refusal(
+                    &mut conn,
+                    *stream_id,
+                    payload,
+                    "orphaned CONTINUATION stream creation",
+                );
             }
             StreamCreationAttempt::EvenStreamId { stream_id } => {
                 let even_id = *stream_id & 0x7fff_fffe; // Force even
-                let _ = conn.attempt_stream_creation(even_id, vec![]);
+                blocked_attempts += observe_zero_limit_stream_refusal(
+                    &mut conn,
+                    even_id,
+                    vec![],
+                    "even stream-id creation",
+                );
             }
         }
     }
@@ -885,17 +981,14 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
             }
             RecoveryOperation::CreateStreamAfterIncrease {
                 stream_id,
-                expect_success,
+                expect_success: _,
             } => {
                 if recovery_successful {
-                    let _result = conn.attempt_stream_creation(*stream_id, vec![]);
-
-                    if *expect_success
-                        && conn.active_stream_count() < conn.settings.max_concurrent_streams
-                    {
-                        // Stream creation might still fail due to ID sequence or other issues
-                        // Don't assert success, just verify no zero-limit violation
-                    }
+                    observe_recovery_stream_attempt(
+                        &mut conn,
+                        *stream_id,
+                        "post-recovery stream creation",
+                    );
                 }
             }
             RecoveryOperation::ResetToZero => {
@@ -906,7 +999,7 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
             RecoveryOperation::RapidLimitChanges { changes } => {
                 for &limit in changes.iter().take(5) {
                     let limit = cap_u8(limit, 50) as u32;
-                    let _ = conn.test_recovery(limit);
+                    expect_frame_ok(conn.test_recovery(limit), "rapid limit recovery change");
                 }
             }
         }
@@ -926,7 +1019,10 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
             EdgeCaseTest::MultipleZeroSettings { count } => {
                 for _ in 0..cap_u8(*count, 5) {
                     let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
-                    let _ = conn.handle_settings_frame(&settings);
+                    expect_frame_ok(
+                        conn.handle_settings_frame(&settings),
+                        "repeated zero MAX_CONCURRENT_STREAMS SETTINGS",
+                    );
                 }
             }
             EdgeCaseTest::ZeroLimitWithAck => {
@@ -941,16 +1037,42 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
             } => {
                 // Try stream creation
                 if let StreamCreationAttempt::StandardHeaders { stream_id, .. } = stream_attempt {
-                    let _ = conn.attempt_stream_creation(*stream_id, vec![]);
+                    if conn.settings.max_concurrent_streams == 0 {
+                        observe_zero_limit_stream_refusal(
+                            &mut conn,
+                            *stream_id,
+                            vec![],
+                            "interleaved zero-limit stream creation",
+                        );
+                    } else {
+                        observe_recovery_stream_attempt(
+                            &mut conn,
+                            *stream_id,
+                            "interleaved recovered stream creation",
+                        );
+                    }
                 }
 
                 // Change setting
                 let limit = cap_u32(*setting_change, 10);
-                let _ = conn.test_recovery(limit);
+                expect_frame_ok(conn.test_recovery(limit), "interleaved SETTINGS recovery");
             }
             EdgeCaseTest::LargeStreamId { stream_id } => {
                 let large_id = cap_u32(*stream_id, 0x7fff_ffff);
-                let _ = conn.attempt_stream_creation(large_id, vec![]);
+                if conn.settings.max_concurrent_streams == 0 {
+                    observe_zero_limit_stream_refusal(
+                        &mut conn,
+                        large_id,
+                        vec![],
+                        "large stream-id zero-limit creation",
+                    );
+                } else {
+                    observe_recovery_stream_attempt(
+                        &mut conn,
+                        large_id,
+                        "large stream-id recovered creation",
+                    );
+                }
             }
         }
     }
@@ -1077,8 +1199,8 @@ mod tests {
         conn.establish_with_zero_limit().unwrap();
 
         // Block some stream attempts
-        let _ = conn.attempt_stream_creation(1, vec![]);
-        let _ = conn.attempt_stream_creation(3, vec![]);
+        observe_zero_limit_stream_refusal(&mut conn, 1, vec![], "first blocked test stream");
+        observe_zero_limit_stream_refusal(&mut conn, 3, vec![], "second blocked test stream");
 
         // Should be properly enforced
         assert!(conn.zero_limit_properly_enforced());
@@ -1110,13 +1232,13 @@ mod tests {
         assert!(conn.validate_state_consistency().is_ok());
 
         // State should remain consistent after blocked attempts
-        let _ = conn.attempt_stream_creation(1, vec![]);
-        let _ = conn.attempt_stream_creation(3, vec![]);
+        observe_zero_limit_stream_refusal(&mut conn, 1, vec![], "first consistency test stream");
+        observe_zero_limit_stream_refusal(&mut conn, 3, vec![], "second consistency test stream");
         assert!(conn.validate_state_consistency().is_ok());
 
         // State should be consistent after recovery
-        let _ = conn.test_recovery(1);
-        let _ = conn.attempt_stream_creation(1, vec![]);
+        expect_frame_ok(conn.test_recovery(1), "test recovery to one stream");
+        observe_recovery_stream_attempt(&mut conn, 1, "recovered consistency test stream");
         assert!(conn.validate_state_consistency().is_ok());
     }
 }
