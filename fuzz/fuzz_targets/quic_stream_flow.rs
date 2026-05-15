@@ -252,6 +252,47 @@ fn observe_reset_send(
     }
 }
 
+fn observe_stream_table_result(
+    result: Result<(), asupersync::net::quic_native::streams::StreamTableError>,
+    context: &str,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "{context}: stream-table error must be visible"
+            );
+            false
+        }
+    }
+}
+
+fn observe_flow_credit_result(
+    result: Result<(), asupersync::net::quic_native::streams::FlowControlError>,
+    context: &str,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "{context}: flow-credit error must be visible"
+            );
+            false
+        }
+    }
+}
+
+fn observe_execute_result(result: Result<(), Box<dyn std::error::Error>>, context: &str) {
+    if let Err(error) = result {
+        assert!(
+            !error.to_string().is_empty(),
+            "{context}: operation error must be visible"
+        );
+    }
+}
+
 /// Execute QUIC stream flow control fuzzing
 fn fuzz_quic_stream_flow(input: QuicStreamFlowFuzz) {
     use asupersync::net::quic_native::streams::StreamTable;
@@ -283,7 +324,10 @@ fn fuzz_quic_stream_flow(input: QuicStreamFlowFuzz) {
 
     // Execute flow control operations
     for op in input.operations {
-        let _ = execute_flow_control_operation(&mut table, &stream_ids, op, role);
+        observe_execute_result(
+            execute_flow_control_operation(&mut table, &stream_ids, op, role),
+            "flow_control_operation",
+        );
 
         // Verify flow control invariants after each operation
         verify_flow_control_invariants(&table, &stream_ids);
@@ -291,19 +335,28 @@ fn fuzz_quic_stream_flow(input: QuicStreamFlowFuzz) {
 
     // Execute connection-level flow control tests
     for conn_test in input.connection_tests {
-        let _ = execute_connection_flow_test(&mut table, &stream_ids, conn_test);
+        observe_execute_result(
+            execute_connection_flow_test(&mut table, &stream_ids, conn_test),
+            "connection_flow_test",
+        );
         verify_flow_control_invariants(&table, &stream_ids);
     }
 
     // Execute window update tests
     for window_test in input.window_updates {
-        let _ = execute_window_update_test(&mut table, &stream_ids, window_test);
+        observe_execute_result(
+            execute_window_update_test(&mut table, &stream_ids, window_test),
+            "window_update_test",
+        );
         verify_flow_control_invariants(&table, &stream_ids);
     }
 
     // Execute edge case tests
     for edge_case in input.edge_cases {
-        let _ = execute_flow_control_edge_case(&mut table, &stream_ids, edge_case);
+        observe_execute_result(
+            execute_flow_control_edge_case(&mut table, &stream_ids, edge_case),
+            "flow_control_edge_case",
+        );
         verify_flow_control_invariants(&table, &stream_ids);
     }
 
@@ -342,7 +395,10 @@ fn execute_flow_control_operation(
             data_len,
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                let _ = table.receive_stream(id, data_len as u64);
+                observe_stream_table_result(
+                    table.receive_stream(id, data_len as u64),
+                    "receive_data",
+                );
             }
         }
         FlowControlOperation::ReceiveSegment {
@@ -352,7 +408,10 @@ fn execute_flow_control_operation(
             fin_flag,
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                let _ = table.receive_stream_segment(id, offset as u64, data_len as u64, fin_flag);
+                observe_stream_table_result(
+                    table.receive_stream_segment(id, offset as u64, data_len as u64, fin_flag),
+                    "receive_segment",
+                );
             }
         }
         FlowControlOperation::StreamWindowUpdate {
@@ -363,7 +422,10 @@ fn execute_flow_control_operation(
                 && let Ok(stream) = table.stream_mut(id)
             {
                 // Test window increase on individual stream
-                let _ = stream.send_credit.increase_limit(new_limit as u64);
+                observe_flow_credit_result(
+                    stream.send_credit.increase_limit(new_limit as u64),
+                    "stream_window_update",
+                );
             }
         }
         FlowControlOperation::ConnectionWindowUpdate {
@@ -371,8 +433,14 @@ fn execute_flow_control_operation(
             new_recv_limit,
         } => {
             // Test connection-level window updates
-            let _ = table.increase_connection_send_limit(new_send_limit as u64);
-            let _ = table.increase_connection_recv_limit(new_recv_limit as u64);
+            observe_flow_credit_result(
+                table.increase_connection_send_limit(new_send_limit as u64),
+                "connection_send_window_update",
+            );
+            observe_flow_credit_result(
+                table.increase_connection_recv_limit(new_recv_limit as u64),
+                "connection_recv_window_update",
+            );
         }
         FlowControlOperation::ResetStream {
             stream_index,
@@ -441,7 +509,10 @@ fn execute_flow_control_operation(
                 assert!(result.is_err()); // Should fail with flow control error
 
                 // Smaller excess should also fail gracefully
-                let _ = table.write_stream(id, excess_bytes as u64);
+                observe_stream_table_result(
+                    table.write_stream(id, excess_bytes as u64),
+                    "exhaust_credit_small_write",
+                );
             }
         }
         FlowControlOperation::InterleavedOps {
@@ -452,8 +523,14 @@ fn execute_flow_control_operation(
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 // Interleave send and receive operations to test race conditions
                 for (send, recv) in send_chunks.into_iter().zip(recv_chunks) {
-                    let _ = table.write_stream(id, send as u64);
-                    let _ = table.receive_stream(id, recv as u64);
+                    observe_stream_table_result(
+                        table.write_stream(id, send as u64),
+                        "interleaved_send",
+                    );
+                    observe_stream_table_result(
+                        table.receive_stream(id, recv as u64),
+                        "interleaved_receive",
+                    );
                 }
             }
         }
@@ -475,7 +552,10 @@ fn execute_connection_flow_test(
             // Try to exhaust connection-level send credit across multiple streams
             for i in 0..stream_count.min(stream_ids.len() as u8) {
                 if let Some(&id) = stream_ids.get(i as usize) {
-                    let _ = table.write_stream(id, bytes_per_stream as u64);
+                    observe_stream_table_result(
+                        table.write_stream(id, bytes_per_stream as u64),
+                        "exhaust_connection_send",
+                    );
                 }
             }
         }
@@ -494,7 +574,10 @@ fn execute_connection_flow_test(
             // Try new writes after closing streams
             for (i, &write_amount) in new_writes.iter().enumerate() {
                 if let Some(&id) = stream_ids.get(i % stream_ids.len().max(1)) {
-                    let _ = table.write_stream(id, write_amount as u64);
+                    observe_stream_table_result(
+                        table.write_stream(id, write_amount as u64),
+                        "credit_redistribution_new_write",
+                    );
                 }
             }
         }
@@ -503,11 +586,15 @@ fn execute_connection_flow_test(
             bad_limit,
         } => {
             // Try to regress connection limits (should fail)
-            let _ = table.increase_connection_send_limit(current_limit as u64);
+            observe_flow_credit_result(
+                table.increase_connection_send_limit(current_limit as u64),
+                "limit_regression_current",
+            );
             let result = table.increase_connection_send_limit(bad_limit as u64);
             if bad_limit < current_limit {
                 assert!(result.is_err()); // Should fail on regression
             }
+            observe_flow_credit_result(result, "limit_regression_bad_limit");
         }
         ConnectionFlowTest::RapidExhaustionRecovery {
             exhaust_amount,
@@ -517,13 +604,19 @@ fn execute_connection_flow_test(
             // Rapidly exhaust and recover connection credit
             for _ in 0..repeat_count.min(10) {
                 if let Some(&id) = stream_ids.first() {
-                    let _ = table.write_stream(id, exhaust_amount as u64);
+                    observe_stream_table_result(
+                        table.write_stream(id, exhaust_amount as u64),
+                        "rapid_exhaustion_write",
+                    );
                 }
                 let recovery_limit = table
                     .connection_send_remaining()
                     .saturating_add(exhaust_amount as u64)
                     .saturating_add(recovery_amount as u64);
-                let _ = table.increase_connection_send_limit(recovery_limit);
+                observe_flow_credit_result(
+                    table.increase_connection_send_limit(recovery_limit),
+                    "rapid_exhaustion_recovery",
+                );
             }
         }
     }
@@ -543,7 +636,10 @@ fn execute_window_update_test(
             {
                 // Zero-byte window update should be handled gracefully
                 let current_limit = stream.send_credit.limit();
-                let _ = stream.send_credit.increase_limit(current_limit);
+                observe_flow_credit_result(
+                    stream.send_credit.increase_limit(current_limit),
+                    "zero_byte_window_update",
+                );
             }
         }
         WindowUpdateTest::MassiveIncrease {
@@ -556,7 +652,7 @@ fn execute_window_update_test(
                 // Test potential overflow in window increases
                 let result = stream.send_credit.increase_limit(increase);
                 // Should either succeed or fail gracefully, never panic
-                let _ = result;
+                observe_flow_credit_result(result, "massive_window_increase");
             }
         }
         WindowUpdateTest::DuplicateUpdate {
@@ -569,7 +665,10 @@ fn execute_window_update_test(
             {
                 // Duplicate window updates should be idempotent
                 for _ in 0..repeat_count.min(20) {
-                    let _ = stream.send_credit.increase_limit(limit as u64);
+                    observe_flow_credit_result(
+                        stream.send_credit.increase_limit(limit as u64),
+                        "duplicate_window_update",
+                    );
                 }
                 assert_eq!(stream.send_credit.limit(), limit as u64);
             }
@@ -589,7 +688,10 @@ fn execute_window_update_test(
                         .reset_send(error_code as u64, reset_final_size)
                         .expect("reset at the current send offset must succeed");
                     // Window update after reset should be handled correctly
-                    let _ = stream.send_credit.increase_limit(new_limit as u64);
+                    observe_flow_credit_result(
+                        stream.send_credit.increase_limit(new_limit as u64),
+                        "window_update_after_reset",
+                    );
                 }
                 assert_reset_is_fail_closed(table, id, error_code as u64);
             }
@@ -607,7 +709,10 @@ fn execute_window_update_test(
                     if limit as u64 >= expected_limit {
                         expected_limit = limit as u64;
                     }
-                    let _ = stream.send_credit.increase_limit(limit as u64);
+                    observe_flow_credit_result(
+                        stream.send_credit.increase_limit(limit as u64),
+                        "conflicting_window_update",
+                    );
                 }
                 assert!(stream.send_credit.limit() >= expected_limit);
             }
@@ -629,10 +734,14 @@ fn execute_flow_control_edge_case(
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 // Exhaust stream credit first
-                let _ = table.write_stream(id, u64::MAX);
+                observe_stream_table_result(
+                    table.write_stream(id, u64::MAX),
+                    "send_after_exhaustion_exhaust",
+                );
                 // Try to send more (should emit STREAM_DATA_BLOCKED conceptually)
                 let result = table.write_stream(id, blocked_bytes as u64);
                 assert!(result.is_err()); // Should fail with flow control exhaustion
+                observe_stream_table_result(result, "send_after_exhaustion_blocked");
             }
         }
         FlowControlEdgeCase::FinAtBoundary {
@@ -641,8 +750,14 @@ fn execute_flow_control_edge_case(
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 // Send data up to flow control boundary, then FIN
-                let _ = table.write_stream(id, data_to_boundary as u64);
-                let _ = table.receive_stream_segment(id, 0, data_to_boundary as u64, true);
+                observe_stream_table_result(
+                    table.write_stream(id, data_to_boundary as u64),
+                    "fin_boundary_write",
+                );
+                observe_stream_table_result(
+                    table.receive_stream_segment(id, 0, data_to_boundary as u64, true),
+                    "fin_boundary_receive",
+                );
             }
         }
         FlowControlEdgeCase::ResetAfterPartialSend {
@@ -651,7 +766,10 @@ fn execute_flow_control_edge_case(
             reset_final_size,
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                let _ = table.write_stream(id, sent_bytes as u64);
+                observe_stream_table_result(
+                    table.write_stream(id, sent_bytes as u64),
+                    "reset_after_partial_send_write",
+                );
                 if let Ok(stream) = table.stream_mut(id) {
                     // Reset final size should be >= actually sent bytes
                     let actual_sent = stream.send_offset;
@@ -699,11 +817,15 @@ fn execute_flow_control_edge_case(
             excess_bytes,
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                let _ = table.set_stream_final_size(id, final_size as u64);
+                observe_stream_table_result(
+                    table.set_stream_final_size(id, final_size as u64),
+                    "receive_beyond_final_size_set",
+                );
                 // Try to receive beyond final size (should fail)
                 let result =
                     table.receive_stream_segment(id, final_size as u64, excess_bytes as u64, false);
                 assert!(result.is_err()); // Should fail with final size violation
+                observe_stream_table_result(result, "receive_beyond_final_size_segment");
             }
         }
         FlowControlEdgeCase::ReceiveOffsetOverflow {
@@ -727,14 +849,23 @@ fn execute_flow_control_edge_case(
                 for op in operations {
                     match op {
                         CreditOp::Send(amount) => {
-                            let _ = table.write_stream(id, amount as u64);
+                            observe_stream_table_result(
+                                table.write_stream(id, amount as u64),
+                                "credit_consistency_send",
+                            );
                         }
                         CreditOp::Receive(amount) => {
-                            let _ = table.receive_stream(id, amount as u64);
+                            observe_stream_table_result(
+                                table.receive_stream(id, amount as u64),
+                                "credit_consistency_receive",
+                            );
                         }
                         CreditOp::WindowUpdate(limit) => {
                             if let Ok(stream) = table.stream_mut(id) {
-                                let _ = stream.send_credit.increase_limit(limit as u64);
+                                observe_flow_credit_result(
+                                    stream.send_credit.increase_limit(limit as u64),
+                                    "credit_consistency_window_update",
+                                );
                             }
                         }
                         CreditOp::Reset(final_size) => {
