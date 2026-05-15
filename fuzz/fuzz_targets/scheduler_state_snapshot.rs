@@ -1,8 +1,15 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::runtime::{ContendedMutex, RuntimeState};
+use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
+
+const ZERO_WORKER_DIAGNOSTIC: &str = concat!(
+    "ThreeLaneScheduler requires worker_count >= 1; ",
+    "a zero-worker scheduler cannot dispatch any task and silently hangs block_on. ",
+    "Use try_new_with_options_and_task_table to surface this as ConfigError; ",
+    "the infallible constructors clamp to 1 instead."
+);
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
@@ -39,7 +46,8 @@ fuzz_target!(|data: &[u8]| {
                 let profile_data = &data[8..];
                 if profile_data.len() >= 8 {
                     let min_batch_size = ((profile_data[0] % 64) + 1) as usize; // 1-64
-                    let max_batch_size = (((profile_data[1] as usize) % 512) + 32).max(min_batch_size); // >= min_batch_size
+                    let max_batch_size =
+                        (((profile_data[1] as usize) % 512) + 32).max(min_batch_size); // >= min_batch_size
                     let scale_up_ready_depth = ((profile_data[2] as usize) % 128) + 1; // 1-128
                     let scale_up_in_flight = ((profile_data[3] as usize) % 32) + 1; // 1-32
                     let scale_up_claim_failures = ((profile_data[4] as usize) % 16) + 1; // 1-16
@@ -47,16 +55,17 @@ fuzz_target!(|data: &[u8]| {
                     let cooldown_steps = ((profile_data[6] as usize) % 32) + 1; // 1-32
                     let enabled = profile_data[7] & 1 == 1;
 
-                    let profile = asupersync::runtime::scheduler::three_lane::AdaptiveBatchSizingProfile {
-                        enabled,
-                        min_batch_size,
-                        max_batch_size,
-                        scale_up_ready_depth,
-                        scale_up_in_flight,
-                        scale_up_claim_failures,
-                        cancel_debt_floor,
-                        cooldown_steps,
-                    };
+                    let profile =
+                        asupersync::runtime::scheduler::three_lane::AdaptiveBatchSizingProfile {
+                            enabled,
+                            min_batch_size,
+                            max_batch_size,
+                            scale_up_ready_depth,
+                            scale_up_in_flight,
+                            scale_up_claim_failures,
+                            cancel_debt_floor,
+                            cooldown_steps,
+                        };
                     scheduler.set_adaptive_batch_profile_for_test(Some(profile));
                 }
             }
@@ -68,7 +77,8 @@ fuzz_target!(|data: &[u8]| {
                     let worker_id = pressure_data[0] as usize;
                     let pressure_level = pressure_data[1] as usize; // Use usize as expected
 
-                    if worker_id < 8 && pressure_level < 256 { // Reasonable bounds
+                    if worker_id < 8 && pressure_level < 256 {
+                        // Reasonable bounds
                         scheduler.seed_ready_combiner_pressure_for_test(worker_id, pressure_level);
                     }
                 }
@@ -80,10 +90,10 @@ fuzz_target!(|data: &[u8]| {
         Err(e) => {
             // Expected failure cases
             if worker_count == 0 {
-                // This should fail with ConfigError
-                assert!(
-                    e.to_string().contains("worker_count >= 1"),
-                    "Zero worker count should produce clear error message"
+                assert_eq!(
+                    e.to_string(),
+                    ZERO_WORKER_DIAGNOSTIC,
+                    "zero worker count used wrong diagnostic"
                 );
             }
             // Other error cases are valid and should be handled gracefully
@@ -101,7 +111,7 @@ fn verify_scheduler_invariants(_scheduler: &ThreeLaneScheduler) {
     // so we focus on what we can verify without breaking encapsulation.
 
     // Basic smoke test: scheduler should not panic on these operations
-    let _description = format!("ThreeLaneScheduler with configuration OK");
+    let _description = "ThreeLaneScheduler with configuration OK".to_string();
 
     // If we had public accessor methods, we could verify:
     // - worker_count > 0
