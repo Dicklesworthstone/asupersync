@@ -266,6 +266,22 @@ fn observe_headers_error(context: &str, error: &H2Error) {
     std::hint::black_box((context, error.code, error.stream_id, error.message.as_str()));
 }
 
+fn assert_headers_stream_zero_error(context: &str, error: &H2Error) {
+    assert_eq!(
+        error.code,
+        ErrorCode::ProtocolError,
+        "{context}: stream-zero HEADERS must be a protocol error"
+    );
+    assert_eq!(
+        error.stream_id, None,
+        "{context}: stream-zero HEADERS must be connection-scoped"
+    );
+    assert_eq!(
+        error.message, "HEADERS frame with stream ID 0",
+        "{context}: stream-zero HEADERS used wrong diagnostic"
+    );
+}
+
 /// Test concurrent HEADERS frames on the same stream
 fn test_concurrent_headers(stream_id: u32) -> Result<(), H2Error> {
     let mut connection = Connection::server(Settings::default());
@@ -402,15 +418,7 @@ fuzz_target!(|input: HeadersFrameFuzz| {
                         panic!("HEADERS on stream ID 0 should trigger PROTOCOL_ERROR");
                     }
                     Err(e) => {
-                        // Verify it's a protocol error for stream ID 0
-                        let error_msg = format!("{:?}", e);
-                        assert!(
-                            error_msg.contains("stream ID 0")
-                                || error_msg.contains("PROTOCOL_ERROR")
-                                || e.code == ErrorCode::ProtocolError,
-                            "Expected PROTOCOL_ERROR for stream ID 0, got: {:?}",
-                            e
-                        );
+                        assert_headers_stream_zero_error("stream-id validation", &e);
                     }
                 }
             } else {
@@ -505,8 +513,7 @@ mod tests {
         match test_headers_frame(&input) {
             Ok(_) => panic!("Stream ID 0 should be rejected"),
             Err(e) => {
-                let error_msg = format!("{:?}", e);
-                assert!(error_msg.contains("stream ID 0") || e.code == ErrorCode::ProtocolError);
+                assert_headers_stream_zero_error("unit stream-id zero", &e);
             }
         }
     }
