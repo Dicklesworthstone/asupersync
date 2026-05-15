@@ -614,6 +614,7 @@ fuzz_target!(|input: MaxConcurrentStreamsZeroInput| {
         SettingsFrame::new(vec![Setting::MaxConcurrentStreams(recovery_limit as u32)]);
 
     observe_settings_frame(&mut conn, &recovery_settings, "recovery limit update");
+    let mut final_recovery_limit = recovery_limit;
 
     // Perform recovery operations
     for operation in input.recovery_operations.iter().take(10) {
@@ -634,7 +635,19 @@ fuzz_target!(|input: MaxConcurrentStreamsZeroInput| {
                 let size = cap_u16(*size, 1024);
                 observe_send_data(&mut conn, *stream_id, size, "recovery DATA send");
             }
-            _ => {} // Other operations less relevant for recovery test
+            StreamOperation::EndStream { stream_id } => {
+                observe_close_stream(&mut conn, *stream_id, false, "recovery END_STREAM");
+            }
+            StreamOperation::ResetStream { stream_id, .. } => {
+                observe_close_stream(&mut conn, *stream_id, true, "recovery RST_STREAM");
+            }
+            StreamOperation::UpdateConcurrentLimit { limit } => {
+                let limit = cap_u8(*limit, 20);
+                let settings =
+                    SettingsFrame::new(vec![Setting::MaxConcurrentStreams(limit as u32)]);
+                observe_settings_frame(&mut conn, &settings, "recovery limit operation");
+                final_recovery_limit = limit;
+            }
         }
     }
 
@@ -658,7 +671,7 @@ fuzz_target!(|input: MaxConcurrentStreamsZeroInput| {
         &input.mode,
         initial_active_count,
         zero_limit_create_attempted,
-        recovery_limit,
+        final_recovery_limit,
     );
 });
 
