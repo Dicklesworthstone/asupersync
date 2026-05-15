@@ -43,7 +43,7 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
 /// Magic bytes for AEAD envelope identification.
-const AEAD_ENVELOPE_MAGIC: [u8; 4] = [b'R', b'Q', b'A', b'E']; // "RQAE"
+const AEAD_ENVELOPE_MAGIC: [u8; 4] = *b"RQAE";
 
 /// Current envelope format version.
 const AEAD_ENVELOPE_VERSION: u8 = 1;
@@ -53,6 +53,7 @@ const NONCE_SIZE: usize = 12;
 
 /// Poly1305 authentication tag size in bytes.
 const TAG_SIZE: usize = 16;
+const TAG_EXTENSION_ROTATIONS: [u32; TAG_SIZE] = [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7];
 
 /// Maximum symbol payload size to prevent memory exhaustion.
 const MAX_SYMBOL_SIZE: usize = 16384;
@@ -606,6 +607,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
+fn fold_extended_tag_bytes(tag: &mut [u8; TAG_SIZE], extra_bytes: &[u8]) {
+    for (offset, &byte) in extra_bytes.iter().take(TAG_SIZE).enumerate() {
+        let rotated = byte.rotate_left(TAG_EXTENSION_ROTATIONS[offset]);
+        tag[offset] ^= rotated;
+    }
+}
+
 /// Test envelope decryption with various keys.
 fn test_envelope_decryption(envelope: &AeadEnvelope, key: &AuthKey) {
     // Test decryption with correct key
@@ -699,9 +707,9 @@ fn test_tag_boundary_conditions(envelope: &AeadEnvelope, modification: TagModifi
         }
 
         TagModification::ExtendTag(extra_bytes) => {
-            // In a real implementation, extended tags would be rejected during parsing
-            // For testing, we just ensure the extra bytes don't cause issues
-            let _ = extra_bytes.len();
+            // The mock envelope stores a fixed-size tag, so fold generated
+            // extension bytes into that tag instead of silently discarding them.
+            fold_extended_tag_bytes(&mut modified_envelope.tag, &extra_bytes);
         }
     }
 
