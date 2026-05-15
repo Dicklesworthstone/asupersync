@@ -362,13 +362,32 @@ fn mismatched_params(values: Vec<BindValueInput>, expected: usize) -> Vec<Sqlite
 
     if params.len() == expected {
         if expected > 0 {
-            let _ = params.pop();
+            remove_one_param_for_count_mismatch(&mut params, expected);
         } else {
             params.push(SqliteValue::Null);
         }
     }
 
     params
+}
+
+fn remove_one_param_for_count_mismatch(params: &mut Vec<SqliteValue>, expected: usize) {
+    let before_len = params.len();
+    assert_eq!(
+        before_len, expected,
+        "count-mismatch setup should only remove a parameter from an exactly aligned input"
+    );
+
+    let removed = params.pop();
+    assert!(
+        removed.is_some(),
+        "count-mismatch setup should remove one existing parameter"
+    );
+    assert_eq!(
+        params.len(),
+        before_len - 1,
+        "count-mismatch setup should remove exactly one parameter"
+    );
 }
 
 async fn run_scenario(scenario: Scenario) {
