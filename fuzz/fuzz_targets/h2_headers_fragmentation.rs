@@ -1,6 +1,12 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::connection::Connection;
+use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{ContinuationFrame, Frame, HeadersFrame, SettingsFrame};
+use asupersync::http::h2::settings::Settings;
+use asupersync::http::h2::{Header, HpackEncoder};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -77,6 +83,8 @@ const PRIORITY_FLAG: u8 = 0x20;
 
 // HTTP/2 constants
 const MAX_FRAME_SIZE: usize = 16384; // Default max frame size
+const LIVE_CONTINUATION_SEQUENCE_ERROR: &str =
+    "CONTINUATION without preceding HEADERS/PUSH_PROMISE (RFC 9113 §6.10)";
 
 fn assert_visible_protocol_error_context(context: &str, error_msg: &str) {
     assert!(
@@ -319,6 +327,8 @@ fn test_unexpected_continuation(test_case: &HeadersFragmentationTestCase) {
     if let FragmentationScenario::UnexpectedContinuation { continuation_count } =
         &test_case.fragmentation_scenario
     {
+        assert_live_unsolicited_continuation_after_complete_headers();
+
         // Create complete HEADERS frame with END_HEADERS flag
         let mut headers_frame = test_case.headers_frame.clone();
         headers_frame.frame_type = HEADERS_FRAME_TYPE;
@@ -457,6 +467,8 @@ fn test_orphaned_continuation(test_case: &HeadersFragmentationTestCase) {
     if let FragmentationScenario::OrphanedContinuation { continuation_flags } =
         &test_case.fragmentation_scenario
     {
+        assert_live_orphaned_continuation();
+
         // Create CONTINUATION frame without any preceding HEADERS frame
         let continuation_frame = FuzzedFrame {
             frame_type: CONTINUATION_FRAME_TYPE,
@@ -838,6 +850,82 @@ fn assert_known_stream_state(context: &str, stream_state: &StreamState) {
     assert!(
         STREAM_STATE_DOMAIN.contains(stream_state),
         "{context}: stream state should stay in the mock H2 domain"
+    );
+}
+
+fn assert_live_orphaned_continuation() {
+    let mut connection = open_live_server_connection();
+    let error = connection
+        .process_frame(Frame::Continuation(ContinuationFrame {
+            stream_id: 1,
+            header_block: Bytes::new(),
+            end_headers: true,
+        }))
+        .expect_err("live orphaned CONTINUATION must be rejected");
+    assert_live_continuation_sequence_error("live orphaned CONTINUATION", &error);
+}
+
+fn assert_live_unsolicited_continuation_after_complete_headers() {
+    let mut connection = open_live_server_connection();
+    connection
+        .process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            encoded_live_request_headers(),
+            false,
+            true,
+        )))
+        .expect("live setup HEADERS should complete");
+    assert!(
+        !connection.is_awaiting_continuation(),
+        "live setup HEADERS with END_HEADERS should not await CONTINUATION"
+    );
+
+    let error = connection
+        .process_frame(Frame::Continuation(ContinuationFrame {
+            stream_id: 1,
+            header_block: Bytes::new(),
+            end_headers: true,
+        }))
+        .expect_err("live unsolicited CONTINUATION must be rejected");
+    assert_live_continuation_sequence_error("live unsolicited CONTINUATION", &error);
+}
+
+fn open_live_server_connection() -> Connection {
+    let mut connection = Connection::server(Settings::default());
+    connection
+        .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+        .expect("empty SETTINGS should open live server connection");
+    connection
+}
+
+fn encoded_live_request_headers() -> Bytes {
+    let mut encoder = HpackEncoder::new();
+    let mut block = BytesMut::new();
+    encoder.encode(
+        &[
+            Header::new(":method", "GET"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.test"),
+            Header::new(":path", "/"),
+        ],
+        &mut block,
+    );
+    block.freeze()
+}
+
+fn assert_live_continuation_sequence_error(context: &str, error: &H2Error) {
+    assert_eq!(
+        error.code,
+        ErrorCode::ProtocolError,
+        "{context}: live CONTINUATION sequencing should be PROTOCOL_ERROR"
+    );
+    assert_eq!(
+        error.stream_id, None,
+        "{context}: live CONTINUATION sequencing must be connection-level"
+    );
+    assert_eq!(
+        error.message, LIVE_CONTINUATION_SEQUENCE_ERROR,
+        "{context}: live CONTINUATION sequencing diagnostic changed"
     );
 }
 
