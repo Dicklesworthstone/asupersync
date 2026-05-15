@@ -105,10 +105,11 @@ fuzz_target!(|data: &[u8]| {
         Ok(case) => case,
         Err(_) => return, // Invalid input for generating test case
     };
-    observe_generated_knobs(&test_case);
-
     // Test scenario 1: Basic Connection: close handling
     test_basic_connection_close(&test_case);
+
+    // Test scenario 1b: generated connection reuse policy before close
+    test_connection_reuse_until_close(&test_case);
 
     // Test scenario 2: Connection close with multiple requests
     test_connection_close_with_multiple_requests(&test_case);
@@ -131,35 +132,15 @@ fuzz_target!(|data: &[u8]| {
     // Test scenario 8: Malformed Connection headers
     test_malformed_connection_headers(&test_case);
 
+    // Test scenario 8b: generated invalid directive bytes still parse predictably
+    test_generated_invalid_directives(&test_case);
+
     // Test scenario 9: Connection close with different HTTP methods
     test_connection_close_with_methods(&test_case);
 
     // Test scenario 10: Final response handling
     test_final_response_handling(&test_case);
 });
-
-fn observe_generated_knobs(test_case: &ConnectionCloseTestCase) {
-    let _ = test_case.server_behavior.test_connection_reuse;
-    let malformed = &test_case.malformed_scenarios;
-    let _ = (
-        malformed.invalid_header_syntax,
-        malformed.non_ascii_values,
-        malformed.extremely_long_values,
-        malformed.null_bytes_in_headers,
-        malformed.missing_colon,
-        malformed.empty_header_name,
-    );
-
-    for header in &test_case.connection_headers {
-        let _ = (&header.value, header.multiple_values);
-    }
-
-    for request in &test_case.requests {
-        if let ConnectionDirective::Invalid(value) = &request.connection_directive {
-            let _ = value.len();
-        }
-    }
-}
 
 /// Test basic Connection: close header handling
 fn test_basic_connection_close(test_case: &ConnectionCloseTestCase) {
@@ -284,13 +265,69 @@ fn test_connection_close_with_multiple_requests(test_case: &ConnectionCloseTestC
     }
 }
 
+/// Test generated connection reuse state before Connection: close
+fn test_connection_reuse_until_close(test_case: &ConnectionCloseTestCase) {
+    if !test_case.server_behavior.test_connection_reuse {
+        return;
+    }
+
+    let mut http_server = create_http_server();
+
+    let keep_alive_request = HttpRequest {
+        method: HttpMethod::Get,
+        uri: "/reuse".to_string(),
+        headers: vec![("Connection".to_string(), "keep-alive".to_string())],
+        body: Vec::new(),
+        connection_directive: ConnectionDirective::KeepAlive,
+    };
+
+    let keep_alive_http_request =
+        format_http_request(&keep_alive_request, &keep_alive_request.headers);
+    let keep_alive_response = http_server
+        .handle_request(&keep_alive_http_request)
+        .expect("valid keep-alive request should be accepted");
+
+    assert!(
+        !keep_alive_response.should_close_connection,
+        "Keep-alive response should leave the connection reusable"
+    );
+    assert!(
+        http_server.accepts_new_requests(),
+        "Server should accept a follow-up request before Connection: close"
+    );
+
+    let close_request = HttpRequest {
+        method: HttpMethod::Get,
+        uri: "/reuse-close".to_string(),
+        headers: vec![("Connection".to_string(), "close".to_string())],
+        body: Vec::new(),
+        connection_directive: ConnectionDirective::Close,
+    };
+
+    let close_http_request = format_http_request(&close_request, &close_request.headers);
+    let close_response = http_server
+        .handle_request(&close_http_request)
+        .expect("valid close request should be accepted");
+
+    assert!(
+        close_response.should_close_connection,
+        "Connection: close should end a previously reusable connection"
+    );
+    assert!(
+        !http_server.accepts_new_requests(),
+        "Server should stop accepting requests after Connection: close"
+    );
+}
+
 /// Test Connection header case sensitivity variations
 fn test_connection_header_case_variants(test_case: &ConnectionCloseTestCase) {
     for connection_header in &test_case.connection_headers {
         let mut http_server = create_http_server();
 
         let header_name = format_header_name("Connection", &connection_header.case_variant);
-        let header_value = format_header_value("close", &connection_header.whitespace_pattern);
+        let generated_value = generated_connection_close_value(connection_header);
+        let header_value =
+            format_header_value(&generated_value, &connection_header.whitespace_pattern);
 
         let request = HttpRequest {
             method: HttpMethod::Get,
@@ -541,19 +578,43 @@ fn test_server_state_after_close(test_case: &ConnectionCloseTestCase) {
 }
 
 /// Test malformed Connection headers
-fn test_malformed_connection_headers(_test_case: &ConnectionCloseTestCase) {
+fn test_malformed_connection_headers(test_case: &ConnectionCloseTestCase) {
+    let malformed = &test_case.malformed_scenarios;
     let long_value = " ".repeat(10000);
-    let malformed_headers = vec![
-        // Invalid syntax patterns
-        ("Connection", ""),                        // Empty value
-        ("Connection", "close\x00null"),           // Null byte
-        ("Connection", "close\r\nInjection: bad"), // Header injection
-        ("Connection", long_value.as_str()),       // Extremely long value
-        ("Connection", "clóse"),                   // Non-ASCII
-        ("", "close"),                             // Empty header name
-        ("Connection\x00", "close"),               // Null in header name
-        ("Connection\r\n", "close"),               // CRLF in header name
-    ];
+    let mut malformed_headers = Vec::new();
+
+    if malformed.invalid_header_syntax {
+        malformed_headers.push(("Connection", ""));
+        malformed_headers.push(("Connection", "close\r\nInjection: bad"));
+    }
+
+    if malformed.null_bytes_in_headers {
+        malformed_headers.push(("Connection", "close\x00null"));
+        malformed_headers.push(("Connection\x00", "close"));
+    }
+
+    if malformed.missing_colon {
+        assert_malformed_raw_request(
+            "GET /test HTTP/1.1\r\nConnection close\r\n\r\n",
+            "missing colon",
+        );
+    }
+
+    if malformed.extremely_long_values {
+        malformed_headers.push(("Connection", long_value.as_str()));
+    }
+
+    if malformed.non_ascii_values {
+        malformed_headers.push(("Connection", "clóse"));
+    }
+
+    if malformed.empty_header_name {
+        malformed_headers.push(("", "close"));
+    }
+
+    if malformed_headers.is_empty() {
+        return;
+    }
 
     for (header_name, header_value) in malformed_headers {
         let mut http_server = create_http_server();
@@ -590,6 +651,56 @@ fn test_malformed_connection_headers(_test_case: &ConnectionCloseTestCase) {
                     header_name,
                     header_value
                 );
+            }
+        }
+    }
+}
+
+fn assert_malformed_raw_request(raw_request: &str, context: &str) {
+    let mut http_server = create_http_server();
+    let result = http_server.handle_request(raw_request);
+
+    match result {
+        Ok(response) => assert!(
+            !response.should_close_connection,
+            "Malformed raw request should not be interpreted as Connection: close for {context}"
+        ),
+        Err(error_msg) => {
+            let lower_error = error_msg.to_ascii_lowercase();
+            assert!(
+                lower_error.contains("invalid")
+                    || lower_error.contains("malformed")
+                    || lower_error.contains("bad request")
+                    || lower_error.contains("400"),
+                "Malformed raw request should be properly rejected for {context}: {error_msg}"
+            );
+        }
+    }
+}
+
+fn test_generated_invalid_directives(test_case: &ConnectionCloseTestCase) {
+    for request in &test_case.requests {
+        if let ConnectionDirective::Invalid(value) = &request.connection_directive {
+            let generated_request = HttpRequest {
+                method: HttpMethod::Get,
+                uri: "/generated-invalid".to_string(),
+                headers: vec![("Connection".to_string(), value.clone())],
+                body: Vec::new(),
+                connection_directive: ConnectionDirective::Invalid(value.clone()),
+            };
+
+            let raw_request = format_http_request(&generated_request, &generated_request.headers);
+            match parse_http_request(&raw_request) {
+                Ok((_, headers, _)) => assert!(
+                    headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("connection")),
+                    "Generated invalid directive request lost its Connection header"
+                ),
+                Err(error_msg) => assert!(
+                    !error_msg.is_empty(),
+                    "Generated invalid directive produced an empty parse error"
+                ),
             }
         }
     }
@@ -940,6 +1051,32 @@ fn format_header_value(value: &str, whitespace_pattern: &WhitespacePattern) -> S
         WhitespacePattern::NoSpaces => value.replace(" ", ""),
         WhitespacePattern::Tabs => format!("\t{}\t", value),
         WhitespacePattern::Mixed => format!(" \t {} \t ", value),
+    }
+}
+
+fn generated_connection_close_value(header: &ConnectionHeader) -> String {
+    let sanitized: String = header
+        .value
+        .chars()
+        .filter(|ch| !matches!(ch, '\0' | '\r' | '\n'))
+        .take(64)
+        .collect();
+
+    let base = if sanitized
+        .split(',')
+        .any(|directive| directive.trim().eq_ignore_ascii_case("close"))
+    {
+        sanitized
+    } else if sanitized.trim().is_empty() {
+        "close".to_string()
+    } else {
+        format!("{sanitized}, close")
+    };
+
+    if header.multiple_values {
+        format!("keep-alive, {base}")
+    } else {
+        base
     }
 }
 
