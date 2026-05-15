@@ -83,12 +83,83 @@ fn truncate(s: &str, cap: usize) -> String {
     s[..end].to_string()
 }
 
+fn expected_metadata_key(key: &str) -> Option<String> {
+    let normalized = key.to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    normalized
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+        .then_some(normalized)
+}
+
+fn expected_ascii_value(value: &str) -> String {
+    value
+        .bytes()
+        .filter(|byte| (0x20..=0x7E).contains(byte))
+        .map(char::from)
+        .collect()
+}
+
+fn assert_metadata_insert_observation(
+    metadata: &Metadata,
+    before_len: usize,
+    key: &str,
+    value: &str,
+    inserted: bool,
+) {
+    let after_len = metadata.len();
+    if !inserted {
+        assert_eq!(
+            after_len,
+            before_len,
+            "Metadata::insert rejected an entry but mutated metadata: \
+             raw_key_len={}, before_len={before_len}, after_len={after_len}",
+            key.len(),
+        );
+        assert!(
+            expected_metadata_key(key).is_none(),
+            "Metadata::insert rejected a locally valid metadata key: raw_key={key:?}",
+        );
+        return;
+    }
+
+    assert_eq!(
+        after_len,
+        before_len + 1,
+        "Metadata::insert accepted an entry without appending exactly one entry: \
+         raw_key_len={}, before_len={before_len}, after_len={after_len}",
+        key.len(),
+    );
+    let expected_key = expected_metadata_key(key).expect("accepted metadata key must normalize");
+    let expected_value = expected_ascii_value(value);
+    let (stored_key, stored_value) = metadata
+        .iter()
+        .last()
+        .expect("accepted metadata entry must be observable");
+    assert_eq!(
+        stored_key, expected_key,
+        "accepted key normalization drifted"
+    );
+    match stored_value {
+        MetadataValue::Ascii(stored) => assert_eq!(
+            stored, &expected_value,
+            "accepted metadata value was not sanitized as documented",
+        ),
+        MetadataValue::Binary(_) => panic!("Metadata::insert stored an ASCII value as binary"),
+    }
+}
+
 fn build_request(spec: &CallSpec) -> Request<Bytes> {
     let mut metadata = Metadata::new();
     for (key, value) in &spec.headers {
         let key = truncate(key, MAX_KV_LEN);
         let value = truncate(value, MAX_KV_LEN);
-        let _ = metadata.insert(key, value);
+        let before_len = metadata.len();
+        let inserted = metadata.insert(key.as_str(), value.as_str());
+        assert_metadata_insert_observation(&metadata, before_len, &key, &value, inserted);
     }
     Request::with_metadata(Bytes::new(), metadata)
 }
