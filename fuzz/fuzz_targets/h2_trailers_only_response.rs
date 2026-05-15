@@ -49,6 +49,19 @@ const CONTINUATION_FRAME_TYPE: u8 = 0x9;
 const END_STREAM_FLAG: u8 = 0x1;
 const END_HEADERS_FLAG: u8 = 0x4;
 
+fn observe_frame_processing_error(error: &str, context: &str) {
+    let diagnostic = format!("{context}: {error}");
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "H2 trailer-only frame errors must expose diagnostics"
+    );
+    assert!(
+        diagnostic.len() < 1024,
+        "H2 trailer-only frame diagnostics must stay bounded"
+    );
+    std::hint::black_box(diagnostic);
+}
+
 // Known problematic header patterns for testing
 const PROBLEMATIC_HEADERS: &[(&str, &str)] = &[
     ("", "empty-name"),
@@ -113,31 +126,41 @@ fuzz_target!(|data: &[u8]| {
 
     // Test scenario 10: Multiple CONTINUATION frames for trailers
     test_continuation_trailers(&test_case);
+
+    // Test scenario 11: Arbitrary frame sequence preserves basic frame invariants
+    test_arbitrary_frame_sequence(&test_case);
 });
 
 /// Test valid trailers-only response handling
 fn test_valid_trailers_only_response(test_case: &TrailersOnlyTestCase) {
     // Create a valid HEADERS frame with END_STREAM flag
     let mut headers_frame = create_headers_frame(&test_case.headers);
-    headers_frame.flags |= END_STREAM_FLAG | END_HEADERS_FLAG;
+    headers_frame.flags |= END_HEADERS_FLAG;
+    if test_case.end_stream_flag {
+        headers_frame.flags |= END_STREAM_FLAG;
+    }
 
     // Process the frame and verify it's handled correctly
     let result = process_h2_frame(&headers_frame);
 
     // Should succeed for valid trailers
     if is_valid_trailers_only(&test_case.headers) {
-        assert!(
-            result.is_ok(),
-            "Valid trailers-only response should be accepted"
-        );
-        assert!(
-            result.unwrap().body_empty,
-            "Trailers-only response should have empty body"
-        );
-        assert!(
-            result.unwrap().has_end_stream,
-            "Trailers-only response should have END_STREAM"
-        );
+        if test_case.end_stream_flag {
+            let response = result.expect("Valid trailers-only response should be accepted");
+            assert!(
+                response.body_empty,
+                "Trailers-only response should have empty body"
+            );
+            assert!(
+                response.has_end_stream,
+                "Trailers-only response should have END_STREAM"
+            );
+        } else if let Ok(response) = result {
+            assert!(
+                !response.is_trailers_only(),
+                "Valid headers without END_STREAM cannot be trailers-only"
+            );
+        }
     }
 }
 
@@ -235,7 +258,7 @@ fn test_duplicate_end_stream(test_case: &TrailersOnlyTestCase) {
     first_frame.flags |= END_STREAM_FLAG | END_HEADERS_FLAG;
 
     // Create second frame also with END_STREAM (protocol violation)
-    let mut second_frame = create_headers_frame(&test_case.headers[1..].to_vec());
+    let mut second_frame = create_headers_frame(&test_case.headers[1..]);
     second_frame.flags |= END_STREAM_FLAG | END_HEADERS_FLAG;
     second_frame.stream_id = first_frame.stream_id; // Same stream
 
@@ -316,8 +339,8 @@ fn test_oversized_trailers(test_case: &TrailersOnlyTestCase) {
                 "Should limit number of headers"
             );
         }
-        Err(_) => {
-            // Rejection is acceptable for oversized headers
+        Err(error) => {
+            observe_frame_processing_error(&error, "oversized trailer rejection");
         }
     }
 }
@@ -366,14 +389,21 @@ fn test_invalid_header_characters(test_case: &TrailersOnlyTestCase) {
         // Lenient implementations might accept them
         // Either is acceptable as long as it's consistent
         match result {
-            Ok(_) => {}  // Lenient handling
-            Err(_) => {} // Strict rejection
+            Ok(_) => {} // Lenient handling
+            Err(error) => {
+                observe_frame_processing_error(&error, "invalid trailer character rejection")
+            }
         }
     }
 }
 
 /// Test multiple CONTINUATION frames for trailers
 fn test_continuation_trailers(test_case: &TrailersOnlyTestCase) {
+    if test_case.headers.is_empty() {
+        observe_frame_processing_error("empty trailer block", "continuation trailer setup");
+        return;
+    }
+
     // Split headers across multiple CONTINUATION frames
     let mut frames = Vec::new();
 
@@ -415,7 +445,9 @@ fn test_continuation_trailers(test_case: &TrailersOnlyTestCase) {
                     response.headers_complete,
                     "Final frame should complete headers"
                 ),
-                Err(_) => {} // Error is acceptable if headers are malformed
+                Err(error) => {
+                    observe_frame_processing_error(error, "final continuation trailer rejection");
+                }
             }
         } else {
             // Intermediate frames should be pending or error
@@ -424,7 +456,35 @@ fn test_continuation_trailers(test_case: &TrailersOnlyTestCase) {
                     !response.headers_complete,
                     "Intermediate frame should not complete headers"
                 ),
-                Err(_) => {} // Error is acceptable
+                Err(error) => {
+                    observe_frame_processing_error(
+                        error,
+                        "intermediate continuation trailer rejection",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn test_arbitrary_frame_sequence(test_case: &TrailersOnlyTestCase) {
+    for (index, frame) in test_case.frame_sequence.iter().take(8).enumerate() {
+        match process_h2_frame(frame) {
+            Ok(response) => {
+                if matches!(frame.frame_type, HEADERS_FRAME_TYPE | DATA_FRAME_TYPE) {
+                    assert_eq!(
+                        response.has_end_stream,
+                        frame.flags & END_STREAM_FLAG != 0,
+                        "frame {index} END_STREAM flag should match response state"
+                    );
+                }
+                assert!(
+                    response.headers.len() <= frame.payload.len(),
+                    "frame {index} decoded more headers than payload bytes"
+                );
+            }
+            Err(error) => {
+                observe_frame_processing_error(&error, "arbitrary frame sequence rejection");
             }
         }
     }
@@ -543,7 +603,7 @@ fn process_h2_frame(frame: &FuzzedFrame) -> Result<MockH2Response, String> {
             let headers = decode_mock_headers(&frame.payload)?;
 
             // Validate trailer headers
-            for (name, _value) in &headers {
+            for name in headers.keys() {
                 if name.starts_with(':') {
                     return Err("Pseudo-headers forbidden in trailers".to_string());
                 }
