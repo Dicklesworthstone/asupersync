@@ -31,6 +31,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
+use asupersync::http::h2::ErrorCode;
 use asupersync::http::h2::hpack::{Decoder, Header};
 use libfuzzer_sys::fuzz_target;
 
@@ -161,10 +162,14 @@ fn assert_table_shrink_rejects_stale_index_and_recovers() {
     let err = decoder
         .decode(&mut Bytes::from(evict_then_read))
         .expect_err("stale dynamic-table index must fail after shrink-to-zero");
-    let message = err.to_string();
-    assert!(
-        message.contains("invalid dynamic index"),
-        "unexpected stale-index error: {message}"
+    assert_eq!(
+        err.code,
+        ErrorCode::CompressionError,
+        "stale-index rejection must stay a compression error"
+    );
+    assert_eq!(
+        err.message, "invalid dynamic index",
+        "stale-index error message changed"
     );
     assert_eq!(
         decoder.dynamic_table_size(),
