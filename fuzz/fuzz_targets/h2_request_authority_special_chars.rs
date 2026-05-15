@@ -829,8 +829,29 @@ fuzz_target!(|input: FuzzInput| {
             HeadersParseResult::ProtocolError(_) => {
                 // Expected - invalid pattern correctly rejected
             }
-            _ => {
-                // Other results (incomplete, etc.) are acceptable
+            HeadersParseResult::Valid {
+                authority_result: Some(auth_result),
+                ..
+            } => {
+                panic!(
+                    "invalid authority pattern produced non-valid authority result instead of protocol error: pattern='{}', result={:?}",
+                    invalid_pattern, auth_result
+                );
+            }
+            HeadersParseResult::Valid {
+                authority_result: None,
+                ..
+            } => {
+                panic!(
+                    "invalid authority pattern lost the :authority header: '{}'",
+                    invalid_pattern
+                );
+            }
+            HeadersParseResult::IncompleteFrame => {
+                panic!(
+                    "complete invalid-authority HEADERS frame parsed as incomplete: '{}'",
+                    invalid_pattern
+                );
             }
         }
     }
@@ -885,8 +906,11 @@ fuzz_target!(|input: FuzzInput| {
                     valid_pattern, msg
                 );
             }
-            _ => {
-                // Other results are acceptable (frame issues, etc.)
+            HeadersParseResult::IncompleteFrame => {
+                panic!(
+                    "complete valid-authority HEADERS frame parsed as incomplete: '{}'",
+                    valid_pattern
+                );
             }
         }
     }
