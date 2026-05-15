@@ -498,6 +498,19 @@ enum HeaderBlockResult {
     Error(String),
 }
 
+fn observe_table_update_error(error: &str, context: &str) {
+    let diagnostic = format!("{context}: {error}");
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "HPACK table-size update errors must expose diagnostics"
+    );
+    assert!(
+        diagnostic.len() < 1024,
+        "HPACK table-size update diagnostics must stay bounded"
+    );
+    std::hint::black_box(diagnostic);
+}
+
 #[derive(Debug, Clone)]
 struct TableState {
     size_limit: u32,
@@ -519,7 +532,8 @@ fuzz_target!(|input: HpackTableInput| {
 
     // Set initial table size
     let initial_update = decoder.update_table_size(input.initial_table_size);
-    if let TableUpdateResult::Error(_) = initial_update {
+    if let TableUpdateResult::Error(error) = initial_update {
+        observe_table_update_error(&error, "initial table-size update rejection");
         return; // Invalid initial config
     }
 
@@ -567,8 +581,8 @@ fuzz_target!(|input: HpackTableInput| {
             );
         }
 
-        TableUpdateResult::Error(_) => {
-            // Errors are acceptable for invalid sizes
+        TableUpdateResult::Error(error) => {
+            observe_table_update_error(&error, "zero table-size update rejection");
         }
     }
 
