@@ -51262,20 +51262,20 @@ mod otlp_122_tests {
                     // Missing messaging.aws_sqs.queue_url - should be invalid
                 ],
                 should_be_valid: false,
-                expected_queue_url: "".to_string(),
+                expected_queue_url: String::new(),
             },
             AwsSqsConsumerScenario {
                 description: "aws_sqs_consumer_empty_queue_url".to_string(),
                 span_kind: SpanKind::Consumer,
                 messaging_system: "aws_sqs".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("".to_string())), // Empty queue URL
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue(String::new())), // Empty queue URL
                     ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
                     ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
                     ("messaging.operation".to_string(), AnyValue::StringValue("poll".to_string())),
                 ],
                 should_be_valid: false,
-                expected_queue_url: "".to_string(),
+                expected_queue_url: String::new(),
             },
             AwsSqsConsumerScenario {
                 description: "aws_sqs_consumer_wrong_attribute_type".to_string(),
@@ -51288,7 +51288,7 @@ mod otlp_122_tests {
                     ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
                 ],
                 should_be_valid: false,
-                expected_queue_url: "".to_string(),
+                expected_queue_url: String::new(),
             },
             AwsSqsConsumerScenario {
                 description: "aws_sqs_producer_span_exempt".to_string(),
@@ -51301,7 +51301,7 @@ mod otlp_122_tests {
                     // Producer spans are exempt from consumer queue URL requirement
                 ],
                 should_be_valid: true, // Producer spans don't need consumer queue URL
-                expected_queue_url: "".to_string(),
+                expected_queue_url: String::new(),
             },
             AwsSqsConsumerScenario {
                 description: "non_aws_sqs_messaging_system_exempt".to_string(),
@@ -51314,7 +51314,7 @@ mod otlp_122_tests {
                     // Non-AWS SQS systems exempt from queue URL requirement
                 ],
                 should_be_valid: true,
-                expected_queue_url: "".to_string(),
+                expected_queue_url: String::new(),
             },
             AwsSqsConsumerScenario {
                 description: "case_sensitive_messaging_system_check".to_string(),
@@ -51327,7 +51327,7 @@ mod otlp_122_tests {
                     // Case-sensitive check - "Aws_Sqs" != "aws_sqs"
                 ],
                 should_be_valid: true, // Not exact "aws_sqs" so exempt
-                expected_queue_url: "".to_string(),
+                expected_queue_url: String::new(),
             },
             AwsSqsConsumerScenario {
                 description: "aws_sqs_consumer_with_dlq_attributes".to_string(),
