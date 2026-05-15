@@ -265,7 +265,7 @@ fn fuzz_stream_info(spec: StreamInfoSpec) {
             assert_eq!(info.state.consumer_count, spec.consumer_count);
         }
         StreamInfoMode::MissingName => match fuzz_parse_stream_info(payload.as_bytes()) {
-            Err(JsError::ParseError(msg)) => assert!(msg.contains("missing stream name"), "{msg}"),
+            Err(JsError::ParseError(msg)) => assert_eq!(msg, "missing stream name"),
             other => panic!("expected missing-name parse error, got {other:?}"),
         },
         StreamInfoMode::ErrorApi => match fuzz_parse_stream_info(payload.as_bytes()) {
@@ -336,14 +336,14 @@ fn fuzz_pub_ack(spec: PubAckSpec) {
         }
         PubAckMode::MissingStream => match fuzz_parse_pub_ack(payload.as_bytes()) {
             Err(JsError::ParseError(msg)) => {
-                assert!(msg.contains("missing stream in PubAck"), "{msg}")
+                assert_eq!(msg, "missing stream in PubAck")
             }
             other => panic!("expected missing-stream parse error, got {other:?}"),
         },
         PubAckMode::MissingSeq | PubAckMode::OversizedSeq => {
             match fuzz_parse_pub_ack(payload.as_bytes()) {
                 Err(JsError::ParseError(msg)) => {
-                    assert!(msg.contains("missing seq in PubAck"), "{msg}")
+                    assert_eq!(msg, "missing seq in PubAck")
                 }
                 other => panic!("expected missing-seq parse error, got {other:?}"),
             }
