@@ -138,9 +138,17 @@ fn assert_known_eof_outcomes() {
     let mut incomplete = BytesMut::from(&[0, 0, 0, 3, b'a', b'b'][..]);
     let mut incomplete_codec = LengthDelimitedCodec::new();
     let incomplete_result = incomplete_codec.decode_eof(&mut incomplete);
-    assert!(
-        matches!(&incomplete_result, Err(e) if e.kind() == ErrorKind::UnexpectedEof),
-        "incomplete EOF must surface UnexpectedEof; got {incomplete_result:?}"
+    let incomplete_error =
+        incomplete_result.expect_err("incomplete EOF must surface UnexpectedEof");
+    assert_eq!(
+        incomplete_error.kind(),
+        ErrorKind::UnexpectedEof,
+        "incomplete EOF must use UnexpectedEof"
+    );
+    assert_eq!(
+        incomplete_error.to_string(),
+        "incomplete frame at EOF",
+        "incomplete EOF must preserve the exact diagnostic"
     );
     assert_eq!(
         incomplete.as_ref(),
@@ -153,9 +161,16 @@ fn assert_known_eof_outcomes() {
         .max_frame_length(2)
         .new_codec();
     let over_cap_result = over_cap_codec.decode_eof(&mut over_cap);
-    assert!(
-        matches!(&over_cap_result, Err(e) if e.kind() == ErrorKind::InvalidData),
-        "over-cap EOF must surface InvalidData; got {over_cap_result:?}"
+    let over_cap_error = over_cap_result.expect_err("over-cap EOF must surface InvalidData");
+    assert_eq!(
+        over_cap_error.kind(),
+        ErrorKind::InvalidData,
+        "over-cap EOF must use InvalidData"
+    );
+    assert_eq!(
+        over_cap_error.to_string(),
+        "frame length exceeds max_frame_length",
+        "over-cap EOF must preserve the exact diagnostic"
     );
     assert_eq!(
         over_cap.as_ref(),
