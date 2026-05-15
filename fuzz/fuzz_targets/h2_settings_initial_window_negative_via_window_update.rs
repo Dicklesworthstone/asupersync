@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 //! Fuzz target for HTTP/2 flow control with negative windows via INITIAL_WINDOW_SIZE changes
 //!
@@ -194,7 +195,10 @@ impl MockNegativeWindowConnection {
             return Err(H2Error::ProtocolError);
         }
 
-        self.log_operation(Operation::WindowUpdate { stream_id, increment });
+        self.log_operation(Operation::WindowUpdate {
+            stream_id,
+            increment,
+        });
 
         if stream_id == 0 {
             // Connection-level window update
@@ -242,7 +246,10 @@ impl MockNegativeWindowConnection {
     fn handle_data_frame(&mut self, stream_id: u32, data_length: u32) -> Result<(), H2Error> {
         self.stats.data_frames += 1;
 
-        self.log_operation(Operation::DataFrame { stream_id, bytes: data_length });
+        self.log_operation(Operation::DataFrame {
+            stream_id,
+            bytes: data_length,
+        });
 
         // Check connection-level window
         if self.connection_window < data_length as i64 {
@@ -306,7 +313,7 @@ impl MockNegativeWindowConnection {
                     new_window: initial_window_size as i64,
                     reason: WindowChangeReason::InitialWindowSizeChange {
                         old_size: 0,
-                        new_size: initial_window_size
+                        new_size: initial_window_size,
                     },
                 }],
             };
@@ -322,7 +329,9 @@ impl MockNegativeWindowConnection {
         let op = FlowControlOperation {
             id: self.operation_history.len() as u32,
             operation,
-            timestamp: self.stats.settings_frames + self.stats.window_update_frames + self.stats.data_frames,
+            timestamp: self.stats.settings_frames
+                + self.stats.window_update_frames
+                + self.stats.data_frames,
         };
         self.operation_history.push(op);
     }
@@ -374,8 +383,10 @@ impl MockNegativeWindowConnection {
         for stream in self.streams.values() {
             // Check if blocked status matches window state
             if stream.blocked && stream.window > 0 {
-                violations.push(format!("Stream {} blocked but has positive window {}",
-                                      stream.stream_id, stream.window));
+                violations.push(format!(
+                    "Stream {} blocked but has positive window {}",
+                    stream.stream_id, stream.window
+                ));
             }
 
             // Check window history consistency
@@ -383,8 +394,10 @@ impl MockNegativeWindowConnection {
                 if i > 0 {
                     let prev_change = &stream.window_history[i - 1];
                     if prev_change.new_window != change.old_window {
-                        violations.push(format!("Stream {} window history inconsistent at index {}",
-                                              stream.stream_id, i));
+                        violations.push(format!(
+                            "Stream {} window history inconsistent at index {}",
+                            stream.stream_id, i
+                        ));
                     }
                 }
             }
@@ -465,6 +478,98 @@ enum FlowControlOp {
     CreateStream { stream_id: u32 },
 }
 
+fn observe_handle_settings_initial_window_size(
+    connection: &mut MockNegativeWindowConnection,
+    new_size: u32,
+    context: &str,
+) {
+    let result = connection.handle_settings_initial_window_size(new_size);
+    assert!(
+        result.is_ok(),
+        "{context}: valid INITIAL_WINDOW_SIZE update failed: {result:?}"
+    );
+    assert_eq!(
+        connection.initial_window_size, new_size,
+        "{context}: INITIAL_WINDOW_SIZE was not applied"
+    );
+}
+
+fn observe_handle_window_update(
+    connection: &mut MockNegativeWindowConnection,
+    stream_id: u32,
+    increment: u32,
+    context: &str,
+) {
+    let overflow_violations_before = connection
+        .violations
+        .iter()
+        .filter(|violation| matches!(violation, ViolationType::WindowOverflow))
+        .count();
+    let result = connection.handle_window_update(stream_id, increment);
+    match result {
+        Ok(()) => {}
+        Err(H2Error::FlowControlError) => {
+            let overflow_violations_after = connection
+                .violations
+                .iter()
+                .filter(|violation| matches!(violation, ViolationType::WindowOverflow))
+                .count();
+            assert!(
+                overflow_violations_after > overflow_violations_before,
+                "{context}: WINDOW_UPDATE flow-control failure did not record overflow"
+            );
+        }
+        Err(H2Error::ProtocolError) => {
+            panic!("{context}: sanitized WINDOW_UPDATE was rejected as a protocol error");
+        }
+    }
+}
+
+fn observe_handle_data_frame(
+    connection: &mut MockNegativeWindowConnection,
+    stream_id: u32,
+    bytes: u32,
+    context: &str,
+) {
+    let blocked_before = connection.stats.blocked_transmissions;
+    let result = connection.handle_data_frame(stream_id, bytes);
+    match result {
+        Ok(()) => {
+            assert!(
+                connection.streams.contains_key(&stream_id),
+                "{context}: DATA succeeded without materializing stream state"
+            );
+        }
+        Err(H2Error::FlowControlError) => {
+            assert!(
+                connection.stats.blocked_transmissions > blocked_before,
+                "{context}: DATA flow-control failure did not update blocked count"
+            );
+        }
+        Err(H2Error::ProtocolError) => {
+            panic!("{context}: DATA frame returned an unexpected protocol error");
+        }
+    }
+}
+
+fn observe_get_or_create_stream(
+    connection: &mut MockNegativeWindowConnection,
+    stream_id: u32,
+    context: &str,
+) {
+    {
+        let stream = connection.get_or_create_stream(stream_id);
+        assert_eq!(
+            stream.stream_id, stream_id,
+            "{context}: stream state preserved the wrong id"
+        );
+    }
+    assert!(
+        connection.streams.contains_key(&stream_id),
+        "{context}: get_or_create_stream did not insert the stream"
+    );
+}
+
 fuzz_target!(|input: FuzzInput| {
     // Limit input size to prevent excessive resource usage
     if input.operations.len() > 50 {
@@ -475,34 +580,59 @@ fuzz_target!(|input: FuzzInput| {
 
     // Set initial window size (with bounds checking)
     let safe_initial_size = input.initial_window_size.min(0x7FFFFFFF);
-    let _ = connection.handle_settings_initial_window_size(safe_initial_size);
+    observe_handle_settings_initial_window_size(
+        &mut connection,
+        safe_initial_size,
+        "initial fuzz setup",
+    );
 
     // Process operations
     for operation in input.operations {
         match operation {
             FlowControlOp::ChangeInitialWindowSize { new_size } => {
                 let safe_size = new_size.min(0x7FFFFFFF);
-                let _ = connection.handle_settings_initial_window_size(safe_size);
+                observe_handle_settings_initial_window_size(
+                    &mut connection,
+                    safe_size,
+                    "fuzz operation INITIAL_WINDOW_SIZE change",
+                );
             }
 
-            FlowControlOp::WindowUpdate { stream_id, increment } => {
+            FlowControlOp::WindowUpdate {
+                stream_id,
+                increment,
+            } => {
                 // Sanitize inputs
                 let safe_stream_id = (stream_id % 1000) + 1; // Stream IDs 1-1000
-                let safe_increment = increment.min(0x7FFFFFFF).max(1); // Valid increment range
+                let safe_increment = increment.clamp(1, 0x7FFFFFFF); // Valid increment range
 
-                let _ = connection.handle_window_update(safe_stream_id, safe_increment);
+                observe_handle_window_update(
+                    &mut connection,
+                    safe_stream_id,
+                    safe_increment,
+                    "fuzz operation WINDOW_UPDATE",
+                );
             }
 
             FlowControlOp::SendData { stream_id, bytes } => {
                 let safe_stream_id = (stream_id % 1000) + 1;
                 let safe_bytes = bytes.min(1000000); // Max 1MB per frame
 
-                let _ = connection.handle_data_frame(safe_stream_id, safe_bytes);
+                observe_handle_data_frame(
+                    &mut connection,
+                    safe_stream_id,
+                    safe_bytes,
+                    "fuzz operation DATA",
+                );
             }
 
             FlowControlOp::CreateStream { stream_id } => {
                 let safe_stream_id = (stream_id % 1000) + 1;
-                let _ = connection.get_or_create_stream(safe_stream_id);
+                observe_get_or_create_stream(
+                    &mut connection,
+                    safe_stream_id,
+                    "fuzz operation stream creation",
+                );
             }
         }
     }
@@ -512,9 +642,11 @@ fuzz_target!(|input: FuzzInput| {
         let scenario_result = connection.execute_negative_window_scenario();
 
         // Validate the specific scenario worked correctly
-        if scenario_result.step1_success && scenario_result.step2_success &&
-           scenario_result.step3_success && scenario_result.step4_success {
-
+        if scenario_result.step1_success
+            && scenario_result.step2_success
+            && scenario_result.step3_success
+            && scenario_result.step4_success
+        {
             // Expected sequence:
             // Initial: 10000, After WINDOW_UPDATE: 15000, After DATA: 5000, Final: -3000
             assert_eq!(scenario_result.initial_window, 10000);
@@ -529,7 +661,10 @@ fuzz_target!(|input: FuzzInput| {
     // Validate flow control invariants
     let invariant_violations = connection.validate_flow_control_invariants();
     if !invariant_violations.is_empty() {
-        panic!("Flow control invariant violations: {:?}", invariant_violations);
+        panic!(
+            "Flow control invariant violations: {:?}",
+            invariant_violations
+        );
     }
 
     // Check for critical violations
@@ -565,8 +700,11 @@ fuzz_target!(|input: FuzzInput| {
         // Verify streams with negative windows are blocked
         for stream in connection.streams.values() {
             if stream.window < 0 {
-                assert!(stream.blocked, "Stream {} has negative window {} but is not blocked",
-                       stream.stream_id, stream.window);
+                assert!(
+                    stream.blocked,
+                    "Stream {} has negative window {} but is not blocked",
+                    stream.stream_id, stream.window
+                );
             }
         }
     }
@@ -577,27 +715,41 @@ fn test_negative_window_edge_cases(connection: &mut MockNegativeWindowConnection
     let stream_id = 999;
 
     // Test case: Large initial window, then reduce to small value
-    let _ = connection.handle_settings_initial_window_size(1000000);
-    let _ = connection.get_or_create_stream(stream_id);
-    let _ = connection.handle_data_frame(stream_id, 500000);
-    let _ = connection.handle_settings_initial_window_size(100000);
+    observe_handle_settings_initial_window_size(connection, 1000000, "edge case large window");
+    observe_get_or_create_stream(connection, stream_id, "edge case stream creation");
+    observe_handle_data_frame(connection, stream_id, 500000, "edge case large DATA");
+    observe_handle_settings_initial_window_size(connection, 100000, "edge case window reduction");
 
     // Stream should now have window = 500000 - 900000 = -400000
-    if let Some(stream) = connection.get_stream_state(stream_id) {
-        if stream.window < 0 {
-            assert!(stream.blocked, "Stream with negative window should be blocked");
+    if let Some(stream) = connection.get_stream_state(stream_id)
+        && stream.window < 0
+    {
+        assert!(
+            stream.blocked,
+            "Stream with negative window should be blocked"
+        );
 
-            // Try to send more data - should fail
-            let result = connection.handle_data_frame(stream_id, 1);
-            assert!(result.is_err(), "Should not be able to send data on blocked stream");
-        }
+        // Try to send more data - should fail
+        let result = connection.handle_data_frame(stream_id, 1);
+        assert!(
+            result.is_err(),
+            "Should not be able to send data on blocked stream"
+        );
     }
 
     // Test recovery: send WINDOW_UPDATE to make window positive
-    let _ = connection.handle_window_update(stream_id, 500000);
-    if let Some(stream) = connection.get_stream_state(stream_id) {
-        if stream.window > 0 {
-            assert!(!stream.blocked, "Stream with positive window should not be blocked");
-        }
+    observe_handle_window_update(
+        connection,
+        stream_id,
+        500000,
+        "edge case WINDOW_UPDATE recovery",
+    );
+    if let Some(stream) = connection.get_stream_state(stream_id)
+        && stream.window > 0
+    {
+        assert!(
+            !stream.blocked,
+            "Stream with positive window should not be blocked"
+        );
     }
 }
