@@ -123,15 +123,8 @@ impl InvariantChecker {
             );
         }
 
-        // Invariant 4: Key phase bits are well-defined
-        let local_phase = self.machine.local_key_phase();
-        let remote_phase = self.machine.remote_key_phase();
-        assert!(local_phase == true || local_phase == false);
-        assert!(remote_phase == true || remote_phase == false);
-
-        // Invariant 5: Resumption flag is consistent
-        let reported_resumption = self.machine.resumption_enabled();
-        assert!(reported_resumption == true || reported_resumption == false);
+        // Key phase and resumption state are represented by bools; the type
+        // system enforces their domain.
     }
 
     fn into_machine(self) -> QuicTlsMachine {
@@ -142,6 +135,128 @@ impl InvariantChecker {
 /// Operation limits for safety
 const MAX_OPERATIONS: usize = 1000;
 const MAX_KEY_PHASE_VALUES: usize = 100;
+
+fn observe_handshake_keys_available(
+    machine: &mut QuicTlsMachine,
+    expected_level: &mut CryptoLevel,
+    context: &str,
+) {
+    let result = machine.on_handshake_keys_available();
+    match result {
+        Ok(()) => {
+            if *expected_level < CryptoLevel::Handshake {
+                *expected_level = CryptoLevel::Handshake;
+            }
+            assert_eq!(machine.level(), *expected_level, "{context}");
+        }
+        Err(QuicTlsError::InvalidTransition { from, to }) => {
+            assert!(
+                to < from,
+                "{context}: error for non-backwards transition: {from:?} -> {to:?}"
+            );
+        }
+        Err(error) => {
+            panic!("{context}: unexpected error from on_handshake_keys_available: {error:?}");
+        }
+    }
+}
+
+fn observe_1rtt_keys_available(
+    machine: &mut QuicTlsMachine,
+    expected_level: &mut CryptoLevel,
+    context: &str,
+) {
+    let result = machine.on_1rtt_keys_available();
+    match result {
+        Ok(()) => {
+            if *expected_level < CryptoLevel::OneRtt {
+                *expected_level = CryptoLevel::OneRtt;
+            }
+            assert_eq!(machine.level(), *expected_level, "{context}");
+        }
+        Err(QuicTlsError::InvalidTransition { from, to }) => {
+            assert!(
+                to < from,
+                "{context}: error for non-backwards transition: {from:?} -> {to:?}"
+            );
+        }
+        Err(error) => {
+            panic!("{context}: unexpected error from on_1rtt_keys_available: {error:?}");
+        }
+    }
+}
+
+fn observe_peer_key_phase(machine: &mut QuicTlsMachine, phase: bool, context: &str) {
+    let old_remote_phase = machine.remote_key_phase();
+    let was_1rtt_available = machine.can_send_1rtt();
+    let result = machine.on_peer_key_phase(phase);
+
+    match result {
+        Ok(KeyUpdateEvent::NoChange) => {
+            assert!(
+                was_1rtt_available,
+                "{context}: no-change peer key phase before 1-RTT availability"
+            );
+            assert_eq!(
+                old_remote_phase, phase,
+                "{context}: no-change peer key phase did not match old phase"
+            );
+        }
+        Ok(KeyUpdateEvent::RemoteUpdateAccepted {
+            new_phase,
+            generation,
+        }) => {
+            assert_eq!(new_phase, phase, "{context}: accepted wrong peer phase");
+            assert_eq!(
+                machine.remote_key_phase(),
+                phase,
+                "{context}: accepted peer phase was not stored"
+            );
+            assert_ne!(
+                old_remote_phase, phase,
+                "{context}: accepted peer phase did not change"
+            );
+            assert!(generation > 0, "{context}: peer key generation stayed zero");
+            assert!(
+                machine.can_send_1rtt(),
+                "{context}: peer key update accepted but 1-RTT not available"
+            );
+        }
+        Ok(event) => {
+            panic!("{context}: unexpected event from on_peer_key_phase: {event:?}");
+        }
+        Err(QuicTlsError::HandshakeNotConfirmed) => {
+            assert!(
+                !was_1rtt_available,
+                "{context}: handshake-not-confirmed after 1-RTT was available"
+            );
+            assert_eq!(
+                machine.remote_key_phase(),
+                old_remote_phase,
+                "{context}: failed peer phase changed remote state"
+            );
+        }
+        Err(QuicTlsError::StalePeerKeyPhase(stale_phase)) => {
+            assert!(
+                was_1rtt_available,
+                "{context}: stale peer phase before 1-RTT availability"
+            );
+            assert_eq!(stale_phase, phase, "{context}: stale phase mismatch");
+            assert!(
+                old_remote_phase && !phase,
+                "{context}: stale phase should only reject true -> false rollback"
+            );
+            assert_eq!(
+                machine.remote_key_phase(),
+                old_remote_phase,
+                "{context}: stale peer phase changed remote state"
+            );
+        }
+        Err(error) => {
+            panic!("{context}: unexpected error from on_peer_key_phase: {error:?}");
+        }
+    }
+}
 
 fuzz_target!(|input: QuicTlsStateMachineFuzz| {
     // Limit input size to prevent timeouts
@@ -168,50 +283,19 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
     for operation in input.operations.iter().take(MAX_OPERATIONS) {
         match operation {
             QuicTlsOperation::OnHandshakeKeysAvailable => {
-                let result = machine.on_handshake_keys_available();
-                match result {
-                    Ok(()) => {
-                        if expected_level < CryptoLevel::Handshake {
-                            expected_level = CryptoLevel::Handshake;
-                        }
-                        assert_eq!(machine.level(), expected_level);
-                    }
-                    Err(QuicTlsError::InvalidTransition { from, to }) => {
-                        // Backwards transition should fail
-                        assert!(
-                            to < from,
-                            "Error for non-backwards transition: {:?} -> {:?}",
-                            from,
-                            to
-                        );
-                    }
-                    Err(e) => {
-                        panic!("Unexpected error from on_handshake_keys_available: {:?}", e);
-                    }
-                }
+                observe_handshake_keys_available(
+                    &mut machine,
+                    &mut expected_level,
+                    "operation handshake keys available",
+                );
             }
 
             QuicTlsOperation::On1RttKeysAvailable => {
-                let result = machine.on_1rtt_keys_available();
-                match result {
-                    Ok(()) => {
-                        if expected_level < CryptoLevel::OneRtt {
-                            expected_level = CryptoLevel::OneRtt;
-                        }
-                        assert_eq!(machine.level(), expected_level);
-                    }
-                    Err(QuicTlsError::InvalidTransition { from, to }) => {
-                        assert!(
-                            to < from,
-                            "Error for non-backwards transition: {:?} -> {:?}",
-                            from,
-                            to
-                        );
-                    }
-                    Err(e) => {
-                        panic!("Unexpected error from on_1rtt_keys_available: {:?}", e);
-                    }
-                }
+                observe_1rtt_keys_available(
+                    &mut machine,
+                    &mut expected_level,
+                    "operation 1-RTT keys available",
+                );
             }
 
             QuicTlsOperation::OnHandshakeConfirmed => {
@@ -292,39 +376,7 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
             }
 
             QuicTlsOperation::OnPeerKeyPhase(phase) => {
-                let old_remote_phase = machine.remote_key_phase();
-                let result = machine.on_peer_key_phase(*phase);
-
-                match result {
-                    Ok(KeyUpdateEvent::NoChange) => {
-                        // Same phase as before or handshake not confirmed
-                        if machine.can_send_1rtt() {
-                            assert_eq!(old_remote_phase, *phase);
-                        }
-                    }
-                    Ok(KeyUpdateEvent::RemoteUpdateAccepted {
-                        new_phase,
-                        generation,
-                    }) => {
-                        assert_eq!(new_phase, *phase);
-                        assert_eq!(machine.remote_key_phase(), *phase);
-                        assert_ne!(old_remote_phase, *phase);
-                        assert!(generation > 0);
-                        assert!(
-                            machine.can_send_1rtt(),
-                            "Peer key update accepted but 1-RTT not available"
-                        );
-                    }
-                    Ok(event) => {
-                        panic!("Unexpected event from on_peer_key_phase: {:?}", event);
-                    }
-                    Err(QuicTlsError::HandshakeNotConfirmed) => {
-                        assert!(!machine.can_send_1rtt());
-                    }
-                    Err(e) => {
-                        panic!("Unexpected error from on_peer_key_phase: {:?}", e);
-                    }
-                }
+                observe_peer_key_phase(&mut machine, *phase, "operation peer key phase");
             }
 
             QuicTlsOperation::EnableResumption => {
@@ -346,10 +398,18 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
                         // Can't go backwards - this should be tested implicitly
                     }
                     CryptoLevel::Handshake => {
-                        let _ = machine.on_handshake_keys_available();
+                        observe_handshake_keys_available(
+                            &mut machine,
+                            &mut expected_level,
+                            "force-advance handshake helper",
+                        );
                     }
                     CryptoLevel::OneRtt => {
-                        let _ = machine.on_1rtt_keys_available();
+                        observe_1rtt_keys_available(
+                            &mut machine,
+                            &mut expected_level,
+                            "force-advance 1-RTT helper",
+                        );
                     }
                 }
             }
@@ -385,7 +445,7 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
         // Test additional key phase values if available
         if key_phase_index < input.key_phase_values.len() {
             let key_phase = input.key_phase_values[key_phase_index];
-            let _ = machine.on_peer_key_phase(key_phase);
+            observe_peer_key_phase(&mut machine, key_phase, "extra peer key phase value");
             key_phase_index += 1;
         }
 
@@ -442,9 +502,8 @@ fn test_consistency(machine: &QuicTlsMachine) {
         );
     }
 
-    // Consistency check: Key phases are boolean
-    assert!(machine.local_key_phase() == true || machine.local_key_phase() == false);
-    assert!(machine.remote_key_phase() == true || machine.remote_key_phase() == false);
+    // Key phase bits are bool-typed, so the previous state checks cover their
+    // semantic constraints.
 }
 
 /// Test error condition edge cases
