@@ -326,6 +326,30 @@ fn open_required_client_stream(conn: &mut MockH2Connection, stream_id: u32) {
     }
 }
 
+fn observe_invalid_enable_push_probe(conn: &mut MockH2Connection) {
+    let invalid_frame = SettingsFrame {
+        settings: vec![Setting::EnablePush(2)],
+        ack: false,
+    };
+
+    let result = conn.process_settings(&invalid_frame);
+    let Err(error) = result else {
+        panic!("SETTINGS_ENABLE_PUSH=2 should be rejected");
+    };
+
+    if conn.is_client {
+        assert!(
+            error.contains("server MUST NOT send SETTINGS_ENABLE_PUSH"),
+            "client-side invalid ENABLE_PUSH probe should hit the server prohibition, got {error}"
+        );
+    } else {
+        assert!(
+            error.contains("Invalid setting value") && error.contains("EnablePush"),
+            "server-side invalid ENABLE_PUSH probe should hit value validation, got {error}"
+        );
+    }
+}
+
 fuzz_target!(|scenario: EnablePushScenario| {
     // Skip overly complex scenarios to avoid timeouts
     if scenario.actions.len() > 50 {
@@ -366,13 +390,8 @@ fuzz_target!(|scenario: EnablePushScenario| {
 
                 // Test invalid ENABLE_PUSH values if requested
                 if scenario.include_invalid_values {
-                    let invalid_frame = SettingsFrame {
-                        settings: vec![Setting::EnablePush(2)], // Invalid value
-                        ack: false,
-                    };
-                    if conn.process_settings(&invalid_frame).is_err() {
-                        invalid_setting_errors += 1;
-                    }
+                    observe_invalid_enable_push_probe(&mut conn);
+                    invalid_setting_errors += 1;
                 }
 
                 // Process the actual settings frame
