@@ -1,6 +1,11 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::frame::{
+    FrameHeader, FrameType, Setting, SettingsFrame as H2SettingsFrame, settings_flags,
+};
+use asupersync::http::h2::{ErrorCode, H2Error, Settings};
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS unlimited handling testing.
@@ -47,6 +52,14 @@ const SETTINGS_MAX_CONCURRENT_STREAMS: u16 = 3;
 const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 4;
 const SETTINGS_MAX_FRAME_SIZE: u16 = 5;
 const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 6;
+const KNOWN_SETTING_IDS: [u16; 6] = [
+    SETTINGS_HEADER_TABLE_SIZE,
+    SETTINGS_ENABLE_PUSH,
+    SETTINGS_MAX_CONCURRENT_STREAMS,
+    SETTINGS_INITIAL_WINDOW_SIZE,
+    SETTINGS_MAX_FRAME_SIZE,
+    SETTINGS_MAX_HEADER_LIST_SIZE,
+];
 
 /// Practical implementation limits
 const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 1000; // Sensible default cap
@@ -75,7 +88,7 @@ impl MockH2SettingsLimiter {
     /// Process SETTINGS frame and update limits
     fn process_settings_frame(&mut self, frame: &SettingsFrame) -> Result<(), String> {
         // Validate frame structure
-        if frame.stream_id != 0 {
+        if stream_id_for_wire(frame.stream_id) != 0 {
             return Err("PROTOCOL_ERROR: SETTINGS frame stream ID must be 0".into());
         }
 
@@ -202,9 +215,10 @@ fuzz_target!(|data: &[u8]| {
 
     let mut limiter = MockH2SettingsLimiter::new();
     let result = limiter.process_settings_frame(&input.settings_frame);
+    assert_live_settings_behavior(&input.settings_frame);
 
     // Test 1: Frame validation errors
-    if input.settings_frame.stream_id != 0 {
+    if stream_id_for_wire(input.settings_frame.stream_id) != 0 {
         assert!(
             result.is_err(),
             "SETTINGS frame with non-zero stream ID should be rejected"
@@ -350,6 +364,153 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 });
+
+fn assert_live_settings_behavior(frame: &SettingsFrame) {
+    let wire = build_settings_frame_wire(frame);
+    let mut src = BytesMut::from(wire);
+    let header = FrameHeader::parse(&mut src).expect("generated SETTINGS header is complete");
+    let payload = src.freeze();
+    assert_eq!(header.frame_type, FrameType::Settings as u8);
+    assert_eq!(
+        header.length as usize,
+        payload.len(),
+        "generated SETTINGS header length must match payload"
+    );
+
+    let result = H2SettingsFrame::parse(&header, &payload);
+
+    if header.stream_id != 0 {
+        assert_error_code(result, ErrorCode::ProtocolError);
+        return;
+    }
+
+    let ack_flag_set = header.has_flag(settings_flags::ACK);
+    if ack_flag_set && !payload.is_empty() {
+        assert_error_code(result, ErrorCode::FrameSizeError);
+        return;
+    }
+
+    if let Some(code) = first_live_setting_error(&payload) {
+        assert_error_code(result, code);
+        return;
+    }
+
+    let parsed = result.expect("valid SETTINGS frame should parse");
+    assert_eq!(parsed.ack, ack_flag_set);
+    if ack_flag_set {
+        assert!(
+            parsed.settings.is_empty(),
+            "SETTINGS ACK must not expose payload settings"
+        );
+        return;
+    }
+
+    assert_eq!(
+        parsed.settings,
+        expected_known_settings(&payload),
+        "live SETTINGS parser must preserve known settings and ignore unknown IDs"
+    );
+    assert_eq!(
+        parsed.settings.len(),
+        payload.chunks_exact(6).count() - unknown_setting_count(&payload),
+        "live SETTINGS parser must not retain unknown IDs"
+    );
+
+    let mut live_settings = Settings::default();
+    for setting in parsed.settings {
+        live_settings
+            .apply(setting)
+            .expect("settings accepted by parser must apply");
+    }
+
+    let expected_max_concurrent_streams = payload
+        .chunks_exact(6)
+        .filter_map(|chunk| {
+            let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+            let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+            (id == SETTINGS_MAX_CONCURRENT_STREAMS).then_some(value)
+        })
+        .next_back()
+        .unwrap_or_else(|| Settings::default().max_concurrent_streams);
+    assert_eq!(
+        live_settings.max_concurrent_streams, expected_max_concurrent_streams,
+        "live SETTINGS apply must use the last advertised MAX_CONCURRENT_STREAMS or its default"
+    );
+}
+
+fn build_settings_frame_wire(frame: &SettingsFrame) -> Vec<u8> {
+    let payload = build_settings_payload(&frame.settings);
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: FrameType::Settings as u8,
+        flags: frame.flags,
+        stream_id: stream_id_for_wire(frame.stream_id),
+    };
+
+    let mut wire = BytesMut::new();
+    header.write(&mut wire);
+    wire.extend_from_slice(&payload);
+    wire.to_vec()
+}
+
+fn build_settings_payload(settings: &[SettingEntry]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(settings.len() * 6);
+    for setting in settings {
+        payload.extend_from_slice(&setting.id.to_be_bytes());
+        payload.extend_from_slice(&setting.value.to_be_bytes());
+    }
+    payload
+}
+
+fn first_live_setting_error(payload: &Bytes) -> Option<ErrorCode> {
+    for chunk in payload.chunks_exact(6) {
+        let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+        let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+        match id {
+            SETTINGS_ENABLE_PUSH if value > 1 => return Some(ErrorCode::ProtocolError),
+            SETTINGS_INITIAL_WINDOW_SIZE if value > 0x7fff_ffff => {
+                return Some(ErrorCode::FlowControlError);
+            }
+            SETTINGS_MAX_FRAME_SIZE if !(16_384..=16_777_215).contains(&value) => {
+                return Some(ErrorCode::ProtocolError);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn expected_known_settings(payload: &Bytes) -> Vec<Setting> {
+    payload
+        .chunks_exact(6)
+        .filter_map(|chunk| {
+            let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+            let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+            Setting::from_id_value(id, value)
+        })
+        .collect()
+}
+
+fn unknown_setting_count(payload: &Bytes) -> usize {
+    payload
+        .chunks_exact(6)
+        .filter(|chunk| {
+            let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+            !KNOWN_SETTING_IDS.contains(&id)
+        })
+        .count()
+}
+
+fn assert_error_code(result: Result<H2SettingsFrame, H2Error>, expected: ErrorCode) {
+    match result {
+        Ok(frame) => panic!("expected {expected:?}, parsed SETTINGS frame: {frame:?}"),
+        Err(err) => assert_eq!(err.code, expected, "unexpected SETTINGS parse error: {err}"),
+    }
+}
+
+fn stream_id_for_wire(stream_id: u32) -> u32 {
+    stream_id & 0x7fff_ffff
+}
 
 #[cfg(test)]
 mod tests {
