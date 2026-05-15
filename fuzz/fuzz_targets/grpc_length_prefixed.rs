@@ -4,7 +4,8 @@
 //! and malformed frame variants. The key invariants are:
 //! - valid frames roundtrip through `GrpcCodec` without reordering
 //! - partial frames remain pending until the declared payload is complete
-//! - complete invalid compression-flag frames are consumed and rejected
+//! - in-limit invalid compression-flag frames are consumed and rejected
+//! - over-limit invalid compression-flag frames fail closed before consumption
 //! - incomplete invalid compression-flag frames remain buffered
 //! - declared lengths above the configured decode limit fail closed
 
@@ -188,14 +189,27 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
             };
             let payload = truncate_bytes(payload);
             encode_frame(invalid_flag, payload.len(), &payload, &mut buf);
+            let frame_len = buf.len();
 
             let result = observe_framing_decode(&mut codec, &mut buf);
-            assert!(matches!(result, Err(GrpcError::Protocol(_))));
-            assert_eq!(
-                buf.len(),
-                0,
-                "complete invalid compression flag should consume its frame"
-            );
+            if payload.len() > decode_limit {
+                assert!(
+                    matches!(result, Err(GrpcError::MessageTooLarge)),
+                    "over-limit invalid compression flag should fail on length before flag validation"
+                );
+                assert_eq!(
+                    buf.len(),
+                    frame_len,
+                    "over-limit invalid compression flag should remain buffered"
+                );
+            } else {
+                expect_invalid_compression_flag(result, invalid_flag);
+                assert_eq!(
+                    buf.len(),
+                    0,
+                    "complete in-limit invalid compression flag should consume its frame"
+                );
+            }
         }
         MalformedFrame::OversizedLength { compressed, excess } => {
             let declared_len = decode_limit.saturating_add(usize::from(*excess).max(1));
@@ -289,14 +303,20 @@ fn assert_fixed_decode_canaries() {
     let mut complete_invalid = BytesMut::new();
     encode_frame(2, 2, b"no", &mut complete_invalid);
     let mut codec = GrpcCodec::new();
-    assert!(matches!(
-        observe_framing_decode(&mut codec, &mut complete_invalid),
-        Err(GrpcError::Protocol(_))
-    ));
+    expect_invalid_compression_flag(observe_framing_decode(&mut codec, &mut complete_invalid), 2);
     assert!(
         complete_invalid.is_empty(),
         "complete invalid-flag frames should be consumed"
     );
+
+    let mut oversized_invalid = BytesMut::new();
+    encode_frame(2, 3, b"bad", &mut oversized_invalid);
+    let mut codec = GrpcCodec::with_max_size(2);
+    assert!(matches!(
+        observe_framing_decode(&mut codec, &mut oversized_invalid),
+        Err(GrpcError::MessageTooLarge)
+    ));
+    assert_eq!(oversized_invalid.as_ref(), b"\x02\0\0\0\x03bad");
 
     let mut incomplete_invalid_header = BytesMut::from(&[2, 0, 0][..]);
     let mut codec = GrpcCodec::new();
@@ -324,6 +344,26 @@ fn assert_fixed_decode_canaries() {
         Err(GrpcError::MessageTooLarge)
     ));
     assert_eq!(oversized.as_ref(), b"\0\0\0\0\x03");
+}
+
+fn expect_invalid_compression_flag(
+    result: Result<Option<GrpcMessage>, GrpcError>,
+    invalid_flag: u8,
+) {
+    match result {
+        Err(GrpcError::Protocol(message)) => {
+            assert_eq!(
+                message,
+                format!("invalid gRPC compression flag: {invalid_flag}")
+            );
+        }
+        Ok(decoded) => {
+            panic!("expected invalid compression flag Protocol error, got decoded {decoded:?}");
+        }
+        Err(error) => {
+            panic!("expected invalid compression flag Protocol error, got {error:?}");
+        }
+    }
 }
 
 fn encode_frame(flag: u8, declared_len: usize, payload: &[u8], dst: &mut BytesMut) {
