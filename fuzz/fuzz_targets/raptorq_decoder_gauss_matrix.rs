@@ -297,7 +297,9 @@ fn build_repairs(
     (0..count)
         .map(|offset| {
             let esi = start_esi + offset as u32;
-            let (columns, coefficients) = decoder.repair_equation(esi);
+            let (columns, coefficients) = decoder
+                .repair_equation(esi)
+                .expect("generated repair ESI should have an equation");
             let data = encoder.repair_symbol(esi);
             ReceivedSymbol::repair(esi, columns, coefficients, data)
         })
@@ -324,6 +326,31 @@ fn build_mixed_payload(
     payload
 }
 
+fn observe_arity_mismatch_coefficient_drop(symbol: &mut ReceivedSymbol) {
+    let columns_len = symbol.columns.len();
+    let coefficients_len_before = symbol.coefficients.len();
+    assert_eq!(
+        columns_len, coefficients_len_before,
+        "structural arity fault should start from a matched symbol equation"
+    );
+
+    let removed = symbol.coefficients.pop();
+    assert!(
+        removed.is_some(),
+        "ArityMismatch should remove one coefficient from the selected symbol"
+    );
+    assert_eq!(
+        symbol.coefficients.len() + 1,
+        coefficients_len_before,
+        "ArityMismatch should shrink coefficient arity by one"
+    );
+    assert_eq!(
+        columns_len,
+        symbol.coefficients.len() + 1,
+        "ArityMismatch should leave one unmatched column"
+    );
+}
+
 fn mutate_structural_fault(
     decoder: &InactivationDecoder,
     symbol: &mut ReceivedSymbol,
@@ -332,7 +359,7 @@ fn mutate_structural_fault(
 ) {
     match fault {
         StructuralFault::ArityMismatch => {
-            let _ = symbol.coefficients.pop();
+            observe_arity_mismatch_coefficient_drop(symbol);
         }
         StructuralFault::ColumnOutOfRange => {
             symbol.columns[0] = decoder.params().l + usize::from(bad_column) + 1;
