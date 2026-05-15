@@ -51,7 +51,7 @@ struct DefaultSetting {
     id: DefaultSettingId,
 }
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum DefaultSettingId {
     HeaderTableSize,   // 4096
     EnablePush,        // 1
@@ -71,7 +71,7 @@ struct SettingChange {
     new_value: u32,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum SettingId {
     HeaderTableSize,
     EnablePush,
@@ -94,7 +94,7 @@ struct ExtremeSetting {
     extreme_type: ExtremeType,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum ExtremeType {
     /// Minimum valid value
     Minimum,
@@ -515,6 +515,84 @@ impl MockH2SettingsStateMachine {
     }
 }
 
+fn setting_value_is_invalid(id: u16, value: u32) -> bool {
+    match id {
+        2 => value > 1,
+        4 => value > MAX_INITIAL_WINDOW_SIZE,
+        5 => !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&value),
+        _ => false,
+    }
+}
+
+fn frame_contains_setting(frame: &[(u16, u32)], expected_id: u16, expected_value: u32) -> bool {
+    frame
+        .iter()
+        .any(|&(id, value)| id == expected_id && value == expected_value)
+}
+
+fn input_contains_invalid_setting(
+    input: &H2SettingsTransitionInput,
+    expected_id: u16,
+    expected_value: u32,
+    include_initial: bool,
+) -> bool {
+    if !setting_value_is_invalid(expected_id, expected_value) {
+        return false;
+    }
+
+    if include_initial {
+        let initial =
+            MockH2SettingsStateMachine::generate_default_settings_frame(&input.initial_settings);
+        if frame_contains_setting(&initial, expected_id, expected_value) {
+            return true;
+        }
+    }
+
+    for frame in
+        MockH2SettingsStateMachine::generate_changed_settings_frame(&input.changed_settings)
+    {
+        if frame_contains_setting(&frame, expected_id, expected_value) {
+            return true;
+        }
+    }
+
+    for additional in &input.additional_frames {
+        let frame: Vec<(u16, u32)> = additional
+            .changes
+            .iter()
+            .map(MockH2SettingsStateMachine::setting_change_to_tuple)
+            .collect();
+        if frame_contains_setting(&frame, expected_id, expected_value) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn assert_generated_invalid_value(
+    input: &H2SettingsTransitionInput,
+    id: u16,
+    value: u32,
+    include_initial: bool,
+    context: &str,
+) {
+    assert!(
+        input_contains_invalid_setting(input, id, value, include_initial),
+        "{}: InvalidValue {}={} did not correspond to a generated invalid setting",
+        context,
+        id,
+        value
+    );
+}
+
+fn panic_on_unreachable_settings_error(error: &SettingsValidationError, context: &str) -> ! {
+    panic!(
+        "{}: unexpected SETTINGS sequence error: {:?}",
+        context, error
+    );
+}
+
 fuzz_target!(|input: H2SettingsTransitionInput| {
     // Skip inputs that would cause excessive processing
     if input.additional_frames.len() > 20 {
@@ -527,45 +605,66 @@ fuzz_target!(|input: H2SettingsTransitionInput| {
     let result = state_machine.simulate_settings_sequence(&input);
 
     // Apply test assertions based on the settings strategy
-    match input.initial_settings {
+    match &input.initial_settings {
         InitialSettingsStrategy::AllDefaults | InitialSettingsStrategy::ExplicitDefaults(_) => {
             // Default settings should always be accepted
-            match result {
+            match &result {
                 Ok(()) => {
                     // Expected: defaults accepted
                     assert!(state_machine.verify_settings_transition(&input));
                 }
-                Err(SettingsValidationError::InvalidValue { .. }) => {
-                    panic!("Default SETTINGS values should never be invalid");
+                Err(SettingsValidationError::InvalidValue { id, value }) => {
+                    assert_generated_invalid_value(
+                        &input,
+                        *id,
+                        *value,
+                        false,
+                        "default initial SETTINGS sequence",
+                    );
                 }
-                Err(_) => {
-                    // Other errors may occur due to test sequence
+                Err(error) => {
+                    panic_on_unreachable_settings_error(error, "default initial SETTINGS sequence")
                 }
             }
         }
         InitialSettingsStrategy::Empty => {
             // Empty settings should always succeed
-            match result {
+            match &result {
                 Ok(()) => {
                     // Expected: empty settings accepted
                 }
+                Err(SettingsValidationError::InvalidValue { id, value }) => {
+                    assert_generated_invalid_value(
+                        &input,
+                        *id,
+                        *value,
+                        false,
+                        "empty initial SETTINGS sequence",
+                    );
+                }
                 Err(error) => {
-                    panic!("Empty SETTINGS frame should not fail: {:?}", error);
+                    panic_on_unreachable_settings_error(error, "empty initial SETTINGS sequence");
                 }
             }
         }
         _ => {
             // Mixed settings may have validation errors
-            match result {
+            match &result {
                 Ok(()) => {
                     // Verify state transition occurred correctly
                     assert!(state_machine.verify_settings_transition(&input));
                 }
-                Err(SettingsValidationError::InvalidValue { .. }) => {
-                    // Expected for invalid custom values
+                Err(SettingsValidationError::InvalidValue { id, value }) => {
+                    assert_generated_invalid_value(
+                        &input,
+                        *id,
+                        *value,
+                        true,
+                        "mixed SETTINGS sequence",
+                    );
                 }
-                Err(_) => {
-                    // Other errors may occur
+                Err(error) => {
+                    panic_on_unreachable_settings_error(error, "mixed SETTINGS sequence");
                 }
             }
         }
@@ -582,8 +681,22 @@ fn test_settings_transition_invariants(
     _initial_state: &SettingsState,
 ) {
     // Invariant: Empty SETTINGS frame should always succeed
-    if matches!(input.initial_settings, InitialSettingsStrategy::Empty) && result.is_err() {
-        panic!("Empty SETTINGS frame should never fail");
+    if matches!(&input.initial_settings, InitialSettingsStrategy::Empty) {
+        match result {
+            Ok(()) => {}
+            Err(SettingsValidationError::InvalidValue { id, value }) => {
+                assert_generated_invalid_value(
+                    input,
+                    *id,
+                    *value,
+                    false,
+                    "empty initial SETTINGS invariant",
+                );
+            }
+            Err(error) => {
+                panic_on_unreachable_settings_error(error, "empty initial SETTINGS invariant")
+            }
+        }
     }
 
     // Invariant: Default values should always be valid
