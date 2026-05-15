@@ -103,6 +103,15 @@ fuzz_target!(|data: &[u8]| {
                         ErrorCode::ProtocolError,
                         "self-dependency must be rejected as a protocol error"
                     );
+                    assert_eq!(
+                        err.stream_id,
+                        Some(stream_id),
+                        "self-dependency must be scoped to the offending stream"
+                    );
+                    assert_eq!(
+                        err.message, "stream cannot depend on itself",
+                        "self-dependency used wrong diagnostic"
+                    );
                 }
             }
         }
@@ -326,6 +335,15 @@ fn observe_priority_creation_result(
                     ErrorCode::ProtocolError,
                     "{context}: self-dependency must be a protocol error"
                 );
+                assert_eq!(
+                    err.stream_id,
+                    Some(stream_id),
+                    "{context}: self-dependency must be scoped to the offending stream"
+                );
+                assert_eq!(
+                    err.message, "stream cannot depend on itself",
+                    "{context}: self-dependency used wrong diagnostic"
+                );
             }
         }
     }
@@ -401,13 +419,14 @@ fn observe_truncated_priority_result(size: usize, result: Result<Frame, H2Error>
         Ok(_) => panic!("truncated priority payload of {size} bytes parsed successfully"),
         Err(err) => {
             observe_h2_error("truncated priority", &err);
-            assert!(
-                matches!(
-                    err.code,
-                    ErrorCode::FrameSizeError | ErrorCode::ProtocolError
-                ),
-                "truncated priority should fail with frame-size/protocol error, got {:?}",
-                err.code
+            assert_eq!(
+                err.code,
+                ErrorCode::ProtocolError,
+                "truncated priority should fail with a protocol error"
+            );
+            assert_eq!(
+                err.message, "HEADERS frame too short for priority",
+                "truncated priority used wrong diagnostic"
             );
         }
     }
@@ -574,8 +593,9 @@ mod tests {
         assert!(result.is_err());
 
         if let Err(error) = result {
-            // Should be a protocol error for self-dependency
             assert_eq!(error.code, ErrorCode::ProtocolError);
+            assert_eq!(error.stream_id, Some(1));
+            assert_eq!(error.message, "stream cannot depend on itself");
         }
     }
 
@@ -621,7 +641,9 @@ mod tests {
         // Test with insufficient data for priority (need 5 bytes)
         let short_data = [0x01, 0x02, 0x03]; // Only 3 bytes
         let result = create_headers_frame_with_truncated_priority(1, &short_data);
-        assert!(result.is_err());
+        let error = result.expect_err("short priority payload must be rejected");
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert_eq!(error.message, "HEADERS frame too short for priority");
     }
 
     #[test]
