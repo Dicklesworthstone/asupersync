@@ -262,7 +262,10 @@ fn test_connection_window_operations(test_case: &FlowControlTest) {
         i32::try_from(bounded_initial_window_size(test_case.initial_window_size)).unwrap_or(65535),
     );
 
-    if open_test_stream(&mut connection, stream_id).is_ok() {
+    if observe_stream_open_result(
+        "connection-window setup stream open",
+        &open_test_stream(&mut connection, stream_id),
+    ) {
         window_tracker.track_default_stream(stream_id);
     }
 
@@ -310,7 +313,7 @@ fn test_window_credit_recovery(test_case: &FlowControlTest) {
 
     // Step 1: Open stream
     let open_result = open_test_stream(&mut connection, stream_id);
-    if open_result.is_err() {
+    if !observe_stream_open_result("window credit recovery stream open", &open_result) {
         return; // Stream opening failed
     }
 
@@ -332,14 +335,10 @@ fn test_window_credit_recovery(test_case: &FlowControlTest) {
     // Step 3: Send RST_STREAM and verify window handling
     let rst_result = send_rst_stream(&mut connection, stream_id, ErrorCode::Cancel);
 
-    match rst_result {
-        Ok(()) => {
-            // RST_STREAM should succeed and handle window correctly
-            // In a full implementation, we'd verify window credits are returned
-        }
-        Err(_) => {
-            // RST_STREAM failure is acceptable for some edge cases
-        }
+    if let Err(error) = &rst_result {
+        observe_h2_error("window credit recovery RST_STREAM", error);
+    } else {
+        assert_valid_connection_state("window credit recovery RST_STREAM", connection.state());
     }
 
     // Step 4: Verify stream is properly closed
@@ -359,7 +358,10 @@ fn test_concurrent_rst_stream_operations(test_case: &FlowControlTest) {
     // Open multiple streams
     for i in 0..max_streams {
         let stream_id = normalize_stream_id(u32::from(i * 2 + 1));
-        if open_test_stream(&mut connection, stream_id).is_ok() {
+        if observe_stream_open_result(
+            "concurrent RST_STREAM setup stream open",
+            &open_test_stream(&mut connection, stream_id),
+        ) {
             active_streams.push(stream_id);
         }
     }
@@ -376,14 +378,10 @@ fn test_concurrent_rst_stream_operations(test_case: &FlowControlTest) {
     for &stream_id in &active_streams {
         let rst_result = send_rst_stream(&mut connection, stream_id, ErrorCode::Cancel);
 
-        // Should not panic regardless of success
-        match rst_result {
-            Ok(()) => {
-                // Expected success
-            }
-            Err(_) => {
-                // Some failures acceptable in edge cases
-            }
+        if let Err(error) = &rst_result {
+            observe_h2_error("concurrent RST_STREAM reset", error);
+        } else {
+            assert_valid_connection_state("concurrent RST_STREAM reset", connection.state());
         }
     }
 
@@ -400,7 +398,8 @@ fn test_window_exhaustion_with_rst(_test_case: &FlowControlTest) {
     let stream_id = normalize_stream_id(1);
 
     // Open stream
-    if open_test_stream(&mut connection, stream_id).is_err() {
+    let open_result = open_test_stream(&mut connection, stream_id);
+    if !observe_stream_open_result("window exhaustion setup stream open", &open_result) {
         return;
     }
 
@@ -526,8 +525,12 @@ fn execute_stream_operation(
         }
         StreamOpType::SendData { size, end_stream } => {
             // Track window consumption
-            if window_tracker.consume_window(stream_id, *size).is_err() {
+            if let Err(error) = window_tracker.consume_window(stream_id, *size) {
                 // Window exhausted - this is expected behavior
+                assert!(
+                    !error.is_empty(),
+                    "window tracker exhaustion should include diagnostic text"
+                );
                 return Ok(());
             }
             send_data_frame(connection, stream_id, *size, *end_stream)
@@ -610,6 +613,16 @@ fn assert_valid_connection_state(context: &str, state: ConnectionState) {
 fn observe_h2_result(context: &str, result: &Result<(), H2Error>) {
     if let Err(error) = result {
         observe_h2_error(context, error);
+    }
+}
+
+fn observe_stream_open_result(context: &str, result: &Result<(), H2Error>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            observe_h2_error(context, error);
+            false
+        }
     }
 }
 
