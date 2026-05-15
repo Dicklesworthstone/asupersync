@@ -307,15 +307,19 @@ fuzz_target!(|input: FuzzInput| {
         }
     }
 
-    // Additional boundary testing: One-byte payload with PADDED should work
-    // (pad length = 0, no actual padding)
+    // Additional boundary testing: One-byte payload with PADDED must work
+    // (pad length = 0, no actual padding).
     if input.set_padded_flag && payload_length == 1 && input.truncate_at.is_none() {
         match &result {
             DataFrameResult::Valid {
                 pad_length: Some(0),
+                payload,
                 ..
             } => {
-                // Expected: one byte payload allows pad_length=0
+                assert!(
+                    payload.is_empty(),
+                    "one-byte PADDED DATA should expose empty application payload"
+                );
             }
             DataFrameResult::Valid {
                 pad_length: Some(n),
@@ -331,8 +335,9 @@ fuzz_target!(|input: FuzzInput| {
             } => {
                 panic!("PADDED frame should have pad_length field");
             }
-            // Errors are acceptable (parser may be strict about minimum sizes)
-            _ => {}
+            other => {
+                panic!("one-byte PADDED DATA must parse as empty DATA, got: {other:?}");
+            }
         }
     }
 });
