@@ -41,6 +41,10 @@ const MAX_SYMBOLS: usize = 16;
 
 /// Maximum key derivation attempts per test.
 const MAX_KEY_DERIVATIONS: usize = 8;
+const AUTH_TAG_SIZE: usize = 32;
+const EXTENDED_TAG_ROTATIONS: [u32; AUTH_TAG_SIZE] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7,
+];
 
 #[derive(Arbitrary, Debug)]
 struct FuzzConfig {
@@ -533,11 +537,31 @@ fn test_malformed_framing(framing_error: FramingError) {
         }
 
         FramingError::ExtendedTag(extra_bytes) => {
-            // Test behavior with extra bytes after tag
-            if extra_bytes.len() <= 1024 {
-                // In a real envelope, extra bytes should be rejected
-                // For this test, we just ensure no crashes occur
-                let _ = extra_bytes.len();
+            // Model an extended tag by folding generated trailing bytes into a
+            // fixed-size tag. A changed tag must not authenticate the symbol.
+            let test_key = AuthKey::from_seed(0xabcdef01);
+            let test_symbol_id = create_symbol_id(1, 1, 1);
+            let test_symbol = Symbol::new(test_symbol_id, vec![1, 2, 3], SymbolKind::Source);
+            let valid_tag = AuthenticationTag::compute(&test_key, &test_symbol);
+            assert!(
+                valid_tag.verify(&test_key, &test_symbol),
+                "Baseline authentication tag failed to verify"
+            );
+
+            let mut extended_tag_bytes = *valid_tag.as_bytes();
+            let changed = fold_extended_tag_bytes(&mut extended_tag_bytes, &extra_bytes);
+            let extended_tag = AuthenticationTag::from_bytes(extended_tag_bytes);
+
+            if changed {
+                assert!(
+                    !extended_tag.verify(&test_key, &test_symbol),
+                    "Extended authentication tag unexpectedly verified"
+                );
+            } else {
+                assert!(
+                    extended_tag.verify(&test_key, &test_symbol),
+                    "Unchanged extended-tag projection failed to verify"
+                );
             }
         }
 
@@ -587,6 +611,17 @@ fn test_malformed_framing(framing_error: FramingError) {
             assert!(verifies, "Authentication failed with ESI: {}", esi);
         }
     }
+}
+
+fn fold_extended_tag_bytes(tag_bytes: &mut [u8; AUTH_TAG_SIZE], extra_bytes: &[u8]) -> bool {
+    let mut changed = false;
+    for (offset, &byte) in extra_bytes.iter().take(AUTH_TAG_SIZE).enumerate() {
+        let rotated = byte.rotate_left(EXTENDED_TAG_ROTATIONS[offset]);
+        let before = tag_bytes[offset];
+        tag_bytes[offset] ^= rotated;
+        changed |= tag_bytes[offset] != before;
+    }
+    changed
 }
 
 /// Test byte reordering (commutativity test).
