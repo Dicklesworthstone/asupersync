@@ -282,6 +282,43 @@ fn assert_headers_stream_zero_error(context: &str, error: &H2Error) {
     );
 }
 
+fn headers_padding_overflow_expected(input: &HeadersFrameFuzz) -> bool {
+    if !input.flags.padded || wire_stream_id(input.stream_id) == 0 {
+        return false;
+    }
+
+    let Some(padding) = &input.padding_config else {
+        return false;
+    };
+
+    let priority_bytes = if input.flags.priority { 5usize } else { 0 };
+    let payload_len_before_padding_tail = 1usize + priority_bytes + input.header_block.len();
+    let padding_tail_len = if padding.enforce_boundary {
+        (padding.pad_length as usize).min(payload_len_before_padding_tail.saturating_sub(1))
+    } else {
+        padding.pad_length as usize
+    };
+    let payload_after_pad_length = priority_bytes + input.header_block.len() + padding_tail_len;
+
+    (padding.pad_length as usize).saturating_add(priority_bytes) > payload_after_pad_length
+}
+
+fn assert_headers_padding_error(context: &str, error: &H2Error) {
+    assert_eq!(
+        error.code,
+        ErrorCode::ProtocolError,
+        "{context}: padding overflow HEADERS must be a protocol error"
+    );
+    assert_eq!(
+        error.stream_id, None,
+        "{context}: padding overflow HEADERS must be connection-scoped"
+    );
+    assert_eq!(
+        error.message, "HEADERS frame padding exceeds data length",
+        "{context}: padding overflow HEADERS used wrong diagnostic"
+    );
+}
+
 /// Test concurrent HEADERS frames on the same stream
 fn test_concurrent_headers(stream_id: u32) -> Result<(), H2Error> {
     let mut connection = Connection::server(Settings::default());
@@ -374,14 +411,11 @@ fuzz_target!(|input: HeadersFrameFuzz| {
                         }
                     }
                     Err(e) => {
-                        // Check if error is due to padding exceeding payload length
-                        if input.padding_config.is_some() {
-                            let error_msg = format!("{:?}", e);
-                            if error_msg.contains("padding exceeds") {
-                                // This is expected for invalid padding lengths
-                            }
+                        if headers_padding_overflow_expected(&input) {
+                            assert_headers_padding_error("padded HEADERS parse", &e);
+                        } else {
+                            observe_headers_error("padded HEADERS parse", &e);
                         }
-                        observe_headers_error("padded HEADERS parse", &e);
                     }
                 }
             }
@@ -599,9 +633,7 @@ mod tests {
         match test_headers_frame(&input) {
             Ok(_) => panic!("HEADERS padding overflow should be rejected"),
             Err(error) => {
-                assert_eq!(error.code, ErrorCode::ProtocolError);
-                assert_eq!(error.stream_id, None);
-                assert_eq!(error.message, "HEADERS frame padding exceeds data length");
+                assert_headers_padding_error("unit padding overflow", &error);
             }
         }
     }
