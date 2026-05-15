@@ -541,12 +541,26 @@ fuzz_target!(|input: FuzzInput| {
             | HttpError::HeadersTooLarge
             | HttpError::BadHeader
             | HttpError::InvalidHeaderName
-            | HttpError::InvalidHeaderValue,
+            | HttpError::InvalidHeaderValue
+            | HttpError::RequestLineTooLong
+            | HttpError::BadContentLength
+            | HttpError::DuplicateContentLength
+            | HttpError::DuplicateTransferEncoding
+            | HttpError::BadTransferEncoding
+            | HttpError::AmbiguousBodyLength
+            | HttpError::TooManyHeaders
+            | HttpError::BadChunkedEncoding
+            | HttpError::BodyTooLarge
+            | HttpError::BodyTooLargeDetailed { .. },
         )) => {
-            // Expected for malformed status lines or injected header syntax.
+            // Expected for malformed status lines or injected header/body syntax.
         }
-        Ok(Err(_)) => {
-            // Other codec errors are acceptable for fuzzed full responses.
+        Ok(Err(error)) => {
+            panic!(
+                "Unexpected HTTP/1.1 client status-line codec error for constructed response: \
+                 error={error:?}, status_line={:?}",
+                String::from_utf8_lossy(&status_line_bytes)
+            );
         }
         Err(_) => {
             // Codec panicked - this is a bug
