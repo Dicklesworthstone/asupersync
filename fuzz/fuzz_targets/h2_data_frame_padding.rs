@@ -289,10 +289,9 @@ fn assert_padding_exceeds_payload(
             },
         ) => {
             observe_h2_parse_error(&error, context);
-            assert!(
-                error.message.contains("padding exceeds"),
-                "{context}: ProtocolError did not identify padding overflow: {}",
-                error.message
+            assert_eq!(
+                error.message, "DATA frame padding exceeds data length",
+                "{context}: ProtocolError did not identify padding overflow"
             );
         }
         Err(error) => panic!("{context}: expected ProtocolError, got {error:?}"),
