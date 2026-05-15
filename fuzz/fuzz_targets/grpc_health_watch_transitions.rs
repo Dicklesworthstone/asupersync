@@ -16,7 +16,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
 use asupersync::grpc::health::{
-    HealthCheckRequest, HealthCheckResponse, HealthService, MAX_SERVICE_NAME_LEN, ServingStatus,
+    HealthCheckRequest, HealthCheckResponse, HealthError, HealthService, MAX_SERVICE_NAME_LEN,
+    ServingStatus,
 };
 use asupersync::grpc::streaming::{Metadata, Request, Streaming};
 
@@ -362,6 +363,47 @@ fn observe_watch_poll<S>(
     }
 }
 
+fn observe_try_set_status(
+    service: &HealthService,
+    name: &str,
+    status: ServingStatus,
+    context: &str,
+) -> bool {
+    let previous_status = service.get_status(name);
+
+    match service.try_set_status(name, status) {
+        Ok(()) => {
+            assert_eq!(
+                service.get_status(name),
+                Some(status),
+                "{context}: accepted health status update was not stored"
+            );
+            true
+        }
+        Err(HealthError::ServiceNameTooLong { len, max }) => {
+            assert!(
+                name.len() > MAX_SERVICE_NAME_LEN,
+                "{context}: length-cap error for an in-range service name"
+            );
+            assert_eq!(
+                len,
+                name.len(),
+                "{context}: length-cap error reported wrong length"
+            );
+            assert_eq!(
+                max, MAX_SERVICE_NAME_LEN,
+                "{context}: length-cap error reported wrong max"
+            );
+            assert_eq!(
+                service.get_status(name),
+                previous_status,
+                "{context}: rejected health status update mutated service status"
+            );
+            false
+        }
+    }
+}
+
 fuzz_target!(|scenario: HealthWatchScenario| {
     // Limit complexity for fuzzer performance
     if scenario.initial_services.len() > MAX_SERVICES {
@@ -390,7 +432,12 @@ fn test_watch_transitions(scenario: &HealthWatchScenario) {
     // Set up initial services
     for setup in &scenario.initial_services {
         let name = setup.name.as_string();
-        let _ = service.try_set_status(&name, setup.status.into());
+        observe_try_set_status(
+            &service,
+            &name,
+            setup.status.into(),
+            "watch-transition initial service setup",
+        );
     }
 
     // Apply state transitions
@@ -416,7 +463,7 @@ fn apply_state_transition(service: &HealthService, transition: &StateTransition)
             status,
         } => {
             let name = svc_name.as_string();
-            let _ = service.try_set_status(&name, (*status).into());
+            observe_try_set_status(service, &name, (*status).into(), "single status transition");
         }
 
         StateTransition::SetServerStatus { status } => {
@@ -435,7 +482,7 @@ fn apply_state_transition(service: &HealthService, transition: &StateTransition)
                 .collect();
 
             for (name, status) in names_and_statuses {
-                let _ = service.try_set_status(&name, status);
+                observe_try_set_status(service, &name, status, "batch status transition");
             }
         }
 
@@ -446,8 +493,18 @@ fn apply_state_transition(service: &HealthService, transition: &StateTransition)
         } => {
             let name = svc_name.as_string();
             // Set intermediate status then immediately change to final
-            let _ = service.try_set_status(&name, (*intermediate_status).into());
-            let _ = service.try_set_status(&name, (*final_status).into());
+            observe_try_set_status(
+                service,
+                &name,
+                (*intermediate_status).into(),
+                "transient intermediate status transition",
+            );
+            observe_try_set_status(
+                service,
+                &name,
+                (*final_status).into(),
+                "transient final status transition",
+            );
         }
     }
 }
@@ -488,10 +545,12 @@ fn test_single_watcher(service: &HealthService, setup: &WatcherSetup) {
                 }
                 PollingBehavior::OnChange => {
                     // Only poll after making a change
-                    let changed_to_not_serving = service
-                        .try_set_status(&service_name, ServingStatus::NotServing)
-                        .is_ok()
-                        && initial_status != ServingStatus::NotServing;
+                    let changed_to_not_serving = observe_try_set_status(
+                        service,
+                        &service_name,
+                        ServingStatus::NotServing,
+                        "watcher on-change status update",
+                    ) && initial_status != ServingStatus::NotServing;
                     observe_watch_poll(
                         &mut stream,
                         &mut cx,
@@ -531,7 +590,12 @@ fn test_concurrent_streams(scenario: &HealthWatchScenario) {
     // Set up initial services
     for setup in &scenario.initial_services {
         let name = setup.name.as_string();
-        let _ = service.try_set_status(&name, setup.status.into());
+        observe_try_set_status(
+            &service,
+            &name,
+            setup.status.into(),
+            "concurrent initial service setup",
+        );
     }
 
     // Create multiple concurrent watchers
@@ -599,7 +663,7 @@ fn apply_concurrent_operation(service: &HealthService, op: &ConcurrentOperation)
         } => {
             let name = svc_name.as_string();
             for &status in updates {
-                let _ = service.try_set_status(&name, status.into());
+                observe_try_set_status(service, &name, status.into(), "concurrent status update");
             }
         }
 
@@ -652,7 +716,7 @@ fn apply_concurrent_operation(service: &HealthService, op: &ConcurrentOperation)
             // Rapid status changes
             for i in 0..(*duration as usize).min(50) {
                 let status = statuses[i % statuses.len()];
-                let _ = service.try_set_status(&name, status);
+                observe_try_set_status(service, &name, status, "status thrashing update");
             }
         }
     }
