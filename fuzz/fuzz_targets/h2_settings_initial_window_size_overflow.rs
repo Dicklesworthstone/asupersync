@@ -309,6 +309,41 @@ fn observe_send_data_result(
     }
 }
 
+fn observe_window_update_result(
+    result: Result<(), ErrorCode>,
+    conn: &MockWindowSizeConnection,
+    phase: &str,
+) {
+    if let Err(err) = result {
+        match err {
+            ErrorCode::FlowControlError => assert!(
+                conn.has_flow_control_violation(),
+                "{phase} WINDOW_UPDATE flow-control rejection must be reflected in the violation ledger"
+            ),
+            ErrorCode::ProtocolError => assert!(
+                conn.violations().iter().any(|violation| {
+                    matches!(violation, WindowViolation::InvalidWindowUpdate { .. })
+                }),
+                "{phase} WINDOW_UPDATE protocol rejection must record an invalid update"
+            ),
+            _ => panic!("{phase} WINDOW_UPDATE rejected with unexpected error {err:?}"),
+        }
+    }
+
+    assert!(
+        conn.connection_window <= MAX_WINDOW_SIZE,
+        "{phase} WINDOW_UPDATE left connection window above maximum: {}",
+        conn.connection_window
+    );
+    for flow_control in conn.stream_windows.values() {
+        assert!(
+            flow_control.send_window <= MAX_WINDOW_SIZE,
+            "{phase} WINDOW_UPDATE left stream window above maximum: {}",
+            flow_control.send_window
+        );
+    }
+}
+
 /// Normalize stream ID to be valid (non-zero, client-initiated odd)
 fn normalize_stream_id(raw: u32) -> u32 {
     let mut id = raw & 0x7fff_ffff; // Ensure 31-bit
@@ -400,7 +435,8 @@ fuzz_target!(|input: WindowSizeOverflowInput| {
                             stream_id,
                             increment,
                         };
-                        let _ = conn.handle_window_update(&window_update);
+                        let update_result = conn.handle_window_update(&window_update);
+                        observe_window_update_result(update_result, &conn, "operation");
                     }
                 }
                 FlowControlOperation::NewStream { stream_id } => {
