@@ -4,7 +4,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::panic::AssertUnwindSafe;
 
-use asupersync::lab::oracle::cancel_debt::{CancelDebtConfig, CancelDebtOracle, CleanupWorkType};
+use asupersync::lab::oracle::cancel_debt::{
+    CancelDebtConfig, CancelDebtOracle, CancelDebtStatistics, CancelDebtViolation, CleanupWorkType,
+};
 use asupersync::types::{RegionId, TaskId, Time};
 
 /// Fuzz input for CancelDebtOracle testing
@@ -555,13 +557,58 @@ fn process_operation(oracle: &CancelDebtOracle, operation: &DebtOperation, base_
             oracle.reset();
         }
         DebtOperation::GetStatistics => {
-            let _ = oracle.get_statistics();
+            let stats = oracle.get_statistics();
+            observe_statistics(&stats);
         }
         DebtOperation::GetViolations { limit } => {
-            let _ = oracle.get_recent_violations(*limit as usize);
+            let violations = oracle.get_recent_violations(*limit as usize);
+            observe_recent_violations(&violations, *limit as usize);
         }
         DebtOperation::GetQueueStates => {
-            let _ = oracle.get_queue_states();
+            let queue_states = oracle.get_queue_states();
+            observe_queue_states(&queue_states);
         }
+    }
+}
+
+fn observe_statistics(stats: &CancelDebtStatistics) {
+    assert!(
+        stats.work_items_tracked >= stats.total_current_debt as u64,
+        "current debt cannot exceed total tracked work items"
+    );
+    assert!(
+        stats.violations_detected >= stats.total_violations as u64,
+        "retained violations cannot exceed detected violations"
+    );
+    assert!(
+        stats.total_estimated_memory_usage >= stats.total_current_debt.saturating_mul(100),
+        "pending debt memory estimate should cover every queued work item"
+    );
+}
+
+fn observe_recent_violations(violations: &[CancelDebtViolation], requested_limit: usize) {
+    assert!(
+        violations.len() <= requested_limit,
+        "recent violation query returned more entries than requested"
+    );
+    for violation in violations {
+        let diagnostic = violation.to_string();
+        assert!(
+            !diagnostic.trim().is_empty(),
+            "cancel-debt violation diagnostics should be non-empty"
+        );
+    }
+}
+
+fn observe_queue_states(queue_states: &[(String, usize, usize)]) {
+    for (queue_name, pending_items, estimated_memory) in queue_states {
+        assert!(
+            !queue_name.trim().is_empty(),
+            "queue state names should be non-empty"
+        );
+        assert!(
+            *estimated_memory >= pending_items.saturating_mul(100),
+            "queue memory estimate should cover pending work items"
+        );
     }
 }
