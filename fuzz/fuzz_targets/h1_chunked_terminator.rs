@@ -6,7 +6,7 @@
 //! result in proper errors without body data leakage.
 //!
 //! Key invariants tested:
-//! - Missing final chunk terminator `0\r\n\r\n` → BadChunkedEncoding error
+//! - Missing final chunk terminator `0\r\n\r\n` → incomplete parse or BadChunkedEncoding
 //! - Incomplete chunk size lines → proper error handling
 //! - Malformed chunk size values → parse errors
 //! - Truncated trailer sections → clean failure
@@ -36,9 +36,17 @@ const CHUNK_PATTERNS: &[&[u8]] = &[
     b"ff\r\n",                                // Large chunk size but no data
 ];
 
+#[derive(Debug)]
+enum ChunkedParseOutcome {
+    Complete(Vec<u8>),
+    Incomplete,
+    Error(HttpError),
+}
+
 fuzz_target!(|data: &[u8]| {
     test_chunk_extension_parsing_canaries();
     test_terminator_corruption();
+    test_incomplete_chunked_canaries();
 
     // Guard against excessive input sizes
     if data.is_empty() || data.len() > MAX_INPUT_SIZE {
@@ -262,7 +270,7 @@ fuzz_target!(|data: &[u8]| {
 });
 
 /// Test chunked terminator parsing with arbitrary data
-fn test_chunked_terminator(chunked_data: &[u8]) -> Result<Vec<u8>, HttpError> {
+fn test_chunked_terminator(chunked_data: &[u8]) -> ChunkedParseOutcome {
     let mut codec = Http1Codec::new();
 
     // Create a proper HTTP request with chunked transfer encoding
@@ -274,16 +282,16 @@ fn test_chunked_terminator(chunked_data: &[u8]) -> Result<Vec<u8>, HttpError> {
     request.extend_from_slice(chunked_data);
 
     match codec.decode(&mut request) {
-        Ok(Some(req)) => Ok(req.body),
-        Ok(None) => Ok(Vec::new()), // Incomplete, but not an error
-        Err(e) => Err(e),
+        Ok(Some(req)) => ChunkedParseOutcome::Complete(req.body),
+        Ok(None) => ChunkedParseOutcome::Incomplete,
+        Err(e) => ChunkedParseOutcome::Error(e),
     }
 }
 
 /// Validate chunked parsing result for security properties
-fn validate_chunked_result(result: Result<Vec<u8>, HttpError>, input_data: &[u8]) {
+fn validate_chunked_result(result: ChunkedParseOutcome, input_data: &[u8]) {
     match result {
-        Ok(body) => {
+        ChunkedParseOutcome::Complete(body) => {
             // If parsing succeeded, the body should be valid
             // Body length should be reasonable (not unbounded)
             if body.len() > input_data.len() * 2 {
@@ -295,22 +303,25 @@ fn validate_chunked_result(result: Result<Vec<u8>, HttpError>, input_data: &[u8]
                 );
             }
         }
-        Err(HttpError::BadChunkedEncoding) => {
+        ChunkedParseOutcome::Incomplete => {
+            // Streaming decode correctly waits for more bytes on truncated input.
+        }
+        ChunkedParseOutcome::Error(HttpError::BadChunkedEncoding) => {
             // Expected error for malformed chunks - this is correct
         }
-        Err(HttpError::BodyTooLarge) => {
+        ChunkedParseOutcome::Error(HttpError::BodyTooLarge) => {
             // Valid error for oversized bodies
         }
-        Err(HttpError::HeadersTooLarge) => {
+        ChunkedParseOutcome::Error(HttpError::HeadersTooLarge) => {
             // Valid error for oversized trailers
         }
-        Err(HttpError::BadHeader) => {
+        ChunkedParseOutcome::Error(HttpError::BadHeader) => {
             // May occur if malformed trailer headers
         }
-        Err(HttpError::Io(_)) => {
+        ChunkedParseOutcome::Error(HttpError::Io(_)) => {
             // I/O errors are acceptable
         }
-        Err(other) => {
+        ChunkedParseOutcome::Error(other) => {
             observe_unexpected_chunked_error("chunked terminator parse", &other, input_data);
         }
     }
@@ -352,22 +363,25 @@ fn test_terminator_corruption() {
         let result = test_chunked_terminator(&chunk_data);
 
         match (result, should_succeed) {
-            (Ok(_), true) => {
+            (ChunkedParseOutcome::Complete(_), true) => {
                 // Expected success.
             }
-            (Err(_), false) => {
-                // Expected failure.
-            }
-            (Ok(body), false) if body.is_empty() => {
+            (ChunkedParseOutcome::Incomplete | ChunkedParseOutcome::Error(_), false) => {
                 // Incomplete terminators may be held for more bytes rather than errored.
             }
-            (Ok(body), false) => {
+            (ChunkedParseOutcome::Complete(body), false) => {
                 panic!(
                     "Expected failure or incomplete parse for terminator {:?} but got body {:?}",
                     terminator, body
                 );
             }
-            (Err(e), true) => {
+            (ChunkedParseOutcome::Incomplete, true) => {
+                panic!(
+                    "Expected success for terminator {:?} but got incomplete parse",
+                    terminator
+                );
+            }
+            (ChunkedParseOutcome::Error(e), true) => {
                 panic!(
                     "Expected success for terminator {:?} but got error: {:?}",
                     terminator, e
@@ -379,14 +393,14 @@ fn test_terminator_corruption() {
 
 fn expect_chunked_body(chunked: &[u8], expected: &[u8]) {
     match test_chunked_terminator(chunked) {
-        Ok(body) => assert_eq!(
+        ChunkedParseOutcome::Complete(body) => assert_eq!(
             body,
             expected,
             "chunked body mismatch for {:?}",
             String::from_utf8_lossy(chunked)
         ),
-        Err(err) => panic!(
-            "expected chunked body {:?} for {:?}, got {err:?}",
+        other => panic!(
+            "expected chunked body {:?} for {:?}, got {other:?}",
             expected,
             String::from_utf8_lossy(chunked)
         ),
@@ -396,10 +410,28 @@ fn expect_chunked_body(chunked: &[u8], expected: &[u8]) {
 fn expect_bad_chunked(chunked: &[u8]) {
     let result = test_chunked_terminator(chunked);
     assert!(
-        matches!(result, Err(HttpError::BadChunkedEncoding)),
+        matches!(
+            result,
+            ChunkedParseOutcome::Error(HttpError::BadChunkedEncoding)
+        ),
         "expected BadChunkedEncoding for {:?}, got {result:?}",
         String::from_utf8_lossy(chunked)
     );
+}
+
+fn expect_incomplete_chunked(chunked: &[u8]) {
+    let result = test_chunked_terminator(chunked);
+    assert!(
+        matches!(result, ChunkedParseOutcome::Incomplete),
+        "expected incomplete parse for {:?}, got {result:?}",
+        String::from_utf8_lossy(chunked)
+    );
+}
+
+fn test_incomplete_chunked_canaries() {
+    expect_incomplete_chunked(b"5\r\nhello\r\n0\r\n");
+    expect_incomplete_chunked(b"5\r\nhello\r\n0");
+    expect_incomplete_chunked(b"5\r\nhello\r\n0\r\nX-Trailer: value\r\n");
 }
 
 fn test_chunk_extension_parsing_canaries() {
@@ -422,61 +454,56 @@ mod tests {
     #[test]
     fn test_valid_chunked_termination() {
         let valid = b"5\r\nhello\r\n0\r\n\r\n";
-        let result = test_chunked_terminator(valid);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), b"hello");
+        expect_chunked_body(valid, b"hello");
     }
 
     #[test]
     fn test_missing_final_crlf() {
         let invalid = b"5\r\nhello\r\n0\r\n";
-        let result = test_chunked_terminator(invalid);
-        assert!(matches!(result, Ok(body) if body.is_empty()) || result.is_err());
+        expect_incomplete_chunked(invalid);
     }
 
     #[test]
     fn test_truncated_terminator() {
         let invalid = b"5\r\nhello\r\n0";
-        let result = test_chunked_terminator(invalid);
-        assert!(matches!(result, Ok(body) if body.is_empty()) || result.is_err());
+        expect_incomplete_chunked(invalid);
     }
 
     #[test]
     fn test_corrupted_chunk_size() {
         let invalid = b"g\r\nhello\r\n0\r\n\r\n"; // 'g' is not hex
         let result = test_chunked_terminator(invalid);
-        assert!(result.is_err());
+        assert!(
+            matches!(
+                result,
+                ChunkedParseOutcome::Error(HttpError::BadChunkedEncoding)
+            ),
+            "expected BadChunkedEncoding for corrupted chunk size, got {result:?}"
+        );
     }
 
     #[test]
     fn test_trailer_handling() {
         let with_trailer = b"5\r\nhello\r\n0\r\nX-Trailer: value\r\n\r\n";
-        let result = test_chunked_terminator(with_trailer);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), b"hello");
+        expect_chunked_body(with_trailer, b"hello");
     }
 
     #[test]
     fn test_missing_trailer_termination() {
         let invalid = b"5\r\nhello\r\n0\r\nX-Trailer: value\r\n";
-        let result = test_chunked_terminator(invalid);
-        assert!(matches!(result, Ok(body) if body.is_empty()) || result.is_err());
+        expect_incomplete_chunked(invalid);
     }
 
     #[test]
     fn test_multiple_chunks() {
         let valid = b"3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n";
-        let result = test_chunked_terminator(valid);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), b"foobar");
+        expect_chunked_body(valid, b"foobar");
     }
 
     #[test]
     fn test_zero_length_chunk() {
         let valid = b"0\r\n\r\n";
-        let result = test_chunked_terminator(valid);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), b"");
+        expect_chunked_body(valid, b"");
     }
 
     #[test]
