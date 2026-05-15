@@ -350,19 +350,21 @@ fn test_multiple_pending_settings(test_case: &SettingsAckTimeoutTest) {
         // ACK the second SETTINGS first
         if settings_ids.len() >= 2 {
             let ack_result = mock_connection.send_settings_ack(settings_ids[1]);
-            // Out-of-order ACK might be accepted or rejected depending on implementation
             assert!(
-                matches!(ack_result, AckResult::Accepted | AckResult::Ignored),
-                "out-of-order SETTINGS ACK should be accepted or ignored"
+                matches!(ack_result, AckResult::Accepted),
+                "out-of-order ACK for pending SETTINGS id {} should be accepted, got {:?}",
+                settings_ids[1],
+                ack_result
             );
         }
 
         // Then ACK the first
         let ack_result = mock_connection.send_settings_ack(settings_ids[0]);
-        // Should be accepted even after out-of-order ACK
         assert!(
-            matches!(ack_result, AckResult::Accepted | AckResult::Ignored),
-            "first SETTINGS ACK after out-of-order ACK should be accepted or ignored"
+            matches!(ack_result, AckResult::Accepted),
+            "first pending SETTINGS id {} should still be accepted after out-of-order ACK, got {:?}",
+            settings_ids[0],
+            ack_result
         );
     }
 }
