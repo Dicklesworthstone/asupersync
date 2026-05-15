@@ -87,6 +87,14 @@ struct ChunkedParserConfig {
     strict_parsing: bool,
 }
 
+const MAX_GENERATED_ATTACK_BYTES: usize = 16 * 1024;
+const MAX_GENERATED_EXTENSION_COUNT: u16 = 128;
+const MAX_GENERATED_MIXED_REPEAT: u8 = 16;
+const MAX_GENERATED_QUOTE_DEPTH: u8 = 16;
+const MAX_NORMALIZED_EXTENSION_LENGTH: u32 = 16 * 1024;
+const MAX_NORMALIZED_NAME_LENGTH: u32 = 1024;
+const MAX_NORMALIZED_VALUE_LENGTH: u32 = 4096;
+
 impl Default for ChunkedParserConfig {
     fn default() -> Self {
         Self {
@@ -97,6 +105,34 @@ impl Default for ChunkedParserConfig {
             strict_parsing: true,
         }
     }
+}
+
+fn normalize_parser_config(config: &mut ChunkedParserConfig) {
+    config.max_extension_length = config
+        .max_extension_length
+        .clamp(1, MAX_NORMALIZED_EXTENSION_LENGTH);
+    config.max_name_length = config.max_name_length.clamp(1, MAX_NORMALIZED_NAME_LENGTH);
+    config.max_value_length = config
+        .max_value_length
+        .clamp(1, MAX_NORMALIZED_VALUE_LENGTH);
+    config.max_extension_count = config
+        .max_extension_count
+        .clamp(1, MAX_GENERATED_EXTENSION_COUNT);
+}
+
+fn capped_u32_len(length: u32) -> usize {
+    usize::try_from(length)
+        .unwrap_or(MAX_GENERATED_ATTACK_BYTES)
+        .min(MAX_GENERATED_ATTACK_BYTES)
+}
+
+fn repeat_token_capped(token: &str, requested_repeats: usize) -> String {
+    if token.is_empty() {
+        return String::new();
+    }
+
+    let max_repeats = MAX_GENERATED_ATTACK_BYTES / token.len();
+    token.repeat(requested_repeats.min(max_repeats))
 }
 
 /// Mock HTTP/1.1 chunked encoding parser for DoS testing
@@ -509,6 +545,7 @@ fuzz_target!(|input: ChunkedExtensionDoSInput| {
     if input.dos_patterns.len() > 5 {
         input.dos_patterns.truncate(5); // Limit for performance
     }
+    normalize_parser_config(&mut input.parser_config);
 
     let mut parser = MockChunkedParser::new(input.parser_config.clone());
 
@@ -559,7 +596,7 @@ fuzz_target!(|input: ChunkedExtensionDoSInput| {
                         );
                     }
 
-                    DoSPattern::LongValue { length: _, .. } => {
+                    DoSPattern::LongValue { .. } => {
                         assert!(
                             reason.contains("value") || reason.contains("length"),
                             "DoS block should mention value length issue: {}",
@@ -572,7 +609,7 @@ fuzz_target!(|input: ChunkedExtensionDoSInput| {
                         );
                     }
 
-                    DoSPattern::ManySmall { count: _, .. } => {
+                    DoSPattern::ManySmall { .. } => {
                         assert!(
                             reason.contains("count") || reason.contains("length"),
                             "DoS block should mention count or total length: {}",
@@ -626,39 +663,7 @@ fuzz_target!(|input: ChunkedExtensionDoSInput| {
         }
     }
 
-    // Test edge cases around limits
-    let limit_tests = vec![
-        // Exactly at limit
-        format!(
-            "{}; {}={}",
-            input.chunk_size_hex,
-            "x".repeat(parser.config.max_name_length as usize),
-            "y".repeat(parser.config.max_value_length as usize)
-        ),
-        // Just over limit
-        format!(
-            "{}; {}=z",
-            input.chunk_size_hex,
-            "x".repeat(parser.config.max_name_length as usize + 1)
-        ),
-    ];
-
-    for test_line in limit_tests {
-        let result = parser.parse_chunk_line(&test_line);
-
-        // Results should be consistent with limits
-        match result {
-            ChunkParseResult::Success { .. } => {
-                // Should only succeed if within limits
-            }
-            ChunkParseResult::DoSBlocked { .. } => {
-                // Should be blocked if over limits
-            }
-            _ => {
-                // Other results are acceptable
-            }
-        }
-    }
+    assert_exact_limit_boundaries();
 
     // Verify stats consistency
     let stats = parser.get_stats();
@@ -678,14 +683,98 @@ fuzz_target!(|input: ChunkedExtensionDoSInput| {
     // (Implicit - if we reach here without panicking, the test passed)
 });
 
+fn assert_exact_limit_boundaries() {
+    let config = ChunkedParserConfig {
+        max_extension_length: 64,
+        max_name_length: 16,
+        max_value_length: 16,
+        max_extension_count: 4,
+        strict_parsing: true,
+    };
+    let mut parser = MockChunkedParser::new(config.clone());
+
+    let at_limit = format!(
+        "1;{}={}",
+        "x".repeat(config.max_name_length as usize),
+        "y".repeat(config.max_value_length as usize)
+    );
+    match parser.parse_chunk_line(&at_limit) {
+        ChunkParseResult::Success {
+            chunk_size,
+            extensions,
+            total_extension_length,
+        } => {
+            assert_eq!(chunk_size, 1, "boundary chunk size should parse");
+            assert_eq!(
+                extensions.len(),
+                1,
+                "boundary probe should parse one extension"
+            );
+            let extension = &extensions[0];
+            assert_eq!(
+                extension.name.len(),
+                config.max_name_length as usize,
+                "at-limit extension name length should be preserved"
+            );
+            assert_eq!(
+                extension.value.as_ref().map(|value| value.value.len()),
+                Some(config.max_value_length as usize),
+                "at-limit extension value length should be preserved"
+            );
+            assert_eq!(
+                total_extension_length,
+                (config.max_name_length + config.max_value_length) as usize,
+                "at-limit total length should match parsed name plus value"
+            );
+        }
+        other => panic!("at-limit chunk extension should parse successfully: {other:?}"),
+    }
+
+    let over_name = format!("1;{}=z", "x".repeat(config.max_name_length as usize + 1));
+    match parser.parse_chunk_line(&over_name) {
+        ChunkParseResult::DoSBlocked {
+            reason,
+            attack_type,
+        } => {
+            assert_eq!(
+                attack_type, "name_length",
+                "just-over-name-limit probe should hit name_length guard"
+            );
+            assert!(
+                reason.contains("name length"),
+                "name-length guard should report a name-length diagnostic: {reason}"
+            );
+        }
+        other => panic!("just-over-name-limit chunk extension should be blocked: {other:?}"),
+    }
+
+    let over_value = format!("1;x={}", "y".repeat(config.max_value_length as usize + 1));
+    match parser.parse_chunk_line(&over_value) {
+        ChunkParseResult::DoSBlocked {
+            reason,
+            attack_type,
+        } => {
+            assert_eq!(
+                attack_type, "value_length",
+                "just-over-value-limit probe should hit value_length guard"
+            );
+            assert!(
+                reason.contains("value length"),
+                "value-length guard should report a value-length diagnostic: {reason}"
+            );
+        }
+        other => panic!("just-over-value-limit chunk extension should be blocked: {other:?}"),
+    }
+}
+
 fn build_dos_chunk_line(pattern: &DoSPattern) -> String {
     match pattern {
         DoSPattern::LongName { length } => {
-            format!("1000; {}=value", "a".repeat(*length as usize))
+            format!("1000; {}=value", "a".repeat(capped_u32_len(*length)))
         }
 
         DoSPattern::LongValue { length, quoted } => {
-            let value = "b".repeat(*length as usize);
+            let value = "b".repeat(capped_u32_len(*length));
             if *quoted {
                 format!("1000; name=\"{}\"", value)
             } else {
@@ -695,8 +784,10 @@ fn build_dos_chunk_line(pattern: &DoSPattern) -> String {
 
         DoSPattern::ManySmall { count, each_size } => {
             let mut chunk_line = "1000".to_string();
-            for i in 0..*count {
-                chunk_line.push_str(&format!("; name{}={}", i, "x".repeat(*each_size as usize)));
+            let capped_count = (*count).min(MAX_GENERATED_EXTENSION_COUNT);
+            let capped_size = usize::from(*each_size).min(MAX_GENERATED_ATTACK_BYTES);
+            for i in 0..capped_count {
+                chunk_line.push_str(&format!("; name{}={}", i, "x".repeat(capped_size)));
             }
             chunk_line
         }
@@ -706,8 +797,14 @@ fn build_dos_chunk_line(pattern: &DoSPattern) -> String {
             size_per_level,
         } => {
             let mut value = "base".to_string();
-            for _ in 0..*depth {
-                value = format!("\"{}{}\"", value, "y".repeat(*size_per_level as usize));
+            let capped_depth = (*depth).min(MAX_GENERATED_QUOTE_DEPTH);
+            let capped_size = usize::from(*size_per_level).min(MAX_GENERATED_ATTACK_BYTES);
+            for _ in 0..capped_depth {
+                value = format!("\"{}{}\"", value, "y".repeat(capped_size));
+                if value.len() > MAX_GENERATED_ATTACK_BYTES {
+                    value.truncate(MAX_GENERATED_ATTACK_BYTES);
+                    break;
+                }
             }
             format!("1000; name={}", value)
         }
@@ -720,17 +817,24 @@ fn build_dos_chunk_line(pattern: &DoSPattern) -> String {
             let mut chunk_line = "1000".to_string();
 
             // Add long names
-            for _ in 0..*long_names {
-                chunk_line.push_str(&format!("; {}=short", "longname".repeat(1000)));
+            for _ in 0..(*long_names).min(MAX_GENERATED_MIXED_REPEAT) {
+                chunk_line.push_str(&format!(
+                    "; {}=short",
+                    repeat_token_capped("longname", 1000)
+                ));
             }
 
             // Add long values
-            for i in 0..*long_values {
-                chunk_line.push_str(&format!("; short{} ={}", i, "longvalue".repeat(1000)));
+            for i in 0..(*long_values).min(MAX_GENERATED_MIXED_REPEAT) {
+                chunk_line.push_str(&format!(
+                    "; short{}={}",
+                    i,
+                    repeat_token_capped("longvalue", 1000)
+                ));
             }
 
             // Add many small
-            for i in 0..*small_count {
+            for i in 0..(*small_count).min(MAX_GENERATED_EXTENSION_COUNT) {
                 chunk_line.push_str(&format!("; s{}=v", i));
             }
 
