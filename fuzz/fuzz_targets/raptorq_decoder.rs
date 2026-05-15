@@ -510,7 +510,7 @@ fn apply_mutations(packets: &mut Vec<ReceivedSymbol>, mutations: &[PacketMutatio
             }
             MutationKind::DropCoefficient => {
                 let packet = &mut packets[idx];
-                let _ = packet.coefficients.pop();
+                drop_last_coefficient_observed(packet);
             }
             MutationKind::AddCoefficient { coefficient } => {
                 let packet = &mut packets[idx];
@@ -537,6 +537,38 @@ fn apply_mutations(packets: &mut Vec<ReceivedSymbol>, mutations: &[PacketMutatio
             }
         }
     }
+}
+
+fn drop_last_coefficient_observed(packet: &mut ReceivedSymbol) {
+    let before = packet.coefficients.clone();
+    let removed = packet.coefficients.pop();
+
+    if before.is_empty() {
+        assert!(
+            removed.is_none(),
+            "empty coefficient vector should not yield a removed value"
+        );
+        assert!(
+            packet.coefficients.is_empty(),
+            "DropCoefficient should leave empty coefficient vectors empty"
+        );
+        return;
+    }
+
+    let expected_removed = before[before.len() - 1];
+    assert!(
+        removed.is_some_and(|coefficient| coefficient == expected_removed),
+        "DropCoefficient should remove the previous last coefficient"
+    );
+    assert_eq!(
+        packet.coefficients.len(),
+        before.len() - 1,
+        "DropCoefficient should remove exactly one coefficient"
+    );
+    assert!(
+        packet.coefficients.as_slice() == &before[..before.len() - 1],
+        "DropCoefficient should preserve the coefficient prefix"
+    );
 }
 
 fn max_repair_payload_len(symbol_size: usize) -> usize {
