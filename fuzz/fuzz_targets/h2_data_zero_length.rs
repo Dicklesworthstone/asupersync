@@ -116,6 +116,14 @@ const STREAM_CLOSED: u32 = 0x5;
 /// Initial flow control window size
 const INITIAL_WINDOW_SIZE: i32 = 65535;
 
+fn flow_control_len(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
+
+fn flow_control_delta(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
 impl MockZeroDataConnection {
     fn new() -> Self {
         Self {
@@ -207,9 +215,9 @@ impl MockZeroDataConnection {
                 return;
             }
             let data_length = payload.len() - 1 - pad_length; // -1 for pad_length byte
-            (data_length, payload.len() as u32) // Flow control counts entire frame payload
+            (data_length, flow_control_len(payload.len())) // Flow control counts entire frame payload
         } else {
-            (payload.len(), payload.len() as u32)
+            (payload.len(), flow_control_len(payload.len()))
         };
 
         // CRITICAL: Zero-length DATA frames are LEGAL per RFC 7540
@@ -235,8 +243,10 @@ impl MockZeroDataConnection {
 
         // Update flow control windows
         if flow_control_consumed > 0 {
+            let flow_control_debit = flow_control_delta(flow_control_consumed);
+
             // Check connection-level flow control
-            if self.connection_window < flow_control_consumed as i32 {
+            if self.connection_window < flow_control_debit {
                 self.connection_error = Some(FLOW_CONTROL_ERROR);
                 self.protocol_violations
                     .push("Connection flow control window exceeded".to_string());
@@ -244,7 +254,7 @@ impl MockZeroDataConnection {
             }
 
             // Check stream-level flow control
-            if stream_state.flow_control_window < flow_control_consumed as i32 {
+            if stream_state.flow_control_window < flow_control_debit {
                 self.connection_error = Some(FLOW_CONTROL_ERROR);
                 self.protocol_violations
                     .push(format!("Stream {} flow control window exceeded", stream_id));
@@ -252,8 +262,8 @@ impl MockZeroDataConnection {
             }
 
             // Consume flow control
-            self.connection_window -= flow_control_consumed as i32;
-            stream_state.flow_control_window -= flow_control_consumed as i32;
+            self.connection_window -= flow_control_debit;
+            stream_state.flow_control_window -= flow_control_debit;
         }
 
         // Update stream state
@@ -360,13 +370,15 @@ impl MockZeroDataConnection {
 
         if stream_id == 0 {
             // Connection-level window update
-            self.connection_window = self.connection_window.saturating_add(increment as i32);
+            self.connection_window = self
+                .connection_window
+                .saturating_add(flow_control_delta(increment));
         } else {
             // Stream-level window update
             if let Some(stream_state) = self.stream_states.get_mut(&stream_id) {
                 stream_state.flow_control_window = stream_state
                     .flow_control_window
-                    .saturating_add(increment as i32);
+                    .saturating_add(flow_control_delta(increment));
             }
         }
     }
