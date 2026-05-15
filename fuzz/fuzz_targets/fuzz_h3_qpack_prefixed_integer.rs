@@ -158,7 +158,7 @@ fn test_fixed_integer_canaries() {
         0x80,
         0x01,
     ];
-    expect_invalid_frame_contains(
+    expect_invalid_frame(
         &unknown_static_after_continuation,
         "unknown static qpack index",
     );
@@ -168,12 +168,12 @@ fn test_fixed_integer_canaries() {
 
     let mut overflowing_static = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0xFF];
     overflowing_static.extend(std::iter::repeat_n(0x80, 9));
-    expect_invalid_frame_contains(&overflowing_static, "qpack integer overflow");
+    expect_invalid_frame(&overflowing_static, "qpack integer overflow");
 
     let non_zero_required_insert_count = vec![0xFF, 0x00, 0x00];
-    expect_qpack_policy_contains(
+    expect_qpack_policy(
         &non_zero_required_insert_count,
-        "required insert count must be zero",
+        "required insert count must be zero in static-only mode",
     );
 }
 
@@ -208,26 +208,20 @@ fn expect_unexpected_eof(input: &[u8]) {
     }
 }
 
-fn expect_invalid_frame_contains(input: &[u8], expected: &str) {
+fn expect_invalid_frame(input: &[u8], expected: &'static str) {
     match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
         Err(H3NativeError::InvalidFrame(message)) => {
-            assert!(
-                message.contains(expected),
-                "InvalidFrame message {message:?} should contain {expected:?}"
-            );
+            assert_eq!(message, expected);
         }
         Ok(decoded) => panic!("expected InvalidFrame({expected}), got {decoded:?}"),
         Err(error) => panic!("expected InvalidFrame({expected}), got {error:?}"),
     }
 }
 
-fn expect_qpack_policy_contains(input: &[u8], expected: &str) {
+fn expect_qpack_policy(input: &[u8], expected: &'static str) {
     match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
         Err(H3NativeError::QpackPolicy(message)) => {
-            assert!(
-                message.contains(expected),
-                "QpackPolicy message {message:?} should contain {expected:?}"
-            );
+            assert_eq!(message, expected);
         }
         Ok(decoded) => panic!("expected QpackPolicy({expected}), got {decoded:?}"),
         Err(error) => panic!("expected QpackPolicy({expected}), got {error:?}"),
