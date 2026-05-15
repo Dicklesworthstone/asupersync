@@ -167,7 +167,8 @@ fuzz_target!(|input: &[u8]| {
         fuzz_input.initial_value.clone()
     };
 
-    let (tx, _rx) = asupersync::channel::watch::channel(initial_value.clone());
+    let (tx, initial_rx) = asupersync::channel::watch::channel(initial_value.clone());
+    drop(initial_rx);
     let mut env = TestEnv::new(initial_value);
     let mut receivers: HashMap<u8, asupersync::channel::watch::Receiver<TestValue>> =
         HashMap::new();
@@ -178,7 +179,8 @@ fuzz_target!(|input: &[u8]| {
         if config.create_at_start && i < MAX_RECEIVERS {
             let receiver_id = i as u8;
             let new_rx = tx.subscribe();
-            env.track_receiver(receiver_id, tx.borrow().id as u64);
+            let current_version = env.shadow.version.load(Ordering::Relaxed);
+            env.track_receiver(receiver_id, current_version);
             receivers.insert(receiver_id, new_rx);
         }
     }
@@ -251,7 +253,7 @@ fuzz_target!(|input: &[u8]| {
                     && !receivers.contains_key(&receiver_id)
                 {
                     let new_rx = tx.subscribe();
-                    let current_version = tx.borrow().id as u64;
+                    let current_version = env.shadow.version.load(Ordering::Relaxed);
                     env.track_receiver(receiver_id, current_version);
                     receivers.insert(receiver_id, new_rx);
                 }
@@ -282,8 +284,10 @@ fuzz_target!(|input: &[u8]| {
                     let cloned = receiver.borrow_and_clone();
                     env.shadow.total_borrows.fetch_add(1, Ordering::Relaxed);
 
-                    // Verify cloned value matches current state expectations
-                    assert_eq!(cloned.data.len(), cloned.data.len()); // Sanity check
+                    assert!(
+                        cloned.data.len() <= MAX_DATA_SIZE,
+                        "borrow_and_clone returned data beyond fuzz size cap"
+                    );
 
                     // Test that cloned value is independent
                     let cloned2 = receiver.borrow_and_clone();
@@ -296,17 +300,26 @@ fuzz_target!(|input: &[u8]| {
                 if let Some(receiver) = receivers.get_mut(&receiver_id) {
                     // Check if changed before update
                     let was_changed = receiver.has_changed();
+                    let shadow_receiver_version = env
+                        .shadow
+                        .receiver_versions
+                        .get(&receiver_id)
+                        .copied()
+                        .unwrap_or(0);
+                    let current_version_before = env.shadow.version.load(Ordering::Relaxed);
+                    assert_eq!(
+                        was_changed,
+                        shadow_receiver_version != current_version_before,
+                        "pre-update has_changed mismatch for receiver {receiver_id}"
+                    );
 
                     let value = receiver.borrow_and_update();
                     env.shadow.total_borrows.fetch_add(1, Ordering::Relaxed);
 
-                    // Update shadow receiver version if there was a change
-                    if was_changed {
-                        if let Some(shadow_version) =
-                            env.shadow.receiver_versions.get_mut(&receiver_id)
-                        {
-                            *shadow_version = env.shadow.version.load(Ordering::Relaxed);
-                        }
+                    let current_version = env.shadow.version.load(Ordering::Relaxed);
+                    if let Some(shadow_version) = env.shadow.receiver_versions.get_mut(&receiver_id)
+                    {
+                        *shadow_version = current_version;
                     }
 
                     // Verify value accessibility
@@ -331,11 +344,11 @@ fuzz_target!(|input: &[u8]| {
                             .unwrap_or(0);
                         let current_version = env.shadow.version.load(Ordering::Relaxed);
 
-                        if shadow_receiver_version < current_version {
-                            // Should indicate change available
-                        }
-
-                        let _ = has_changed; // Use the result to avoid unused variable warning
+                        let expected_changed = shadow_receiver_version != current_version;
+                        assert_eq!(
+                            has_changed, expected_changed,
+                            "has_changed mismatch for receiver {receiver_id}: seen={shadow_receiver_version}, current={current_version}"
+                        );
                     }
                 }
             }
@@ -345,9 +358,15 @@ fuzz_target!(|input: &[u8]| {
                     let count = tx.receiver_count();
                     let shadow_count = env.shadow.receiver_count.load(Ordering::Relaxed);
 
-                    // Verify count consistency (allowing for concurrent drops)
-                    assert!(count <= receivers.len());
-                    assert!(count <= shadow_count + 1); // +1 for potential race conditions
+                    assert_eq!(
+                        count,
+                        receivers.len(),
+                        "sender receiver_count must match tracked receivers"
+                    );
+                    assert_eq!(
+                        count, shadow_count,
+                        "sender receiver_count must match shadow receiver count"
+                    );
                 }
             }
 
@@ -356,27 +375,24 @@ fuzz_target!(|input: &[u8]| {
                     let is_closed = tx.is_closed();
                     let shadow_closed = env.shadow.receiver_count.load(Ordering::Relaxed) == 0;
 
-                    // Verify closed state consistency
-                    if receivers.is_empty() {
-                        assert_eq!(is_closed, shadow_closed);
-                    }
+                    assert_eq!(is_closed, shadow_closed);
                 }
             }
 
             WatchOperation::QueryVersion { receiver_id } => {
                 if let Some(receiver) = receivers.get(&receiver_id) {
                     let version = receiver.seen_version();
-                    let _shadow_version = env
+                    let shadow_version = env
                         .shadow
                         .receiver_versions
                         .get(&receiver_id)
                         .copied()
                         .unwrap_or(0);
 
-                    // Version should be consistent with shadow tracking
-                    // (allowing for some drift due to concurrent updates)
-                    let current_version = env.shadow.version.load(Ordering::Relaxed);
-                    assert!(version <= current_version);
+                    assert_eq!(
+                        version, shadow_version,
+                        "receiver seen_version must match shadow cursor"
+                    );
                 }
             }
 
@@ -423,12 +439,14 @@ fuzz_target!(|input: &[u8]| {
     if sender_active {
         // Test sender state consistency
         let final_receiver_count = tx.receiver_count();
-        assert!(final_receiver_count <= receivers.len());
+        assert_eq!(
+            final_receiver_count,
+            receivers.len(),
+            "final sender receiver_count must match tracked receivers"
+        );
 
         let is_closed = tx.is_closed();
-        if receivers.is_empty() {
-            assert!(is_closed);
-        }
+        assert_eq!(is_closed, receivers.is_empty());
 
         // Test final borrow from sender
         let final_value = tx.borrow();
@@ -446,11 +464,19 @@ fuzz_target!(|input: &[u8]| {
         // Test version consistency
         let version = receiver.seen_version();
         let shadow_version = env.shadow.receiver_versions.get(id).copied().unwrap_or(0);
-        assert!(version >= shadow_version);
+        assert_eq!(
+            version, shadow_version,
+            "final receiver seen_version must match shadow cursor"
+        );
 
         // Test change detection
         let has_changed = receiver.has_changed();
-        let _ = has_changed; // Use result
+        let current_version = env.shadow.version.load(Ordering::Relaxed);
+        assert_eq!(
+            has_changed,
+            shadow_version != current_version,
+            "final has_changed must reflect shadow cursor"
+        );
 
         // Test Debug formatting
         let _ = format!("{:?}", receiver);
