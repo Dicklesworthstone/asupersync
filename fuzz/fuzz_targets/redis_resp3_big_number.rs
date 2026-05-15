@@ -21,10 +21,9 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::messaging::redis::{RespValue, RedisError};
+use asupersync::messaging::redis::RespValue;
 
 const MAX_NUMBER_LENGTH: usize = 100_000; // Reasonable limit to avoid OOM
-const MAX_FUZZ_ITERATIONS: usize = 1000; // Limit iterations per input
 
 #[derive(Debug, Arbitrary)]
 struct BigNumberInput {
@@ -62,10 +61,10 @@ enum ValidNumberChoice {
 
 #[derive(Debug, Arbitrary)]
 enum ZeroVariant {
-    Simple, // "0"
+    Simple,       // "0"
     LeadingZeros, // "000"
-    PlusZero, // "+0"
-    MinusZero, // "-0"
+    PlusZero,     // "+0"
+    MinusZero,    // "-0"
 }
 
 #[derive(Debug, Arbitrary)]
@@ -95,9 +94,9 @@ enum HugeNumberPattern {
 
 #[derive(Debug, Arbitrary)]
 enum MathPattern {
-    Factorial(u8), // n! for n = 0-50
+    Factorial(u8),                    // n! for n = 0-50
     Power { base: u8, exponent: u8 }, // base^exp
-    Fibonacci(u8), // Fibonacci(n)
+    Fibonacci(u8),                    // Fibonacci(n)
 }
 
 #[derive(Debug, Arbitrary)]
@@ -132,16 +131,16 @@ enum NonNumericPattern {
 
 #[derive(Debug, Arbitrary)]
 enum LetterPattern {
-    Hex, // 0x123ABC
-    Alpha, // abc123
+    Hex,     // 0x123ABC
+    Alpha,   // abc123
     Unicode, // numbers with unicode chars
 }
 
 #[derive(Debug, Arbitrary)]
 enum SymbolPattern {
     Punctuation, // !@#$%
-    Math, // +-*/%
-    Currency, // $¥€£
+    Math,        // +-*/%
+    Currency,    // $¥€£
 }
 
 #[derive(Debug, Arbitrary)]
@@ -153,26 +152,26 @@ enum MixedPattern {
 
 #[derive(Debug, Arbitrary)]
 enum WhitespacePattern {
-    Leading, // "  123"
+    Leading,  // "  123"
     Trailing, // "123  "
     Embedded, // "1 2 3"
-    Tabs, // "\t123\t"
+    Tabs,     // "\t123\t"
     Newlines, // "123\n"
 }
 
 #[derive(Debug, Arbitrary)]
 enum InvalidUtf8Pattern {
-    HighBit, // 0x80-0xFF bytes
-    BrokenSequences, // Invalid UTF-8 sequences
+    HighBit,          // 0x80-0xFF bytes
+    BrokenSequences,  // Invalid UTF-8 sequences
     OverlongEncoding, // Overlong UTF-8 sequences
 }
 
 #[derive(Debug, Arbitrary)]
 enum InjectionPattern {
-    CRLF, // embedded \r\n
-    NullBytes, // embedded \0
+    Crlf,            // embedded \r\n
+    NullBytes,       // embedded \0
     EscapeSequences, // \t\n\r etc
-    ControlChars, // 0x00-0x1F
+    ControlChars,    // 0x00-0x1F
 }
 
 #[derive(Debug, Arbitrary)]
@@ -187,40 +186,40 @@ enum EdgeCaseChoice {
 
 #[derive(Debug, Arbitrary)]
 enum BoundaryPattern {
-    MaxInt64, // i64::MAX
-    MinInt64, // i64::MIN
-    MaxUint64, // u64::MAX
-    MaxInt128, // i128::MAX
+    MaxInt64,    // i64::MAX
+    MinInt64,    // i64::MIN
+    MaxUint64,   // u64::MAX
+    MaxInt128,   // i128::MAX
     EmptyString, // ""
 }
 
 #[derive(Debug, Arbitrary)]
 enum MalformedPattern {
     MultipleSigns, // --123, ++123
-    TrailingJunk, // 123abc
+    TrailingJunk,  // 123abc
     EmbeddedSigns, // 1-23
-    MultipleDots, // 12.34.56
+    MultipleDots,  // 12.34.56
 }
 
 #[derive(Debug, Arbitrary)]
 enum StressPattern {
-    ManyZeros, // 00000...
+    ManyZeros,          // 00000...
     AlternatingPattern, // 010101...
-    MaxLength, // Fill to MAX_NUMBER_LENGTH
+    MaxLength,          // Fill to MAX_NUMBER_LENGTH
 }
 
 #[derive(Debug, Arbitrary)]
 enum LargeNumberChoice {
-    VeryLarge(u16), // Length in thousands of digits
-    Exponential(u8), // 10^n where n is the value
+    VeryLarge(u16),            // Length in thousands of digits
+    Exponential(u8),           // 10^n where n is the value
     BigInteger(BigIntPattern), // Well-known large numbers
 }
 
 #[derive(Debug, Arbitrary)]
 enum BigIntPattern {
-    Mersenne(u8), // Mersenne primes 2^n - 1
-    GooglePlex, // 10^100
-    GrahamsNumber, // Approximation
+    Mersenne(u8),           // Mersenne primes 2^n - 1
+    GooglePlex,             // 10^100
+    GrahamsNumber,          // Approximation
     AckermanResult(u8, u8), // Ackermann function result
 }
 
@@ -256,8 +255,9 @@ fn fuzz_resp3_big_number(input: BigNumberInput) {
 
     // Step 2: Test encoding edge cases if enabled
     if input.encoding_edge_cases.test_crlf_filtering
-       || input.encoding_edge_cases.test_invalid_chars
-       || input.encoding_edge_cases.test_large_encoding {
+        || input.encoding_edge_cases.test_invalid_chars
+        || input.encoding_edge_cases.test_large_encoding
+    {
         test_encoding_edge_cases(&number_string, &input.encoding_edge_cases);
     }
 
@@ -266,9 +266,10 @@ fn fuzz_resp3_big_number(input: BigNumberInput) {
 
     // Step 4: Test decoding edge cases with malformed wire formats
     if input.decoding_edge_cases.test_utf8_validation
-       || input.decoding_edge_cases.test_crlf_boundaries
-       || input.decoding_edge_cases.test_buffer_overflow
-       || input.decoding_edge_cases.test_malformed_wire {
+        || input.decoding_edge_cases.test_crlf_boundaries
+        || input.decoding_edge_cases.test_buffer_overflow
+        || input.decoding_edge_cases.test_malformed_wire
+    {
         test_decoding_edge_cases(&number_string, &input.decoding_edge_cases);
     }
 
@@ -297,72 +298,89 @@ fn generate_valid_number(choice: &ValidNumberChoice) -> String {
             PositiveNumberPattern::Single(n) => {
                 let digit = (*n % 9) + 1; // 1-9
                 digit.to_string()
-            },
+            }
             PositiveNumberPattern::Small(n) => n.to_string(),
             PositiveNumberPattern::Decimal(dec) => match dec {
-                DecimalPattern::Fraction { integer, fractional } => {
+                DecimalPattern::Fraction {
+                    integer,
+                    fractional,
+                } => {
                     format!("{}.{}", integer, fractional)
-                },
-                DecimalPattern::SmallFraction { numerator, denominator } => {
+                }
+                DecimalPattern::SmallFraction {
+                    numerator,
+                    denominator,
+                } => {
                     if *denominator == 0 {
                         numerator.to_string()
                     } else {
                         format!("{}.{}", numerator / denominator, numerator % denominator)
                     }
-                },
+                }
             },
             PositiveNumberPattern::Scientific(sci) => match sci {
-                ScientificPattern::Positive { mantissa, exponent } => {
+                ScientificPattern::Positive { mantissa, exponent }
+                | ScientificPattern::Negative { mantissa, exponent } => {
                     format!("{}e{}", mantissa, exponent)
-                },
-                _ => "1e10".to_string(),
+                }
             },
         },
         ValidNumberChoice::Negative(pattern) => match pattern {
             NegativeNumberPattern::Simple(n) => format!("-{}", n),
-            NegativeNumberPattern::Decimal(dec) => format!("-{}", match dec {
-                DecimalPattern::Fraction { integer, fractional } => {
-                    format!("{}.{}", integer, fractional)
-                },
-                DecimalPattern::SmallFraction { numerator, denominator } => {
-                    if *denominator == 0 {
-                        numerator.to_string()
-                    } else {
-                        format!("{}.{}", numerator / denominator, numerator % denominator)
+            NegativeNumberPattern::Decimal(dec) => format!(
+                "-{}",
+                match dec {
+                    DecimalPattern::Fraction {
+                        integer,
+                        fractional,
+                    } => {
+                        format!("{}.{}", integer, fractional)
                     }
-                },
-            }),
-            NegativeNumberPattern::Scientific(sci) => format!("-1e{}", match sci {
-                ScientificPattern::Positive { exponent, .. } => *exponent,
-                ScientificPattern::Negative { exponent, .. } => *exponent,
-            }),
+                    DecimalPattern::SmallFraction {
+                        numerator,
+                        denominator,
+                    } => {
+                        if *denominator == 0 {
+                            numerator.to_string()
+                        } else {
+                            format!("{}.{}", numerator / denominator, numerator % denominator)
+                        }
+                    }
+                }
+            ),
+            NegativeNumberPattern::Scientific(sci) => match sci {
+                ScientificPattern::Positive { mantissa, exponent }
+                | ScientificPattern::Negative { mantissa, exponent } => {
+                    format!("-{}e{}", mantissa, exponent)
+                }
+            },
         },
         ValidNumberChoice::Huge(pattern) => match pattern {
             HugeNumberPattern::ManyDigits(count) => {
                 let digit_count = (*count as usize).min(MAX_NUMBER_LENGTH);
                 "1".repeat(digit_count)
-            },
+            }
             HugeNumberPattern::RepeatedPattern { pattern, count } => {
                 let digit = (*pattern % 10).to_string();
                 let repeat_count = (*count as usize).min(MAX_NUMBER_LENGTH);
                 digit.repeat(repeat_count)
-            },
+            }
             HugeNumberPattern::Mathematical(math) => match math {
                 MathPattern::Factorial(n) => {
                     // Calculate factorial for small n to avoid overflow
                     let n = (*n).min(20);
                     (1..=n as u64).product::<u64>().to_string()
-                },
+                }
                 MathPattern::Power { base, exponent } => {
                     let base = (*base as u64).max(1);
                     let exp = (*exponent as u32).min(20);
                     base.pow(exp).to_string()
-                },
+                }
                 MathPattern::Fibonacci(n) => {
                     // Calculate Fibonacci number for small n
                     let n = (*n).min(50);
                     fibonacci(n).to_string()
-                },
+                }
             },
         },
     }
@@ -411,12 +429,14 @@ fn generate_invalid_format(choice: &InvalidFormatChoice) -> String {
                 WhitespacePattern::Newlines => "123\n456".to_string(),
             },
         },
-        InvalidFormatChoice::InvalidUtf8(_) => {
-            // Generate invalid UTF-8 sequences
-            String::from_utf8_lossy(&[0xFF, 0xFE, b'1', b'2', b'3']).to_string()
-        },
+        InvalidFormatChoice::InvalidUtf8(pattern) => String::from_utf8_lossy(match pattern {
+            InvalidUtf8Pattern::HighBit => &[0xFF, 0xFE, b'1', b'2', b'3'],
+            InvalidUtf8Pattern::BrokenSequences => &[0xC3, 0x28, b'4', b'5', b'6'],
+            InvalidUtf8Pattern::OverlongEncoding => &[0xC0, 0xAF, b'7', b'8', b'9'],
+        })
+        .to_string(),
         InvalidFormatChoice::Injection(injection) => match injection {
-            InjectionPattern::CRLF => "123\r\n456".to_string(),
+            InjectionPattern::Crlf => "123\r\n456".to_string(),
             InjectionPattern::NullBytes => "123\x00456".to_string(),
             InjectionPattern::EscapeSequences => "123\t\n\r456".to_string(),
             InjectionPattern::ControlChars => "123\x01\x02\x03456".to_string(),
@@ -452,11 +472,11 @@ fn generate_large_number(choice: &LargeNumberChoice) -> String {
         LargeNumberChoice::VeryLarge(thousands) => {
             let length = (*thousands as usize * 1000).min(MAX_NUMBER_LENGTH);
             "9".repeat(length)
-        },
+        }
         LargeNumberChoice::Exponential(n) => {
             let exp = (*n as usize).min(100);
             format!("1{}", "0".repeat(exp))
-        },
+        }
         LargeNumberChoice::BigInteger(pattern) => match pattern {
             BigIntPattern::Mersenne(n) => {
                 // Mersenne prime 2^n - 1, approximated
@@ -466,7 +486,7 @@ fn generate_large_number(choice: &LargeNumberChoice) -> String {
                 } else {
                     "2".repeat(n) // Approximation for very large Mersenne numbers
                 }
-            },
+            }
             BigIntPattern::GooglePlex => "1".to_string() + &"0".repeat(100),
             BigIntPattern::GrahamsNumber => "3".repeat(1000), // Very rough approximation
             BigIntPattern::AckermanResult(m, n) => {
@@ -474,7 +494,7 @@ fn generate_large_number(choice: &LargeNumberChoice) -> String {
                 let m = (*m).min(3);
                 let n = (*n).min(3);
                 ackermann(m, n).to_string()
-            },
+            }
         },
     }
 }
@@ -485,7 +505,11 @@ fn ackermann(m: u8, n: u8) -> u64 {
         (m, 0) => ackermann(m - 1, 1),
         (m, n) => {
             let inner = ackermann(m, n - 1);
-            if inner > 20 { inner } else { ackermann(m - 1, inner as u8) }
+            if inner > 20 {
+                inner
+            } else {
+                ackermann(m - 1, inner as u8)
+            }
         }
     }
 }
@@ -495,16 +519,22 @@ fn test_encoding_edge_cases(number_string: &str, edge_cases: &EncodingEdgeCases)
         // Test that CRLF characters are filtered during encoding
         let big_number = RespValue::BigNumber(number_string.to_string());
         let mut encoded = Vec::new();
-        big_number.encode_to(&mut encoded);
+        big_number.encode_into(&mut encoded);
 
         // Verify encoding format: starts with '(', ends with '\r\n'
         assert!(encoded.starts_with(b"("), "BigNumber must start with '('");
         assert!(encoded.ends_with(b"\r\n"), "BigNumber must end with CRLF");
 
         // Verify no embedded CRLF in the number portion
-        let content = &encoded[1..encoded.len()-2];
-        assert!(!content.contains(&b'\r'), "Encoded number must not contain \\r");
-        assert!(!content.contains(&b'\n'), "Encoded number must not contain \\n");
+        let content = &encoded[1..encoded.len() - 2];
+        assert!(
+            !content.contains(&b'\r'),
+            "Encoded number must not contain \\r"
+        );
+        assert!(
+            !content.contains(&b'\n'),
+            "Encoded number must not contain \\n"
+        );
     }
 }
 
@@ -519,7 +549,7 @@ fn test_round_trip_encoding(number_string: &str) {
 
     // Encode to wire format
     let mut encoded = Vec::new();
-    original.encode_to(&mut encoded);
+    original.encode_into(&mut encoded);
 
     // Attempt to decode back
     // Note: We expect this to either succeed (for valid numbers) or fail gracefully (for invalid)
@@ -530,10 +560,10 @@ fn test_decoding_edge_cases(number_string: &str, edge_cases: &DecodingEdgeCases)
     if edge_cases.test_malformed_wire && number_string.len() < 1000 {
         // Test various malformed wire formats
         let test_cases = vec![
-            format!("({}", number_string), // Missing CRLF
-            format!("({}\\r", number_string), // Missing LF
-            format!("({}\\n", number_string), // Missing CR
-            format!("{}\r\n", number_string), // Missing opening '('
+            format!("({}", number_string),         // Missing CRLF
+            format!("({}\\r", number_string),      // Missing LF
+            format!("({}\\n", number_string),      // Missing CR
+            format!("{}\r\n", number_string),      // Missing opening '('
             format!("({}\r\n\r\n", number_string), // Extra CRLF
         ];
 
@@ -556,17 +586,24 @@ fn test_vulnerability_scenarios(number_string: &str) {
     }
 
     // Test 1: UTF-8 validation - should handle invalid UTF-8 gracefully
-    let invalid_utf8 = format!("({}\xFF\xFE\r\n", number_string);
+    let mut invalid_utf8 = Vec::with_capacity(number_string.len() + 5);
+    invalid_utf8.push(b'(');
+    invalid_utf8.extend_from_slice(number_string.as_bytes());
+    invalid_utf8.extend_from_slice(&[0xFF, 0xFE, b'\r', b'\n']);
     let _ = std::hint::black_box(invalid_utf8);
 
     // Test 2: CRLF injection - encoding should filter these
     let crlf_injection = format!("{}\r\nINJECTED\r\n", number_string);
     let big_number = RespValue::BigNumber(crlf_injection);
     let mut encoded = Vec::new();
-    big_number.encode_to(&mut encoded);
+    big_number.encode_into(&mut encoded);
     // Verify the injection was filtered
     let encoded_str = String::from_utf8_lossy(&encoded);
-    assert_eq!(encoded_str.matches("\r\n").count(), 1, "Should have exactly one CRLF at the end");
+    assert_eq!(
+        encoded_str.matches("\r\n").count(),
+        1,
+        "Should have exactly one CRLF at the end"
+    );
 
     // Test 3: Memory exhaustion protection
     if number_string.len() < 1000 {
