@@ -219,15 +219,17 @@ fn test_connection_state_invariants(input: &FrameSequenceInput) {
         if let Ok(frame) = parse_frame_from_bytes(frame_bytes) {
             let before_state = connection.state();
 
-            match connection.process_frame(frame) {
+            let process_result = connection.process_frame(frame);
+            match &process_result {
                 Ok(_) => {
                     let after_state = connection.state();
 
                     // Verify valid state transitions
                     assert_valid_state_transition(before_state, after_state);
                 }
-                Err(_) => {
-                    // Error is acceptable - connection should remain in valid state
+                Err(err) => {
+                    assert_well_formed_h2_error(err);
+                    // Rejected frames must preserve a valid connection state.
                     let error_state = connection.state();
                     assert!(
                         matches!(
@@ -291,7 +293,8 @@ fn test_multi_stream_coordination(input: &FrameSequenceInput) {
                     active_streams.insert(stream_id);
                 }
 
-                match connection.process_frame(frame) {
+                let process_result = connection.process_frame(frame);
+                match &process_result {
                     Ok(_) => {
                         // Verify no stream state corruption
                         assert!(
@@ -300,9 +303,7 @@ fn test_multi_stream_coordination(input: &FrameSequenceInput) {
                             active_streams.len()
                         );
                     }
-                    Err(_) => {
-                        // Error is acceptable for invalid frame sequences
-                    }
+                    Err(err) => assert_well_formed_h2_error(err),
                 }
             }
         }
@@ -338,6 +339,7 @@ fn test_resource_exhaustion_protection(input: &FrameSequenceInput) {
                     );
                 }
                 Err(err) => {
+                    assert_well_formed_h2_error(&err);
                     // Check for proper resource exhaustion errors
                     let error_msg = format!("{err}");
                     if error_msg.contains("flood")
@@ -734,7 +736,8 @@ fn parse_frame_from_bytes(bytes: &[u8]) -> Result<Frame, H2Error> {
     let header = FrameHeader::parse(&mut src)?;
     let payload_len = match usize::try_from(header.length) {
         Ok(len) => len,
-        Err(_) => {
+        Err(error) => {
+            std::hint::black_box(error);
             return Err(H2Error::frame_size(
                 "frame payload length does not fit usize",
             ));
@@ -790,16 +793,18 @@ fn test_pre_handshake_attack(input: &FrameSequenceInput) {
     // First non-SETTINGS frame should be rejected
     for frame_bytes in frame_sequence.iter().take(10) {
         if let Ok(frame) = parse_frame_from_bytes(frame_bytes) {
+            let is_settings = matches!(frame, Frame::Settings(_));
             let result = connection.process_frame(frame);
 
             // Should either error or remain in valid state
             match result {
                 Ok(_) => {
-                    // If successful, must have been a SETTINGS frame
+                    assert!(
+                        is_settings,
+                        "non-SETTINGS frame was accepted before the H2 handshake completed"
+                    );
                 }
-                Err(_) => {
-                    // Expected for non-SETTINGS frames in handshaking
-                }
+                Err(err) => assert_well_formed_h2_error(&err),
             }
         }
     }
@@ -816,6 +821,7 @@ fn test_continuation_disorder(input: &FrameSequenceInput) {
             // CONTINUATION violations should be caught
             match result {
                 Err(err) => {
+                    assert_well_formed_h2_error(&err);
                     let error_msg = format!("{err}");
                     if error_msg.contains("CONTINUATION") || error_msg.contains("protocol") {
                         // Expected protocol error
@@ -913,7 +919,7 @@ fn test_general_ordering(input: &FrameSequenceInput) {
         if let Ok(frame) = parse_frame_from_bytes(frame_bytes) {
             let result = connection.process_frame(frame);
 
-            match result {
+            match &result {
                 Ok(_) => {
                     // Connection should remain in valid state
                     assert!(matches!(
@@ -924,9 +930,7 @@ fn test_general_ordering(input: &FrameSequenceInput) {
                             | ConnectionState::Closed
                     ));
                 }
-                Err(_) => {
-                    // Errors are acceptable for invalid frame sequences
-                }
+                Err(err) => assert_well_formed_h2_error(err),
             }
         }
     }
