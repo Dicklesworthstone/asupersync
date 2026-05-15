@@ -88,11 +88,14 @@ async fn exercise_binary_pipeline(cx: &asupersync::cx::Cx, case: &HashCommandCas
         .expect("binary hash pipeline should complete");
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0], Ok(RespValue::Integer(1)));
-    assert_eq!(
-        results[1],
-        Ok(RespValue::BulkString(Some(case.value.clone())))
-    );
+    match &results[0] {
+        Ok(RespValue::Integer(1)) => {}
+        other => panic!("HSET pipeline result should be integer 1, got {other:?}"),
+    }
+    match &results[1] {
+        Ok(RespValue::BulkString(Some(bytes))) => assert_eq!(bytes, &case.value),
+        other => panic!("HGET pipeline result should be matching bulk string, got {other:?}"),
+    }
     server
         .join()
         .expect("binary pipeline fake redis server join");
@@ -215,9 +218,10 @@ async fn exercise_wrappers(
                 .hset(cx, key, field, value)
                 .await
                 .expect_err("malformed HSET reply must fail closed");
-            assert!(
-                matches!(err, RedisError::Protocol(msg) if msg.contains("HSET did not return integer"))
-            );
+            match err {
+                RedisError::Protocol(msg) => assert_eq!(msg, "HSET did not return integer"),
+                other => panic!("HSET wrong-type reply should fail as Protocol, got {other:?}"),
+            }
         }
         WrapperScenario::HGetWrongType => {
             let inserted = client
@@ -230,9 +234,12 @@ async fn exercise_wrappers(
                 .hget(cx, key, field)
                 .await
                 .expect_err("malformed HGET reply must fail closed");
-            assert!(
-                matches!(err, RedisError::Protocol(msg) if msg.contains("HGET expected bulk string"))
-            );
+            match err {
+                RedisError::Protocol(msg) => {
+                    assert_eq!(msg, "HGET expected bulk string, got Integer(9)");
+                }
+                other => panic!("HGET wrong-type reply should fail as Protocol, got {other:?}"),
+            }
         }
     }
     server.join().expect("wrapper fake redis server join");
