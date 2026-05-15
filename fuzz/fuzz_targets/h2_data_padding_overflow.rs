@@ -1,18 +1,23 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::Bytes;
+use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{DataFrame, FrameHeader, FrameType, data_flags};
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 DATA frame padding validation fuzz target.
 ///
-/// Tests RFC 7540 §6.1 compliance for PADDED DATA frames where pad-length
-/// exceeds available payload space. The specification requires the padding
-/// length to be strictly less than the full frame payload length; the one-byte
-/// pad-length field may leave zero DATA bytes when all remaining octets are
-/// padding.
+/// Tests the live `DataFrame::parse` implementation for RFC 9113 §6.1
+/// compliance where PADDED DATA frame pad-length exceeds available payload
+/// space. The one-byte pad-length field may leave zero DATA bytes when all
+/// remaining octets are padding.
 ///
 /// Critical test case: pad-length=255 with frame-payload-length=256 is the
 /// maximum wire-legal all-padding DATA frame, not a padding overflow.
+const DATA_STREAM_ZERO_MESSAGE: &str = "DATA frame with stream ID 0";
+const PADDED_DATA_MISSING_PAD_LENGTH_MESSAGE: &str = "PADDED DATA frame with no padding length";
+const DATA_PADDING_OVERFLOW_MESSAGE: &str = "DATA frame padding exceeds data length";
 
 #[derive(Arbitrary, Debug, Clone)]
 struct DataPaddingInput {
@@ -31,208 +36,128 @@ struct DataPaddingInput {
     /// Whether END_STREAM flag is set
     end_stream_flag: bool,
 
-    /// Validation policy configuration
-    policy: PaddingValidationPolicy,
+    /// Deterministic payload fill byte for non-padding DATA bytes.
+    payload_seed: u8,
 }
 
-#[derive(Arbitrary, Debug, Clone)]
-struct PaddingValidationPolicy {
-    /// Maximum frame payload size allowed
-    max_frame_size: u32,
-}
+impl DataPaddingInput {
+    #[must_use]
+    fn stream_id(&self) -> u32 {
+        self.stream_id & 0x7fff_ffff
+    }
 
-impl Default for PaddingValidationPolicy {
-    fn default() -> Self {
-        Self {
-            max_frame_size: 16384, // RFC 7540 default SETTINGS_MAX_FRAME_SIZE
+    #[must_use]
+    fn flags(&self) -> u8 {
+        let mut flags = 0;
+        if self.padded_flag {
+            flags |= data_flags::PADDED;
         }
+        if self.end_stream_flag {
+            flags |= data_flags::END_STREAM;
+        }
+        flags
+    }
+
+    #[must_use]
+    fn payload(&self) -> Vec<u8> {
+        let payload_len = usize::from(self.frame_payload_length);
+        let mut payload = Vec::with_capacity(payload_len);
+
+        for index in 0..payload_len {
+            let offset = u8::try_from(index % 256).expect("index modulo 256 fits in u8");
+            payload.push(self.payload_seed.wrapping_add(offset));
+        }
+
+        if self.padded_flag && !payload.is_empty() {
+            payload[0] = self.pad_length;
+        }
+
+        payload
     }
 }
 
-/// Mock HTTP/2 DATA frame processor for testing padding validation
-struct MockDataProcessor {
-    policy: PaddingValidationPolicy,
-}
-
-impl MockDataProcessor {
-    fn new(policy: PaddingValidationPolicy) -> Self {
-        Self { policy }
-    }
-
-    /// Process a DATA frame and validate padding according to RFC 7540 §6.1
-    fn process_data_frame(&self, input: &DataPaddingInput) -> DataFrameResult {
-        // Validate stream ID (must be non-zero for stream frames)
-        if input.stream_id == 0 {
-            return DataFrameResult::Invalid("DATA frame on stream 0".to_string());
-        }
-
-        // Check frame size limits
-        if input.frame_payload_length as u32 > self.policy.max_frame_size {
-            return DataFrameResult::Invalid(format!(
-                "Frame size {} exceeds maximum {}",
-                input.frame_payload_length, self.policy.max_frame_size
-            ));
-        }
-
-        if !input.padded_flag {
-            // No padding, frame is valid if it has payload space
-            return if input.frame_payload_length > 0 {
-                DataFrameResult::Valid("DATA frame without padding".to_string())
-            } else {
-                DataFrameResult::Valid("Empty DATA frame".to_string())
-            };
-        }
-
-        // PADDED flag is set - validate padding per RFC 7540 §6.1
-        let pad_length = input.pad_length as u16;
-        let total_payload = input.frame_payload_length;
-
-        // RFC 7540 §6.1: "The total number of padding octets is determined by the
-        // value of the Pad Length field. If the length of the padding is the length
-        // of the frame payload or greater, the recipient MUST treat this as a
-        // connection error of type PROTOCOL_ERROR."
-
-        // Pad length field itself takes 1 byte
-        let pad_length_field_size = 1u16;
-        if total_payload < pad_length_field_size {
-            return DataFrameResult::ProtocolError(
-                "PADDED DATA frame missing pad length field".to_string(),
-            );
-        }
-
-        let available_for_padding = total_payload - pad_length_field_size;
-
-        if pad_length > available_for_padding {
-            return DataFrameResult::ProtocolError(format!(
-                "Pad length {} exceeds available space {} (total payload {} - pad length field {})",
-                pad_length, available_for_padding, total_payload, pad_length_field_size
-            ));
-        }
-
-        // Calculate actual data length
-        let data_length = total_payload - pad_length_field_size - pad_length;
-
-        // Additional validation scenarios
-        self.validate_padding_scenarios(input, data_length)
-    }
-
-    fn validate_padding_scenarios(
-        &self,
-        input: &DataPaddingInput,
-        data_length: u16,
-    ) -> DataFrameResult {
-        let pad_length = input.pad_length as u16;
-        let total_payload = input.frame_payload_length;
-
-        // Scenario 1: Padding exceeds total payload
-        if pad_length + 1 > total_payload {
-            return DataFrameResult::ProtocolError(
-                "Padding plus pad-length field exceeds total payload".to_string(),
-            );
-        }
-
-        // Scenario 2: Valid all-padding DATA frame
-        if data_length == 0 && pad_length > 0 {
-            let stream_state = if input.end_stream_flag {
-                "END_STREAM "
-            } else {
-                ""
-            };
-            return DataFrameResult::Valid(format!(
-                "Valid {stream_state}DATA frame with padding only"
-            ));
-        }
-
-        DataFrameResult::Valid(format!(
-            "Valid DATA frame: {} bytes data, {} bytes padding",
-            data_length, pad_length
-        ))
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum DataFrameResult {
-    /// Frame is valid per RFC 7540
-    Valid(String),
-
-    /// Frame violates RFC 7540 and should trigger PROTOCOL_ERROR
-    ProtocolError(String),
-
-    /// Frame is invalid but not necessarily a protocol error
-    Invalid(String),
+fn assert_protocol_error(error: &H2Error, expected_message: &str) {
+    assert_eq!(
+        error.code,
+        ErrorCode::ProtocolError,
+        "DATA padding oracle expected PROTOCOL_ERROR for {expected_message:?}, got {error:?}"
+    );
+    assert_eq!(
+        error.message, expected_message,
+        "DATA padding oracle message drift"
+    );
+    assert!(
+        error.is_connection_error(),
+        "DATA frame parser protocol errors should be connection-level: {error:?}"
+    );
 }
 
 fuzz_target!(|input: DataPaddingInput| {
-    // Ensure stream ID is valid (non-zero)
-    if input.stream_id == 0 {
+    let stream_id = input.stream_id();
+    let payload = input.payload();
+    let header = FrameHeader {
+        length: u32::try_from(payload.len()).expect("fuzz payload length fits in u32"),
+        frame_type: FrameType::Data as u8,
+        flags: input.flags(),
+        stream_id,
+    };
+
+    let result = DataFrame::parse(&header, Bytes::copy_from_slice(&payload));
+
+    if stream_id == 0 {
+        let error = result.expect_err("DATA frame with stream ID 0 should be rejected");
+        assert_protocol_error(&error, DATA_STREAM_ZERO_MESSAGE);
         return;
     }
 
-    let processor = MockDataProcessor::new(input.policy.clone());
-    let result = processor.process_data_frame(&input);
-
-    // Test critical RFC 7540 §6.1 violation cases
-    match result {
-        DataFrameResult::ProtocolError(ref msg) => {
-            // These should definitely be padding-overflow protocol errors.
-            let pad_length = input.pad_length as u16;
-            let total_payload = input.frame_payload_length;
-
-            assert!(
-                input.padded_flag && pad_length + 1 > total_payload,
-                "ProtocolError must be reserved for true padding overflow; pad_length={pad_length}, total_payload={total_payload}, padded={}",
-                input.padded_flag
-            );
-            assert!(
-                msg.contains("exceeds") || msg.contains("missing pad length"),
-                "Protocol error should mention padding overflow or missing pad-length field: {}",
-                msg
-            );
-        }
-
-        DataFrameResult::Valid(ref msg) => {
-            // Verify that valid frames actually have proper padding
-            if input.padded_flag {
-                let pad_length = input.pad_length as u16;
-                let available = input.frame_payload_length.saturating_sub(1);
-                assert!(
-                    pad_length <= available,
-                    "Valid frame should not have padding overflow"
-                );
-                if pad_length > 0 && pad_length == available {
-                    assert!(
-                        msg.contains("padding only"),
-                        "All-padding DATA frames should be classified explicitly: {}",
-                        msg
-                    );
-                }
-            }
-        }
-
-        DataFrameResult::Invalid(_) => {
-            assert!(
-                input.frame_payload_length as u32 > input.policy.max_frame_size,
-                "Invalid DATA frame should only reflect configured frame-size policy"
-            );
-        }
+    if !input.padded_flag {
+        let frame = result.expect("unpadded DATA frame on a non-zero stream should parse");
+        assert_eq!(frame.stream_id, stream_id);
+        assert_eq!(frame.end_stream, input.end_stream_flag);
+        assert_eq!(
+            frame.data.len(),
+            payload.len(),
+            "unpadded DATA frame should expose the full payload"
+        );
+        assert_eq!(
+            frame.data.as_ref(),
+            payload.as_slice(),
+            "unpadded DATA frame payload changed during parse"
+        );
+        return;
     }
 
-    // Additional consistency checks
-    if input.padded_flag && input.pad_length == 255 {
-        match result {
-            DataFrameResult::ProtocolError(_) => {
-                assert!(
-                    input.frame_payload_length <= 255,
-                    "Pad length 255 only overflows when payload length is 255 or smaller"
-                );
-            }
-            DataFrameResult::Valid(_) => {
-                assert!(
-                    input.frame_payload_length >= 256,
-                    "Maximum padding is valid at the exact all-padding boundary and above"
-                );
-            }
-            DataFrameResult::Invalid(_) => {}
-        }
+    if payload.is_empty() {
+        let error = result.expect_err("PADDED DATA frame without pad-length byte should fail");
+        assert_protocol_error(&error, PADDED_DATA_MISSING_PAD_LENGTH_MESSAGE);
+        return;
+    }
+
+    let pad_length = usize::from(payload[0]);
+    let available_after_pad_length = payload.len() - 1;
+
+    if pad_length > available_after_pad_length {
+        let error = result.expect_err("DATA frame with padding overflow should fail");
+        assert_protocol_error(&error, DATA_PADDING_OVERFLOW_MESSAGE);
+        return;
+    }
+
+    let frame = result.expect("DATA frame with valid padding should parse");
+    let data_end = payload.len() - pad_length;
+    let expected_data = &payload[1..data_end];
+
+    assert_eq!(frame.stream_id, stream_id);
+    assert_eq!(frame.end_stream, input.end_stream_flag);
+    assert_eq!(
+        frame.data.as_ref(),
+        expected_data,
+        "padded DATA frame should strip pad-length byte and padding tail"
+    );
+
+    if pad_length == available_after_pad_length {
+        assert!(
+            frame.data.is_empty(),
+            "all-padding DATA frame should expose zero application bytes"
+        );
     }
 });
