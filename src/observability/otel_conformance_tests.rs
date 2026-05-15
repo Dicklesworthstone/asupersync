@@ -52860,46 +52860,41 @@ mod otlp_122_tests {
                     preserved_url,
                     was_normalized,
                 } => {
-                    if !scenario.should_be_valid {
-                        panic!(
-                            "Expected failure but URL was preserved: original='{}', preserved='{}'",
-                            original_url, preserved_url
-                        );
-                    }
+                    assert!(
+                        scenario.should_be_valid,
+                        "Expected failure but URL was preserved: original='{}', preserved='{}'",
+                        original_url, preserved_url
+                    );
 
                     // Verify URL was preserved exactly
                     if !scenario.original_queue_url.is_empty() {
-                        if original_url != scenario.original_queue_url {
-                            panic!(
-                                "Original URL mismatch: expected '{}', got '{}'",
-                                scenario.original_queue_url, original_url
-                            );
-                        }
-                        if preserved_url != scenario.expected_preserved_url {
-                            panic!(
-                                "Preserved URL mismatch: expected '{}', got '{}'",
-                                scenario.expected_preserved_url, preserved_url
-                            );
-                        }
+                        assert_eq!(
+                            original_url, scenario.original_queue_url,
+                            "Original URL mismatch: expected '{}', got '{}'",
+                            scenario.original_queue_url, original_url
+                        );
+                        assert_eq!(
+                            preserved_url, scenario.expected_preserved_url,
+                            "Preserved URL mismatch: expected '{}', got '{}'",
+                            scenario.expected_preserved_url, preserved_url
+                        );
                     }
 
                     // Verify normalization expectation
-                    if was_normalized != scenario.path_normalization_expected {
-                        panic!(
-                            "Normalization expectation mismatch: expected {}, got {}",
-                            scenario.path_normalization_expected, was_normalized
-                        );
-                    }
+                    assert_eq!(
+                        was_normalized, scenario.path_normalization_expected,
+                        "Normalization expectation mismatch: expected {}, got {}",
+                        scenario.path_normalization_expected, was_normalized
+                    );
 
                     true
                 }
                 AwsSqsUrlPreservationResult::Invalid { violations } => {
-                    if scenario.should_be_valid {
-                        panic!(
-                            "Expected success but URL preservation failed: violations={:?}",
-                            violations
-                        );
-                    }
+                    assert!(
+                        !scenario.should_be_valid,
+                        "Expected success but URL preservation failed: violations={:?}",
+                        violations
+                    );
                     true
                 }
                 AwsSqsUrlPreservationResult::NotApplicable { .. } => scenario.should_be_valid,
