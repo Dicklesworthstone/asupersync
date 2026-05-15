@@ -224,8 +224,10 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
                         // Duplicate stream ID or other protocol violation
                         state.protocol_errors += 1;
                     }
-                    Err(_) => {
-                        // Other errors acceptable
+                    Err(error_code) => {
+                        panic!(
+                            "unexpected stream-limit model error for stream {stream_id}: {error_code:?}"
+                        );
                     }
                 }
             }
