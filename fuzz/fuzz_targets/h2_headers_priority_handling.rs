@@ -97,20 +97,12 @@ fuzz_target!(|data: &[u8]| {
             match result {
                 Ok(_) => panic!("self-dependency parsed successfully"),
                 Err(err) => {
-                    observe_h2_error("self-dependency", &err);
-                    assert_eq!(
-                        err.code,
+                    assert_h2_error_shape(
+                        "self-dependency",
+                        &err,
                         ErrorCode::ProtocolError,
-                        "self-dependency must be rejected as a protocol error"
-                    );
-                    assert_eq!(
-                        err.stream_id,
                         Some(stream_id),
-                        "self-dependency must be scoped to the offending stream"
-                    );
-                    assert_eq!(
-                        err.message, "stream cannot depend on itself",
-                        "self-dependency used wrong diagnostic"
+                        "stream cannot depend on itself",
                     );
                 }
             }
@@ -328,22 +320,16 @@ fn observe_priority_creation_result(
             );
         }
         Err(err) => {
-            observe_h2_error(context, &err);
             if stream_id == (dependency & 0x7fff_ffff) {
-                assert_eq!(
-                    err.code,
+                assert_h2_error_shape(
+                    context,
+                    &err,
                     ErrorCode::ProtocolError,
-                    "{context}: self-dependency must be a protocol error"
-                );
-                assert_eq!(
-                    err.stream_id,
                     Some(stream_id),
-                    "{context}: self-dependency must be scoped to the offending stream"
+                    "stream cannot depend on itself",
                 );
-                assert_eq!(
-                    err.message, "stream cannot depend on itself",
-                    "{context}: self-dependency used wrong diagnostic"
-                );
+            } else {
+                observe_h2_error(context, &err);
             }
         }
     }
@@ -418,15 +404,12 @@ fn observe_truncated_priority_result(size: usize, result: Result<Frame, H2Error>
     match result {
         Ok(_) => panic!("truncated priority payload of {size} bytes parsed successfully"),
         Err(err) => {
-            observe_h2_error("truncated priority", &err);
-            assert_eq!(
-                err.code,
+            assert_h2_error_shape(
+                "truncated priority",
+                &err,
                 ErrorCode::ProtocolError,
-                "truncated priority should fail with a protocol error"
-            );
-            assert_eq!(
-                err.message, "HEADERS frame too short for priority",
-                "truncated priority used wrong diagnostic"
+                None,
+                "HEADERS frame too short for priority",
             );
         }
     }
@@ -446,6 +429,45 @@ fn observe_h2_error(context: &str, err: &H2Error) {
     assert!(
         !debug.trim().is_empty(),
         "{context}: H2 error debug should not be empty"
+    );
+}
+
+fn assert_h2_error_shape(
+    context: &str,
+    err: &H2Error,
+    expected_code: ErrorCode,
+    expected_stream_id: Option<u32>,
+    expected_message: &str,
+) {
+    observe_h2_error(context, err);
+    assert_eq!(
+        err.code, expected_code,
+        "{context}: unexpected error code for {err:?}"
+    );
+    assert_eq!(
+        err.stream_id, expected_stream_id,
+        "{context}: unexpected stream id for {err:?}"
+    );
+    assert_eq!(
+        err.message, expected_message,
+        "{context}: unexpected message for {err:?}"
+    );
+    assert_eq!(
+        err.is_connection_error(),
+        expected_stream_id.is_none(),
+        "{context}: unexpected connection/stream classification for {err:?}"
+    );
+
+    let expected_display = match expected_stream_id {
+        Some(stream_id) => {
+            format!("HTTP/2 stream {stream_id} error ({expected_code}): {expected_message}")
+        }
+        None => format!("HTTP/2 connection error ({expected_code}): {expected_message}"),
+    };
+    assert_eq!(
+        err.to_string(),
+        expected_display,
+        "{context}: unexpected display text for {err:?}"
     );
 }
 
@@ -593,9 +615,13 @@ mod tests {
         assert!(result.is_err());
 
         if let Err(error) = result {
-            assert_eq!(error.code, ErrorCode::ProtocolError);
-            assert_eq!(error.stream_id, Some(1));
-            assert_eq!(error.message, "stream cannot depend on itself");
+            assert_h2_error_shape(
+                "self-dependency unit",
+                &error,
+                ErrorCode::ProtocolError,
+                Some(1),
+                "stream cannot depend on itself",
+            );
         }
     }
 
@@ -642,8 +668,13 @@ mod tests {
         let short_data = [0x01, 0x02, 0x03]; // Only 3 bytes
         let result = create_headers_frame_with_truncated_priority(1, &short_data);
         let error = result.expect_err("short priority payload must be rejected");
-        assert_eq!(error.code, ErrorCode::ProtocolError);
-        assert_eq!(error.message, "HEADERS frame too short for priority");
+        assert_h2_error_shape(
+            "truncated priority unit",
+            &error,
+            ErrorCode::ProtocolError,
+            None,
+            "HEADERS frame too short for priority",
+        );
     }
 
     #[test]
