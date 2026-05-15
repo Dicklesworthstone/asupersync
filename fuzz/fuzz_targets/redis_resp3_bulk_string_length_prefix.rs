@@ -78,34 +78,27 @@ fn fuzz_bulk_string_length_prefix(case: BulkStringLengthPrefixCase) {
             let wire = wire_with_length_prefix(&declared_len.to_string(), &[], None);
             let result = RespValue::try_decode_with_limits(&wire, &fuzz_limits(default_limit));
 
-            assert!(matches!(
+            assert_protocol_message(
                 result,
-                Err(RedisError::Protocol(message))
-                    if message.contains("bulk-shape length")
-                        || message.contains("bulk string length")
-            ));
+                &format!("bulk-shape length {declared_len} exceeds maximum {default_limit}"),
+            );
         }
         BulkStringScenario::OverflowDigits { digits } => {
             let overflow_digits = overflow_length_digits(&digits);
             let wire = wire_with_length_prefix(&overflow_digits, &[], None);
             let result = RespValue::try_decode_with_limits(&wire, &fuzz_limits(default_limit));
 
-            assert!(matches!(
-                result,
-                Err(RedisError::Protocol(message)) if message.contains("integer overflow")
-            ));
+            assert_protocol_message(result, "integer overflow");
         }
         BulkStringScenario::Negative { magnitude } => {
             let invalid_len = -2_i64 - i64::from(magnitude % 32);
             let wire = wire_with_length_prefix(&invalid_len.to_string(), &[], None);
             let result = RespValue::try_decode_with_limits(&wire, &fuzz_limits(default_limit));
 
-            assert!(matches!(
+            assert_protocol_message(
                 result,
-                Err(RedisError::Protocol(message))
-                    if message.contains("invalid bulk-shape length")
-                        || message.contains("invalid bulk string length")
-            ));
+                &format!("invalid bulk-shape length for byte 0x24: {invalid_len}"),
+            );
         }
         BulkStringScenario::Truncated {
             payload,
@@ -127,11 +120,18 @@ fn fuzz_bulk_string_length_prefix(case: BulkStringLengthPrefixCase) {
                 wire_with_length_prefix(&payload.len().to_string(), &payload, Some(&wrong_trailer));
             let result = RespValue::try_decode_with_limits(&wire, &fuzz_limits(default_limit));
 
-            assert!(matches!(
-                result,
-                Err(RedisError::Protocol(message)) if message.contains("trailing CRLF")
-            ));
+            assert_protocol_message(result, "bulk string missing trailing CRLF");
         }
+    }
+}
+
+fn assert_protocol_message(
+    result: Result<Option<(RespValue, usize)>, RedisError>,
+    expected_message: &str,
+) {
+    match result {
+        Err(RedisError::Protocol(message)) => assert_eq!(message, expected_message),
+        other => panic!("expected Redis protocol error `{expected_message}`, got {other:?}"),
     }
 }
 

@@ -577,12 +577,7 @@ fn test_max_frame_size_edge_cases(connection: &mut MockSettingsValidationConnect
                 );
             }
         } else {
-            let expected_reason = if value < MIN_MAX_FRAME_SIZE {
-                "below minimum"
-            } else {
-                "above maximum"
-            };
-            assert_invalid_max_frame_size_rejection(connection, value, expected_reason);
+            assert_invalid_max_frame_size_rejection(connection, value);
         }
     }
 
@@ -595,8 +590,9 @@ fn test_max_frame_size_edge_cases(connection: &mut MockSettingsValidationConnect
     let result = connection.handle_settings_frame(multiple_invalid, false);
     match result {
         Err(H2Error::ProtocolError(reason)) => {
-            assert!(
-                reason.contains("MAX_FRAME_SIZE 8192 below minimum"),
+            assert_eq!(
+                reason,
+                expected_invalid_max_frame_size_reason(8192),
                 "multiple invalid settings should reject on the MAX_FRAME_SIZE diagnostic, got {reason}"
             );
         }
@@ -608,20 +604,29 @@ fn test_max_frame_size_edge_cases(connection: &mut MockSettingsValidationConnect
 fn assert_invalid_max_frame_size_rejection(
     connection: &mut MockSettingsValidationConnection,
     value: u32,
-    expected_reason: &str,
 ) {
     let settings = vec![Setting { id: 5, value }];
     let result = connection.handle_settings_frame(settings, false);
 
     match result {
         Err(H2Error::ProtocolError(reason)) => {
-            let value_text = value.to_string();
-            assert!(
-                reason.contains(expected_reason) && reason.contains(&value_text),
-                "MAX_FRAME_SIZE {value} should reject with {expected_reason:?}, got {reason}"
+            assert_eq!(
+                reason,
+                expected_invalid_max_frame_size_reason(value),
+                "MAX_FRAME_SIZE {value} used wrong rejection diagnostic"
             );
         }
         Ok(()) => panic!("MAX_FRAME_SIZE {value} should be rejected but was accepted"),
         Err(err) => panic!("MAX_FRAME_SIZE {value} should cause ProtocolError, got {err:?}"),
+    }
+}
+
+fn expected_invalid_max_frame_size_reason(value: u32) -> String {
+    if value < MIN_MAX_FRAME_SIZE {
+        format!("MAX_FRAME_SIZE {value} below minimum {MIN_MAX_FRAME_SIZE}")
+    } else if value > MAX_MAX_FRAME_SIZE {
+        format!("MAX_FRAME_SIZE {value} above maximum {MAX_MAX_FRAME_SIZE}")
+    } else {
+        panic!("MAX_FRAME_SIZE {value} is valid and has no rejection diagnostic");
     }
 }
