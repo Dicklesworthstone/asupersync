@@ -863,6 +863,43 @@ impl PartialEq for ExpectationAction {
     }
 }
 
+fn observe_followup_request_result(
+    result: Result<ExpectationResult, String>,
+    state: &ExpectState,
+    context: &str,
+) {
+    match result {
+        Ok(expectation_result) => {
+            assert!(
+                matches!(expectation_result.response_code, 0 | 100 | 417),
+                "{context}: unexpected expectation response code {}",
+                expectation_result.response_code
+            );
+            assert!(
+                !matches!(state, ExpectState::Error(_)),
+                "{context}: successful request left handler in error state"
+            );
+            if expectation_result.response_code == 417 {
+                assert!(
+                    expectation_result.error.is_some(),
+                    "{context}: rejection response must carry an error reason"
+                );
+            }
+        }
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "{context}: process_request returned an empty error"
+            );
+            assert_eq!(
+                state,
+                &ExpectState::Error(error),
+                "{context}: handler state did not preserve the returned error"
+            );
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
 
@@ -968,8 +1005,13 @@ fuzz_target!(|data: &[u8]| {
         }
 
         // Test edge case: multiple rapid requests on same handler
-        for _ in 0..3 {
-            let _ = handler.process_request(&test_case);
+        for attempt in 0..3 {
+            let result = handler.process_request(&test_case);
+            observe_followup_request_result(
+                result,
+                &handler.state,
+                &format!("rapid repeat request {attempt}"),
+            );
         }
 
         // Test state reset between requests
@@ -984,7 +1026,17 @@ fuzz_target!(|data: &[u8]| {
         );
 
         // Verify processing doesn't corrupt future requests
-        let _ = second_handler.process_request(&test_case);
-        let _ = second_handler.process_request(&test_case);
+        let first_result = second_handler.process_request(&test_case);
+        observe_followup_request_result(
+            first_result,
+            &second_handler.state,
+            "fresh handler first request",
+        );
+        let second_result = second_handler.process_request(&test_case);
+        observe_followup_request_result(
+            second_result,
+            &second_handler.state,
+            "fresh handler second request",
+        );
     }
 });
