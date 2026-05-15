@@ -17,6 +17,9 @@ const DATA_FRAME_TYPE: u8 = 0x0;
 const PADDED_FLAG: u8 = 0x8;
 const END_STREAM_FLAG: u8 = 0x1;
 
+/// A fully-padded DATA payload is one pad-length byte plus at most 255 padding bytes.
+const MAX_FULLY_PADDED_DATA_PAYLOAD_LEN: u32 = 1 + u8::MAX as u32;
+
 /// Default maximum frame size per RFC 7540 §6.5.2
 const DEFAULT_MAX_FRAME_SIZE: u32 = 16384; // 2^14
 
@@ -112,6 +115,13 @@ impl LiveH2DataPaddingParser {
         Self { max_frame_size }
     }
 
+    fn legal_fully_padded_payload_len(&self, requested_frame_size: u32) -> u32 {
+        requested_frame_size
+            .max(1)
+            .min(self.max_frame_size)
+            .min(MAX_FULLY_PADDED_DATA_PAYLOAD_LEN)
+    }
+
     /// Parse DATA frame with strict padding validation per RFC 7540 §6.1
     ///
     /// Key rules for DATA frame padding:
@@ -199,8 +209,9 @@ impl LiveH2DataPaddingParser {
         frame_size: u32,
         end_stream: bool,
     ) -> Vec<u8> {
-        // Frame size must be at least 1 (for pad_length byte)
-        let frame_size = frame_size.max(1).min(self.max_frame_size);
+        // Frame size must be at least 1 for the pad_length byte, and fully-padded DATA
+        // cannot exceed the one-byte pad-length encoding limit.
+        let frame_size = self.legal_fully_padded_payload_len(frame_size);
 
         // For fully-padded frame: pad_length = frame_size - 1 (subtract pad_length byte itself)
         let pad_length = (frame_size - 1) as u8;
@@ -334,6 +345,8 @@ fuzz_target!(|input: FuzzInput| {
                     pad_length,
                     ..
                 } => {
+                    let expected_frame_size = parser.legal_fully_padded_payload_len(size);
+
                     // CRITICAL ASSERTION: Fully-padded frame should have 0 data bytes
                     assert_eq!(
                         actual_data_size, 0,
@@ -341,22 +354,34 @@ fuzz_target!(|input: FuzzInput| {
                         actual_data_size, total_frame_size, pad_length
                     );
 
+                    assert_eq!(
+                        total_frame_size, expected_frame_size,
+                        "Fully-padded request for size {} should clamp to legal payload size {}",
+                        size, expected_frame_size
+                    );
+
                     // Padding size should be frame_size - 1 (subtract pad_length byte)
                     assert_eq!(
                         padding_size,
-                        (size - 1) as usize,
+                        (total_frame_size - 1) as usize,
                         "Padding size mismatch for fully-padded frame of size {}",
-                        size
+                        total_frame_size
+                    );
+                    assert_eq!(
+                        pad_length,
+                        Some((total_frame_size - 1) as u8),
+                        "Pad length mismatch for fully-padded frame of size {}",
+                        total_frame_size
                     );
 
                     // Total accounting: pad_length_byte (1) + padding_bytes = frame_size
                     assert_eq!(
                         1 + padding_size,
-                        size as usize,
+                        total_frame_size as usize,
                         "Frame size accounting error: 1 + {} != {} for frame size {}",
                         padding_size,
-                        size,
-                        size
+                        total_frame_size,
+                        total_frame_size
                     );
                 }
 
@@ -368,12 +393,9 @@ fuzz_target!(|input: FuzzInput| {
                 }
 
                 DataFrameParseResult::FrameSizeError => {
-                    // Only acceptable if size exceeds max_frame_size
-                    assert!(
-                        size > max_frame_size,
-                        "Frame size error for size {} within limit {}",
-                        size,
-                        max_frame_size
+                    panic!(
+                        "Constructed fully-padded frame size {} hit frame-size error within limit {}",
+                        size, max_frame_size
                     );
                 }
 
@@ -508,13 +530,27 @@ fuzz_target!(|input: FuzzInput| {
         (
             PaddingConfig::Maximum,
             DataFrameParseResult::Valid {
-                actual_data_size, ..
+                actual_data_size,
+                padding_size,
+                total_frame_size,
+                pad_length,
+                ..
             },
         ) => {
             // Maximum padding should result in 0 data bytes
             assert_eq!(
                 actual_data_size, 0,
                 "Maximum padding should result in 0 data bytes"
+            );
+            assert_eq!(
+                padding_size,
+                (total_frame_size - 1) as usize,
+                "Maximum padding size should consume the whole payload after the pad-length byte"
+            );
+            assert_eq!(
+                pad_length,
+                Some((total_frame_size - 1) as u8),
+                "Maximum padding should use the largest legal pad length for the constructed frame"
             );
         }
 
@@ -567,15 +603,27 @@ fuzz_target!(|input: FuzzInput| {
                 );
                 let test_result = parser.parse_data_frame(&test_frame);
 
-                if let DataFrameParseResult::Valid {
-                    actual_data_size, ..
-                } = test_result
-                {
-                    assert_eq!(
-                        actual_data_size, 0,
-                        "Full padding test at size {} should have 0 data bytes",
-                        size
-                    );
+                match test_result {
+                    DataFrameParseResult::Valid {
+                        actual_data_size,
+                        total_frame_size,
+                        ..
+                    } => {
+                        assert_eq!(
+                            actual_data_size, 0,
+                            "Full padding test at size {} should have 0 data bytes",
+                            size
+                        );
+                        assert_eq!(
+                            total_frame_size,
+                            parser.legal_fully_padded_payload_len(size),
+                            "Full padding test at size {} should clamp to the legal wire size",
+                            size
+                        );
+                    }
+                    other => {
+                        panic!("Full padding test at size {} failed: {:?}", size, other);
+                    }
                 }
             }
 
@@ -598,12 +646,23 @@ fuzz_target!(|input: FuzzInput| {
                     // All these should be valid fully-padded frames
                     match edge_result {
                         DataFrameParseResult::Valid {
-                            actual_data_size, ..
+                            actual_data_size,
+                            total_frame_size,
+                            ..
                         } => {
                             assert_eq!(actual_data_size, 0);
+                            assert_eq!(
+                                total_frame_size,
+                                parser.legal_fully_padded_payload_len(edge_size),
+                                "edge size {} should clamp to the legal full-padding payload size",
+                                edge_size
+                            );
                         }
-                        _ => {
-                            // May fail for very small sizes in some implementations
+                        other => {
+                            panic!(
+                                "Edge full-padding frame size {} failed: {:?}",
+                                edge_size, other
+                            );
                         }
                     }
                 }
