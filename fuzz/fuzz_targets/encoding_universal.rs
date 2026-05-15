@@ -15,7 +15,6 @@ use asupersync::encoding::{EncodingError, EncodingPipeline};
 use asupersync::types::ObjectId;
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 use libfuzzer_sys::fuzz_target;
-use std::io;
 
 /// Maximum frame size to prevent memory exhaustion during fuzzing
 const MAX_FRAME_SIZE: usize = 1024 * 1024; // 1MB
@@ -172,8 +171,11 @@ fn fuzz_structured_frame(frame: FrameData) {
                     "Invalid compressor kind should be reported correctly"
                 );
             }
-            Err(_) => {
-                // Other errors are acceptable for invalid compressor
+            Err(e) => {
+                panic!(
+                    "Invalid compressor kind {} should report InvalidCompressor, got {:?}",
+                    frame.compressor_kind, e
+                );
             }
             Ok(_) => {
                 panic!(
@@ -196,8 +198,11 @@ fn fuzz_structured_frame(frame: FrameData) {
                     "Length bound violation should report correct length"
                 );
             }
-            Err(_) => {
-                // Other errors are acceptable for oversized length
+            Err(e) => {
+                panic!(
+                    "Oversized length {} should report LengthTooLarge, got {:?}",
+                    frame.uncompressed_length, e
+                );
             }
             Ok(_) => {
                 panic!(
@@ -215,19 +220,44 @@ fn fuzz_structured_frame(frame: FrameData) {
         if frame.checksum != expected_checksum {
             let serialized = serialize_frame(&frame);
             let result = parse_frame(&serialized);
-            match result {
-                Err(ParseError::ChecksumMismatch { expected, actual }) => {
-                    assert_eq!(expected, expected_checksum);
-                    assert_eq!(actual, frame.checksum);
+            if payload_len_matches_claim(&frame) {
+                match result {
+                    Err(ParseError::ChecksumMismatch { expected, actual }) => {
+                        assert_eq!(expected, expected_checksum);
+                        assert_eq!(actual, frame.checksum);
+                    }
+                    Err(e) => {
+                        panic!(
+                            "Checksum mismatch should report ChecksumMismatch, got {:?}",
+                            e
+                        );
+                    }
+                    Ok(_) => {
+                        panic!(
+                            "Checksum mismatch should be detected: expected {}, got {}",
+                            expected_checksum, frame.checksum
+                        );
+                    }
                 }
-                Err(_) => {
-                    // Other errors are acceptable for checksum mismatch
-                }
-                Ok(_) => {
-                    panic!(
-                        "Checksum mismatch should be detected: expected {}, got {}",
-                        expected_checksum, frame.checksum
-                    );
+            } else {
+                match result {
+                    Err(ParseError::PayloadLengthMismatch { claimed, actual }) => {
+                        assert_eq!(claimed, frame.uncompressed_length);
+                        assert_eq!(actual, frame.payload.len());
+                    }
+                    Err(e) => {
+                        panic!(
+                            "Payload length mismatch should precede checksum validation, got {:?}",
+                            e
+                        );
+                    }
+                    Ok(_) => {
+                        panic!(
+                            "Frame with claimed length {} and actual payload length {} should be rejected",
+                            frame.uncompressed_length,
+                            frame.payload.len()
+                        );
+                    }
                 }
             }
             return;
@@ -263,11 +293,7 @@ fn fuzz_multi_frame_stream(frames: Vec<FrameData>) {
 
     for frame in frames {
         // Only include valid frames in expected output
-        if frame.compressor_kind <= 3
-            && frame.uncompressed_length as usize <= MAX_FRAME_SIZE
-            && (frame.checksum_type == 0
-                || frame.checksum == compute_checksum(frame.checksum_type, &frame.payload))
-        {
+        if is_parseable_frame(&frame) {
             let serialized = serialize_frame(&frame);
             stream_bytes.extend_from_slice(&serialized);
             expected_frames.push(frame);
@@ -336,6 +362,79 @@ fn fuzz_edge_case(edge: EdgeCaseFrame) {
             );
         }
 
+        EdgeCaseFrame::InvalidCompressor(kind) => {
+            let compressor_kind = kind.max(4);
+            let frame = FrameData {
+                compressor_kind,
+                uncompressed_length: 0,
+                payload: Vec::new(),
+                checksum_type: 0,
+                checksum: 0,
+            };
+
+            let serialized = serialize_frame(&frame);
+            let result = parse_frame(&serialized);
+            match result {
+                Err(ParseError::InvalidCompressor(kind)) => {
+                    assert_eq!(kind, compressor_kind);
+                }
+                Err(e) => {
+                    panic!(
+                        "Invalid compressor edge case should report the offending kind, got {:?}",
+                        e
+                    );
+                }
+                Ok(_) => {
+                    panic!(
+                        "Invalid compressor edge case {} should be rejected",
+                        compressor_kind
+                    );
+                }
+            }
+        }
+
+        EdgeCaseFrame::BadChecksum {
+            payload,
+            claimed_checksum,
+        } => {
+            if payload.len() > MAX_FRAME_SIZE {
+                return;
+            }
+
+            let expected_checksum = compute_checksum(1, &payload);
+            let checksum = if claimed_checksum == expected_checksum {
+                expected_checksum.wrapping_add(1)
+            } else {
+                claimed_checksum
+            };
+            let frame = FrameData {
+                compressor_kind: 0,
+                uncompressed_length: u32::try_from(payload.len())
+                    .expect("payload length is bounded by MAX_FRAME_SIZE"),
+                payload,
+                checksum_type: 1,
+                checksum,
+            };
+
+            let serialized = serialize_frame(&frame);
+            let result = parse_frame(&serialized);
+            match result {
+                Err(ParseError::ChecksumMismatch { expected, actual }) => {
+                    assert_eq!(expected, expected_checksum);
+                    assert_eq!(actual, checksum);
+                }
+                Err(e) => {
+                    panic!(
+                        "Bad checksum edge case should report expected and actual checksums, got {:?}",
+                        e
+                    );
+                }
+                Ok(_) => {
+                    panic!("Bad checksum edge case should be rejected");
+                }
+            }
+        }
+
         EdgeCaseFrame::TruncatedHeader(bytes) => {
             if bytes.len() < FRAME_HEADER_SIZE {
                 // ASSERTION 4: Incomplete frames should return Incomplete, not panic
@@ -401,10 +500,6 @@ fn fuzz_edge_case(edge: EdgeCaseFrame) {
                     "Zero length with non-empty payload should be rejected"
                 );
             }
-        }
-
-        _ => {
-            // Handle other edge cases
         }
     }
 }
@@ -499,13 +594,29 @@ fn parse_multi_frame_stream(bytes: &[u8]) -> Result<Vec<FrameData>, ParseError> 
     let mut offset = 0;
 
     while offset < bytes.len() {
-        if bytes.len() - offset < FRAME_HEADER_SIZE {
+        let remaining = bytes.len() - offset;
+        if remaining < FRAME_HEADER_SIZE {
             return Err(ParseError::Incomplete);
         }
 
-        let frame_data = &bytes[offset..];
+        let header = &bytes[offset..offset + FRAME_HEADER_SIZE];
+        let compressor_kind = header[0];
+        if compressor_kind > 3 {
+            return Err(ParseError::InvalidCompressor(compressor_kind));
+        }
+
+        let uncompressed_length = u32::from_le_bytes([header[1], header[2], header[3], header[4]]);
+        if uncompressed_length as usize > MAX_FRAME_SIZE {
+            return Err(ParseError::LengthTooLarge(uncompressed_length));
+        }
+
+        let frame_size = FRAME_HEADER_SIZE + uncompressed_length as usize;
+        if remaining < frame_size {
+            return Err(ParseError::Incomplete);
+        }
+
+        let frame_data = &bytes[offset..offset + frame_size];
         let frame = parse_frame(frame_data)?;
-        let frame_size = FRAME_HEADER_SIZE + frame.payload.len();
 
         frames.push(frame);
         offset += frame_size;
@@ -517,6 +628,19 @@ fn parse_multi_frame_stream(bytes: &[u8]) -> Result<Vec<FrameData>, ParseError> 
     }
 
     Ok(frames)
+}
+
+fn payload_len_matches_claim(frame: &FrameData) -> bool {
+    frame.payload.len() == frame.uncompressed_length as usize
+}
+
+fn is_parseable_frame(frame: &FrameData) -> bool {
+    frame.compressor_kind <= 3
+        && frame.uncompressed_length as usize <= MAX_FRAME_SIZE
+        && payload_len_matches_claim(frame)
+        && frame.checksum_type <= 2
+        && (frame.checksum_type == 0
+            || frame.checksum == compute_checksum(frame.checksum_type, &frame.payload))
 }
 
 fn compute_checksum(checksum_type: u8, payload: &[u8]) -> u32 {
@@ -571,36 +695,51 @@ fn validate_encoding_error(error: &EncodingError) {
     }
 }
 
-fn validate_parse_error(error: &ParseError, _frame: &FrameData) {
+fn validate_parse_error(error: &ParseError, frame: &FrameData) {
     match error {
+        ParseError::Incomplete => {
+            panic!("Serialized structured frame should not be incomplete");
+        }
         ParseError::InvalidCompressor(kind) => {
+            assert_eq!(*kind, frame.compressor_kind);
             assert!(*kind > 3, "Invalid compressor should be > 3");
         }
         ParseError::LengthTooLarge(length) => {
+            assert_eq!(*length, frame.uncompressed_length);
             assert!(
                 *length as usize > MAX_FRAME_SIZE,
                 "Length should exceed limit"
             );
         }
         ParseError::ChecksumMismatch { expected, actual } => {
+            assert!((1..=2).contains(&frame.checksum_type));
+            assert!(payload_len_matches_claim(frame));
+            assert_eq!(
+                *expected,
+                compute_checksum(frame.checksum_type, &frame.payload)
+            );
+            assert_eq!(*actual, frame.checksum);
             assert_ne!(
                 expected, actual,
                 "Checksum mismatch should have different values"
             );
         }
-        _ => {
-            // Other errors are acceptable
+        ParseError::PayloadLengthMismatch { claimed, actual } => {
+            assert_eq!(*claimed, frame.uncompressed_length);
+            assert_eq!(*actual, frame.payload.len());
+            assert_ne!(*actual, *claimed as usize);
+        }
+        ParseError::InvalidChecksumType(kind) => {
+            assert_eq!(*kind, frame.checksum_type);
+            assert!(*kind > 2, "Invalid checksum type should be > 2");
         }
     }
 }
 
-fn validate_parse_error_multi(error: &ParseError, _frames: &[FrameData]) {
-    match error {
-        ParseError::Incomplete => {
-            // Expected when stream is truncated
-        }
-        _ => {
-            // Other errors are acceptable for multi-frame parsing
-        }
-    }
+fn validate_parse_error_multi(error: &ParseError, frames: &[FrameData]) {
+    panic!(
+        "Valid multi-frame stream of {} frame(s) should parse, got {:?}",
+        frames.len(),
+        error
+    );
 }
