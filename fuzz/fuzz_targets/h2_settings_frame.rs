@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::connection::{Connection, ReceivedFrame};
-use asupersync::http::h2::error::H2Error;
+use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
     Frame, FrameHeader, FrameType, Setting, SettingsFrame, settings_flags,
 };
@@ -41,10 +41,17 @@ fn observe_settings_parse(header: &FrameHeader, payload: Bytes) -> Result<Frame,
             panic!("SETTINGS parser probe returned a non-SETTINGS frame");
         }
         Err(err) => {
+            assert_ne!(
+                err.code,
+                ErrorCode::NoError,
+                "H2 SETTINGS parser rejected a frame with NO_ERROR"
+            );
+            let diagnostic = format!("{err:?}");
             assert!(
-                !format!("{err:?}").is_empty(),
+                !diagnostic.is_empty(),
                 "H2 SETTINGS parser errors must remain observable"
             );
+            std::hint::black_box(diagnostic);
         }
     }
 
@@ -52,13 +59,12 @@ fn observe_settings_parse(header: &FrameHeader, payload: Bytes) -> Result<Frame,
 }
 
 fn observe_settings_parse_only(context: &str, header: &FrameHeader, payload: Bytes) {
-    match observe_settings_parse(header, payload) {
-        Ok(_) | Err(_) => {}
-    }
     assert!(
         !context.is_empty(),
         "SETTINGS parser observer context must be named"
     );
+    let parsed = observe_settings_parse(header, payload).is_ok();
+    std::hint::black_box((context, parsed));
 }
 
 fn observe_settings_process(
@@ -93,10 +99,17 @@ fn observe_settings_process(
             );
         }
         Err(err) => {
+            assert_ne!(
+                err.code,
+                ErrorCode::NoError,
+                "{context}: SETTINGS processing rejected a frame with NO_ERROR"
+            );
+            let diagnostic = format!("{err:?}");
             assert!(
-                !format!("{err:?}").is_empty(),
+                !diagnostic.is_empty(),
                 "{context}: SETTINGS processing errors must remain observable"
             );
+            std::hint::black_box(diagnostic);
             assert_eq!(
                 connection.remote_settings(),
                 &before_remote_settings,
@@ -109,9 +122,12 @@ fn observe_settings_process(
 }
 
 fn observe_settings_process_only(connection: &mut Connection, frame: Frame, context: &str) {
-    match observe_settings_process(connection, frame, context) {
-        Ok(_) | Err(_) => {}
-    }
+    assert!(
+        !context.is_empty(),
+        "SETTINGS process observer context must be named"
+    );
+    let processed = observe_settings_process(connection, frame, context).is_ok();
+    std::hint::black_box((context, processed));
 }
 
 fn observe_fuzz_result(result: Result<(), String>) {
