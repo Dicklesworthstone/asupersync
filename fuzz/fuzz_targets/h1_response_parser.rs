@@ -86,11 +86,13 @@ fn test_fixed_response_canaries() {
     expect_error_variant(
         b"HTTP/1.1 99 Bad\r\nContent-Length: 0\r\n\r\n",
         matches_bad_request_line,
+        "malformed request line",
         "status below 100 must reject as bad status line",
     );
     expect_error_variant(
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n",
         matches_ambiguous_body_length,
+        "both Content-Length and Transfer-Encoding present",
         "TE+CL response must reject as ambiguous body length",
     );
     expect_incomplete_then_eof_error(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe");
@@ -121,11 +123,18 @@ fn expect_decode_eof_complete(input: &[u8]) -> Response {
     }
 }
 
-fn expect_error_variant(input: &[u8], predicate: fn(&HttpError) -> bool, message: &str) {
+fn expect_error_variant(
+    input: &[u8],
+    predicate: fn(&HttpError) -> bool,
+    expected_display: &str,
+    message: &str,
+) {
     let mut codec = Http1ClientCodec::new();
     let mut buf = BytesMut::from(input);
     match codec.decode(&mut buf) {
-        Err(error) if predicate(&error) => {}
+        Err(error) if predicate(&error) => {
+            assert_eq!(error.to_string(), expected_display, "{message}");
+        }
         Ok(result) => panic!("{message}: unexpected successful result {result:?}"),
         Err(error) => panic!("{message}: unexpected error {error:?}"),
     }
@@ -140,7 +149,13 @@ fn expect_incomplete_then_eof_error(input: &[u8]) {
         Err(error) => panic!("expected incomplete body, got {error:?}"),
     }
     match codec.decode_eof(&mut buf) {
-        Err(HttpError::Io(error)) if error.kind() == ErrorKind::UnexpectedEof => {}
+        Err(HttpError::Io(error)) if error.kind() == ErrorKind::UnexpectedEof => {
+            assert_eq!(
+                error.to_string(),
+                "incomplete frame at EOF",
+                "incomplete Content-Length body must keep exact EOF diagnostic"
+            );
+        }
         Ok(result) => panic!("expected EOF error for incomplete body, got {result:?}"),
         Err(error) => panic!("expected EOF error for incomplete body, got {error:?}"),
     }
