@@ -231,10 +231,14 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
                     }
                 }
             }
-            Err(_) => {
-                // Frame encoding failed - may be due to protocol violations
-                // This is acceptable for fuzz testing, but failed encoding must
-                // not affect the stream-limit model.
+            Err(err) => {
+                // Rejected HEADERS encodes must stay diagnostic and must not
+                // affect the stream-limit model.
+                assert!(
+                    !err.message.is_empty(),
+                    "failed HEADERS encode should expose a diagnostic"
+                );
+                std::hint::black_box((err.code, err.stream_id, err.message.as_str()));
                 assert_eq!(
                     state.active_streams.len(),
                     before_active,
