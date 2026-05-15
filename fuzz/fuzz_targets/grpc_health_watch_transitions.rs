@@ -666,14 +666,21 @@ fn build_metadata(auth: &AuthSetup) -> Metadata {
             // No auth metadata
         }
         AuthSetup::Valid(valid_token) => {
-            let _ = metadata.insert("authorization", valid_token.as_metadata_value());
+            insert_authorization_metadata(&mut metadata, valid_token.as_metadata_value());
         }
         AuthSetup::Invalid(invalid_token) => {
-            let _ = metadata.insert("authorization", invalid_token.as_metadata_value());
+            insert_authorization_metadata(&mut metadata, invalid_token.as_metadata_value());
         }
     }
 
     metadata
+}
+
+fn insert_authorization_metadata(metadata: &mut Metadata, value: String) {
+    assert!(
+        metadata.insert("authorization", value),
+        "static authorization metadata key must be accepted"
+    );
 }
 
 fn create_health_request(service: String, metadata: Metadata) -> Request<HealthCheckRequest> {
