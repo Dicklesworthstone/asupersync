@@ -10,6 +10,9 @@ use asupersync::http::h2::frame::{
 };
 use asupersync::http::h2::{Connection, Settings};
 
+const ORPHANED_CONTINUATION_ERROR: &str =
+    "CONTINUATION without preceding HEADERS/PUSH_PROMISE (RFC 9113 §6.10)";
+
 /// HTTP/2 frame sequence for testing CONTINUATION-without-HEADERS scenarios
 #[derive(Debug, Clone, Arbitrary)]
 struct ContinuationTestSequence {
@@ -203,10 +206,9 @@ fn expect_orphaned_continuation_error(
                 error.stream_id, None,
                 "{context} should be a connection-level error"
             );
-            assert!(
-                error.message.contains("CONTINUATION"),
-                "{context} diagnostic should identify CONTINUATION: {}",
-                error.message
+            assert_eq!(
+                error.message, ORPHANED_CONTINUATION_ERROR,
+                "{context} diagnostic should match the live RFC 9113 orphaned-CONTINUATION error"
             );
             std::hint::black_box(error.message);
         }
