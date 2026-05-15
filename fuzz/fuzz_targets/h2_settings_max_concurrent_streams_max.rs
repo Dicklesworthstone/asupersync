@@ -542,6 +542,43 @@ fn observe_stress_test_result(result: &StressTestResult, requested_count: u32) {
     );
 }
 
+fn observe_at_limit_stream_refusal(
+    connection: &mut MockMaxConcurrentStreamsConnection,
+    context: &str,
+) {
+    let before_active = connection.active_count.load(Ordering::Acquire);
+    let before_refused = connection.stats.streams_refused;
+
+    assert_eq!(
+        before_active, connection.max_concurrent_streams,
+        "{context}: at-limit probe called while connection was not exactly at limit"
+    );
+
+    match connection.create_stream(true) {
+        Ok(stream_id) => panic!("{context}: stream {stream_id} was created at the active limit"),
+        Err(H2Error::RefusedStream) => {
+            assert_eq!(
+                connection.active_count.load(Ordering::Acquire),
+                before_active,
+                "{context}: refused at-limit stream mutated active count"
+            );
+            assert_eq!(
+                connection.stats.streams_refused,
+                before_refused.saturating_add(1),
+                "{context}: at-limit refusal did not advance refusal counter"
+            );
+            assert!(
+                last_violation_matches(connection, |violation| matches!(
+                    violation,
+                    ViolationType::MaxConcurrentStreamsExceeded
+                )),
+                "{context}: at-limit refusal did not record max-concurrency violation"
+            );
+        }
+        Err(other) => panic!("{context}: at-limit stream create returned unexpected {other:?}"),
+    }
+}
+
 /// Fuzz input structure
 #[derive(Arbitrary, Debug, Clone)]
 struct FuzzInput {
@@ -700,22 +737,7 @@ fuzz_target!(|input: FuzzInput| {
 
     // Test edge case: try to create one more stream when at limit
     if final_state.active_streams == connection.max_concurrent_streams {
-        let result = connection.create_stream(true);
-        match result {
-            Ok(_) => {
-                // This should not happen - we were at the limit
-                panic!("Stream creation succeeded when at MAX_CONCURRENT_STREAMS limit");
-            }
-            Err(H2Error::RefusedStream) => {
-                // Expected behavior
-            }
-            Err(H2Error::ProtocolError) => {
-                // Also acceptable if there's a protocol violation
-            }
-            Err(_) => {
-                // Other errors are acceptable
-            }
-        }
+        observe_at_limit_stream_refusal(&mut connection, "final at-limit stream create");
     }
 
     // Verify overflow protection
