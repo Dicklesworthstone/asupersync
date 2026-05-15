@@ -66,6 +66,8 @@ struct UnderflowScenarios {
 const WINDOW_UPDATE_FRAME_TYPE: u8 = 0x8;
 const INITIAL_WINDOW_SIZE: i64 = 65535; // RFC 9113 default
 const MAX_WINDOW_SIZE: i64 = 2147483647; // 2^31 - 1
+const ZERO_INCREMENT_PROTOCOL_ERROR: &str =
+    "PROTOCOL_ERROR: Window update increment must be non-zero";
 
 fuzz_target!(|data: &[u8]| {
     // Guard against excessively large inputs
@@ -497,19 +499,7 @@ fn test_zero_increment_updates(test_case: &WindowUpdateTestCase) {
 
     let result = flow_control.process_window_update(&zero_connection_update);
 
-    match result {
-        Ok(_) => {
-            // Some implementations might allow zero increments as no-ops
-        }
-        Err(error_msg) => {
-            // RFC 9113 requires rejecting zero increments
-            assert!(
-                error_msg.contains("PROTOCOL_ERROR") || error_msg.contains("zero increment"),
-                "Zero increment should cause PROTOCOL_ERROR: {}",
-                error_msg
-            );
-        }
-    }
+    assert_zero_increment_rejected(result, "connection-level zero increment");
 
     // Test zero increment on stream
     if let Some(stream) = test_case.initial_stream_windows.first() {
@@ -527,18 +517,7 @@ fn test_zero_increment_updates(test_case: &WindowUpdateTestCase) {
 
         let result = flow_control.process_window_update(&zero_stream_update);
 
-        match result {
-            Ok(_) => {
-                // Some implementations might allow zero increments
-            }
-            Err(error_msg) => {
-                assert!(
-                    error_msg.contains("PROTOCOL_ERROR") || error_msg.contains("zero increment"),
-                    "Zero stream increment should cause PROTOCOL_ERROR: {}",
-                    error_msg
-                );
-            }
-        }
+        assert_zero_increment_rejected(result, "stream-level zero increment");
     }
 }
 
@@ -849,13 +828,27 @@ fn observe_window_update_metadata(update: &WindowUpdateFrame) {
     std::hint::black_box((WINDOW_UPDATE_FRAME_TYPE, timing_marker, malformed_count));
 }
 
+fn assert_zero_increment_rejected(result: Result<WindowState, String>, context: &str) {
+    match result {
+        Err(error_msg) => {
+            assert_eq!(
+                error_msg, ZERO_INCREMENT_PROTOCOL_ERROR,
+                "{context} must fail with the exact WINDOW_UPDATE protocol error"
+            );
+        }
+        Ok(state) => {
+            panic!("{context} was accepted as a no-op: {state:?}");
+        }
+    }
+}
+
 impl FlowControlContext {
     fn process_window_update(&mut self, update: &WindowUpdateFrame) -> Result<WindowState, String> {
         observe_window_update_metadata(update);
 
         // Validate increment
         if update.window_size_increment == 0 {
-            return Err("PROTOCOL_ERROR: Window update increment must be non-zero".to_string());
+            return Err(ZERO_INCREMENT_PROTOCOL_ERROR.to_string());
         }
 
         if update.window_size_increment > (MAX_WINDOW_SIZE as u32) {
