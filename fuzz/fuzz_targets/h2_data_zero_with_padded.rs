@@ -54,7 +54,7 @@ impl LiveH2DataParser {
     /// For a zero-length payload with PADDED flag, this creates an impossible situation:
     /// - PADDED flag says "first byte is pad length"
     /// - Zero payload means there IS no first byte
-    /// This should result in PROTOCOL_ERROR per RFC 7540 §6.1
+    ///   This should result in PROTOCOL_ERROR per RFC 7540 §6.1
     fn parse_data_frame(&self, buf: &[u8]) -> DataFrameResult {
         let pad_length = if buf.get(4).is_some_and(|flags| flags & PADDED_FLAG != 0)
             && buf.len() > FRAME_HEADER_SIZE
@@ -203,6 +203,11 @@ fuzz_target!(|input: FuzzInput| {
     // Add extra bytes for testing
     frame_bytes.extend_from_slice(&input.extra_bytes);
 
+    let expected_frame_len = FRAME_HEADER_SIZE + payload_length;
+    let was_truncated = input
+        .truncate_at
+        .is_some_and(|truncate_at| truncate_at < expected_frame_len);
+
     // Create parser with specified max frame size
     let max_frame_size = input.max_frame_size.clamp(16384, 16777215); // RFC limits
     let parser = LiveH2DataParser::with_max_frame_size(max_frame_size);
@@ -211,7 +216,7 @@ fuzz_target!(|input: FuzzInput| {
     let result = parser.parse_data_frame(&frame_bytes);
 
     // Validate behavior based on input characteristics
-    match result {
+    match &result {
         DataFrameResult::Valid {
             stream_id: parsed_stream_id,
             flags: parsed_flags,
@@ -225,8 +230,8 @@ fuzz_target!(|input: FuzzInput| {
             // 2. Payload length fits in max frame size
             // 3. If PADDED flag set, payload length > 0
 
-            assert_eq!(parsed_stream_id, stream_id);
-            assert_eq!(parsed_flags, flags);
+            assert_eq!(*parsed_stream_id, stream_id);
+            assert_eq!(*parsed_flags, flags);
 
             if input.set_padded_flag {
                 // PADDED flag set - this should only succeed if payload_length > 0
@@ -238,7 +243,7 @@ fuzz_target!(|input: FuzzInput| {
             }
         }
 
-        DataFrameResult::ProtocolError(ref msg) => {
+        DataFrameResult::ProtocolError(msg) => {
             // Expected protocol error cases:
             // 1. Zero payload length with PADDED flag set
             // 2. Invalid padding configuration
@@ -263,12 +268,10 @@ fuzz_target!(|input: FuzzInput| {
 
         DataFrameResult::IncompleteFrame => {
             // Expected for truncated frames or frames with insufficient data
-            if let Some(truncate_at) = input.truncate_at {
-                assert!(
-                    truncate_at < FRAME_HEADER_SIZE + payload_length,
-                    "Incomplete frame should only occur for actually truncated frames"
-                );
-            }
+            assert!(
+                was_truncated,
+                "Incomplete frame should only occur for actually truncated frames"
+            );
         }
 
         DataFrameResult::InvalidStreamId => {
@@ -279,8 +282,8 @@ fuzz_target!(|input: FuzzInput| {
 
     // CORE ASSERTION: Zero payload with PADDED flag must be a protocol error
     if input.set_padded_flag && payload_length == 0 && input.truncate_at.is_none() {
-        match result {
-            DataFrameResult::ProtocolError(ref msg) => {
+        match &result {
+            DataFrameResult::ProtocolError(msg) => {
                 // Expected - verify it's the right kind of protocol error
                 assert!(
                     is_zero_length_padded_protocol_error(msg),
@@ -295,9 +298,11 @@ fuzz_target!(|input: FuzzInput| {
                      but zero-length payload has no bytes."
                 );
             }
-            _ => {
-                // Other errors (frame size, incomplete, etc.) are acceptable as long as
-                // it doesn't parse as valid
+            other => {
+                panic!(
+                    "zero-length PADDED DATA must reject with protocol error, got: {:?}",
+                    other
+                );
             }
         }
     }
@@ -305,7 +310,7 @@ fuzz_target!(|input: FuzzInput| {
     // Additional boundary testing: One-byte payload with PADDED should work
     // (pad length = 0, no actual padding)
     if input.set_padded_flag && payload_length == 1 && input.truncate_at.is_none() {
-        match result {
+        match &result {
             DataFrameResult::Valid {
                 pad_length: Some(0),
                 ..
