@@ -141,11 +141,15 @@ fuzz_target!(|input: FuzzInput| {
             _ => panic!("enforce_metadata_size_limit is non-referentially-transparent"),
         }
 
-        // Run the interceptor chain. Errors are legal (e.g. the
-        // chain's BearerAuth might inject and other interceptors
-        // might reject); the property to test is metadata
-        // ISOLATION across calls, not success.
-        let _ = chain.intercept_request(&mut req);
+        // Run the interceptor chain. This concrete chain is
+        // Tracing + Logging + BearerAuth, and every layer should
+        // accept every request; observing the result catches future
+        // interceptor drift before metadata checks inspect a
+        // partially-processed request.
+        assert!(
+            chain.intercept_request(&mut req).is_ok(),
+            "metadata isolation fuzz chain unexpectedly rejected a request",
+        );
         post_call_requests.push(req);
     }
 
@@ -182,7 +186,7 @@ fuzz_target!(|input: FuzzInput| {
         let pre_i = &pre_call_metadata[i];
         for (key, value) in post.metadata().iter() {
             // Skip interceptor-injected keys — those are NOT a leak.
-            if interceptor_injected.contains(key.as_str()) {
+            if interceptor_injected.contains(key) {
                 continue;
             }
             let MetadataValue::Ascii(post_val) = value else {
