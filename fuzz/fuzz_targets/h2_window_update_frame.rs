@@ -427,9 +427,10 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
                             ErrorCode::ProtocolError,
                             "Should be protocol error"
                         );
-                        assert!(
-                            err.message.contains("zero increment"),
-                            "Error message should mention zero increment"
+                        assert_eq!(
+                            err.message.as_str(),
+                            "WINDOW_UPDATE with zero increment",
+                            "zero increment used wrong diagnostic"
                         );
                     }
                     Err(ref err) if clamped_stream_id > 0 => {
@@ -445,9 +446,10 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
                             ErrorCode::ProtocolError,
                             "Should be protocol error"
                         );
-                        assert!(
-                            err.message.contains("zero increment"),
-                            "Error message should mention zero increment"
+                        assert_eq!(
+                            err.message.as_str(),
+                            "WINDOW_UPDATE with zero increment",
+                            "zero increment used wrong diagnostic"
                         );
                     }
                     Ok(_) => {
@@ -550,9 +552,10 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
                     // Should fail for invalid payload length
                     match result {
                         Err(ref err) if err.code == ErrorCode::FrameSizeError => {
-                            assert!(
-                                err.message.contains("4 bytes"),
-                                "Error should mention required 4 bytes"
+                            assert_eq!(
+                                err.message.as_str(),
+                                "WINDOW_UPDATE frame must be 4 bytes",
+                                "invalid length used wrong diagnostic"
                             );
                         }
                         Ok(_) => {
@@ -1077,9 +1080,10 @@ fn verify_window_update_error_consistency(err: &H2Error, header: &FrameHeader, p
                 WINDOW_UPDATE_PAYLOAD_SIZE,
                 "FrameSizeError is only expected for invalid WINDOW_UPDATE payload length"
             );
-            assert!(
-                err.message.contains("4 bytes"),
-                "Frame size error should mention 4 bytes"
+            assert_eq!(
+                err.message.as_str(),
+                "WINDOW_UPDATE frame must be 4 bytes",
+                "frame size error used wrong diagnostic"
             );
         }
         ErrorCode::ProtocolError => {
@@ -1096,9 +1100,10 @@ fn verify_window_update_error_consistency(err: &H2Error, header: &FrameHeader, p
                 increment, 0,
                 "ProtocolError is only expected for zero WINDOW_UPDATE increments"
             );
-            assert!(
-                err.message.contains("zero increment"),
-                "Protocol error should mention zero increment"
+            assert_eq!(
+                err.message.as_str(),
+                "WINDOW_UPDATE with zero increment",
+                "zero increment used wrong diagnostic"
             );
             if header.stream_id == 0 {
                 assert!(
