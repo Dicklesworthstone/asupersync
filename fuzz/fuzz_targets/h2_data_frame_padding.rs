@@ -45,13 +45,17 @@ fuzz_target!(|data: &[u8]| {
                 let _payload = &data_frame.data;
                 // Should contain only the actual data, padding stripped
             }
-            Err(H2Error {
-                code: ErrorCode::ProtocolError,
-                ..
-            }) => {
+            Err(
+                error @ H2Error {
+                    code: ErrorCode::ProtocolError,
+                    ..
+                },
+            ) => {
+                observe_h2_parse_error(&error, "padded DATA malformed padding");
                 // Expected for malformed padding (pad_length > payload_length)
             }
-            Err(_) => {
+            Err(error) => {
+                observe_h2_parse_error(&error, "padded DATA frame");
                 // Other errors acceptable for malformed input
             }
             _ => {} // Non-DATA frames from parsing
@@ -68,7 +72,8 @@ fuzz_target!(|data: &[u8]| {
                 // All input should be treated as application data
                 assert_eq!(data_frame.data.len(), data.len());
             }
-            Err(_) => {
+            Err(error) => {
+                observe_h2_parse_error(&error, "unpadded DATA frame");
                 // Parse errors acceptable for malformed frame structure
             }
             _ => {}
@@ -85,7 +90,8 @@ fuzz_target!(|data: &[u8]| {
                 // Test the parsing of our constructed frame
                 let _parse_result = validate_data_frame_padding(&frame);
             }
-            Err(_) => {
+            Err(error) => {
+                observe_h2_parse_error(&error, "single-byte padded DATA frame");
                 // Construction failed due to invalid parameters
             }
         }
@@ -103,11 +109,17 @@ fuzz_target!(|data: &[u8]| {
                 // Should either succeed (valid zero-data) or fail (invalid padding)
                 match parse_result {
                     Ok(_) => {} // Valid zero-length data
-                    Err(H2Error {
-                        code: ErrorCode::ProtocolError,
-                        ..
-                    }) => {} // Invalid padding
-                    Err(_) => {} // Other errors
+                    Err(
+                        error @ H2Error {
+                            code: ErrorCode::ProtocolError,
+                            ..
+                        },
+                    ) => {
+                        observe_h2_parse_error(&error, "zero-length padded DATA frame");
+                    } // Invalid padding
+                    Err(error) => {
+                        observe_h2_parse_error(&error, "zero-length DATA frame");
+                    } // Other errors
                 }
             }
         }
@@ -140,7 +152,7 @@ fuzz_target!(|data: &[u8]| {
                     assert!(data_frame.data.is_empty());
                 }
                 Ok(_) => {}
-                Err(_) => {}
+                Err(error) => observe_h2_parse_error(&error, "all-padding DATA frame"),
             }
         }
     }
@@ -197,7 +209,8 @@ fuzz_target!(|data: &[u8]| {
                 let _data_len = data_frame.data.len();
                 // No padding info available after parsing - it should be stripped
             }
-            Err(_) => {
+            Err(error) => {
+                observe_h2_parse_error(&error, "raw padded DATA frame");
                 // Parse errors are acceptable for malformed input
             }
             _ => {} // Other frame types
@@ -225,6 +238,18 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+fn observe_h2_parse_error(error: &H2Error, context: &str) {
+    assert_ne!(
+        error.code,
+        ErrorCode::NoError,
+        "{context}: parse error used NO_ERROR"
+    );
+    assert!(
+        !error.message.trim().is_empty(),
+        "{context}: parse error message was empty"
+    );
+}
 
 /// Parse DATA frame with specified padding flag
 fn parse_data_frame_with_padding(data: &[u8], padded: bool) -> Result<Frame, H2Error> {
