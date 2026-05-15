@@ -52285,7 +52285,7 @@ mod otlp_122_tests {
                     // Missing messaging.aws_sns.topic_arn - should be invalid
                 ],
                 should_be_valid: false,
-                expected_topic_arn: "".to_string(),
+                expected_topic_arn: String::new(),
                 expected_subscription_arn: "arn:aws:sns:us-west-1:111222333444:alerts:12345678-abcd-efgh-ijkl-123456789012".to_string(),
             },
             AwsSnsConsumerScenario {
@@ -52301,7 +52301,7 @@ mod otlp_122_tests {
                 ],
                 should_be_valid: false,
                 expected_topic_arn: "arn:aws:sns:ca-central-1:555666777888:user-events".to_string(),
-                expected_subscription_arn: "".to_string(),
+                expected_subscription_arn: String::new(),
             },
             AwsSnsConsumerScenario {
                 description: "aws_sns_producer_span_exempt".to_string(),
@@ -52314,8 +52314,8 @@ mod otlp_122_tests {
                     // Producer spans are exempt from consumer ARN requirements
                 ],
                 should_be_valid: true, // Producer spans don't need consumer ARNs
-                expected_topic_arn: "".to_string(),
-                expected_subscription_arn: "".to_string(),
+                expected_topic_arn: String::new(),
+                expected_subscription_arn: String::new(),
             },
         ];
 
@@ -52403,11 +52403,11 @@ mod otlp_122_tests {
                 }
                 Some(_) => {
                     violations.push("OTLP-155: messaging.aws_sns.topic_arn has wrong type (expected StringValue)".to_string());
-                    "".to_string()
+                    String::new()
                 }
                 None => {
                     violations.push("OTLP-155: AWS SNS consumer span missing required messaging.aws_sns.topic_arn attribute".to_string());
-                    "".to_string()
+                    String::new()
                 }
             };
 
@@ -52428,11 +52428,11 @@ mod otlp_122_tests {
                 }
                 Some(_) => {
                     violations.push("OTLP-155: messaging.aws_sns.subscription_arn has wrong type (expected StringValue)".to_string());
-                    "".to_string()
+                    String::new()
                 }
                 None => {
                     violations.push("OTLP-155: AWS SNS consumer span missing required messaging.aws_sns.subscription_arn attribute".to_string());
-                    "".to_string()
+                    String::new()
                 }
             };
 
