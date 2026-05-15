@@ -34,6 +34,38 @@ const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65535;
 /// Maximum allowed window size per RFC 9113 Section 6.9.1
 const MAX_WINDOW_SIZE: i32 = i32::MAX;
 
+fn observe_h2_operation<T>(result: Result<T, H2Error>, context: &str) {
+    assert!(
+        !context.trim().is_empty(),
+        "H2 retroactive window observer context must be non-empty"
+    );
+
+    match result {
+        Ok(_) => {
+            std::hint::black_box(context);
+        }
+        Err(error) => observe_h2_error(&error, context),
+    }
+}
+
+fn observe_h2_error(error: &H2Error, context: &str) {
+    assert_ne!(
+        error.code,
+        ErrorCode::NoError,
+        "H2 retroactive window operation failed with NO_ERROR"
+    );
+    let diagnostic = format!("{context}: {}: {}", error.code, error.message);
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "H2 retroactive window errors must expose diagnostics"
+    );
+    assert!(
+        diagnostic.len() < 1024,
+        "H2 retroactive window diagnostics must stay bounded"
+    );
+    std::hint::black_box((error.stream_id, diagnostic));
+}
+
 fn open_connection(conn: &mut Connection) -> Result<(), H2Error> {
     conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
         .map(|_| ())
@@ -60,14 +92,7 @@ fuzz_target!(|data: &[u8]| {
 
             if initial_window <= MAX_WINDOW_SIZE as u32 && new_window <= MAX_WINDOW_SIZE as u32 {
                 let result = test_single_stream_window_update(initial_window, new_window);
-                match result {
-                    Ok(_) => {} // Valid window update
-                    Err(H2Error {
-                        code: ErrorCode::FlowControlError,
-                        ..
-                    }) => {} // Expected overflow
-                    Err(_) => {} // Other errors acceptable
-                }
+                observe_h2_operation(result, "single stream retroactive update");
             }
         }
     }
@@ -92,7 +117,10 @@ fuzz_target!(|data: &[u8]| {
         }
 
         if !window_updates.is_empty() {
-            let _result = test_multiple_streams_window_update(&window_updates);
+            observe_h2_operation(
+                test_multiple_streams_window_update(&window_updates),
+                "multiple streams retroactive update",
+            );
         }
     }
 
@@ -115,7 +143,10 @@ fuzz_target!(|data: &[u8]| {
         }
 
         if !updates.is_empty() {
-            let _result = test_rapid_settings_updates(&updates);
+            observe_h2_operation(
+                test_rapid_settings_updates(&updates),
+                "rapid settings retroactive update",
+            );
         }
     }
 
@@ -128,7 +159,10 @@ fuzz_target!(|data: &[u8]| {
             let new_window =
                 u32::from_be_bytes([data[8], data[9], data[10], data[11]]) & MAX_WINDOW_SIZE as u32;
 
-            let _result = test_window_update_with_closure(initial, consume_amount, new_window);
+            observe_h2_operation(
+                test_window_update_with_closure(initial, consume_amount, new_window),
+                "closed stream retroactive update",
+            );
         }
     }
 
@@ -145,7 +179,10 @@ fuzz_target!(|data: &[u8]| {
 
         for &initial in &test_windows {
             for &new_size in &test_windows {
-                let _result = test_boundary_window_update(initial, new_size);
+                observe_h2_operation(
+                    test_boundary_window_update(initial, new_size),
+                    "boundary retroactive window update",
+                );
             }
         }
     }
@@ -158,8 +195,10 @@ fuzz_target!(|data: &[u8]| {
         let new_initial = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
         let old_initial = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
 
-        let _result =
-            test_window_arithmetic_edge_case(base_window, consumed, old_initial, new_initial);
+        observe_h2_operation(
+            test_window_arithmetic_edge_case(base_window, consumed, old_initial, new_initial),
+            "window arithmetic edge-case update",
+        );
     }
 
     // Test 7: Mixed valid and invalid SETTINGS in sequence
@@ -175,7 +214,10 @@ fuzz_target!(|data: &[u8]| {
             })
             .collect::<Vec<_>>();
 
-        let _result = test_mixed_valid_invalid_sequence(&sequence);
+        observe_h2_operation(
+            test_mixed_valid_invalid_sequence(&sequence),
+            "mixed valid-invalid retroactive update sequence",
+        );
     }
 
     // Test 8: Connection state during window updates
@@ -186,7 +228,10 @@ fuzz_target!(|data: &[u8]| {
             let new_window = u32::from_be_bytes([data[4], data[5], data[6], data[7]])
                 % (MAX_WINDOW_SIZE as u32 + 1);
 
-            let _result = test_window_update_connection_states(old_window, new_window);
+            observe_h2_operation(
+                test_window_update_connection_states(old_window, new_window),
+                "connection-state retroactive update",
+            );
         }
     }
 
@@ -198,8 +243,10 @@ fuzz_target!(|data: &[u8]| {
         let base_window = u32::from_be_bytes([data[8], data[9], data[10], data[11]])
             % (MAX_WINDOW_SIZE as u32 + 1);
 
-        let _result =
-            test_pattern_based_updates(pattern_type, stream_count, window_delta, base_window);
+        observe_h2_operation(
+            test_pattern_based_updates(pattern_type, stream_count, window_delta, base_window),
+            "pattern-based retroactive update",
+        );
     }
 
     // Test 10: Zero and negative window scenarios
@@ -207,7 +254,10 @@ fuzz_target!(|data: &[u8]| {
         let scenario = data[0] % 3; // 3 different zero/negative scenarios
         let window_value = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
-        let _result = test_zero_negative_windows(scenario, window_value);
+        observe_h2_operation(
+            test_zero_negative_windows(scenario, window_value),
+            "zero-negative retroactive update",
+        );
     }
 });
 
@@ -224,7 +274,10 @@ fn test_single_stream_window_update(initial_window: u32, new_window: u32) -> Res
     // Send some data to partially consume the window
     if initial_window > 1000 {
         let data_frame = create_data_frame(1, 1000);
-        let _result = conn.process_frame(data_frame);
+        observe_h2_operation(
+            conn.process_frame(data_frame),
+            "single stream data before window update",
+        );
     }
 
     // Apply SETTINGS_INITIAL_WINDOW_SIZE update
@@ -243,14 +296,20 @@ fn test_multiple_streams_window_update(window_updates: &[u32]) -> Result<(), H2E
     for i in 0..window_updates.len().min(10) {
         let stream_id = (i as u32 * 2) + 1; // Odd stream IDs for client-initiated
         let headers_frame = create_headers_frame(stream_id);
-        let _result = conn.process_frame(headers_frame);
+        observe_h2_operation(
+            conn.process_frame(headers_frame),
+            "multiple-stream headers before window update",
+        );
 
         // Send varying amounts of data on each stream
         if i > 0 {
             let data_amount = (i * 500) as u32;
             if data_amount < DEFAULT_INITIAL_WINDOW_SIZE {
                 let data_frame = create_data_frame(stream_id, data_amount);
-                let _result = conn.process_frame(data_frame);
+                observe_h2_operation(
+                    conn.process_frame(data_frame),
+                    "multiple-stream data before window update",
+                );
             }
         }
     }
@@ -259,7 +318,10 @@ fn test_multiple_streams_window_update(window_updates: &[u32]) -> Result<(), H2E
     for &new_window in window_updates {
         if new_window <= MAX_WINDOW_SIZE as u32 {
             let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(new_window)]);
-            let _result = conn.process_frame(Frame::Settings(settings));
+            observe_h2_operation(
+                conn.process_frame(Frame::Settings(settings)),
+                "multiple-stream settings window update",
+            );
         }
     }
 
@@ -276,7 +338,10 @@ fn test_rapid_settings_updates(updates: &[u32]) -> Result<(), H2Error> {
     conn.process_frame(headers_frame)?;
 
     let data_frame = create_data_frame(1, 5000);
-    let _result = conn.process_frame(data_frame);
+    observe_h2_operation(
+        conn.process_frame(data_frame),
+        "rapid settings data before window update",
+    );
 
     // Apply rapid SETTINGS updates
     for &window_size in updates {
@@ -285,18 +350,7 @@ fn test_rapid_settings_updates(updates: &[u32]) -> Result<(), H2Error> {
             let result = conn.process_frame(Frame::Settings(settings));
 
             // Each update should either succeed or fail with a flow control error
-            match result {
-                Ok(_) => {} // Success
-                Err(H2Error {
-                    code: ErrorCode::FlowControlError,
-                    ..
-                }) => {} // Expected overflow
-                Err(H2Error {
-                    code: ErrorCode::ProtocolError,
-                    ..
-                }) => {} // Invalid value
-                Err(_) => {} // Other errors
-            }
+            observe_h2_operation(result, "rapid settings window update");
         }
     }
 
@@ -316,25 +370,37 @@ fn test_window_update_with_closure(
     for i in 1..=5 {
         let stream_id = i * 2 + 1;
         let headers_frame = create_headers_frame(stream_id);
-        let _result = conn.process_frame(headers_frame);
+        observe_h2_operation(
+            conn.process_frame(headers_frame),
+            "closure headers before window update",
+        );
 
         // Consume some window on each stream
         if consume_amount > 0 && consume_amount < initial_window {
             let data_frame = create_data_frame(stream_id, consume_amount % initial_window);
-            let _result = conn.process_frame(data_frame);
+            observe_h2_operation(
+                conn.process_frame(data_frame),
+                "closure data before window update",
+            );
         }
 
         // Close some streams (this should make them skip window updates)
         if i % 2 == 0 {
             let rst_frame = create_rst_stream_frame(stream_id);
-            let _result = conn.process_frame(rst_frame);
+            observe_h2_operation(
+                conn.process_frame(rst_frame),
+                "closure rst before window update",
+            );
         }
     }
 
     // Apply window size update (should skip closed streams)
     if new_window <= MAX_WINDOW_SIZE as u32 {
         let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(new_window)]);
-        let _result = conn.process_frame(Frame::Settings(settings));
+        observe_h2_operation(
+            conn.process_frame(Frame::Settings(settings)),
+            "closure settings window update",
+        );
     }
 
     Ok(())
@@ -354,7 +420,10 @@ fn test_boundary_window_update(initial: u32, new_size: u32) -> Result<(), H2Erro
     if initial > 1000 {
         let consume = initial - 100; // Leave small amount
         let data_frame = create_data_frame(1, consume);
-        let _result = conn.process_frame(data_frame);
+        observe_h2_operation(
+            conn.process_frame(data_frame),
+            "boundary data before window update",
+        );
     }
 
     // Apply potentially problematic window update
@@ -389,7 +458,10 @@ fn test_window_arithmetic_edge_case(
 
     // Update to new window size
     let new_settings = SettingsFrame::new(vec![Setting::InitialWindowSize(new_initial)]);
-    let _result = conn.process_frame(Frame::Settings(new_settings));
+    observe_h2_operation(
+        conn.process_frame(Frame::Settings(new_settings)),
+        "arithmetic settings window update",
+    );
 
     Ok(())
 }
@@ -404,7 +476,10 @@ fn test_mixed_valid_invalid_sequence(sequence: &[u32]) -> Result<(), H2Error> {
 
     for &window_size in sequence {
         let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(window_size)]);
-        let _result = conn.process_frame(Frame::Settings(settings));
+        observe_h2_operation(
+            conn.process_frame(Frame::Settings(settings)),
+            "mixed sequence settings window update",
+        );
         // Mixed sequence - some may succeed, some may fail, both are valid outcomes
     }
 
@@ -418,10 +493,16 @@ fn test_window_update_connection_states(old_window: u32, new_window: u32) -> Res
     apply_initial_window_size(&mut conn, old_window)?;
 
     let headers_frame = create_headers_frame(1);
-    let _result = conn.process_frame(headers_frame);
+    observe_h2_operation(
+        conn.process_frame(headers_frame),
+        "connection-state headers before window update",
+    );
 
     let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(new_window)]);
-    let _result = conn.process_frame(Frame::Settings(settings));
+    observe_h2_operation(
+        conn.process_frame(Frame::Settings(settings)),
+        "connection-state settings window update",
+    );
 
     Ok(())
 }
@@ -440,7 +521,10 @@ fn test_pattern_based_updates(
     for i in 0..stream_count.min(16) {
         let stream_id = (i as u32 * 2) + 1;
         let headers_frame = create_headers_frame(stream_id);
-        let _result = conn.process_frame(headers_frame);
+        observe_h2_operation(
+            conn.process_frame(headers_frame),
+            "pattern headers before window update",
+        );
 
         // Apply different consumption patterns
         match pattern_type {
@@ -449,7 +533,10 @@ fn test_pattern_based_updates(
                 let consume = (i as u32 * 1000).min(base_window.saturating_sub(1000));
                 if consume > 0 {
                     let data_frame = create_data_frame(stream_id, consume);
-                    let _result = conn.process_frame(data_frame);
+                    observe_h2_operation(
+                        conn.process_frame(data_frame),
+                        "pattern ascending data before window update",
+                    );
                 }
             }
             1 => {
@@ -458,7 +545,10 @@ fn test_pattern_based_updates(
                     ((stream_count - i) as u32 * 1000).min(base_window.saturating_sub(1000));
                 if consume > 0 {
                     let data_frame = create_data_frame(stream_id, consume);
-                    let _result = conn.process_frame(data_frame);
+                    observe_h2_operation(
+                        conn.process_frame(data_frame),
+                        "pattern descending data before window update",
+                    );
                 }
             }
             2 => {
@@ -470,15 +560,25 @@ fn test_pattern_based_updates(
                 };
                 if consume > 0 && consume < base_window {
                     let data_frame = create_data_frame(stream_id, consume);
-                    let _result = conn.process_frame(data_frame);
+                    observe_h2_operation(
+                        conn.process_frame(data_frame),
+                        "pattern alternating data before window update",
+                    );
                 }
             }
             _ => {
                 // Random pattern based on stream ID
-                let consume = (stream_id * 777) % base_window;
+                let consume = if base_window == 0 {
+                    0
+                } else {
+                    (stream_id * 777) % base_window
+                };
                 if consume > 0 {
                     let data_frame = create_data_frame(stream_id, consume);
-                    let _result = conn.process_frame(data_frame);
+                    observe_h2_operation(
+                        conn.process_frame(data_frame),
+                        "pattern modulo data before window update",
+                    );
                 }
             }
         }
@@ -493,7 +593,10 @@ fn test_pattern_based_updates(
     .min(MAX_WINDOW_SIZE as u32);
 
     let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(new_window)]);
-    let _result = conn.process_frame(Frame::Settings(settings));
+    observe_h2_operation(
+        conn.process_frame(Frame::Settings(settings)),
+        "pattern settings window update",
+    );
 
     Ok(())
 }
@@ -511,7 +614,10 @@ fn test_zero_negative_windows(_scenario: u8, window_value: u32) -> Result<(), H2
 
     for &value in &test_values {
         let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(value)]);
-        let _result = conn.process_frame(Frame::Settings(settings));
+        observe_h2_operation(
+            conn.process_frame(Frame::Settings(settings)),
+            "zero-negative settings window update",
+        );
     }
 
     Ok(())
