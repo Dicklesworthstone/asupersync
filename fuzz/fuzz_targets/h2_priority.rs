@@ -23,7 +23,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{FrameHeader, FrameType, PriorityFrame};
 
 /// Maximum valid stream ID (31 bits).
@@ -157,42 +157,46 @@ fn fuzz_priority_frame(input: &PriorityFrameFuzzInput) {
         }
 
         Err(error) => {
-            match error {
+            match (error.code, error.stream_id) {
                 // Assertion 5: PRIORITY on Stream ID 0 triggers PROTOCOL_ERROR
-                H2Error::Protocol { message, .. } if header.stream_id == 0 => {
-                    assert!(
-                        message.contains("PRIORITY frame with stream ID 0"),
-                        "Expected PRIORITY stream ID 0 error message, got: {}",
-                        message
+                (ErrorCode::ProtocolError, None) if header.stream_id == 0 => {
+                    assert_eq!(
+                        error.message, "PRIORITY frame with stream ID 0",
+                        "PRIORITY stream ID 0 should use the live parser diagnostic"
                     );
                 }
 
                 // Assertion 1: Frame length != 5 bytes triggers FRAME_SIZE_ERROR
-                H2Error::Stream {
-                    error_code: ErrorCode::FrameSizeError,
-                    ..
-                } => {
+                (ErrorCode::FrameSizeError, Some(stream_id)) => {
                     assert!(
                         header.length != 5,
                         "FRAME_SIZE_ERROR should only occur when length != 5, got length {}",
                         header.length
                     );
+                    assert_eq!(
+                        stream_id, header.stream_id,
+                        "FRAME_SIZE_ERROR should be scoped to the PRIORITY stream"
+                    );
+                    assert_eq!(
+                        error.message, "PRIORITY frame must be 5 bytes",
+                        "PRIORITY length error should use the live parser diagnostic"
+                    );
                 }
 
                 // Stream errors for self-dependency
-                H2Error::Stream {
-                    error_code: ErrorCode::ProtocolError,
-                    message,
-                    ..
-                } => {
-                    if message.contains("stream cannot depend on itself") {
-                        // This is expected when dependency == stream_id
-                        assert!(
-                            input.use_structured_payload
-                                && (input.structured.dependency & 0x7FFF_FFFF) == header.stream_id,
-                            "Self-dependency error without actual self-dependency"
-                        );
-                    }
+                (ErrorCode::ProtocolError, Some(stream_id))
+                    if error.message == "stream cannot depend on itself" =>
+                {
+                    // This is expected when dependency == stream_id
+                    assert_eq!(
+                        stream_id, header.stream_id,
+                        "self-dependency error should be scoped to the PRIORITY stream"
+                    );
+                    assert!(
+                        input.use_structured_payload
+                            && (input.structured.dependency & 0x7FFF_FFFF) == header.stream_id,
+                        "Self-dependency error without actual self-dependency"
+                    );
                 }
 
                 // Other errors are acceptable for malformed input
