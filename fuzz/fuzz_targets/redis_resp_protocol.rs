@@ -24,7 +24,7 @@ use libfuzzer_sys::fuzz_target;
 /// - Memory exhaustion protection verification
 // Import the Redis module to test
 use asupersync::messaging::redis::{
-    PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisClientTrackingPush,
+    PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisClientTrackingPush, RedisError,
     RedisProtocolLimits, RedisResp3NonPubSubPush, RespValue, decode_resp_value_for_fuzz,
     parse_acl_for_fuzz, parse_client_kill_for_fuzz, parse_client_tracking_push_for_fuzz,
     parse_cluster_command_for_fuzz, parse_latency_for_fuzz, parse_pubsub_event_for_fuzz,
@@ -33,6 +33,72 @@ use asupersync::messaging::redis::{
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
+
+#[derive(Debug, Default)]
+struct RespDecodeStats {
+    complete: usize,
+    incomplete: usize,
+    errors: usize,
+}
+
+impl RespDecodeStats {
+    fn total(&self) -> usize {
+        self.complete + self.incomplete + self.errors
+    }
+
+    fn assert_attempts(&self, context: &str, expected: usize) {
+        assert_eq!(
+            self.total(),
+            expected,
+            "{context} should classify every decode attempt"
+        );
+    }
+}
+
+fn assert_visible_debug<T: core::fmt::Debug + ?Sized>(context: &str, value: &T) {
+    let rendered = format!("{value:?}");
+    assert!(
+        !rendered.trim().is_empty(),
+        "{context} should expose debug diagnostics"
+    );
+}
+
+fn observe_resp_decode_result(
+    context: &str,
+    input_len: usize,
+    result: Result<Option<(RespValue, usize)>, RedisError>,
+    stats: &mut RespDecodeStats,
+) -> Option<(RespValue, usize)> {
+    match result {
+        Ok(Some((value, consumed))) => {
+            stats.complete += 1;
+            assert!(
+                consumed > 0 && consumed <= input_len,
+                "{context} consumed {consumed} bytes from {input_len}-byte input"
+            );
+            assert_visible_debug(context, &value);
+            let encoded = value.encode();
+            assert!(
+                !encoded.is_empty(),
+                "{context} should encode complete values to nonempty RESP bytes"
+            );
+            Some((value, consumed))
+        }
+        Ok(None) => {
+            stats.incomplete += 1;
+            None
+        }
+        Err(error) => {
+            stats.errors += 1;
+            let diagnostic = error.to_string();
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "{context} should expose protocol-error diagnostics"
+            );
+            None
+        }
+    }
+}
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum StructuredPushKind {
@@ -578,9 +644,13 @@ fn exercise_resp3_streamed_types(data: &[u8]) {
     }
 
     assert!(
-        decode_resp_value_for_fuzz(b"$?\r\n;3\r\nabc\r\n", limits)
+        decode_resp_value_for_fuzz(b"$?\r\n;1\r\na\r\n", limits)
             .expect("incomplete RESP3 streamed blob should not error")
             .is_none()
+    );
+    assert!(
+        decode_resp_value_for_fuzz(b"$?\r\n;3\r\nabc\r\n", limits).is_err(),
+        "oversized incomplete RESP3 streamed blob chunk must fail closed"
     );
     assert!(
         decode_resp_value_for_fuzz(b"%?\r\n+key\r\n.\r\n", limits).is_err(),
@@ -921,7 +991,7 @@ fn exercise_client_kill_parser(data: &[u8]) {
     let parsed =
         parse_client_kill_for_fuzz(valid_filters).expect("CLIENT KILL filters should parse");
     assert!(parsed.legacy_addr.is_none());
-    assert_eq!(parsed.filters.len(), 6);
+    assert_eq!(parsed.filters.len(), 7);
 
     let arbitrary_user = RespValue::Array(Some(vec![
         bulk_arg(b"CLIENT"),
@@ -1136,7 +1206,7 @@ fn exercise_zadd_option_parser(data: &[u8]) {
 
 fn exercise_zrangebyscore_parser(data: &[u8]) {
     let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
-    let finite_bound = format!("{}.{}", payload.len(), data.first().copied().unwrap_or(0));
+    let limit_count = payload.len().saturating_add(1).to_string();
     let valid_command = RespValue::Array(Some(vec![
         bulk_arg(b"ZRANGEBYSCORE"),
         bulk_arg(b"zset"),
@@ -1145,7 +1215,7 @@ fn exercise_zrangebyscore_parser(data: &[u8]) {
         bulk_arg(b"WITHSCORES"),
         bulk_arg(b"LIMIT"),
         bulk_arg(b"0"),
-        bulk_arg(finite_bound.as_bytes()),
+        bulk_arg(limit_count.as_bytes()),
     ]));
     let parsed = parse_zrangebyscore_for_fuzz(valid_command)
         .expect("sanitized ZRANGEBYSCORE command should parse");
@@ -1387,10 +1457,20 @@ fn exercise_cluster_command_parser(data: &[u8]) {
 /// Test helper functions in isolation
 fn test_helper_functions(data: &[u8]) {
     // Test find_crlf with various scenarios
-    for _start_pos in [0, 1, data.len().saturating_sub(1)] {
+    let mut indirect_crlf_stats = RespDecodeStats::default();
+    let start_positions = [0, 1, data.len().saturating_sub(1)];
+    for start_pos in start_positions {
         // Call through RespValue to access find_crlf indirectly
-        let _ = RespValue::try_decode(data);
+        let start_pos = start_pos.min(data.len());
+        let probe = &data[start_pos..];
+        observe_resp_decode_result(
+            "indirect CRLF probe",
+            probe.len(),
+            RespValue::try_decode(probe),
+            &mut indirect_crlf_stats,
+        );
     }
+    indirect_crlf_stats.assert_attempts("indirect CRLF probes", start_positions.len());
 
     // Test parse_i64_ascii by creating integer RESP values
     if let Ok(s) = std::str::from_utf8(data) {
@@ -1401,13 +1481,22 @@ fn test_helper_functions(data: &[u8]) {
             .collect::<String>();
         if !clean_str.is_empty() {
             let resp_data = format!(":{clean_str}\r\n");
-            let _ = RespValue::try_decode(resp_data.as_bytes());
+            let mut integer_stats = RespDecodeStats::default();
+            observe_resp_decode_result(
+                "integer ASCII probe",
+                resp_data.len(),
+                RespValue::try_decode(resp_data.as_bytes()),
+                &mut integer_stats,
+            );
+            integer_stats.assert_attempts("integer ASCII probes", 1);
         }
     }
 }
 
 /// Test protocol limits enforcement
 fn test_protocol_limits(data: &[u8]) {
+    let mut limit_stats = RespDecodeStats::default();
+
     // Test with strict limits
     let strict_limits = RedisProtocolLimits {
         max_frame_size: 1024,
@@ -1416,7 +1505,12 @@ fn test_protocol_limits(data: &[u8]) {
         max_bulk_string_len: 100,
     };
 
-    let _ = RespValue::try_decode_with_limits(data, &strict_limits);
+    observe_resp_decode_result(
+        "strict Redis protocol limits",
+        data.len(),
+        RespValue::try_decode_with_limits(data, &strict_limits),
+        &mut limit_stats,
+    );
 
     // Test with very permissive limits
     let permissive_limits = RedisProtocolLimits {
@@ -1426,7 +1520,12 @@ fn test_protocol_limits(data: &[u8]) {
         max_bulk_string_len: 1_000_000_000,
     };
 
-    let _ = RespValue::try_decode_with_limits(data, &permissive_limits);
+    observe_resp_decode_result(
+        "permissive Redis protocol limits",
+        data.len(),
+        RespValue::try_decode_with_limits(data, &permissive_limits),
+        &mut limit_stats,
+    );
 
     // Test with minimal limits
     let minimal_limits = RedisProtocolLimits {
@@ -1436,32 +1535,58 @@ fn test_protocol_limits(data: &[u8]) {
         max_bulk_string_len: 1,
     };
 
-    let _ = RespValue::try_decode_with_limits(data, &minimal_limits);
+    observe_resp_decode_result(
+        "minimal Redis protocol limits",
+        data.len(),
+        RespValue::try_decode_with_limits(data, &minimal_limits),
+        &mut limit_stats,
+    );
+    limit_stats.assert_attempts("Redis protocol limit probes", 3);
 }
 
 /// Round-trip test: encode then decode should preserve structure
 fn test_round_trip_properties(data: &[u8]) {
     // Only test round-trip on successfully parsed values
-    if let Ok(Some((value, _))) = RespValue::try_decode(data) {
-        let encoded = value.encode();
+    let mut source_stats = RespDecodeStats::default();
+    let Some((value, _)) = observe_resp_decode_result(
+        "round-trip source decode",
+        data.len(),
+        RespValue::try_decode(data),
+        &mut source_stats,
+    ) else {
+        source_stats.assert_attempts("round-trip source decode", 1);
+        return;
+    };
+    source_stats.assert_attempts("round-trip source decode", 1);
 
-        // The re-encoded value should parse successfully
-        if let Ok(Some((value2, _))) = RespValue::try_decode(&encoded) {
-            // Check basic structural equality
-            assert_eq!(
-                std::mem::discriminant(&value),
-                std::mem::discriminant(&value2)
-            );
+    let encoded = value.encode();
 
-            // For non-recursive types, check exact equality
-            match (&value, &value2) {
-                (RespValue::SimpleString(s1), RespValue::SimpleString(s2)) => assert_eq!(s1, s2),
-                (RespValue::Error(e1), RespValue::Error(e2)) => assert_eq!(e1, e2),
-                (RespValue::Integer(i1), RespValue::Integer(i2)) => assert_eq!(i1, i2),
-                (RespValue::BulkString(b1), RespValue::BulkString(b2)) => assert_eq!(b1, b2),
-                _ => {} // Skip arrays due to potential recursion complexity
-            }
-        }
+    // The re-encoded value should parse successfully
+    let mut encoded_stats = RespDecodeStats::default();
+    let Some((value2, _)) = observe_resp_decode_result(
+        "round-trip encoded decode",
+        encoded.len(),
+        RespValue::try_decode(&encoded),
+        &mut encoded_stats,
+    ) else {
+        encoded_stats.assert_attempts("round-trip encoded decode", 1);
+        return;
+    };
+    encoded_stats.assert_attempts("round-trip encoded decode", 1);
+
+    // Check basic structural equality
+    assert_eq!(
+        std::mem::discriminant(&value),
+        std::mem::discriminant(&value2)
+    );
+
+    // For non-recursive types, check exact equality
+    match (&value, &value2) {
+        (RespValue::SimpleString(s1), RespValue::SimpleString(s2)) => assert_eq!(s1, s2),
+        (RespValue::Error(e1), RespValue::Error(e2)) => assert_eq!(e1, e2),
+        (RespValue::Integer(i1), RespValue::Integer(i2)) => assert_eq!(i1, i2),
+        (RespValue::BulkString(b1), RespValue::BulkString(b2)) => assert_eq!(b1, b2),
+        _ => {} // Skip arrays due to potential recursion complexity
     }
 }
 
@@ -1472,32 +1597,60 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test 1: Direct parsing of fuzz input with default limits
-    let _ = RespValue::try_decode(data);
+    let mut direct_decode_stats = RespDecodeStats::default();
+    observe_resp_decode_result(
+        "direct fuzz input decode",
+        data.len(),
+        RespValue::try_decode(data),
+        &mut direct_decode_stats,
+    );
+    direct_decode_stats.assert_attempts("direct fuzz input decode", 1);
 
     // Test 2: Direct parsing with various protocol limits
     test_protocol_limits(data);
 
     // Test 3: Test all RESP type parsing through valid samples
     let valid_samples = generate_valid_resp_samples(data);
+    let mut valid_sample_stats = RespDecodeStats::default();
+    let mut valid_roundtrip_stats = RespDecodeStats::default();
     for sample in &valid_samples {
         let result = RespValue::try_decode(sample);
 
         // Valid samples should generally parse successfully
-        if let Ok(Some((value, consumed))) = result {
-            // Verify consumed bytes make sense
-            assert!(consumed <= sample.len());
-
+        if let Some((value, _consumed)) = observe_resp_decode_result(
+            "valid RESP sample",
+            sample.len(),
+            result,
+            &mut valid_sample_stats,
+        ) {
             // Test encoding round-trip
             let encoded = value.encode();
-            let _ = RespValue::try_decode(&encoded);
+            observe_resp_decode_result(
+                "valid RESP sample re-encode",
+                encoded.len(),
+                RespValue::try_decode(&encoded),
+                &mut valid_roundtrip_stats,
+            );
         }
     }
+    valid_sample_stats.assert_attempts("valid RESP sample probes", valid_samples.len());
+    valid_roundtrip_stats.assert_attempts(
+        "valid RESP sample re-encode probes",
+        valid_sample_stats.complete,
+    );
 
     // Test 4: Test parsing with malformed/edge case data
     let malformed_samples = generate_malformed_resp_data(data);
+    let mut malformed_sample_stats = RespDecodeStats::default();
     for sample in &malformed_samples {
-        let _ = RespValue::try_decode(sample);
+        observe_resp_decode_result(
+            "malformed RESP sample",
+            sample.len(),
+            RespValue::try_decode(sample),
+            &mut malformed_sample_stats,
+        );
     }
+    malformed_sample_stats.assert_attempts("malformed RESP sample probes", malformed_samples.len());
 
     // Test 5: Test helper functions indirectly
     test_helper_functions(data);
@@ -1508,10 +1661,19 @@ fuzz_target!(|data: &[u8]| {
     } else {
         (data[0] as usize % 100) + 1
     };
+    let mut deep_nesting_stats = RespDecodeStats::default();
+    let mut deep_nesting_attempts = 0;
     for depth in [1, 5, 10, max_test_depth.min(200)].iter().copied() {
         let deep_data = generate_deep_nesting_data(depth);
-        let _ = RespValue::try_decode(&deep_data);
+        observe_resp_decode_result(
+            "deep nested RESP array",
+            deep_data.len(),
+            RespValue::try_decode(&deep_data),
+            &mut deep_nesting_stats,
+        );
+        deep_nesting_attempts += 1;
     }
+    deep_nesting_stats.assert_attempts("deep nested RESP array probes", deep_nesting_attempts);
 
     // Test 7: Test large array scenarios
     let max_test_count = if data.is_empty() {
@@ -1519,10 +1681,19 @@ fuzz_target!(|data: &[u8]| {
     } else {
         (data[0] as usize % 1000) + 1
     };
+    let mut large_array_stats = RespDecodeStats::default();
+    let mut large_array_attempts = 0;
     for count in [0, 1, 10, max_test_count.min(5000)].iter().copied() {
         let large_array_data = generate_large_array_data(count);
-        let _ = RespValue::try_decode(&large_array_data);
+        observe_resp_decode_result(
+            "large RESP array",
+            large_array_data.len(),
+            RespValue::try_decode(&large_array_data),
+            &mut large_array_stats,
+        );
+        large_array_attempts += 1;
     }
+    large_array_stats.assert_attempts("large RESP array probes", large_array_attempts);
 
     // Test 8: Round-trip property verification
     test_round_trip_properties(data);
@@ -1565,6 +1736,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 20: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
+        let mut fragmented_stats = RespDecodeStats::default();
+        let mut fragmented_attempts = 0;
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
             .copied()
@@ -1574,14 +1747,27 @@ fuzz_target!(|data: &[u8]| {
                 let second_part = &data[split_point..];
 
                 // Test parsing of partial data (should return Ok(None) for incomplete)
-                let _ = RespValue::try_decode(first_part);
+                observe_resp_decode_result(
+                    "fragmented RESP first part",
+                    first_part.len(),
+                    RespValue::try_decode(first_part),
+                    &mut fragmented_stats,
+                );
+                fragmented_attempts += 1;
 
                 // Test parsing of combined data
                 let mut combined = first_part.to_vec();
                 combined.extend_from_slice(second_part);
-                let _ = RespValue::try_decode(&combined);
+                observe_resp_decode_result(
+                    "fragmented RESP recombined buffer",
+                    combined.len(),
+                    RespValue::try_decode(&combined),
+                    &mut fragmented_stats,
+                );
+                fragmented_attempts += 1;
             }
         }
+        fragmented_stats.assert_attempts("fragmented RESP probes", fragmented_attempts);
     }
 
     // Test 21: Boundary value testing for limits
@@ -1600,7 +1786,17 @@ fuzz_target!(|data: &[u8]| {
         },
     ];
 
+    let mut boundary_limit_stats = RespDecodeStats::default();
     for limits in &boundary_limits {
-        let _ = RespValue::try_decode_with_limits(data, limits);
+        observe_resp_decode_result(
+            "boundary Redis protocol limits",
+            data.len(),
+            RespValue::try_decode_with_limits(data, limits),
+            &mut boundary_limit_stats,
+        );
     }
+    boundary_limit_stats.assert_attempts(
+        "boundary Redis protocol limit probes",
+        boundary_limits.len(),
+    );
 });
