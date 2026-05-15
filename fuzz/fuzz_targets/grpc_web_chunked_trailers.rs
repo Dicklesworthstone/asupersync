@@ -127,13 +127,19 @@ fn build_trailer_content(spec: &TrailerSpec) -> (Status, Metadata) {
             MetadataEntry::Ascii { key, value } => {
                 if let Some(clean_key) = sanitize_metadata_key(key, false) {
                     let clean_value = sanitize_ascii_value(value);
-                    let _ = metadata.insert(clean_key, clean_value);
+                    assert!(
+                        metadata.insert(clean_key.clone(), clean_value),
+                        "sanitized ASCII metadata key {clean_key:?} should be accepted",
+                    );
                 }
             }
             MetadataEntry::Binary { key, value } => {
                 if let Some(clean_key) = sanitize_metadata_key(key, true) {
                     let truncated: Vec<u8> = value.iter().copied().take(MAX_VALUE_LEN).collect();
-                    let _ = metadata.insert_bin(clean_key, Bytes::from(truncated));
+                    assert!(
+                        metadata.insert_bin(clean_key.clone(), Bytes::from(truncated)),
+                        "sanitized binary metadata key {clean_key:?} should be accepted",
+                    );
                 }
             }
         }
