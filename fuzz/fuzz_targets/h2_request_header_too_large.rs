@@ -575,6 +575,49 @@ enum HeadersParseResult {
     ProtocolError(String),
 }
 
+fn assert_memory_exhaustion_stopped_before_limit(allocated: usize, limit: u32) {
+    let limit = limit as usize;
+    assert!(
+        allocated <= limit,
+        "Memory exhaustion should stop before exceeding the limit: allocated {allocated}, limit {limit}"
+    );
+}
+
+fn assert_too_many_headers_at_limit(count: usize, limit: u16) {
+    assert!(
+        count >= limit as usize,
+        "TooManyHeaders should only fire at the configured limit: count {count}, limit {limit}"
+    );
+}
+
+fn assert_success_within_limits(
+    headers: &[ParsedHeader],
+    total_size: usize,
+    header_count: usize,
+    config: &HeaderParserConfig,
+) {
+    assert!(
+        total_size <= config.max_total_headers_size as usize,
+        "Successful parse should not exceed total size limit"
+    );
+    assert_eq!(
+        header_count,
+        headers.len(),
+        "Reported header count should match parsed headers"
+    );
+    assert!(
+        headers.len() <= config.max_header_count as usize,
+        "Successful parse should not exceed header count limit"
+    );
+
+    for header in headers {
+        assert!(
+            header.value.len() <= config.max_header_value_size as usize,
+            "Individual header should not exceed value size limit"
+        );
+    }
+}
+
 fuzz_target!(|input: LargeHeaderInput| {
     // Normalize input for reasonable fuzzing bounds
     let mut input = input;
@@ -617,37 +660,26 @@ fuzz_target!(|input: LargeHeaderInput| {
         HeadersParseResult::MemoryExhaustion {
             allocated, limit, ..
         } => {
-            assert!(
-                allocated >= limit as usize,
-                "Memory exhaustion should occur at or after limit"
-            );
+            assert_memory_exhaustion_stopped_before_limit(allocated, limit);
         }
 
         HeadersParseResult::Success {
             headers,
             total_size,
-            ..
+            header_count,
         } => {
-            // Verify successful parses respect limits
-            assert!(
-                total_size <= parser.config.max_total_headers_size as usize,
-                "Successful parse should not exceed total size limit"
-            );
-            assert!(
-                headers.len() <= parser.config.max_header_count as usize,
-                "Successful parse should not exceed header count limit"
-            );
-
-            for header in &headers {
-                assert!(
-                    header.value.len() <= parser.config.max_header_value_size as usize,
-                    "Individual header should not exceed value size limit"
-                );
-            }
+            assert_success_within_limits(&headers, total_size, header_count, &parser.config);
         }
 
-        _ => {
-            // Other results are acceptable
+        HeadersParseResult::TooManyHeaders { count, limit } => {
+            assert_too_many_headers_at_limit(count, limit);
+        }
+
+        HeadersParseResult::InvalidHeader(message) | HeadersParseResult::ProtocolError(message) => {
+            assert!(
+                !message.is_empty(),
+                "Header parser rejection should include a diagnostic"
+            );
         }
     }
 
@@ -669,17 +701,30 @@ fuzz_target!(|input: LargeHeaderInput| {
                 }
             }
 
-            HeadersParseResult::Success { .. } => {
-                // Should only succeed if pattern is actually within limits
-                if let LargeHeaderPattern::MassiveValue { size_mb, .. } = pattern
-                    && *size_mb > 0
-                {
-                    panic!("Massive value pattern should be rejected");
-                }
+            HeadersParseResult::MemoryExhaustion {
+                allocated, limit, ..
+            } => {
+                assert_memory_exhaustion_stopped_before_limit(allocated, limit);
             }
 
-            _ => {
-                // Other rejections are acceptable
+            HeadersParseResult::Success {
+                headers,
+                total_size,
+                header_count,
+            } => {
+                assert_success_within_limits(&headers, total_size, header_count, &parser.config);
+            }
+
+            HeadersParseResult::TooManyHeaders { count, limit } => {
+                assert_too_many_headers_at_limit(count, limit);
+            }
+
+            HeadersParseResult::InvalidHeader(message)
+            | HeadersParseResult::ProtocolError(message) => {
+                assert!(
+                    !message.is_empty(),
+                    "Large-header pattern rejection should include a diagnostic"
+                );
             }
         }
     }
@@ -718,8 +763,16 @@ fuzz_target!(|input: LargeHeaderInput| {
                 "1MB header should not succeed unless limits allow it"
             );
         }
-        _ => {
-            // Other results acceptable
+        HeadersParseResult::MemoryExhaustion {
+            allocated, limit, ..
+        } => {
+            assert_memory_exhaustion_stopped_before_limit(allocated, limit);
+        }
+        HeadersParseResult::TooManyHeaders { count, limit } => {
+            assert_too_many_headers_at_limit(count, limit);
+        }
+        HeadersParseResult::InvalidHeader(message) | HeadersParseResult::ProtocolError(message) => {
+            panic!("1MB valid header should not fail with parser diagnostic: {message}");
         }
     }
 
