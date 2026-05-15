@@ -280,6 +280,15 @@ enum PaddingTest {
     ZeroLengthPadded,
 }
 
+fn normalize_data_stream_id(raw_stream_id: u32) -> u32 {
+    let masked = raw_stream_id & 0x7FFF_FFFF;
+    if masked == 0 { 1 } else { masked }
+}
+
+fn offset_data_stream_id(base_stream_id: u32, offset: u32) -> u32 {
+    normalize_data_stream_id(base_stream_id.wrapping_add(offset))
+}
+
 fuzz_target!(|input: FuzzInput| {
     // Clamp max frame size to valid range
     let max_frame_size = input
@@ -288,12 +297,8 @@ fuzz_target!(|input: FuzzInput| {
 
     let parser = LiveH2DataPaddingParser::with_max_frame_size(max_frame_size);
 
-    // Ensure valid stream ID (non-zero for DATA frames)
-    let stream_id = if input.stream_id == 0 {
-        1
-    } else {
-        input.stream_id & 0x7FFF_FFFF
-    };
+    // Ensure valid stream ID (non-zero for DATA frames) after clearing the reserved bit.
+    let stream_id = normalize_data_stream_id(input.stream_id);
 
     // Test the core full-padding edge case
     if input.test_full_padding_edge_case {
@@ -372,8 +377,18 @@ fuzz_target!(|input: FuzzInput| {
                     );
                 }
 
-                _ => {
-                    // Other errors might be acceptable depending on implementation
+                DataFrameParseResult::IncompleteFrame => {
+                    panic!(
+                        "Constructed fully-padded frame size {} was reported incomplete",
+                        size
+                    );
+                }
+
+                DataFrameParseResult::InvalidStreamId => {
+                    panic!(
+                        "Constructed fully-padded frame size {} used invalid DATA stream id",
+                        size
+                    );
                 }
             }
         }
@@ -545,7 +560,11 @@ fuzz_target!(|input: FuzzInput| {
         match extra_test {
             PaddingTest::FullPaddingAtSize(size) => {
                 let size = (*size).clamp(1, max_frame_size);
-                let test_frame = parser.create_fully_padded_frame(stream_id + 1, size, false);
+                let test_frame = parser.create_fully_padded_frame(
+                    offset_data_stream_id(stream_id, 1),
+                    size,
+                    false,
+                );
                 let test_result = parser.parse_data_frame(&test_frame);
 
                 if let DataFrameParseResult::Valid {
@@ -569,8 +588,11 @@ fuzz_target!(|input: FuzzInput| {
                         continue;
                     }
 
-                    let edge_frame =
-                        parser.create_fully_padded_frame(stream_id + 2, edge_size, false);
+                    let edge_frame = parser.create_fully_padded_frame(
+                        offset_data_stream_id(stream_id, 2),
+                        edge_size,
+                        false,
+                    );
                     let edge_result = parser.parse_data_frame(&edge_frame);
 
                     // All these should be valid fully-padded frames
@@ -599,7 +621,7 @@ fuzz_target!(|input: FuzzInput| {
                         length: target_size.min(50), // Small frame
                         frame_type: DATA_FRAME_TYPE,
                         flags: PADDED_FLAG,
-                        stream_id: stream_id + 3,
+                        stream_id: offset_data_stream_id(stream_id, 3),
                     };
 
                     let mut invalid_frame = Vec::new();
@@ -626,7 +648,7 @@ fuzz_target!(|input: FuzzInput| {
                     length: 0,
                     frame_type: DATA_FRAME_TYPE,
                     flags: PADDED_FLAG,
-                    stream_id: stream_id + 4,
+                    stream_id: offset_data_stream_id(stream_id, 4),
                 };
 
                 let mut zero_frame = Vec::new();
@@ -648,8 +670,11 @@ fuzz_target!(|input: FuzzInput| {
     // Frame size = 256, pad_length = 255, data bytes = 0
     let canonical_size = 256u32.min(max_frame_size);
     if canonical_size >= 2 {
-        let canonical_frame =
-            parser.create_fully_padded_frame(stream_id + 10, canonical_size, true);
+        let canonical_frame = parser.create_fully_padded_frame(
+            offset_data_stream_id(stream_id, 10),
+            canonical_size,
+            true,
+        );
         let canonical_result = parser.parse_data_frame(&canonical_frame);
 
         match canonical_result {
