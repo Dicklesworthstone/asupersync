@@ -7,7 +7,7 @@
 //! `"duplicate"` extraction logic with a local mock.
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::messaging::jetstream::fuzz_parse_pub_ack;
+use asupersync::messaging::jetstream::{JsError, fuzz_parse_pub_ack};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum payload size for reasonable fuzzing performance.
@@ -294,7 +294,28 @@ fn exercise_curated_cases() {
         assert_eq!(ack.duplicate, *expected_duplicate);
     }
 
-    assert!(fuzz_parse_pub_ack(br#"{"error":{"code":500,"description":"fuzz"}}"#).is_err());
+    assert_pub_ack_api_error(
+        fuzz_parse_pub_ack(br#"{"error":{"code":500,"description":"fuzz"}}"#),
+        500,
+        "fuzz",
+    );
+}
+
+fn assert_pub_ack_api_error<T>(result: Result<T, JsError>, expected_code: u32, expected: &str) {
+    let Err(err) = result else {
+        panic!("JetStream API error fixture parsed successfully");
+    };
+    let display = err.to_string();
+
+    let JsError::Api { code, description } = err else {
+        panic!("expected JetStream API error, got {err:?}");
+    };
+    assert_eq!(code, expected_code);
+    assert_eq!(description, expected);
+    assert_eq!(
+        display,
+        format!("JetStream API error {expected_code}: {expected}")
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
