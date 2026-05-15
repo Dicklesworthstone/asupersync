@@ -222,14 +222,7 @@ fuzz_target!(|data: &[u8]| {
             }
         }
         Err(e) => {
-            // Frame-level errors are acceptable
-            assert!(
-                e.contains("flags must be 0")
-                    || e.contains("stream ID must be 0")
-                    || e.contains("exceeds maximum frame size"),
-                "Unexpected error: {}",
-                e
-            );
+            assert_mock_frame_error_matches_input(&input, &e);
             return; // Skip further tests on frame errors
         }
     }
@@ -327,6 +320,32 @@ fn assert_live_settings_behavior(input: &FuzzInput, parser: &MockH2SettingsParse
 
     if input.flags == 0 && input.stream_id == 0 && parser.errors.is_empty() {
         assert_live_settings_match_mock(&live_settings, &parser.applied_settings);
+    }
+}
+
+fn assert_mock_frame_error_matches_input(input: &FuzzInput, error: &str) {
+    assert!(
+        !error.is_empty(),
+        "mock SETTINGS frame error should expose a diagnostic"
+    );
+
+    if input.flags != 0 {
+        assert_eq!(
+            error, "SETTINGS frame flags must be 0 (no ACK for data payload)",
+            "mock SETTINGS flag error should identify the invalid flags"
+        );
+    } else if input.stream_id != 0 {
+        assert_eq!(
+            error, "SETTINGS frame stream ID must be 0",
+            "mock SETTINGS stream error should identify the nonzero stream"
+        );
+    } else if input.settings.len() * 6 > 16_777_215 {
+        assert_eq!(
+            error, "SETTINGS frame payload exceeds maximum frame size",
+            "mock SETTINGS size error should identify the oversized payload"
+        );
+    } else {
+        panic!("mock SETTINGS parser returned an unexpected frame error: {error}");
     }
 }
 
