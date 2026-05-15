@@ -87,6 +87,49 @@ impl StreamInfo {
     }
 }
 
+fn observe_send_headers(stream: &mut StreamInfo, end_stream: bool, context: &str) {
+    let old_state = stream.state;
+    let result = stream.send_headers(end_stream);
+
+    match result {
+        Ok(()) => {
+            assert_eq!(
+                old_state,
+                StreamState::Idle,
+                "{context}: send_headers succeeded from non-idle state"
+            );
+            let expected_state = if end_stream {
+                StreamState::HalfClosedLocal
+            } else {
+                StreamState::Open
+            };
+            assert_eq!(
+                stream.state, expected_state,
+                "{context}: send_headers stored wrong state"
+            );
+            assert!(
+                stream.is_active(),
+                "{context}: send_headers success did not make stream active"
+            );
+        }
+        Err(error) => {
+            assert_ne!(
+                old_state,
+                StreamState::Idle,
+                "{context}: send_headers rejected an idle stream"
+            );
+            assert_eq!(
+                stream.state, old_state,
+                "{context}: failed send_headers changed stream state"
+            );
+            assert!(
+                error.contains("Invalid state for send_headers"),
+                "{context}: send_headers returned an unexpected error: {error}"
+            );
+        }
+    }
+}
+
 /// Mock HTTP/2 stream store for concurrent streams testing
 #[derive(Debug)]
 struct MockStreamStore {
@@ -356,7 +399,7 @@ fuzz_target!(|scenario: ConcurrentStreamsScenario| {
                 end_stream,
             } => {
                 if let Some(stream) = store.get_stream_mut(*stream_id) {
-                    let _ = stream.send_headers(*end_stream);
+                    observe_send_headers(stream, *end_stream, "operation send headers");
                 }
             }
 
@@ -469,7 +512,7 @@ fn test_limit_reduction_with_active_streams(store: &mut MockStreamStore) {
     for _ in 0..5 {
         if let Ok(id) = store.allocate_stream_id() {
             if let Some(stream) = store.get_stream_mut(id) {
-                let _ = stream.send_headers(false); // Activate stream
+                observe_send_headers(stream, false, "limit reduction setup");
             }
             active_streams.push(id);
         }
@@ -529,7 +572,7 @@ fn test_stream_lifecycle(store: &mut MockStreamStore) {
 
     // Activate stream
     if let Some(stream) = store.get_stream_mut(stream_id) {
-        let _ = stream.send_headers(false);
+        observe_send_headers(stream, false, "stream lifecycle activation");
     }
 
     // Verify now active
