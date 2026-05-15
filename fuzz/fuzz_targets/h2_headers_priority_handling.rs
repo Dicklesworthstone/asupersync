@@ -27,9 +27,23 @@ use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 4096;
+const MAX_H2_FRAME_PAYLOAD_LEN: usize = 16_777_215;
 
 /// HEADERS frame type constant
 const HEADERS_FRAME_TYPE: u8 = 0x1;
+
+fn capped_h2_payload_len(len: usize) -> u32 {
+    let capped = len.min(MAX_H2_FRAME_PAYLOAD_LEN);
+    u32::try_from(capped).expect("HTTP/2 maximum frame payload length fits u32")
+}
+
+fn exact_h2_payload_len(len: usize) -> Result<u32, H2Error> {
+    if len > MAX_H2_FRAME_PAYLOAD_LEN {
+        return Err(H2Error::protocol("HEADERS priority payload too large"));
+    }
+
+    u32::try_from(len).map_err(|_| H2Error::protocol("HEADERS priority payload too large"))
+}
 
 fuzz_target!(|data: &[u8]| {
     // Guard against excessive input sizes
@@ -483,7 +497,7 @@ fn test_priority_in_connection_context(data: &[u8]) -> Result<(), H2Error> {
 fn parse_headers_frame_with_priority_from_raw(data: &[u8]) -> Result<Frame, H2Error> {
     // Create frame header with PRIORITY flag
     let header = FrameHeader {
-        length: std::cmp::min(data.len() as u32, 16_777_215),
+        length: capped_h2_payload_len(data.len()),
         frame_type: HEADERS_FRAME_TYPE,
         flags: headers_flags::END_HEADERS | headers_flags::PRIORITY,
         stream_id: 1, // Valid client stream
@@ -499,7 +513,7 @@ fn create_headers_frame_with_truncated_priority(
 ) -> Result<Frame, H2Error> {
     // Create frame header with PRIORITY flag
     let header = FrameHeader {
-        length: priority_data.len() as u32,
+        length: exact_h2_payload_len(priority_data.len())?,
         frame_type: HEADERS_FRAME_TYPE,
         flags: headers_flags::PRIORITY | headers_flags::END_HEADERS,
         stream_id,
