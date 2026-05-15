@@ -395,7 +395,11 @@ fn test_split_buffer_parsing(data: &[u8], split_points: &[usize], max_iterations
     // Process remaining data if any
     if pos < data.len() {
         let remaining = &data[pos..];
-        let _ = decoder.process_fragment(remaining);
+        match decoder.process_fragment(remaining) {
+            Ok(Some((body, trailers))) => validate_parsed_result(&body, &trailers),
+            Ok(None) => {}
+            Err(error) => validate_parse_error(&error, remaining),
+        }
     }
 }
 
