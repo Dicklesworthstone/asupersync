@@ -801,8 +801,11 @@ fn test_connection_error_properties(error: &ConnectionError) {
 
     // Test specific ConnectionError methods if available
     let is_no_error = error.is_h3_no_error();
-    // Should not panic regardless of result
-    let _ = is_no_error;
+    assert_eq!(
+        is_no_error,
+        matches!(error.code.kind, H3CodeKind::NoError),
+        "ConnectionError::is_h3_no_error should reflect parsed code kind"
+    );
 }
 
 fn test_stream_error_properties(error: &StreamError) {
@@ -826,7 +829,10 @@ fn test_io_error_properties(error: &io::Error) {
     assert_nonempty_text("I/O error kind Debug", &kind_debug);
 
     // Test error source if present
-    let _ = error.source();
+    if let Some(source) = error.source() {
+        let source_display = format!("{source}");
+        assert_nonempty_text("I/O error source Display", &source_display);
+    }
 }
 
 fn test_error_source_chain(error: &H3Error) {
