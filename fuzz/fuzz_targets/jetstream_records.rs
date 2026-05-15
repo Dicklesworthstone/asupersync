@@ -209,6 +209,37 @@ fn observe_reply_subject_result(reply: &str, result: Option<(u64, u32)>, context
     }
 }
 
+fn observe_subject_pattern_result(subject: &str, result: Option<String>, context: &str) {
+    let has_invalid_char = !subject.is_empty()
+        && subject.chars().any(
+            |ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '*' | '>' | '_' | '-'),
+        );
+    let has_non_terminal_gt = subject.contains(">.");
+
+    match result {
+        Some(error) => {
+            assert!(
+                !error.is_empty(),
+                "empty subject-pattern diagnostic: {context}"
+            );
+            assert!(
+                has_invalid_char || has_non_terminal_gt,
+                "subject-pattern diagnostic without observed violation: {context}"
+            );
+        }
+        None => {
+            assert!(
+                !has_invalid_char,
+                "subject with invalid character accepted: {context}"
+            );
+            assert!(
+                !has_non_terminal_gt,
+                "subject with non-terminal '>' accepted: {context}"
+            );
+        }
+    }
+}
+
 fn fuzz_api_response_parsing(json_bytes: &[u8]) {
     let json_str = String::from_utf8_lossy(json_bytes);
 
@@ -271,7 +302,8 @@ fn fuzz_stream_config_serialization(config: FuzzStreamConfig) {
 
     // ASSERTION 2: Subject wildcards parsed correctly
     for subject in &config.subjects {
-        let _ = subject_pattern_error(subject);
+        let context = format!("stream config subject={:?}", preview_str(subject));
+        observe_subject_pattern_result(subject, subject_pattern_error(subject), &context);
     }
 
     // Test JSON serialization doesn't panic
@@ -290,14 +322,19 @@ fn fuzz_stream_config_serialization(config: FuzzStreamConfig) {
 fn fuzz_consumer_config_serialization(config: FuzzConsumerConfig) {
     // ASSERTION 2: Subject wildcards in filter_subject
     if let Some(ref filter) = config.filter_subject {
-        let _ = subject_pattern_error(filter);
+        let context = format!("consumer filter subject={:?}", preview_str(filter));
+        observe_subject_pattern_result(filter, subject_pattern_error(filter), &context);
     }
 
     // ASSERTION 5: Heartbeat intervals should be reasonable
     let ack_wait_duration = Duration::from_nanos(config.ack_wait_nanos);
     if ack_wait_duration.as_secs() > 0 {
         // Should be able to create timeout without panic
-        let _ = ack_wait_duration.saturating_add(Duration::from_millis(100));
+        let extended = ack_wait_duration.saturating_add(Duration::from_millis(100));
+        assert!(
+            extended >= ack_wait_duration,
+            "ack_wait saturation moved backwards"
+        );
     }
 
     // Test JSON serialization
@@ -397,7 +434,8 @@ fn fuzz_edge_case(edge: EdgeCaseVariant) {
 
         EdgeCaseVariant::SubjectWildcards(subjects) => {
             for subject in &subjects {
-                let _ = subject_pattern_error(subject);
+                let context = format!("edge wildcard subject={:?}", preview_str(subject));
+                observe_subject_pattern_result(subject, subject_pattern_error(subject), &context);
             }
         }
 
