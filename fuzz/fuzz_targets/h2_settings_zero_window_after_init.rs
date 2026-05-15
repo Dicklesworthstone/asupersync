@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::http::h2::{ErrorCode, Setting, Settings};
+use asupersync::http::h2::{ErrorCode, H2Error, Setting, Settings};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -285,12 +285,33 @@ fn assert_live_initial_window_size(value: u32) {
         );
     } else {
         let err = result.expect_err("live INITIAL_WINDOW_SIZE should reject overflow values");
-        assert_eq!(
-            err.code,
-            ErrorCode::FlowControlError,
-            "INITIAL_WINDOW_SIZE overflow should be FLOW_CONTROL_ERROR"
-        );
+        assert_live_initial_window_overflow(err);
     }
+}
+
+fn assert_live_initial_window_overflow(err: H2Error) {
+    assert_eq!(
+        err.code,
+        ErrorCode::FlowControlError,
+        "INITIAL_WINDOW_SIZE overflow should be FLOW_CONTROL_ERROR"
+    );
+    assert!(
+        err.is_connection_error(),
+        "INITIAL_WINDOW_SIZE overflow should be connection-scoped: {err:?}"
+    );
+    assert_eq!(
+        err.stream_id, None,
+        "INITIAL_WINDOW_SIZE overflow should not attach a stream id"
+    );
+    assert_eq!(
+        err.message, "initial window size exceeds maximum (2^31-1)",
+        "INITIAL_WINDOW_SIZE overflow should keep the exact live diagnostic"
+    );
+    assert_eq!(
+        err.to_string(),
+        "HTTP/2 connection error (FLOW_CONTROL_ERROR): initial window size exceeds maximum (2^31-1)",
+        "INITIAL_WINDOW_SIZE overflow should keep stable Display output"
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
