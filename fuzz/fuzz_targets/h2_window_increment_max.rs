@@ -106,6 +106,7 @@ fn apply_connection_max_increment(connection: &mut Connection, should_accept: bo
         let err = result.expect_err("max connection WINDOW_UPDATE should overflow positive window");
         assert_eq!(err.code, ErrorCode::FlowControlError);
         assert!(err.stream_id.is_none());
+        assert_eq!(err.message.as_str(), "connection window overflow");
         assert_eq!(connection.send_window(), before_connection);
     }
 
@@ -144,6 +145,7 @@ fn apply_stream_max_increment(connection: &mut Connection, should_accept: bool) 
         let err = result.expect_err("max stream WINDOW_UPDATE should overflow positive window");
         assert_eq!(err.code, ErrorCode::FlowControlError);
         assert_eq!(err.stream_id, Some(STREAM_ID));
+        assert_eq!(err.message.as_str(), "window size overflow");
         assert_eq!(
             connection
                 .stream(STREAM_ID)
