@@ -81,7 +81,7 @@ impl LiveH2DataParser {
             Ok(None) => DataFrameResult::IncompleteFrame,
             Err(err) => match err.code {
                 ErrorCode::FrameSizeError => DataFrameResult::FrameSizeError,
-                ErrorCode::ProtocolError if err.message.contains("stream ID 0") => {
+                ErrorCode::ProtocolError if err.message == "DATA frame with stream ID 0" => {
                     DataFrameResult::InvalidStreamId
                 }
                 ErrorCode::ProtocolError => DataFrameResult::ProtocolError(err.message),
