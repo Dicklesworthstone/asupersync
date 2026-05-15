@@ -50268,7 +50268,7 @@ mod otlp_122_tests {
 
                 Self {
                     name: format!("redis_consumer_span_{}", scenario.description),
-                    kind: scenario.span_kind.clone(),
+                    kind: scenario.span_kind,
                     messaging_system: scenario.messaging_system.clone(),
                     attributes,
                 }
