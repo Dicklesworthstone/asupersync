@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::messaging::redis::{RedisProtocolLimits, RespValue};
+use asupersync::messaging::redis::{RedisError, RedisProtocolLimits, RespValue};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_WIRE_LEN: usize = 16 * 1024;
@@ -182,7 +182,8 @@ fn decode_one(wire: &[u8], limits: &RedisProtocolLimits) -> (RespValue, usize) {
 
 fn assert_no_complete_decode(wire: &[u8], limits: &RedisProtocolLimits) {
     match RespValue::try_decode_with_limits(wire, limits) {
-        Ok(None) | Err(_) => {}
+        Ok(None) => {}
+        Err(error) => observe_decode_error(&error, "malformed RESP3 attribute canary"),
         Ok(Some((decoded, used))) => {
             panic!("malformed RESP3 attribute decoded as {decoded:?} using {used} bytes");
         }
@@ -220,8 +221,15 @@ fn observe_decode_result(wire: &[u8], limits: &RedisProtocolLimits, context: &st
                 "{context}: complete-looking non-length-prefixed frame should not need more bytes"
             );
         }
-        Err(_) => {}
+        Err(error) => observe_decode_error(&error, context),
     }
+}
+
+fn observe_decode_error(error: &RedisError, context: &str) {
+    assert!(
+        !error.to_string().trim().is_empty(),
+        "{context}: RESP3 attribute decode error should expose a diagnostic"
+    );
 }
 
 fn starts_length_prefixed_frame(wire: &[u8]) -> bool {
