@@ -27,7 +27,7 @@
 //!     non-determinism across invocations.
 
 use asupersync::raptorq::gf256::{
-    Gf256, active_kernel, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice,
+    Gf256, Gf256Kernel, active_kernel, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice,
     gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
 };
 use libfuzzer_sys::fuzz_target;
@@ -40,8 +40,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Touch the dispatcher once so fuzzing covers kernel selection.
-    let _ = active_kernel();
+    observe_active_kernel();
 
     let mut cursor = Cursor::new(data);
     for _ in 0..MAX_OPS {
@@ -61,6 +60,29 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+fn observe_active_kernel() {
+    let selected = active_kernel();
+    assert_eq!(
+        active_kernel(),
+        selected,
+        "GF(256) kernel dispatch changed within one fuzz iteration; selected={selected:?}"
+    );
+    assert!(
+        !active_kernel_name(selected).is_empty(),
+        "GF(256) active kernel must have an observer label"
+    );
+}
+
+fn active_kernel_name(kernel: Gf256Kernel) -> &'static str {
+    match kernel {
+        Gf256Kernel::Scalar => "scalar",
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        Gf256Kernel::X86Avx2 => "x86-avx2",
+        #[cfg(target_arch = "aarch64")]
+        Gf256Kernel::Aarch64Neon => "aarch64-neon",
+    }
+}
 
 fn run_add_slice(c: &mut Cursor) {
     let Some((dst0, src, _)) = c.take_aligned_pair() else {
