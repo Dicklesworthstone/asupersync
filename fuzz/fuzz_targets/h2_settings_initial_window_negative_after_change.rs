@@ -262,6 +262,17 @@ enum Operation {
     CreateStream(u32),
 }
 
+fn assert_window_update_overflow_error(context: &str, error: &str) {
+    assert!(
+        !error.trim().is_empty(),
+        "{context}: flow-control error should include diagnostics"
+    );
+    assert!(
+        error.contains("overflow") || error.contains("exceed"),
+        "{context}: expected overflow diagnostic, got: {error}"
+    );
+}
+
 fuzz_target!(|input: FuzzInput| {
     let mut flow_control = MockH2FlowControl::new();
     let mut operations = input.operations;
@@ -274,7 +285,9 @@ fuzz_target!(|input: FuzzInput| {
 
     match flow_control.process_settings(&initial_params) {
         Ok(()) => {}
-        Err(_) => return, // Invalid initial settings
+        Err(error) => {
+            panic!("clamped initial SETTINGS_INITIAL_WINDOW_SIZE should be valid: {error}")
+        }
     }
 
     // Add classic negative window test case if requested
@@ -322,8 +335,8 @@ fuzz_target!(|input: FuzzInput| {
                             "Initial window size not updated correctly"
                         );
                     }
-                    Err(_) => {
-                        // Expected for invalid values
+                    Err(error) => {
+                        panic!("clamped SETTINGS_INITIAL_WINDOW_SIZE should be valid: {error}");
                     }
                 }
             }
@@ -349,8 +362,8 @@ fuzz_target!(|input: FuzzInput| {
                             stream_state.assert_window_consistency("WINDOW_UPDATE");
                         }
                     }
-                    Err(_) => {
-                        // Expected for overflow cases
+                    Err(error) => {
+                        assert_window_update_overflow_error("WINDOW_UPDATE", &error);
                     }
                 }
             }
@@ -389,8 +402,8 @@ fuzz_target!(|input: FuzzInput| {
                             );
                         }
                     }
-                    Err(_) => {
-                        // Expected for invalid operations
+                    Err(error) => {
+                        panic!("send_data should not error for open fuzz streams: {error}");
                     }
                 }
             }
@@ -453,8 +466,8 @@ fuzz_target!(|input: FuzzInput| {
                 Ok(true) => {
                     panic!("Should not be able to send data when stream has negative window");
                 }
-                Err(_) => {
-                    // Also acceptable - error due to flow control
+                Err(error) => {
+                    panic!("negative-window send should report blocked, not error: {error}");
                 }
             }
 
