@@ -16,7 +16,7 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::Header;
 use asupersync::http::h2::connection::Connection;
-use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{Frame, FrameHeader, FrameType, RstStreamFrame, SettingsFrame};
 use asupersync::http::h2::settings::Settings;
 
@@ -111,6 +111,17 @@ fn assert_stream_closed(connection: &Connection, stream_id: u32) {
     );
 }
 
+fn assert_h2_error(
+    error: &H2Error,
+    expected_code: ErrorCode,
+    expected_stream_id: Option<u32>,
+    expected_message: &str,
+) {
+    assert_eq!(error.code, expected_code);
+    assert_eq!(error.stream_id, expected_stream_id);
+    assert_eq!(error.message.as_str(), expected_message);
+}
+
 fn assert_live_connection_rst_behavior(input: &RstStreamFuzzInput) {
     let error_code = ErrorCode::from_u32(input.error_code);
 
@@ -119,10 +130,11 @@ fn assert_live_connection_rst_behavior(input: &RstStreamFuzzInput) {
     let zero_err = zero_stream
         .process_frame(Frame::RstStream(RstStreamFrame::new(0, error_code)))
         .expect_err("RST_STREAM on stream 0 must be rejected by the live state machine");
-    assert_eq!(zero_err.code, ErrorCode::ProtocolError);
-    assert!(
-        zero_err.stream_id.is_none(),
-        "stream-0 RST_STREAM must be a connection error"
+    assert_h2_error(
+        &zero_err,
+        ErrorCode::ProtocolError,
+        None,
+        "RST_STREAM with stream ID 0",
     );
 
     // RFC 7540 §5.1: RST_STREAM received on an idle stream is a connection error.
@@ -130,10 +142,11 @@ fn assert_live_connection_rst_behavior(input: &RstStreamFuzzInput) {
     let idle_err = idle_stream
         .process_frame(Frame::RstStream(RstStreamFrame::new(2, error_code)))
         .expect_err("RST_STREAM on an idle peer stream must be rejected");
-    assert_eq!(idle_err.code, ErrorCode::ProtocolError);
-    assert!(
-        idle_err.stream_id.is_none(),
-        "idle-stream RST_STREAM must be a connection error"
+    assert_h2_error(
+        &idle_err,
+        ErrorCode::ProtocolError,
+        None,
+        "RST_STREAM received on idle stream",
     );
 
     // RST_STREAM on a known open stream should be delivered once and close it.
@@ -181,17 +194,23 @@ fn assert_rst_parse_contract(header: &FrameHeader, payload: &Bytes, raw_error_co
 
     if header.stream_id == 0 {
         let err = result.expect_err("RST_STREAM on stream ID 0 must be rejected");
-        assert_eq!(err.code, ErrorCode::ProtocolError);
-        assert!(
-            err.stream_id.is_none(),
-            "RST_STREAM parser should report stream 0 as a connection error"
+        assert_h2_error(
+            &err,
+            ErrorCode::ProtocolError,
+            None,
+            "RST_STREAM frame with stream ID 0",
         );
         return;
     }
 
     if payload.len() != 4 {
         let err = result.expect_err("RST_STREAM payload length must be exactly 4 bytes");
-        assert_eq!(err.code, ErrorCode::FrameSizeError);
+        assert_h2_error(
+            &err,
+            ErrorCode::FrameSizeError,
+            None,
+            "RST_STREAM frame must be 4 bytes",
+        );
         return;
     }
 
@@ -230,12 +249,21 @@ fuzz_target!(|input: RstStreamFuzzInput| {
             );
 
             if let Err(err) = result {
-                assert_eq!(
-                    err.code,
-                    ErrorCode::FrameSizeError,
-                    "Incorrect frame length should cause FrameSizeError, got: {:?}",
-                    err
-                );
+                if header.stream_id == 0 {
+                    assert_h2_error(
+                        &err,
+                        ErrorCode::ProtocolError,
+                        None,
+                        "RST_STREAM frame with stream ID 0",
+                    );
+                } else {
+                    assert_h2_error(
+                        &err,
+                        ErrorCode::FrameSizeError,
+                        None,
+                        "RST_STREAM frame must be 4 bytes",
+                    );
+                }
             }
         } else {
             // Correct length should not fail due to frame size (might fail for other reasons)
@@ -295,11 +323,11 @@ fuzz_target!(|input: RstStreamFuzzInput| {
         );
 
         if let Err(err) = result {
-            assert_eq!(
-                err.code,
+            assert_h2_error(
+                &err,
                 ErrorCode::ProtocolError,
-                "RST_STREAM on stream ID 0 should cause ProtocolError, got: {:?}",
-                err
+                None,
+                "RST_STREAM frame with stream ID 0",
             );
         }
     }
@@ -332,10 +360,11 @@ fuzz_target!(|input: RstStreamFuzzInput| {
             assert!(result.is_err(), "Empty RST_STREAM frame should be rejected");
 
             if let Err(err) = result {
-                assert_eq!(
-                    err.code,
+                assert_h2_error(
+                    &err,
                     ErrorCode::FrameSizeError,
-                    "Empty RST_STREAM should cause FrameSizeError"
+                    None,
+                    "RST_STREAM frame must be 4 bytes",
                 );
             }
         }
@@ -376,10 +405,11 @@ fuzz_target!(|input: RstStreamFuzzInput| {
                 );
 
                 if let Err(err) = result {
-                    assert_eq!(
-                        err.code,
+                    assert_h2_error(
+                        &err,
                         ErrorCode::FrameSizeError,
-                        "Oversized RST_STREAM should cause FrameSizeError"
+                        None,
+                        "RST_STREAM frame must be 4 bytes",
                     );
                 }
             }
