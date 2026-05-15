@@ -16,12 +16,11 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// RFC 7540 constants for MAX_FRAME_SIZE
-const MIN_MAX_FRAME_SIZE: u32 = 16384;      // 2^14 = 16KB minimum
-const MAX_MAX_FRAME_SIZE: u32 = 16777215;   // 2^24-1 = ~16MB maximum
-const DEFAULT_MAX_FRAME_SIZE: u32 = 16384;  // Default value
+const MIN_MAX_FRAME_SIZE: u32 = 16384; // 2^14 = 16KB minimum
+const MAX_MAX_FRAME_SIZE: u32 = 16777215; // 2^24-1 = ~16MB maximum
+const DEFAULT_MAX_FRAME_SIZE: u32 = 16384; // Default value
 
 /// Mock HTTP/2 connection for testing SETTINGS validation
 struct MockSettingsValidationConnection {
@@ -30,9 +29,6 @@ struct MockSettingsValidationConnection {
 
     /// Received SETTINGS frames
     settings_received: Vec<SettingsFrame>,
-
-    /// Connection state
-    state: ConnectionState,
 
     /// Statistics tracking
     stats: SettingsStats,
@@ -67,27 +63,12 @@ impl Default for ConnectionSettings {
 #[derive(Clone, Debug)]
 struct SettingsFrame {
     settings: Vec<Setting>,
-    ack: bool,
-    validation_result: SettingsValidationResult,
 }
 
 #[derive(Clone, Debug)]
 struct Setting {
     id: u16,
     value: u32,
-}
-
-#[derive(Clone, Debug)]
-enum SettingsValidationResult {
-    Accepted,
-    RejectedProtocolError { reason: String },
-    RejectedFlowControlError { reason: String },
-}
-
-#[derive(Clone, Debug)]
-enum ConnectionState {
-    Open,
-    Closed { reason: String },
 }
 
 #[derive(Default, Clone, Debug)]
@@ -103,11 +84,8 @@ struct SettingsStats {
 
 #[derive(Clone, Debug)]
 enum ViolationType {
-    InvalidMaxFrameSizeAccepted,
     BelowMinimumAccepted,
     AboveMaximumAccepted,
-    MissingProtocolError,
-    InvalidSettingsApplied,
 }
 
 impl MockSettingsValidationConnection {
@@ -115,7 +93,6 @@ impl MockSettingsValidationConnection {
         Self {
             settings: ConnectionSettings::default(),
             settings_received: Vec::new(),
-            state: ConnectionState::Open,
             stats: SettingsStats::default(),
             violations: Vec::new(),
         }
@@ -127,7 +104,9 @@ impl MockSettingsValidationConnection {
             self.stats.settings_ack_frames_received += 1;
             // SETTINGS ACK frames should be empty
             if !settings.is_empty() {
-                return Err(H2Error::ProtocolError("SETTINGS ACK must be empty".to_string()));
+                return Err(H2Error::ProtocolError(
+                    "SETTINGS ACK must be empty".to_string(),
+                ));
             }
             return Ok(());
         }
@@ -147,11 +126,7 @@ impl MockSettingsValidationConnection {
         self.stats.settings_applied += 1;
 
         // Record the frame
-        let frame = SettingsFrame {
-            settings,
-            ack,
-            validation_result: SettingsValidationResult::Accepted,
-        };
+        let frame = SettingsFrame { settings };
         self.settings_received.push(frame);
 
         Ok(())
@@ -179,7 +154,6 @@ impl MockSettingsValidationConnection {
             self.stats.invalid_max_frame_size_count += 1;
             self.stats.below_minimum_frame_size_count += 1;
             self.stats.protocol_errors += 1;
-            self.violations.push(ViolationType::BelowMinimumAccepted);
             return Err(H2Error::ProtocolError(format!(
                 "MAX_FRAME_SIZE {} below minimum {}",
                 value, MIN_MAX_FRAME_SIZE
@@ -190,7 +164,6 @@ impl MockSettingsValidationConnection {
             self.stats.invalid_max_frame_size_count += 1;
             self.stats.above_maximum_frame_size_count += 1;
             self.stats.protocol_errors += 1;
-            self.violations.push(ViolationType::AboveMaximumAccepted);
             return Err(H2Error::ProtocolError(format!(
                 "MAX_FRAME_SIZE {} above maximum {}",
                 value, MAX_MAX_FRAME_SIZE
@@ -226,10 +199,7 @@ impl MockSettingsValidationConnection {
     /// Validate SETTINGS_INITIAL_WINDOW_SIZE
     fn validate_initial_window_size(&self, value: u32) -> Result<(), H2Error> {
         if value > 0x7FFFFFFF {
-            return Err(H2Error::FlowControlError(format!(
-                "INITIAL_WINDOW_SIZE {} exceeds maximum 2^31-1",
-                value
-            )));
+            return Err(H2Error::FlowControlError);
         }
         Ok(())
     }
@@ -264,25 +234,31 @@ impl MockSettingsValidationConnection {
         match self.handle_settings_frame(settings1, false) {
             Ok(()) => {
                 result.test1_incorrectly_accepted = true;
-                self.violations.push(ViolationType::InvalidMaxFrameSizeAccepted);
+                self.violations.push(ViolationType::BelowMinimumAccepted);
             }
             Err(H2Error::ProtocolError(_)) => result.test1_correctly_rejected = true,
             Err(_) => result.test1_other_error = true,
         }
 
         // Test 2: 16383 (one below minimum)
-        let settings2 = vec![Setting { id: 5, value: 16383 }];
+        let settings2 = vec![Setting {
+            id: 5,
+            value: 16383,
+        }];
         match self.handle_settings_frame(settings2, false) {
             Ok(()) => {
                 result.test2_incorrectly_accepted = true;
-                self.violations.push(ViolationType::InvalidMaxFrameSizeAccepted);
+                self.violations.push(ViolationType::BelowMinimumAccepted);
             }
             Err(H2Error::ProtocolError(_)) => result.test2_correctly_rejected = true,
             Err(_) => result.test2_other_error = true,
         }
 
         // Test 3: 16384 (exact minimum, should be accepted)
-        let settings3 = vec![Setting { id: 5, value: 16384 }];
+        let settings3 = vec![Setting {
+            id: 5,
+            value: 16384,
+        }];
         match self.handle_settings_frame(settings3, false) {
             Ok(()) => result.test3_correctly_accepted = true,
             Err(_) => result.test3_incorrectly_rejected = true,
@@ -293,18 +269,21 @@ impl MockSettingsValidationConnection {
         match self.handle_settings_frame(settings4, false) {
             Ok(()) => {
                 result.test4_incorrectly_accepted = true;
-                self.violations.push(ViolationType::InvalidMaxFrameSizeAccepted);
+                self.violations.push(ViolationType::BelowMinimumAccepted);
             }
             Err(H2Error::ProtocolError(_)) => result.test4_correctly_rejected = true,
             Err(_) => result.test4_other_error = true,
         }
 
         // Test 5: 16777216 (one above maximum)
-        let settings5 = vec![Setting { id: 5, value: 16777216 }];
+        let settings5 = vec![Setting {
+            id: 5,
+            value: 16777216,
+        }];
         match self.handle_settings_frame(settings5, false) {
             Ok(()) => {
                 result.test5_incorrectly_accepted = true;
-                self.violations.push(ViolationType::InvalidMaxFrameSizeAccepted);
+                self.violations.push(ViolationType::AboveMaximumAccepted);
             }
             Err(H2Error::ProtocolError(_)) => result.test5_correctly_rejected = true,
             Err(_) => result.test5_other_error = true,
@@ -343,19 +322,9 @@ impl MockSettingsValidationConnection {
         issues
     }
 
-    /// Get statistics
-    fn get_stats(&self) -> &SettingsStats {
-        &self.stats
-    }
-
     /// Get violations
     fn get_violations(&self) -> &[ViolationType] {
         &self.violations
-    }
-
-    /// Get current settings
-    fn get_settings(&self) -> &ConnectionSettings {
-        &self.settings
     }
 }
 
@@ -380,8 +349,7 @@ struct InvalidFrameSizeTestResult {
 #[derive(Clone, Debug)]
 enum H2Error {
     ProtocolError(String),
-    FlowControlError(String),
-    InternalError(String),
+    FlowControlError,
 }
 
 /// Fuzz input structure
@@ -428,19 +396,28 @@ fuzz_target!(|input: FuzzInput| {
         }
 
         // Convert to internal format
-        let settings: Vec<Setting> = frame_input.settings.into_iter()
-            .map(|s| Setting { id: s.id, value: s.value })
+        let settings: Vec<Setting> = frame_input
+            .settings
+            .into_iter()
+            .map(|s| Setting {
+                id: s.id,
+                value: s.value,
+            })
             .collect();
 
         let result = connection.handle_settings_frame(settings, frame_input.ack);
 
         // Validate specific MAX_FRAME_SIZE behavior
-        for setting in &connection.settings_received.last().unwrap_or(&SettingsFrame {
-            settings: Vec::new(),
-            ack: frame_input.ack,
-            validation_result: SettingsValidationResult::Accepted,
-        }).settings {
-            if setting.id == 5 { // SETTINGS_MAX_FRAME_SIZE
+        for setting in &connection
+            .settings_received
+            .last()
+            .unwrap_or(&SettingsFrame {
+                settings: Vec::new(),
+            })
+            .settings
+        {
+            if setting.id == 5 {
+                // SETTINGS_MAX_FRAME_SIZE
                 validate_max_frame_size_result(setting.value, &result);
             }
         }
@@ -454,22 +431,13 @@ fuzz_target!(|input: FuzzInput| {
 
     // Final validations
     let violations = connection.get_violations();
-    for violation in violations {
+    if let Some(violation) = violations.first() {
         match violation {
-            ViolationType::InvalidMaxFrameSizeAccepted => {
-                panic!("CRITICAL: Invalid MAX_FRAME_SIZE was accepted");
-            }
             ViolationType::BelowMinimumAccepted => {
                 panic!("CRITICAL: MAX_FRAME_SIZE below minimum was accepted");
             }
             ViolationType::AboveMaximumAccepted => {
                 panic!("CRITICAL: MAX_FRAME_SIZE above maximum was accepted");
-            }
-            ViolationType::MissingProtocolError => {
-                panic!("CRITICAL: Expected PROTOCOL_ERROR not generated");
-            }
-            ViolationType::InvalidSettingsApplied => {
-                panic!("CRITICAL: Invalid settings were applied to connection");
             }
         }
     }
@@ -477,7 +445,10 @@ fuzz_target!(|input: FuzzInput| {
     // Validate final state consistency
     let consistency_issues = connection.validate_state_consistency();
     if !consistency_issues.is_empty() {
-        panic!("Connection state consistency issues: {:?}", consistency_issues);
+        panic!(
+            "Connection state consistency issues: {:?}",
+            consistency_issues
+        );
     }
 
     // Test edge cases
@@ -490,30 +461,38 @@ fn validate_max_frame_size_result(value: u32, result: &Result<(), H2Error>) {
         // Should be rejected with PROTOCOL_ERROR
         match result {
             Ok(()) => {
-                panic!("MAX_FRAME_SIZE {} below minimum {} was incorrectly accepted",
-                       value, MIN_MAX_FRAME_SIZE);
+                panic!(
+                    "MAX_FRAME_SIZE {} below minimum {} was incorrectly accepted",
+                    value, MIN_MAX_FRAME_SIZE
+                );
             }
             Err(H2Error::ProtocolError(_)) => {
                 // Expected behavior
             }
             Err(other) => {
-                panic!("MAX_FRAME_SIZE {} below minimum should cause PROTOCOL_ERROR, got {:?}",
-                       value, other);
+                panic!(
+                    "MAX_FRAME_SIZE {} below minimum should cause PROTOCOL_ERROR, got {:?}",
+                    value, other
+                );
             }
         }
     } else if value > MAX_MAX_FRAME_SIZE {
         // Should be rejected with PROTOCOL_ERROR
         match result {
             Ok(()) => {
-                panic!("MAX_FRAME_SIZE {} above maximum {} was incorrectly accepted",
-                       value, MAX_MAX_FRAME_SIZE);
+                panic!(
+                    "MAX_FRAME_SIZE {} above maximum {} was incorrectly accepted",
+                    value, MAX_MAX_FRAME_SIZE
+                );
             }
             Err(H2Error::ProtocolError(_)) => {
                 // Expected behavior
             }
             Err(other) => {
-                panic!("MAX_FRAME_SIZE {} above maximum should cause PROTOCOL_ERROR, got {:?}",
-                       value, other);
+                panic!(
+                    "MAX_FRAME_SIZE {} above maximum should cause PROTOCOL_ERROR, got {:?}",
+                    value, other
+                );
             }
         }
     } else {
@@ -523,8 +502,10 @@ fn validate_max_frame_size_result(value: u32, result: &Result<(), H2Error>) {
                 // Expected behavior
             }
             Err(err) => {
-                panic!("Valid MAX_FRAME_SIZE {} was incorrectly rejected: {:?}",
-                       value, err);
+                panic!(
+                    "Valid MAX_FRAME_SIZE {} was incorrectly rejected: {:?}",
+                    value, err
+                );
             }
         }
     }
@@ -533,24 +514,34 @@ fn validate_max_frame_size_result(value: u32, result: &Result<(), H2Error>) {
 /// Validate the scenario test results
 fn validate_scenario_results(result: &InvalidFrameSizeTestResult) {
     // Test 1: 8192 should be rejected
-    assert!(result.test1_correctly_rejected && !result.test1_incorrectly_accepted,
-            "8192 MAX_FRAME_SIZE should be rejected");
+    assert!(
+        result.test1_correctly_rejected && !result.test1_incorrectly_accepted,
+        "8192 MAX_FRAME_SIZE should be rejected"
+    );
 
     // Test 2: 16383 should be rejected
-    assert!(result.test2_correctly_rejected && !result.test2_incorrectly_accepted,
-            "16383 MAX_FRAME_SIZE should be rejected");
+    assert!(
+        result.test2_correctly_rejected && !result.test2_incorrectly_accepted,
+        "16383 MAX_FRAME_SIZE should be rejected"
+    );
 
     // Test 3: 16384 should be accepted
-    assert!(result.test3_correctly_accepted && !result.test3_incorrectly_rejected,
-            "16384 MAX_FRAME_SIZE should be accepted");
+    assert!(
+        result.test3_correctly_accepted && !result.test3_incorrectly_rejected,
+        "16384 MAX_FRAME_SIZE should be accepted"
+    );
 
     // Test 4: 1 should be rejected
-    assert!(result.test4_correctly_rejected && !result.test4_incorrectly_accepted,
-            "1 MAX_FRAME_SIZE should be rejected");
+    assert!(
+        result.test4_correctly_rejected && !result.test4_incorrectly_accepted,
+        "1 MAX_FRAME_SIZE should be rejected"
+    );
 
     // Test 5: 16777216 should be rejected
-    assert!(result.test5_correctly_rejected && !result.test5_incorrectly_accepted,
-            "16777216 MAX_FRAME_SIZE should be rejected");
+    assert!(
+        result.test5_correctly_rejected && !result.test5_incorrectly_accepted,
+        "16777216 MAX_FRAME_SIZE should be rejected"
+    );
 }
 
 /// Test specific edge cases for MAX_FRAME_SIZE validation
@@ -569,32 +560,60 @@ fn test_max_frame_size_edge_cases(connection: &mut MockSettingsValidationConnect
     ];
 
     for (value, should_accept) in edge_cases {
-        let settings = vec![Setting { id: 5, value }];
-        let result = connection.handle_settings_frame(settings, false);
-
-        match (result, should_accept) {
-            (Ok(()), true) => {
-                // Correctly accepted
+        if should_accept {
+            let settings = vec![Setting { id: 5, value }];
+            if let Err(err) = connection.handle_settings_frame(settings, false) {
+                panic!(
+                    "Edge case MAX_FRAME_SIZE {} should be accepted but was rejected: {:?}",
+                    value, err
+                );
             }
-            (Err(H2Error::ProtocolError(_)), false) => {
-                // Correctly rejected
-            }
-            (Ok(()), false) => {
-                panic!("Edge case MAX_FRAME_SIZE {} should be rejected but was accepted", value);
-            }
-            (Err(err), true) => {
-                panic!("Edge case MAX_FRAME_SIZE {} should be accepted but was rejected: {:?}",
-                       value, err);
-            }
+        } else {
+            let expected_reason = if value < MIN_MAX_FRAME_SIZE {
+                "below minimum"
+            } else {
+                "above maximum"
+            };
+            assert_invalid_max_frame_size_rejection(connection, value, expected_reason);
         }
     }
 
     // Test multiple invalid settings in one frame
     let multiple_invalid = vec![
-        Setting { id: 5, value: 8192 },   // Invalid MAX_FRAME_SIZE
-        Setting { id: 2, value: 2 },      // Invalid ENABLE_PUSH
+        Setting { id: 5, value: 8192 }, // Invalid MAX_FRAME_SIZE
+        Setting { id: 2, value: 2 },    // Invalid ENABLE_PUSH
     ];
 
     let result = connection.handle_settings_frame(multiple_invalid, false);
-    assert!(result.is_err(), "Frame with multiple invalid settings should be rejected");
+    match result {
+        Err(H2Error::ProtocolError(reason)) => {
+            assert!(
+                reason.contains("MAX_FRAME_SIZE 8192 below minimum"),
+                "multiple invalid settings should reject on the MAX_FRAME_SIZE diagnostic, got {reason}"
+            );
+        }
+        Ok(()) => panic!("Frame with multiple invalid settings should be rejected"),
+        Err(err) => panic!("Multiple invalid settings should cause ProtocolError, got {err:?}"),
+    }
+}
+
+fn assert_invalid_max_frame_size_rejection(
+    connection: &mut MockSettingsValidationConnection,
+    value: u32,
+    expected_reason: &str,
+) {
+    let settings = vec![Setting { id: 5, value }];
+    let result = connection.handle_settings_frame(settings, false);
+
+    match result {
+        Err(H2Error::ProtocolError(reason)) => {
+            let value_text = value.to_string();
+            assert!(
+                reason.contains(expected_reason) && reason.contains(&value_text),
+                "MAX_FRAME_SIZE {value} should reject with {expected_reason:?}, got {reason}"
+            );
+        }
+        Ok(()) => panic!("MAX_FRAME_SIZE {value} should be rejected but was accepted"),
+        Err(err) => panic!("MAX_FRAME_SIZE {value} should cause ProtocolError, got {err:?}"),
+    }
 }
