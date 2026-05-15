@@ -6,9 +6,9 @@ use asupersync::config::EncodingConfig;
 use asupersync::decoding::{
     DecodingConfig, DecodingError, DecodingPipeline, RejectReason, SymbolAcceptResult,
 };
-use asupersync::security::SecurityContext;
+use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use asupersync::types::resource::{PoolConfig, SymbolPool};
-use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
+use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive fuzz target for RaptorQ codec encoding/decoding pipeline
@@ -191,8 +191,8 @@ fuzz_target!(|input: RaptorQCodecFuzz| {
 });
 
 fn test_config_validation(
-    encoding_config: &EncodingConfigFuzz,
-    decoding_config: &DecodingConfigFuzz,
+    _encoding_config: &EncodingConfigFuzz,
+    _decoding_config: &DecodingConfigFuzz,
 ) {
     // Test configuration validation edge cases
     let configs_to_test = [
@@ -239,12 +239,11 @@ fn test_encoding_operation(config: &EncodingConfig, object_id: u64, data: &[u8])
     let mut pipeline = EncodingPipeline::new(config.clone(), pool);
 
     // Encoding should handle any input gracefully
-    let object_id = ObjectId::from_u128(object_id);
+    let object_id = object_id_from_fuzz(object_id);
     let symbol_iter = pipeline.encode(object_id, limited_data);
 
     // Collect and validate symbols
-    let mut symbol_count = 0;
-    for symbol_result in symbol_iter {
+    for (symbol_count, symbol_result) in symbol_iter.enumerate() {
         if symbol_count > MAX_SYMBOLS {
             break; // Prevent resource exhaustion
         }
@@ -258,7 +257,6 @@ fn test_encoding_operation(config: &EncodingConfig, object_id: u64, data: &[u8])
                 test_encoding_error_properties(&err);
             }
         }
-        symbol_count += 1;
     }
 
     // Test encoding statistics
@@ -266,7 +264,7 @@ fn test_encoding_operation(config: &EncodingConfig, object_id: u64, data: &[u8])
     test_encoding_stats_consistency(&stats, limited_data.len());
 }
 
-fn test_decoding_operation(config: &DecodingConfig, object_id: u64, symbols: &[SymbolFuzz]) {
+fn test_decoding_operation(config: &DecodingConfig, _object_id: u64, symbols: &[SymbolFuzz]) {
     let limited_symbols = if symbols.len() > MAX_SYMBOLS {
         &symbols[..MAX_SYMBOLS]
     } else {
@@ -275,36 +273,42 @@ fn test_decoding_operation(config: &DecodingConfig, object_id: u64, symbols: &[S
 
     // Create decoding pipeline
     let mut pipeline = DecodingPipeline::new(config.clone());
-    let object_id = ObjectId::from_u128(object_id);
 
     // Feed symbols to decoder
     for symbol_fuzz in limited_symbols {
         let symbol = convert_symbol_fuzz(symbol_fuzz);
 
         // Symbol acceptance should never panic
-        let accept_result = pipeline.accept_symbol(symbol);
+        observe_symbol_accept_result(pipeline.feed(auth_symbol(symbol)));
+    }
+}
 
-        match accept_result {
-            Ok(SymbolAcceptResult::Accepted) => {
-                // Symbol was accepted
-            }
-            Ok(SymbolAcceptResult::Rejected(reason)) => {
-                // Symbol was rejected - verify reason is valid
-                test_reject_reason_validity(reason);
-            }
-            Ok(SymbolAcceptResult::ObjectComplete(data)) => {
-                // Object decoding completed
-                test_decoded_data_properties(&data);
-            }
-            Err(err) => {
-                // Decoding errors are acceptable
-                test_decoding_error_properties(&err);
-            }
+fn observe_symbol_accept_result(accept_result: Result<SymbolAcceptResult, DecodingError>) {
+    match accept_result {
+        Ok(SymbolAcceptResult::Accepted { received, needed }) => {
+            // Symbol was accepted
+            assert!(
+                needed == 0 || received <= needed.saturating_add(MAX_SYMBOLS),
+                "accepted-symbol progress should stay bounded"
+            );
+        }
+        Ok(SymbolAcceptResult::DecodingStarted { .. }) => {}
+        Ok(SymbolAcceptResult::BlockComplete { data, .. }) => {
+            test_decoded_data_properties(&data);
+        }
+        Ok(SymbolAcceptResult::Duplicate) => {}
+        Ok(SymbolAcceptResult::Rejected(reason)) => {
+            // Symbol was rejected - verify reason is valid
+            test_reject_reason_validity(reason);
+        }
+        Err(err) => {
+            // Decoding errors are acceptable
+            test_decoding_error_properties(&err);
         }
     }
+}
 
-    // Test forced decode attempt
-    let decode_result = pipeline.try_decode(object_id);
+fn observe_decode_result(decode_result: Result<Vec<u8>, DecodingError>) {
     match decode_result {
         Ok(data) => {
             test_decoded_data_properties(&data);
@@ -336,14 +340,13 @@ fn test_round_trip_operation(
     // Encode
     let pool = create_encoding_pool(encoding_config);
     let mut encoder = EncodingPipeline::new(encoding_config.clone(), pool);
-    let object_id = ObjectId::from_u128(object_id);
+    let object_id = object_id_from_fuzz(object_id);
 
     let symbol_iter = encoder.encode(object_id, limited_data);
     let mut symbols = Vec::new();
-    let mut symbol_count = 0;
 
     // Collect symbols with potential corruption/missing
-    for symbol_result in symbol_iter {
+    for (symbol_count, symbol_result) in symbol_iter.enumerate() {
         if symbol_count > MAX_SYMBOLS {
             break;
         }
@@ -363,17 +366,20 @@ fn test_round_trip_operation(
                 symbols.push(symbol);
             }
         }
-        symbol_count += 1;
     }
 
     // Decode
     let mut decoder = DecodingPipeline::new(decoding_config.clone());
+    let params = object_params_for_payload(object_id, limited_data.len(), encoding_config);
+    if let Err(err) = decoder.set_object_params(params) {
+        test_decoding_error_properties(&err);
+    }
     for symbol in symbols {
-        let _ = decoder.accept_symbol(symbol);
+        observe_symbol_accept_result(decoder.feed(auth_symbol(symbol)));
     }
 
     // Test final decode
-    let _ = decoder.try_decode(object_id);
+    observe_decode_result(decoder.into_data());
 }
 
 fn test_symbol_authentication(symbols: &[SymbolFuzz], use_security: bool) {
@@ -425,8 +431,8 @@ fn test_pool_exhaustion_scenarios(pool_size: u16, data_size: u32) {
 
     let pool_config = PoolConfig {
         symbol_size: config.symbol_size,
-        initial_size: limited_pool_size,
-        max_size: limited_pool_size,
+        initial_size: usize::from(limited_pool_size),
+        max_size: usize::from(limited_pool_size),
         allow_growth: false, // Force exhaustion
         growth_increment: 0,
     };
@@ -438,28 +444,21 @@ fn test_pool_exhaustion_scenarios(pool_size: u16, data_size: u32) {
     let data = vec![0xAB; limited_data_size];
     let object_id = ObjectId::from_u128(12345);
 
-    let encode_result = encoder.encode(object_id, &data);
+    let symbol_iter = encoder.encode(object_id, &data);
 
-    match encode_result {
-        Ok(symbol_iter) => {
-            // Consume symbols until pool exhaustion or completion
-            for symbol_result in symbol_iter.take(MAX_SYMBOLS) {
-                match symbol_result {
-                    Ok(_) => {} // Symbol produced successfully
-                    Err(EncodingError::PoolExhausted) => {
-                        // Expected exhaustion
-                        break;
-                    }
-                    Err(_) => {
-                        // Other errors are also acceptable
-                        break;
-                    }
-                }
+    // Consume symbols until pool exhaustion or completion.
+    for symbol_result in symbol_iter.take(MAX_SYMBOLS) {
+        match symbol_result {
+            Ok(_) => {} // Symbol produced successfully
+            Err(EncodingError::PoolExhausted) => {
+                // Expected exhaustion
+                break;
             }
-        }
-        Err(err) => {
-            // Encoding can fail due to pool exhaustion
-            test_encoding_error_properties(&err);
+            Err(err) => {
+                // Other errors are also acceptable
+                test_encoding_error_properties(&err);
+                break;
+            }
         }
     }
 }
@@ -523,6 +522,7 @@ fn test_main_input_data(config: &EncodingConfig, data: &[u8]) {
 // Helper functions
 
 fn create_safe_encoding_config(config: &EncodingConfigFuzz) -> EncodingConfig {
+    let _ = config.pool_size;
     EncodingConfig {
         symbol_size: config.symbol_size.clamp(MIN_SYMBOL_SIZE, MAX_SYMBOL_SIZE),
         max_block_size: config.max_block_size.clamp(1, MAX_BLOCK_SIZE) as usize,
@@ -556,6 +556,34 @@ fn create_encoding_pool(config: &EncodingConfig) -> SymbolPool {
     SymbolPool::new(pool_config)
 }
 
+fn object_id_from_fuzz(value: u64) -> ObjectId {
+    ObjectId::from_u128(u128::from(value))
+}
+
+fn auth_symbol(symbol: Symbol) -> AuthenticatedSymbol {
+    AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero())
+}
+
+fn object_params_for_payload(
+    object_id: ObjectId,
+    object_size: usize,
+    config: &EncodingConfig,
+) -> ObjectParams {
+    let symbol_size = usize::from(config.symbol_size).max(1);
+    let max_block_size = config.max_block_size.max(1);
+    let source_blocks = object_size.div_ceil(max_block_size);
+    let max_block_len = object_size.min(max_block_size);
+    let symbols_per_block = max_block_len.div_ceil(symbol_size);
+
+    ObjectParams::new(
+        object_id,
+        object_size as u64,
+        config.symbol_size,
+        u16::try_from(source_blocks).unwrap_or(u16::MAX),
+        u16::try_from(symbols_per_block).unwrap_or(u16::MAX),
+    )
+}
+
 fn convert_symbol_fuzz(symbol_fuzz: &SymbolFuzz) -> Symbol {
     let symbol_kind = match symbol_fuzz.symbol_id.kind {
         SymbolKindFuzz::Source => SymbolKind::Source,
@@ -563,16 +591,19 @@ fn convert_symbol_fuzz(symbol_fuzz: &SymbolFuzz) -> Symbol {
     };
 
     let symbol_id = SymbolId::new(
-        ObjectId::from_u128(symbol_fuzz.symbol_id.object_id),
+        object_id_from_fuzz(symbol_fuzz.object_id ^ symbol_fuzz.symbol_id.object_id),
         symbol_fuzz.symbol_id.block_number,
         symbol_fuzz.symbol_id.symbol_index as u32,
     );
 
-    let limited_data = if symbol_fuzz.data.len() > MAX_SYMBOL_SIZE as usize {
+    let mut limited_data = if symbol_fuzz.data.len() > MAX_SYMBOL_SIZE as usize {
         symbol_fuzz.data[..MAX_SYMBOL_SIZE as usize].to_vec()
     } else {
         symbol_fuzz.data.clone()
     };
+    if symbol_fuzz.is_corrupted && !limited_data.is_empty() {
+        limited_data[0] ^= 0xFF;
+    }
 
     Symbol::new(symbol_id, limited_data, symbol_kind)
 }
@@ -625,12 +656,10 @@ fn test_decoding_error_properties(err: &DecodingError) {
         DecodingError::MatrixInversionFailed { reason } => {
             assert!(!reason.is_empty());
         }
-        DecodingError::BlockTimeout { sbn, elapsed } => {
-            assert!(*sbn <= 255);
+        DecodingError::BlockTimeout { elapsed, .. } => {
             assert!(*elapsed > std::time::Duration::ZERO);
         }
-        DecodingError::InconsistentMetadata { sbn, details } => {
-            assert!(*sbn <= 255);
+        DecodingError::InconsistentMetadata { details, .. } => {
             assert!(!details.is_empty());
         }
         DecodingError::SymbolSizeMismatch { expected, actual } => {
