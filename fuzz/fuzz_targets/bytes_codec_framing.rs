@@ -337,7 +337,7 @@ fn test_framed_read_operations(input: &FuzzInput) {
     let mut framed_read = FramedRead::with_capacity(mock_reader, codec, capacity);
 
     // Test basic FramedRead operations
-    test_framed_read_basic_ops(&mut framed_read);
+    test_framed_read_basic_ops(&mut framed_read, capacity);
 
     // Test with blocking reader
     if !input.framed_read_data.is_empty() {
@@ -346,23 +346,52 @@ fn test_framed_read_operations(input: &FuzzInput) {
         let blocking_codec = BytesCodec::new();
         let mut blocking_framed =
             FramedRead::with_capacity(blocking_reader, blocking_codec, capacity);
-        test_framed_read_basic_ops(&mut blocking_framed);
+        test_framed_read_basic_ops(&mut blocking_framed, capacity);
     }
 }
 
 /// Test basic FramedRead operations.
-fn test_framed_read_basic_ops<R>(framed_read: &mut FramedRead<R, BytesCodec>)
+fn test_framed_read_basic_ops<R>(framed_read: &mut FramedRead<R, BytesCodec>, min_capacity: usize)
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + core::fmt::Debug,
 {
-    // Test getter methods (should not panic)
-    let _ = framed_read.get_ref();
-    let _ = framed_read.decoder();
-    let _ = framed_read.read_buffer();
+    // Test getter methods and their initial invariants.
+    let reader_debug = format!("{:?}", framed_read.get_ref());
+    assert!(
+        !reader_debug.is_empty(),
+        "FramedRead reader debug output should not be empty"
+    );
+
+    let decoder_debug = format!("{:?}", framed_read.decoder());
+    assert!(
+        !decoder_debug.is_empty(),
+        "FramedRead decoder debug output should not be empty"
+    );
+
+    let read_buffer = framed_read.read_buffer();
+    assert!(
+        read_buffer.is_empty(),
+        "fresh FramedRead buffer should be empty"
+    );
+    assert!(
+        read_buffer.capacity() >= min_capacity,
+        "fresh FramedRead buffer capacity {} should be at least requested capacity {}",
+        read_buffer.capacity(),
+        min_capacity
+    );
 
     // Test mutable getters
-    let _ = framed_read.get_mut();
-    let _ = framed_read.decoder_mut();
+    let reader_debug_after_mut_getter = format!("{:?}", framed_read.get_mut());
+    assert_eq!(
+        reader_debug_after_mut_getter, reader_debug,
+        "FramedRead::get_mut should expose the same reader without perturbing state"
+    );
+
+    let decoder_debug_after_mut_getter = format!("{:?}", framed_read.decoder_mut());
+    assert_eq!(
+        decoder_debug_after_mut_getter, decoder_debug,
+        "FramedRead::decoder_mut should expose the same decoder without perturbing state"
+    );
 
     // Note: We can't easily test the Stream implementation in a fuzz target
     // without an async runtime, but we can test the basic structure.
