@@ -133,6 +133,18 @@ impl From<io::Error> for TestDecoderError {
     }
 }
 
+fn remove_observed_newline_delimiter(frame_data: &mut Vec<u8>) -> Result<(), TestDecoderError> {
+    match frame_data.pop() {
+        Some(b'\n') => Ok(()),
+        Some(delimiter) => Err(TestDecoderError::InvalidData(format!(
+            "framed read delimiter observer removed {delimiter:#04x} instead of newline"
+        ))),
+        None => Err(TestDecoderError::InvalidData(
+            "framed read delimiter observer saw an empty frame".to_string(),
+        )),
+    }
+}
+
 impl TestDecoder {
     fn new(max_frame_length: u16, error_after: u8, error_type: CustomErrorType) -> Self {
         Self {
@@ -178,7 +190,7 @@ impl Decoder for TestDecoder {
 
             let frame = src.split_to(pos + 1);
             let mut frame_data = frame.to_vec();
-            frame_data.pop(); // Remove newline
+            remove_observed_newline_delimiter(&mut frame_data)?;
             Ok(Some(frame_data))
         } else {
             // INVARIANT 1: Check buffer doesn't grow beyond limit
