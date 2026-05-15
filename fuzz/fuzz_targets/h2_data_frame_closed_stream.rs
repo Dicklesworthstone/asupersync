@@ -100,6 +100,10 @@ impl DataFrame {
         self.padded = Some(padding_len);
         self
     }
+
+    fn flow_control_len_i32(&self) -> i32 {
+        i32::try_from(self.data.len()).unwrap_or(i32::MAX)
+    }
 }
 
 /// Stream information for tracking state
@@ -284,7 +288,9 @@ impl MockH2Connection {
         }
 
         // Check flow control
-        if frame.data.len() as i32 > stream_info.window_size {
+        let flow_control_len = frame.flow_control_len_i32();
+
+        if flow_control_len > stream_info.window_size {
             self.stream_errors.push((
                 stream_id,
                 ErrorCode::FlowControlError,
@@ -298,7 +304,7 @@ impl MockH2Connection {
         }
 
         // Process the frame
-        stream_info.window_size -= frame.data.len() as i32;
+        stream_info.window_size -= flow_control_len;
 
         if frame.end_stream {
             stream_info.end_stream_received = true;
