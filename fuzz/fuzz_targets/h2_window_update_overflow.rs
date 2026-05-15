@@ -49,18 +49,12 @@ fuzz_target!(|data: &[u8]| {
             // - delta = 0 → PROTOCOL_ERROR
             // - current + delta > 2^31-1 → FLOW_CONTROL_ERROR
             // - otherwise OK
-            match result {
-                Ok(_) => {} // Valid window update
-                Err(H2Error {
-                    code: ErrorCode::ProtocolError,
-                    ..
-                }) => {} // Zero delta
-                Err(H2Error {
-                    code: ErrorCode::FlowControlError,
-                    ..
-                }) => {} // Overflow
-                Err(error) => observe_window_update_error("connection-level update", &error),
-            }
+            observe_window_update_result(
+                "connection-level update",
+                delta,
+                DEFAULT_WINDOW_SIZE,
+                result,
+            );
         }
     }
 
@@ -73,18 +67,7 @@ fuzz_target!(|data: &[u8]| {
         let result = validate_window_update(&frame, DEFAULT_WINDOW_SIZE);
 
         // Should apply same validation rules for stream-level updates
-        match result {
-            Ok(_) => {}
-            Err(H2Error {
-                code: ErrorCode::ProtocolError,
-                ..
-            }) => {}
-            Err(H2Error {
-                code: ErrorCode::FlowControlError,
-                ..
-            }) => {}
-            Err(error) => observe_window_update_error("stream-level update", &error),
-        }
+        observe_window_update_result("stream-level update", delta, DEFAULT_WINDOW_SIZE, result);
     }
 
     // Test 3: Multiple WINDOW_UPDATE frames leading to overflow
@@ -98,19 +81,32 @@ fuzz_target!(|data: &[u8]| {
 
         // Apply first update
         let frame1 = create_window_update_frame(delta1, 1);
-        if let Ok(new_window) = validate_window_update(&frame1, current_window) {
+        if let Some(new_window) = observe_window_update_result(
+            "first accumulated update",
+            delta1,
+            current_window,
+            validate_window_update(&frame1, current_window),
+        ) {
             current_window = new_window;
 
             // Apply second update
             let frame2 = create_window_update_frame(delta2, 1);
-            if let Ok(new_window) = validate_window_update(&frame2, current_window) {
+            if let Some(new_window) = observe_window_update_result(
+                "second accumulated update",
+                delta2,
+                current_window,
+                validate_window_update(&frame2, current_window),
+            ) {
                 current_window = new_window;
 
                 // Apply third update - this might overflow
                 let frame3 = create_window_update_frame(delta3, 1);
-                if let Err(error) = validate_window_update(&frame3, current_window) {
-                    observe_window_update_error("third accumulated update", &error);
-                }
+                observe_window_update_result(
+                    "third accumulated update",
+                    delta3,
+                    current_window,
+                    validate_window_update(&frame3, current_window),
+                );
             }
         }
     }
@@ -127,9 +123,12 @@ fuzz_target!(|data: &[u8]| {
 
         for &delta in &boundary_deltas {
             let frame = create_window_update_frame(delta, 1);
-            if let Err(error) = validate_window_update(&frame, DEFAULT_WINDOW_SIZE) {
-                observe_window_update_error("boundary update", &error);
-            }
+            observe_window_update_result(
+                "boundary update",
+                delta,
+                DEFAULT_WINDOW_SIZE,
+                validate_window_update(&frame, DEFAULT_WINDOW_SIZE),
+            );
         }
     }
 
@@ -149,18 +148,7 @@ fuzz_target!(|data: &[u8]| {
             let result = validate_window_update(&frame, *current_window);
 
             // Most deltas should cause overflow when window is near max
-            match result {
-                Ok(_) => {} // Somehow didn't overflow
-                Err(H2Error {
-                    code: ErrorCode::FlowControlError,
-                    ..
-                }) => {} // Expected overflow
-                Err(H2Error {
-                    code: ErrorCode::ProtocolError,
-                    ..
-                }) => {} // Zero delta
-                Err(error) => observe_window_update_error("near-maximum update", &error),
-            }
+            observe_window_update_result("near-maximum update", delta, *current_window, result);
         }
     }
 
@@ -191,9 +179,12 @@ fuzz_target!(|data: &[u8]| {
             // Note: WINDOW_UPDATE uses u32, but we want to test edge cases
             let delta_as_u32 = delta_signed as u32;
             let frame = create_window_update_frame(delta_as_u32, 1);
-            if let Err(error) = validate_window_update(&frame, DEFAULT_WINDOW_SIZE) {
-                observe_window_update_error("negative signed delta reinterpreted as u32", &error);
-            }
+            observe_window_update_result(
+                "negative signed delta reinterpreted as u32",
+                delta_as_u32,
+                DEFAULT_WINDOW_SIZE,
+                validate_window_update(&frame, DEFAULT_WINDOW_SIZE),
+            );
         }
     }
 
@@ -208,14 +199,12 @@ fuzz_target!(|data: &[u8]| {
         let result = validate_window_update(&frame, MAX_WINDOW_SIZE - 100);
 
         // Both connection and stream windows should have same overflow behavior
-        match result {
-            Ok(_) => {}
-            Err(H2Error {
-                code: ErrorCode::FlowControlError,
-                ..
-            }) => {}
-            Err(error) => observe_window_update_error("connection-vs-stream overflow", &error),
-        }
+        observe_window_update_result(
+            "connection-vs-stream overflow",
+            delta,
+            MAX_WINDOW_SIZE - 100,
+            result,
+        );
     }
 
     // Test 9: Maximum frame size with repeated deltas
@@ -228,19 +217,20 @@ fuzz_target!(|data: &[u8]| {
 
         for _ in 0..iterations {
             let frame = create_window_update_frame(small_delta, 1);
-            match validate_window_update(&frame, current_window) {
-                Ok(new_window) => {
-                    current_window = new_window;
-                    let small_delta_i32 =
-                        i32::try_from(small_delta).expect("small delta modulo 10000 fits i32");
-                    if current_window >= MAX_WINDOW_SIZE - small_delta_i32 {
-                        break; // Stop before certain overflow
-                    }
-                }
-                Err(error) => {
-                    observe_window_update_error("repeated small update", &error);
+            if let Some(new_window) = observe_window_update_result(
+                "repeated small update",
+                small_delta,
+                current_window,
+                validate_window_update(&frame, current_window),
+            ) {
+                current_window = new_window;
+                let small_delta_i32 =
+                    i32::try_from(small_delta).expect("small delta modulo 10000 fits i32");
+                if current_window >= MAX_WINDOW_SIZE - small_delta_i32 {
                     break;
                 }
+            } else {
+                break;
             }
         }
     }
@@ -322,6 +312,63 @@ fn parse_window_update_from_raw(data: &[u8]) -> Result<Frame, H2Error> {
 
 fn checked_delta_i32(delta: u32) -> Result<i32, H2Error> {
     i32::try_from(delta).map_err(|_| H2Error::flow_control("WINDOW_UPDATE increment too large"))
+}
+
+fn expected_window_update_result(delta: u32, current_window: i32) -> Result<i32, ErrorCode> {
+    if delta == 0 {
+        return Err(ErrorCode::ProtocolError);
+    }
+
+    let Ok(delta_i32) = i32::try_from(delta) else {
+        return Err(ErrorCode::FlowControlError);
+    };
+
+    if current_window > MAX_WINDOW_SIZE - delta_i32 {
+        return Err(ErrorCode::FlowControlError);
+    }
+
+    Ok(current_window + delta_i32)
+}
+
+fn observe_window_update_result(
+    context: &str,
+    delta: u32,
+    current_window: i32,
+    result: Result<i32, H2Error>,
+) -> Option<i32> {
+    match (expected_window_update_result(delta, current_window), result) {
+        (Ok(expected_window), Ok(new_window)) => {
+            assert_eq!(
+                new_window, expected_window,
+                "{context}: WINDOW_UPDATE returned wrong window for delta {delta} from {current_window}"
+            );
+            Some(new_window)
+        }
+        (Err(expected_code), Err(error)) => {
+            assert_eq!(
+                error.code, expected_code,
+                "{context}: expected {:?} for delta {delta} from {current_window}, got {:?}: {}",
+                expected_code, error.code, error.message
+            );
+            assert!(
+                !error.message.trim().is_empty(),
+                "{context}: WINDOW_UPDATE error must expose a diagnostic"
+            );
+            None
+        }
+        (Ok(expected_window), Err(error)) => {
+            panic!(
+                "{context}: expected successful window {expected_window} for delta {delta} from {current_window}, got {:?}: {}",
+                error.code, error.message
+            );
+        }
+        (Err(expected_code), Ok(new_window)) => {
+            panic!(
+                "{context}: expected {:?} for delta {delta} from {current_window}, got successful window {new_window}",
+                expected_code
+            );
+        }
+    }
 }
 
 fn observe_window_update_error(context: &str, error: &H2Error) {
