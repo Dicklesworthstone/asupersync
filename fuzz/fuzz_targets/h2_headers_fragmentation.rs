@@ -230,8 +230,11 @@ fn test_incomplete_headers_with_end_flag(test_case: &HeadersFragmentationTestCas
                 );
                 assert_known_stream_state("accepted incomplete HEADERS", &response.stream_state);
             }
-            _ => {
-                // Other errors are acceptable (connection issues, etc.)
+            Err(error_msg) => {
+                assert_visible_protocol_error_context(
+                    "incomplete HEADERS alternate rejection",
+                    &error_msg,
+                );
             }
         }
     }
@@ -269,8 +272,11 @@ fn test_missing_continuation_frame(test_case: &HeadersFragmentationTestCase) {
                     "Should be awaiting CONTINUATION frame"
                 );
             }
-            Err(_) => {
-                // Error is acceptable for malformed frame
+            Err(error_msg) => {
+                assert_visible_protocol_error_context(
+                    "missing CONTINUATION initial rejection",
+                    &error_msg,
+                );
             }
         }
 
@@ -292,9 +298,17 @@ fn test_missing_continuation_frame(test_case: &HeadersFragmentationTestCase) {
             Err(error_msg) if error_msg.contains("CONTINUATION") => {
                 // Also acceptable: specific error about missing CONTINUATION
             }
-            _ => {
-                // If we get here, the implementation might be lenient or have different error handling
-                // This is not necessarily wrong, but should be noted
+            Ok(response) => {
+                assert_known_stream_state(
+                    "missing CONTINUATION lenient DATA",
+                    &response.stream_state,
+                );
+            }
+            Err(error_msg) => {
+                assert_visible_protocol_error_context(
+                    "missing CONTINUATION alternate rejection",
+                    &error_msg,
+                );
             }
         }
     }
@@ -361,12 +375,19 @@ fn test_unexpected_continuation(test_case: &HeadersFragmentationTestCase) {
                 {
                     // Also acceptable: specific error about unexpected CONTINUATION
                 }
-                Ok(_) => {
+                Ok(response) => {
+                    assert_known_stream_state(
+                        "unexpected CONTINUATION lenient response",
+                        &response.stream_state,
+                    );
                     // Some implementations might silently ignore or handle this differently
                     // This is not necessarily wrong but worth noting
                 }
-                _ => {
-                    // Other errors are acceptable
+                Err(error_msg) => {
+                    assert_visible_protocol_error_context(
+                        "unexpected CONTINUATION alternate rejection",
+                        &error_msg,
+                    );
                 }
             }
         }
@@ -414,11 +435,18 @@ fn test_duplicate_headers_frames(test_case: &HeadersFragmentationTestCase) {
             Err(error_msg) if error_msg.contains("PROTOCOL_ERROR") => {
                 // Expected if stream doesn't allow additional headers
             }
-            Ok(_) => {
+            Ok(response) => {
+                assert_known_stream_state(
+                    "duplicate HEADERS accepted response",
+                    &response.stream_state,
+                );
                 // Might be acceptable if implementation supports trailers or stream reuse
             }
-            _ => {
-                // Other errors are acceptable
+            Err(error_msg) => {
+                assert_visible_protocol_error_context(
+                    "duplicate HEADERS alternate rejection",
+                    &error_msg,
+                );
             }
         }
     }
@@ -455,8 +483,11 @@ fn test_orphaned_continuation(test_case: &HeadersFragmentationTestCase) {
                 // If accepted, this could be a protocol violation
                 panic!("Orphaned CONTINUATION frame should be rejected");
             }
-            _ => {
-                // Other errors are acceptable
+            Err(error_msg) => {
+                assert_visible_protocol_error_context(
+                    "orphaned CONTINUATION alternate rejection",
+                    &error_msg,
+                );
             }
         }
     }
@@ -525,8 +556,11 @@ fn test_interleaved_stream_frames(test_case: &HeadersFragmentationTestCase) {
                 // CONTINUATION should be accepted
                 match interleave_result {
                     Ok(_) => break, // Headers completed
-                    Err(_) => {
-                        // Error in CONTINUATION is worth noting but not necessarily wrong
+                    Err(error_msg) => {
+                        assert_visible_protocol_error_context(
+                            "interleaved CONTINUATION alternate rejection",
+                            &error_msg,
+                        );
                     }
                 }
             } else {
@@ -541,8 +575,11 @@ fn test_interleaved_stream_frames(test_case: &HeadersFragmentationTestCase) {
                         // Lenient implementation allows interleaving
                         // This might be acceptable depending on interpretation
                     }
-                    Err(_) => {
-                        // Other errors are acceptable
+                    Err(error_msg) => {
+                        assert_visible_protocol_error_context(
+                            "interleaved non-CONTINUATION alternate rejection",
+                            &error_msg,
+                        );
                     }
                 }
             }
@@ -627,8 +664,11 @@ fn test_maximum_fragmentation(test_case: &HeadersFragmentationTestCase) {
                     // Implementation may limit number of fragments
                     break;
                 }
-                Err(_) => {
-                    // Other errors are acceptable
+                Err(error_msg) => {
+                    assert_visible_protocol_error_context(
+                        "maximum fragmentation alternate rejection",
+                        &error_msg,
+                    );
                     break;
                 }
             }
@@ -689,8 +729,11 @@ fn test_oversized_headers_frame(test_case: &HeadersFragmentationTestCase) {
             {
                 // Expected: frame size limit exceeded
             }
-            Err(_) => {
-                // Other errors are acceptable
+            Err(error_msg) => {
+                assert_visible_protocol_error_context(
+                    "oversized HEADERS alternate rejection",
+                    &error_msg,
+                );
             }
             Ok(_) => {
                 // If accepted, verify it doesn't violate frame size limits
@@ -733,8 +776,11 @@ fn test_malformed_hpack_fragments(test_case: &HeadersFragmentationTestCase) {
             Ok(_) => {
                 // If accepted, the parser might be very lenient or have different error handling
             }
-            _ => {
-                // Other errors are acceptable
+            Err(error_msg) => {
+                assert_visible_protocol_error_context(
+                    "malformed HPACK alternate rejection",
+                    &error_msg,
+                );
             }
         }
     }
