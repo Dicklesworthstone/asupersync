@@ -342,9 +342,10 @@ fn observe_length_mismatch_decode(
                 declared_len <= actual_payload_len,
                 "invalid compression flag should only be consumed after the full declared frame is buffered"
             );
-            assert!(
-                message.contains("compression flag"),
-                "protocol error should identify the invalid compression flag: {message}"
+            assert_eq!(
+                message,
+                format!("invalid gRPC compression flag: {compression_flag}"),
+                "protocol error should identify the invalid compression flag"
             );
             assert_eq!(
                 remaining_len,
@@ -450,10 +451,7 @@ fn assert_fixed_decode_canaries() {
     invalid_flag.extend_from_slice(&2u32.to_be_bytes());
     invalid_flag.extend_from_slice(b"no");
     let mut codec = GrpcCodec::new();
-    assert_protocol_status(
-        observe_grpc_decode(&mut codec, &mut invalid_flag),
-        Code::Internal,
-    );
+    assert_invalid_compression_flag_status(observe_grpc_decode(&mut codec, &mut invalid_flag), 2);
     assert!(
         invalid_flag.is_empty(),
         "complete invalid-flag frames should be consumed"
@@ -470,11 +468,20 @@ fn assert_fixed_decode_canaries() {
     assert_eq!(oversized.as_ref(), b"\0\0\0\0\x03");
 }
 
-fn assert_protocol_status(result: Result<Option<GrpcMessage>, GrpcError>, expected_code: Code) {
+fn assert_invalid_compression_flag_status(
+    result: Result<Option<GrpcMessage>, GrpcError>,
+    invalid_flag: u8,
+) {
     let err = result.expect_err("framing edge case should fail");
-    assert!(matches!(err, GrpcError::Protocol(_)));
+    match &err {
+        GrpcError::Protocol(message) => {
+            let expected = format!("invalid gRPC compression flag: {invalid_flag}");
+            assert_eq!(message, &expected);
+        }
+        error => panic!("expected invalid compression flag Protocol error, got {error:?}"),
+    }
     let status = err.into_status();
-    assert_eq!(status.code(), expected_code);
+    assert_eq!(status.code(), Code::Internal);
 }
 
 fn test_invalid_compression_flag_status(data: &[u8]) {
@@ -488,7 +495,7 @@ fn test_invalid_compression_flag_status(data: &[u8]) {
 
     let mut codec = GrpcCodec::new();
     let result = observe_grpc_decode(&mut codec, &mut buf);
-    assert_protocol_status(result, Code::Internal);
+    assert_invalid_compression_flag_status(result, invalid_flag);
     assert!(buf.is_empty());
     assert_eq!(original.len(), MESSAGE_HEADER_SIZE + payload.len());
 }
@@ -525,6 +532,8 @@ fn test_explicit_framing_statuses(
     actual_payload: &[u8],
 ) {
     if compression_flag > 1 {
+        let declared_len =
+            usize::try_from(declared_length).expect("u32 gRPC frame length should fit usize");
         let mut invalid_flag_frame = BytesMut::new();
         invalid_flag_frame.extend_from_slice(&compression_flag.to_be_bytes());
         invalid_flag_frame.extend_from_slice(&declared_length.to_be_bytes());
@@ -532,9 +541,31 @@ fn test_explicit_framing_statuses(
         let original = invalid_flag_frame.clone();
         let mut codec = GrpcCodec::new();
         let result = observe_grpc_decode(&mut codec, &mut invalid_flag_frame);
-        assert_protocol_status(result, Code::Internal);
-        assert!(invalid_flag_frame.is_empty());
-        assert_eq!(original.len(), MESSAGE_HEADER_SIZE + actual_payload.len());
+        if declared_len > DEFAULT_MAX_MESSAGE_SIZE {
+            let err = result.expect_err("oversized invalid-flag frame should fail on length");
+            assert!(matches!(err, GrpcError::MessageTooLarge));
+            assert_eq!(err.into_status().code(), Code::ResourceExhausted);
+            assert_eq!(
+                invalid_flag_frame, original,
+                "oversized invalid-flag frame should remain buffered"
+            );
+        } else if declared_len > actual_payload.len() {
+            assert!(
+                matches!(result, Ok(None)),
+                "incomplete invalid-flag frame should remain pending"
+            );
+            assert_eq!(
+                invalid_flag_frame, original,
+                "incomplete invalid-flag frame should remain buffered"
+            );
+        } else {
+            assert_invalid_compression_flag_status(result, compression_flag);
+            assert_eq!(
+                invalid_flag_frame.len(),
+                actual_payload.len() - declared_len,
+                "complete invalid-flag frame should consume exactly the declared frame"
+            );
+        }
     }
 
     let status_probe_limit = actual_payload
