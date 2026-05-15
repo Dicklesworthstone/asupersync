@@ -132,8 +132,8 @@ fn test_data_after_end_stream(test_case: &FrameSequenceTest) {
     // Step 1: Set up the stream with normal frames
     for step in &test_case.setup_frames {
         let frame_result = create_and_send_frame(&mut connection, stream_id, step, false);
-        if frame_result.is_err() {
-            return; // Setup failed, which is acceptable
+        if !observe_h2_setup_result("DATA-after-END_STREAM setup frame", frame_result) {
+            return;
         }
     }
 
@@ -146,8 +146,8 @@ fn test_data_after_end_stream(test_case: &FrameSequenceTest) {
 
     let end_stream_result =
         create_and_send_frame(&mut connection, stream_id, &end_stream_frame, false);
-    if end_stream_result.is_err() {
-        return; // END_STREAM setup failed
+    if !observe_h2_setup_result("DATA-after-END_STREAM END_STREAM setup", end_stream_result) {
+        return;
     }
 
     // Step 3: Verify stream is in appropriate closed state
@@ -452,6 +452,16 @@ fn matches_stream_closed_error(error: &H2Error) -> bool {
 fn observe_h2_result(context: &str, result: Result<(), H2Error>) {
     if let Err(error) = result {
         observe_h2_error(context, &error);
+    }
+}
+
+fn observe_h2_setup_result(context: &str, result: Result<(), H2Error>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            observe_h2_error(context, &error);
+            false
+        }
     }
 }
 
