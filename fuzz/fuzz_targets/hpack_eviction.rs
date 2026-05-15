@@ -84,10 +84,20 @@ fn test_table_size_updates(config: &HpackEvictionConfig) -> Result<(), String> {
         let mut src = buf.freeze();
         match decoder.decode(&mut src) {
             Ok(_) => {
-                // Size update was processed successfully
+                if new_size > config.initial_allowed_size {
+                    return Err(format!(
+                        "HPACK decoder accepted over-limit dynamic table size update: {} > {}",
+                        new_size, config.initial_allowed_size
+                    ));
+                }
             }
-            Err(_) => {
-                // Size update may fail if it exceeds allowed size - this is valid
+            Err(error) => {
+                if new_size <= config.initial_allowed_size {
+                    return Err(format!(
+                        "HPACK decoder rejected in-limit dynamic table size update ({} <= {}): {}",
+                        new_size, config.initial_allowed_size, error
+                    ));
+                }
             }
         }
     }
