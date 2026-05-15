@@ -1,6 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::BytesMut;
+use asupersync::codec::Decoder;
+use asupersync::http::h2::{Frame, FrameCodec};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -115,6 +118,53 @@ const STREAM_CLOSED: u32 = 0x5;
 
 /// Initial flow control window size
 const INITIAL_WINDOW_SIZE: i32 = 65535;
+
+fn data_frame_wire(stream_id: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+    let length = payload.len() as u32;
+    let stream_id = stream_id & 0x7fff_ffff;
+    let mut wire = Vec::with_capacity(9 + payload.len());
+    wire.push((length >> 16) as u8);
+    wire.push((length >> 8) as u8);
+    wire.push(length as u8);
+    wire.push(FRAME_TYPE_DATA);
+    wire.push(flags);
+    wire.push((stream_id >> 24) as u8);
+    wire.push((stream_id >> 16) as u8);
+    wire.push((stream_id >> 8) as u8);
+    wire.push(stream_id as u8);
+    wire.extend_from_slice(payload);
+    wire
+}
+
+fn assert_live_zero_length_data_frame(stream_id: u32, flags: u8, payload: &[u8], context: &str) {
+    assert_ne!(stream_id, 0, "{context}: DATA stream ID must be nonzero");
+    let wire = data_frame_wire(stream_id, flags, payload);
+    let mut src = BytesMut::from(wire.as_slice());
+    let mut codec = FrameCodec::new();
+
+    match codec.decode(&mut src) {
+        Ok(Some(Frame::Data(frame))) => {
+            assert_eq!(
+                frame.stream_id,
+                stream_id & 0x7fff_ffff,
+                "{context}: stream ID"
+            );
+            assert!(
+                frame.data.is_empty(),
+                "{context}: live parser returned non-empty DATA payload: {:?}",
+                frame.data
+            );
+            assert_eq!(
+                frame.end_stream,
+                (flags & FLAG_END_STREAM) != 0,
+                "{context}: END_STREAM flag"
+            );
+        }
+        Ok(Some(other)) => panic!("{context}: live parser returned non-DATA frame: {other:?}"),
+        Ok(None) => panic!("{context}: constructed zero-length DATA frame was incomplete"),
+        Err(err) => panic!("{context}: live parser rejected zero-length DATA frame: {err}"),
+    }
+}
 
 fn flow_control_len(len: usize) -> u32 {
     u32::try_from(len).unwrap_or(u32::MAX)
@@ -548,6 +598,8 @@ fuzz_target!(|input: ZeroLengthDataInput| {
         flags |= FLAG_PADDED;
     }
 
+    assert_live_zero_length_data_frame(stream_id, flags, &payload, "generated zero-length DATA");
+
     // Send the zero-length DATA frame
     let initial_zero_frames = conn.get_zero_data_frames().len();
     conn.process_frame(FRAME_TYPE_DATA, stream_id, flags, &payload);
@@ -614,6 +666,12 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
         conn.process_frame(FRAME_TYPE_HEADERS, stream_id, FLAG_END_HEADERS, b"headers");
 
         // Send zero-length DATA with END_STREAM
+        assert_live_zero_length_data_frame(
+            stream_id,
+            FLAG_END_STREAM,
+            &[],
+            "scenario 1 END_STREAM zero-length DATA",
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, FLAG_END_STREAM, &[]);
 
         assert!(
@@ -630,6 +688,7 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
         conn.process_frame(FRAME_TYPE_HEADERS, stream_id, FLAG_END_HEADERS, b"headers");
 
         // Send zero-length DATA without END_STREAM
+        assert_live_zero_length_data_frame(stream_id, 0, &[], "scenario 2 plain zero-length DATA");
         conn.process_frame(FRAME_TYPE_DATA, stream_id, 0, &[]);
 
         assert!(
@@ -645,6 +704,12 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
         conn.process_frame(FRAME_TYPE_HEADERS, stream_id, FLAG_END_HEADERS, b"headers");
 
         // PADDED with pad_length=0: [0][no data][no padding]
+        assert_live_zero_length_data_frame(
+            stream_id,
+            FLAG_PADDED,
+            &[0],
+            "scenario 3 padded zero-length DATA",
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, FLAG_PADDED, &[0]);
 
         assert!(
@@ -663,8 +728,26 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
         conn.process_frame(FRAME_TYPE_HEADERS, stream_id, FLAG_END_HEADERS, b"headers");
 
         // Send multiple zero-length DATA frames
+        assert_live_zero_length_data_frame(
+            stream_id,
+            0,
+            &[],
+            "scenario 4 first plain zero-length DATA",
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, 0, &[]);
+        assert_live_zero_length_data_frame(
+            stream_id,
+            0,
+            &[],
+            "scenario 4 second plain zero-length DATA",
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, 0, &[]);
+        assert_live_zero_length_data_frame(
+            stream_id,
+            FLAG_END_STREAM,
+            &[],
+            "scenario 4 terminating zero-length DATA",
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, FLAG_END_STREAM, &[]);
 
         assert!(
@@ -681,6 +764,12 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
 
         // Send regular DATA, then zero-length DATA
         conn.process_frame(FRAME_TYPE_DATA, stream_id, 0, b"some data");
+        assert_live_zero_length_data_frame(
+            stream_id,
+            FLAG_END_STREAM,
+            &[],
+            "scenario 5 zero-length DATA after regular DATA",
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, FLAG_END_STREAM, &[]);
 
         assert!(
@@ -702,6 +791,12 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
             stream_id,
             0,
             &1000u32.to_be_bytes(),
+        );
+        assert_live_zero_length_data_frame(
+            stream_id,
+            FLAG_END_STREAM,
+            &[],
+            "scenario 6 zero-length DATA between WINDOW_UPDATE frames",
         );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, FLAG_END_STREAM, &[]);
         conn.process_frame(
@@ -728,7 +823,19 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
         conn.process_frame(FRAME_TYPE_HEADERS, stream2, FLAG_END_HEADERS, b"headers2");
 
         // Send zero-length DATA on both streams
+        assert_live_zero_length_data_frame(
+            stream_id,
+            0,
+            &[],
+            "scenario 7 first stream zero-length DATA",
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, 0, &[]);
+        assert_live_zero_length_data_frame(
+            stream2,
+            FLAG_END_STREAM,
+            &[],
+            "scenario 7 second stream zero-length DATA",
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream2, FLAG_END_STREAM, &[]);
 
         assert!(
@@ -745,6 +852,12 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
 
         // Zero-length frame still participates in flow control if PADDED
         if input.padded {
+            assert_live_zero_length_data_frame(
+                stream_id,
+                FLAG_PADDED | FLAG_END_STREAM,
+                &[0],
+                "scenario 8 padded zero-length DATA",
+            );
             conn.process_frame(
                 FRAME_TYPE_DATA,
                 stream_id,
