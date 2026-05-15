@@ -127,7 +127,7 @@ impl TrackingPushCase {
         match malformed {
             TrackingMalformed::None => wire,
             TrackingMalformed::TruncateOne => {
-                let _ = wire.pop();
+                truncate_one_observed(&mut wire);
                 wire
             }
             TrackingMalformed::TruncateMany(n) => {
@@ -142,10 +142,10 @@ impl TrackingPushCase {
                 wire
             }
             TrackingMalformed::BadBulkLengthDigit => {
-                if let Some(pos) = wire.iter().position(|byte| *byte == b'$') {
-                    if pos + 1 < wire.len() {
-                        wire[pos + 1] = b'x';
-                    }
+                if let Some(pos) = wire.iter().position(|byte| *byte == b'$')
+                    && pos + 1 < wire.len()
+                {
+                    wire[pos + 1] = b'x';
                 }
                 wire
             }
@@ -202,6 +202,29 @@ impl TrackingPushCase {
             }
         }
     }
+}
+
+fn truncate_one_observed(wire: &mut Vec<u8>) {
+    let before_len = wire.len();
+    let before_prefix = wire[..before_len.saturating_sub(1)].to_vec();
+    let removed = wire
+        .pop()
+        .expect("valid client tracking push wire should contain a byte to truncate");
+
+    assert_eq!(
+        wire.len(),
+        before_len - 1,
+        "TruncateOne should remove exactly one byte"
+    );
+    assert_eq!(
+        wire.as_slice(),
+        before_prefix.as_slice(),
+        "TruncateOne should preserve the wire prefix"
+    );
+    assert_eq!(
+        removed, b'\n',
+        "valid client tracking push wire should end with a RESP newline delimiter"
+    );
 }
 
 fn append_bulk_string(wire: &mut Vec<u8>, value: &[u8]) {
