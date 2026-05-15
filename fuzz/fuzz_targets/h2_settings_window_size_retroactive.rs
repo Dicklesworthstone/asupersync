@@ -15,12 +15,11 @@
 
 #![no_main]
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::http::h2::connection::{Connection, ConnectionState};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::connection::Connection;
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{
-    DataFrame, FrameHeader, HeadersFrame, RstStreamFrame, Setting, SettingsFrame, data_flags,
-    parse_frame,
+    DataFrame, HeadersFrame, RstStreamFrame, Setting, SettingsFrame,
 };
 use asupersync::http::h2::settings::Settings;
 use asupersync::http::h2::{Frame, H2Error};
@@ -34,6 +33,16 @@ const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65535;
 
 /// Maximum allowed window size per RFC 9113 Section 6.9.1
 const MAX_WINDOW_SIZE: i32 = i32::MAX;
+
+fn open_connection(conn: &mut Connection) -> Result<(), H2Error> {
+    conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+        .map(|_| ())
+}
+
+fn apply_initial_window_size(conn: &mut Connection, initial_window: u32) -> Result<(), H2Error> {
+    let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(initial_window)]);
+    conn.process_frame(Frame::Settings(settings)).map(|_| ())
+}
 
 fuzz_target!(|data: &[u8]| {
     // Guard against excessive input sizes
@@ -65,11 +74,11 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 2: Multiple streams with varying data consumption
     if data.len() >= 16 {
-        let stream_count = (data[0] % 8) + 1; // 1-8 streams
+        let stream_count = usize::from((data[0] % 8) + 1); // 1-8 streams
         let mut window_updates = Vec::new();
 
-        let mut offset = 1;
-        for i in 0..stream_count.min((data.len() - offset) / 4) {
+        let mut offset = 1usize;
+        for _ in 0..stream_count.min((data.len() - offset) / 4) {
             if offset + 4 <= data.len() {
                 let window = u32::from_be_bytes([
                     data[offset],
@@ -89,7 +98,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 3: Rapid sequence of SETTINGS updates
     if data.len() >= 20 {
-        let update_count = (data[0] % 5) + 1; // 1-5 updates
+        let update_count = usize::from((data[0] % 5) + 1); // 1-5 updates
         let mut updates = Vec::new();
 
         for i in 0..update_count.min((data.len() - 1) / 4) {
@@ -205,7 +214,8 @@ fuzz_target!(|data: &[u8]| {
 /// Test retroactive window update with single stream
 fn test_single_stream_window_update(initial_window: u32, new_window: u32) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
+    apply_initial_window_size(&mut conn, initial_window)?;
 
     // Create and open a stream
     let stream_frame = create_headers_frame(1);
@@ -227,7 +237,7 @@ fn test_single_stream_window_update(initial_window: u32, new_window: u32) -> Res
 /// Test multiple streams with retroactive updates
 fn test_multiple_streams_window_update(window_updates: &[u32]) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
 
     // Create multiple streams
     for i in 0..window_updates.len().min(10) {
@@ -259,7 +269,7 @@ fn test_multiple_streams_window_update(window_updates: &[u32]) -> Result<(), H2E
 /// Test rapid sequence of SETTINGS updates
 fn test_rapid_settings_updates(updates: &[u32]) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
 
     // Create a stream with some data sent
     let headers_frame = create_headers_frame(1);
@@ -276,7 +286,7 @@ fn test_rapid_settings_updates(updates: &[u32]) -> Result<(), H2Error> {
 
             // Each update should either succeed or fail with a flow control error
             match result {
-                Ok(()) => {} // Success
+                Ok(_) => {} // Success
                 Err(H2Error {
                     code: ErrorCode::FlowControlError,
                     ..
@@ -300,7 +310,7 @@ fn test_window_update_with_closure(
     new_window: u32,
 ) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
 
     // Create multiple streams
     for i in 1..=5 {
@@ -333,7 +343,8 @@ fn test_window_update_with_closure(
 /// Test boundary window updates that might cause overflow
 fn test_boundary_window_update(initial: u32, new_size: u32) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
+    apply_initial_window_size(&mut conn, initial)?;
 
     // Create stream and consume most of the window
     let headers_frame = create_headers_frame(1);
@@ -367,7 +378,7 @@ fn test_window_arithmetic_edge_case(
     }
 
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
 
     // Set initial window size
     let initial_settings = SettingsFrame::new(vec![Setting::InitialWindowSize(old_initial)]);
@@ -386,7 +397,7 @@ fn test_window_arithmetic_edge_case(
 /// Test mixed sequence of valid and potentially invalid updates
 fn test_mixed_valid_invalid_sequence(sequence: &[u32]) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
 
     let headers_frame = create_headers_frame(1);
     conn.process_frame(headers_frame)?;
@@ -402,25 +413,15 @@ fn test_mixed_valid_invalid_sequence(sequence: &[u32]) -> Result<(), H2Error> {
 
 /// Test window updates in different connection states
 fn test_window_update_connection_states(old_window: u32, new_window: u32) -> Result<(), H2Error> {
-    let states = [
-        ConnectionState::Handshaking,
-        ConnectionState::Open,
-        ConnectionState::Closing,
-    ];
+    let mut conn = Connection::server(Settings::default());
+    open_connection(&mut conn)?;
+    apply_initial_window_size(&mut conn, old_window)?;
 
-    for state in &states {
-        let mut conn = Connection::server(Settings::default());
-        conn.state = *state;
+    let headers_frame = create_headers_frame(1);
+    let _result = conn.process_frame(headers_frame);
 
-        // Only test in Open state (SETTINGS frames require established connection)
-        if *state == ConnectionState::Open {
-            let headers_frame = create_headers_frame(1);
-            let _result = conn.process_frame(headers_frame);
-
-            let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(new_window)]);
-            let _result = conn.process_frame(Frame::Settings(settings));
-        }
-    }
+    let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(new_window)]);
+    let _result = conn.process_frame(Frame::Settings(settings));
 
     Ok(())
 }
@@ -433,7 +434,7 @@ fn test_pattern_based_updates(
     base_window: u32,
 ) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
 
     // Create streams based on pattern
     for i in 0..stream_count.min(16) {
@@ -500,7 +501,7 @@ fn test_pattern_based_updates(
 /// Test zero and negative window scenarios
 fn test_zero_negative_windows(_scenario: u8, window_value: u32) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    open_connection(&mut conn)?;
 
     let headers_frame = create_headers_frame(1);
     conn.process_frame(headers_frame)?;
