@@ -23,6 +23,10 @@ use asupersync::http::h2::{
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
+const ZERO_INCREMENT_ERROR: &str = "WINDOW_UPDATE with zero increment";
+const INCREMENT_TOO_LARGE_ERROR: &str = "window increment too large";
+const WINDOW_OVERFLOW_ERROR: &str = "flow control window overflow";
+
 /// HTTP/2 WINDOW_UPDATE frame
 #[derive(Debug, Clone, Arbitrary)]
 struct WindowUpdateFrame {
@@ -76,14 +80,14 @@ impl MockH2Connection {
     fn process_window_update(&mut self, frame: &WindowUpdateFrame) -> Result<(), String> {
         // RFC 9113 §6.9: Convert to signed integer for validation
         let increment =
-            i32::try_from(frame.increment).map_err(|_| "window increment too large".to_string())?;
+            i32::try_from(frame.increment).map_err(|_| INCREMENT_TOO_LARGE_ERROR.to_string())?;
 
         // RFC 9113 §6.9.1: increment of 0 MUST be treated as PROTOCOL_ERROR
         if increment == 0 {
             if frame.stream_id == 0 {
-                return Err("WINDOW_UPDATE with zero increment".to_string());
+                return Err(ZERO_INCREMENT_ERROR.to_string());
             }
-            return Err("WINDOW_UPDATE with zero increment".to_string());
+            return Err(ZERO_INCREMENT_ERROR.to_string());
         }
 
         // Apply window update
@@ -93,7 +97,7 @@ impl MockH2Connection {
 
             // Check for window overflow per RFC 9113 §6.9.1
             if new_window > i64::from(i32::MAX) {
-                return Err("flow control window overflow".to_string());
+                return Err(WINDOW_OVERFLOW_ERROR.to_string());
             }
 
             self.connection_send_window = validated_window_i32(new_window);
@@ -103,7 +107,7 @@ impl MockH2Connection {
             let new_window = i64::from(stream.send_window) + i64::from(increment);
 
             if new_window > i64::from(i32::MAX) {
-                return Err("flow control window overflow".to_string());
+                return Err(WINDOW_OVERFLOW_ERROR.to_string());
             }
 
             stream.send_window = validated_window_i32(new_window);
@@ -175,6 +179,13 @@ fn generate_edge_case_frames() -> Vec<WindowUpdateFrame> {
     ]
 }
 
+fn assert_mock_window_update_error(context: &str, actual: &str, expected: &str) {
+    assert_eq!(
+        actual, expected,
+        "{context}: wrong WINDOW_UPDATE diagnostic"
+    );
+}
+
 fuzz_target!(|scenario: WindowUpdateScenario| {
     // Limit scenario size to avoid timeouts
     if scenario.frames.len() > 50 || scenario.max_frames > 100 {
@@ -221,26 +232,18 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
             Err(err) => {
                 if test_frame.increment == 0 {
                     zero_delta_errors += 1;
-
-                    // Verify correct error message for zero delta
-                    if !err.contains("WINDOW_UPDATE with zero increment") {
-                        panic!(
-                            "Wrong error message for zero delta: expected 'WINDOW_UPDATE with zero increment', got '{}'",
-                            err
-                        );
-                    }
+                    assert_mock_window_update_error("zero delta", &err, ZERO_INCREMENT_ERROR);
                 } else if test_frame.increment > i32::MAX as u32 {
-                    // Verify correct error message for overflow
-                    if !err.contains("window increment too large")
-                        && !err.contains("flow control window overflow")
-                    {
-                        panic!("Wrong error message for invalid WINDOW_UPDATE increment: {err}");
-                    }
-                } else if !err.contains("flow control window overflow") {
-                    // Unexpected error for valid increment
-                    panic!(
-                        "Unexpected error for valid WINDOW_UPDATE increment {}: {}",
-                        test_frame.increment, err
+                    assert_mock_window_update_error(
+                        "invalid increment",
+                        &err,
+                        INCREMENT_TOO_LARGE_ERROR,
+                    );
+                } else {
+                    assert_mock_window_update_error(
+                        "valid increment overflow",
+                        &err,
+                        WINDOW_OVERFLOW_ERROR,
                     );
                 }
             }
@@ -272,10 +275,10 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         result.is_err(),
         "Connection-level WINDOW_UPDATE with zero increment should fail"
     );
-    assert!(
-        result
-            .unwrap_err()
-            .contains("WINDOW_UPDATE with zero increment")
+    assert_mock_window_update_error(
+        "connection zero increment",
+        &result.unwrap_err(),
+        ZERO_INCREMENT_ERROR,
     );
 
     // Test 2: Stream-level zero increment (stream_id>0)
@@ -288,10 +291,10 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         result.is_err(),
         "Stream-level WINDOW_UPDATE with zero increment should fail"
     );
-    assert!(
-        result
-            .unwrap_err()
-            .contains("WINDOW_UPDATE with zero increment")
+    assert_mock_window_update_error(
+        "stream zero increment",
+        &result.unwrap_err(),
+        ZERO_INCREMENT_ERROR,
     );
 
     // Test 3: Valid minimum increment should succeed
@@ -328,7 +331,11 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         result.is_err(),
         "WINDOW_UPDATE with increment > i32::MAX should fail"
     );
-    assert!(result.unwrap_err().contains("window increment too large"));
+    assert_mock_window_update_error(
+        "oversized increment",
+        &result.unwrap_err(),
+        INCREMENT_TOO_LARGE_ERROR,
+    );
 
     // Test 6: Maximum in-range increment overflows the current stream window.
     let max_in_range_frame = WindowUpdateFrame {
@@ -341,7 +348,11 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         "WINDOW_UPDATE that exceeds i32::MAX window should fail: {:?}",
         result
     );
-    assert!(result.unwrap_err().contains("flow control window overflow"));
+    assert_mock_window_update_error(
+        "stream window overflow",
+        &result.unwrap_err(),
+        WINDOW_OVERFLOW_ERROR,
+    );
 }
 
 fn open_live_connection() -> Connection {
@@ -370,12 +381,7 @@ fn assert_live_window_update_delta_zero() {
     let err = connection
         .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(0, 0)))
         .expect_err("connection-level zero WINDOW_UPDATE should fail");
-    assert_live_h2_error(
-        &err,
-        ErrorCode::ProtocolError,
-        None,
-        "WINDOW_UPDATE with zero increment",
-    );
+    assert_live_h2_error(&err, ErrorCode::ProtocolError, None, ZERO_INCREMENT_ERROR);
 
     let err = connection
         .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(1, 0)))
@@ -384,7 +390,7 @@ fn assert_live_window_update_delta_zero() {
         &err,
         ErrorCode::ProtocolError,
         Some(1),
-        "WINDOW_UPDATE with zero increment",
+        ZERO_INCREMENT_ERROR,
     );
 
     connection
@@ -414,7 +420,7 @@ fn assert_live_window_update_delta_zero() {
         &err,
         ErrorCode::FlowControlError,
         None,
-        "window increment too large",
+        INCREMENT_TOO_LARGE_ERROR,
     );
 }
 
