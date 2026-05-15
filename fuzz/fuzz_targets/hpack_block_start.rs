@@ -137,9 +137,9 @@ fn assert_block_start_table_size_updates_evict_stale_dynamic_entry() {
     let err = decoder
         .decode(&mut stale_index_block.freeze())
         .expect_err("stale dynamic-table index must be rejected after eviction");
-    assert!(
-        err.message.contains("invalid dynamic index"),
-        "unexpected stale-index error: {err:?}"
+    assert_eq!(
+        err.message, "invalid dynamic index",
+        "stale-index error message changed"
     );
 
     let mut good_block = BytesMut::new();
