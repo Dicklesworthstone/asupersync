@@ -916,12 +916,8 @@ fn exercise_encoded_authority(
                 assert_eq!(err.code, ErrorCode::CompressionError);
                 assert_eq!(err.stream_id, None);
             } else {
-                assert!(
-                    matches!(
-                        err.code,
-                        ErrorCode::ProtocolError | ErrorCode::CompressionError
-                    ),
-                    "unexpected huge-authority rejection: {err:?}"
+                panic!(
+                    "in-limit non-duplicate request headers were rejected unexpectedly: {err:?}"
                 );
             }
         }
