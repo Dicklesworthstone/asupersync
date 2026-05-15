@@ -192,6 +192,19 @@ fn observe_parsed_frame_shape(header: &FrameHeader, payload_len: usize, frame: &
     }
 }
 
+fn assert_h2_error_shape(error: &H2Error, code: ErrorCode, stream_id: Option<u32>, message: &str) {
+    assert_eq!(error.code, code);
+    assert_eq!(error.stream_id, stream_id);
+    assert_eq!(error.message, message);
+    assert_eq!(error.is_connection_error(), stream_id.is_none());
+
+    let expected_display = match stream_id {
+        Some(stream_id) => format!("HTTP/2 stream {stream_id} error ({code}): {message}"),
+        None => format!("HTTP/2 connection error ({code}): {message}"),
+    };
+    assert_eq!(error.to_string(), expected_display);
+}
+
 fn assert_settings_ack_non_empty_payload_rejected() {
     let header = FrameHeader {
         length: 6,
@@ -203,9 +216,49 @@ fn assert_settings_ack_non_empty_payload_rejected() {
 
     let err = parse_frame(&header, payload)
         .expect_err("SETTINGS ACK with payload must be rejected as FRAME_SIZE_ERROR");
-    assert_eq!(err.code, ErrorCode::FrameSizeError);
-    assert_eq!(err.stream_id, None);
-    assert_eq!(err.message, "SETTINGS ACK with non-zero length");
+    assert_h2_error_shape(
+        &err,
+        ErrorCode::FrameSizeError,
+        None,
+        "SETTINGS ACK with non-zero length",
+    );
+}
+
+fn assert_ping_non_zero_stream_rejected() {
+    let header = FrameHeader {
+        length: 8,
+        frame_type: 0x6,
+        flags: ping_flags::ACK,
+        stream_id: 1,
+    };
+    let payload = Bytes::from_static(b"12345678");
+
+    let err = parse_frame(&header, payload).expect_err("PING on stream 1 must be rejected");
+    assert_h2_error_shape(
+        &err,
+        ErrorCode::ProtocolError,
+        None,
+        "PING frame with non-zero stream ID",
+    );
+}
+
+fn assert_window_update_zero_increment_rejected() {
+    let header = FrameHeader {
+        length: 4,
+        frame_type: 0x8,
+        flags: 0,
+        stream_id: 3,
+    };
+    let payload = Bytes::from_static(&[0, 0, 0, 0]);
+
+    let err =
+        parse_frame(&header, payload).expect_err("WINDOW_UPDATE zero increment must be rejected");
+    assert_h2_error_shape(
+        &err,
+        ErrorCode::ProtocolError,
+        Some(3),
+        "WINDOW_UPDATE with zero increment",
+    );
 }
 
 /// Fuzzing input for individual frame parsing
@@ -332,6 +385,8 @@ fuzz_target!(|input: FrameParseInput| {
     }
 
     assert_settings_ack_non_empty_payload_rejected();
+    assert_ping_non_zero_stream_rejected();
+    assert_window_update_zero_increment_rejected();
 
     match input.scenario {
         FrameParseScenario::HeaderParsing {
