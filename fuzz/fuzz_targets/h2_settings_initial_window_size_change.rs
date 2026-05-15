@@ -272,6 +272,37 @@ fn observe_fuzz_setup_adjustment(result: Result<(), WindowError>, context: &str)
     }
 }
 
+fn observe_fuzz_stream_creation(
+    connection: &mut MockH2Connection,
+    stream_id: u32,
+    context: &str,
+) -> bool {
+    let streams_before = connection.state.stream_windows.len();
+    match connection.create_stream(stream_id) {
+        Ok(()) => {
+            assert_eq!(
+                connection.state.stream_windows.len(),
+                streams_before + 1,
+                "{context}: stream creation did not record a new stream"
+            );
+            assert_eq!(
+                connection.state.stream_windows.get(&stream_id).copied(),
+                Some(connection.state.current_initial_window_size as i64),
+                "{context}: stream creation used the wrong initial window"
+            );
+            true
+        }
+        Err(WindowError::SettingsViolation) => {
+            assert!(
+                streams_before >= connection.policy.max_tracked_streams,
+                "{context}: stream creation hit settings limit before max tracked streams"
+            );
+            false
+        }
+        Err(error) => panic!("{context}: unexpected stream creation error: {error:?}"),
+    }
+}
+
 fn expect_predefined_setup(result: Result<(), WindowError>, context: &str) {
     if let Err(error) = result {
         panic!("{context} failed: {error:?}");
@@ -426,7 +457,8 @@ fuzz_target!(|data: &[u8]| {
         let stream_id = (i as u32 * 2) + 1; // Odd stream IDs
 
         // Create stream
-        if connection.create_stream(stream_id).is_err() {
+        let context = format!("fuzz stream {stream_id} create setup");
+        if !observe_fuzz_stream_creation(&mut connection, stream_id, &context) {
             continue; // Skip if we hit limits
         }
 
