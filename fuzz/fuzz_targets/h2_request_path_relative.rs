@@ -267,15 +267,18 @@ fuzz_target!(|input: H2PathInput| {
             Err(PathValidationError::RelativeSegments) => {
                 // Expected outcome - correctly rejected
             }
-            Err(PathValidationError::NotAbsolute) => {
-                // Also acceptable - malformed paths may trigger different errors
-            }
             Err(PathValidationError::InvalidEncoding) => {
                 // Acceptable - encoding errors can occur with percent sequences
             }
-            Err(_) => {
-                // Other errors are also acceptable ways to reject invalid paths
-                // Real HTTP/2 implementation might use different error categories
+            Err(PathValidationError::NullBytes) => {
+                // Acceptable - fuzzed path components can contain raw nulls
+            }
+            Err(other) => {
+                panic!(
+                    "Dot-segment path should reject as RelativeSegments unless an earlier exact \
+                     encoding/null-byte check fires: path={:?}, error={:?}",
+                    test_path, other
+                );
             }
         }
     } else {
