@@ -198,6 +198,14 @@ fn observe_qpack_decode_rejection(input: &QpackFuzzInput, err: &H3NativeError) {
     );
 }
 
+fn observe_qpack_attack_rejection(context: &str, err: &H3NativeError, bytes_len: usize) {
+    let diagnostic = format!("{err:?}");
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "{context}: QPACK decoder rejected {bytes_len} bytes without a diagnostic"
+    );
+}
+
 /// Property 2: Invalid static table index rejected gracefully
 fn test_invalid_static_index(input: &QpackFuzzInput) {
     if let AttackScenario::InvalidStaticIndex { index } = &input.attack_scenario {
@@ -215,8 +223,12 @@ fn test_invalid_static_index(input: &QpackFuzzInput) {
                     "Error message should indicate static index issue: {msg}"
                 );
             }
-            Err(_) => {
-                // Other errors are acceptable for malformed input
+            Err(err) => {
+                observe_qpack_attack_rejection(
+                    "invalid static index",
+                    &err,
+                    malicious_section.len(),
+                );
             }
             Ok(_) => {
                 // If successful, the index must be valid (< 99 per RFC 9204)
@@ -245,8 +257,12 @@ fn test_dynamic_table_size(input: &QpackFuzzInput) {
                         "Should reject dynamic table operations in static-only mode: {msg}"
                     );
                 }
-                Err(_) => {
-                    // Other errors acceptable
+                Err(err) => {
+                    observe_qpack_attack_rejection(
+                        "static-only dynamic table reference",
+                        &err,
+                        dynamic_section.len(),
+                    );
                 }
                 Ok(_) => {
                     // Should not succeed with dynamic references in static-only mode
@@ -268,8 +284,8 @@ fn test_delta_base(input: &QpackFuzzInput) {
             Err(H3NativeError::InvalidFrame(_)) | Err(H3NativeError::UnexpectedEof) => {
                 // Expected for nonsensical bases or truncated continuations.
             }
-            Err(_) => {
-                // Other decoder errors are acceptable for adversarial input.
+            Err(err) => {
+                observe_qpack_attack_rejection("delta base", &err, delta_section.len());
             }
             Ok(plan) => {
                 assert!(
@@ -305,8 +321,8 @@ fn test_huffman_string_safety(input: &QpackFuzzInput) {
                     );
                 }
             }
-            Err(_) => {
-                // Other errors are acceptable for malformed data
+            Err(err) => {
+                observe_qpack_attack_rejection("huffman string", &err, huffman_section.len());
             }
             Ok(_) => {
                 // Success is acceptable as long as the decoder returned normally.
@@ -366,8 +382,8 @@ fn test_required_insert_count_stall(input: &QpackFuzzInput) {
             Err(H3NativeError::InvalidFrame(_)) => {
                 // Expected for invalid required insert count scenarios
             }
-            Err(_) => {
-                // Other errors acceptable
+            Err(err) => {
+                observe_qpack_attack_rejection("required insert count", &err, ric_section.len());
             }
             Ok(_) => {
                 // Success is fine if the RIC was actually valid
@@ -529,8 +545,12 @@ fn test_malformed_patterns(input: &QpackFuzzInput) {
             Err(H3NativeError::InvalidFrame(_)) => {
                 // Expected for malformed patterns
             }
-            Err(_) => {
-                // Other errors acceptable
+            Err(err) => {
+                observe_qpack_attack_rejection(
+                    "malformed field pattern",
+                    &err,
+                    malformed_section.len(),
+                );
             }
             Ok(_) => {
                 // Unexpected success with malformed input - may indicate issue
