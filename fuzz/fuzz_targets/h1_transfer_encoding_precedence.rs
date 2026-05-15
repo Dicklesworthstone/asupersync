@@ -622,9 +622,9 @@ fn assert_precedence_analysis_rejected(
 ) {
     match result {
         Ok(analysis) => panic!("{context} unexpectedly accepted case: {analysis:?}"),
-        Err(message) => assert!(
-            message.contains(expected_message),
-            "{context} rejected with unexpected reason: {message}"
+        Err(message) => assert_eq!(
+            message, expected_message,
+            "{context} rejected with unexpected reason"
         ),
     }
 }
