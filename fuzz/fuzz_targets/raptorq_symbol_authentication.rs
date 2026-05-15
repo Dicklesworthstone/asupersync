@@ -42,6 +42,8 @@ const MAX_SYMBOLS: usize = 16;
 /// Maximum key derivation attempts per test.
 const MAX_KEY_DERIVATIONS: usize = 8;
 const AUTH_TAG_SIZE: usize = 32;
+const SOURCE_KIND_DOMAIN_BYTE: u8 = 0x53;
+const REPAIR_KIND_DOMAIN_BYTE: u8 = 0xA7;
 const EXTENDED_TAG_ROTATIONS: [u32; AUTH_TAG_SIZE] = [
     0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7,
 ];
@@ -566,10 +568,9 @@ fn test_malformed_framing(framing_error: FramingError) {
         }
 
         FramingError::InvalidSymbolKind(kind_byte) => {
-            // Test with invalid symbol kind values
-            // The SymbolKind enum only has Source and Repair variants
-            // Invalid values should be rejected during parsing
-            let _ = kind_byte;
+            // Generated framing bytes are valid only for the two
+            // authentication-domain symbol kind encodings.
+            test_generated_symbol_kind_byte(kind_byte);
         }
 
         FramingError::LengthMismatch { declared, actual } => {
@@ -610,6 +611,61 @@ fn test_malformed_framing(framing_error: FramingError) {
 
             assert!(verifies, "Authentication failed with ESI: {}", esi);
         }
+    }
+}
+
+fn test_generated_symbol_kind_byte(kind_byte: u8) {
+    match classify_symbol_kind_byte(kind_byte) {
+        Ok(kind) => {
+            let key = AuthKey::from_seed(0x5151_6b69_6e64);
+            let symbol_id = create_symbol_id(0x5151, 2, 3);
+            let symbol = Symbol::new(symbol_id, vec![kind_byte, 1, 2, 3], kind);
+            let tag = AuthenticationTag::compute(&key, &symbol);
+
+            assert!(
+                tag.verify(&key, &symbol),
+                "Accepted symbol kind byte failed to authenticate: {kind_byte:#04x}"
+            );
+        }
+        Err(rejected) => {
+            assert_eq!(
+                rejected, kind_byte,
+                "Rejected symbol kind byte changed during classification"
+            );
+            assert!(
+                rejected != SOURCE_KIND_DOMAIN_BYTE && rejected != REPAIR_KIND_DOMAIN_BYTE,
+                "Valid symbol kind byte was rejected: {rejected:#04x}"
+            );
+
+            let key = AuthKey::from_seed(0x5151_6b69_6e64);
+            let symbol_id = create_symbol_id(0x5151, 2, 3);
+            let source_symbol = Symbol::new(symbol_id, vec![rejected, 1, 2, 3], SymbolKind::Source);
+            let repair_symbol = Symbol::new(symbol_id, vec![rejected, 1, 2, 3], SymbolKind::Repair);
+            let source_tag = AuthenticationTag::compute(&key, &source_symbol);
+            let repair_tag = AuthenticationTag::compute(&key, &repair_symbol);
+
+            assert_ne!(
+                source_tag.as_bytes(),
+                repair_tag.as_bytes(),
+                "Source and repair tags must remain separated for rejected byte {rejected:#04x}"
+            );
+            assert!(
+                !source_tag.verify(&key, &repair_symbol),
+                "Source tag authenticated repair symbol for rejected byte {rejected:#04x}"
+            );
+            assert!(
+                !repair_tag.verify(&key, &source_symbol),
+                "Repair tag authenticated source symbol for rejected byte {rejected:#04x}"
+            );
+        }
+    }
+}
+
+fn classify_symbol_kind_byte(kind_byte: u8) -> Result<SymbolKind, u8> {
+    match kind_byte {
+        SOURCE_KIND_DOMAIN_BYTE => Ok(SymbolKind::Source),
+        REPAIR_KIND_DOMAIN_BYTE => Ok(SymbolKind::Repair),
+        rejected => Err(rejected),
     }
 }
 
