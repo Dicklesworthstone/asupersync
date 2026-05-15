@@ -316,6 +316,42 @@ fn assert_alternate_rejection_has_context(context: &str, rejection: &ValidationR
     );
 }
 
+fn assert_frame_error_matches_input(
+    context: &str,
+    frame_error: &FrameErrorType,
+    frame_data: &[u8],
+    frame_flags: u8,
+    stream_id: u32,
+) {
+    match frame_error {
+        FrameErrorType::InvalidStreamId => {
+            assert_ne!(
+                stream_id, 0,
+                "{context}: invalid stream id error should only occur for non-zero stream IDs"
+            );
+        }
+        FrameErrorType::AckWithPayload => {
+            assert!(
+                frame_flags & 0x01 != 0 && !frame_data.is_empty(),
+                "{context}: ACK-with-payload error should only occur for ACK frames with payload"
+            );
+        }
+        FrameErrorType::FrameSizeError => {
+            assert!(
+                !frame_data.len().is_multiple_of(6),
+                "{context}: frame-size error should only occur for payload lengths not divisible by 6"
+            );
+        }
+        FrameErrorType::InvalidFlags => {
+            assert_ne!(
+                frame_flags & 0xFE,
+                0,
+                "{context}: invalid-flags error should only occur when reserved SETTINGS flags are set"
+            );
+        }
+    }
+}
+
 impl SettingsState {
     fn default() -> Self {
         Self {
@@ -815,24 +851,13 @@ fuzz_target!(|input: H2SettingsInvalidValueInput| {
                 }
             }
             Err(ValidationResult::FrameError(frame_error)) => {
-                // Frame-level errors are also acceptable
-                match frame_error {
-                    FrameErrorType::InvalidStreamId => {
-                        assert_ne!(
-                            stream_id, 0,
-                            "Invalid stream ID error should only occur for non-zero stream IDs"
-                        );
-                    }
-                    FrameErrorType::AckWithPayload => {
-                        assert!(
-                            input.frame_options.ack_flag && !frame_data.is_empty(),
-                            "ACK with payload error should only occur for ACK frames with payload"
-                        );
-                    }
-                    _ => {
-                        // Other frame errors acceptable
-                    }
-                }
+                assert_frame_error_matches_input(
+                    "invalid SETTINGS frame-level rejection",
+                    frame_error,
+                    &frame_data,
+                    frame_flags,
+                    stream_id,
+                );
             }
             Err(ValidationResult::PartiallyValid) => {
                 // Some parsers might use this for mixed valid/invalid
@@ -855,8 +880,14 @@ fuzz_target!(|input: H2SettingsInvalidValueInput| {
                     "All valid settings should result in AllValid validation"
                 );
             }
-            Err(ValidationResult::FrameError(_)) => {
-                // Frame-level errors are acceptable even with valid settings
+            Err(ValidationResult::FrameError(frame_error)) => {
+                assert_frame_error_matches_input(
+                    "valid SETTINGS frame-level rejection",
+                    frame_error,
+                    &frame_data,
+                    frame_flags,
+                    stream_id,
+                );
             }
             Err(ValidationResult::ProtocolError(_)) => {
                 panic!("Frame with only valid settings should not cause protocol error");
