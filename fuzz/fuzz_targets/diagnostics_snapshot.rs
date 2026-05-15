@@ -528,6 +528,14 @@ fn observe_task_console_snapshot_parse(
     }
 }
 
+fn observe_in_memory_parse_error(err: &serde_json::Error, context: &str) {
+    assert_ne!(
+        err.classify(),
+        serde_json::error::Category::Io,
+        "{context}: in-memory snapshot parsing must not report I/O errors"
+    );
+}
+
 fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
     // Limit input processing to reasonable bounds
     let mut raw_data = input.pattern.to_json_bytes();
@@ -716,7 +724,11 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
 
     // General robustness: parser must never panic on any input
     let json_str = String::from_utf8_lossy(&raw_data);
-    let _ = observe_task_console_snapshot_parse(&json_str, "raw diagnostic snapshot");
+    let raw_parse_result =
+        observe_task_console_snapshot_parse(&json_str, "raw diagnostic snapshot");
+    if let Err(err) = &raw_parse_result {
+        observe_in_memory_parse_error(err, "raw diagnostic snapshot");
+    }
 
     // Test round-trip consistency for valid cases
     if input.test_valid_path
@@ -790,8 +802,21 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
         r#"{"malformed": true}"#,
     ];
 
+    let mut minimal_successes = 0usize;
+    let mut minimal_errors = 0usize;
     for &minimal in &minimal_cases {
-        let _ = observe_task_console_snapshot_parse(minimal, "minimal diagnostic snapshot");
+        match observe_task_console_snapshot_parse(minimal, "minimal diagnostic snapshot") {
+            Ok(_) => minimal_successes += 1,
+            Err(err) => {
+                observe_in_memory_parse_error(&err, "minimal diagnostic snapshot");
+                minimal_errors += 1;
+            }
+        }
         // Should not panic on minimal/malformed inputs
     }
+    assert_eq!(
+        minimal_successes + minimal_errors,
+        minimal_cases.len(),
+        "minimal diagnostic snapshot parse observations must cover every case"
+    );
 });
