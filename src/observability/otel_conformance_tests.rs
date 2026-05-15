@@ -50523,21 +50523,21 @@ mod otlp_122_tests {
 
                 // Command-destination consistency checks
                 match cmd_upper.as_str() {
-                    "SUBSCRIBE" | "PSUBSCRIBE" => {
-                        if dest_name.contains("queue") || dest_name.contains("list") {
-                            println!(
-                                "⚠ Pub/sub command '{}' with queue-like destination '{}' - consider list commands",
-                                command, dest_name
-                            );
-                        }
+                    "SUBSCRIBE" | "PSUBSCRIBE"
+                        if dest_name.contains("queue") || dest_name.contains("list") =>
+                    {
+                        println!(
+                            "⚠ Pub/sub command '{}' with queue-like destination '{}' - consider list commands",
+                            command, dest_name
+                        );
                     }
-                    "BRPOP" | "BLPOP" => {
-                        if dest_name.contains("channel") || dest_name.contains("topic") {
-                            println!(
-                                "⚠ List command '{}' with channel-like destination '{}' - consider pub/sub commands",
-                                command, dest_name
-                            );
-                        }
+                    "BRPOP" | "BLPOP"
+                        if dest_name.contains("channel") || dest_name.contains("topic") =>
+                    {
+                        println!(
+                            "⚠ List command '{}' with channel-like destination '{}' - consider pub/sub commands",
+                            command, dest_name
+                        );
                     }
                     _ => {}
                 }
