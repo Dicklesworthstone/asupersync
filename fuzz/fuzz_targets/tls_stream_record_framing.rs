@@ -11,7 +11,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use asupersync::runtime::{Runtime, RuntimeBuilder};
-use asupersync::time::{timeout, wall_now};
+use asupersync::time::{Elapsed, timeout, wall_now};
 use asupersync::tls::{Certificate, TlsConnector, TlsConnectorBuilder};
 use libfuzzer_sys::fuzz_target;
 use rustls::crypto::ring::default_provider;
@@ -62,9 +62,9 @@ enum PostHandshakeAction {
 
 #[derive(Debug)]
 enum Outcome {
-    ConnectOk,
-    ConnectErr,
-    ConnectTimeout,
+    Connected,
+    Rejected,
+    TimedOut,
 }
 
 struct LoopbackServerIo {
@@ -93,7 +93,7 @@ impl LoopbackServerIo {
     }
 
     fn maybe_pending(cx: &Context<'_>, every: u8, op_index: usize) -> bool {
-        if every > 0 && op_index % every as usize == 0 {
+        if every > 0 && op_index.is_multiple_of(every as usize) {
             cx.waker().wake_by_ref();
             return true;
         }
@@ -230,6 +230,25 @@ impl AsyncWrite for LoopbackServerIo {
     }
 }
 
+fn observe_shutdown_result(result: Result<io::Result<()>, Elapsed>, clean_success_expected: bool) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if clean_success_expected => {
+            panic!("clean TLS stream shutdown should succeed: {error}");
+        }
+        Ok(Err(error)) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "mutated TLS stream shutdown error must be visible"
+            );
+        }
+        Err(elapsed) if clean_success_expected => {
+            panic!("clean TLS stream shutdown should not time out: {elapsed}");
+        }
+        Err(_) => {}
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let Ok(mut input) = Unstructured::new(data).arbitrary::<TlsStreamRecordInput>() else {
         return;
@@ -243,9 +262,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let runtime = match simple_runtime() {
-        Ok(runtime) => runtime,
-        Err(_) => return,
+    let Some(runtime) = simple_runtime() else {
+        return;
     };
 
     let clean_success_expected = expects_clean_success(&input);
@@ -260,8 +278,8 @@ fuzz_target!(|data: &[u8]| {
 
         let mut stream = match connect_result {
             Ok(Ok(stream)) => stream,
-            Ok(Err(_)) => return Outcome::ConnectErr,
-            Err(_) => return Outcome::ConnectTimeout,
+            Ok(Err(_)) => return Outcome::Rejected,
+            Err(_) => return Outcome::TimedOut,
         };
 
         if !async_input.client_payload.is_empty() {
@@ -307,19 +325,20 @@ fuzz_target!(|data: &[u8]| {
             }
         }
 
-        let _ = timeout(
+        let shutdown_result = timeout(
             wall_now(),
             Duration::from_millis(IO_TIMEOUT_MS),
             stream.shutdown(),
         )
         .await;
+        observe_shutdown_result(shutdown_result, clean_success_expected);
 
-        Outcome::ConnectOk
+        Outcome::Connected
     });
 
     if clean_success_expected {
         assert!(
-            matches!(result, Outcome::ConnectOk),
+            matches!(result, Outcome::Connected),
             "clean TLS stream path must succeed, got {result:?}"
         );
     }
@@ -437,6 +456,6 @@ fn parse_fixture_key() -> Option<PrivateKeyDer<'static>> {
         .map(PrivateKeyDer::Pkcs8)
 }
 
-fn simple_runtime() -> Result<Runtime, asupersync::error::Error> {
-    RuntimeBuilder::current_thread().build()
+fn simple_runtime() -> Option<Runtime> {
+    RuntimeBuilder::current_thread().build().ok()
 }
