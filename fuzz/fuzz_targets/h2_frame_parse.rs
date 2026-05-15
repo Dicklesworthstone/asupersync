@@ -192,6 +192,22 @@ fn observe_parsed_frame_shape(header: &FrameHeader, payload_len: usize, frame: &
     }
 }
 
+fn assert_settings_ack_non_empty_payload_rejected() {
+    let header = FrameHeader {
+        length: 6,
+        frame_type: 0x4,
+        flags: settings_flags::ACK,
+        stream_id: 0,
+    };
+    let payload = Bytes::from_static(&[0, 1, 0, 0, 0, 1]);
+
+    let err = parse_frame(&header, payload)
+        .expect_err("SETTINGS ACK with payload must be rejected as FRAME_SIZE_ERROR");
+    assert_eq!(err.code, ErrorCode::FrameSizeError);
+    assert_eq!(err.stream_id, None);
+    assert_eq!(err.message, "SETTINGS ACK with non-zero length");
+}
+
 /// Fuzzing input for individual frame parsing
 #[derive(Arbitrary, Debug, Clone)]
 struct FrameParseInput {
@@ -314,6 +330,8 @@ fuzz_target!(|input: FrameParseInput| {
     if input.raw_frame_data.len() > MAX_FUZZ_INPUT_SIZE {
         return;
     }
+
+    assert_settings_ack_non_empty_payload_rejected();
 
     match input.scenario {
         FrameParseScenario::HeaderParsing {
@@ -487,10 +505,7 @@ fn fuzz_padding_validation(
                 // Frame parsing failed - check if it's due to padding validation
                 match err.code {
                     ErrorCode::ProtocolError | ErrorCode::FrameSizeError => {
-                        // Expected for invalid padding length
-                        if pad_length as usize >= payload_size as usize {
-                            // This is the correct behavior for invalid padding
-                        }
+                        // Expected for invalid padding length or related frame validation.
                     }
                     _ => {
                         // Other errors are acceptable
