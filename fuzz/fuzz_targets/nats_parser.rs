@@ -718,11 +718,7 @@ fuzz_target!(|input: FuzzInput| {
                 *duplicate_sid,
             );
             let result = parser.parse_line(sub_line2.as_bytes());
-
-            if result.is_ok() {
-                // SID collision should be detected and rejected
-                // NOTE: This might be acceptable depending on implementation
-            }
+            observe_sid_collision_parse(result, *duplicate_sid);
         }
         CorruptionStrategy::ExceedMaxPayload { size } if *size > input.max_payload_config => {
             // Ensure oversized payloads are properly rejected
@@ -781,6 +777,23 @@ fn observe_sid_setup_parse(result: Result<(), NatsError>, parser: &MockNatsParse
         }
         Err(error) => {
             observe_nats_parse_error(error, "SID collision setup parse");
+        }
+    }
+}
+
+fn observe_sid_collision_parse(result: Result<(), NatsError>, sid: u64) {
+    match result {
+        Ok(()) => {
+            panic!("NATS parser accepted duplicate subscription SID {sid}");
+        }
+        Err(NatsError::Protocol(msg)) => {
+            assert!(
+                !msg.trim().is_empty(),
+                "SID collision protocol error must expose diagnostics"
+            );
+        }
+        Err(error) => {
+            observe_nats_parse_error(error, "SID collision duplicate parse");
         }
     }
 }
