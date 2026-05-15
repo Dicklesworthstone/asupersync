@@ -617,6 +617,44 @@ fn exercise_prefix_roundtrip_invariant(config: &FramedFuzzConfig) {
     }
 }
 
+fn observe_read_buffer<T, U>(framed: &Framed<T, U>, context: &str) {
+    let buffer = framed.read_buffer();
+
+    assert!(
+        buffer.len() <= buffer.capacity(),
+        "{context} read buffer length exceeded capacity"
+    );
+    assert_eq!(
+        buffer.as_ref().len(),
+        buffer.len(),
+        "{context} read buffer slice length diverged from buffer length"
+    );
+}
+
+fn observe_write_buffer<T, U>(framed: &Framed<T, U>, context: &str) {
+    let buffer = framed.write_buffer();
+
+    assert!(
+        buffer.len() <= buffer.capacity(),
+        "{context} write buffer length exceeded capacity"
+    );
+    assert_eq!(
+        buffer.as_ref().len(),
+        buffer.len(),
+        "{context} write buffer slice length diverged from buffer length"
+    );
+}
+
+fn observe_codec_accessors<T, U>(framed: &mut Framed<T, U>, context: &str) {
+    let codec_ptr = framed.codec() as *const U;
+    let codec_mut_ptr = framed.codec_mut() as *mut U as *const U;
+
+    assert_eq!(
+        codec_mut_ptr, codec_ptr,
+        "{context} codec and codec_mut should expose the same codec"
+    );
+}
+
 fuzz_target!(|input: FramedFuzzConfig| {
     // Limit total operations to prevent excessive test time
     let operations = input.operations.iter().take(100);
@@ -693,16 +731,15 @@ fn test_framed_operations_lines<T>(
             }
 
             FramedOperation::InspectReadBuffer => {
-                let _ = framed.read_buffer();
+                observe_read_buffer(framed, "Framed<LinesCodec>");
             }
 
             FramedOperation::InspectWriteBuffer => {
-                let _ = framed.write_buffer();
+                observe_write_buffer(framed, "Framed<LinesCodec>");
             }
 
             FramedOperation::ModifyCodec => {
-                // LinesCodec doesn't have mutable behavior
-                let _ = framed.codec_mut();
+                observe_codec_accessors(framed, "Framed<LinesCodec>");
             }
         }
     }
@@ -748,16 +785,15 @@ fn test_framed_operations_bytes<T, U>(
             }
 
             FramedOperation::InspectReadBuffer => {
-                let _ = framed.read_buffer();
+                observe_read_buffer(framed, "Framed<bytes codec>");
             }
 
             FramedOperation::InspectWriteBuffer => {
-                let _ = framed.write_buffer();
+                observe_write_buffer(framed, "Framed<bytes codec>");
             }
 
             FramedOperation::ModifyCodec => {
-                // For mock codecs, we could modify behavior here
-                let _ = framed.codec_mut();
+                observe_codec_accessors(framed, "Framed<bytes codec>");
             }
         }
     }
