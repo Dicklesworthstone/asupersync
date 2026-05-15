@@ -724,17 +724,11 @@ fuzz_target!(|input: FuzzInput| {
             // Ensure oversized payloads are properly rejected
             let pub_line = format!("PUB test.subject {}\r\n", size);
             let result = parser.parse_line(pub_line.as_bytes());
-            match result {
-                Err(NatsError::Protocol(msg)) if msg.contains("exceeds maximum") => {
-                    // Correct rejection of oversized payload
-                }
-                Ok(()) => {
-                    panic!("Parser accepted oversized payload: {}", size);
-                }
-                _ => {
-                    // Other errors are acceptable
-                }
-            }
+            assert_max_payload_rejection(
+                result,
+                *size,
+                input.max_payload_config.min(MAX_PAYLOAD_SIZE),
+            );
         }
         CorruptionStrategy::InvalidWhitespace { .. } => {
             // Whitespace in subjects should be rejected
@@ -759,6 +753,24 @@ fn observe_nats_parse_error(error: NatsError, context: &str) {
         !message.trim().is_empty(),
         "{context} error must expose diagnostics"
     );
+}
+
+fn assert_max_payload_rejection(result: Result<(), NatsError>, size: usize, effective_max: usize) {
+    match result {
+        Err(NatsError::Protocol(msg)) => {
+            let expected = format!("Payload size {size} exceeds maximum {effective_max}");
+            assert_eq!(
+                msg, expected,
+                "oversized PUB must fail with exact max-payload protocol error"
+            );
+        }
+        Ok(()) => {
+            panic!("Parser accepted oversized payload: {size}");
+        }
+        Err(error) => {
+            panic!("Oversized PUB returned non-protocol error: {error:?}");
+        }
+    }
 }
 
 fn observe_sid_setup_parse(result: Result<(), NatsError>, parser: &MockNatsParser, sid: u64) {
