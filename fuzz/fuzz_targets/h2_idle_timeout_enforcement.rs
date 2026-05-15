@@ -591,7 +591,7 @@ fn process_frame_observed(
     let state_after = connection.state();
 
     match result {
-        Ok(()) => {
+        Ok(_received_frame) => {
             assert!(
                 connection_state_rank(state_after) >= connection_state_rank(state_before),
                 "{context} regressed connection state from {state_before:?} to {state_after:?}"
@@ -765,13 +765,29 @@ fn create_and_send_frame(
 
 // Validation functions
 
+fn assert_initialized_connection_state(state: ConnectionState, context: &str) {
+    assert!(
+        !matches!(state, ConnectionState::Handshaking),
+        "{context} should not remain in handshaking after initialization"
+    );
+}
+
 fn validate_connection_result(result: Result<ConnectionLifecycleResult, H2Error>) {
     match result {
         Ok(res) => {
+            assert_initialized_connection_state(
+                res.initial_state,
+                "connection lifecycle initial state",
+            );
+
             // Connection should not panic
             assert!(
                 res.frames_sent >= res.errors_encountered,
                 "More errors than frames sent"
+            );
+            assert!(
+                res.outgoing_frame_count >= res.goaway_frames.len(),
+                "Captured more GOAWAY frames than total outgoing frames"
             );
 
             // GOAWAY frames should have valid error codes
@@ -808,6 +824,11 @@ fn validate_goaway_result(result: Result<GoAwayGenerationResult, H2Error>, _erro
                 res.setup_streams_created <= 3,
                 "GOAWAY setup created more streams than requested"
             );
+            assert_initialized_connection_state(res.connection_state, "GOAWAY connection state");
+            assert!(
+                res.protocol_error_triggered,
+                "Malformed GOAWAY trigger frame should produce a protocol error"
+            );
 
             if res.goaway_sent {
                 assert!(
@@ -842,6 +863,19 @@ fn validate_stream_operations_result(
                 res.streams_created <= expected_stream_count as u32,
                 "More streams created than requested"
             );
+            assert!(
+                res.errors <= expected_stream_count as u32 * 2,
+                "More stream operation errors than attempted DATA/close frames"
+            );
+            assert!(
+                res.final_frame_count
+                    <= (res.streams_created + res.data_frames_sent + res.errors) as usize + 16,
+                "Unexpectedly large stream operation outgoing frame count"
+            );
+            assert_initialized_connection_state(
+                res.connection_state,
+                "stream operation connection state",
+            );
 
             // Data frames should not exceed stream count
             assert!(
@@ -868,6 +902,7 @@ fn validate_ping_result(result: Result<PingHandlingResult, H2Error>, ping_count:
                 res.ping_responses <= res.pings_sent,
                 "More PING responses than requests"
             );
+            assert_initialized_connection_state(res.connection_state, "PING connection state");
         }
         Err(_) => {
             // PING errors are acceptable
@@ -877,7 +912,16 @@ fn validate_ping_result(result: Result<PingHandlingResult, H2Error>, ping_count:
 
 fn validate_window_update_result(result: Result<WindowUpdateResult, H2Error>) {
     match result {
-        Ok(_res) => {
+        Ok(res) => {
+            assert!(
+                res.updates_sent <= 8,
+                "More WINDOW_UPDATE frames accepted than fuzz cap"
+            );
+            assert!(res.errors <= 8, "More WINDOW_UPDATE errors than fuzz cap");
+            assert_initialized_connection_state(
+                res.connection_state,
+                "WINDOW_UPDATE connection state",
+            );
             // Window updates should not cause connection failure (unless invalid)
         }
         Err(_) => {
@@ -888,7 +932,13 @@ fn validate_window_update_result(result: Result<WindowUpdateResult, H2Error>) {
 
 fn validate_settings_result(result: Result<SettingsProcessingResult, H2Error>) {
     match result {
-        Ok(_res) => {
+        Ok(res) => {
+            assert!(
+                res.settings_frames_sent <= 5,
+                "More SETTINGS frames accepted than fuzz cap"
+            );
+            assert!(res.errors <= 5, "More SETTINGS errors than fuzz cap");
+            assert_initialized_connection_state(res.connection_state, "SETTINGS connection state");
             // Settings processing should not cause fundamental failures
         }
         Err(_) => {
@@ -923,6 +973,10 @@ fn validate_interleaved_result(result: Result<InterleavedFrameResult, H2Error>) 
             assert!(
                 res.frames_processed >= res.errors,
                 "Processed frame count inconsistent with errors"
+            );
+            assert_initialized_connection_state(
+                res.connection_state,
+                "interleaved connection state",
             );
         }
         Err(_) => {
