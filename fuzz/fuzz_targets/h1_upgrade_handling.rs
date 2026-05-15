@@ -93,6 +93,21 @@ fn expect_complete_request(raw: &[u8]) -> Request {
         .expect("valid upgrade request must decode completely")
 }
 
+fn expect_http_error(
+    raw: &[u8],
+    predicate: fn(&HttpError) -> bool,
+    expected_display: &str,
+    message: &str,
+) {
+    match decode_once(raw) {
+        Err(error) if predicate(&error) => {
+            assert_eq!(error.to_string(), expected_display, "{message}");
+        }
+        Ok(result) => panic!("{message}: unexpected successful result {result:?}"),
+        Err(error) => panic!("{message}: unexpected error {error:?}"),
+    }
+}
+
 fn header_values<'a>(request: &'a Request, name: &str) -> impl Iterator<Item = &'a str> {
     request
         .headers
@@ -149,18 +164,27 @@ fn run_fixed_canaries() {
             .expect("partial upgrade head must wait for more bytes, not error");
     assert!(partial.is_none(), "partial upgrade head must not decode");
 
-    let malformed_line = decode_once(b"GET  /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n");
-    assert!(
-        matches!(malformed_line, Err(HttpError::BadRequestLine)),
-        "repeated request-line delimiter must reject, got {malformed_line:?}"
+    expect_http_error(
+        b"GET  /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n",
+        matches_bad_request_line,
+        "malformed request line",
+        "repeated request-line delimiter must reject with exact diagnostic",
     );
 
-    let invalid_upgrade_value =
-        decode_once(b"GET /chat HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: web\0socket\r\n\r\n");
-    assert!(
-        matches!(invalid_upgrade_value, Err(HttpError::InvalidHeaderValue)),
-        "NUL inside Upgrade value must reject, got {invalid_upgrade_value:?}"
+    expect_http_error(
+        b"GET /chat HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: web\0socket\r\n\r\n",
+        matches_invalid_header_value,
+        "invalid header value",
+        "NUL inside Upgrade value must reject with exact diagnostic",
     );
+}
+
+fn matches_bad_request_line(error: &HttpError) -> bool {
+    matches!(error, HttpError::BadRequestLine)
+}
+
+fn matches_invalid_header_value(error: &HttpError) -> bool {
+    matches!(error, HttpError::InvalidHeaderValue)
 }
 
 fuzz_target!(|data: &[u8]| {
