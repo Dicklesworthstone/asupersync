@@ -9,6 +9,10 @@
 
 use libfuzzer_sys::fuzz_target;
 
+const MAX_COMPRESSED_CHUNK_LEN: usize = 64 * 1024 * 1024;
+const MAX_RAW_DECOMPRESSED_LEN: usize = 16 * 1024 * 1024;
+const MAX_BLOCK_DECOMPRESSED_LEN: usize = 1024 * 1024;
+
 fuzz_target!(|data: &[u8]| {
     // Skip tiny inputs
     if data.len() < 4 {
@@ -16,7 +20,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Limit input size to prevent timeout (64MB max - matches MAX_COMPRESSED_CHUNK_LEN)
-    if data.len() > 64 * 1024 * 1024 {
+    if data.len() > MAX_COMPRESSED_CHUNK_LEN {
         return;
     }
 
@@ -39,17 +43,16 @@ fuzz_target!(|data: &[u8]| {
                 round_trip, decompressed,
                 "LZ4 prepended-size recompression changed decompressed bytes"
             );
+            assert_size_prepended_len(data, decompressed.len(), "initial prepended-size decode");
 
             // Test that decompressed size is reasonable (guard against decompression bombs)
             // The trace file parser has MAX_COMPRESSED_CHUNK_LEN = 64MB limit
-            if decompressed.len() > 64 * 1024 * 1024 {
+            if decompressed.len() > MAX_COMPRESSED_CHUNK_LEN {
                 // This would be caught by the trace parser's bounds checking
                 return;
             }
         }
-        Err(_) => {
-            // Decompression error is expected for malformed input
-        }
+        Err(err) => observe_decompress_error(err, "initial prepended-size decode"),
     }
 
     // Test raw LZ4 decompression (no size prefix)
@@ -60,19 +63,27 @@ fuzz_target!(|data: &[u8]| {
             as usize;
 
         // Only attempt decompression if size is reasonable (prevent memory exhaustion)
-        if size <= 16 * 1024 * 1024 {
+        if size <= MAX_RAW_DECOMPRESSED_LEN {
             let compressed_data = &data[4..];
-            let _ = lz4_flex::decompress(compressed_data, size);
+            observe_decompress_result(
+                lz4_flex::decompress(compressed_data, size),
+                "raw block decode from declared size",
+                size,
+            );
         }
     }
 
     // Test LZ4 block format decompression
     if data.len() > 4 {
-        let _ = lz4_flex::block::decompress(data, 1024 * 1024);
+        observe_decompress_result(
+            lz4_flex::block::decompress(data, MAX_BLOCK_DECOMPRESSED_LEN),
+            "bounded block decode",
+            MAX_BLOCK_DECOMPRESSED_LEN,
+        );
     }
 
     // Test compression of the input data to exercise the compression path
-    if data.len() <= 1024 * 1024 {
+    if data.len() <= MAX_BLOCK_DECOMPRESSED_LEN {
         // Reasonable size for compression testing
         let compressed = lz4_flex::compress(data);
         let decompressed = lz4_flex::decompress(&compressed, data.len()).unwrap_or_else(|err| {
@@ -110,17 +121,17 @@ fuzz_target!(|data: &[u8]| {
 
         // Test with maximum u32 size (potential integer overflow)
         modified[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
-        let _ = lz4_flex::decompress_size_prepended(&modified);
+        observe_size_prepended_decode(&modified, "u32::MAX size prefix");
 
         // Test with zero size
         modified[0..4].copy_from_slice(&0u32.to_le_bytes());
-        let _ = lz4_flex::decompress_size_prepended(&modified);
+        observe_size_prepended_decode(&modified, "zero size prefix");
 
         // Test with size larger than remaining data
         if data.len() > 8 {
             let large_size = (data.len() * 10) as u32;
             modified[0..4].copy_from_slice(&large_size.to_le_bytes());
-            let _ = lz4_flex::decompress_size_prepended(&modified);
+            observe_size_prepended_decode(&modified, "oversized relative size prefix");
         }
     }
 
@@ -132,10 +143,60 @@ fuzz_target!(|data: &[u8]| {
                     let end = (start + chunk_size).min(data.len());
                     let chunk = &data[start..end];
                     if chunk.len() >= 4 {
-                        let _ = lz4_flex::decompress_size_prepended(chunk);
+                        observe_size_prepended_decode(chunk, "partial chunk prepended-size decode");
                     }
                 }
             }
         }
     }
 });
+
+fn observe_size_prepended_decode(data: &[u8], context: &str) {
+    match lz4_flex::decompress_size_prepended(data) {
+        Ok(decompressed) => {
+            assert_size_prepended_len(data, decompressed.len(), context);
+            assert!(
+                decompressed.len() <= MAX_COMPRESSED_CHUNK_LEN,
+                "{context} produced {} bytes, above trace chunk bound {}",
+                decompressed.len(),
+                MAX_COMPRESSED_CHUNK_LEN
+            );
+        }
+        Err(err) => observe_decompress_error(err, context),
+    }
+}
+
+fn observe_decompress_result<E: core::fmt::Debug>(
+    result: Result<Vec<u8>, E>,
+    context: &str,
+    max_decompressed_len: usize,
+) {
+    match result {
+        Ok(decompressed) => {
+            assert!(
+                decompressed.len() <= max_decompressed_len,
+                "{context} produced {} bytes, above expected bound {}",
+                decompressed.len(),
+                max_decompressed_len
+            );
+        }
+        Err(err) => observe_decompress_error(err, context),
+    }
+}
+
+fn observe_decompress_error<E: core::fmt::Debug>(err: E, context: &str) {
+    let err_debug = format!("{err:?}");
+    assert!(
+        !err_debug.is_empty(),
+        "{context} returned an empty decompression error"
+    );
+}
+
+fn assert_size_prepended_len(data: &[u8], decompressed_len: usize, context: &str) {
+    debug_assert!(data.len() >= 4);
+    let declared_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    assert_eq!(
+        decompressed_len, declared_len,
+        "{context} produced {decompressed_len} bytes but declared {declared_len}"
+    );
+}
