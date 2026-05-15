@@ -36,6 +36,10 @@ struct FlowControlState {
     send_window: i32,
 }
 
+fn validated_window_i32(window: i64) -> i32 {
+    i32::try_from(window).expect("validated H2 flow-control window must fit i32")
+}
+
 impl Default for FlowControlState {
     fn default() -> Self {
         Self {
@@ -92,7 +96,7 @@ impl MockH2Connection {
                 return Err("flow control window overflow".to_string());
             }
 
-            self.connection_send_window = new_window as i32;
+            self.connection_send_window = validated_window_i32(new_window);
         } else {
             // Stream-level window update
             let stream = self.streams.entry(frame.stream_id).or_default();
@@ -102,7 +106,7 @@ impl MockH2Connection {
                 return Err("flow control window overflow".to_string());
             }
 
-            stream.send_window = new_window as i32;
+            stream.send_window = validated_window_i32(new_window);
         }
 
         Ok(())
