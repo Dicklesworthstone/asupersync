@@ -4,7 +4,7 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::frame::SettingsFrame;
-use asupersync::http::h2::{ErrorCode, FrameHeader, FrameType, Settings};
+use asupersync::http::h2::{ErrorCode, FrameHeader, FrameType, H2Error, Settings};
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 SETTINGS frame with known IDs but invalid values test input
@@ -350,6 +350,35 @@ fn assert_frame_error_matches_input(
             );
         }
     }
+}
+
+fn assert_production_h2_error_shape(
+    context: &str,
+    error: &H2Error,
+    expected_code: ErrorCode,
+    expected_message: &str,
+) {
+    assert_eq!(
+        error.code, expected_code,
+        "{context}: production parser returned unexpected error code"
+    );
+    assert_eq!(
+        error.stream_id, None,
+        "{context}: production SETTINGS errors must be connection-level"
+    );
+    assert_eq!(
+        error.message, expected_message,
+        "{context}: production parser returned unexpected message"
+    );
+    assert!(
+        error.is_connection_error(),
+        "{context}: production SETTINGS error should classify as connection-level"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("HTTP/2 connection error ({expected_code}): {expected_message}"),
+        "{context}: production parser returned unexpected display text"
+    );
 }
 
 impl SettingsState {
@@ -955,16 +984,24 @@ fn exercise_production_settings_value_validation(
     if stream_id != 0 {
         let err =
             parse_result.expect_err("production SETTINGS parser must reject non-zero stream IDs");
-        assert_eq!(err.code, ErrorCode::ProtocolError);
-        assert_eq!(err.message, "SETTINGS frame with non-zero stream ID");
+        assert_production_h2_error_shape(
+            "non-zero SETTINGS stream ID",
+            &err,
+            ErrorCode::ProtocolError,
+            "SETTINGS frame with non-zero stream ID",
+        );
         return;
     }
 
     if frame_flags & 0x01 != 0 && !frame_data.is_empty() {
         let err = parse_result
             .expect_err("production SETTINGS parser must reject ACK frames with payload");
-        assert_eq!(err.code, ErrorCode::FrameSizeError);
-        assert_eq!(err.message, "SETTINGS ACK with non-zero length");
+        assert_production_h2_error_shape(
+            "SETTINGS ACK with payload",
+            &err,
+            ErrorCode::FrameSizeError,
+            "SETTINGS ACK with non-zero length",
+        );
         return;
     }
 
@@ -985,14 +1022,22 @@ fn exercise_production_settings_value_validation(
             }
         }
         Err(err) => {
-            assert!(
-                invalid_settings
-                    .iter()
-                    .any(|entry| entry.expected_error_code == err.code
-                        && entry.expected_message == err.message),
-                "production SETTINGS parser rejected with unexpected error {:?}; invalid settings: {:?}",
-                err,
-                invalid_settings
+            let matching_setting = invalid_settings
+                .iter()
+                .find(|entry| {
+                    entry.expected_error_code == err.code && entry.expected_message == err.message
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "production SETTINGS parser rejected with unexpected error {:?}; invalid settings: {:?}",
+                        err, invalid_settings
+                    )
+                });
+            assert_production_h2_error_shape(
+                "invalid SETTINGS value",
+                &err,
+                matching_setting.expected_error_code,
+                matching_setting.expected_message,
             );
         }
     }
