@@ -71,6 +71,43 @@ struct TlsExtension {
     data: Vec<u8>,
 }
 
+fn observe_tls_context(context: &TlsContextData) -> usize {
+    let tls_score = match context.tls_version {
+        TlsVersion::Tls12 => 12,
+        TlsVersion::Tls13 => 13,
+        TlsVersion::Unsupported(version) => usize::from(version),
+    };
+    let cipher_score = match context.cipher_preference {
+        CipherSuite::Aes128GcmSha256 => 128,
+        CipherSuite::Aes256GcmSha384 => 256,
+        CipherSuite::ChaCha20Poly1305Sha256 => 20,
+        CipherSuite::Unsupported(suite) => usize::from(suite),
+    };
+    let extension_score = context
+        .extensions
+        .iter()
+        .take(8)
+        .fold(0usize, |score, extension| {
+            score
+                .wrapping_add(usize::from(extension.extension_type))
+                .wrapping_add(extension.data.len())
+        });
+
+    context
+        .sni_hostname
+        .len()
+        .wrapping_add(tls_score)
+        .wrapping_add(cipher_score)
+        .wrapping_add(extension_score)
+}
+
+fn is_plausible_alpn_token(protocol: &[u8]) -> bool {
+    !protocol.is_empty()
+        && protocol.len() <= 255
+        && protocol.iter().all(|&b| b >= 0x20 || b == 0x09)
+        && std::str::from_utf8(protocol).is_ok()
+}
+
 fuzz_target!(|data: &[u8]| {
     // Guard against excessive input size
     if data.len() > 100_000 {
@@ -89,6 +126,8 @@ fuzz_target!(|data: &[u8]| {
     if test_seq.offered_protocols.len() > 20 {
         return;
     }
+
+    let _tls_context_observation = observe_tls_context(&test_seq.tls_context);
 
     // Test core ALPN negotiation
     test_alpn_negotiation(&test_seq);
@@ -126,14 +165,11 @@ fn test_alpn_negotiation(test_seq: &AlpnNegotiationSequence) {
             // Validate h2-only server behavior
             if test_seq.h2_only_server {
                 if known_protocol == b"h2" {
-                    match negotiation_result {
-                        AlpnResult::Accepted => {
-                            // h2 should be accepted on h2-only server
-                        }
-                        _ => {
-                            // This might be acceptable if server has additional restrictions
-                        }
-                    }
+                    assert_eq!(
+                        negotiation_result,
+                        AlpnResult::Accepted,
+                        "h2-only server must accept the exact h2 ALPN protocol"
+                    );
                 } else if known_protocol == b"http/1.1" {
                     assert!(
                         matches!(negotiation_result, AlpnResult::Rejected),
@@ -195,10 +231,10 @@ fn test_h2_only_enforcement(test_seq: &AlpnNegotiationSequence) {
 
     // Test that h2 is still accepted
     let h2_result = simulate_alpn_negotiation(b"h2", true);
-    // h2 should be accepted (or at least not rejected for protocol reasons)
-    assert!(
-        !matches!(h2_result, AlpnResult::Rejected),
-        "h2-only server should not reject h2 protocol"
+    assert_eq!(
+        h2_result,
+        AlpnResult::Accepted,
+        "h2-only server must accept h2 protocol"
     );
 }
 
@@ -247,7 +283,7 @@ fn test_malformed_protocols(test_seq: &AlpnNegotiationSequence) {
                     // This should only happen if the malformed data happens to match "h2"
                     // and we're not on an h2-only server with strict validation
                 }
-                AlpnResult::Rejected | AlpnResult::NoMatch | AlpnResult::Error => {
+                AlpnResult::Rejected | AlpnResult::NoMatch => {
                     // Expected for malformed protocols
                 }
             }
@@ -259,6 +295,9 @@ fn test_malformed_protocols(test_seq: &AlpnNegotiationSequence) {
         if protocol.data.len() > 1000 {
             continue; // Skip extremely long protocols for performance
         }
+
+        let _format_hint_matches =
+            protocol.is_valid_format == is_plausible_alpn_token(&protocol.data);
 
         let fuzz_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             simulate_alpn_negotiation(&protocol.data, test_seq.h2_only_server)
@@ -282,8 +321,6 @@ enum AlpnResult {
     Rejected,
     /// No matching protocol found
     NoMatch,
-    /// Error during negotiation
-    Error,
 }
 
 /// Simulate ALPN negotiation process
@@ -327,26 +364,6 @@ fn simulate_alpn_negotiation(protocol: &[u8], h2_only: bool) -> AlpnResult {
             _ => AlpnResult::NoMatch,
         }
     }
-}
-
-/// Generate test scenarios with multiple protocol offerings
-fn generate_multi_protocol_scenarios() -> Vec<Vec<Vec<u8>>> {
-    vec![
-        // Standard client preferences
-        vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-        vec![b"http/1.1".to_vec(), b"h2".to_vec()], // Reverse order
-        // With deprecated protocols
-        vec![b"h2".to_vec(), b"spdy/3.1".to_vec(), b"http/1.1".to_vec()],
-        // Edge cases
-        vec![b"h2c".to_vec(), b"h2".to_vec()], // Cleartext first
-        vec![b"unknown".to_vec(), b"h2".to_vec()],
-        vec![b"".to_vec(), b"h2".to_vec()], // Empty protocol
-        // Only unsupported protocols
-        vec![b"spdy/2".to_vec(), b"custom".to_vec()],
-        // Single protocol offers
-        vec![b"h2".to_vec()],
-        vec![b"http/1.1".to_vec()],
-    ]
 }
 
 /// Test that multi-protocol negotiation selects the best available option
