@@ -216,9 +216,15 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
             }
             Err(H2Error {
                 code: ErrorCode::CompressionError,
-                ..
+                message,
+                stream_id,
             }) => {
-                // If failed, it's likely due to eviction from size reduction
+                assert_compression_error_shape(
+                    message,
+                    stream_id,
+                    "invalid dynamic index",
+                    "post-shrink dynamic index",
+                );
             }
             Err(e) => {
                 panic!("Unexpected error after size update: {}", e);
@@ -251,9 +257,38 @@ fn assert_compression_error(error: H2Error, expected_message: &str) {
         ErrorCode::CompressionError,
         "expected compression error, got {error}"
     );
+    assert_compression_error_shape(
+        error.message,
+        error.stream_id,
+        expected_message,
+        "compression error",
+    );
+}
+
+fn assert_compression_error_shape(
+    message: String,
+    stream_id: Option<u32>,
+    expected_message: &str,
+    context: &str,
+) {
+    assert!(
+        stream_id.is_none(),
+        "{context}: HPACK compression errors must be connection-level"
+    );
     assert_eq!(
-        error.message, expected_message,
-        "compression error message changed"
+        message, expected_message,
+        "{context}: compression error message changed"
+    );
+
+    let error = H2Error::compression(message);
+    assert!(
+        error.is_connection_error(),
+        "{context}: rebuilt HPACK compression error must be connection-level"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("HTTP/2 connection error (COMPRESSION_ERROR): {expected_message}"),
+        "{context}: compression error display changed"
     );
 }
 
