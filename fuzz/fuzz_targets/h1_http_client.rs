@@ -239,7 +239,8 @@ fn test_status_line_parsing(
         Ok(None) => {
             // Incomplete response - acceptable
         }
-        Err(_) => {
+        Err(error) => {
+            observe_client_response_error(&error, "status-line response");
             // Parse error - acceptable for malformed input.
         }
     }
@@ -286,7 +287,8 @@ fn test_header_parsing(
         Ok(None) => {
             // Incomplete response
         }
-        Err(_) => {
+        Err(error) => {
+            observe_client_response_error(&error, "header response");
             // Parse error - acceptable for malformed fuzz input.
         }
     }
@@ -326,7 +328,8 @@ fn test_content_length_parsing(
         Ok(None) => {
             // Incomplete response
         }
-        Err(_) => {
+        Err(error) => {
+            observe_client_response_error(&error, "content-length response");
             // Parse error - acceptable for malformed fuzz input.
         }
     }
@@ -398,7 +401,8 @@ fn test_header_injection(
         Ok(None) => {
             // Incomplete response
         }
-        Err(_) => {
+        Err(error) => {
+            observe_client_response_error(&error, "header-injection response");
             // Parse error - acceptable for injection attempts
         }
     }
@@ -431,13 +435,15 @@ fn observe_response_decode(input: &[u8]) {
                 "incomplete client response decode should not grow source buffer"
             );
         }
-        Err(error) => {
-            assert!(
-                !error.to_string().is_empty(),
-                "client response parser errors should carry non-empty diagnostics"
-            );
-        }
+        Err(error) => observe_client_response_error(error, "raw response"),
     }
+}
+
+fn observe_client_response_error(error: &HttpError, context: &str) {
+    assert!(
+        !error.to_string().is_empty(),
+        "{context}: client response parser error should carry non-empty diagnostics"
+    );
 }
 
 fn validate_decoded_response(response: &Response) {
