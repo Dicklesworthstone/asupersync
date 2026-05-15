@@ -167,6 +167,35 @@ fn observe_manifest_parse(manifest: &str) {
     }
 }
 
+fn observe_known_json_fields(value: &serde_json::Value, fields: &[&str], context: &str) {
+    let present = fields
+        .iter()
+        .filter(|field| value.get(**field).is_some())
+        .count();
+    if present > 0 {
+        assert!(
+            value.is_object(),
+            "{context} fields observed on non-object JSON"
+        );
+    }
+}
+
+fn observe_json_number_projection(value: &serde_json::Value, context: &str) {
+    assert!(value.is_number(), "{context} should be a JSON number");
+    assert!(
+        value.as_u64().is_some() || value.as_i64().is_some() || value.as_f64().is_some(),
+        "{context} number has no serde_json numeric projection"
+    );
+}
+
+fn observe_json_bool_projection(value: &serde_json::Value, context: &str) {
+    assert!(value.is_boolean(), "{context} should be a JSON bool");
+    assert!(
+        value.as_bool().is_some(),
+        "{context} bool has no serde_json bool projection"
+    );
+}
+
 fn test_ndjson_parsing(lines: &[String]) {
     let limited_lines = if lines.len() > MAX_NDJSON_LINES {
         &lines[..MAX_NDJSON_LINES]
@@ -202,35 +231,41 @@ fn test_forensic_line_parsing(line: &str) {
     // If it parses as JSON, verify structure expectations
     if let Some(json_value) = observe_json_value_parse(line, "forensic line field scan") {
         // Check for expected forensic log fields
-        let _ = json_value.get("v");
-        let _ = json_value.get("ts_us");
-        let _ = json_value.get("subsystem");
-        let _ = json_value.get("test_id");
-        let _ = json_value.get("seed");
-        let _ = json_value.get("event");
-        let _ = json_value.get("category");
-        let _ = json_value.get("level");
-        let _ = json_value.get("thread_id");
-        let _ = json_value.get("message");
-        let _ = json_value.get("data");
+        observe_known_json_fields(
+            &json_value,
+            &[
+                "v",
+                "ts_us",
+                "subsystem",
+                "test_id",
+                "seed",
+                "event",
+                "category",
+                "level",
+                "thread_id",
+                "message",
+                "data",
+            ],
+            "forensic line",
+        );
 
         // Test field type expectations
         if let Some(v) = json_value.get("v")
             && v.is_number()
         {
-            let _ = v.as_u64();
+            observe_json_number_projection(v, "forensic line v");
         }
 
         if let Some(ts) = json_value.get("ts_us")
             && ts.is_number()
         {
-            let _ = ts.as_u64();
+            observe_json_number_projection(ts, "forensic line ts_us");
         }
 
         if let Some(thread_id) = json_value.get("thread_id")
             && thread_id.is_number()
         {
-            let _ = thread_id.as_u64();
+            observe_json_number_projection(thread_id, "forensic line thread_id");
         }
     }
 }
@@ -300,25 +335,31 @@ fn test_manifest_parsing(manifest_data: &str) {
     // Test specific manifest expectations
     if let Some(json_value) = observe_json_value_parse(safe_data, "manifest field scan") {
         // Check expected manifest fields
-        let _ = json_value.get("schema_id");
-        let _ = json_value.get("passed");
-        let _ = json_value.get("scenario_id");
-        let _ = json_value.get("seed");
-        let _ = json_value.get("exit_code");
-        let _ = json_value.get("duration_us");
-        let _ = json_value.get("artifacts");
+        observe_known_json_fields(
+            &json_value,
+            &[
+                "schema_id",
+                "passed",
+                "scenario_id",
+                "seed",
+                "exit_code",
+                "duration_us",
+                "artifacts",
+            ],
+            "manifest",
+        );
 
         // Validate field types
         if let Some(passed) = json_value.get("passed")
             && passed.is_boolean()
         {
-            let _ = passed.as_bool();
+            observe_json_bool_projection(passed, "manifest passed");
         }
 
         if let Some(exit_code) = json_value.get("exit_code")
             && exit_code.is_number()
         {
-            let _ = exit_code.as_i64();
+            observe_json_number_projection(exit_code, "manifest exit_code");
         }
     }
 }
