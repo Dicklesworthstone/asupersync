@@ -55,10 +55,9 @@ fuzz_target!(|data: &[u8]| {
                 // Expected for malformed padding (pad_length > payload_length)
             }
             Err(error) => {
-                observe_h2_parse_error(&error, "padded DATA frame");
-                // Other errors acceptable for malformed input
+                panic!("padded DATA frame should decode or report ProtocolError: {error:?}");
             }
-            _ => {} // Non-DATA frames from parsing
+            frame => panic!("padded DATA frame parser returned non-DATA frame: {frame:?}"),
         }
     }
 
@@ -73,10 +72,9 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(data_frame.data.len(), data.len());
             }
             Err(error) => {
-                observe_h2_parse_error(&error, "unpadded DATA frame");
-                // Parse errors acceptable for malformed frame structure
+                panic!("unpadded DATA frame with stream 1 should parse as DATA: {error:?}");
             }
-            _ => {}
+            frame => panic!("unpadded DATA frame parser returned non-DATA frame: {frame:?}"),
         }
     }
 
