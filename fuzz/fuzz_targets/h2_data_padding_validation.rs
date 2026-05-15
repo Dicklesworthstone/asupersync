@@ -681,33 +681,35 @@ fn test_flag_combinations(parser: &MockDataFrameParser, test_case: &DataPaddingT
 }
 
 fn test_padding_boundaries(parser: &MockDataFrameParser, test_case: &DataPaddingTestCase) {
-    // Test padding length exactly equal to remaining data length
+    // Test padding length exactly equal to the remaining payload bytes.
     if let PayloadConfig::WithPadding { data, .. } = &test_case.payload {
         let data_bytes = parser.build_data_content(data);
+        let boundary_padding_len = data_bytes.len().min(u8::MAX as usize);
         let mut exact_padding_case = test_case.clone();
 
-        if let PayloadConfig::WithPadding {
-            ref mut padding_length_byte,
-            ..
-        } = exact_padding_case.payload
-        {
-            *padding_length_byte = data_bytes.len() as u8;
+        exact_padding_case.header.flags.padded = true;
+        exact_padding_case.header.stream_id = StreamIdConfig::Valid(1);
+        exact_padding_case.scenario = PaddingScenario::ExactFit;
+        exact_padding_case.payload = PayloadConfig::WithPadding {
+            padding_length_byte: boundary_padding_len as u8,
+            data: DataContent::Empty,
+            padding_bytes: PaddingContent::Zeros(boundary_padding_len),
+        };
 
-            let result = parser.parse_data_frame(&exact_padding_case);
+        let result = parser.parse_data_frame(&exact_padding_case);
 
-            // This should result in empty data (all padding) or an error
-            match result {
-                Ok(parsed) => {
-                    assert!(
-                        parsed.data.is_empty(),
-                        "Exact padding should result in empty data"
-                    );
-                }
-                Err(FrameParseError::PaddingExceedsData { .. }) => {
-                    // Also acceptable if padding calculation includes the padding length byte
-                }
-                _ => {}
+        match result {
+            Ok(parsed) => {
+                assert!(
+                    parsed.data.is_empty(),
+                    "Exact padding should result in empty data"
+                );
+                assert_eq!(
+                    parsed.padding_removed, boundary_padding_len,
+                    "Exact padding should remove the declared padding length"
+                );
             }
+            Err(error) => panic!("Exact padding boundary should parse cleanly: {error:?}"),
         }
     }
 }
