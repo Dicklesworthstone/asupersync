@@ -617,24 +617,27 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                 }
 
                 for invalid_frame in invalid_raw_frames {
-                    if invalid_frame.len() >= 8 {
-                        let frame_data = create_raw_ping_frame(
-                            &invalid_frame[..invalid_frame.len().min(8)],
-                            0,
-                            false,
-                        );
+                    let raw_len = invalid_frame.len().min(1024);
+                    let raw_payload = &invalid_frame[..raw_len];
+                    let frame_data = create_raw_ping_frame(raw_payload, 0, false);
 
-                        if frame_data.len() >= 9 {
-                            let mut header_buf = BytesMut::from(&frame_data[0..9]);
-                            let payload_bytes = Bytes::copy_from_slice(&frame_data[9..]);
+                    if frame_data.len() >= 9 {
+                        let mut header_buf = BytesMut::from(&frame_data[0..9]);
+                        let payload_bytes = Bytes::copy_from_slice(&frame_data[9..]);
 
-                            if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                                let result = assert_ping_parse_contract(&header, &payload_bytes)?;
+                        if let Ok(header) = FrameHeader::parse(&mut header_buf) {
+                            let result = assert_ping_parse_contract(&header, &payload_bytes)?;
+                            if raw_payload.len() == 8 {
                                 observe_ping_parse_outcome(
                                     result,
                                     false,
-                                    "mixed invalid raw frame",
+                                    "mixed raw frame with valid PING length",
                                 )?;
+                            } else if result.is_some() {
+                                return Err(format!(
+                                    "mixed invalid raw frame with {} bytes parsed successfully",
+                                    raw_payload.len()
+                                ));
                             }
                         }
                     }
