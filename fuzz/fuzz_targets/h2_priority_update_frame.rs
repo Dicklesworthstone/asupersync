@@ -1,35 +1,51 @@
-//! HTTP/2 PRIORITY_UPDATE frame handling fuzz target.
+//! HTTP/2 PRIORITY_UPDATE frame implementation-gap fuzz target.
 //!
 //! Tests PRIORITY_UPDATE frame processing per RFC 9218 HTTP/2 Priority specification.
-//! PRIORITY_UPDATE frames (type 0xC) update stream priority using urgency and incremental flags.
+//! PRIORITY_UPDATE frames (type 0x10) update stream priority using urgency and incremental flags.
 //!
 //! NOTE: PRIORITY_UPDATE frames are not yet implemented in the current HTTP/2 stack,
-//! so this fuzzer simulates the expected behavior according to the specification.
+//! so this fuzzer drives the live frame parser and stream codec implementation gap
+//! instead of simulating priority parsing locally.
 //!
 //! This fuzzer generates arbitrary frame variants and verifies:
-//! 1. Unknown urgency values (>7) are rejected per RFC 9218 Section 4
-//! 2. Reserved flags are ignored or rejected appropriately
-//! 3. Invalid stream IDs are handled correctly
-//! 4. Frame size constraints are enforced
+//! 1. PRIORITY_UPDATE uses the RFC 9218 HTTP/2 frame type, 0x10
+//! 2. The direct parser preserves the extension frame as `Frame::Unknown`
+//! 3. The streaming codec skips the unimplemented extension frame and stays aligned
+//! 4. Frame size constraints are enforced before extension-frame skipping
 //! 5. No panics occur with malformed priority data
 
 #![no_main]
 
-use arbitrary::Arbitrary;
-use asupersync::bytes::BytesMut;
+use arbitrary::{Arbitrary, Unstructured};
+use asupersync::{
+    bytes::{Bytes, BytesMut},
+    codec::Decoder,
+    http::h2::{
+        Frame, FrameCodec,
+        frame::{DEFAULT_MAX_FRAME_SIZE, FrameHeader, parse_frame},
+    },
+};
 use libfuzzer_sys::fuzz_target;
+
+const PRIORITY_UPDATE_FRAME_TYPE: u8 = 0x10;
+const PING_FRAME_TYPE: u8 = 0x06;
+const MAX_PRIORITY_FIELD_BYTES: usize = 4096;
+const MAX_CUSTOM_FIELDS: usize = 10;
+const PING_PAYLOAD: &[u8; 8] = b"priority";
 
 /// PRIORITY_UPDATE frame test with arbitrary priority parameters
 #[derive(Debug, Clone, Arbitrary)]
 struct PriorityUpdateTest {
-    /// Target stream ID for priority update
+    /// Prioritized Stream ID carried inside the PRIORITY_UPDATE payload.
     stream_id: u32,
     /// Priority update payload (urgency + incremental + custom fields)
     priority_payload: PriorityPayload,
     /// Additional frame flags beyond standard ones
     extra_flags: u8,
-    /// Whether to test with connection-level priority update (stream_id = 0)
+    /// Whether to use the RFC-valid connection stream in the frame header.
     connection_level: bool,
+    /// Byte index used when truncating a generated wire frame.
+    truncate_seed: u16,
 }
 
 /// Priority payload with arbitrary urgency and flags
@@ -62,7 +78,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let mut u = arbitrary::Unstructured::new(data);
+    let mut u = Unstructured::new(data);
 
     // Generate PRIORITY_UPDATE test case
     let test_case = match PriorityUpdateTest::arbitrary(&mut u) {
@@ -71,253 +87,130 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Limit fields to prevent excessive processing
-    if test_case.priority_payload.custom_fields.len() > 10
-        || test_case.priority_payload.raw_bytes.len() > 10_000
+    if test_case.priority_payload.custom_fields.len() > MAX_CUSTOM_FIELDS
+        || test_case.priority_payload.raw_bytes.len() > MAX_PRIORITY_FIELD_BYTES
     {
         return;
     }
 
-    // Test core PRIORITY_UPDATE frame processing
-    test_priority_update_frame(&test_case);
-
-    // Test urgency validation specifically
-    test_urgency_validation(&test_case);
-
-    // Test stream ID validation
-    test_stream_id_validation(&test_case);
-
-    // Test malformed payload handling
-    test_malformed_payload(&test_case);
-
-    // Test flag handling
-    test_frame_flags(&test_case);
-});
-
-/// Test PRIORITY_UPDATE frame processing with arbitrary parameters
-fn test_priority_update_frame(test_case: &PriorityUpdateTest) {
-    let stream_id = if test_case.connection_level {
-        0 // Connection-level priority update
-    } else {
-        test_case.stream_id.max(1) // Ensure valid stream ID
-    };
-
-    let priority_data = build_priority_payload(&test_case.priority_payload);
-
-    // Test frame creation
-    let frame_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        simulate_priority_update_frame(stream_id, &priority_data, test_case.extra_flags)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        observe_direct_priority_update_parser(&test_case);
+        observe_codec_skips_complete_priority_update(&test_case);
+        observe_codec_alignment_after_priority_update(&test_case);
+        observe_truncated_priority_update_waits(&test_case);
+        observe_oversized_priority_update_rejected();
     }));
 
     assert!(
-        frame_result.is_ok(),
-        "PRIORITY_UPDATE frame processing should not panic for stream_id={}, payload_len={}",
-        stream_id,
-        priority_data.len()
+        result.is_ok(),
+        "live PRIORITY_UPDATE frame observation should not panic: {test_case:?}",
     );
+});
 
-    if let Ok(result) = frame_result {
-        match result {
-            PriorityUpdateResult::Accepted {
-                urgency,
-                incremental,
-            } => {
-                // Valid priority update - check constraints
-                assert!(
-                    urgency <= 7,
-                    "Accepted urgency {} exceeds maximum of 7",
-                    urgency
-                );
+/// Exercise the public frame parser seam. Until PRIORITY_UPDATE has first-class
+/// support, the parser must preserve it as an unknown extension frame.
+fn observe_direct_priority_update_parser(test_case: &PriorityUpdateTest) {
+    let payload = build_priority_update_payload(test_case);
+    let header = priority_update_header(test_case, payload.len() as u32);
+    let frame = parse_frame(&header, Bytes::copy_from_slice(&payload))
+        .expect("PRIORITY_UPDATE extension frame should parse as unknown");
 
-                // Incremental flag should be preserved
-                assert_eq!(
-                    incremental, test_case.priority_payload.incremental,
-                    "Incremental flag should be preserved in valid update"
-                );
-            }
-            PriorityUpdateResult::Rejected { reason } => {
-                // Rejection should have a valid reason
-                assert!(!reason.is_empty(), "Rejection reason should be provided");
-            }
-            PriorityUpdateResult::Error => {
-                // Error cases are acceptable for malformed input
-            }
+    match frame {
+        Frame::Unknown {
+            frame_type,
+            stream_id,
+            payload: parsed_payload,
+        } => {
+            assert_eq!(frame_type, PRIORITY_UPDATE_FRAME_TYPE);
+            assert_eq!(stream_id, header.stream_id);
+            assert_eq!(&parsed_payload[..], &payload[..]);
         }
+        other => panic!("PRIORITY_UPDATE should parse as Frame::Unknown, got {other:?}"),
     }
 }
 
-/// Test that urgency values >7 are rejected per draft specification
-fn test_urgency_validation(test_case: &PriorityUpdateTest) {
-    let urgency_test_cases = vec![
-        0, 1, 2, 3, 4, 5, 6, 7, // Valid values
-        8, 9, 15, 31, 63, 127, 255, // Invalid values
-    ];
+/// Exercise the streaming codec seam. `FrameCodec` intentionally skips unknown
+/// extension frames, so a complete PRIORITY_UPDATE frame alone yields no frame.
+fn observe_codec_skips_complete_priority_update(test_case: &PriorityUpdateTest) {
+    let payload = build_priority_update_payload(test_case);
+    let wire = encode_priority_update_frame(test_case, &payload);
+    let mut bytes = BytesMut::from(wire.as_slice());
+    let mut codec = FrameCodec::new();
 
-    for urgency in urgency_test_cases {
-        let mut payload = test_case.priority_payload.clone();
-        payload.urgency = urgency;
-        payload.use_structured = true; // Force structured format for this test
-
-        let priority_data = build_priority_payload(&payload);
-        let result = simulate_priority_update_frame(test_case.stream_id.max(1), &priority_data, 0);
-
-        match result {
-            PriorityUpdateResult::Accepted {
-                urgency: accepted_urgency,
-                ..
-            } => {
-                assert!(
-                    urgency <= 7,
-                    "Urgency {} should be rejected but was accepted as {}",
-                    urgency,
-                    accepted_urgency
-                );
-                assert_eq!(
-                    urgency, accepted_urgency,
-                    "Accepted urgency should match input for valid values"
-                );
-            }
-            PriorityUpdateResult::Rejected { .. } => {
-                // Rejection is expected for urgency > 7
-                if urgency <= 7 {
-                    // Valid urgency values should generally be accepted
-                    // (unless other fields are invalid)
-                }
-            }
-            PriorityUpdateResult::Error => {
-                // Errors are acceptable for any input
-            }
-        }
-    }
+    let decoded = codec
+        .decode(&mut bytes)
+        .expect("unknown PRIORITY_UPDATE frame should be skipped");
+    assert!(
+        decoded.is_none(),
+        "unimplemented PRIORITY_UPDATE should not yield a decoded frame",
+    );
+    assert!(
+        bytes.is_empty(),
+        "complete unknown PRIORITY_UPDATE frame should be consumed",
+    );
 }
 
-/// Test stream ID validation for PRIORITY_UPDATE frames
-fn test_stream_id_validation(test_case: &PriorityUpdateTest) {
-    let stream_id_tests = vec![
-        0,          // Connection-level (special case)
-        1,          // Valid client-initiated
-        2,          // Valid server-initiated
-        0x7FFFFFFF, // Maximum valid stream ID
-        0x80000000, // Invalid (reserved bit set)
-        0xFFFFFFFF, // Invalid (all bits set)
-    ];
+/// After skipping PRIORITY_UPDATE, the codec must keep byte-stream alignment and
+/// decode the next known frame.
+fn observe_codec_alignment_after_priority_update(test_case: &PriorityUpdateTest) {
+    let payload = build_priority_update_payload(test_case);
+    let mut wire = encode_priority_update_frame(test_case, &payload);
+    wire.extend_from_slice(&encode_ping_frame());
 
-    let priority_data = build_priority_payload(&test_case.priority_payload);
+    let mut bytes = BytesMut::from(wire.as_slice());
+    let mut codec = FrameCodec::new();
+    let decoded = codec
+        .decode(&mut bytes)
+        .expect("codec should skip PRIORITY_UPDATE and decode following PING");
 
-    for stream_id in stream_id_tests {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            simulate_priority_update_frame(stream_id, &priority_data, test_case.extra_flags)
-        }));
-
-        assert!(
-            result.is_ok(),
-            "PRIORITY_UPDATE processing should not panic for stream_id=0x{:08X}",
-            stream_id
-        );
-
-        if let Ok(frame_result) = result {
-            match frame_result {
-                PriorityUpdateResult::Accepted { .. } => {
-                    // Stream ID 0 is valid for connection-level updates
-                    // Other valid stream IDs are implementation-dependent
-                }
-                PriorityUpdateResult::Rejected { .. } => {
-                    // Invalid stream IDs should be rejected
-                    if stream_id & 0x80000000 != 0 {
-                        // Reserved bit set - rejection expected
-                    }
-                }
-                PriorityUpdateResult::Error => {
-                    // Errors acceptable for malformed stream IDs
-                }
-            }
-        }
-    }
+    assert!(matches!(decoded, Some(Frame::Ping(_))));
+    assert!(bytes.is_empty(), "codec should consume the following PING");
 }
 
-/// Test handling of malformed priority payloads
-fn test_malformed_payload(test_case: &PriorityUpdateTest) {
-    let malformed_payloads = vec![
-        // Empty payload
-        vec![],
-        // Single bytes
-        vec![0x00],
-        vec![0xFF],
-        // Binary data
-        (0u8..=255u8).collect::<Vec<u8>>(),
-        // Oversized payload
-        vec![0x55; 10000],
-        // Priority field-like but malformed
-        b"u=8".to_vec(),         // Invalid urgency
-        b"u=7,i".to_vec(),       // Incomplete incremental
-        b"u=7,i=2".to_vec(),     // Invalid incremental value
-        b"u=7,i=1,x=y".to_vec(), // Unknown field
-        // Invalid structured format
-        b"urgency=7".to_vec(), // Wrong field name
-        b"u=7;i=1".to_vec(),   // Wrong separator
-        b"u=7, i=1".to_vec(),  // Extra whitespace
-        // Control characters
-        vec![0x00, 0x01, 0x1F, 0x7F],
-        // Non-ASCII
-        "u=7,i=1,名前=値".as_bytes().to_vec(),
-        // Very long field names/values
-        format!("u=7,{}=value", "x".repeat(1000)).into_bytes(),
-        format!("u=7,field={}", "y".repeat(1000)).into_bytes(),
-    ];
-
-    for payload in malformed_payloads {
-        if payload.len() > 20_000 {
-            continue; // Skip extremely large payloads for performance
-        }
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            simulate_priority_update_frame(
-                test_case.stream_id.max(1),
-                &payload,
-                test_case.extra_flags,
-            )
-        }));
-
-        assert!(
-            result.is_ok(),
-            "Malformed payload should not panic: {:?} (len={})",
-            String::from_utf8_lossy(&payload[..payload.len().min(50)]),
-            payload.len()
-        );
+/// Incomplete PRIORITY_UPDATE bytes should wait for more input rather than
+/// panicking or fabricating a frame.
+fn observe_truncated_priority_update_waits(test_case: &PriorityUpdateTest) {
+    let payload = build_priority_update_payload(test_case);
+    let wire = encode_priority_update_frame(test_case, &payload);
+    if wire.is_empty() {
+        return;
     }
+
+    let max_cut = wire.len().saturating_sub(1);
+    let cut = usize::from(test_case.truncate_seed) % (max_cut + 1);
+    let mut bytes = BytesMut::from(&wire[..cut]);
+    let mut codec = FrameCodec::new();
+    let decoded = codec
+        .decode(&mut bytes)
+        .expect("truncated PRIORITY_UPDATE should wait for more bytes");
+
+    assert!(
+        decoded.is_none(),
+        "truncated PRIORITY_UPDATE should not decode a frame",
+    );
 }
 
-/// Test frame flag handling
-fn test_frame_flags(test_case: &PriorityUpdateTest) {
-    let flag_tests = vec![
-        0x00, // No flags
-        0x01, // END_STREAM (should be ignored for PRIORITY_UPDATE)
-        0x04, // PADDED (should be ignored for PRIORITY_UPDATE)
-        0x08, // Reserved
-        0xFF, // All flags set
-    ];
+/// The codec checks configured frame-size limits before skipping unknown frames.
+fn observe_oversized_priority_update_rejected() {
+    let wire = encode_frame_header(DEFAULT_MAX_FRAME_SIZE + 1, PRIORITY_UPDATE_FRAME_TYPE, 0, 0);
+    let mut bytes = BytesMut::from(wire.as_slice());
+    let mut codec = FrameCodec::new();
 
-    let priority_data = build_priority_payload(&test_case.priority_payload);
-
-    for flags in flag_tests {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            simulate_priority_update_frame(test_case.stream_id.max(1), &priority_data, flags)
-        }));
-
-        assert!(
-            result.is_ok(),
-            "Flag combination 0x{:02X} should not panic",
-            flags
-        );
-
-        // PRIORITY_UPDATE frames should ignore most flags
-        // Only frame-type-specific flags should be processed
-    }
+    assert!(
+        codec.decode(&mut bytes).is_err(),
+        "oversized PRIORITY_UPDATE should fail frame-size validation",
+    );
 }
 
 /// Build priority payload from structured or raw format
 fn build_priority_payload(payload: &PriorityPayload) -> Vec<u8> {
-    if !payload.use_structured || payload.custom_fields.is_empty() {
-        return payload.raw_bytes.clone();
+    if !payload.use_structured {
+        return payload
+            .raw_bytes
+            .iter()
+            .copied()
+            .take(MAX_PRIORITY_FIELD_BYTES)
+            .collect();
     }
 
     // Build structured priority string: "u=N,i=B,field=value,..."
@@ -345,7 +238,81 @@ fn build_priority_payload(payload: &PriorityPayload) -> Vec<u8> {
         }
     }
 
-    parts.join(",").into_bytes()
+    parts
+        .join(",")
+        .into_bytes()
+        .into_iter()
+        .take(MAX_PRIORITY_FIELD_BYTES)
+        .collect()
+}
+
+fn build_priority_update_payload(test_case: &PriorityUpdateTest) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4 + MAX_PRIORITY_FIELD_BYTES);
+    payload.extend_from_slice(&prioritized_stream_id(test_case).to_be_bytes());
+    payload.extend_from_slice(&build_priority_payload(&test_case.priority_payload));
+    payload
+}
+
+fn prioritized_stream_id(test_case: &PriorityUpdateTest) -> u32 {
+    test_case.stream_id & 0x7fff_ffff
+}
+
+fn header_stream_id(test_case: &PriorityUpdateTest) -> u32 {
+    if test_case.connection_level {
+        0
+    } else {
+        test_case.stream_id.max(1) & 0x7fff_ffff
+    }
+}
+
+fn priority_update_header(test_case: &PriorityUpdateTest, length: u32) -> FrameHeader {
+    FrameHeader {
+        length,
+        frame_type: PRIORITY_UPDATE_FRAME_TYPE,
+        flags: test_case.extra_flags,
+        stream_id: header_stream_id(test_case),
+    }
+}
+
+fn encode_priority_update_frame(test_case: &PriorityUpdateTest, payload: &[u8]) -> Vec<u8> {
+    let header = priority_update_header(test_case, payload.len() as u32);
+    encode_frame(
+        header.length,
+        header.frame_type,
+        header.flags,
+        header.stream_id,
+        payload,
+    )
+}
+
+fn encode_ping_frame() -> Vec<u8> {
+    encode_frame(
+        PING_PAYLOAD.len() as u32,
+        PING_FRAME_TYPE,
+        0,
+        0,
+        PING_PAYLOAD,
+    )
+}
+
+fn encode_frame(length: u32, frame_type: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut wire = encode_frame_header(length, frame_type, flags, stream_id);
+    wire.extend_from_slice(payload);
+    wire
+}
+
+fn encode_frame_header(length: u32, frame_type: u8, flags: u8, stream_id: u32) -> Vec<u8> {
+    vec![
+        (length >> 16) as u8,
+        (length >> 8) as u8,
+        length as u8,
+        frame_type,
+        flags,
+        ((stream_id >> 24) & 0x7f) as u8,
+        (stream_id >> 16) as u8,
+        (stream_id >> 8) as u8,
+        stream_id as u8,
+    ]
 }
 
 /// Sanitize field name for priority string format
@@ -366,262 +333,54 @@ fn sanitize_field_value(input: &str) -> String {
         .collect()
 }
 
-/// Result of PRIORITY_UPDATE frame processing
-#[derive(Debug, Clone, PartialEq)]
-enum PriorityUpdateResult {
-    /// Priority update was accepted
-    Accepted { urgency: u8, incremental: bool },
-    /// Priority update was rejected
-    Rejected { reason: String },
-    /// Error during processing
-    Error,
-}
-
-/// Simulate PRIORITY_UPDATE frame processing
-fn simulate_priority_update_frame(
-    stream_id: u32,
-    priority_data: &[u8],
-    _flags: u8,
-) -> PriorityUpdateResult {
-    // This simulates the PRIORITY_UPDATE frame processing logic
-    // In a real implementation, this would be in the HTTP/2 connection handler
-
-    // Basic frame size validation
-    if priority_data.len() > 65535 {
-        return PriorityUpdateResult::Rejected {
-            reason: "Priority payload too large".to_string(),
-        };
-    }
-
-    // Stream ID validation
-    if stream_id & 0x80000000 != 0 {
-        return PriorityUpdateResult::Rejected {
-            reason: "Invalid stream ID (reserved bit set)".to_string(),
-        };
-    }
-
-    // Parse priority string
-    let priority_str = match std::str::from_utf8(priority_data) {
-        Ok(s) => s,
-        Err(_) => {
-            return PriorityUpdateResult::Rejected {
-                reason: "Invalid UTF-8 in priority payload".to_string(),
-            };
-        }
-    };
-
-    // Parse structured priority parameters
-    let mut urgency = 0u8;
-    let mut incremental = false;
-    let mut found_urgency = false;
-
-    for part in priority_str.split(',') {
-        let part = part.trim();
-        if let Some((key, value)) = part.split_once('=') {
-            match key.trim() {
-                "u" => {
-                    match value.trim().parse::<u8>() {
-                        Ok(u) if u <= 7 => {
-                            urgency = u;
-                            found_urgency = true;
-                        }
-                        Ok(u) => {
-                            // Urgency > 7 is invalid per draft
-                            return PriorityUpdateResult::Rejected {
-                                reason: format!("Invalid urgency value: {} (must be 0-7)", u),
-                            };
-                        }
-                        Err(_) => {
-                            return PriorityUpdateResult::Rejected {
-                                reason: "Invalid urgency format".to_string(),
-                            };
-                        }
-                    }
-                }
-                "i" => match value.trim() {
-                    "0" => incremental = false,
-                    "1" => incremental = true,
-                    _ => {
-                        return PriorityUpdateResult::Rejected {
-                            reason: "Invalid incremental value (must be 0 or 1)".to_string(),
-                        };
-                    }
-                },
-                _ => {
-                    // Unknown fields are ignored in this simulation
-                    // Real implementations might be more strict
-                }
-            }
-        }
-    }
-
-    if !found_urgency && !priority_str.is_empty() {
-        return PriorityUpdateResult::Rejected {
-            reason: "Missing urgency parameter".to_string(),
-        };
-    }
-
-    // Connection-level priority updates (stream_id = 0) have special semantics
-    if stream_id == 0 {
-        // Connection-level priority affects default priority for new streams
-        // This is valid but handled differently
-    }
-
-    PriorityUpdateResult::Accepted {
-        urgency,
-        incremental,
-    }
-}
-
-/// Generate test scenarios with various priority configurations
-fn generate_priority_scenarios() -> Vec<PriorityUpdateTest> {
-    vec![
-        // Valid urgency values
-        PriorityUpdateTest {
-            stream_id: 1,
-            priority_payload: PriorityPayload {
-                urgency: 0,
-                incremental: false,
-                custom_fields: vec![],
-                raw_bytes: b"u=0,i=0".to_vec(),
-                use_structured: true,
-            },
-            extra_flags: 0,
-            connection_level: false,
-        },
-        // Maximum valid urgency
-        PriorityUpdateTest {
-            stream_id: 3,
-            priority_payload: PriorityPayload {
-                urgency: 7,
-                incremental: true,
-                custom_fields: vec![],
-                raw_bytes: b"u=7,i=1".to_vec(),
-                use_structured: true,
-            },
-            extra_flags: 0,
-            connection_level: false,
-        },
-        // Invalid urgency (should be rejected)
-        PriorityUpdateTest {
-            stream_id: 5,
-            priority_payload: PriorityPayload {
-                urgency: 8,
-                incremental: false,
-                custom_fields: vec![],
-                raw_bytes: b"u=8,i=0".to_vec(),
-                use_structured: true,
-            },
-            extra_flags: 0,
-            connection_level: false,
-        },
-        // Connection-level priority update
-        PriorityUpdateTest {
-            stream_id: 0,
-            priority_payload: PriorityPayload {
-                urgency: 3,
-                incremental: true,
-                custom_fields: vec![],
-                raw_bytes: b"u=3,i=1".to_vec(),
-                use_structured: true,
-            },
-            extra_flags: 0,
-            connection_level: true,
-        },
-        // Priority with custom fields
-        PriorityUpdateTest {
-            stream_id: 7,
-            priority_payload: PriorityPayload {
-                urgency: 5,
-                incremental: true,
-                custom_fields: vec![PriorityField {
-                    name: "custom".to_string(),
-                    value: "value".to_string(),
-                }],
-                raw_bytes: vec![],
-                use_structured: true,
-            },
-            extra_flags: 0,
-            connection_level: false,
-        },
-        // Raw malformed payload
-        PriorityUpdateTest {
-            stream_id: 9,
-            priority_payload: PriorityPayload {
-                urgency: 0,
-                incremental: false,
-                custom_fields: vec![],
-                raw_bytes: vec![0xFF, 0xFE, 0xFD, 0x00, 0x01],
-                use_structured: false,
-            },
-            extra_flags: 0x08, // Reserved flag
-            connection_level: false,
-        },
-    ]
-}
-
-/// Test that demonstrates expected PRIORITY_UPDATE behavior
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_valid_priority_update() {
-        let result = simulate_priority_update_frame(1, b"u=3,i=1", 0);
-        assert!(matches!(
-            result,
-            PriorityUpdateResult::Accepted {
+    fn priority_update_frame_type_matches_rfc_9218() {
+        assert_eq!(PRIORITY_UPDATE_FRAME_TYPE, 0x10);
+    }
+
+    #[test]
+    fn direct_parser_preserves_priority_update_as_unknown() {
+        observe_direct_priority_update_parser(&structured_case());
+    }
+
+    #[test]
+    fn codec_skips_priority_update_and_decodes_following_ping() {
+        observe_codec_alignment_after_priority_update(&structured_case());
+    }
+
+    #[test]
+    fn truncated_priority_update_waits_for_more_bytes() {
+        observe_truncated_priority_update_waits(&PriorityUpdateTest {
+            truncate_seed: 6,
+            ..structured_case()
+        });
+    }
+
+    #[test]
+    fn oversized_priority_update_hits_frame_size_guard() {
+        observe_oversized_priority_update_rejected();
+    }
+
+    fn structured_case() -> PriorityUpdateTest {
+        PriorityUpdateTest {
+            stream_id: 7,
+            priority_payload: PriorityPayload {
                 urgency: 3,
-                incremental: true
-            }
-        ));
-    }
-
-    #[test]
-    fn test_invalid_urgency_rejected() {
-        let result = simulate_priority_update_frame(1, b"u=8,i=0", 0);
-        assert!(matches!(result, PriorityUpdateResult::Rejected { .. }));
-    }
-
-    #[test]
-    fn test_connection_level_priority() {
-        let result = simulate_priority_update_frame(0, b"u=2,i=0", 0);
-        assert!(matches!(
-            result,
-            PriorityUpdateResult::Accepted {
-                urgency: 2,
-                incremental: false
-            }
-        ));
-    }
-
-    #[test]
-    fn test_malformed_payload() {
-        let result = simulate_priority_update_frame(1, &[0xFF, 0xFE], 0);
-        assert!(matches!(result, PriorityUpdateResult::Rejected { .. }));
-    }
-
-    #[test]
-    fn test_reserved_stream_id() {
-        let result = simulate_priority_update_frame(0x80000001, b"u=1,i=0", 0);
-        assert!(matches!(result, PriorityUpdateResult::Rejected { .. }));
-    }
-
-    #[test]
-    fn test_missing_urgency() {
-        let result = simulate_priority_update_frame(1, b"i=1", 0);
-        assert!(matches!(result, PriorityUpdateResult::Rejected { .. }));
-    }
-
-    #[test]
-    fn test_empty_payload() {
-        let result = simulate_priority_update_frame(1, b"", 0);
-        assert!(matches!(
-            result,
-            PriorityUpdateResult::Accepted {
-                urgency: 0,
-                incremental: false
-            }
-        ));
+                incremental: true,
+                custom_fields: vec![PriorityField {
+                    name: "custom".to_string(),
+                    value: "value".to_string(),
+                }],
+                raw_bytes: Vec::new(),
+                use_structured: true,
+            },
+            extra_flags: 0,
+            connection_level: true,
+            truncate_seed: 0,
+        }
     }
 }
