@@ -35,6 +35,28 @@ const MAX_STREAMS: u32 = 64;
 /// Maximum dependency chain length to test
 const MAX_CHAIN_LENGTH: u32 = 32;
 
+fn assert_visible_h2_error(context: &str, error: &H2Error) {
+    let display = error.to_string();
+    assert!(
+        !display.is_empty(),
+        "{context}: H2 error must have a visible display message: {error:?}"
+    );
+    assert!(
+        !error.message.is_empty(),
+        "{context}: H2 error must retain diagnostic message text"
+    );
+}
+
+fn observe_h2_result(result: Result<(), H2Error>, context: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            assert_visible_h2_error(context, &error);
+            false
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Guard against excessive input sizes
     if data.is_empty() || data.len() > MAX_INPUT_SIZE {
@@ -157,7 +179,10 @@ fn test_self_dependency_detection(data: &[u8]) -> Result<SelfDependencyResult, H
         let exclusive = data[i] & 0x80 != 0;
 
         // Create stream first
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        observe_h2_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "self dependency setup HEADERS",
+        );
 
         // Attempt self-dependency via PRIORITY frame
         if let Some(_priority_frame) =
@@ -174,8 +199,12 @@ fn test_self_dependency_detection(data: &[u8]) -> Result<SelfDependencyResult, H
             );
             self_dependency_attempts += 1;
 
-            if result.is_err() {
-                self_dependency_rejections += 1;
+            match result {
+                Ok(()) => {}
+                Err(error) => {
+                    assert_visible_h2_error("self dependency priority update", &error);
+                    self_dependency_rejections += 1;
+                }
             }
         }
     }
@@ -210,7 +239,8 @@ fn test_simple_cycle_detection(
     let result1 =
         send_headers_with_priority(&mut connection, stream_a, stream_b, weight_a, exclusive_a);
     cycle_attempts += 1;
-    if result1.is_err() {
+    if let Err(error) = result1 {
+        assert_visible_h2_error("simple cycle first dependency", &error);
         cycle_rejections += 1;
     }
 
@@ -218,8 +248,11 @@ fn test_simple_cycle_detection(
     let result2 =
         send_headers_with_priority(&mut connection, stream_b, stream_a, weight_b, exclusive_b);
     cycle_attempts += 1;
-    if result2.is_err() {
+    let mut final_error = None;
+    if let Err(error) = result2 {
+        assert_visible_h2_error("simple cycle closing dependency", &error);
         cycle_rejections += 1;
+        final_error = Some(error);
     }
 
     Ok(CycleDetectionResult {
@@ -227,7 +260,7 @@ fn test_simple_cycle_detection(
         attempts: cycle_attempts,
         rejections: cycle_rejections,
         connection_state: connection.state(),
-        final_error: result2.err(),
+        final_error,
     })
 }
 
@@ -244,7 +277,10 @@ fn test_long_chain_cycle(chain_length: u8, data: &[u8]) -> Result<CycleDetection
     for i in 0..chain_length {
         let stream_id = (i as u32 + 1) * 2 + 1;
         streams.push(stream_id);
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        observe_h2_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "long chain setup HEADERS",
+        );
     }
 
     let mut final_error = None;
@@ -254,7 +290,7 @@ fn test_long_chain_cycle(chain_length: u8, data: &[u8]) -> Result<CycleDetection
         let source_stream = streams[i];
         let target_stream = streams[i + 1];
         let weight = if i < data.len() { data[i] } else { 16 };
-        let exclusive = i % 2 == 0; // Alternate exclusive flag
+        let exclusive = i.is_multiple_of(2); // Alternate exclusive flag
 
         let result = send_headers_with_priority(
             &mut connection,
@@ -264,10 +300,11 @@ fn test_long_chain_cycle(chain_length: u8, data: &[u8]) -> Result<CycleDetection
             exclusive,
         );
         cycle_attempts += 1;
-        if result.is_err() {
+        if let Err(error) = result {
+            assert_visible_h2_error("long chain dependency update", &error);
             cycle_rejections += 1;
             if final_error.is_none() {
-                final_error = result.err();
+                final_error = Some(error);
             }
         }
     }
@@ -281,7 +318,7 @@ fn test_long_chain_cycle(chain_length: u8, data: &[u8]) -> Result<CycleDetection
         } else {
             16
         };
-        let exclusive = chain_length % 2 == 0;
+        let exclusive = chain_length.is_multiple_of(2);
 
         let result = send_headers_with_priority(
             &mut connection,
@@ -291,9 +328,10 @@ fn test_long_chain_cycle(chain_length: u8, data: &[u8]) -> Result<CycleDetection
             exclusive,
         );
         cycle_attempts += 1;
-        if result.is_err() {
+        if let Err(error) = result {
+            assert_visible_h2_error("long chain closing dependency", &error);
             cycle_rejections += 1;
-            final_error = result.err();
+            final_error = Some(error);
         }
     }
 
@@ -322,7 +360,10 @@ fn test_complex_dependency_graph(
     for i in 0..std::cmp::min(graph_size, MAX_STREAMS as u8) {
         let stream_id = (i as u32 + 1) * 2 + 1;
         streams.push(stream_id);
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        observe_h2_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "complex graph setup HEADERS",
+        );
     }
 
     // Create complex dependency pattern based on fuzzed data
@@ -346,7 +387,8 @@ fn test_complex_dependency_graph(
                 exclusive,
             );
             dependency_attempts += 1;
-            if result.is_err() {
+            if let Err(error) = result {
+                assert_visible_h2_error("complex graph dependency update", &error);
                 dependency_rejections += 1;
             }
         }
@@ -377,12 +419,21 @@ fn test_priority_updates_cycles(
     for i in 0..base_streams {
         let stream_id = (i + 1) * 2 + 1;
         streams.push(stream_id);
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        observe_h2_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "priority update setup HEADERS",
+        );
     }
 
     // Create initial dependency: 1 → 3, 5 → 7
-    let _ = send_headers_with_priority(&mut connection, streams[0], streams[1], 16, false);
-    let _ = send_headers_with_priority(&mut connection, streams[2], streams[3], 16, false);
+    observe_h2_result(
+        send_headers_with_priority(&mut connection, streams[0], streams[1], 16, false),
+        "priority update initial dependency 1",
+    );
+    observe_h2_result(
+        send_headers_with_priority(&mut connection, streams[2], streams[3], 16, false),
+        "priority update initial dependency 2",
+    );
 
     let mut update_attempts = 0;
     let mut update_rejections = 0;
@@ -404,7 +455,8 @@ fn test_priority_updates_cycles(
                     exclusive,
                 );
                 update_attempts += 1;
-                if result.is_err() {
+                if let Err(error) = result {
+                    assert_visible_h2_error("priority update dependency", &error);
                     update_rejections += 1;
                 }
             }
@@ -433,7 +485,10 @@ fn test_exclusive_dependency_cycles(
     for i in 0..stream_count {
         let stream_id = (i + 1) * 2 + 1;
         streams.push(stream_id);
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        observe_h2_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "exclusive dependency setup HEADERS",
+        );
     }
 
     let mut exclusive_attempts = 0;
@@ -454,7 +509,8 @@ fn test_exclusive_dependency_cycles(
             exclusive,
         );
         exclusive_attempts += 1;
-        if result.is_err() {
+        if let Err(error) = result {
+            assert_visible_h2_error("exclusive dependency update", &error);
             exclusive_rejections += 1;
         }
     }
@@ -468,7 +524,8 @@ fn test_exclusive_dependency_cycles(
         let result =
             send_headers_with_priority(&mut connection, last_stream, first_stream, 32, exclusive);
         exclusive_attempts += 1;
-        if result.is_err() {
+        if let Err(error) = result {
+            assert_visible_h2_error("exclusive dependency closing update", &error);
             exclusive_rejections += 1;
         }
     }
@@ -492,7 +549,10 @@ fn test_deep_dependency_chain(depth: u32, data: &[u8]) -> Result<DeepChainResult
     for i in 0..depth {
         let stream_id = (i + 1) * 2 + 1;
         streams.push(stream_id);
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        observe_h2_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "deep chain setup HEADERS",
+        );
     }
 
     let mut chain_attempts = 0;
@@ -503,7 +563,7 @@ fn test_deep_dependency_chain(depth: u32, data: &[u8]) -> Result<DeepChainResult
         let source_stream = streams[i];
         let target_stream = streams[0]; // All depend on first stream (no cycle)
         let weight = if i < data.len() { data[i] } else { 16 };
-        let exclusive = i % 2 == 0;
+        let exclusive = i.is_multiple_of(2);
 
         let result = send_headers_with_priority(
             &mut connection,
@@ -513,8 +573,9 @@ fn test_deep_dependency_chain(depth: u32, data: &[u8]) -> Result<DeepChainResult
             exclusive,
         );
         chain_attempts += 1;
-        if result.is_ok() {
-            chain_successes += 1;
+        match result {
+            Ok(()) => chain_successes += 1,
+            Err(error) => assert_visible_h2_error("deep chain dependency update", &error),
         }
     }
 
@@ -541,7 +602,10 @@ fn test_concurrent_cycle_attempts(
     for i in 0..stream_pairs * 2 {
         let stream_id = (i as u32 + 1) * 2 + 1;
         streams.push(stream_id);
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        observe_h2_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "concurrent cycle setup HEADERS",
+        );
     }
 
     let mut concurrent_attempts = 0;
@@ -558,7 +622,8 @@ fn test_concurrent_cycle_attempts(
             let result1 =
                 send_headers_with_priority(&mut connection, stream_a, stream_b, weight, false);
             concurrent_attempts += 1;
-            if result1.is_err() {
+            if let Err(error) = result1 {
+                assert_visible_h2_error("concurrent cycle first dependency", &error);
                 concurrent_rejections += 1;
             }
 
@@ -566,7 +631,8 @@ fn test_concurrent_cycle_attempts(
             let result2 =
                 send_headers_with_priority(&mut connection, stream_b, stream_a, weight, false);
             concurrent_attempts += 1;
-            if result2.is_err() {
+            if let Err(error) = result2 {
+                assert_visible_h2_error("concurrent cycle closing dependency", &error);
                 concurrent_rejections += 1;
             }
         }
@@ -594,13 +660,25 @@ fn test_parent_child_inversions(
     for i in 0..stream_count {
         let stream_id = (i + 1) * 2 + 1;
         streams.push(stream_id);
-        let _ = send_headers_frame(&mut connection, stream_id, false);
+        observe_h2_result(
+            send_headers_frame(&mut connection, stream_id, false),
+            "inversion setup HEADERS",
+        );
     }
 
     // Create initial parent-child relationships: 1→3→5→7, 2→4→6→8
-    let _ = send_headers_with_priority(&mut connection, streams[2], streams[0], 16, false); // 5→1
-    let _ = send_headers_with_priority(&mut connection, streams[4], streams[2], 16, false); // 9→5
-    let _ = send_headers_with_priority(&mut connection, streams[6], streams[4], 16, false); // 13→9
+    observe_h2_result(
+        send_headers_with_priority(&mut connection, streams[2], streams[0], 16, false),
+        "inversion initial dependency 5 to 1",
+    );
+    observe_h2_result(
+        send_headers_with_priority(&mut connection, streams[4], streams[2], 16, false),
+        "inversion initial dependency 9 to 5",
+    );
+    observe_h2_result(
+        send_headers_with_priority(&mut connection, streams[6], streams[4], 16, false),
+        "inversion initial dependency 13 to 9",
+    );
 
     let mut inversion_attempts = 0;
     let mut inversion_rejections = 0;
@@ -621,7 +699,8 @@ fn test_parent_child_inversions(
                 false,
             );
             inversion_attempts += 1;
-            if result.is_err() {
+            if let Err(error) = result {
+                assert_visible_h2_error("parent-child inversion dependency", &error);
                 inversion_rejections += 1;
             }
         }
@@ -647,11 +726,15 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
             // Test dependency on stream 0 (connection-level)
             if !data.is_empty() {
                 let stream_id = ((data[0] as u32) % 16 + 1) * 2 + 1;
-                let _ = send_headers_frame(&mut connection, stream_id, false);
+                observe_h2_result(
+                    send_headers_frame(&mut connection, stream_id, false),
+                    "edge dependency-on-zero setup HEADERS",
+                );
 
                 let result = send_headers_with_priority(&mut connection, stream_id, 0, 16, false);
                 edge_case_attempts += 1;
-                if result.is_err() {
+                if let Err(error) = result {
+                    assert_visible_h2_error("edge dependency-on-zero update", &error);
                     edge_case_rejections += 1;
                 }
             }
@@ -663,8 +746,14 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
                 let max_stream_id = max_stream_id | 1;
                 let target_stream = ((data[0] as u32) % 16 + 1) * 2 + 1;
 
-                let _ = send_headers_frame(&mut connection, max_stream_id, false);
-                let _ = send_headers_frame(&mut connection, target_stream, false);
+                observe_h2_result(
+                    send_headers_frame(&mut connection, max_stream_id, false),
+                    "edge max-stream setup HEADERS",
+                );
+                observe_h2_result(
+                    send_headers_frame(&mut connection, target_stream, false),
+                    "edge max-stream target setup HEADERS",
+                );
 
                 let result = send_headers_with_priority(
                     &mut connection,
@@ -674,7 +763,8 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
                     false,
                 );
                 edge_case_attempts += 1;
-                if result.is_err() {
+                if let Err(error) = result {
+                    assert_visible_h2_error("edge max-stream dependency update", &error);
                     edge_case_rejections += 1;
                 }
             }
@@ -685,14 +775,21 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
                 let stream_a = ((data[0] as u32) % 16 + 1) * 2 + 1;
                 let stream_b = ((data[1] as u32) % 16 + 2) * 2 + 1;
 
-                let _ = send_headers_frame(&mut connection, stream_a, false);
-                let _ = send_headers_frame(&mut connection, stream_b, false);
+                observe_h2_result(
+                    send_headers_frame(&mut connection, stream_a, false),
+                    "edge weight-boundary first setup HEADERS",
+                );
+                observe_h2_result(
+                    send_headers_frame(&mut connection, stream_b, false),
+                    "edge weight-boundary second setup HEADERS",
+                );
 
                 // Test weight 0
                 let result1 =
                     send_headers_with_priority(&mut connection, stream_a, stream_b, 0, false);
                 edge_case_attempts += 1;
-                if result1.is_err() {
+                if let Err(error) = result1 {
+                    assert_visible_h2_error("edge weight-zero dependency update", &error);
                     edge_case_rejections += 1;
                 }
 
@@ -700,31 +797,34 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
                 let result2 =
                     send_headers_with_priority(&mut connection, stream_a, stream_b, 255, false);
                 edge_case_attempts += 1;
-                if result2.is_err() {
+                if let Err(error) = result2 {
+                    assert_visible_h2_error("edge weight-255 dependency update", &error);
                     edge_case_rejections += 1;
                 }
             }
         }
-        3 => {
+        3 if !data.is_empty() => {
             // Test nonexistent dependency target
-            if !data.is_empty() {
-                let stream_id = ((data[0] as u32) % 16 + 1) * 2 + 1;
-                let nonexistent_target = ((data[0] as u32) % 16 + 10) * 2 + 1;
+            let stream_id = ((data[0] as u32) % 16 + 1) * 2 + 1;
+            let nonexistent_target = ((data[0] as u32) % 16 + 10) * 2 + 1;
 
-                let _ = send_headers_frame(&mut connection, stream_id, false);
-                // Don't create the target stream
+            observe_h2_result(
+                send_headers_frame(&mut connection, stream_id, false),
+                "edge nonexistent-target setup HEADERS",
+            );
+            // Don't create the target stream
 
-                let result = send_headers_with_priority(
-                    &mut connection,
-                    stream_id,
-                    nonexistent_target,
-                    16,
-                    false,
-                );
-                edge_case_attempts += 1;
-                if result.is_err() {
-                    edge_case_rejections += 1;
-                }
+            let result = send_headers_with_priority(
+                &mut connection,
+                stream_id,
+                nonexistent_target,
+                16,
+                false,
+            );
+            edge_case_attempts += 1;
+            if let Err(error) = result {
+                assert_visible_h2_error("edge nonexistent-target dependency update", &error);
+                edge_case_rejections += 1;
             }
         }
         _ => {}
@@ -816,7 +916,7 @@ fn initialize_connection(connection: &mut Connection) -> Result<(), H2Error> {
         Setting::InitialWindowSize(65536),
         Setting::MaxFrameSize(16384),
     ]);
-    let _ = connection.process_frame(Frame::Settings(settings_frame))?;
+    connection.process_frame(Frame::Settings(settings_frame))?;
     Ok(())
 }
 
@@ -831,7 +931,7 @@ fn send_headers_frame(
         end_stream,
         true, // end_headers
     );
-    let _ = connection.process_frame(Frame::Headers(headers_frame))?;
+    connection.process_frame(Frame::Headers(headers_frame))?;
     Ok(())
 }
 
@@ -857,19 +957,18 @@ fn send_headers_with_priority(
         weight,
     });
 
-    let _ = connection.process_frame(Frame::Headers(headers_frame))?;
+    connection.process_frame(Frame::Headers(headers_frame))?;
     Ok(())
 }
 
 fn create_priority_frame(
-    stream_id: u32,
-    dependency: u32,
-    weight: u8,
-    exclusive: bool,
+    _stream_id: u32,
+    _dependency: u32,
+    _weight: u8,
+    _exclusive: bool,
 ) -> Option<PriorityFrame> {
     // PRIORITY frames are deprecated in HTTP/2 RFC 9113
     // Return None to indicate they're not used
-    let _ = (stream_id, dependency, weight, exclusive);
     None
 }
 
@@ -902,6 +1001,10 @@ fn validate_cycle_result(result: Result<CycleDetectionResult, H2Error>, expected
     match result {
         Ok(res) => {
             assert_eq!(res.cycle_length, expected_length, "Cycle length mismatch");
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should not close after cycle detection"
+            );
 
             // For cycles of length > 1, the final dependency should be rejected
             if expected_length > 1 {
@@ -939,6 +1042,10 @@ fn validate_complex_graph_result(result: Result<ComplexGraphResult, H2Error>, _e
                 res.dependency_attempts > 0 || res.graph_size <= 1,
                 "Complex graph should attempt dependencies"
             );
+            assert!(
+                res.dependency_rejections <= res.dependency_attempts,
+                "Complex graph rejections should not exceed attempts"
+            );
 
             // Connection should handle complex graphs without crashing
             assert!(
@@ -969,6 +1076,10 @@ fn validate_priority_update_result(
                 res.update_rejections <= res.update_attempts,
                 "Rejections should not exceed attempts"
             );
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should survive priority updates"
+            );
         }
         Err(_) => {
             // Errors during priority updates are acceptable
@@ -983,6 +1094,14 @@ fn validate_exclusive_result(result: Result<ExclusiveDependencyResult, H2Error>)
             assert!(
                 res.exclusive_attempts > 0,
                 "Exclusive dependency operations should be attempted"
+            );
+            assert!(
+                res.exclusive_rejections <= res.exclusive_attempts,
+                "Exclusive dependency rejections should not exceed attempts"
+            );
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should survive exclusive dependency attempts"
             );
         }
         Err(_) => {
@@ -1006,6 +1125,10 @@ fn validate_deep_chain_result(result: Result<DeepChainResult, H2Error>, depth: u
                     res.chain_attempts
                 );
             }
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should survive deep dependency chain attempts"
+            );
         }
         Err(_) => {
             // Errors during deep chain tests are acceptable
@@ -1027,6 +1150,10 @@ fn validate_concurrent_result(result: Result<ConcurrentResult, H2Error>) {
                 res.concurrent_rejections > 0 || res.concurrent_attempts <= 2,
                 "Concurrent cycle attempts should be rejected"
             );
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should survive concurrent cycle attempts"
+            );
         }
         Err(_) => {
             // Errors during concurrent tests are acceptable
@@ -1044,6 +1171,10 @@ fn validate_inversion_result(result: Result<InversionResult, H2Error>) {
                     "Parent-child inversions should be rejected"
                 );
             }
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should survive parent-child inversions"
+            );
         }
         Err(_) => {
             // Errors during inversion tests are acceptable
@@ -1053,9 +1184,18 @@ fn validate_inversion_result(result: Result<InversionResult, H2Error>) {
 
 fn validate_edge_case_result(result: Result<EdgeCaseResult, H2Error>) {
     match result {
-        Ok(_res) => {
+        Ok(res) => {
             // Edge cases should be handled without crashing
             // Specific validation depends on edge case type
+            assert!(res.edge_case_type <= 3, "Edge case type should be bounded");
+            assert!(
+                res.edge_case_rejections <= res.edge_case_attempts,
+                "Edge case rejections should not exceed attempts"
+            );
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should survive priority edge cases"
+            );
         }
         Err(_) => {
             // Errors during edge case tests are acceptable
