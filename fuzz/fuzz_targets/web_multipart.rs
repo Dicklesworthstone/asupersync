@@ -680,15 +680,16 @@ fn regression_total_size_limit() {
         )
         .into_bytes(),
     );
-    let limits = MultipartLimits::new().max_total_size(body.len().saturating_sub(1));
+    let body_len = body.len();
+    let max_total_size = body_len.saturating_sub(1);
+    let limits = MultipartLimits::new().max_total_size(max_total_size);
     let error = Multipart::from_request(build_regression_request(boundary, body, limits))
         .expect_err("total-size regression should be rejected");
 
     assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(
-        error.message.contains("multipart body too large"),
-        "unexpected total-size error: {}",
-        error.message
+    assert_eq!(
+        error.message,
+        format!("multipart body too large: {body_len} bytes (max {max_total_size})")
     );
 }
 
