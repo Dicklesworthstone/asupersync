@@ -121,6 +121,24 @@ impl HeaderListSizeState {
     }
 }
 
+fn observe_frame_encode_result<E: Debug>(frame_result: Result<(), E>, context: &str) -> bool {
+    match frame_result {
+        Ok(()) => true,
+        Err(error) => {
+            let diagnostic = format!("{context}: {error:?}");
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "frame encode failures must expose diagnostics"
+            );
+            assert!(
+                diagnostic.len() < 1024,
+                "frame encode diagnostics must stay bounded"
+            );
+            false
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Guard against excessive input size
     if data.len() > 100_000 {
@@ -153,19 +171,19 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
     let settings_frame =
         create_settings_frame_with_header_list_size(max_header_size, &test_seq.additional_settings);
 
-    match codec.encode(settings_frame, &mut buffer) {
-        Ok(()) => {
-            // Settings frame should encode successfully
-            assert!(
-                buffer.len() >= FRAME_HEADER_SIZE,
-                "SETTINGS frame should produce output"
-            );
-            state.record_frame_processed();
-        }
-        Err(_) => {
-            // Settings encoding failed - skip this test
-            return;
-        }
+    if observe_frame_encode_result(
+        codec.encode(settings_frame, &mut buffer),
+        "initial SETTINGS_MAX_HEADER_LIST_SIZE encode",
+    ) {
+        // Settings frame should encode successfully
+        assert!(
+            buffer.len() >= FRAME_HEADER_SIZE,
+            "SETTINGS frame should produce output"
+        );
+        state.record_frame_processed();
+    } else {
+        state.record_enforcement_triggered();
+        return;
     }
 
     // Test HEADERS frames against the limit
@@ -192,7 +210,16 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
         }));
 
         match encode_result {
-            Ok(Ok(())) => {
+            Ok(result) => {
+                if !observe_frame_encode_result(
+                    result,
+                    "HEADERS frame encode against max-header-list limit",
+                ) {
+                    state.record_enforcement_triggered();
+                    state.record_frame_processed();
+                    continue;
+                }
+
                 // Frame encoded successfully
                 state.record_headers_sent();
 
@@ -201,11 +228,6 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
                     // Large header blocks should ideally be caught during processing
                     // but encoding may succeed before full validation
                 }
-            }
-            Ok(Err(_)) => {
-                // Frame encoding failed - this is acceptable
-                // May indicate limit enforcement or other validation
-                state.record_enforcement_triggered();
             }
             Err(_) => {
                 // Panic occurred during encoding - this should not happen
@@ -280,7 +302,11 @@ fn test_header_list_size_limit(max_size: u32, headers_attempts: &[HeadersAttempt
     }));
 
     match encode_result {
-        Ok(Ok(())) => {
+        Ok(result) => {
+            if !observe_frame_encode_result(result, "edge SETTINGS_MAX_HEADER_LIST_SIZE encode") {
+                return;
+            }
+
             // Settings encoded successfully - test headers
             for attempt in headers_attempts.iter().take(3) {
                 // Limit iterations
@@ -301,15 +327,18 @@ fn test_header_list_size_limit(max_size: u32, headers_attempts: &[HeadersAttempt
                     codec.encode(headers_frame, &mut buffer)
                 }));
 
-                assert!(
-                    headers_result.is_ok(),
-                    "HEADERS encoding should not panic with max_header_list_size = {}",
-                    max_size
-                );
+                match headers_result {
+                    Ok(result) => {
+                        observe_frame_encode_result(result, "edge HEADERS frame encode");
+                    }
+                    Err(_) => {
+                        panic!(
+                            "HEADERS encoding should not panic with max_header_list_size = {}",
+                            max_size
+                        );
+                    }
+                }
             }
-        }
-        Ok(Err(_)) => {
-            // Settings encoding failed - acceptable for extreme values
         }
         Err(_) => {
             panic!(
@@ -390,17 +419,8 @@ fn observe_interleaved_frame_result<E: Debug>(
     frame_result: Result<(), E>,
     state: &mut HeaderListSizeState,
 ) {
-    if let Err(error) = frame_result {
+    if !observe_frame_encode_result(frame_result, "interleaved frame encode") {
         state.record_enforcement_triggered();
-        let diagnostic = format!("interleaved frame encode: {error:?}");
-        assert!(
-            !diagnostic.trim().is_empty(),
-            "interleaved frame encode failures must expose diagnostics"
-        );
-        assert!(
-            diagnostic.len() < 1024,
-            "interleaved frame encode diagnostics must stay bounded"
-        );
     }
 }
 
