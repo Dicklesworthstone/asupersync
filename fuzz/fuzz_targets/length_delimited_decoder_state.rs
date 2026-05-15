@@ -517,9 +517,10 @@ fn assert_head_error(
         .decode(&mut first)
         .expect_err("invalid header must error");
     assert_eq!(err.kind(), kind);
-    assert!(
-        err.to_string().contains(expected_message),
-        "unexpected error message: {err:?}"
+    assert_eq!(
+        err.to_string(),
+        expected_message,
+        "invalid header used wrong diagnostic"
     );
     assert_eq!(
         first, before,
@@ -531,9 +532,10 @@ fn assert_head_error(
         .decode(&mut second)
         .expect_err("decoder state must remain in head mode after header error");
     assert_eq!(err.kind(), kind);
-    assert!(
-        err.to_string().contains(expected_message),
-        "unexpected second error message: {err:?}"
+    assert_eq!(
+        err.to_string(),
+        expected_message,
+        "repeated invalid header used wrong diagnostic"
     );
     assert_eq!(
         second, before,
