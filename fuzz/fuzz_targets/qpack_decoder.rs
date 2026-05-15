@@ -217,10 +217,9 @@ fn test_invalid_static_index(input: &QpackFuzzInput) {
 
         match result {
             Err(H3NativeError::InvalidFrame(msg)) => {
-                // Should gracefully reject with appropriate error message
-                assert!(
-                    msg.contains("static") || msg.contains("index") || msg.contains("unknown"),
-                    "Error message should indicate static index issue: {msg}"
+                assert_eq!(
+                    msg, "unknown static qpack index",
+                    "invalid static index should use the live decoder diagnostic"
                 );
             }
             Err(err) => {
@@ -313,11 +312,11 @@ fn test_huffman_string_safety(input: &QpackFuzzInput) {
 
         match result {
             Err(H3NativeError::InvalidFrame(msg)) => {
-                // Expected for malformed Huffman or in static-only mode
+                // Expected for malformed Huffman.
                 if matches!(mode, H3QpackMode::StaticOnly) {
-                    assert!(
-                        msg.contains("huffman") || msg.contains("not supported"),
-                        "Should reject Huffman in static-only mode: {msg}"
+                    assert_eq!(
+                        msg, "invalid qpack huffman string",
+                        "malformed Huffman should use the live decoder diagnostic"
                     );
                 }
             }
