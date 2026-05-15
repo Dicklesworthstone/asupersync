@@ -197,15 +197,7 @@ fn test_parse_multipart_direct(body: &Bytes, boundary: &str, limits: &MultipartL
 
     match result {
         Ok(parse_result) => {
-            match parse_result {
-                Ok(multipart) => {
-                    // Parsing succeeded - verify invariants
-                    validate_multipart_invariants(&multipart, limits);
-                }
-                Err(_extraction_error) => {
-                    // Parsing failed cleanly - this is acceptable
-                }
-            }
+            observe_multipart_result(parse_result, limits, "direct multipart parse");
         }
         Err(_) => {
             panic!(
@@ -225,8 +217,9 @@ fn test_multipart_extraction(body: &Bytes, boundary: &str, limits: &MultipartLim
 
     let result = test_multipart_with_mock_request(body, &headers, limits);
 
-    // Just ensure it doesn't panic - success/failure both acceptable
-    let _ = result;
+    // Success and clean failure are both acceptable, but both must carry
+    // useful state for the caller to act on.
+    observe_multipart_result(result, limits, "multipart extraction");
 }
 
 /// Mock request testing helper
@@ -310,6 +303,31 @@ fn validate_multipart_invariants(multipart: &MockMultipart, _limits: &MultipartL
         multipart.body_len < 2 * 1024 * 1024,
         "Body size should be reasonable"
     );
+}
+
+fn validate_extraction_error(error: &ExtractionError, context: &str) {
+    assert!(
+        error.status.is_client_error(),
+        "{context} returned non-client extraction status {}: {}",
+        error.status.as_u16(),
+        error.message
+    );
+    assert!(
+        !error.message.is_empty(),
+        "{context} returned empty extraction error message for status {}",
+        error.status.as_u16()
+    );
+}
+
+fn observe_multipart_result(
+    result: Result<MockMultipart, ExtractionError>,
+    limits: &MultipartLimits,
+    context: &str,
+) {
+    match result {
+        Ok(multipart) => validate_multipart_invariants(&multipart, limits),
+        Err(error) => validate_extraction_error(&error, context),
+    }
 }
 
 /// Build boundary string from configuration
