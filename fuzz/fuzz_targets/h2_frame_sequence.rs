@@ -36,7 +36,7 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::http::h2::{
-    connection::{Connection, ConnectionState},
+    connection::{Connection, ConnectionState, ReceivedFrame},
     error::{ErrorCode, H2Error},
     frame::{
         FRAME_HEADER_SIZE, Frame, FrameHeader, PingFrame, RstStreamFrame, Setting, SettingsFrame,
@@ -178,15 +178,25 @@ fn test_no_panic_frame_sequence(input: &FrameSequenceInput) {
 
         // Process the client preface if this is a server connection
         if std::str::from_utf8(asupersync::http::h2::connection::CLIENT_PREFACE).is_ok() {
-            let _ = connection.process_frame(create_settings_frame(false));
+            let handshake_result = connection.process_frame(create_settings_frame(false));
+            observe_process_frame_result(&handshake_result);
+            assert!(
+                handshake_result.is_ok(),
+                "empty SETTINGS handshake should be accepted: {handshake_result:?}"
+            );
         }
 
         // Process frame sequence
         for (frame_index, frame_bytes) in frame_sequence.iter().take(100).enumerate() {
             if let Ok(frame) = parse_frame_from_bytes(frame_bytes) {
-                let _ = connection
-                    .process_frame(frame)
-                    .map_err(|err| (frame_index, err));
+                let process_result = connection.process_frame(frame);
+                observe_process_frame_result(&process_result);
+                if let Err(err) = &process_result {
+                    assert!(
+                        !err.message.is_empty(),
+                        "frame {frame_index} returned an empty H2 error message"
+                    );
+                }
             }
         }
     });
@@ -262,7 +272,12 @@ fn test_multi_stream_coordination(input: &FrameSequenceInput) {
         let mut connection = create_test_connection(&input.connection_config);
 
         // Initialize connection
-        let _ = connection.process_frame(create_settings_frame(false));
+        let handshake_result = connection.process_frame(create_settings_frame(false));
+        observe_process_frame_result(&handshake_result);
+        assert!(
+            handshake_result.is_ok(),
+            "empty SETTINGS handshake should be accepted: {handshake_result:?}"
+        );
 
         // Track streams and their states
         let mut active_streams = std::collections::HashSet::new();
@@ -300,7 +315,12 @@ fn test_resource_exhaustion_protection(input: &FrameSequenceInput) {
     let mut connection = create_test_connection(&input.connection_config);
 
     // Initialize connection
-    let _ = connection.process_frame(create_settings_frame(false));
+    let handshake_result = connection.process_frame(create_settings_frame(false));
+    observe_process_frame_result(&handshake_result);
+    assert!(
+        handshake_result.is_ok(),
+        "empty SETTINGS handshake should be accepted: {handshake_result:?}"
+    );
 
     let mut total_processed = 0;
 
@@ -822,7 +842,8 @@ fn test_post_goaway_frames(input: &FrameSequenceInput) {
                 goaway_sent = true;
             }
 
-            let _ = connection.process_frame(frame);
+            let process_result = connection.process_frame(frame);
+            observe_process_frame_result(&process_result);
 
             if goaway_sent {
                 // After GOAWAY, connection should be in closing state
@@ -833,6 +854,55 @@ fn test_post_goaway_frames(input: &FrameSequenceInput) {
             }
         }
     }
+}
+
+fn observe_process_frame_result(result: &Result<Option<ReceivedFrame>, H2Error>) {
+    match result {
+        Ok(Some(received)) => observe_received_frame(received),
+        Ok(None) => {}
+        Err(err) => assert_well_formed_h2_error(err),
+    }
+}
+
+fn assert_well_formed_h2_error(err: &H2Error) {
+    assert!(
+        !err.message.is_empty(),
+        "H2 errors should include diagnostic context"
+    );
+    if let Some(stream_id) = err.stream_id {
+        assert_valid_stream_id(stream_id, "error");
+    }
+}
+
+fn observe_received_frame(frame: &ReceivedFrame) {
+    match frame {
+        ReceivedFrame::Headers { stream_id, .. }
+        | ReceivedFrame::Data { stream_id, .. }
+        | ReceivedFrame::Reset { stream_id, .. } => {
+            assert_valid_stream_id(*stream_id, "received frame");
+        }
+        ReceivedFrame::PushPromise {
+            stream_id,
+            promised_stream_id,
+            ..
+        } => {
+            assert_valid_stream_id(*stream_id, "push promise");
+            assert_valid_stream_id(*promised_stream_id, "promised stream");
+        }
+        ReceivedFrame::GoAway { last_stream_id, .. } => {
+            assert!(
+                *last_stream_id <= 0x7fff_ffff,
+                "GOAWAY last stream ID must keep the reserved bit clear"
+            );
+        }
+    }
+}
+
+fn assert_valid_stream_id(stream_id: u32, context: &str) {
+    assert!(
+        (1..=0x7fff_ffff).contains(&stream_id),
+        "{context} stream ID must be nonzero and 31-bit: {stream_id}"
+    );
 }
 
 fn test_general_ordering(input: &FrameSequenceInput) {
