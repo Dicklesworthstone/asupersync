@@ -123,6 +123,118 @@ fn build_normal_payload(input: &GoAwayFuzzInput) -> Vec<u8> {
     payload
 }
 
+fn expected_last_stream_id(payload: &[u8]) -> u32 {
+    ((u32::from(payload[0]) & 0x7f) << 24)
+        | (u32::from(payload[1]) << 16)
+        | (u32::from(payload[2]) << 8)
+        | u32::from(payload[3])
+}
+
+fn expected_error_code(payload: &[u8]) -> ErrorCode {
+    ErrorCode::from_u32(
+        (u32::from(payload[4]) << 24)
+            | (u32::from(payload[5]) << 16)
+            | (u32::from(payload[6]) << 8)
+            | u32::from(payload[7]),
+    )
+}
+
+fn assert_goaway_matches_payload(
+    context: &str,
+    frame: &GoAwayFrame,
+    payload: &[u8],
+) -> Result<(), String> {
+    if payload.len() < 8 {
+        return Err(format!(
+            "{context}: parsed GOAWAY from short payload of {} bytes",
+            payload.len()
+        ));
+    }
+
+    let expected_last_stream_id = expected_last_stream_id(payload);
+    if frame.last_stream_id != expected_last_stream_id {
+        return Err(format!(
+            "{context}: last_stream_id mismatch. Expected {}, got {}",
+            expected_last_stream_id, frame.last_stream_id
+        ));
+    }
+
+    let expected_error_code = expected_error_code(payload);
+    if frame.error_code != expected_error_code {
+        return Err(format!(
+            "{context}: error code mismatch. Expected {:?}, got {:?}",
+            expected_error_code, frame.error_code
+        ));
+    }
+
+    let expected_debug_data = &payload[8..];
+    if frame.debug_data.as_ref() != expected_debug_data {
+        return Err(format!(
+            "{context}: debug data not preserved. Expected {} bytes, got {} bytes",
+            expected_debug_data.len(),
+            frame.debug_data.len()
+        ));
+    }
+
+    Ok(())
+}
+
+fn assert_goaway_parse_error(
+    context: &str,
+    error: &asupersync::http::h2::error::H2Error,
+    header: &FrameHeader,
+    payload_len: usize,
+) -> Result<(), String> {
+    if header.stream_id != 0 {
+        if error.code != ErrorCode::ProtocolError {
+            return Err(format!(
+                "{context}: GOAWAY with non-zero stream ID should cause PROTOCOL_ERROR, got {:?}",
+                error.code
+            ));
+        }
+        if error.stream_id.is_some() {
+            return Err(format!(
+                "{context}: GOAWAY stream-id violation should be connection-level, got stream {:?}",
+                error.stream_id
+            ));
+        }
+        if !error.message.contains("non-zero stream ID") {
+            return Err(format!(
+                "{context}: GOAWAY stream-id diagnostic changed: {}",
+                error.message
+            ));
+        }
+        return Ok(());
+    }
+
+    if payload_len < 8 {
+        if error.code != ErrorCode::FrameSizeError {
+            return Err(format!(
+                "{context}: short GOAWAY payload should cause FRAME_SIZE_ERROR, got {:?}",
+                error.code
+            ));
+        }
+        if error.stream_id.is_some() {
+            return Err(format!(
+                "{context}: short GOAWAY payload should be connection-level, got stream {:?}",
+                error.stream_id
+            ));
+        }
+        if !error.message.contains("at least 8 bytes") {
+            return Err(format!(
+                "{context}: GOAWAY size diagnostic changed: {}",
+                error.message
+            ));
+        }
+        return Ok(());
+    }
+
+    Err(format!(
+        "{context}: stream-0 GOAWAY payload with {payload_len} bytes should parse, got {:?}",
+        error.code
+    ))
+}
+
 /// Test the 5 GOAWAY frame parsing assertions.
 fn test_goaway_frame_assertions(input: GoAwayFuzzInput) -> Result<(), String> {
     let payload_bytes = build_goaway_payload(&input);
@@ -150,91 +262,27 @@ fn test_goaway_frame_assertions(input: GoAwayFuzzInput) -> Result<(), String> {
 
     match parse_result {
         Ok(goaway_frame) => {
-            // ASSERTION 1: last-stream-id within uint31 bounds
-            // The parser should have cleared the reserved (R) bit.
-            if goaway_frame.last_stream_id > 0x7FFFFFFF {
-                return Err(format!(
-                    "ASSERTION 1 FAILED: last_stream_id {} exceeds 31-bit limit",
-                    goaway_frame.last_stream_id
-                ));
-            }
-
-            // Verify R bit was properly cleared.
-            let expected_last_stream_id = input.raw_last_stream_id & 0x7FFFFFFF;
-            if goaway_frame.last_stream_id != expected_last_stream_id {
-                return Err(format!(
-                    "ASSERTION 1 FAILED: R bit not properly cleared. Expected {}, got {}",
-                    expected_last_stream_id, goaway_frame.last_stream_id
-                ));
-            }
-
-            // ASSERTION 2: error_code enum validated
-            // Unknown error codes should be mapped to INTERNAL_ERROR.
-            let expected_error_code = ErrorCode::from_u32(input.raw_error_code);
-            if goaway_frame.error_code != expected_error_code {
-                return Err(format!(
-                    "ASSERTION 2 FAILED: error code validation failed. Expected {:?}, got {:?}",
-                    expected_error_code, goaway_frame.error_code
-                ));
-            }
-
-            // ASSERTION 3: additional_debug_data opaque
-            // Any debug data should be preserved as-is.
-            if goaway_frame.debug_data.as_ref() != input.debug_data.as_slice() {
-                return Err(format!(
-                    "ASSERTION 3 FAILED: debug data not preserved. Expected {} bytes, got {} bytes",
-                    input.debug_data.len(),
-                    goaway_frame.debug_data.len()
-                ));
-            }
-
-            // ASSERTION 5: GOAWAY on Stream ID 0 mandatory
-            // If frame was parsed successfully, stream ID must have been 0.
             if frame_header.stream_id != 0 {
                 return Err(format!(
                     "ASSERTION 5 FAILED: GOAWAY parsed with non-zero stream ID {}",
                     frame_header.stream_id
                 ));
             }
+
+            assert_goaway_matches_payload(
+                "ASSERTION 1/2/3 FAILED",
+                &goaway_frame,
+                payload.as_ref(),
+            )?;
         }
 
         Err(h2_error) => {
-            // ASSERTION 5: GOAWAY on Stream ID 0 mandatory
-            // Non-zero stream ID should be rejected with PROTOCOL_ERROR.
-            if frame_header.stream_id != 0 {
-                if h2_error.code != ErrorCode::ProtocolError {
-                    return Err(format!(
-                        "ASSERTION 5 FAILED: Non-zero stream ID should cause PROTOCOL_ERROR, got {:?}",
-                        h2_error.code
-                    ));
-                }
-                // This is the expected behavior - GOAWAY with non-zero stream ID rejected.
-                return Ok(());
-            }
-
-            // For other parse errors, verify they're reasonable.
-            match h2_error.code {
-                ErrorCode::FrameSizeError => {
-                    // ASSERTION 3: Frame too short should be rejected.
-                    if payload.len() < 8 {
-                        return Ok(()); // Expected
-                    }
-                    return Err(format!(
-                        "ASSERTION 3 FAILED: Unexpected FRAME_SIZE_ERROR with payload length {}",
-                        payload.len()
-                    ));
-                }
-                ErrorCode::ProtocolError => {
-                    // Various protocol violations are acceptable to reject.
-                    return Ok(());
-                }
-                _ => {
-                    return Err(format!(
-                        "ASSERTION GENERAL: Unexpected error code {:?} for GOAWAY parsing",
-                        h2_error.code
-                    ));
-                }
-            }
+            assert_goaway_parse_error(
+                "ASSERTION 3/5 FAILED",
+                &h2_error,
+                &frame_header,
+                payload.len(),
+            )?;
         }
     }
 
@@ -262,8 +310,10 @@ fn test_goaway_frame_pipeline(input: &GoAwayFuzzInput) -> Result<(), String> {
     frame_bytes.extend_from_slice(&payload_bytes);
 
     // Parse complete frame through the live header/payload pipeline.
-    let parse_result = FrameHeader::parse(&mut frame_bytes)
-        .and_then(|header| parse_frame(&header, frame_bytes.freeze()));
+    let parsed_header = FrameHeader::parse(&mut frame_bytes)
+        .map_err(|error| format!("ASSERTION PIPELINE: own header did not parse: {error:?}"))?;
+    let payload = frame_bytes.freeze();
+    let parse_result = parse_frame(&parsed_header, payload.clone());
 
     match parse_result {
         Ok(Frame::GoAway(goaway_frame)) => {
@@ -271,32 +321,19 @@ fn test_goaway_frame_pipeline(input: &GoAwayFuzzInput) -> Result<(), String> {
             // This is a protocol-level assertion - the frame itself doesn't enforce closure,
             // but the connection state machine should handle this. For fuzzing purposes,
             // we just verify the frame was parsed correctly.
-
-            // Verify the frame contents match our expectations.
-            let expected_last_stream_id = input.raw_last_stream_id & 0x7FFFFFFF;
-            if goaway_frame.last_stream_id != expected_last_stream_id {
-                return Err(
-                    "ASSERTION 4/PIPELINE: Pipeline parsing altered last_stream_id".to_string(),
-                );
-            }
-
-            Ok(())
+            assert_goaway_matches_payload("ASSERTION 4/PIPELINE", &goaway_frame, payload.as_ref())
         }
 
         Ok(_other_frame) => {
             Err("ASSERTION PIPELINE: Expected GoAway frame, got different frame type".to_string())
         }
 
-        Err(h2_error) => {
-            // Various parsing errors are acceptable.
-            match h2_error.code {
-                ErrorCode::ProtocolError | ErrorCode::FrameSizeError => Ok(()),
-                _ => Err(format!(
-                    "ASSERTION PIPELINE: Unexpected error {:?}",
-                    h2_error.code
-                )),
-            }
-        }
+        Err(h2_error) => assert_goaway_parse_error(
+            "ASSERTION PIPELINE",
+            &h2_error,
+            &parsed_header,
+            payload.len(),
+        ),
     }
 }
 
