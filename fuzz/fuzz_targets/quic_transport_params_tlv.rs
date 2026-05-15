@@ -194,15 +194,42 @@ fn observe_transport_parameters_decode(bytes: &[u8]) -> Result<TransportParamete
 
     match &result {
         Ok(params) => assert_valid_decoded_params(params),
-        Err(err) => {
-            assert!(
-                !format!("{err:?}").is_empty(),
-                "transport parameter decode errors must remain observable"
-            );
-        }
+        Err(err) => assert_quic_error_display(err),
     }
 
     result
+}
+
+fn assert_quic_error_display(error: &QuicCoreError) {
+    let expected = match error {
+        QuicCoreError::UnexpectedEof => "unexpected EOF".to_string(),
+        QuicCoreError::VarIntOutOfRange(value) => format!("varint out of range: {value}"),
+        QuicCoreError::InvalidHeader(message) => format!("invalid header: {message}"),
+        QuicCoreError::InvalidConnectionIdLength(length) => {
+            format!("invalid connection id length: {length}")
+        }
+        QuicCoreError::PacketNumberTooLarge {
+            packet_number,
+            width,
+        } => format!("packet number {packet_number} does not fit in {width} bytes"),
+        QuicCoreError::DuplicateTransportParameter(id) => {
+            format!("duplicate transport parameter: 0x{id:x}")
+        }
+        QuicCoreError::InvalidTransportParameter(id) => {
+            format!("invalid transport parameter: 0x{id:x}")
+        }
+    };
+
+    assert_eq!(
+        error.to_string(),
+        expected,
+        "QUIC core error display message drift for {error:?}"
+    );
+}
+
+fn assert_quic_error_eq(error: QuicCoreError, expected: QuicCoreError) {
+    assert_eq!(error, expected);
+    assert_quic_error_display(&error);
 }
 
 fn has_any_transport_parameter(params: &TransportParameters) -> bool {
@@ -243,11 +270,7 @@ fn observe_transport_parameters_encode(
             }
         }
         Err(err) => {
-            let message = err.to_string();
-            assert!(
-                !message.trim().is_empty(),
-                "transport parameter encode errors must expose diagnostics"
-            );
+            assert_quic_error_display(err);
             assert!(
                 encoded.len() >= start_len,
                 "transport parameter encode error must not shrink caller buffer"
@@ -264,10 +287,7 @@ fn assert_expected_encode_result(context: &str, result: Result<(), QuicCoreError
             matches!(err, QuicCoreError::VarIntOutOfRange(_)),
             "{context}: unexpected transport parameter encode error: {err:?}"
         );
-        assert!(
-            !err.to_string().trim().is_empty(),
-            "{context}: encode error should expose diagnostics"
-        );
+        assert_quic_error_display(&err);
     }
 }
 
@@ -286,10 +306,7 @@ fn assert_expected_decode_result(
             | QuicCoreError::UnexpectedEof
             | QuicCoreError::VarIntOutOfRange(_)),
         ) => {
-            assert!(
-                !err.to_string().trim().is_empty(),
-                "{context}: decode error should expose diagnostics"
-            );
+            assert_quic_error_display(&err);
             None
         }
         Err(err) => {
@@ -460,6 +477,7 @@ fn test_round_trip_consistency(input: &TransportParamsFuzzInput) {
                                 ),
                                 "unexpected round-trip decode error: {err:?}"
                             );
+                            assert_quic_error_display(&err);
                         }
                     }
                 }
@@ -468,6 +486,7 @@ fn test_round_trip_consistency(input: &TransportParamsFuzzInput) {
                         matches!(err, QuicCoreError::VarIntOutOfRange(_)),
                         "unexpected round-trip encode error: {err:?}"
                     );
+                    assert_quic_error_display(&err);
                 }
             }
         }
@@ -482,10 +501,12 @@ fn test_invalid_input_rejection(input: &TransportParamsFuzzInput) {
                 Ok(params) => {
                     assert_valid_decoded_params(&params);
                 }
-                Err(QuicCoreError::DuplicateTransportParameter(_))
-                | Err(QuicCoreError::InvalidTransportParameter(_))
-                | Err(QuicCoreError::UnexpectedEof)
-                | Err(QuicCoreError::VarIntOutOfRange(_)) => {}
+                Err(
+                    err @ (QuicCoreError::DuplicateTransportParameter(_)
+                    | QuicCoreError::InvalidTransportParameter(_)
+                    | QuicCoreError::UnexpectedEof
+                    | QuicCoreError::VarIntOutOfRange(_)),
+                ) => assert_quic_error_display(&err),
                 Err(err) => panic!("unexpected transport parameter decode error: {err:?}"),
             }
         }
@@ -516,11 +537,11 @@ fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
             match TransportParameters::decode(malformed_bytes) {
                 Ok(params) => assert_valid_decoded_params(&params),
                 Err(
-                    QuicCoreError::DuplicateTransportParameter(_)
+                    err @ (QuicCoreError::DuplicateTransportParameter(_)
                     | QuicCoreError::InvalidTransportParameter(_)
                     | QuicCoreError::UnexpectedEof
-                    | QuicCoreError::VarIntOutOfRange(_),
-                ) => {}
+                    | QuicCoreError::VarIntOutOfRange(_)),
+                ) => assert_quic_error_display(&err),
                 Err(err) => panic!("unexpected malformed TLV error: {err:?}"),
             }
         }
@@ -537,7 +558,7 @@ fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
             }
             let err = TransportParameters::decode(&encoded)
                 .expect_err("duplicate transport parameter should fail");
-            assert_eq!(err, QuicCoreError::DuplicateTransportParameter(id));
+            assert_quic_error_eq(err, QuicCoreError::DuplicateTransportParameter(id));
         }
         AttackScenario::InvalidValues { invalid_type } => {
             // Test specific invalid value scenarios
@@ -553,9 +574,9 @@ fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
                         .expect("small UDP payload should encode as TLV");
                     let err = TransportParameters::decode(&encoded)
                         .expect_err("small UDP payload should be rejected");
-                    assert_eq!(
+                    assert_quic_error_eq(
                         err,
-                        QuicCoreError::InvalidTransportParameter(TP_MAX_UDP_PAYLOAD_SIZE)
+                        QuicCoreError::InvalidTransportParameter(TP_MAX_UDP_PAYLOAD_SIZE),
                     );
                 }
                 InvalidValueType::LargeAckDelayExponent => {
@@ -568,18 +589,18 @@ fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
                         .expect("large ACK delay exponent should encode as TLV");
                     let err = TransportParameters::decode(&encoded)
                         .expect_err("large ACK delay exponent should be rejected");
-                    assert_eq!(
+                    assert_quic_error_eq(
                         err,
-                        QuicCoreError::InvalidTransportParameter(TP_ACK_DELAY_EXPONENT)
+                        QuicCoreError::InvalidTransportParameter(TP_ACK_DELAY_EXPONENT),
                     );
                 }
                 InvalidValueType::NonEmptyDisableActiveMigration => {
                     encode_parameter(&mut encoded, TP_DISABLE_ACTIVE_MIGRATION, &[0x01]);
                     let err = TransportParameters::decode(&encoded)
                         .expect_err("non-empty disable_active_migration should be rejected");
-                    assert_eq!(
+                    assert_quic_error_eq(
                         err,
-                        QuicCoreError::InvalidTransportParameter(TP_DISABLE_ACTIVE_MIGRATION)
+                        QuicCoreError::InvalidTransportParameter(TP_DISABLE_ACTIVE_MIGRATION),
                     );
                 }
             }
@@ -610,7 +631,7 @@ fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
                     let err = params
                         .encode(&mut encoded)
                         .expect_err("u64::MAX exceeds QUIC varint range");
-                    assert_eq!(err, QuicCoreError::VarIntOutOfRange(out_of_range_value));
+                    assert_quic_error_eq(err, QuicCoreError::VarIntOutOfRange(out_of_range_value));
                 }
                 LargeParamType::UnknownParamValue => {
                     params
@@ -629,7 +650,7 @@ fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
             let truncate_amount = usize::from(*truncate_bytes).clamp(1, encoded.len() - 1);
             encoded.truncate(encoded.len() - truncate_amount);
             let err = TransportParameters::decode(&encoded).expect_err("truncated TLV should fail");
-            assert_eq!(err, QuicCoreError::UnexpectedEof);
+            assert_quic_error_eq(err, QuicCoreError::UnexpectedEof);
         }
     }
 }
