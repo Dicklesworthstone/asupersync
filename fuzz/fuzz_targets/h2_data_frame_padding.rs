@@ -144,21 +144,22 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 6: Padding length equals payload length (edge case)
     if data.len() >= 2 {
-        let payload_data = &data[1..];
-        let pad_length = payload_data.len() as u8;
+        let padding_len = (data.len() - 1).min(u8::MAX as usize);
+        let payload_data = &data[1..=padding_len];
+        let pad_length = u8::try_from(padding_len).expect("padding length capped at u8::MAX");
 
-        let result = create_padded_data_frame(payload_data, pad_length, 1);
-        if let Ok(frame) = result {
-            let parse_result = validate_data_frame_padding(&frame);
-            // This should result in zero application data (all padding)
-            match parse_result {
-                Ok(Frame::Data(data_frame)) => {
-                    // All data was padding, so payload should be empty
-                    assert!(data_frame.data.is_empty());
-                }
-                Ok(_) => {}
-                Err(error) => observe_h2_parse_error(&error, "all-padding DATA frame"),
+        let parse_result = parse_raw_padded_data_payload(payload_data, pad_length, 1);
+        // This should result in zero application data (all padding).
+        match parse_result {
+            Ok(Frame::Data(data_frame)) => {
+                assert!(
+                    data_frame.data.is_empty(),
+                    "all-padding DATA frame exposed application data"
+                );
+                assert_eq!(data_frame.stream_id, 1);
             }
+            Ok(frame) => panic!("all-padding DATA parse returned non-DATA frame {frame:?}"),
+            Err(error) => panic!("all-padding DATA frame should parse cleanly: {error:?}"),
         }
     }
 
