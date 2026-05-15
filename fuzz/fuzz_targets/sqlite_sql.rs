@@ -55,17 +55,19 @@ const MAX_TEXT_BYTES: usize = 256;
 const MAX_BLOB_BYTES: usize = 1024;
 
 /// SQL statement type classification
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 enum SqlStatementType {
-    DDL,    // Data Definition Language (CREATE, DROP, ALTER)
-    DML,    // Data Manipulation Language (SELECT, INSERT, UPDATE, DELETE)
-    DCL,    // Data Control Language (GRANT, REVOKE)
-    TCL,    // Transaction Control Language (BEGIN, COMMIT, ROLLBACK, SAVEPOINT)
+    Ddl,    // Data Definition Language (CREATE, DROP, ALTER)
+    Dml,    // Data Manipulation Language (SELECT, INSERT, UPDATE, DELETE)
+    Dcl,    // Data Control Language (GRANT, REVOKE)
+    Tcl,    // Transaction Control Language (BEGIN, COMMIT, ROLLBACK, SAVEPOINT)
     Pragma, // PRAGMA statements
     Unknown,
 }
 
 /// SQL statement generation strategy for fuzzing
+#[allow(dead_code)]
 #[derive(Arbitrary, Debug, Clone)]
 enum SqlStrategy {
     /// Valid SELECT statement
@@ -138,6 +140,7 @@ enum SavepointOp {
 }
 
 /// Parameter binding strategy for fuzzing
+#[allow(dead_code)]
 #[derive(Arbitrary, Debug, Clone)]
 struct ParameterStrategy {
     /// Number of parameters to bind
@@ -182,6 +185,7 @@ impl BindValueInput {
 }
 
 /// Test case for SQLite fuzzing
+#[allow(dead_code)]
 #[derive(Arbitrary, Debug)]
 struct SqliteFuzzInput {
     /// SQL statement generation strategy
@@ -422,19 +426,19 @@ impl SqliteFuzzInput {
             || sql_upper.starts_with("UPDATE")
             || sql_upper.starts_with("DELETE")
         {
-            SqlStatementType::DML
+            SqlStatementType::Dml
         } else if sql_upper.starts_with("CREATE")
             || sql_upper.starts_with("DROP")
             || sql_upper.starts_with("ALTER")
         {
-            SqlStatementType::DDL
+            SqlStatementType::Ddl
         } else if sql_upper.starts_with("BEGIN")
             || sql_upper.starts_with("COMMIT")
             || sql_upper.starts_with("ROLLBACK")
             || sql_upper.starts_with("SAVEPOINT")
             || sql_upper.starts_with("RELEASE")
         {
-            SqlStatementType::TCL
+            SqlStatementType::Tcl
         } else if sql_upper.starts_with("PRAGMA") {
             SqlStatementType::Pragma
         } else {
@@ -629,7 +633,7 @@ impl SqliteTestHarness {
 
         // Test 3: DDL vs DML discrimination
         match statement_type {
-            SqlStatementType::DDL => {
+            SqlStatementType::Ddl => {
                 // DDL statements (CREATE, DROP, ALTER) should be detected
                 // and may require special handling
                 match self.conn.execute(&self.cx, &sql, &params).await {
@@ -651,7 +655,7 @@ impl SqliteTestHarness {
                     Outcome::Panicked(_) => panic!("sqlite execute panicked"),
                 }
             }
-            SqlStatementType::DML => {
+            SqlStatementType::Dml => {
                 // DML statements (SELECT, INSERT, UPDATE, DELETE) are the common case
                 match self.conn.execute(&self.cx, &sql, &params).await {
                     Outcome::Ok(_) => {
@@ -664,7 +668,7 @@ impl SqliteTestHarness {
                     Outcome::Panicked(_) => panic!("sqlite execute panicked"),
                 }
             }
-            SqlStatementType::TCL => {
+            SqlStatementType::Tcl => {
                 // Test 4: Transaction nesting (SAVEPOINT) tracked
                 if sql.trim().to_uppercase().starts_with("BEGIN") {
                     self.transaction_depth += 1;
@@ -676,12 +680,11 @@ impl SqliteTestHarness {
                     if let Some(name) = sql.split_whitespace().nth(1) {
                         self.savepoint_stack.push(name.to_string());
                     }
-                } else if sql.trim().to_uppercase().starts_with("RELEASE SAVEPOINT") {
-                    if let Some(name) = sql.split_whitespace().nth(2) {
-                        if let Some(pos) = self.savepoint_stack.iter().position(|x| x == name) {
-                            self.savepoint_stack.remove(pos);
-                        }
-                    }
+                } else if sql.trim().to_uppercase().starts_with("RELEASE SAVEPOINT")
+                    && let Some(name) = sql.split_whitespace().nth(2)
+                    && let Some(pos) = self.savepoint_stack.iter().position(|x| x == name)
+                {
+                    self.savepoint_stack.remove(pos);
                 }
 
                 match self.conn.execute(&self.cx, &sql, &params).await {
@@ -765,7 +768,7 @@ fuzz_target!(|input: SqliteFuzzInput| {
     }
 
     // Test SQLite operations using futures_lite runtime
-    let _ = block_on(async {
+    block_on(async {
         let mut harness = match SqliteTestHarness::new().await {
             Ok(h) => h,
             Err(_) => return, // Skip if we can't create test harness
@@ -780,10 +783,7 @@ fuzz_target!(|input: SqliteFuzzInput| {
             Ok(_) => {
                 // Test completed normally
             }
-            Err(_) => {
-                // Panic occurred - this indicates a bug that fuzzing found
-                // The panic will be reported by libfuzzer
-            }
+            Err(payload) => std::panic::resume_unwind(payload),
         }
     });
 });
