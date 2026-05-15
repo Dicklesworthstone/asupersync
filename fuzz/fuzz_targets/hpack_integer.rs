@@ -1,12 +1,12 @@
 //! Comprehensive fuzz target for HPACK integer decoding per RFC 7541 Section 5.1.
 //!
-//! This target feeds malformed N-bit prefixed integer encodings to the HPACK
-//! integer decoder to assert critical security and robustness properties:
+//! This target feeds malformed prefixed integer encodings through the live HPACK
+//! header decoder to assert critical security and robustness properties:
 //!
 //! 1. 2^N-1 encoding extends to continuation bytes correctly
 //! 2. overflow on u64::MAX boundary rejected, not silent truncation
 //! 3. truncated continuation returns error not panic
-//! 4. all 8 prefix-bit variants (N=1..8) correctly decoded
+//! 4. every public HPACK decoder context that consumes an integer is exercised
 //! 5. high-bit-set continuation bytes terminated correctly
 //!
 //! # Running
@@ -17,7 +17,7 @@
 //! # Security Focus
 //! - Integer overflow protection in variable-length encoding
 //! - Buffer boundary validation during continuation byte parsing
-//! - Prefix bit masking correctness (N=1 to N=8)
+//! - Prefix bit masking correctness for live HPACK field and string contexts
 //! - Shift operation overflow detection
 //! - Memory safety under malformed input sequences
 
@@ -25,11 +25,14 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::error::H2Error;
+use asupersync::http::h2::hpack::{Decoder, Header};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum number of continuation bytes for practical testing
 const MAX_CONTINUATION_BYTES: usize = 20;
+const MAX_BLOCK_BYTES: usize = 256;
+const MAX_LITERAL_PAYLOAD: usize = 64;
+const MAX_TABLE_SIZE: usize = 4096;
 
 /// HPACK integer decoding fuzzing configuration
 #[derive(Arbitrary, Debug, Clone)]
@@ -43,61 +46,72 @@ struct HpackIntegerFuzzInput {
 enum IntegerTestCase {
     /// Test valid encoding for specific prefix bits
     ValidEncoding {
-        prefix_bits: PrefixBits,
-        value: u32,     // Bounded to prevent excessive resource usage
-        add_prefix: u8, // Additional bits in the prefix byte
+        context: HpackIntegerContext,
+        value: u32, // Bounded to prevent excessive resource usage
     },
     /// Test boundary value 2^N-1 which triggers multi-byte encoding
-    BoundaryValue {
-        prefix_bits: PrefixBits,
-        add_prefix: u8,
-    },
+    BoundaryValue { context: HpackIntegerContext },
     /// Test continuation byte sequences
     ContinuationSequence {
-        prefix_bits: PrefixBits,
+        context: HpackIntegerContext,
         continuation_bytes: Vec<u8>, // Raw continuation bytes
-        add_prefix: u8,
     },
     /// Test truncated input
     TruncatedInput {
-        prefix_bits: PrefixBits,
+        context: HpackIntegerContext,
         partial_bytes: Vec<u8>, // Incomplete byte sequence
-        add_prefix: u8,
     },
     /// Test overflow scenarios
     OverflowAttempt {
-        prefix_bits: PrefixBits,
+        context: HpackIntegerContext,
         large_continuation: LargeValueStrategy,
-        add_prefix: u8,
     },
 }
 
-/// Prefix bit count (N=1 to N=8)
+/// Public HPACK decoder contexts that consume an HPACK integer primitive.
 #[derive(Arbitrary, Debug, Clone, Copy)]
-enum PrefixBits {
-    One = 1,
-    Two = 2,
-    Three = 3,
-    Four = 4,
-    Five = 5,
-    Six = 6,
-    Seven = 7,
-    Eight = 8,
+enum HpackIntegerContext {
+    /// RFC 7541 Section 6.3: dynamic table size update, 5-bit prefix.
+    DynamicTableSizeUpdate,
+    /// RFC 7541 Section 6.1: indexed header field, 7-bit prefix.
+    IndexedHeaderField,
+    /// RFC 7541 Section 6.2.1: literal with incremental indexing name index, 6-bit prefix.
+    LiteralWithIndexingNameIndex,
+    /// RFC 7541 Section 6.2.2: literal without indexing name index, 4-bit prefix.
+    LiteralWithoutIndexingNameIndex,
+    /// RFC 7541 Section 6.2.3: literal never indexed name index, 4-bit prefix.
+    LiteralNeverIndexedNameIndex,
+    /// RFC 7541 Section 5.2: literal name string length, 7-bit prefix.
+    LiteralNameLength,
+    /// RFC 7541 Section 5.2: literal value string length, 7-bit prefix.
+    LiteralValueLength,
 }
 
-impl PrefixBits {
-    fn as_u8(self) -> u8 {
-        self as u8
+impl HpackIntegerContext {
+    fn prefix_bits(self) -> u8 {
+        match self {
+            Self::DynamicTableSizeUpdate => 5,
+            Self::IndexedHeaderField | Self::LiteralNameLength | Self::LiteralValueLength => 7,
+            Self::LiteralWithIndexingNameIndex => 6,
+            Self::LiteralWithoutIndexingNameIndex | Self::LiteralNeverIndexedNameIndex => 4,
+        }
+    }
+
+    fn tag(self) -> u8 {
+        match self {
+            Self::DynamicTableSizeUpdate => 0x20,
+            Self::IndexedHeaderField => 0x80,
+            Self::LiteralWithIndexingNameIndex => 0x40,
+            Self::LiteralWithoutIndexingNameIndex
+            | Self::LiteralNameLength
+            | Self::LiteralValueLength => 0x00,
+            Self::LiteralNeverIndexedNameIndex => 0x10,
+        }
     }
 
     /// Maximum value that can be encoded in the prefix bits
     fn max_prefix_value(self) -> usize {
-        (1 << self.as_u8()) - 1
-    }
-
-    /// Mask for the prefix bits
-    fn prefix_mask(self) -> u8 {
-        ((1u16 << self.as_u8()) - 1) as u8
+        (1 << self.prefix_bits()) - 1
     }
 }
 
@@ -115,6 +129,8 @@ enum LargeValueStrategy {
 }
 
 fuzz_target!(|input: HpackIntegerFuzzInput| {
+    assert_seed_integer_contexts_hit_live_decoder();
+
     // Bound input size to prevent excessive resource usage
     if input.test_cases.len() > 100 {
         return;
@@ -126,13 +142,8 @@ fuzz_target!(|input: HpackIntegerFuzzInput| {
         }));
 
         match test_result {
-            Ok(Ok(())) => {
+            Ok(()) => {
                 // Test case processed successfully
-            }
-            Ok(Err(_h2_error)) => {
-                // H2Error is expected for malformed input - this is correct behavior
-                // **ASSERTION 2**: Overflow on u64::MAX boundary rejected
-                // **ASSERTION 3**: Truncated continuation returns error not panic
             }
             Err(_) => {
                 // **ASSERTION 3**: Truncated continuation returns error not panic
@@ -143,158 +154,73 @@ fuzz_target!(|input: HpackIntegerFuzzInput| {
 });
 
 /// Process a single integer test case
-fn process_integer_test_case(test_case: &IntegerTestCase) -> Result<(), H2Error> {
+fn process_integer_test_case(test_case: &IntegerTestCase) {
     match test_case {
-        IntegerTestCase::ValidEncoding {
-            prefix_bits,
-            value,
-            add_prefix,
-        } => test_valid_encoding(*prefix_bits, *value as usize, *add_prefix),
-        IntegerTestCase::BoundaryValue {
-            prefix_bits,
-            add_prefix,
-        } => test_boundary_value(*prefix_bits, *add_prefix),
+        IntegerTestCase::ValidEncoding { context, value } => {
+            test_valid_encoding(*context, *value as usize)
+        }
+        IntegerTestCase::BoundaryValue { context } => test_boundary_value(*context),
         IntegerTestCase::ContinuationSequence {
-            prefix_bits,
+            context,
             continuation_bytes,
-            add_prefix,
-        } => test_continuation_sequence(*prefix_bits, continuation_bytes, *add_prefix),
+        } => test_continuation_sequence(*context, continuation_bytes),
         IntegerTestCase::TruncatedInput {
-            prefix_bits,
+            context,
             partial_bytes,
-            add_prefix,
-        } => test_truncated_input(*prefix_bits, partial_bytes, *add_prefix),
+        } => test_truncated_input(*context, partial_bytes),
         IntegerTestCase::OverflowAttempt {
-            prefix_bits,
+            context,
             large_continuation,
-            add_prefix,
-        } => test_overflow_attempt(*prefix_bits, large_continuation, *add_prefix),
+        } => test_overflow_attempt(*context, large_continuation),
     }
 }
 
 /// Test valid encoding for various values and prefix bit counts
-fn test_valid_encoding(
-    prefix_bits: PrefixBits,
-    value: usize,
-    add_prefix: u8,
-) -> Result<(), H2Error> {
-    // **ASSERTION 4**: All 8 prefix-bit variants (N=1..8) correctly decoded
-
-    let prefix_mask = prefix_bits.prefix_mask();
-    let non_prefix_mask = !prefix_mask;
-    let prefix_byte = (add_prefix & non_prefix_mask)
-        | if value < prefix_bits.max_prefix_value() {
-            value as u8
-        } else {
-            prefix_mask
-        };
-
-    let mut data = vec![prefix_byte];
-
-    // If value >= 2^N-1, add continuation bytes
-    if value >= prefix_bits.max_prefix_value() {
-        // **ASSERTION 1**: 2^N-1 encoding extends to continuation bytes
-        let mut remaining = value - prefix_bits.max_prefix_value();
-        while remaining >= 128 {
-            data.push((remaining & 0x7f) as u8 | 0x80);
-            remaining >>= 7;
-        }
-        data.push(remaining as u8); // **ASSERTION 5**: Final byte has high bit clear
-    }
-
-    let mut bytes = Bytes::from(data);
-    let decoded = decode_integer_test(&mut bytes, prefix_bits.as_u8())?;
-
-    // Verify round-trip correctness for valid inputs
-    if value <= usize::MAX / 2 {
-        assert_eq!(
-            decoded,
-            value,
-            "Round-trip mismatch for value {} with {}-bit prefix",
-            value,
-            prefix_bits.as_u8()
-        );
-    }
-
-    Ok(())
+fn test_valid_encoding(context: HpackIntegerContext, value: usize) {
+    let integer = encode_integer_field(context, value);
+    observe_live_decoder(context, integer, "valid encoding");
 }
 
 /// Test boundary value 2^N-1 which should trigger multi-byte encoding
-fn test_boundary_value(prefix_bits: PrefixBits, add_prefix: u8) -> Result<(), H2Error> {
+fn test_boundary_value(context: HpackIntegerContext) {
     // **ASSERTION 1**: 2^N-1 encoding extends to continuation bytes
 
-    let boundary_value = prefix_bits.max_prefix_value();
-    let prefix_mask = prefix_bits.prefix_mask();
-    let non_prefix_mask = !prefix_mask;
-
-    // Boundary value should be encoded as prefix_mask + continuation bytes
-    let data = vec![
-        (add_prefix & non_prefix_mask) | prefix_mask, // First byte: 2^N-1 in prefix bits
-        0x00, // Single continuation byte with value 0 (high bit clear)
-    ];
-
-    let mut bytes = Bytes::from(data);
-    let decoded = decode_integer_test(&mut bytes, prefix_bits.as_u8())?;
-
-    assert_eq!(
-        decoded,
-        boundary_value,
-        "Boundary value {boundary_value} incorrectly decoded with {}-bit prefix",
-        prefix_bits.as_u8()
-    );
-
-    Ok(())
+    let data = vec![context.tag() | context.max_prefix_value() as u8, 0x00];
+    observe_live_decoder(context, data, "boundary value");
 }
 
 /// Test arbitrary continuation byte sequences
-fn test_continuation_sequence(
-    prefix_bits: PrefixBits,
-    continuation_bytes: &[u8],
-    add_prefix: u8,
-) -> Result<(), H2Error> {
+fn test_continuation_sequence(context: HpackIntegerContext, continuation_bytes: &[u8]) {
     // **ASSERTION 5**: High-bit-set continuation bytes terminated correctly
 
     if continuation_bytes.len() > MAX_CONTINUATION_BYTES {
-        return Ok(()); // Skip excessively long sequences
+        return; // Skip excessively long sequences
     }
 
-    let prefix_mask = prefix_bits.prefix_mask();
-    let non_prefix_mask = !prefix_mask;
-
-    let mut data = vec![(add_prefix & non_prefix_mask) | prefix_mask]; // Use boundary value
+    let mut data = vec![context.tag() | context.max_prefix_value() as u8];
     data.extend_from_slice(continuation_bytes);
-
-    let mut bytes = Bytes::from(data);
-    let _decoded = decode_integer_test(&mut bytes, prefix_bits.as_u8())?;
 
     // **ASSERTION 5**: If the sequence is valid (last byte has high bit clear),
     // it should decode successfully. If invalid (all bytes have high bit set),
     // it should return an error, not panic.
-
-    Ok(())
+    observe_live_decoder(context, data, "continuation sequence");
 }
 
 /// Test truncated input sequences
-fn test_truncated_input(
-    prefix_bits: PrefixBits,
-    partial_bytes: &[u8],
-    add_prefix: u8,
-) -> Result<(), H2Error> {
+fn test_truncated_input(context: HpackIntegerContext, partial_bytes: &[u8]) {
     // **ASSERTION 3**: Truncated continuation returns error not panic
 
     if partial_bytes.is_empty() {
-        // Empty input should error
-        let mut bytes = Bytes::new();
-        let _result = decode_integer_test(&mut bytes, prefix_bits.as_u8())?;
-        return Ok(());
+        // Empty header blocks are valid; this still proves the live decoder
+        // surface handles the shortest input without panicking.
+        observe_raw_block(Bytes::new(), "empty HPACK block");
+        return;
     }
 
     let mut data = Vec::new();
 
     // Create a sequence that appears to need continuation bytes
-    let prefix_mask = prefix_bits.prefix_mask();
-    let non_prefix_mask = !prefix_mask;
-    data.push((add_prefix & non_prefix_mask) | prefix_mask); // Indicates continuation needed
+    data.push(context.tag() | context.max_prefix_value() as u8);
 
     // Add partial continuation bytes - all with high bit set (0x80) to indicate "more to come"
     for &byte in partial_bytes.iter().take(MAX_CONTINUATION_BYTES) {
@@ -302,37 +228,21 @@ fn test_truncated_input(
     }
     // Don't add a final byte without the high bit - this creates truncation
 
-    let mut bytes = Bytes::from(data);
-    let result = decode_integer_test(&mut bytes, prefix_bits.as_u8());
-
     // **ASSERTION 3**: This should return an error (truncation detected), not panic
-    if result.is_ok() {
-        // If it somehow succeeds despite truncation, that might indicate a bug,
-        // but it's not a panic so it's acceptable behavior
-    }
-
-    Ok(())
+    observe_live_decoder(context, data, "truncated input");
 }
 
 /// Test overflow scenarios
-fn test_overflow_attempt(
-    prefix_bits: PrefixBits,
-    strategy: &LargeValueStrategy,
-    add_prefix: u8,
-) -> Result<(), H2Error> {
+fn test_overflow_attempt(context: HpackIntegerContext, strategy: &LargeValueStrategy) {
     // **ASSERTION 2**: Overflow on u64::MAX boundary rejected
 
-    let prefix_mask = prefix_bits.prefix_mask();
-    let non_prefix_mask = !prefix_mask;
-    let mut data = vec![(add_prefix & non_prefix_mask) | prefix_mask]; // Use boundary value
+    let mut data = vec![context.tag() | context.max_prefix_value() as u8];
 
     match strategy {
         LargeValueStrategy::ManyMaxBytes { count } => {
             // Many 0xFF continuation bytes followed by a terminator
             let byte_count = (*count as usize).min(MAX_CONTINUATION_BYTES);
-            for _ in 0..byte_count {
-                data.push(0xFF); // 0x7F with continuation bit = 0xFF
-            }
+            data.extend(std::iter::repeat_n(0xFF, byte_count));
             data.push(0x01); // Small terminating value
         }
         LargeValueStrategy::OverflowPattern => {
@@ -367,73 +277,185 @@ fn test_overflow_attempt(
         }
     }
 
-    let mut bytes = Bytes::from(data);
-    let result = decode_integer_test(&mut bytes, prefix_bits.as_u8());
-
     // **ASSERTION 2**: Large values should either:
     // 1. Be rejected with an overflow error, or
     // 2. Be accepted if they fit in usize
     // They must NOT panic or cause undefined behavior
-    match result {
-        Ok(_value) => {
-            // Accepted - this is fine if the value fits
-        }
-        Err(_) => {
-            // Rejected - this is fine and expected for overflow cases
-        }
-    }
-
-    Ok(())
+    observe_live_decoder(context, data, "overflow attempt");
 }
 
-/// Test wrapper for the actual HPACK decode_integer function
-fn decode_integer_test(src: &mut Bytes, prefix_bits: u8) -> Result<usize, H2Error> {
-    // We need to access the internal decode_integer function
-    // Since it's not public, we'll simulate its behavior for testing
-
-    if src.is_empty() {
-        return Err(H2Error::compression("unexpected end of integer"));
+fn observe_live_decoder(context: HpackIntegerContext, integer_field: Vec<u8>, scenario: &str) {
+    let block = block_for_context(context, integer_field);
+    if block.len() > MAX_BLOCK_BYTES {
+        return;
     }
+    observe_raw_block(Bytes::from(block), scenario);
+}
 
-    let max_first = (1 << prefix_bits) - 1;
-    let first = src[0] & max_first as u8;
-    let _ = src.split_to(1);
+fn observe_raw_block(mut bytes: Bytes, scenario: &str) {
+    let before_len = bytes.len();
+    let mut decoder = Decoder::with_max_size(MAX_TABLE_SIZE);
+    decoder.set_allowed_table_size(MAX_TABLE_SIZE);
+    decoder.set_max_header_list_size(MAX_BLOCK_BYTES);
 
-    if (first as usize) < max_first {
-        return Ok(first as usize);
-    }
+    let result = decoder.decode(&mut bytes);
 
-    let mut value = max_first;
-    let mut shift = 0;
+    assert!(
+        bytes.len() <= before_len,
+        "{scenario}: decoder grew the input buffer"
+    );
+    assert!(
+        decoder.dynamic_table_size() <= decoder.dynamic_table_max_size(),
+        "{scenario}: dynamic table size exceeded its max"
+    );
 
-    loop {
-        if src.is_empty() {
-            return Err(H2Error::compression("unexpected end of integer"));
+    match result {
+        Ok(headers) => {
+            for header in headers {
+                assert_valid_header(&header, scenario);
+            }
         }
-        let byte = src[0];
-        let _ = src.split_to(1);
-
-        // Guard against unbounded continuation sequences
-        if shift > 28 {
-            return Err(H2Error::compression("integer too large"));
-        }
-
-        // Compute increment using checked arithmetic to detect overflow
-        let multiplier = 1usize
-            .checked_shl(shift)
-            .ok_or_else(|| H2Error::compression("integer overflow in shift"))?;
-        let increment = ((byte & 0x7f) as usize)
-            .checked_mul(multiplier)
-            .ok_or_else(|| H2Error::compression("integer overflow in multiply"))?;
-        value = value
-            .checked_add(increment)
-            .ok_or_else(|| H2Error::compression("integer overflow in addition"))?;
-        shift += 7;
-
-        if byte & 0x80 == 0 {
-            break;
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "{scenario}: empty HPACK error message"
+            );
         }
     }
+}
 
-    Ok(value)
+fn assert_valid_header(header: &Header, scenario: &str) {
+    assert!(
+        valid_header_name(&header.name),
+        "{scenario}: decoded invalid header name {:?}",
+        header.name
+    );
+    assert!(
+        valid_header_value(&header.value),
+        "{scenario}: decoded invalid header value {:?}",
+        header.value
+    );
+}
+
+fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().enumerate().all(|(i, b)| {
+            matches!(
+                b,
+                b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            ) || (b == b':' && i == 0)
+        })
+}
+
+fn valid_header_value(value: &str) -> bool {
+    !value.bytes().any(|b| matches!(b, b'\0' | b'\r' | b'\n'))
+}
+
+fn block_for_context(context: HpackIntegerContext, integer_field: Vec<u8>) -> Vec<u8> {
+    let mut block = Vec::with_capacity(integer_field.len() + MAX_LITERAL_PAYLOAD + 8);
+    match context {
+        HpackIntegerContext::DynamicTableSizeUpdate | HpackIntegerContext::IndexedHeaderField => {
+            block.extend_from_slice(&integer_field);
+        }
+        HpackIntegerContext::LiteralWithIndexingNameIndex
+        | HpackIntegerContext::LiteralWithoutIndexingNameIndex
+        | HpackIntegerContext::LiteralNeverIndexedNameIndex => {
+            block.extend_from_slice(&integer_field);
+            append_plain_string(&mut block, b"x");
+            append_plain_string(&mut block, b"v");
+        }
+        HpackIntegerContext::LiteralNameLength => {
+            block.push(0x00); // Literal without indexing, literal name follows.
+            block.extend_from_slice(&integer_field);
+            block.extend(std::iter::repeat_n(b'a', MAX_LITERAL_PAYLOAD));
+            append_plain_string(&mut block, b"v");
+        }
+        HpackIntegerContext::LiteralValueLength => {
+            block.push(0x02); // Literal without indexing, static name index 2 (:method).
+            block.extend_from_slice(&integer_field);
+            block.extend(std::iter::repeat_n(b'a', MAX_LITERAL_PAYLOAD));
+        }
+    }
+    block
+}
+
+fn encode_integer_field(context: HpackIntegerContext, value: usize) -> Vec<u8> {
+    let prefix_bits = context.prefix_bits();
+    let max_first = (1usize << prefix_bits) - 1;
+    let mut out = Vec::new();
+
+    if value < max_first {
+        out.push(context.tag() | value as u8);
+        return out;
+    }
+
+    out.push(context.tag() | max_first as u8);
+    let mut remaining = value - max_first;
+    while remaining >= 128 {
+        out.push((remaining & 0x7f) as u8 | 0x80);
+        remaining >>= 7;
+    }
+    out.push(remaining as u8);
+    out
+}
+
+fn append_plain_string(dst: &mut Vec<u8>, value: &[u8]) {
+    encode_plain_string_len(dst, value.len());
+    dst.extend_from_slice(value);
+}
+
+fn encode_plain_string_len(dst: &mut Vec<u8>, len: usize) {
+    let context = HpackIntegerContext::LiteralValueLength;
+    let encoded = encode_integer_field(context, len);
+    dst.extend_from_slice(&encoded);
+}
+
+fn assert_seed_integer_contexts_hit_live_decoder() {
+    let mut decoder = Decoder::with_max_size(MAX_TABLE_SIZE);
+    decoder.set_allowed_table_size(MAX_TABLE_SIZE);
+
+    let mut table_update = Bytes::from(vec![0x3f, 0x00]);
+    let headers = decoder
+        .decode(&mut table_update)
+        .expect("boundary table-size update should decode");
+    assert!(headers.is_empty());
+    assert_eq!(decoder.dynamic_table_max_size(), 31);
+
+    let mut indexed = Bytes::from(vec![0x82]);
+    let headers = Decoder::new()
+        .decode(&mut indexed)
+        .expect("indexed static header should decode");
+    assert_eq!(headers, vec![Header::new(":method", "GET")]);
+
+    let mut literal = Vec::from([0x42]);
+    append_plain_string(&mut literal, b"GET");
+    let headers = Decoder::new()
+        .decode(&mut Bytes::from(literal))
+        .expect("literal with indexed name should decode");
+    assert_eq!(headers, vec![Header::new(":method", "GET")]);
+
+    let mut literal_name = Vec::from([0x00]);
+    append_plain_string(&mut literal_name, b"x");
+    append_plain_string(&mut literal_name, b"v");
+    let headers = Decoder::new()
+        .decode(&mut Bytes::from(literal_name))
+        .expect("literal name and value lengths should decode");
+    assert_eq!(headers, vec![Header::new("x", "v")]);
 }
