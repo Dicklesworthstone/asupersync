@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
                     code: ErrorCode::FlowControlError,
                     ..
                 }) => {} // Overflow
-                Err(_) => {} // Other errors acceptable
+                Err(error) => observe_window_update_error("connection-level update", &error),
             }
         }
     }
@@ -83,7 +83,7 @@ fuzz_target!(|data: &[u8]| {
                 code: ErrorCode::FlowControlError,
                 ..
             }) => {}
-            Err(_) => {}
+            Err(error) => observe_window_update_error("stream-level update", &error),
         }
     }
 
@@ -108,8 +108,9 @@ fuzz_target!(|data: &[u8]| {
 
                 // Apply third update - this might overflow
                 let frame3 = create_window_update_frame(delta3, 1);
-                let _result = validate_window_update(&frame3, current_window);
-                // Should handle overflow gracefully
+                if let Err(error) = validate_window_update(&frame3, current_window) {
+                    observe_window_update_error("third accumulated update", &error);
+                }
             }
         }
     }
@@ -126,8 +127,9 @@ fuzz_target!(|data: &[u8]| {
 
         for &delta in &boundary_deltas {
             let frame = create_window_update_frame(delta, 1);
-            let _result = validate_window_update(&frame, DEFAULT_WINDOW_SIZE);
-            // Test all boundary conditions
+            if let Err(error) = validate_window_update(&frame, DEFAULT_WINDOW_SIZE) {
+                observe_window_update_error("boundary update", &error);
+            }
         }
     }
 
@@ -157,7 +159,7 @@ fuzz_target!(|data: &[u8]| {
                     code: ErrorCode::ProtocolError,
                     ..
                 }) => {} // Zero delta
-                Err(_) => {} // Other errors
+                Err(error) => observe_window_update_error("near-maximum update", &error),
             }
         }
     }
@@ -170,11 +172,11 @@ fuzz_target!(|data: &[u8]| {
             Ok(Frame::WindowUpdate(window_frame)) => {
                 // Successfully parsed - validate the delta
                 let delta = window_frame.increment;
-                let _result = validate_delta_value(delta);
+                if let Err(error) = validate_delta_value(delta) {
+                    observe_window_update_error("parsed delta validation", &error);
+                }
             }
-            Err(_) => {
-                // Parse error is acceptable for malformed input
-            }
+            Err(error) => observe_window_update_parse_error("raw frame parse", &error),
             _ => {} // Other frame types from parsing
         }
     }
@@ -189,8 +191,9 @@ fuzz_target!(|data: &[u8]| {
             // Note: WINDOW_UPDATE uses u32, but we want to test edge cases
             let delta_as_u32 = delta_signed as u32;
             let frame = create_window_update_frame(delta_as_u32, 1);
-            let _result = validate_window_update(&frame, DEFAULT_WINDOW_SIZE);
-            // Large u32 values should be handled properly
+            if let Err(error) = validate_window_update(&frame, DEFAULT_WINDOW_SIZE) {
+                observe_window_update_error("negative signed delta reinterpreted as u32", &error);
+            }
         }
     }
 
@@ -211,7 +214,7 @@ fuzz_target!(|data: &[u8]| {
                 code: ErrorCode::FlowControlError,
                 ..
             }) => {}
-            Err(_) => {}
+            Err(error) => observe_window_update_error("connection-vs-stream overflow", &error),
         }
     }
 
@@ -234,7 +237,10 @@ fuzz_target!(|data: &[u8]| {
                         break; // Stop before certain overflow
                     }
                 }
-                Err(_) => break, // Stop on any error
+                Err(error) => {
+                    observe_window_update_error("repeated small update", &error);
+                    break;
+                }
             }
         }
     }
@@ -316,6 +322,38 @@ fn parse_window_update_from_raw(data: &[u8]) -> Result<Frame, H2Error> {
 
 fn checked_delta_i32(delta: u32) -> Result<i32, H2Error> {
     i32::try_from(delta).map_err(|_| H2Error::flow_control("WINDOW_UPDATE increment too large"))
+}
+
+fn observe_window_update_error(context: &str, error: &H2Error) {
+    assert!(
+        matches!(
+            error.code,
+            ErrorCode::ProtocolError | ErrorCode::FlowControlError
+        ),
+        "{context}: unexpected WINDOW_UPDATE error code {:?}: {}",
+        error.code,
+        error.message
+    );
+    assert!(
+        !error.message.trim().is_empty(),
+        "{context}: WINDOW_UPDATE error must expose a diagnostic"
+    );
+}
+
+fn observe_window_update_parse_error(context: &str, error: &H2Error) {
+    assert!(
+        matches!(
+            error.code,
+            ErrorCode::ProtocolError | ErrorCode::FrameSizeError | ErrorCode::FlowControlError
+        ),
+        "{context}: unexpected WINDOW_UPDATE parse error code {:?}: {}",
+        error.code,
+        error.message
+    );
+    assert!(
+        !error.message.trim().is_empty(),
+        "{context}: WINDOW_UPDATE parse error must expose a diagnostic"
+    );
 }
 
 /// Test arithmetic overflow scenarios directly
