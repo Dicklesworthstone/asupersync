@@ -665,7 +665,17 @@ fn validate_keep_alive_state_transition(
 
 /// Test timeout behavior specifically
 fn test_timeout_behavior(config: &KeepAliveConfig) {
-    let mut manager = MockKeepAliveManager::new(config.clone());
+    let mut timeout_config = config.clone();
+    timeout_config.enabled = true;
+    timeout_config.max_timeout = timeout_config.max_timeout.max(30);
+    timeout_config.default_timeout = timeout_config.default_timeout.max(30);
+    timeout_config.default_max_requests = timeout_config.default_max_requests.max(2);
+    timeout_config.max_concurrent_connections = timeout_config.max_concurrent_connections.max(1);
+    timeout_config.current_connections = timeout_config
+        .current_connections
+        .min(timeout_config.max_concurrent_connections - 1);
+
+    let mut manager = MockKeepAliveManager::new(timeout_config);
 
     // Send a keep-alive message
     let message = KeepAliveMessage {
@@ -681,7 +691,8 @@ fn test_timeout_behavior(config: &KeepAliveConfig) {
         processing_time_ms: 0,
     };
 
-    let _ = manager.process_message(&message);
+    let setup_result = manager.process_message(&message);
+    assert_eq!(setup_result, Ok(KeepAliveState::Idle));
     assert_eq!(manager.get_state(), KeepAliveState::Idle);
 
     // Advance time but stay under timeout
