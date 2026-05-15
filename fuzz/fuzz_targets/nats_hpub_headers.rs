@@ -9,6 +9,11 @@ const MAX_FIELD_BYTES: usize = 96;
 const MAX_HEADER_BYTES: usize = 1024;
 const HPUB_PREFIX: &[u8] = b"NATS/1.0\r\n";
 const HPUB_TERMINATOR: &[u8] = b"\r\n\r\n";
+const HPUB_EMPTY_BLOCK: &[u8] = b"NATS/1.0\r\n\r\n";
+const NATS_PROTOCOL_ERROR_PREFIX: &str = "NATS protocol error: ";
+
+type EncodedHeader = (Vec<u8>, Vec<u8>);
+type EncodedHeaders = Vec<EncodedHeader>;
 
 #[derive(Clone, Debug)]
 struct HeaderField {
@@ -16,11 +21,19 @@ struct HeaderField {
     value: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ModelError {
-    InvalidKey,
-    InvalidValue,
-    TooLarge,
+    InvalidKey {
+        key: String,
+    },
+    InvalidValue {
+        key: String,
+    },
+    LengthOverflow,
+    TooLarge {
+        estimated: usize,
+        max_header_bytes: usize,
+    },
 }
 
 fn take_byte(data: &[u8], cursor: &mut usize) -> u8 {
@@ -111,16 +124,26 @@ fn parse_input(data: &[u8]) -> (usize, Vec<HeaderField>) {
 fn model_encode_headers(
     headers: &[HeaderField],
     max_header_bytes: usize,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ModelError> {
-    let mut estimated = HPUB_PREFIX.len() + HPUB_TERMINATOR.len();
+) -> Result<EncodedHeaders, ModelError> {
+    let mut estimated = HPUB_EMPTY_BLOCK.len();
     let mut expected = Vec::with_capacity(headers.len());
+
+    if estimated > max_header_bytes {
+        return Err(ModelError::TooLarge {
+            estimated,
+            max_header_bytes,
+        });
+    }
 
     for field in headers {
         estimated = estimated
             .checked_add(field.key.len() + field.value.len() + 4)
-            .ok_or(ModelError::TooLarge)?;
+            .ok_or(ModelError::LengthOverflow)?;
         if estimated > max_header_bytes {
-            return Err(ModelError::TooLarge);
+            return Err(ModelError::TooLarge {
+                estimated,
+                max_header_bytes,
+            });
         }
         if field.key.is_empty()
             || !field.key.is_ascii()
@@ -129,14 +152,18 @@ fn model_encode_headers(
                 .bytes()
                 .any(|byte| byte == b':' || byte == b'\r' || byte == b'\n')
         {
-            return Err(ModelError::InvalidKey);
+            return Err(ModelError::InvalidKey {
+                key: field.key.clone(),
+            });
         }
         if field
             .value
             .iter()
             .any(|&byte| byte == b'\r' || byte == b'\n')
         {
-            return Err(ModelError::InvalidValue);
+            return Err(ModelError::InvalidValue {
+                key: field.key.clone(),
+            });
         }
         expected.push((field.key.as_bytes().to_vec(), field.value.clone()));
     }
@@ -144,7 +171,7 @@ fn model_encode_headers(
     Ok(expected)
 }
 
-fn decode_header_block(block: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+fn decode_header_block(block: &[u8]) -> Option<EncodedHeaders> {
     if !block.starts_with(HPUB_PREFIX) || !block.ends_with(HPUB_TERMINATOR) {
         return None;
     }
@@ -174,17 +201,32 @@ fn decode_header_block(block: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
 
 fn assert_error_matches_model(err: &str, model_error: ModelError) {
     match model_error {
-        ModelError::InvalidKey => assert!(
-            err.contains("invalid NATS header key"),
-            "expected invalid key error, got {err:?}"
+        ModelError::InvalidKey { key } => assert_eq!(
+            err,
+            format!("{NATS_PROTOCOL_ERROR_PREFIX}invalid NATS header key: {key:?}"),
+            "expected exact invalid key error"
         ),
-        ModelError::InvalidValue => assert!(
-            err.contains("invalid NATS header value"),
-            "expected invalid value error, got {err:?}"
+        ModelError::InvalidValue { key } => assert_eq!(
+            err,
+            format!(
+                "{NATS_PROTOCOL_ERROR_PREFIX}invalid NATS header value (contains CR/LF) for key {key:?}"
+            ),
+            "expected exact invalid value error"
         ),
-        ModelError::TooLarge => assert!(
-            err.contains("too large") || err.contains("overflow"),
-            "expected oversize/overflow error, got {err:?}"
+        ModelError::LengthOverflow => assert_eq!(
+            err,
+            format!("{NATS_PROTOCOL_ERROR_PREFIX}NATS header block length overflow"),
+            "expected exact header length overflow error"
+        ),
+        ModelError::TooLarge {
+            estimated,
+            max_header_bytes,
+        } => assert_eq!(
+            err,
+            format!(
+                "{NATS_PROTOCOL_ERROR_PREFIX}NATS header block too large: {estimated} > {max_header_bytes}"
+            ),
+            "expected exact oversized header block error"
         ),
     }
 }

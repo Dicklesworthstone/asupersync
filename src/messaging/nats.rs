@@ -801,6 +801,11 @@ fn encode_nats_headers(
     max_header_bytes: usize,
 ) -> Result<Vec<u8>, NatsError> {
     let mut estimated = b"NATS/1.0\r\n\r\n".len();
+    if estimated > max_header_bytes {
+        return Err(NatsError::Protocol(format!(
+            "NATS header block too large: {estimated} > {max_header_bytes}"
+        )));
+    }
     for (k, v) in headers {
         estimated = estimated
             .checked_add(k.len() + v.len() + 4)
@@ -2875,10 +2880,19 @@ mod tests {
             .expect_err("oversize header block must fail closed");
         match err {
             NatsError::Protocol(msg) => {
-                assert!(
-                    msg.contains("NATS header block too large"),
-                    "unexpected error: {msg}"
-                );
+                assert_eq!(msg, "NATS header block too large: 37 > 16");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encode_nats_headers_rejects_empty_block_when_base_exceeds_cap() {
+        let err = encode_nats_headers(&[], 0)
+            .expect_err("mandatory empty header block must respect max_header_bytes");
+        match err {
+            NatsError::Protocol(msg) => {
+                assert_eq!(msg, "NATS header block too large: 12 > 0");
             }
             other => panic!("expected Protocol error, got {other:?}"),
         }
@@ -4188,10 +4202,7 @@ mod tests {
                 .expect_err("oversize headers must fail closed");
             match err {
                 NatsError::Protocol(msg) => {
-                    assert!(
-                        msg.contains("NATS header block too large"),
-                        "unexpected error: {msg}"
-                    );
+                    assert_eq!(msg, "NATS header block too large: 43 > 32");
                 }
                 other => panic!("expected Protocol error, got {other:?}"),
             }
