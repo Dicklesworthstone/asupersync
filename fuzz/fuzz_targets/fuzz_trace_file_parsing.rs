@@ -126,6 +126,31 @@ fn observe_io_result(context: &str, result: std::io::Result<()>) -> bool {
     }
 }
 
+fn observe_io_value<T>(context: &str, result: std::io::Result<T>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            let error_kind = format!("{:?}", error.kind());
+            assert!(
+                !error_kind.is_empty(),
+                "{context} failed without an I/O error kind"
+            );
+            None
+        }
+    }
+}
+
+fn observe_writer_create_result(
+    context: &str,
+    result: Result<TraceWriter, TraceFileError>,
+) -> Option<TraceWriter> {
+    match result {
+        Ok(writer) => Some(writer),
+        Err(TraceFileError::Io(_)) => None,
+        Err(error) => panic!("{context} returned non-create trace error: {error:?}"),
+    }
+}
+
 fn observe_writer_result(context: &str, result: Result<(), TraceFileError>) -> bool {
     match result {
         Ok(()) => true,
@@ -239,7 +264,10 @@ fn test_config_validation(_config: &WriterConfigFuzz) {
     for config in &test_configs {
         // Configuration creation should not panic
         if let Ok(temp) = create_temp_file_result() {
-            let _ = TraceWriter::create_with_config(&temp, config.clone());
+            let _writer = observe_writer_create_result(
+                "config validation writer create",
+                TraceWriter::create_with_config(&temp, config.clone()),
+            );
             let _ = remove_file(temp);
         }
     }
@@ -360,8 +388,19 @@ fn test_file_truncation(
     }
 
     // Truncate the file at specified position
-    if let Ok(file) = File::options().write(true).open(&temp_file) {
-        let _ = file.set_len(truncate_at as u64);
+    let Some(file) = observe_io_value(
+        "trace truncation open",
+        File::options().write(true).open(&temp_file),
+    ) else {
+        let _ = remove_file(&temp_file);
+        return;
+    };
+    if !observe_io_result(
+        "trace truncation set_len",
+        file.set_len(u64::from(truncate_at)),
+    ) {
+        let _ = remove_file(&temp_file);
+        return;
     }
 
     // Try to read the truncated file - should detect truncation
