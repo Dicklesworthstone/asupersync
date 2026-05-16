@@ -980,6 +980,19 @@ fn host_profile_planner_runner_executes_rch_without_local_shell_wrapper() {
         script.contains(r#"RCH_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_host_profile_planner""#),
         "runner target dir must honor TMPDIR"
     );
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            script.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
 }
 
 #[test]

@@ -12,6 +12,7 @@ OUTPUT_ROOT_OVERRIDE="${HOST_PROFILE_PLANNER_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${HOST_PROFILE_PLANNER_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${HOST_PROFILE_PLANNER_SMOKE_RUN_ID:-}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
     cat <<'EOF'
@@ -236,7 +237,7 @@ else
         fi
     fi
 
-    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+    if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RUN_LOG_PATH" 2>/dev/null; then
         COMMAND_EXIT_CODE=86
         SCRIPT_EXIT_CODE=86
         STATUS="failed"
