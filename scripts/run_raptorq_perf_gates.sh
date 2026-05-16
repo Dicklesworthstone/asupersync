@@ -17,6 +17,15 @@ REPORT_FILE="$ARTIFACTS_DIR/raptorq_perf_gate_report.json"
 NDJSON_LOG="$ARTIFACTS_DIR/raptorq_perf_gate_events.ndjson"
 CURRENT_RESULTS="$ARTIFACTS_DIR/raptorq_current_bench_results.json"
 
+reject_rch_local_fallback_file() {
+    local log_path="$1"
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+        echo "FATAL: rch local fallback detected; refusing local cargo execution"
+        echo "rch local fallback detected; refusing local cargo execution" > "$ARTIFACTS_DIR/raptorq_perf_gate_rch_local_fallback.txt"
+        exit 86
+    fi
+}
+
 # Performance gate implementation
 run_performance_gates() {
     local mode="${1:-full}"
@@ -76,11 +85,13 @@ EOF
     if rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo bench --bench raptorq_benchmark \
         --features simd-intrinsics \
         -- --output-format json > "$CURRENT_RESULTS" 2>&1; then
+        reject_rch_local_fallback_file "$CURRENT_RESULTS"
 
         cat >> "$NDJSON_LOG" <<EOF
 {"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","event":"benchmark_complete","suite":"full","status":"success","results_file":"$CURRENT_RESULTS"}
 EOF
     else
+        reject_rch_local_fallback_file "$CURRENT_RESULTS"
         cat >> "$NDJSON_LOG" <<EOF
 {"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","event":"benchmark_complete","suite":"full","status":"failed","error":"benchmark_execution_failed"}
 EOF
@@ -105,11 +116,13 @@ EOF
         -- --warm-up-time 1 --measurement-time 5 \
         'gf256_primitives' 'raptorq_e2e/encode' \
         --output-format json > "$CURRENT_RESULTS" 2>&1; then
+        reject_rch_local_fallback_file "$CURRENT_RESULTS"
 
         cat >> "$NDJSON_LOG" <<EOF
 {"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","event":"benchmark_complete","suite":"smoke","status":"success","results_file":"$CURRENT_RESULTS"}
 EOF
     else
+        reject_rch_local_fallback_file "$CURRENT_RESULTS"
         cat >> "$NDJSON_LOG" <<EOF
 {"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","event":"benchmark_complete","suite":"smoke","status":"failed","error":"smoke_benchmark_failed"}
 EOF
@@ -204,10 +217,12 @@ verify_rollback_integrity() {
     cd "$PROJECT_ROOT"
 
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_raptorq_perf_gates_rollback}"
+    local rollback_log="$ARTIFACTS_DIR/raptorq_perf_gate_rollback.log"
 
     if rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo test --test raptorq_perf_invariants \
         h2_closure_packet_dependency_status_alignment \
-        g1_budget_draft_schema_and_coverage -- --nocapture; then
+        g1_budget_draft_schema_and_coverage -- --nocapture 2>&1 | tee "$rollback_log"; then
+        reject_rch_local_fallback_file "$rollback_log"
 
         echo "✅ Rollback verification passed"
         cat >> "$NDJSON_LOG" <<EOF
@@ -215,6 +230,7 @@ verify_rollback_integrity() {
 EOF
         return 0
     else
+        reject_rch_local_fallback_file "$rollback_log"
         echo "❌ Rollback verification failed"
         cat >> "$NDJSON_LOG" <<EOF
 {"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","event":"rollback_verification","status":"failed"}
