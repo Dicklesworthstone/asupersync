@@ -60,6 +60,11 @@ const PRIVATE_PATH_FRAGMENTS: [&str; 7] = [
     "\\appdata\\",
 ];
 
+fn cargo_proof_command_has_target_dir(command: &str) -> bool {
+    !command.contains("cargo ")
+        || (command.contains("rch exec -- env ") && command.contains("CARGO_TARGET_DIR="))
+}
+
 /// Workload class vocabulary for SLO policy bundles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SloWorkloadClass {
@@ -1421,11 +1426,13 @@ impl SloRuntimePolicyApplication {
             MAX_FIELD_BYTES,
             issues,
         );
-        if !receipt.proof_command.contains("rch exec") {
+        if !receipt.proof_command.contains("rch exec")
+            || !cargo_proof_command_has_target_dir(&receipt.proof_command)
+        {
             issues.push(SloRuntimePolicyApplicationIssue::new(
                 SloRuntimePolicyApplicationIssueKind::MissingRchCommand,
                 "no_win_fallback.proof_command",
-                "no-win receipt proof command must be routed through rch exec",
+                "no-win receipt cargo proof command must be routed through rch exec -- env with CARGO_TARGET_DIR",
             ));
         }
     }
@@ -1443,11 +1450,13 @@ impl SloRuntimePolicyApplication {
             MAX_FIELD_BYTES,
             issues,
         );
-        if !self.proof_command.command.contains("rch exec") {
+        if !self.proof_command.command.contains("rch exec")
+            || !cargo_proof_command_has_target_dir(&self.proof_command.command)
+        {
             issues.push(SloRuntimePolicyApplicationIssue::new(
                 SloRuntimePolicyApplicationIssueKind::MissingRchCommand,
                 "proof_command.command",
-                "runtime application proof command must be routed through rch exec",
+                "runtime application cargo proof command must be routed through rch exec -- env with CARGO_TARGET_DIR",
             ));
         }
     }
@@ -1894,11 +1903,13 @@ impl SloProofReport {
                 MAX_FIELD_BYTES,
                 issues,
             );
-            if !command.command.contains("rch exec") {
+            if !command.command.contains("rch exec")
+                || !cargo_proof_command_has_target_dir(&command.command)
+            {
                 issues.push(SloProofReportIssue::new(
                     SloProofReportIssueKind::MissingRchCommand,
                     format!("{prefix}.command"),
-                    "proof command must be routed through rch exec",
+                    "cargo proof command must be routed through rch exec -- env with CARGO_TARGET_DIR",
                 ));
             }
         }
@@ -1934,11 +1945,13 @@ impl SloProofReport {
             MAX_FIELD_BYTES,
             issues,
         );
-        if !receipt.proof_command.contains("rch exec") {
+        if !receipt.proof_command.contains("rch exec")
+            || !cargo_proof_command_has_target_dir(&receipt.proof_command)
+        {
             issues.push(SloProofReportIssue::new(
                 SloProofReportIssueKind::MissingRchCommand,
                 "no_win_receipt.proof_command",
-                "no-win receipt proof command must be routed through rch exec",
+                "no-win receipt cargo proof command must be routed through rch exec -- env with CARGO_TARGET_DIR",
             ));
         }
     }
@@ -2344,11 +2357,13 @@ impl SloPolicyBundle {
             MAX_FIELD_BYTES,
             issues,
         );
-        if !fallback.proof_command.contains("rch exec") {
+        if !fallback.proof_command.contains("rch exec")
+            || !cargo_proof_command_has_target_dir(&fallback.proof_command)
+        {
             issues.push(SloPolicyValidationIssue::new(
                 SloPolicyValidationIssueKind::MissingNoWinFallback,
                 "no_win_fallback.proof_command",
-                "fallback proof command must name an rch exec proof path",
+                "fallback cargo proof command must name an rch exec -- env proof path with CARGO_TARGET_DIR",
             ));
         }
         if value_is_secret_like(&fallback.proof_command) {

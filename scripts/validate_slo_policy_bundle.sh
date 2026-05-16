@@ -252,6 +252,14 @@ expected_runtime_enforcement_issue_kinds = {
     "malformed_report",
     "local_rch_fallback",
 }
+
+
+def cargo_command_has_target_dir(command):
+    return "cargo " not in command or (
+        "rch exec -- env " in command and "CARGO_TARGET_DIR=" in command
+    )
+
+
 required_bundle_fields = {
     "schema_version",
     "policy_id",
@@ -437,7 +445,7 @@ for replay_scenario in artifact.get("lab_replay_scenarios") or []:
     if unknown_issues:
         validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_issues": unknown_issues})
     proof_command = replay_scenario.get("proof_command") or ""
-    if "rch exec" not in proof_command:
+    if "rch exec" not in proof_command or not cargo_command_has_target_dir(proof_command):
         validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.proof_command"})
 
     event = {
@@ -503,14 +511,16 @@ for proof_scenario in artifact.get("proof_report_scenarios") or []:
             validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.proof_commands"})
         for index, command in enumerate(proof_commands):
             rendered = command.get("command") or ""
-            if "rch exec" not in rendered:
+            if "rch exec" not in rendered or not cargo_command_has_target_dir(rendered):
                 validation_errors.append({"kind": "missing_rch_command", "field": f"{scenario_id}.proof_commands[{index}]"})
         if status == "no_win":
             receipt = report.get("no_win_receipt")
             if not receipt:
                 validation_errors.append({"kind": "missing_no_win_receipt", "field": scenario_id})
-            elif "rch exec" not in str(receipt.get("proof_command") or ""):
-                validation_errors.append({"kind": "missing_rch_command", "field": f"{scenario_id}.no_win_receipt.proof_command"})
+            else:
+                receipt_command = str(receipt.get("proof_command") or "")
+                if "rch exec" not in receipt_command or not cargo_command_has_target_dir(receipt_command):
+                    validation_errors.append({"kind": "missing_rch_command", "field": f"{scenario_id}.no_win_receipt.proof_command"})
         if status == "degraded" and "degraded" not in str(report.get("human_summary") or "").lower():
             validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.human_summary"})
         if status == "no_win":
@@ -569,7 +579,7 @@ for runtime_scenario in artifact.get("runtime_enforcement_scenarios") or []:
     unknown_issues = sorted(set(issue_kinds) - expected_runtime_enforcement_issue_kinds)
     if unknown_issues:
         validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_issues": unknown_issues})
-    if "rch exec" not in proof_command:
+    if "rch exec" not in proof_command or not cargo_command_has_target_dir(proof_command):
         validation_errors.append({"kind": "missing_rch_command", "field": f"{scenario_id}.proof_command"})
     if not redaction.get("passed", False):
         validation_errors.append({"kind": "redaction_failure", "field": f"{scenario_id}.redaction"})

@@ -28,6 +28,8 @@ const CONTRACT_PATH: &str = "artifacts/slo_policy_bundle_contract_v1.json";
 const SCRIPT_PATH: &str = "scripts/validate_slo_policy_bundle.sh";
 const README_PATH: &str = "README.md";
 const OPERATOR_DOC_PATH: &str = "docs/ci_proof_gates_contract.md";
+const SLO_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture";
+const SLO_REPLAY_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture";
 
 fn text_file(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))
@@ -36,6 +38,28 @@ fn text_file(path: &str) -> String {
 fn json_file(path: &str) -> Value {
     let raw = text_file(path);
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {path}: {error}"))
+}
+
+fn cargo_command_has_target_dir(command: &str) -> bool {
+    !command.contains("cargo ")
+        || (command.contains("rch exec -- env ") && command.contains("CARGO_TARGET_DIR="))
+}
+
+fn collect_json_strings<'a>(value: &'a Value, output: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => output.push(text),
+        Value::Array(items) => {
+            for item in items {
+                collect_json_strings(item, output);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                collect_json_strings(item, output);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn contract() -> Value {
@@ -111,7 +135,7 @@ fn valid_bundle() -> SloPolicyBundle {
         no_win_fallback: Some(SloNoWinFallback {
             fallback_profile: "agent-swarm-safe-mode".to_string(),
             fallback_reason: "objectives-conflict-with-pressure".to_string(),
-            proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture".to_string(),
+            proof_command: SLO_PROOF_COMMAND.to_string(),
         }),
         provenance: SloPolicyProvenance {
             profile_id: "agent-swarm-prod".to_string(),
@@ -482,7 +506,7 @@ fn valid_proof_report(status: SloProofReportStatus) -> SloProofReport {
     let no_win_receipt = (status == SloProofReportStatus::NoWin).then(|| SloProofNoWinReceipt {
         fallback_profile: "agent-swarm-safe-mode".to_string(),
         fallback_reason: "objectives-conflict-with-pressure".to_string(),
-        proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture".to_string(),
+        proof_command: SLO_PROOF_COMMAND.to_string(),
     });
     let observed_profile_hash = if status == SloProofReportStatus::StaleEvidence {
         Some(profile_hash('b'))
@@ -505,13 +529,15 @@ fn valid_proof_report(status: SloProofReportStatus) -> SloProofReport {
         },
         proof_commands: vec![SloProofCommand {
             label: "slo-proof-contract".to_string(),
-            command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture".to_string(),
+            command: SLO_PROOF_COMMAND.to_string(),
         }],
         no_win_receipt,
         rows: vec![SloProofReportRow {
             row_id: format!("row-{}", status.as_str()),
             status,
-            evidence_ref: "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson".to_string(),
+            evidence_ref:
+                "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson"
+                    .to_string(),
             summary: summary.to_string(),
         }],
         redaction: SloPolicyRedaction {
@@ -606,7 +632,7 @@ fn replay_fixture(
         optional_work_units,
         optional_work_class: None,
         cleanup_work_ms,
-        proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+        proof_command: SLO_REPLAY_PROOF_COMMAND,
         observed_profile_hash: Some(profile_hash('a')),
         queue_wait_ms: 20,
         memory_basis_points,
@@ -627,7 +653,7 @@ fn malformed_replay_fixture() -> LabReplayFixture {
         optional_work_units: 1,
         optional_work_class: None,
         cleanup_work_ms: 0,
-        proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+        proof_command: SLO_REPLAY_PROOF_COMMAND,
         observed_profile_hash: None,
         queue_wait_ms: 20,
         memory_basis_points: 6_500,
@@ -1223,6 +1249,22 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
 }
 
 #[test]
+fn artifact_cargo_proof_commands_use_isolated_rch_target_dirs() {
+    let artifact = contract();
+    let mut strings = Vec::new();
+    collect_json_strings(&artifact, &mut strings);
+    let offenders = strings
+        .into_iter()
+        .filter(|value| {
+            value.contains("cargo ")
+                && (value.contains("rch exec -- cargo") || !cargo_command_has_target_dir(value))
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(offenders.is_empty(), "{offenders:?}");
+}
+
+#[test]
 fn readme_and_operator_docs_track_slo_artifact_and_exports() {
     let artifact = contract();
     let readme = text_file(README_PATH);
@@ -1626,6 +1668,14 @@ fn runtime_slo_policy_application_fail_closed_required_modes() {
             .validate()
             .contains_issue(SloRuntimePolicyApplicationIssueKind::MissingRchCommand)
     );
+    let mut missing_target_dir = valid_runtime_application();
+    missing_target_dir.proof_command.command =
+        "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract".to_string();
+    assert!(
+        missing_target_dir
+            .validate()
+            .contains_issue(SloRuntimePolicyApplicationIssueKind::MissingRchCommand)
+    );
 
     let mut redaction = valid_runtime_application();
     redaction.redaction.passed = false;
@@ -1821,6 +1871,14 @@ fn proof_report_fail_closed_required_issue_modes() {
         "cargo test -p asupersync --test slo_policy_bundle_contract".to_string();
     assert!(
         missing_rch
+            .validate()
+            .contains_issue(SloProofReportIssueKind::MissingRchCommand)
+    );
+    let mut missing_target_dir = valid_proof_report(SloProofReportStatus::Pass);
+    missing_target_dir.proof_commands[0].command =
+        "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract".to_string();
+    assert!(
+        missing_target_dir
             .validate()
             .contains_issue(SloProofReportIssueKind::MissingRchCommand)
     );

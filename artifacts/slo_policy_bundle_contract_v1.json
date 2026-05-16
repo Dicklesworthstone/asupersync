@@ -349,7 +349,7 @@
         "no_win_fallback": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "provenance": {
           "profile_id": "agent-swarm-prod",
@@ -406,7 +406,7 @@
         "no_win_fallback": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "provenance": {
           "profile_id": "agent-swarm-prod",
@@ -509,7 +509,7 @@
         "no_win_fallback": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "provenance": {
           "profile_id": "agent-swarm-prod",
@@ -563,7 +563,7 @@
         "no_win_fallback": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "provenance": {
           "profile_id": "agent-swarm-prod",
@@ -618,7 +618,7 @@
         "no_win_fallback": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "provenance": {
           "profile_id": "agent-swarm-prod",
@@ -675,7 +675,7 @@
         "no_win_fallback": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "provenance": {
           "profile_id": "agent-swarm-prod",
@@ -729,7 +729,7 @@
         "no_win_fallback": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "provenance": {
           "profile_id": "agent-swarm-prod",
@@ -791,7 +791,7 @@
         "no_win_fallback": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "provenance": {
           "profile_id": "agent-swarm-prod",
@@ -883,7 +883,7 @@
       "scenario_id": "lab-replay-normal-load",
       "policy_id": "agent-swarm-standard",
       "seed": 1358954497,
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "expected": {
         "replay_status": "passed",
         "admitted_work_units": 4,
@@ -898,7 +898,7 @@
       "scenario_id": "lab-replay-overload",
       "policy_id": "agent-swarm-standard",
       "seed": 1358954498,
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "expected": {
         "replay_status": "rejected",
         "admitted_work_units": 0,
@@ -915,7 +915,7 @@
       "scenario_id": "lab-replay-cleanup-deadline-pressure",
       "policy_id": "agent-swarm-standard",
       "seed": 1358954499,
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "expected": {
         "replay_status": "passed",
         "admitted_work_units": 4,
@@ -930,7 +930,7 @@
       "scenario_id": "lab-replay-optional-brownout",
       "policy_id": "agent-swarm-standard",
       "seed": 1358954500,
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "expected": {
         "replay_status": "brownout",
         "admitted_work_units": 4,
@@ -947,7 +947,7 @@
       "scenario_id": "lab-replay-no-win-fallback",
       "policy_id": "agent-swarm-standard",
       "seed": 1358954501,
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "expected": {
         "replay_status": "no_win",
         "admitted_work_units": 0,
@@ -964,7 +964,7 @@
       "scenario_id": "lab-replay-stale-profile-hash",
       "policy_id": "agent-swarm-standard",
       "seed": 1358954502,
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "expected": {
         "replay_status": "stale_evidence",
         "admitted_work_units": 0,
@@ -982,7 +982,7 @@
       "scenario_id": "lab-replay-cancelled-admission",
       "policy_id": "agent-swarm-standard",
       "seed": 1358954503,
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "expected": {
         "replay_status": "cancelled",
         "admitted_work_units": 0,
@@ -999,7 +999,7 @@
       "scenario_id": "lab-replay-malformed-policy",
       "policy_id": "",
       "seed": 1359015949,
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "expected": {
         "replay_status": "blocked",
         "admitted_work_units": 0,
@@ -1038,7 +1038,7 @@
         "proof_commands": [
           {
             "label": "slo-proof-contract",
-            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
           }
         ],
         "rows": [
@@ -1082,7 +1082,7 @@
         "proof_commands": [
           {
             "label": "slo-proof-contract",
-            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
           }
         ],
         "rows": [
@@ -1126,13 +1126,13 @@
         "proof_commands": [
           {
             "label": "slo-proof-contract",
-            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
           }
         ],
         "no_win_receipt": {
           "fallback_profile": "agent-swarm-safe-mode",
           "fallback_reason": "objectives-conflict-with-pressure",
-          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
         },
         "rows": [
           {
@@ -1177,7 +1177,7 @@
         "proof_commands": [
           {
             "label": "slo-proof-contract",
-            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
           }
         ],
         "rows": [
@@ -1223,7 +1223,7 @@
         "proof_commands": [
           {
             "label": "slo-proof-contract",
-            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
           }
         ],
         "rows": [
@@ -1269,7 +1269,7 @@
         "proof_commands": [
           {
             "label": "slo-proof-contract",
-            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
           }
         ],
         "rows": [
@@ -1316,7 +1316,7 @@
         "proof_commands": [
           {
             "label": "slo-proof-contract",
-            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
           }
         ],
         "rows": [
@@ -1353,7 +1353,7 @@
     {
       "scenario_id": "runtime-enforcement-pass",
       "policy_id": "agent-swarm-standard",
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "proof_command_source": "lab-replay-normal-load",
       "redaction": {
         "policy_id": "slo-runtime-enforcement-redaction-v1",
@@ -1376,7 +1376,7 @@
     {
       "scenario_id": "runtime-enforcement-degraded-brownout",
       "policy_id": "agent-swarm-standard",
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "proof_command_source": "lab-replay-optional-brownout",
       "redaction": {
         "policy_id": "slo-runtime-enforcement-redaction-v1",
@@ -1401,7 +1401,7 @@
     {
       "scenario_id": "runtime-enforcement-no-win-fallback",
       "policy_id": "agent-swarm-standard",
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "proof_command_source": "lab-replay-no-win-fallback",
       "redaction": {
         "policy_id": "slo-runtime-enforcement-redaction-v1",
@@ -1426,7 +1426,7 @@
     {
       "scenario_id": "runtime-enforcement-blocked-overload",
       "policy_id": "agent-swarm-standard",
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "proof_command_source": "lab-replay-overload",
       "redaction": {
         "policy_id": "slo-runtime-enforcement-redaction-v1",
@@ -1451,7 +1451,7 @@
     {
       "scenario_id": "runtime-enforcement-stale-evidence",
       "policy_id": "agent-swarm-standard",
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
       "proof_command_source": "lab-replay-stale-profile-hash",
       "redaction": {
         "policy_id": "slo-runtime-enforcement-redaction-v1",
