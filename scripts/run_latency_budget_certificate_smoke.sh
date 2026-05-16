@@ -169,7 +169,7 @@ COMMAND_ARGS=(
     "RUSTFLAGS=-D warnings -C debuginfo=0"
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_latency_budget_certificate"
     "ASUPERSYNC_LATENCY_BUDGET_CERTIFICATE_REPORT_PATH=${SMOKE_REPORT_PATH}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
