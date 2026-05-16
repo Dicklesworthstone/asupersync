@@ -18,6 +18,7 @@ ARTIFACT_ROOT="${ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts/mock-code-finder/asupe
 MODE="execute"
 USE_RCH=1
 SCENARIO_FILTER=""
+ALLOW_LOCAL_CARGO="${ALLOW_LOCAL_CARGO:-0}"
 
 SCHEMA_VERSION="mock-code-finder-evidence-jsonl-schema-v1"
 BEAD_ID="asupersync-kokw3m"
@@ -44,7 +45,7 @@ Options:
   --artifact-root <PATH>    Override output root (default: artifacts/mock-code-finder/asupersync-kokw3m)
   --run-id <RUN_ID>         Stable run directory name (default: current)
   RCH_WRAPPER_TIMEOUT       rch wrapper timeout env var (default: 240s)
-  --local                   Run cargo locally instead of through rch (not for agent validation)
+  --local                   Run cargo locally only with ALLOW_LOCAL_CARGO=1 (not for agent validation)
   -h, --help                Show this help
 USAGE
 }
@@ -431,6 +432,10 @@ parse_args() {
                 shift 2
                 ;;
             --local)
+                if [[ "$ALLOW_LOCAL_CARGO" != "1" ]]; then
+                    echo "FATAL: --local requires ALLOW_LOCAL_CARGO=1; use the default rch path for proof runs." >&2
+                    exit 2
+                fi
                 USE_RCH=0
                 shift
                 ;;
