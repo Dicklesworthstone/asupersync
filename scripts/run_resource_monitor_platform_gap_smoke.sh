@@ -215,7 +215,7 @@ COMMAND_ARGS=(
     "RUSTFLAGS=-D warnings -C debuginfo=0"
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_resource_monitor_platform_gap"
     "ASUPERSYNC_RESOURCE_MONITOR_PLATFORM_GAP_REPORT=1"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
