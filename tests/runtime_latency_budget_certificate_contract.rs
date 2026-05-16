@@ -220,6 +220,33 @@ fn runner_exists_and_routes_execute_through_rch() {
 }
 
 #[test]
+fn runner_rejects_full_rch_fallback_marker_set() {
+    let runner = load_runner();
+
+    assert!(
+        runner
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 1,
+        "runner must use the shared local fallback matcher at its rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            runner.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
+#[test]
 fn verifier_accepts_pass_no_win_and_fail_closed_rows() {
     let pass = verify_tail_latency_budget_certificate(base_evidence(
         "latency-budget-cert-pass",
