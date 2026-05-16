@@ -346,12 +346,12 @@ failure without guesswork.
 
 **Fast local repro workflow:**
 1. Read `seed` + `test_id` from `repro_manifest.json` or the failure summary.
-2. Re-run locally:
-   `ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts cargo test <test_id> -- --nocapture`
+2. Re-run through `rch`:
+   `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_replay_debugging_repro ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts cargo test <test_id> -- --nocapture`
 3. Inspect trace artifacts (if present):
-   `cargo run --bin asupersync trace info <trace.async>`
+   `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_replay_debugging_repro cargo run --bin asupersync trace info <trace.async>`
 4. If two traces differ, use:
-   `cargo run --bin asupersync trace diff <trace_a> <trace_b>`
+   `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_replay_debugging_repro cargo run --bin asupersync trace diff <trace_a> <trace_b>`
 
 ### Deterministic Logging Rules (Reference)
 
