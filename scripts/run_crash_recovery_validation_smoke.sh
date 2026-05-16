@@ -108,6 +108,11 @@ run_scenario() {
             cd "$PROJECT_ROOT"
             "${command_args[@]}"
         ) >"$log_file" 2>&1 || rc=$?
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+            printf '\nFATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
+            printf 'rch local fallback detected; refusing local cargo execution\n' > "${scenario_dir}/rch_local_fallback.txt"
+            rc=86
+        fi
         status="$( [[ "$rc" -eq 0 ]] && printf "passed" || printf "failed" )"
     fi
     ended_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
