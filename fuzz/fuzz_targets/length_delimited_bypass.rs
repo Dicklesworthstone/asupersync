@@ -13,6 +13,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::io;
+use std::sync::OnceLock;
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::length_delimited::LengthDelimitedCodec;
@@ -20,6 +21,8 @@ use asupersync::codec::{Decoder, Encoder};
 
 /// Maximum reasonable frame length for bypass testing
 const MAX_FRAME_LENGTH: usize = 1_048_576; // 1MB
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// Bypass attack patterns for length-delimited frame parsing
 #[derive(Arbitrary, Debug, Clone)]
@@ -194,7 +197,7 @@ struct LengthDelimitedBypassFuzz {
 }
 
 fuzz_target!(|input: LengthDelimitedBypassFuzz| {
-    assert_fixed_decode_canaries();
+    FIXED_CANARIES.get_or_init(assert_fixed_decode_canaries);
 
     let raw_data = input.pattern.to_bytes();
     if raw_data.is_empty() || raw_data.len() > MAX_FRAME_LENGTH {
