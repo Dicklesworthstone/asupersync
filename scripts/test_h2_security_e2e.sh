@@ -14,6 +14,8 @@
 #   RUST_BACKTRACE - 1 to enable backtraces (default: 1)
 #   TEST_SEED      - deterministic seed override (default: 0xDEADBEEF)
 #   SUITE_TIMEOUT  - per-suite timeout in seconds (default: 180)
+#   RCH_BIN        - rch executable used for all Cargo commands (default: rch)
+#   RCH_TARGET_ROOT - base target directory for remote Cargo builds
 
 set -euo pipefail
 
@@ -25,6 +27,8 @@ RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 LOG_DIR="${ARTIFACT_DIR}/logs"
 SUITE_TIMEOUT="${SUITE_TIMEOUT:-180}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_ROOT="${RCH_TARGET_ROOT:-${TMPDIR:-/tmp}/rch_target_h2_security_${TIMESTAMP}}"
 
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-trace}"
 export RUST_LOG="${RUST_LOG:-asupersync=debug}"
@@ -42,14 +46,32 @@ echo "  TEST_LOG_LEVEL:  ${TEST_LOG_LEVEL}"
 echo "  RUST_LOG:        ${RUST_LOG}"
 echo "  TEST_SEED:       ${TEST_SEED}"
 echo "  Timeout:         ${SUITE_TIMEOUT}s"
+echo "  RCH_BIN:         ${RCH_BIN}"
+echo "  RCH_TARGET_ROOT: ${RCH_TARGET_ROOT}"
 echo "  Timestamp:       ${TIMESTAMP}"
 echo "  Artifacts:       ${ARTIFACT_DIR}"
 echo "  SKIP_FUZZ:       ${SKIP_FUZZ:-0}"
 echo ""
 
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
+fi
+
+run_cargo() {
+    local label="$1"
+    shift
+    local safe_label="${label//[^A-Za-z0-9_]/_}"
+    local target_dir="${RCH_TARGET_ROOT}/${safe_label}"
+
+    timeout "$SUITE_TIMEOUT" "$RCH_BIN" exec -- env \
+        "CARGO_TARGET_DIR=${target_dir}" \
+        cargo "$@"
+}
+
 # --- [1/4] Pre-flight: compilation check ---
 echo ">>> [1/4] Pre-flight: checking compilation..."
-if ! cargo check --tests --all-features 2>"${ARTIFACT_DIR}/compile_errors.log"; then
+if ! run_cargo compile_check check --tests --all-features 2>"${ARTIFACT_DIR}/compile_errors.log"; then
     echo "  FATAL: compilation failed — see ${ARTIFACT_DIR}/compile_errors.log"
     exit 1
 fi
@@ -71,8 +93,8 @@ run_suite() {
 
     echo "[$TOTAL_SUITES] Running ${name}..."
     set +e
-    timeout "$SUITE_TIMEOUT" "$@" 2>&1 | tee "$log_file"
-    local rc=$?
+    run_cargo "$name" "$@" 2>&1 | tee "$log_file"
+    local rc=${PIPESTATUS[0]}
     set -e
 
     if [ "$rc" -eq 0 ]; then
@@ -84,15 +106,15 @@ run_suite() {
     fi
 }
 
-run_suite "hpack_unit" cargo test --lib http::h2::hpack -- --nocapture
-run_suite "h2_frame_unit" cargo test --lib http::h2::frame -- --nocapture
-run_suite "h2_settings_unit" cargo test --lib http::h2::settings -- --nocapture
-run_suite "h2_security_integration" cargo test --test h2_security --all-features -- --nocapture --test-threads=1
-run_suite "http_verification" cargo test --test http_verification --all-features -- --nocapture --test-threads=1
+run_suite "hpack_unit" test --lib http::h2::hpack -- --nocapture
+run_suite "h2_frame_unit" test --lib http::h2::frame -- --nocapture
+run_suite "h2_settings_unit" test --lib http::h2::settings -- --nocapture
+run_suite "h2_security_integration" test --test h2_security --all-features -- --nocapture --test-threads=1
+run_suite "http_verification" test --test http_verification --all-features -- --nocapture --test-threads=1
 
 if [ "${SKIP_FUZZ:-0}" != "1" ] && [ -d "${PROJECT_ROOT}/fuzz/seeds" ]; then
-    run_suite "fuzz_seed_hpack" cargo test --lib stress_test_hpack -- --nocapture
-    run_suite "fuzz_seed_huffman" cargo test --lib stress_test_huffman -- --nocapture
+    run_suite "fuzz_seed_hpack" test --lib stress_test_hpack -- --nocapture
+    run_suite "fuzz_seed_huffman" test --lib stress_test_huffman -- --nocapture
 else
     echo "[skip] Fuzz seed validation"
 fi
@@ -128,8 +150,8 @@ fi
 echo ""
 echo ">>> [4/4] Collecting artifacts..."
 
-PASSED_TESTS=$(grep -h -c "^test .* ok$" "$LOG_DIR"/*.log 2>/dev/null | awk '{s+=$1} END {print s+0}')
-FAILED_TESTS=$(grep -h -c "^test .* FAILED$" "$LOG_DIR"/*.log 2>/dev/null | awk '{s+=$1} END {print s+0}')
+PASSED_TESTS=$({ grep -h -c "^test .* ok$" "$LOG_DIR"/*.log 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
+FAILED_TESTS=$({ grep -h -c "^test .* FAILED$" "$LOG_DIR"/*.log 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
 SUITE_ID="h2-security_e2e"
 SCENARIO_ID="E2E-SUITE-H2-SECURITY"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
@@ -191,8 +213,6 @@ else
     echo "  Artifacts: ${ARTIFACT_DIR}"
 fi
 echo "==================================================================="
-
-find "$ARTIFACT_DIR" -name "*.txt" -empty -delete 2>/dev/null || true
 
 if [ "$FAILED_SUITES" -ne 0 ] || [ "$PATTERN_FAILURES" -ne 0 ]; then
     exit 1
