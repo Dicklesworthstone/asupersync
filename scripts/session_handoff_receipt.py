@@ -28,6 +28,7 @@ NEXT_ACTIONS = {
 }
 TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db"}
 TRACKER_DIRS = {".beads"}
+TRACKER_WRITE_LOCK_PATH = ".beads/.write.lock"
 
 
 def utc_now() -> str:
@@ -76,6 +77,23 @@ def paths_overlap(left: str, right: str) -> bool:
 
 def tracker_reservation_path(pattern: str) -> bool:
     return any(paths_overlap(pattern, path) for path in TRACKER_PATHS | TRACKER_DIRS)
+
+
+def describe_tracker_write_lock(repo_path: Path) -> dict[str, Any]:
+    lock_path = repo_path / TRACKER_WRITE_LOCK_PATH
+    if not lock_path.exists():
+        return {
+            "exists": False,
+            "path": TRACKER_WRITE_LOCK_PATH,
+        }
+    metadata = lock_path.stat()
+    mtime = dt.datetime.fromtimestamp(metadata.st_mtime, dt.timezone.utc)
+    return {
+        "exists": True,
+        "mtime_utc": mtime.isoformat().replace("+00:00", "Z"),
+        "path": TRACKER_WRITE_LOCK_PATH,
+        "size_bytes": metadata.st_size,
+    }
 
 
 def run_json(repo_path: Path, command: list[str], timeout: float) -> tuple[str, Any]:
@@ -208,6 +226,7 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
                 "in_progress": progress_status,
             },
         },
+        "tracker_write_lock": describe_tracker_write_lock(repo_path),
         "agent_mail": {
             "available": False,
             "reservations": [],
@@ -263,6 +282,30 @@ def extract_issues(value: Any) -> list[dict[str, Any]]:
 
 def compact_summary(raw: str) -> str:
     return " ".join(raw.split())[:500]
+
+
+def normalize_tracker_write_lock(source: Any) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return {
+            "exists": False,
+            "path": TRACKER_WRITE_LOCK_PATH,
+        }
+    lock = {
+        "exists": bool(source.get("exists", False)),
+        "path": normalize_repo_path(str(source.get("path") or TRACKER_WRITE_LOCK_PATH)),
+    }
+    if lock["exists"]:
+        lock["mtime_utc"] = str(source.get("mtime_utc") or "")
+        lock["size_bytes"] = int(source.get("size_bytes") or 0)
+    return lock
+
+
+def beads_status_blocked(status: Any) -> bool:
+    if isinstance(status, dict):
+        values = [str(value) for value in status.values()]
+    else:
+        values = [str(status)]
+    return any(value and value != "ok" for value in values)
 
 
 def normalize_dirty_entries(source: dict[str, Any]) -> list[dict[str, str]]:
@@ -435,6 +478,8 @@ def choose_next_action(
     stale: list[dict[str, Any]],
     agent_mail_available: bool,
     branch: str,
+    tracker_write_lock: dict[str, Any],
+    beads_blocked: bool,
 ) -> dict[str, Any]:
     hard_conflicts = [
         row
@@ -452,6 +497,14 @@ def choose_next_action(
             "reason": "active tracker or unknown-owner reservation conflict",
             "path_pattern": hard_conflicts[0]["path_pattern"],
             "holder": hard_conflicts[0]["holder"],
+        }
+    if tracker_write_lock.get("exists") and beads_blocked:
+        return {
+            "category": "blocked",
+            "reason": "beads write lock blocks tracker reads or writes; do not delete without explicit user approval",
+            "path": tracker_write_lock.get("path", TRACKER_WRITE_LOCK_PATH),
+            "mtime_utc": tracker_write_lock.get("mtime_utc", ""),
+            "size_bytes": tracker_write_lock.get("size_bytes", 0),
         }
     if dirty:
         peer_dirty = [
@@ -532,6 +585,8 @@ def build_receipt(
     ]
     rch = source.get("rch", {})
     branch = str(git.get("branch", ""))
+    tracker_write_lock = normalize_tracker_write_lock(source.get("tracker_write_lock"))
+    beads_status = source.get("beads", {}).get("status", "ok")
     next_action = choose_next_action(
         claimable_ready,
         ready_epics,
@@ -541,11 +596,13 @@ def build_receipt(
         stale_ids,
         agent_mail_available,
         branch,
+        tracker_write_lock,
+        beads_status_blocked(beads_status),
     )
     if next_action["category"] not in NEXT_ACTIONS:
         raise ValueError(f"invalid next action: {next_action['category']}")
 
-    return {
+    receipt = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
         "agent": agent,
@@ -580,13 +637,16 @@ def build_receipt(
         "subsystems": {
             "git": "ok" if branch else "unavailable",
             "dirty_tree": "ok",
-            "beads": str(source.get("beads", {}).get("status", "ok")),
+            "beads": str(beads_status),
             "agent_mail": "ok" if agent_mail_available else str(agent_mail.get("status", "unavailable")),
             "proof_runner": str(proof_runner.get("status", "ok")),
             "rch": "ok" if rch.get("available", False) else "unavailable",
         },
         "next_action": next_action,
     }
+    if tracker_write_lock.get("exists"):
+        receipt["tracker_write_lock"] = tracker_write_lock
+    return receipt
 
 
 def main() -> int:

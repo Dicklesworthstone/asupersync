@@ -263,6 +263,40 @@ fn tracker_directory_reservation_conflict_output_matches_full_reviewed_golden() 
 }
 
 #[test]
+fn tracker_write_lock_timeout_is_reported_without_mutation() {
+    let receipt = receipt_json("write_lock_timeout.json");
+    assert_eq!(next_action_category(&receipt), "blocked");
+    assert_eq!(
+        receipt["next_action"]["path"].as_str(),
+        Some(".beads/.write.lock")
+    );
+    assert_eq!(receipt["next_action"]["size_bytes"].as_u64(), Some(0));
+    assert_eq!(
+        receipt["tracker_write_lock"]["mtime_utc"].as_str(),
+        Some("2026-05-12T01:35:32Z")
+    );
+    assert_eq!(
+        receipt["tracker_write_lock"]["exists"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        receipt["next_action"]["reason"].as_str(),
+        Some(
+            "beads write lock blocks tracker reads or writes; do not delete without explicit user approval"
+        )
+    );
+}
+
+#[test]
+fn tracker_write_lock_timeout_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "write_lock_timeout.json",
+        "write_lock_timeout_expected.json",
+        "write-lock-timeout handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn unavailable_agent_mail_is_explicitly_reported() {
     let receipt = receipt_json("no_agent_mail.json");
     assert_eq!(next_action_category(&receipt), "blocked");
