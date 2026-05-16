@@ -41,6 +41,9 @@ use asupersync::http::h2::frame::{
     FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, data_flags, parse_frame, settings_flags,
 };
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
+
+static PARSER_CONTRACT_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// Frame generation strategies for structured fuzzing
 #[derive(Debug, Clone, Copy)]
@@ -67,7 +70,7 @@ impl FuzzStrategy {
 }
 
 fuzz_target!(|data: &[u8]| {
-    run_parser_contract_canaries();
+    PARSER_CONTRACT_CANARIES.get_or_init(run_parser_contract_canaries);
 
     if data.len() < FRAME_HEADER_SIZE + 1 {
         return; // Need at least header + strategy byte
