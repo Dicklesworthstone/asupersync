@@ -61,6 +61,15 @@ run_timeout_cargo() {
     timeout "$timeout_sec" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
+reject_rch_local_fallback_log() {
+    local log_path="$1"
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+        echo "  FATAL: rch local fallback detected; refusing local cargo execution"
+        echo "rch local fallback detected; refusing local cargo execution" > "${ARTIFACT_DIR}/rch_local_fallback.txt"
+        return 86
+    fi
+}
+
 mkdir -p "$OUTPUT_DIR" "$ARTIFACT_DIR"
 
 echo "==================================================================="
@@ -84,10 +93,11 @@ echo ""
 
 # --- [1/4] Pre-flight: compilation check ---
 echo ">>> [1/4] Pre-flight: checking compilation..."
-if ! run_cargo check --test http_e2e --all-features 2>"${ARTIFACT_DIR}/compile_errors.log"; then
+if ! run_cargo check --test http_e2e --all-features >"${ARTIFACT_DIR}/compile_errors.log" 2>&1; then
     echo "  FATAL: compilation failed — see ${ARTIFACT_DIR}/compile_errors.log"
     exit 1
 fi
+reject_rch_local_fallback_log "${ARTIFACT_DIR}/compile_errors.log"
 echo "  OK"
 
 # --- [2/4] Run tests ---
@@ -132,6 +142,11 @@ check_pattern "test result: FAILED" "cargo reported failures"
 check_pattern "invalid request"     "invalid request"
 check_pattern "malformed"           "malformed input"
 check_pattern "connection reset"    "connection reset"
+if grep -Eq '^\[RCH\] local \(|falling back to local' "$LOG_FILE" 2>/dev/null; then
+    echo "  ERROR: rch local fallback detected"
+    echo "rch local fallback detected; refusing local cargo execution" > "${ARTIFACT_DIR}/rch_local_fallback.txt"
+    ((PATTERN_FAILURES++)) || true
+fi
 
 if [ "$PATTERN_FAILURES" -eq 0 ]; then
     echo "  No failure patterns found"
