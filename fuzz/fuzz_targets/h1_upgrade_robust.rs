@@ -35,6 +35,22 @@ fn expect_complete_request(raw: &[u8]) -> Request {
         .expect("valid upgrade request must decode completely")
 }
 
+fn assert_http_error<T>(result: Result<T, HttpError>, expected: HttpError, expected_display: &str) {
+    let Err(err) = result else {
+        panic!("expected HTTP error {expected:?}");
+    };
+    assert_eq!(
+        std::mem::discriminant(&err),
+        std::mem::discriminant(&expected),
+        "expected HTTP error {expected:?}, got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        expected_display,
+        "HTTP error diagnostic changed"
+    );
+}
+
 fn header_values<'a>(request: &'a Request, name: &str) -> impl Iterator<Item = &'a str> {
     request
         .headers
@@ -91,6 +107,15 @@ fn run_fixed_upgrade_canaries() {
         decode_once(b"GET /chat HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n")
             .expect("partial upgrade head must wait for more bytes, not error");
     assert!(partial.is_none(), "partial upgrade head must not decode");
+
+    let ambiguous_upgrade_body = decode_once(
+        b"POST /chat HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+    );
+    assert_http_error(
+        ambiguous_upgrade_body,
+        HttpError::AmbiguousBodyLength,
+        "both Content-Length and Transfer-Encoding present",
+    );
 }
 
 fn test_upgrade_parsing(data: &[u8]) {
