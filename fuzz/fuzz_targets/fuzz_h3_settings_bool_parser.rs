@@ -33,6 +33,7 @@
 use arbitrary::Arbitrary;
 use asupersync::http::h3_native::{H3NativeError, H3Settings};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_U62: u64 = 0x3FFF_FFFF_FFFF_FFFF;
@@ -44,6 +45,8 @@ const MAX_FIELD_SECTION_SIZE: u64 = 0x06;
 const QPACK_BLOCKED_STREAMS: u64 = 0x07;
 /// HTTP/2-reserved identifiers per RFC 9114 §7.2.4.1.
 const RESERVED_IDS: &[u64] = &[0x00, 0x02, 0x03, 0x04, 0x05];
+
+static FIXED_SETTINGS_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug)]
 enum Scenario {
@@ -76,22 +79,16 @@ enum Scenario {
     },
 }
 
-fuzz_target!(|s: Scenario| match s {
-    Scenario::Arbitrary(bytes) => {
-        fuzz_arbitrary(&bytes);
-        test_fixed_settings_canaries();
-    }
-    Scenario::SinglePair { id, value } => {
-        fuzz_single_pair(id, value);
-        test_fixed_settings_canaries();
-    }
-    Scenario::MultiPair { pairs } => {
-        fuzz_multi_pair(&pairs);
-        test_fixed_settings_canaries();
-    }
-    Scenario::BoolSettingAttack { which, value } => {
-        fuzz_bool_attack(which, value);
-        test_fixed_settings_canaries();
+fuzz_target!(|s: Scenario| {
+    FIXED_SETTINGS_CANARIES.get_or_init(test_fixed_settings_canaries);
+
+    match s {
+        Scenario::Arbitrary(bytes) => fuzz_arbitrary(&bytes),
+        Scenario::SinglePair { id, value } => fuzz_single_pair(id, value),
+        Scenario::MultiPair { pairs } => fuzz_multi_pair(&pairs),
+        Scenario::BoolSettingAttack { which, value } => {
+            fuzz_bool_attack(which, value);
+        }
     }
 });
 
