@@ -636,3 +636,30 @@ fn runtime_capacity_hints_smoke_contract_emits_report() {
         println!("RUNTIME_CAPACITY_HINTS_REPORT_JSON_END");
     }
 }
+
+#[test]
+fn runtime_capacity_hints_runner_rejects_full_rch_fallback_marker_set() {
+    let script = fs::read_to_string("scripts/run_runtime_capacity_hints_smoke.sh")
+        .expect("runtime capacity hints smoke runner should load");
+
+    assert!(
+        script
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 2,
+        "runner must apply the shared fallback marker guard at each log-check site"
+    );
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            script.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
