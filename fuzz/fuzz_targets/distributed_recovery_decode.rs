@@ -12,7 +12,7 @@
 //! The key invariant is that malformed payloads must fail closed with an
 //! error, while valid payloads may only fail at the trigger-validation stage.
 //! Run with:
-//! `cargo fuzz run fuzz_distributed_recovery_decode -- -max_total_time=60`
+//! `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_distributed_recovery_decode_fuzz cargo fuzz run fuzz_distributed_recovery_decode -- -max_total_time=60`
 
 #![no_main]
 
@@ -53,6 +53,8 @@ struct SnapshotInput {
     state: RegionStateInput,
     timestamp_secs: u64,
     sequence: u64,
+    origin_id: u64,
+    epoch: u64,
     tasks: Vec<TaskInput>,
     children: Vec<RegionInput>,
     finalizer_count: u32,
@@ -216,6 +218,8 @@ fn build_snapshot(input: &SnapshotInput) -> RegionSnapshot {
         state: input.state.into_region_state(),
         timestamp: Time::from_secs(input.timestamp_secs),
         sequence: input.sequence,
+        origin_id: input.origin_id,
+        epoch: input.epoch,
         tasks: input
             .tasks
             .iter()
