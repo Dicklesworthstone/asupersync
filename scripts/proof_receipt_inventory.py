@@ -12,6 +12,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ KEY_VALUE_SECRET_RE = re.compile(
 URL_QUERY_RE = re.compile(r"(https?://[^\s?#)>\]]+)\?[^ \n)>\]]+")
 LONG_WORD_RE = re.compile(r"\b[A-Za-z0-9._~/+=-]{96,}\b")
 SPACE_RE = re.compile(r"\s+")
+SAFE_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CARGO_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])cargo(?![A-Za-z0-9_.-])", re.IGNORECASE)
 
 
 def utc_now() -> str:
@@ -162,21 +165,47 @@ def is_covered(row: dict[str, Any]) -> bool:
     return bool(row["script_path"] and row["test_path"] and row["fixture_root"])
 
 
+def first_non_assignment(argv: list[str], start: int = 0) -> int:
+    index = start
+    while index < len(argv) and "=" in argv[index]:
+        name, _value = argv[index].split("=", 1)
+        if not SAFE_ENV_NAME.fullmatch(name):
+            break
+        index += 1
+    return index
+
+
+def command_mentions_cargo(command: str) -> bool:
+    return CARGO_COMMAND_RE.search(command) is not None
+
+
 def command_routes_cargo_through_rch(command: str) -> bool:
-    collapsed = " ".join(command.lower().split())
-    cargo_index = f" {collapsed} ".find(" cargo ")
-    if cargo_index < 0:
-        return True
-    rch_index = collapsed.find("rch exec --")
-    return 0 <= rch_index < cargo_index
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return not command_mentions_cargo(command)
+
+    lowered = [arg.lower() for arg in argv]
+    if "cargo" not in lowered:
+        return not command_mentions_cargo(command)
+
+    program_index = first_non_assignment(argv)
+    if program_index >= len(argv):
+        return False
+    if lowered[program_index:program_index + 3] != ["rch", "exec", "--"]:
+        return False
+
+    remote_index = program_index + 3
+    if remote_index < len(argv) and lowered[remote_index] == "env":
+        remote_index = first_non_assignment(argv, remote_index + 1)
+    return remote_index < len(argv) and lowered[remote_index] == "cargo"
 
 
 def unsafe_validation_commands(row: dict[str, Any]) -> list[str]:
     return [
         command
         for command in row["validation"]
-        if f" {' '.join(command.lower().split())} ".find(" cargo ") >= 0
-        and not command_routes_cargo_through_rch(command)
+        if command_mentions_cargo(command) and not command_routes_cargo_through_rch(command)
     ]
 
 

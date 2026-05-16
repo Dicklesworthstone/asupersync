@@ -244,12 +244,30 @@ fn unsafe_validation_command_is_actionable() {
     );
 
     let cues = receipt["review_cues"].as_array().expect("review cues");
+    let unsafe_commands = cues
+        .iter()
+        .filter(|cue| {
+            cue["kind"].as_str() == Some("unsafe-validation-command")
+                && cue["helper_id"].as_str() == Some("local-cargo-proof-receipt")
+        })
+        .filter_map(|cue| cue["command"].as_str())
+        .collect::<Vec<_>>();
+
     assert!(cues.iter().any(|cue| {
         cue["kind"].as_str() == Some("unsafe-validation-command")
             && cue["helper_id"].as_str() == Some("local-cargo-proof-receipt")
             && cue["command"].as_str()
                 == Some("cargo test -p asupersync --test proof_runner_contract")
     }));
+    assert!(unsafe_commands.contains(
+        &"echo rch exec --; cargo clippy -p asupersync --test proof_receipt_inventory_contract -- -D warnings"
+    ));
+    assert!(unsafe_commands.contains(
+        &"rch exec -- sh -c 'cargo test -p asupersync --test proof_receipt_inventory_contract'"
+    ));
+    assert!(!unsafe_commands.contains(
+        &"RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract"
+    ));
 }
 
 #[test]
