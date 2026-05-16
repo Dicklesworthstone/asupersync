@@ -1,13 +1,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::database::postgres::{PgConnectOptions, SslMode};
+use asupersync::database::postgres::{PgConnectOptions, PgError, SslMode};
 use libfuzzer_sys::fuzz_target;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const MAX_RAW_URL_BYTES: usize = 512;
 const MAX_COMPONENT_CHARS: usize = 32;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 type ParseOutcome = Result<PgConnectOptions, String>;
 type PanicPayload = Box<dyn std::any::Any + Send>;
@@ -379,7 +382,55 @@ fn exercise_structured(url: &str, expectation: UrlExpectation) {
     }
 }
 
+fn assert_invalid_url_rejection(url: &str, expected: &str) {
+    let error =
+        PgConnectOptions::parse(url).expect_err("fixed PostgreSQL URL canary should reject");
+
+    match &error {
+        PgError::InvalidUrl(message) => assert_eq!(
+            message, expected,
+            "PostgreSQL URL diagnostic payload changed for {url:?}"
+        ),
+        other => panic!("expected PostgreSQL InvalidUrl error for {url:?}, got {other:?}"),
+    }
+
+    assert_eq!(
+        error.to_string(),
+        format!("Invalid PostgreSQL URL: {expected}"),
+        "PostgreSQL URL Display diagnostic changed for {url:?}"
+    );
+}
+
+fn assert_fixed_url_error_canaries() {
+    assert_invalid_url_rejection("mysql://localhost/db", "URL must start with postgres://");
+    assert_invalid_url_rejection("postgres://localhost", "missing database name");
+    assert_invalid_url_rejection("postgres://user@host/", "missing database name");
+    assert_invalid_url_rejection("postgres://user@/db", "missing host");
+    assert_invalid_url_rejection(
+        "postgres://user@host:not-a-port/db",
+        "invalid port: not-a-port",
+    );
+    assert_invalid_url_rejection(
+        "postgres://user@[::1:5432/db",
+        "invalid IPv6 host literal: [::1:5432",
+    );
+    assert_invalid_url_rejection(
+        "postgres://user@[::1]oops/db",
+        "invalid host/port segment: [::1]oops",
+    );
+    assert_invalid_url_rejection(
+        "postgres://user@host/db?sslmode=magic",
+        "unknown sslmode: magic",
+    );
+    assert_invalid_url_rejection(
+        "postgres://user@host/db?connect_timeout=not-a-number",
+        "invalid connect_timeout: not-a-number",
+    );
+}
+
 fuzz_target!(|input: FuzzInput| {
+    FIXED_CANARIES.get_or_init(assert_fixed_url_error_canaries);
+
     match input {
         FuzzInput::Raw(bytes) => {
             if bytes.len() > MAX_RAW_URL_BYTES {
