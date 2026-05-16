@@ -122,7 +122,7 @@ COMMAND_ARGS=(
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_provenance_dashboard"
     "ASUPERSYNC_CONTROLLER_PROVENANCE_DASHBOARD_REPORT_PATH=${REPORT_PATH}"
     "ASUPERSYNC_CONTROLLER_PROVENANCE_DASHBOARD_MARKDOWN_PATH=${MARKDOWN_PATH}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
