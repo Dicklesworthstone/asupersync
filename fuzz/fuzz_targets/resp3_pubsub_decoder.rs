@@ -28,6 +28,9 @@ use asupersync::messaging::redis::{
     PubSubEvent, RedisError, RespValue, parse_pubsub_event_for_fuzz,
 };
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
+
+static FIXED_PUBSUB_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// Structure-aware RESP3 pubsub message fuzzing input
 #[derive(Debug, Clone, Arbitrary)]
@@ -305,6 +308,8 @@ impl Resp3PubSubMessage {
 }
 
 fuzz_target!(|data: &[u8]| {
+    FIXED_PUBSUB_CANARIES.get_or_init(assert_fixed_pubsub_diagnostic_canaries);
+
     if data.is_empty() {
         return;
     }
@@ -392,4 +397,85 @@ fn observe_redis_parse_error(error: &RedisError, context: &str) {
         matches!(error, RedisError::Protocol(_)),
         "{context} returned non-protocol parser error: {error:?}"
     );
+}
+
+fn assert_fixed_pubsub_diagnostic_canaries() {
+    assert_pubsub_protocol_error(
+        RespValue::SimpleString("message".to_string()),
+        "pubsub expected array or push event, got SimpleString(\"message\")",
+    );
+    assert_pubsub_protocol_error(RespValue::Array(Some(vec![])), "pubsub event missing kind");
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![bulk("unknown")]),
+        "unsupported pubsub event kind: unknown",
+    );
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![RespValue::BulkString(Some(vec![0xff]))]),
+        "pubsub kind is not valid UTF-8",
+    );
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![bulk("message")]),
+        "pubsub message missing channel",
+    );
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![
+            bulk("message"),
+            RespValue::Integer(1),
+            bulk("payload"),
+        ]),
+        "expected text for message.channel, got Integer(1)",
+    );
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![bulk("message"), bulk("chan"), RespValue::Integer(2)]),
+        "expected payload for message.payload, got Integer(2)",
+    );
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![
+            bulk("message"),
+            bulk("chan"),
+            bulk("payload"),
+            bulk("extra"),
+        ]),
+        "pubsub message has unexpected trailing fields",
+    );
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![bulk("subscribe"), bulk("chan")]),
+        "pubsub subscription missing remaining-count",
+    );
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![
+            bulk("subscribe"),
+            bulk("chan"),
+            RespValue::SimpleString("1".to_string()),
+        ]),
+        "expected integer for subscription.remaining, got SimpleString(\"1\")",
+    );
+    assert_pubsub_protocol_error(
+        pubsub_array(vec![bulk("pong"), bulk("payload"), bulk("extra")]),
+        "pubsub pong has unexpected trailing fields",
+    );
+}
+
+fn assert_pubsub_protocol_error(value: RespValue, expected_message: &str) {
+    match parse_pubsub_event_for_fuzz(value) {
+        Err(RedisError::Protocol(message)) => {
+            assert_eq!(message, expected_message);
+            assert_eq!(
+                RedisError::Protocol(message).to_string(),
+                format!("Redis protocol error: {expected_message}")
+            );
+        }
+        Err(error) => panic!("expected pubsub protocol error, got {error:?}"),
+        Ok(event) => {
+            panic!("expected pubsub protocol error {expected_message:?}, got {event:?}");
+        }
+    }
+}
+
+fn pubsub_array(items: Vec<RespValue>) -> RespValue {
+    RespValue::Array(Some(items))
+}
+
+fn bulk(text: &str) -> RespValue {
+    RespValue::BulkString(Some(text.as_bytes().to_vec()))
 }
