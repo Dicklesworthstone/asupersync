@@ -95,10 +95,11 @@ UNIT_EXIT=0
 CANCEL_EXIT=0
 ASYNC_EXIT=0
 OVERALL_EXIT=0
+LOCAL_FALLBACKS=0
 
 # Run combinator unit tests
 echo "[1/3] Running combinator unit tests..."
-if run_cargo unit test -p asupersync --test combinator_tests e2e::combinator::unit -- --nocapture 2>&1 | tee "$LOG_DIR/unit_tests.log"; then
+if run_cargo unit test -p asupersync --test e2e_combinator e2e::combinator::unit -- --nocapture 2>&1 | tee "$LOG_DIR/unit_tests.log"; then
     UNIT_EXIT=0
     echo "    -> PASS"
 else
@@ -109,7 +110,7 @@ fi
 # Run cancel-correctness tests (CRITICAL)
 echo ""
 echo "[2/3] Running cancel-correctness tests (CRITICAL)..."
-if run_cargo cancel test -p asupersync --test combinator_tests e2e::combinator::cancel_correctness -- --nocapture 2>&1 | tee "$LOG_DIR/cancel_tests.log"; then
+if run_cargo cancel test -p asupersync --test e2e_combinator e2e::combinator::cancel_correctness -- --nocapture 2>&1 | tee "$LOG_DIR/cancel_tests.log"; then
     CANCEL_EXIT=0
     echo "    -> PASS"
 else
@@ -120,7 +121,7 @@ fi
 # Run async loser drain tests
 echo ""
 echo "[3/3] Running async loser drain tests..."
-if run_cargo async test -p asupersync --test combinator_tests async_loser_drain -- --nocapture 2>&1 | tee "$LOG_DIR/async_tests.log"; then
+if run_cargo async test -p asupersync --test e2e_combinator async_loser_drain -- --nocapture 2>&1 | tee "$LOG_DIR/async_tests.log"; then
     ASYNC_EXIT=0
     echo "    -> PASS"
 else
@@ -146,6 +147,18 @@ if grep -qE "(panicked|FAILED)" "$LOG_DIR"/*.log 2>/dev/null; then
     grep -hE "(panicked|FAILED)" "$LOG_DIR"/*.log | head -20
 fi
 
+# Reject proof transcripts that came from a local rch fallback.
+echo ""
+echo "[Analysis] Checking for rch local fallback..."
+if grep -qE '^\[RCH\] local \(|local fallback|fallback to local|executing locally' "$LOG_DIR"/*.log 2>/dev/null; then
+    echo "    -> FATAL: rch local fallback detected; refusing local cargo execution"
+    grep -hE '^\[RCH\] local \(|local fallback|fallback to local|executing locally' "$LOG_DIR"/*.log | head -10
+    LOCAL_FALLBACKS=1
+    OVERALL_EXIT=86
+else
+    echo "    -> No local fallback markers"
+fi
+
 # Generate summary
 echo ""
 echo "=== Test Summary ==="
@@ -169,6 +182,10 @@ DRY_RUN_JSON=false
 if [[ "${DRY_RUN}" -eq 1 ]]; then
     DRY_RUN_JSON=true
 fi
+RCH_ROUTED_JSON=true
+if [[ "${LOCAL_FALLBACKS}" -ne 0 ]]; then
+    RCH_ROUTED_JSON=false
+fi
 
 cat > "$SUMMARY_FILE" << ENDJSON
 {
@@ -181,7 +198,8 @@ cat > "$SUMMARY_FILE" << ENDJSON
   "status": "${SUITE_STATUS}",
   "dry_run": ${DRY_RUN_JSON},
   "runner": "rch exec",
-  "all_rch_routed": true,
+  "all_rch_routed": ${RCH_ROUTED_JSON},
+  "rch_local_fallbacks": ${LOCAL_FALLBACKS},
   "repro_command": "$(json_escape "${REPRO_COMMAND}")",
   "artifact_path": "$(json_escape "${SUMMARY_FILE}")",
   "suite": "${SUITE_ID}",
