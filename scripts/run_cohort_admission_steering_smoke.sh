@@ -12,6 +12,7 @@ OUTPUT_ROOT_OVERRIDE="${COHORT_ADMISSION_STEERING_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${COHORT_ADMISSION_STEERING_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${COHORT_ADMISSION_STEERING_SMOKE_RUN_ID:-}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
     cat <<'EOF'
@@ -231,7 +232,7 @@ else
         SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
         STATUS="failed"
         MESSAGE="rch proof command failed"
-    elif grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+    elif grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RUN_LOG_PATH" 2>/dev/null; then
         COMMAND_EXIT_CODE=86
         SCRIPT_EXIT_CODE=86
         STATUS="failed"
@@ -258,7 +259,7 @@ else
         fi
     fi
     if [ "$COMMAND_EXIT_CODE" -ne 86 ] \
-        && grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        && grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RUN_LOG_PATH" 2>/dev/null; then
         COMMAND_EXIT_CODE=86
         SCRIPT_EXIT_CODE=86
         STATUS="failed"

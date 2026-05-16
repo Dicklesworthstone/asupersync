@@ -325,6 +325,12 @@ fn maybe_write_cohort_admission_steering_report(path: &str, report: &Value) {
     .expect("write cohort admission steering report");
 }
 
+fn load_runner() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/run_cohort_admission_steering_smoke.sh");
+    fs::read_to_string(&path).expect("read cohort admission steering smoke runner")
+}
+
 fn conservative_global_decision(
     window: &CohortAdmissionSteeringWindow,
 ) -> CohortAdmissionSteeringDecision {
@@ -654,6 +660,33 @@ fn build_cohort_admission_steering_report(
         },
         "expected_report_projection": scenario.expected_report_projection
     })
+}
+
+#[test]
+fn runner_rejects_full_rch_fallback_marker_set() {
+    let runner = load_runner();
+
+    assert!(
+        runner
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 2,
+        "runner must use the shared local fallback matcher at every rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            runner.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
 }
 
 #[test]
