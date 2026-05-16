@@ -6,6 +6,10 @@ use asupersync::types::typed_symbol::{
 };
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
+
+static FIXED_ORACLES: OnceLock<()> = OnceLock::new();
+static EXPECTED_TYPE_ID_BYTES: OnceLock<[u8; 8]> = OnceLock::new();
 
 // Simple test type for fuzzing
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -87,7 +91,7 @@ fn assert_fixed_oracles() {
     assert_eq!(err.to_string(), "corrupt symbol data");
 }
 
-fn expected_type_id_bytes() -> [u8; 8] {
+fn build_expected_type_id_bytes() -> [u8; 8] {
     let value = TestData {
         value: 0,
         message: String::new(),
@@ -98,6 +102,10 @@ fn expected_type_id_bytes() -> [u8; 8] {
     let mut out = [0u8; 8];
     out.copy_from_slice(&raw.data()[6..14]);
     out
+}
+
+fn expected_type_id_bytes() -> [u8; 8] {
+    *EXPECTED_TYPE_ID_BYTES.get_or_init(build_expected_type_id_bytes)
 }
 
 fn assert_header_prefix_model(
@@ -132,7 +140,7 @@ fn assert_header_prefix_model(
 }
 
 fuzz_target!(|data: &[u8]| {
-    assert_fixed_oracles();
+    FIXED_ORACLES.get_or_init(assert_fixed_oracles);
 
     // Guard against excessively large inputs that would just waste time
     if data.len() > 100_000 {
