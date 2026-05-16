@@ -148,7 +148,7 @@ COMMAND_ARGS=(
     "RUSTFLAGS=-D warnings -C debuginfo=0"
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tail_causal_attribution_emitters"
     "ASUPERSYNC_TAIL_CAUSAL_ATTRIBUTION_REPORT_PATH=${SMOKE_REPORT_PATH}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
