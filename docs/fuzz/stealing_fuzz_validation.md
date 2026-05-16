@@ -70,13 +70,13 @@ The fuzz target exercises the **Power of Two Choices** algorithm from `stealing.
 ### 1. Run 1-Hour Campaign (AddressSanitizer)
 ```bash
 cd /data/projects/asupersync/fuzz
-cargo +nightly fuzz run stealing_fuzz -- -max_total_time=3600
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_stealing_fuzz cargo +nightly fuzz run stealing_fuzz -- -max_total_time=3600
 ```
 
 ### 2. Run Separate TSan Campaign  
 ```bash
 # TSan-only run (incompatible with ASan)
-RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test --lib runtime::scheduler::stealing
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_stealing_fuzz RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test --lib runtime::scheduler::stealing
 ```
 
 ### 3. Expected Results

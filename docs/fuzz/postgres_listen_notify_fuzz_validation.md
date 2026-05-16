@@ -116,7 +116,7 @@ The `ListenNotifyShadowModel` tracks:
 ### 1. Run 1-Hour Campaign
 ```bash
 cd /data/projects/asupersync/fuzz
-cargo +nightly fuzz run postgres_listen_notify -- -max_total_time=3600
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_postgres_listen_notify_fuzz cargo +nightly fuzz run postgres_listen_notify -- -max_total_time=3600
 ```
 
 ### 2. Expected Results

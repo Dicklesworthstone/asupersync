@@ -20,13 +20,13 @@ The fuzzer specifically targets the HRW routing decisions in:
 
 ```bash
 cd fuzz
-cargo +nightly fuzz run hrw_routing_stability
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_hrw_routing_stability_fuzz cargo +nightly fuzz run hrw_routing_stability
 
 # With specific parameters
-cargo +nightly fuzz run hrw_routing_stability -- -max_total_time=300 -jobs=4
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_hrw_routing_stability_fuzz cargo +nightly fuzz run hrw_routing_stability -- -max_total_time=300 -jobs=4
 
 # To minimize found crashes
-cargo +nightly fuzz tmin hrw_routing_stability artifacts/hrw_routing_stability/crash-xyz
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_hrw_routing_stability_fuzz cargo +nightly fuzz tmin hrw_routing_stability artifacts/hrw_routing_stability/crash-xyz
 ```
 
 ## Test Invariants

@@ -114,7 +114,7 @@ Validates RFC 9297 DATAGRAM frame structure:
 ### 1. Run 1-Hour Campaign
 ```bash
 cd /data/projects/asupersync/fuzz
-cargo +nightly fuzz run h3_datagram_frame -- -max_total_time=3600
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h3_datagram_frame_fuzz cargo +nightly fuzz run h3_datagram_frame -- -max_total_time=3600
 ```
 
 ### 2. Expected Results

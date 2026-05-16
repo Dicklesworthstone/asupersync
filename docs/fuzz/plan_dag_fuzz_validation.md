@@ -85,7 +85,7 @@ Four distinct nesting patterns tested:
 ### 1. Run 1-Hour Campaign  
 ```bash
 cd /data/projects/asupersync/fuzz
-cargo +nightly fuzz run plan_dag_fuzz -- -max_total_time=3600
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_plan_dag_fuzz cargo +nightly fuzz run plan_dag_fuzz -- -max_total_time=3600
 ```
 
 ### 2. Expected Results
