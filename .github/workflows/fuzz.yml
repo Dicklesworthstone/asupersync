@@ -20,7 +20,6 @@ on:
         options:
           - all
           - grpc_codec
-          - grpc_codec
           - fuzz_http1_request
           - fuzz_http1_response
           - dns_resolver_name_compression
@@ -85,7 +84,6 @@ jobs:
       matrix:
         target:
           - grpc_codec
-          - grpc_codec
           - fuzz_http1_request
           - fuzz_http1_response
           - dns_resolver_name_compression
@@ -143,8 +141,14 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+      - name: Require rch
+        run: |
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for fuzz jobs" >&2
+            exit 1
+          fi
+          echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"
 
       - name: Cache corpus
         uses: actions/cache@v4
@@ -155,15 +159,27 @@ jobs:
             fuzz-corpus-${{ matrix.target }}-
 
       - name: Run fuzzer
-        working-directory: fuzz
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+          FUZZ_DURATION: ${{ matrix.duration || inputs.duration || '300' }}
         run: |
-          DURATION=${{ matrix.duration || inputs.duration || '300' }}
-          echo "Fuzzing ${{ matrix.target }} for ${DURATION}s"
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
-            -max_total_time=${DURATION} \
-            -print_final_stats=1 \
-            -jobs=4 \
-            -workers=4
+          DURATION="${FUZZ_DURATION}"
+          TARGET_DIR="${TMPDIR:-/tmp}/rch_target_fuzz_${FUZZ_TARGET}"
+          echo "Fuzzing ${FUZZ_TARGET} for ${DURATION}s"
+          "$RCH_BIN" exec -- env \
+            CARGO_TARGET_DIR="${TARGET_DIR}" \
+            FUZZ_TARGET="${FUZZ_TARGET}" \
+            FUZZ_DURATION="${DURATION}" \
+            bash -lc "
+              set -euo pipefail
+              cargo install cargo-fuzz --locked
+              cd fuzz
+              cargo +nightly fuzz run \"\$FUZZ_TARGET\" -- \
+                -max_total_time=\"\$FUZZ_DURATION\" \
+                -print_final_stats=1 \
+                -jobs=4 \
+                -workers=4
+            "
 
       - name: Upload crashes
         if: failure()
