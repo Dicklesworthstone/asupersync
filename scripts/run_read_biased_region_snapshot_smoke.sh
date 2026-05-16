@@ -305,10 +305,11 @@ COMMAND_ARGS=(
     exec
     --
     env
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_read_biased_region_snapshot"
     "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_CONTRACT_PATH=${ARTIFACT}"
     "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_SCENARIO=${SCENARIO}"
     "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_REPORT_PATH=${SCENARIO_REPORT_PATH}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
