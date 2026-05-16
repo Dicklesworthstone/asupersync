@@ -244,6 +244,32 @@ fn current_clean_matches_full_output_golden() {
 }
 
 #[test]
+fn bare_cargo_command_requires_rerun_even_at_current_head() {
+    let receipt = receipt_json("bare_cargo_command.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(row["classification"].as_str(), Some("unsafe-proof-command"));
+    assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+    assert_eq!(row["safe_to_cite"].as_bool(), Some(false));
+    assert_eq!(row["evidence"]["bare_cargo_command"].as_bool(), Some(true));
+    assert!(
+        row["remediation"]["rerun_command"]
+            .as_str()
+            .expect("rerun command")
+            .starts_with("rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test")
+    );
+    assert_eq!(receipt["summary"]["rerun_required"].as_u64(), Some(1));
+}
+
+#[test]
+fn bare_cargo_command_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "bare_cargo_command.json",
+        "bare_cargo_command_expected.json",
+    );
+}
+
+#[test]
 fn superseded_head_is_suppressed_even_when_status_passed() {
     let receipt = receipt_json("superseded_head.json");
     let row = first_row(&receipt);

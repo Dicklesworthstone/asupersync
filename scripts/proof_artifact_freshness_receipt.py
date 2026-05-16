@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import fnmatch
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,11 @@ GIT_READ_COMMANDS = [
     "git branch --show-current",
     "git status --porcelain=v1",
 ]
+CARGO_PROOF_COMMAND = re.compile(
+    r"\bcargo(?:\s+fuzz)?\s+"
+    r"(?:build|check|clippy|doc|fmt|fuzz|run|test|tree)\b",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -299,6 +305,14 @@ def path_matches(pattern: str, path: str) -> bool:
     )
 
 
+def proof_command_uses_bare_cargo(command: str) -> bool:
+    lowered = command.lower()
+    return any(
+        "rch exec" not in lowered[: match.start()]
+        for match in CARGO_PROOF_COMMAND.finditer(command)
+    )
+
+
 def dirty_overlaps(touched_files: list[str], entries: list[dict[str, str]]) -> list[dict[str, str]]:
     overlaps = []
     for touched in touched_files:
@@ -318,8 +332,10 @@ def classify_artifact(
     artifact_path = artifact["artifact_path"]
     git_sha = artifact["git_sha"]
     git_branch = artifact["git_branch"]
+    command = artifact["command"]
     touched_files = artifact["touched_files"]
     overlaps = dirty_overlaps(touched_files, dirty)
+    bare_cargo_command = proof_command_uses_bare_cargo(command)
 
     evidence = {
         "artifact_git_sha": git_sha,
@@ -329,6 +345,8 @@ def classify_artifact(
         "dirty_overlap_count": len(overlaps),
         "dirty_overlaps": overlaps,
     }
+    if bare_cargo_command:
+        evidence["bare_cargo_command"] = True
 
     if not git_sha or not current_head:
         classification = "unverifiable-head"
@@ -350,6 +368,10 @@ def classify_artifact(
         classification = "unverifiable-surface"
         decision = "suppress-as-unverifiable"
         reason = "artifact does not declare touched files"
+    elif bare_cargo_command:
+        classification = "unsafe-proof-command"
+        decision = "rerun-required"
+        reason = "artifact proof command bypasses rch exec"
     elif overlaps:
         classification = "dirty-surface-overlap"
         decision = "rerun-required"
@@ -367,11 +389,11 @@ def classify_artifact(
         "safe_to_cite": safe_to_cite,
         "reason": reason,
         "status": artifact["status"],
-        "command": artifact["command"],
+        "command": command,
         "touched_files": touched_files,
         "generated_at": artifact["generated_at"],
         "evidence": evidence,
-        "remediation": remediation_for(classification, artifact["command"]),
+        "remediation": remediation_for(classification, command),
     }
 
 
@@ -389,6 +411,15 @@ def remediation_for(classification: str, command: str) -> dict[str, Any]:
                 "rerun the focused proof after the touched surface is committed or cleaned",
             ],
             "rerun_command": command,
+        }
+    if classification == "unsafe-proof-command":
+        return {
+            "operator_note": "Do not cite green output from a local bare Cargo proof.",
+            "next_steps": [
+                "rerun the proof through rch exec with an explicit CARGO_TARGET_DIR",
+                "replace the artifact command before citing it",
+            ],
+            "rerun_command": f"rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR {command}",
         }
     if classification in {"superseded-head", "wrong-branch", "repo-not-main"}:
         return {
