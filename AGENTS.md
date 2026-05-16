@@ -129,7 +129,7 @@ Additionally, full workspace graphs reveal tokio in scoped places: `opentelemetr
 **Verification** (default production runtime crate — what ships without optional tokio-carrying features):
 
 ```
-rch exec -- cargo tree -e normal -p asupersync -i tokio
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_tokio_default" cargo tree -e normal -p asupersync -i tokio
 ```
 
 This must print `warning: nothing to print.` Any dependency path here is a default production regression and must be triaged.
@@ -137,7 +137,7 @@ This must print `warning: nothing to print.` Any dependency path here is a defau
 **Verification** (metrics production runtime crate — optional metrics without OTLP protobuf fuzz helpers):
 
 ```
-rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_tokio_metrics" cargo tree -e normal -p asupersync --features metrics -i tokio
 ```
 
 This must also print `warning: nothing to print.` Any dependency path here is a metrics production regression and must be triaged.
@@ -145,7 +145,7 @@ This must also print `warning: nothing to print.` Any dependency path here is a 
 **Verification** (fuzz quarantine proof, expected to show tokio through OTLP generated messages):
 
 ```
-rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_tokio_fuzz" cargo tree -e normal -p asupersync --features fuzz -i tokio
 ```
 
 This is expected to show `opentelemetry-proto` -> `tonic` / `tonic-prost` -> `tokio`. That path is scoped to fuzz/test OTLP wire helpers and is not part of the default or metrics production guarantee.
@@ -153,7 +153,7 @@ This is expected to show `opentelemetry-proto` -> `tonic` / `tonic-prost` -> `to
 **Verification** (workspace audit, not a production-consumer proof):
 
 ```
-rch exec -- cargo tree -e normal --workspace -i tokio
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_tokio_workspace" cargo tree -e normal --workspace -i tokio
 ```
 
 This intentionally includes the satellite crates and any workspace member that enables optional/test features. Use it to audit scoped edges, but do not treat its output as the default production dependency graph.
@@ -161,7 +161,7 @@ This intentionally includes the satellite crates and any workspace member that e
 **Verification** (full graph including dev-deps):
 
 ```
-rch exec -- cargo tree -e features --workspace --invert tokio
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_tokio_full_graph" cargo tree -e features --workspace --invert tokio
 ```
 
 This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `testing` feature -> `rt-tokio` chain), `tokio-stream`, tokio-util/sqlx differential-test edges, satellite crate edges, and the fuzz-only `opentelemetry-proto` generated-message edge.
@@ -307,13 +307,13 @@ Asupersync is a library/runtime. Core code should not write to stdout/stderr.
 
 ```bash
 # Check for compiler errors and warnings
-rch exec -- cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_check_all_targets" cargo check --all-targets
 
 # Check for clippy lints (pedantic + nursery are enabled)
-rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_clippy_all_targets" cargo clippy --all-targets -- -D warnings
 
 # Verify formatting
-rch exec -- cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_fmt_check" cargo fmt --check
 ```
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
@@ -341,21 +341,21 @@ Prefer deterministic lab-runtime tests for concurrency-sensitive behavior.
 
 ```bash
 # Run all tests
-rch exec -- cargo test
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all" cargo test
 
 # Run with output
-rch exec -- cargo test -- --nocapture
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all_nocapture" cargo test -- --nocapture
 
 # Run tests for a specific module
-rch exec -- cargo test --lib <module_name>
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_module" cargo test --lib <module_name>
 
 # Run tests for a workspace member
-rch exec -- cargo test -p asupersync-macros
-rch exec -- cargo test -p asupersync-conformance
-rch exec -- cargo test -p franken-kernel
-rch exec -- cargo test -p franken-evidence
-rch exec -- cargo test -p franken-decision
-rch exec -- cargo test -p frankenlab
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_asupersync_macros" cargo test -p asupersync-macros
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_asupersync_conformance" cargo test -p asupersync-conformance
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_franken_kernel" cargo test -p franken-kernel
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_franken_evidence" cargo test -p franken-evidence
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_franken_decision" cargo test -p franken-decision
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_frankenlab" cargo test -p frankenlab
 ```
 
 ### Test Categories
@@ -811,11 +811,13 @@ RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation 
 
 **RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
 
+Every manual Cargo invocation must pass an explicit target directory through `rch exec -- env CARGO_TARGET_DIR=... cargo ...`; do not put `cargo` immediately after `rch exec --`.
+
 To manually offload a build:
 ```bash
-rch exec -- cargo build --release
-rch exec -- cargo test
-rch exec -- cargo clippy
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_build_release" cargo build --release
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all" cargo test
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_clippy" cargo clippy
 ```
 
 Quick commands:
