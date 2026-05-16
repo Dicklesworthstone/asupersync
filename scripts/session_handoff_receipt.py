@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import fnmatch
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ NEXT_ACTIONS = {
 TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db"}
 TRACKER_DIRS = {".beads"}
 TRACKER_WRITE_LOCK_PATH = ".beads/.write.lock"
+AM_ACTIVE_RESERVATION_RE = re.compile(r"^\s*(?P<path>.+?)\s+\[(?P<mode>[^\]]+)\]\s+by\s+(?P<holder>.+?)\s*$")
 
 
 def utc_now() -> str:
@@ -209,6 +211,7 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
         timeout,
     )
     rch_status, rch_queue = run_text(repo_path, ["rch", "queue"], timeout)
+    agent_mail = live_agent_mail_snapshot(repo_path, timeout)
 
     return {
         "git": {
@@ -227,11 +230,7 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
             },
         },
         "tracker_write_lock": describe_tracker_write_lock(repo_path),
-        "agent_mail": {
-            "available": False,
-            "reservations": [],
-            "status": "not_configured",
-        },
+        "agent_mail": agent_mail,
         "proof_runner": {
             "status": proof_runner_status,
             "suggested_lanes": proof_suggestions,
@@ -240,6 +239,50 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
             "available": rch_status == "ok",
             "queue_summary": compact_summary(rch_queue) if rch_status == "ok" else rch_status,
         },
+    }
+
+
+def parse_am_active_reservations(raw: str) -> list[dict[str, Any]]:
+    rows = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped == "No active reservations.":
+            continue
+        match = AM_ACTIVE_RESERVATION_RE.match(line)
+        if not match:
+            continue
+        mode = match.group("mode").strip().lower()
+        holder = match.group("holder").strip()
+        path = normalize_repo_path(match.group("path"))
+        if not path:
+            continue
+        rows.append(
+            {
+                "path_pattern": path,
+                "agent_name": holder,
+                "exclusive": mode in {"excl", "exclusive"},
+                "source": "am file_reservations active",
+            }
+        )
+    return rows
+
+
+def live_agent_mail_snapshot(repo_path: Path, timeout: float) -> dict[str, Any]:
+    status, raw = run_text(
+        repo_path,
+        ["am", "file_reservations", "active", str(repo_path)],
+        timeout,
+    )
+    if status != "ok":
+        return {
+            "available": False,
+            "reservations": [],
+            "status": f"am-file-reservations:{status}",
+        }
+    return {
+        "available": True,
+        "reservations": parse_am_active_reservations(raw),
+        "status": "ok",
     }
 
 

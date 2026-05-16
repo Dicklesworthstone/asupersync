@@ -584,6 +584,70 @@ print(json.dumps(receipt.parse_status_lines(raw), sort_keys=True))
 }
 
 #[test]
+fn live_agent_mail_cli_reservation_rows_are_parsed_without_mutation() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import session_handoff_receipt as receipt
+
+raw = "\n".join([
+    "  scripts/session_handoff_receipt.py [excl] by RubyRobin",
+    "  docs/replay debugging.md [shared] by VioletBasin",
+    "No active reservations.",
+    "  malformed row without holder",
+])
+
+def fake_run_text(repo_path, command, timeout):
+    return "ok", raw
+
+receipt.run_text = fake_run_text
+print(json.dumps(receipt.live_agent_mail_snapshot(repo, 2.0), sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run Agent Mail CLI reservation parser probe");
+    assert!(
+        output.status.success(),
+        "python Agent Mail CLI parser probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let snapshot: Value =
+        serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    assert_eq!(snapshot["available"].as_bool(), Some(true));
+    assert_eq!(snapshot["status"].as_str(), Some("ok"));
+    let rows = &snapshot["reservations"];
+    let rows = rows.as_array().expect("reservation rows must be array");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0]["path_pattern"].as_str(),
+        Some("scripts/session_handoff_receipt.py")
+    );
+    assert_eq!(rows[0]["agent_name"].as_str(), Some("RubyRobin"));
+    assert_eq!(rows[0]["exclusive"].as_bool(), Some(true));
+    assert_eq!(
+        rows[1]["path_pattern"].as_str(),
+        Some("docs/replay debugging.md")
+    );
+    assert_eq!(rows[1]["agent_name"].as_str(), Some("VioletBasin"));
+    assert_eq!(rows[1]["exclusive"].as_bool(), Some(false));
+    assert_eq!(
+        rows[1]["source"].as_str(),
+        Some("am file_reservations active")
+    );
+}
+
+#[test]
 fn live_fallback_expands_rename_copy_rows_without_touching_literal_arrow_paths() {
     let probe = r#"
 import json
