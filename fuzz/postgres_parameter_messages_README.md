@@ -25,13 +25,13 @@ The fuzzer generates PostgreSQL-aware test cases including:
 
 ```bash
 # Build and run the fuzzer
-cargo fuzz run postgres_parameter_messages
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_postgres_parameter_messages_fuzz_docs cargo fuzz run postgres_parameter_messages
 
 # Run with custom timeout  
-cargo fuzz run postgres_parameter_messages -- -max_total_time=300
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_postgres_parameter_messages_fuzz_docs cargo fuzz run postgres_parameter_messages -- -max_total_time=300
 
 # Minimize a crash case
-cargo fuzz tmin postgres_parameter_messages artifacts/postgres_parameter_messages/crash-xyz
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_postgres_parameter_messages_fuzz_docs cargo fuzz tmin postgres_parameter_messages artifacts/postgres_parameter_messages/crash-xyz
 ```
 
 ## Seed Corpus

@@ -17,7 +17,7 @@ This implements fuzzing for `src/http/h1/codec.rs` request-line parser, covering
 
 ### Primary: `h1_request_line.rs`
 **Location**: `fuzz/fuzz_targets/h1_request_line.rs`  
-**Runtime**: `cargo fuzz run h1_request_line`
+**Runtime**: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h1_request_line_fuzz_docs cargo fuzz run h1_request_line`
 
 **Coverage:**
 - **Standard Methods**: GET, POST, PUT, DELETE, HEAD, OPTIONS, TRACE, PATCH validation
@@ -175,14 +175,14 @@ Uses `arbitrary::Arbitrary` to generate:
 **CI Integration:**
 ```bash
 # Short regression run (1 minute)
-cargo fuzz run h1_request_line -- -max_total_time=60 -fork=1
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h1_request_line_fuzz_docs cargo fuzz run h1_request_line -- -max_total_time=60 -fork=1
 
 # Nightly deep fuzzing (8 hours)
-cargo fuzz run h1_request_line -- -max_total_time=28800 -fork=8
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h1_request_line_fuzz_docs cargo fuzz run h1_request_line -- -max_total_time=28800 -fork=8
 ```
 
 **Artifact Handling:**
-- All crashes automatically minimize with `cargo fuzz tmin`
+- All crashes automatically minimize with `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h1_request_line_fuzz_docs cargo fuzz tmin`
 - Minimized crashes convert to regression tests in `src/http/h1/request_line_tests.rs`
 - Stack trace hashing for deduplication
 - Length boundary violations get special attention
