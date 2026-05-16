@@ -550,7 +550,7 @@ run_scenario() {
     local jsonl_path="$3"
     local command rch_command test_filter expected source_files_json stdout_path stderr_path combined_path
     local start_ms end_ms duration_ms rc verdict actual validation_result first_failure output_artifact input_artifact
-    local support_class evidence_quality blocker_bead_id expected_verdict
+    local support_class evidence_quality blocker_bead_id expected_verdict rch_local_fallback
 
     command="$(scenario_command "$scenario_id")"
     if [[ "$USE_RCH" -eq 1 && "$scenario_id" != "OTEL-EVIDENCE-REDACTION-SELF-TEST-LIVE" ]]; then
@@ -586,6 +586,14 @@ run_scenario() {
     duration_ms=$((end_ms - start_ms))
     cat "$stdout_path" "$stderr_path" > "$combined_path"
 
+    rch_local_fallback=0
+    if [[ "$USE_RCH" -eq 1 && "$scenario_id" != "OTEL-EVIDENCE-REDACTION-SELF-TEST-LIVE" ]] \
+        && grep -Eq '^\[RCH\] local \(|falling back to local' "$combined_path" 2>/dev/null; then
+        rch_local_fallback=1
+        printf 'rch local fallback detected; refusing local cargo execution\n' > "${run_dir}/${scenario_id}.rch_local_fallback.txt"
+        rc=86
+    fi
+
     verdict="$expected_verdict"
     support_class="production_live"
     evidence_quality="live"
@@ -596,7 +604,13 @@ run_scenario() {
         evidence_quality="unsupported"
     fi
 
-    if validation_result="$(validate_command_output "$combined_path" "$scenario_id" "$expected_verdict")"; then
+    if [[ "$rch_local_fallback" -eq 1 ]]; then
+        verdict="fail"
+        support_class="production_live"
+        evidence_quality="live"
+        actual="rch local fallback detected; refusing local cargo execution"
+        first_failure="$actual"
+    elif validation_result="$(validate_command_output "$combined_path" "$scenario_id" "$expected_verdict")"; then
         actual="$validation_result"
     else
         verdict="fail"
