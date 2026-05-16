@@ -158,6 +158,11 @@ run_scenario() {
         rc=${PIPESTATUS[0]}
         popd >/dev/null
         set -e
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+            printf '\nFATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
+            printf 'rch local fallback detected; refusing local cargo execution\n' > "${scenario_dir}/rch_local_fallback.txt"
+            rc=86
+        fi
         status="failed"
         if [[ "$rc" -eq 0 ]]; then
             status="passed"
