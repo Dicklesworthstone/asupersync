@@ -67,6 +67,14 @@ require_cmd() {
   fi
 }
 
+reject_rch_local_fallback_log() {
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "${LOG_FILE}" 2>/dev/null; then
+    echo "FATAL: rch local fallback detected; refusing local cargo execution" >&2
+    echo "rch local fallback detected; refusing local cargo execution" > "${RUN_DIR}/rch_local_fallback.txt"
+    exit 86
+  fi
+}
+
 require_cmd node
 require_cmd npm
 require_cmd python3
@@ -105,6 +113,7 @@ chmod +x "${CARGO_WRAPPER}"
     --out-dir "${PKG_DIR}" \
     --out-name asupersync_rust_browser_consumer_fixture
 ) | tee "${LOG_FILE}"
+reject_rch_local_fallback_log
 
 for required in \
   "${PKG_DIR}/asupersync_rust_browser_consumer_fixture.js" \
