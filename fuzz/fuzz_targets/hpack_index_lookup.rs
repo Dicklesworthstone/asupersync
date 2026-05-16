@@ -21,6 +21,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::error::{ErrorCode, H2Error};
@@ -31,6 +32,8 @@ const STATIC_TABLE_SIZE: usize = 61;
 
 /// Maximum safe index to test (avoid excessive memory allocation).
 const MAX_TEST_INDEX: usize = 100_000;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// Fuzz input for HPACK index lookup testing.
 #[derive(Arbitrary, Debug)]
@@ -408,7 +411,7 @@ fn encode_varint_continuation(buf: &mut Vec<u8>, mut value: usize) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    run_fixed_canaries();
+    FIXED_CANARIES.get_or_init(run_fixed_canaries);
 
     if let Ok(input) = HpackIndexFuzzInput::arbitrary(&mut Unstructured::new(data)) {
         test_hpack_index_lookup(&input);
