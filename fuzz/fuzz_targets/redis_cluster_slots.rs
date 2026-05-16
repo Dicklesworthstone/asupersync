@@ -225,32 +225,42 @@ fn valid_node() -> RespValue {
 }
 
 fn exercise_malformed(case: MalformedCase) {
-    let response = match case {
-        MalformedCase::ReversedRange => RespValue::Array(Some(vec![RespValue::Array(Some(vec![
-            RespValue::Integer(10),
-            RespValue::Integer(9),
-            valid_node(),
-        ]))])),
-        MalformedCase::SlotOutOfRange => {
+    let (response, expected_message) = match case {
+        MalformedCase::ReversedRange => (
+            RespValue::Array(Some(vec![RespValue::Array(Some(vec![
+                RespValue::Integer(10),
+                RespValue::Integer(9),
+                valid_node(),
+            ]))])),
+            "CLUSTER SLOTS range 0 start slot 10 exceeds end slot 9",
+        ),
+        MalformedCase::SlotOutOfRange => (
             RespValue::Array(Some(vec![RespValue::Array(Some(vec![
                 RespValue::Integer(0),
                 RespValue::Integer(i64::from(REDIS_CLUSTER_MAX_SLOT) + 1),
                 valid_node(),
-            ]))]))
-        }
-        MalformedCase::MissingMaster => RespValue::Array(Some(vec![RespValue::Array(Some(vec![
-            RespValue::Integer(0),
-            RespValue::Integer(1),
-        ]))])),
-        MalformedCase::BadNodePort => RespValue::Array(Some(vec![RespValue::Array(Some(vec![
-            RespValue::Integer(0),
-            RespValue::Integer(1),
-            RespValue::Array(Some(vec![
-                RespValue::BulkString(Some(b"127.0.0.1".to_vec())),
-                RespValue::Integer(-1),
-            ])),
-        ]))])),
-        MalformedCase::NonUtf8Endpoint => {
+            ]))])),
+            "CLUSTER SLOTS end slot 16384 is outside 0..=16383",
+        ),
+        MalformedCase::MissingMaster => (
+            RespValue::Array(Some(vec![RespValue::Array(Some(vec![
+                RespValue::Integer(0),
+                RespValue::Integer(1),
+            ]))])),
+            "CLUSTER SLOTS range 0 must contain start, end, and master node",
+        ),
+        MalformedCase::BadNodePort => (
+            RespValue::Array(Some(vec![RespValue::Array(Some(vec![
+                RespValue::Integer(0),
+                RespValue::Integer(1),
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespValue::Integer(-1),
+                ])),
+            ]))])),
+            "CLUSTER SLOTS master node port -1 is outside u16 range",
+        ),
+        MalformedCase::NonUtf8Endpoint => (
             RespValue::Array(Some(vec![RespValue::Array(Some(vec![
                 RespValue::Integer(0),
                 RespValue::Integer(1),
@@ -258,11 +268,29 @@ fn exercise_malformed(case: MalformedCase) {
                     RespValue::BulkString(Some(vec![0xff])),
                     RespValue::Integer(6379),
                 ])),
-            ]))]))
-        }
+            ]))])),
+            "CLUSTER SLOTS master node endpoint is not valid UTF-8",
+        ),
     };
 
-    assert!(observe_cluster_slots_parse(&response).is_err());
+    assert_cluster_slots_protocol_error(response, expected_message);
+}
+
+fn assert_cluster_slots_protocol_error(response: RespValue, expected_message: &str) {
+    match observe_cluster_slots_parse(&response) {
+        Err(RedisError::Protocol(message)) => {
+            assert_eq!(message, expected_message);
+            assert_eq!(
+                RedisError::Protocol(message).to_string(),
+                format!("Redis protocol error: {expected_message}")
+            );
+        }
+        Err(err) => panic!("expected Redis protocol error {expected_message:?}, got {err:?}"),
+        Ok(ranges) => panic!(
+            "malformed CLUSTER SLOTS response parsed successfully as {ranges:?}; \
+             expected {expected_message:?}"
+        ),
+    }
 }
 
 fn exercise_raw_resp(data: &[u8]) {
