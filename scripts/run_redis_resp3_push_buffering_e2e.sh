@@ -19,6 +19,19 @@ fi
 
 mkdir -p "$LOG_DIR"
 
+reject_rch_local_fallback_log() {
+  local label="$1"
+  local log_file="$2"
+  local safe_label="${label//[^A-Za-z0-9_]/_}"
+
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+    echo "FATAL: rch local fallback detected in ${label}; refusing local cargo execution" >&2
+    echo "rch local fallback detected in ${label}; refusing local cargo execution" > "${LOG_DIR}/${safe_label}.rch_local_fallback.txt"
+    cat "$log_file"
+    exit 86
+  fi
+}
+
 run_step() {
   local label="$1"
   local feature_flags="$2"
@@ -39,6 +52,7 @@ run_step() {
     "$label" "$GIT_REV" "$feature_flags" "$test_filter" "$command"
 
   if "${command_args[@]}" >"$log_file" 2>&1; then
+    reject_rch_local_fallback_log "$label" "$log_file"
     local ended_ms elapsed_ms
     ended_ms="$(date +%s%3N)"
     elapsed_ms="$((ended_ms - started_ms))"
@@ -48,6 +62,7 @@ run_step() {
   fi
 
   local ended_ms elapsed_ms first_failure
+  reject_rch_local_fallback_log "$label" "$log_file"
   ended_ms="$(date +%s%3N)"
   elapsed_ms="$((ended_ms - started_ms))"
   first_failure="$(
