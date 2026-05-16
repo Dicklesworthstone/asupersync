@@ -1333,6 +1333,34 @@ fn capacity_merger_preserves_no_win_fallback_when_simpler_baseline_is_safer() {
 }
 
 #[test]
+fn capacity_envelope_runner_rejects_full_rch_fallback_marker_set() {
+    let script = fs::read_to_string("scripts/run_capacity_envelope_planner_smoke.sh")
+        .expect("capacity envelope smoke runner should load");
+
+    assert!(
+        script
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 2,
+        "runner must use the shared local fallback matcher at every rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            script.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
+#[test]
 fn capacity_envelope_smoke_contract_emits_report() {
     let contract = load_contract();
     let scenario = selected_scenario(&contract);
