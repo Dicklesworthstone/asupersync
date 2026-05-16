@@ -351,7 +351,12 @@ fn assert_fixed_decode_canaries() {
     let mut oversized = frame_bytes(17, 0, 0, 1, &[]);
     let mut codec = FrameCodec::new();
     codec.set_max_frame_size(16);
-    assert!(observe_decode(&mut codec, &mut oversized).is_err());
+    assert_frame_decode_error(
+        &mut codec,
+        &mut oversized,
+        ErrorCode::FrameSizeError,
+        "frame too large: 17 > 16",
+    );
     assert!(
         oversized.is_empty(),
         "oversized-frame rejection should consume the parsed header"
@@ -364,8 +369,21 @@ fn assert_complete_frame_decode_error(
     expected_message: &str,
 ) {
     let mut codec = FrameCodec::new();
-    let error = observe_decode(&mut codec, &mut bytes)
-        .expect_err("complete malformed H2 frame should fail at decode boundary");
+    assert_frame_decode_error(&mut codec, &mut bytes, expected_code, expected_message);
+    assert!(
+        bytes.is_empty(),
+        "complete malformed H2 frame should be consumed before parser error"
+    );
+}
+
+fn assert_frame_decode_error(
+    codec: &mut FrameCodec,
+    bytes: &mut BytesMut,
+    expected_code: ErrorCode,
+    expected_message: &str,
+) {
+    let error = observe_decode(codec, bytes)
+        .expect_err("malformed H2 frame should fail at decode boundary");
     assert_eq!(error.code, expected_code);
     assert_eq!(error.message.as_str(), expected_message);
     assert!(
@@ -373,8 +391,13 @@ fn assert_complete_frame_decode_error(
         "codec boundary canary should be a connection error: {error:?}"
     );
     assert!(
-        bytes.is_empty(),
-        "complete malformed H2 frame should be consumed before parser error"
+        error.is_connection_error(),
+        "codec boundary canary should classify as connection-level: {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("HTTP/2 connection error ({expected_code}): {expected_message}"),
+        "codec boundary canary returned unexpected display text"
     );
 }
 
