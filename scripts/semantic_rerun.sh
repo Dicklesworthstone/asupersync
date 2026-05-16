@@ -44,7 +44,9 @@ SEED=""
 VERBOSE=false
 JSON_OUTPUT=false
 GENERATE_SUMMARY=false
-NOCAPTURE=""
+NOCAPTURE_ARGS=()
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_semantic_rerun}"
 
 # ─── Argument parsing ────────────────────────────────────────────────
 if [[ $# -lt 1 ]]; then
@@ -71,7 +73,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$VERBOSE" == "true" ]]; then
-    NOCAPTURE="-- --nocapture"
+    NOCAPTURE_ARGS=(-- --nocapture)
 fi
 
 # Export seed if provided
@@ -100,30 +102,35 @@ run_tests() {
     fi
 }
 
+# shellcheck disable=SC2317 # Invoked indirectly through run_tests dispatch.
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo "$@"
+}
+
 case "$SUITE" in
     docs)
         run_tests "semantic_docs_lint" \
-            cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint $NOCAPTURE
+            run_cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint "${NOCAPTURE_ARGS[@]}"
         ;;
 
     golden)
         run_tests "semantic_golden_fixture_validation" \
-            cargo test --test semantic_golden_fixture_validation $NOCAPTURE
+            run_cargo test --test semantic_golden_fixture_validation "${NOCAPTURE_ARGS[@]}"
         ;;
 
     lean)
         run_tests "semantic_lean_regression" \
-            cargo test --test semantic_lean_regression $NOCAPTURE
+            run_cargo test --test semantic_lean_regression "${NOCAPTURE_ARGS[@]}"
         ;;
 
     tla)
         run_tests "semantic_tla_scenarios" \
-            cargo test --test semantic_tla_scenarios $NOCAPTURE
+            run_cargo test --test semantic_tla_scenarios "${NOCAPTURE_ARGS[@]}"
         ;;
 
     logging)
         run_tests "semantic_log_schema_validation + witness_replay" \
-            cargo test --test semantic_log_schema_validation --test semantic_witness_replay_e2e $NOCAPTURE
+            run_cargo test --test semantic_log_schema_validation --test semantic_witness_replay_e2e "${NOCAPTURE_ARGS[@]}"
         ;;
 
     coverage)
@@ -133,32 +140,32 @@ case "$SUITE" in
 
     runtime)
         run_tests "golden_fixture_validation" \
-            cargo test --test semantic_golden_fixture_validation $NOCAPTURE
+            run_cargo test --test semantic_golden_fixture_validation "${NOCAPTURE_ARGS[@]}"
         run_tests "evidence_bundle_g4" \
             scripts/assemble_evidence_bundle.sh --json --skip-runner --phase 1
         ;;
 
     laws)
         run_tests "law_tests" \
-            cargo test law_join_assoc law_race_comm law_timeout_min metamorphic_drain law_race_abandon $NOCAPTURE
+            run_cargo test law_join_assoc law_race_comm law_timeout_min metamorphic_drain law_race_abandon "${NOCAPTURE_ARGS[@]}"
         ;;
 
     e2e)
         run_tests "witness_replay + adversarial" \
-            cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus $NOCAPTURE
+            run_cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus "${NOCAPTURE_ARGS[@]}"
         ;;
 
     all)
         run_tests "docs" \
-            cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint $NOCAPTURE
+            run_cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint "${NOCAPTURE_ARGS[@]}"
         run_tests "golden" \
-            cargo test --test semantic_golden_fixture_validation $NOCAPTURE
+            run_cargo test --test semantic_golden_fixture_validation "${NOCAPTURE_ARGS[@]}"
         run_tests "lean" \
-            cargo test --test semantic_lean_regression $NOCAPTURE
+            run_cargo test --test semantic_lean_regression "${NOCAPTURE_ARGS[@]}"
         run_tests "tla" \
-            cargo test --test semantic_tla_scenarios $NOCAPTURE
+            run_cargo test --test semantic_tla_scenarios "${NOCAPTURE_ARGS[@]}"
         run_tests "logging" \
-            cargo test --test semantic_log_schema_validation --test semantic_witness_replay_e2e $NOCAPTURE
+            run_cargo test --test semantic_log_schema_validation --test semantic_witness_replay_e2e "${NOCAPTURE_ARGS[@]}"
         ;;
 
     forensics)
@@ -178,14 +185,14 @@ esac
 # ─── Optional summary generation ────────────────────────────────────
 if [[ "$GENERATE_SUMMARY" == "true" ]]; then
     log "Generating verification summary..."
-    SUMMARY_FLAGS=""
+    SUMMARY_FLAGS=()
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        SUMMARY_FLAGS="--json"
+        SUMMARY_FLAGS+=(--json)
     fi
     if [[ "$VERBOSE" == "true" ]]; then
-        SUMMARY_FLAGS="$SUMMARY_FLAGS --verbose"
+        SUMMARY_FLAGS+=(--verbose)
     fi
-    scripts/generate_verification_summary.sh $SUMMARY_FLAGS || true
+    scripts/generate_verification_summary.sh "${SUMMARY_FLAGS[@]}" || true
 fi
 
 # ─── JSON output ────────────────────────────────────────────────────
