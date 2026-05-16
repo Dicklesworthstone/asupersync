@@ -205,11 +205,53 @@ def command_routes_cargo_through_rch(command: str) -> bool:
     return remote_index < len(argv) and lowered[remote_index] == "cargo"
 
 
+def command_routes_cargo_with_target_dir(command: str) -> bool:
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return not command_mentions_cargo(command)
+
+    lowered = [arg.lower() for arg in argv]
+    if "cargo" not in lowered:
+        return not command_mentions_cargo(command)
+
+    program_index = first_non_assignment(argv)
+    if program_index >= len(argv):
+        return False
+    if lowered[program_index:program_index + 3] != ["rch", "exec", "--"]:
+        return False
+
+    remote_index = program_index + 3
+    if remote_index >= len(argv) or lowered[remote_index] != "env":
+        return False
+
+    has_target_dir = False
+    remote_index += 1
+    while remote_index < len(argv) and "=" in argv[remote_index]:
+        name, value = argv[remote_index].split("=", 1)
+        if not SAFE_ENV_NAME.fullmatch(name):
+            break
+        if name == "CARGO_TARGET_DIR" and value:
+            has_target_dir = True
+        remote_index += 1
+    return has_target_dir and remote_index < len(argv) and lowered[remote_index] == "cargo"
+
+
 def unsafe_validation_commands(row: dict[str, Any]) -> list[str]:
     return [
         command
         for command in row["validation"]
         if command_mentions_cargo(command) and not command_routes_cargo_through_rch(command)
+    ]
+
+
+def missing_target_dir_validation_commands(row: dict[str, Any]) -> list[str]:
+    return [
+        command
+        for command in row["validation"]
+        if command_mentions_cargo(command)
+        and command_routes_cargo_through_rch(command)
+        and not command_routes_cargo_with_target_dir(command)
     ]
 
 
@@ -286,6 +328,7 @@ def capability_summaries(
                 or bool(drafts)
                 or any(not is_covered(row) for row in rows)
                 or any(unsafe_validation_commands(row) for row in rows)
+                or any(missing_target_dir_validation_commands(row) for row in rows)
                 or any(local_fallback_validation_commands(row) for row in rows),
             }
         )
@@ -370,6 +413,17 @@ def review_cues(rows: list[dict[str, Any]], capabilities: list[dict[str, Any]]) 
                     "helper_id": row["helper_id"],
                     "command": command,
                     "recommendation": "route Cargo validation through rch exec before citing this helper",
+                }
+            )
+        for command in missing_target_dir_validation_commands(row):
+            cues.append(
+                {
+                    "kind": "missing-cargo-target-dir-validation",
+                    "severity": "high",
+                    "capability_id": row["capability_id"],
+                    "helper_id": row["helper_id"],
+                    "command": command,
+                    "recommendation": "include explicit CARGO_TARGET_DIR in the rch exec env before citing this helper",
                 }
             )
         for command in local_fallback_validation_commands(row):

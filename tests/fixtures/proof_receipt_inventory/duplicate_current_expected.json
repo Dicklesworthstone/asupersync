@@ -69,6 +69,14 @@
       "kind": "capability-overlap",
       "recommendation": "coordinate before adding another helper for this capability",
       "severity": "high"
+    },
+    {
+      "capability_id": "artifact-freshness",
+      "command": "rch exec -- cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "helper_id": "proof-artifact-freshness-receipt",
+      "kind": "missing-cargo-target-dir-validation",
+      "recommendation": "include explicit CARGO_TARGET_DIR in the rch exec env before citing this helper",
+      "severity": "high"
     }
   ],
   "safety": {
@@ -92,7 +100,7 @@
     "capabilities": 1,
     "duplicate_capabilities": 1,
     "helpers": 2,
-    "review_cues": 1,
+    "review_cues": 2,
     "superseded_helpers": 0
   }
 }

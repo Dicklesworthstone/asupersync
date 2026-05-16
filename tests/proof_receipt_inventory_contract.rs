@@ -280,6 +280,43 @@ fn unsafe_validation_command_matches_full_output_golden() {
 }
 
 #[test]
+fn rch_validation_without_target_dir_is_actionable() {
+    let receipt = receipt_json("current_inventory.json");
+
+    assert_eq!(
+        receipt["capabilities"][0]["capability_id"].as_str(),
+        Some("cross-agent-timeline")
+    );
+    assert_eq!(
+        receipt["capabilities"][0]["needs_review"].as_bool(),
+        Some(true)
+    );
+
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    assert!(cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("missing-cargo-target-dir-validation")
+            && cue["capability_id"].as_str() == Some("cross-agent-timeline")
+            && cue["helper_id"].as_str() == Some("swarm-timeline-receipt")
+            && cue["command"].as_str()
+                == Some(
+                    "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract",
+                )
+    }));
+}
+
+#[test]
+fn rch_validation_with_target_dir_is_not_flagged() {
+    let receipt = receipt_json("unsafe_validation_command.json");
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    let safe_command = "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract";
+
+    assert!(!cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("missing-cargo-target-dir-validation")
+            && cue["command"].as_str() == Some(safe_command)
+    }));
+}
+
+#[test]
 fn redaction_and_missing_contract_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "redaction_and_missing_contract.json",

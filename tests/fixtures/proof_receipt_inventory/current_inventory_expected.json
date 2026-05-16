@@ -8,7 +8,7 @@
       "draft_helper_count": 0,
       "duplicate_active_count": 0,
       "helper_count": 1,
-      "needs_review": false,
+      "needs_review": true,
       "superseded_helper_count": 0
     },
     {
@@ -89,6 +89,14 @@
   "repo_path": "/repo",
   "review_cues": [
     {
+      "capability_id": "cross-agent-timeline",
+      "command": "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract",
+      "helper_id": "swarm-timeline-receipt",
+      "kind": "missing-cargo-target-dir-validation",
+      "recommendation": "include explicit CARGO_TARGET_DIR in the rch exec env before citing this helper",
+      "severity": "high"
+    },
+    {
       "capability_id": "rch-worker-health",
       "helper_id": "rch-worker-quarantine-receipt",
       "kind": "superseded-helper",
@@ -118,7 +126,7 @@
     "capabilities": 2,
     "duplicate_capabilities": 0,
     "helpers": 3,
-    "review_cues": 1,
+    "review_cues": 2,
     "superseded_helpers": 1
   }
 }
