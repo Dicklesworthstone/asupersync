@@ -61,6 +61,10 @@ REMOTE_EXIT_RE = re.compile(
     r"(?:Remote command finished:\s*exit=|remote exit(?: status)?[=:]\s*)(-?\d+)",
     re.IGNORECASE,
 )
+RCH_LOCAL_FALLBACK_RE = re.compile(
+    r"(?m)^\[RCH\] local \(|falling back to local",
+    re.IGNORECASE,
+)
 CARGO_LOCATION_RE = re.compile(r"^\s*-->\s+([^:\s]+):(\d+):(\d+)")
 RUST_ERROR_RE = re.compile(r"^\s*error(?:\[[^\]]+\])?:\s*(.+)")
 WRAPPER_RETRIEVAL_HANG_HINTS = (
@@ -642,6 +646,11 @@ def remote_exit_status(log_text: str) -> Optional[int]:
     return int(matches[-1])
 
 
+def has_rch_local_fallback(log_text: str) -> bool:
+    """Return true when rch reports a local fallback instead of remote proof."""
+    return bool(RCH_LOCAL_FALLBACK_RE.search(log_text))
+
+
 def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
     """Extract the first cargo/rustc file:line blocker from captured output."""
     pending_message = ""
@@ -748,7 +757,18 @@ def classify_rch_outcome(
     wrapper_hang = has_wrapper_retrieval_hang(log_text, remote_exit)
     control_plane = detect_rch_control_plane_inconsistency(log_text)
 
-    if control_plane:
+    if has_rch_local_fallback(log_text):
+        outcome_class = "failed_local"
+        decision = "failed-local"
+        summary = "rch local fallback detected; refusing local cargo execution"
+        blocker = {
+            "file": "rch-local-fallback",
+            "line": 0,
+            "column": 0,
+            "message": summary,
+            "raw": summary,
+        }
+    elif control_plane:
         outcome_class = RCH_CONTROL_PLANE_INCONSISTENT_CLASS
         decision = "blocked-external"
         summary = (
@@ -2347,6 +2367,7 @@ class ProofRunner:
             return_code == 0
             and outcome.get("remote_exit_status") is None
             and outcome.get("decision") == "failed-local"
+            and outcome.get("first_blocker", {}).get("file") != "rch-local-fallback"
         ):
             outcome["outcome_class"] = "pass"
             outcome["decision"] = "pass"
