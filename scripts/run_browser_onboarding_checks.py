@@ -548,6 +548,15 @@ def tail_excerpt(path: Path, max_lines: int = 30) -> str:
     return "\n".join(lines[-max_lines:])
 
 
+def log_has_rch_local_fallback(path: Path) -> bool:
+    if not path.exists():
+        return False
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("[RCH] local (") or "falling back to local" in line.lower():
+            return True
+    return False
+
+
 def run_step(
     scenario_id: str,
     step_index: int,
@@ -603,7 +612,19 @@ def run_step(
 
     duration_ms = int((time.perf_counter() - t0) * 1000)
     ended_at = now_iso()
-    outcome = "pass" if proc.returncode == 0 else "fail"
+    exit_code = proc.returncode
+    rch_local_fallback = log_has_rch_local_fallback(log_path)
+    rch_local_fallback_marker = ""
+    if rch_local_fallback:
+        exit_code = 86
+        rch_local_fallback_marker = str(
+            log_path.with_name(f"{log_path.stem}.rch_local_fallback.txt")
+        )
+        Path(rch_local_fallback_marker).write_text(
+            "rch local fallback detected; refusing local cargo execution\n",
+            encoding="utf-8",
+        )
+    outcome = "pass" if exit_code == 0 else "fail"
 
     return {
         "scenario_id": scenario_id,
@@ -615,10 +636,12 @@ def run_step(
         "started_at": started_at,
         "ended_at": ended_at,
         "duration_ms": duration_ms,
-        "exit_code": proc.returncode,
+        "exit_code": exit_code,
         "outcome": outcome,
         "env": env_metadata,
         "artifact_log_path": str(log_path),
+        "rch_local_fallback": rch_local_fallback,
+        "rch_local_fallback_marker": rch_local_fallback_marker,
         "failure_excerpt": tail_excerpt(log_path, max_lines=40) if outcome == "fail" else "",
         "remediation_hint": step.remediation_hint,
         "package_entrypoint": step.package_entrypoint,
