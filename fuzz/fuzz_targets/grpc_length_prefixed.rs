@@ -15,7 +15,7 @@ use arbitrary::Arbitrary;
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::codec::MESSAGE_HEADER_SIZE;
-use asupersync::grpc::{GrpcCodec, GrpcError, GrpcMessage};
+use asupersync::grpc::{Code, GrpcCodec, GrpcError, GrpcMessage};
 use libfuzzer_sys::fuzz_target;
 use std::sync::OnceLock;
 
@@ -339,7 +339,18 @@ fn expect_message_too_large<T>(result: Result<T, GrpcError>) {
         matches!(&error, GrpcError::MessageTooLarge),
         "expected MessageTooLarge error, got {error:?}"
     );
-    assert_eq!(error.to_string(), "message too large");
+    assert_eq!(
+        error.to_string(),
+        "message too large",
+        "MessageTooLarge display changed"
+    );
+    let status = error.into_status();
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    assert_eq!(
+        status.message(),
+        "message too large",
+        "MessageTooLarge status message changed"
+    );
 }
 
 fn expect_invalid_compression_flag(
@@ -349,23 +360,32 @@ fn expect_invalid_compression_flag(
     let Err(error) = result else {
         panic!("expected invalid compression flag Protocol error");
     };
-    let display = error.to_string();
+    let expected_protocol_message = format!("invalid gRPC compression flag: {invalid_flag}");
+    let expected_display = format!("protocol error: {expected_protocol_message}");
 
-    match error {
+    match &error {
         GrpcError::Protocol(message) => {
             assert_eq!(
-                message,
-                format!("invalid gRPC compression flag: {invalid_flag}")
-            );
-            assert_eq!(
-                display,
-                format!("protocol error: invalid gRPC compression flag: {invalid_flag}")
+                message, &expected_protocol_message,
+                "invalid compression flag protocol message changed"
             );
         }
         error => {
             panic!("expected invalid compression flag Protocol error, got {error:?}");
         }
     }
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "invalid compression flag display changed"
+    );
+    let status = error.into_status();
+    assert_eq!(status.code(), Code::Internal);
+    assert_eq!(
+        status.message(),
+        expected_display,
+        "invalid compression flag status message changed"
+    );
 }
 
 fn encode_frame(flag: u8, declared_len: usize, payload: &[u8], dst: &mut BytesMut) {
