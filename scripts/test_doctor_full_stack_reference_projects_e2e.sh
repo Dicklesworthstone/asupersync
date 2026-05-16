@@ -232,6 +232,16 @@ run_stage_script() {
         stage_ended_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
         cp "${attempt_log}" "${stage_log}"
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "${stage_log}" 2>/dev/null; then
+            echo "rch local fallback detected; refusing local cargo execution" > "${stage_dir}/${stage_id}.rch_local_fallback.txt"
+            summary_path=""
+            summary_status="failed"
+            summary_failure_class="rch_local_fallback"
+            summary_repro_command=""
+            exit_code=86
+            break
+        fi
+
         summary_path="$(
             grep -E 'Summary:' "${stage_log}" | tail -n1 | sed -E 's/.*Summary:[[:space:]]*//' || true
         )"
