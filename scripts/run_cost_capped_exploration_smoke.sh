@@ -112,7 +112,7 @@ mkdir -p "$RUN_DIR"
 
 PROOF_COMMAND=(
     env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cost_capped_exploration"
-    cargo test -p asupersync --test cost_capped_exploration_contract --features test-internals "$TEST_FILTER" -- --nocapture
+    "${CARGO_BIN:-cargo}" test -p asupersync --test cost_capped_exploration_contract --features test-internals "$TEST_FILTER" -- --nocapture
 )
 RCH_COMMAND=("${RCH_BIN}" exec -- "${PROOF_COMMAND[@]}")
 RUN_COMMAND=(timeout "$TIMEOUT_SEC" "${RCH_COMMAND[@]}")
