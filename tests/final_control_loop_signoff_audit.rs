@@ -130,7 +130,7 @@ fn blocker_path_id(path: &str) -> String {
 }
 
 fn artifact_digest(path: &str) -> String {
-    let bytes = fs::read(path).unwrap_or_else(|err| panic!("artifact {path} must load: {err}"));
+    let bytes = fs::read(path).expect("artifact must load");
     let digest = Sha256::digest(bytes);
     digest
         .iter()
@@ -692,4 +692,30 @@ fn final_control_loop_signoff_smoke_emits_report() {
         "{:?}",
         report.failure_reasons
     );
+}
+
+#[test]
+fn final_control_loop_runner_rejects_full_rch_fallback_marker_set() {
+    let runner = include_str!("../scripts/run_final_control_loop_signoff_smoke.sh");
+    let matcher_uses = runner
+        .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+        .count();
+    assert!(
+        matcher_uses >= 1,
+        "runner must use the shared local fallback matcher at every rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            runner.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
 }
