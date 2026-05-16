@@ -110,7 +110,7 @@ build_command_argv() {
     CARGO_PROFILE_TEST_DEBUG=0
     "RUSTFLAGS=-C debuginfo=0"
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_${safe_sid}"
-    cargo test -p asupersync
+    "${CARGO_BIN:-cargo}" test -p asupersync
   )
   if [[ -n "$test_binary" && "$test_binary" != "null" ]]; then
     COMMAND_ARGV+=(--test "$test_binary")
