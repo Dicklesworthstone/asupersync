@@ -1689,6 +1689,34 @@ mod behavioral {
     }
 
     #[test]
+    fn blocking_pool_affinity_runner_rejects_full_rch_fallback_marker_set() {
+        let script = fs::read_to_string("scripts/run_blocking_pool_affinity_smoke.sh")
+            .expect("blocking pool affinity smoke runner should load");
+
+        assert!(
+            script
+                .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+                .count()
+                >= 2,
+            "runner must use the shared local fallback matcher at every rch gate"
+        );
+
+        for token in [
+            "RCH_LOCAL_FALLBACK_PATTERN=",
+            "[RCH\\] local",
+            "falling back to local",
+            "local fallback",
+            "fallback to local",
+            "executing locally",
+        ] {
+            assert!(
+                script.contains(token),
+                "runner missing local fallback marker: {token}"
+            );
+        }
+    }
+
+    #[test]
     fn blocking_pool_affinity_smoke_contract_emits_report() {
         let (description, workload_model, operator_notes, expected_report_projection) =
             maybe_load_blocking_pool_affinity_contract_scenario().unwrap_or_else(|| {
