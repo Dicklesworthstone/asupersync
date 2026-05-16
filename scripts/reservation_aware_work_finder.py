@@ -87,7 +87,7 @@ FORBIDDEN_COMMAND_TOKENS = [
 SAFE_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 CARGO_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_-])cargo(?![A-Za-z0-9_-])")
 RCH_LOCAL_FALLBACK_RE = re.compile(
-    r"(?m)^\[RCH\] local \(|falling back to local",
+    r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
 )
 

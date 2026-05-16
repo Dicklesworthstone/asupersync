@@ -284,6 +284,9 @@ candidate = {
     "proof_commands": [
         "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract\n[RCH] local (daemon unavailable)",
         "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo check -p asupersync\nfalling back to local execution",
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo fmt --check\nlocal fallback selected",
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo clippy -p asupersync --test reservation_aware_work_finder_contract\nfallback to local execution",
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract\nexecuting locally after remote failure",
     ],
 }
 print(json.dumps(finder.proof_command_blockers(candidate), sort_keys=True))
@@ -306,7 +309,7 @@ print(json.dumps(finder.proof_command_blockers(candidate), sort_keys=True))
     let blockers: Value =
         serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
     let blockers = blockers.as_array().expect("blockers array");
-    assert_eq!(blockers.len(), 2);
+    assert_eq!(blockers.len(), 5);
     assert!(blockers.iter().all(|blocker| {
         blocker["kind"].as_str() == Some("rch-local-fallback-proof-command")
             && blocker["token"].as_str() == Some("rch-local-fallback")
