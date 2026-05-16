@@ -17,7 +17,7 @@ This implements fuzzing for `src/codec/encoder.rs` and `src/codec/decoder.rs` Co
 
 ### Primary: `codec_round_trip.rs`
 **Location**: `fuzz/fuzz_targets/codec_round_trip.rs`  
-**Runtime**: `cargo fuzz run codec_round_trip`
+**Runtime**: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_codec_round_trip_fuzz_docs cargo fuzz run codec_round_trip`
 
 **Coverage:**
 - **BytesCodec**: Raw pass-through round-trip testing
@@ -169,14 +169,14 @@ Uses `arbitrary::Arbitrary` to generate:
 **CI Integration:**
 ```bash
 # Short regression run (1 minute per target)
-cargo fuzz run codec_round_trip -- -max_total_time=60 -fork=1
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_codec_round_trip_fuzz_docs cargo fuzz run codec_round_trip -- -max_total_time=60 -fork=1
 
 # Nightly deep fuzzing (8 hours)
-cargo fuzz run codec_round_trip -- -max_total_time=28800 -fork=8
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_codec_round_trip_fuzz_docs cargo fuzz run codec_round_trip -- -max_total_time=28800 -fork=8
 ```
 
 **Artifact Handling:**
-- All crashes automatically minimize with `cargo fuzz tmin`
+- All crashes automatically minimize with `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_codec_round_trip_fuzz_docs cargo fuzz tmin`
 - Minimized crashes convert to regression tests in `src/codec/tests/`  
 - Stack trace hashing for deduplication
 - Severity classification: memory corruption > logic bug > timeout
@@ -225,4 +225,4 @@ This fuzzing setup is designed to detect:
 - **Round-trip archetype**: Harness Archetype #2 (inverse operation oracle)
 - **Bead requirements**: asupersync-jta72e specification
 - **Code coverage**: `cargo-llvm-cov` integration
-- **Corpus minimization**: `cargo fuzz cmin` automation
+- **Corpus minimization**: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_codec_round_trip_fuzz_docs cargo fuzz cmin` automation
