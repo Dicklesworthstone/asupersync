@@ -545,6 +545,13 @@ fn runner_script_exists_and_declares_modes() {
         "validation_passed",
         "local_fallback_detected",
         "test_filter_for_scenario",
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#,
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
     ] {
         assert!(
             script.contains(token),
