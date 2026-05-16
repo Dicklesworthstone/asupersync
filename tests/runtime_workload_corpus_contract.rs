@@ -10,6 +10,7 @@ use asupersync::lab::replay::{
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -48,6 +49,18 @@ fn run_workload_script(args: &[String]) -> std::process::Output {
         .current_dir(repo_root())
         .output()
         .expect("run workload corpus script")
+}
+
+fn run_workload_script_with_env(args: &[String], envs: &[(&str, &Path)]) -> std::process::Output {
+    let mut command = Command::new("bash");
+    command
+        .arg(repo_root().join("scripts/run_runtime_workload_corpus.sh"))
+        .args(args)
+        .current_dir(repo_root());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().expect("run workload corpus script")
 }
 
 fn workload_ids(value: &Value) -> BTreeSet<String> {
@@ -845,5 +858,73 @@ fn coordination_fixture_refuses_missing_scenario_dimensions() {
     assert_eq!(
         pack["refused_bundles"][0]["refusal_reason"],
         "missing_scenario_dimensions"
+    );
+}
+
+#[test]
+fn workload_runner_rejects_rch_local_fallback() {
+    let root = temp_root("rch-local-fallback");
+    let output_root = root.join("out");
+    let fake_rch = root.join("fake-rch");
+    std::fs::create_dir_all(&output_root).expect("create output root");
+    std::fs::write(
+        &fake_rch,
+        "#!/usr/bin/env bash\nprintf '[RCH] local (all worker circuits open)\\n'\nexit 0\n",
+    )
+    .expect("write fake rch");
+    let mut perms = std::fs::metadata(&fake_rch)
+        .expect("fake rch metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake_rch, perms).expect("chmod fake rch");
+
+    let out = run_workload_script_with_env(
+        &[
+            "--workload".into(),
+            "AA01-WL-CANCEL-001".into(),
+            "--output-root".into(),
+            output_root.to_string_lossy().into_owned(),
+        ],
+        &[("RCH_BIN", fake_rch.as_path())],
+    );
+    assert!(
+        !out.status.success(),
+        "local fallback must fail closed; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let run_dirs = std::fs::read_dir(&output_root)
+        .expect("read output root")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("run_"))
+        .collect::<Vec<_>>();
+    assert_eq!(run_dirs.len(), 1, "expected exactly one run directory");
+    let workload_dir = run_dirs[0].path().join("AA01-WL-CANCEL-001");
+    let marker_path = workload_dir.join("rch_local_fallback.txt");
+    assert!(
+        marker_path.exists(),
+        "local fallback marker must be written"
+    );
+    assert!(
+        std::fs::read_to_string(workload_dir.join("run.log"))
+            .expect("read run log")
+            .contains("FATAL: rch local fallback detected; refusing local cargo execution"),
+        "run log must record fail-closed fallback reason"
+    );
+    let summary: Value = serde_json::from_str(
+        &std::fs::read_to_string(workload_dir.join("bundle_manifest.json"))
+            .expect("read workload manifest"),
+    )
+    .expect("parse workload manifest");
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["exit_code"], 86);
+    assert_eq!(summary["failure_class"], "rch_local_fallback");
+    assert_eq!(summary["rch_local_fallback"], true);
+    assert!(
+        summary["rch_local_fallback_marker"]
+            .as_str()
+            .expect("marker path string")
+            .ends_with("rch_local_fallback.txt")
     );
 }

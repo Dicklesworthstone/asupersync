@@ -66,6 +66,11 @@ render_command() {
     printf '%s' "${rendered% }"
 }
 
+is_rch_local_fallback_log() {
+    local log_file="$1"
+    grep -Eiq '^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally' "$log_file" 2>/dev/null
+}
+
 build_workload_command_argv() {
     local workload_id="$1"
     local output_name="$2"
@@ -535,7 +540,7 @@ run_workload() {
     local workload_dir="${RUN_DIR}/${workload_id}"
     local log_file="${workload_dir}/run.log"
     local summary_file="${workload_dir}/bundle_manifest.json"
-    local started_ts ended_ts status rc
+    local started_ts ended_ts status rc rch_local_fallback rch_local_fallback_marker failure_class
 
     mkdir -p "$workload_dir"
     started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -563,6 +568,18 @@ run_workload() {
     popd >/dev/null
     set -e
 
+    rch_local_fallback=false
+    rch_local_fallback_marker=""
+    failure_class=""
+    if is_rch_local_fallback_log "$log_file"; then
+        rc=86
+        rch_local_fallback=true
+        failure_class="rch_local_fallback"
+        rch_local_fallback_marker="${workload_dir}/rch_local_fallback.txt"
+        printf 'rch local fallback detected; refusing local cargo execution\n' >"$rch_local_fallback_marker"
+        printf '\nFATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
+    fi
+
     ended_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     status="failed"
     if [[ "$rc" -eq 0 ]]; then
@@ -586,6 +603,9 @@ run_workload() {
   "entry_command": "$(json_escape "$rendered_command")",
   "replay_command": "$(json_escape "$replay_command")",
   "status": "$(json_escape "$status")",
+  "failure_class": "$(json_escape "$failure_class")",
+  "rch_local_fallback": ${rch_local_fallback},
+  "rch_local_fallback_marker": "$(json_escape "$rch_local_fallback_marker")",
   "exit_code": ${rc},
   "started_ts": "$(json_escape "$started_ts")",
   "ended_ts": "$(json_escape "$ended_ts")",
