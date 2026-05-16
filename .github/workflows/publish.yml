@@ -150,10 +150,15 @@ jobs:
       - name: Dry run/package release crates
         run: |
           set -e
-          cargo publish -p asupersync-macros --dry-run --locked
-          cargo publish -p franken-kernel --dry-run --locked
-          cargo publish -p franken-evidence --dry-run --locked
-          cargo publish -p asupersync-conformance --dry-run --locked
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for crates.io dry-run packaging" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_dry_run_asupersync_macros cargo publish -p asupersync-macros --dry-run --locked
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_dry_run_franken_kernel cargo publish -p franken-kernel --dry-run --locked
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_dry_run_franken_evidence cargo publish -p franken-evidence --dry-run --locked
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_dry_run_asupersync_conformance cargo publish -p asupersync-conformance --dry-run --locked
 
       - name: Publish crates to crates.io
         run: |
