@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use asupersync::{
     bytes::BytesMut,
+    http::h2::error::ErrorCode,
     http::h2::hpack::{Decoder, Header},
 };
 use libfuzzer_sys::fuzz_target;
@@ -140,6 +141,15 @@ fn assert_block_start_table_size_updates_evict_stale_dynamic_entry() {
     assert_eq!(
         err.message, "invalid dynamic index",
         "stale-index error message changed"
+    );
+    assert_eq!(err.code, ErrorCode::CompressionError);
+    assert!(
+        err.is_connection_error(),
+        "stale dynamic-table index must be a connection-level HPACK error: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "HTTP/2 connection error (COMPRESSION_ERROR): invalid dynamic index"
     );
 
     let mut good_block = BytesMut::new();
