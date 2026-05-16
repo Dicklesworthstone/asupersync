@@ -29,11 +29,14 @@ use asupersync::http::h3_native::{
     H3NativeError, H3QpackMode, QpackFieldPlan, qpack_decode_field_section,
 };
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Cap input size so libFuzzer doesn't waste cycles on multi-MB blobs that
 /// the decoder would reject up-front.
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const FIELD_SECTION_PREFIX: [u8; 2] = [0x00, 0x00];
+
+static FIXED_INTEGER_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug)]
 enum Scenario {
@@ -71,22 +74,19 @@ enum Scenario {
     },
 }
 
-fuzz_target!(|s: Scenario| match s {
-    Scenario::Arbitrary(bytes) => {
-        fuzz_arbitrary(&bytes);
-        test_fixed_integer_canaries();
-    }
-    Scenario::SaturatedPrefixWithContinuation {
-        prefix_high_bits,
-        continuation,
-        trailing,
-    } => {
-        fuzz_saturated_prefix(prefix_high_bits, &continuation, &trailing);
-        test_fixed_integer_canaries();
-    }
-    Scenario::AllContinuation { prefix_byte, count } => {
-        fuzz_all_continuation(prefix_byte, count);
-        test_fixed_integer_canaries();
+fuzz_target!(|s: Scenario| {
+    FIXED_INTEGER_CANARIES.get_or_init(test_fixed_integer_canaries);
+
+    match s {
+        Scenario::Arbitrary(bytes) => fuzz_arbitrary(&bytes),
+        Scenario::SaturatedPrefixWithContinuation {
+            prefix_high_bits,
+            continuation,
+            trailing,
+        } => fuzz_saturated_prefix(prefix_high_bits, &continuation, &trailing),
+        Scenario::AllContinuation { prefix_byte, count } => {
+            fuzz_all_continuation(prefix_byte, count);
+        }
     }
 });
 
