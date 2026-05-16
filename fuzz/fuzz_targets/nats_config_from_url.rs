@@ -4,9 +4,12 @@ use arbitrary::Arbitrary;
 use asupersync::messaging::nats::NatsConfig;
 use libfuzzer_sys::fuzz_target;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::OnceLock;
 
 const MAX_RAW_URL_BYTES: usize = 512;
 const MAX_COMPONENT_CHARS: usize = 32;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 type ParseOutcome = Result<NatsConfig, String>;
 type PanicPayload = Box<dyn std::any::Any + Send>;
@@ -197,6 +200,34 @@ fn exercise_raw(url: &str) {
     }
 }
 
+fn assert_url_rejection(url: &str, expected: &str) {
+    let result = parse_no_panic(url).expect("fixed NATS URL canary should not panic");
+    let error = result.expect_err("fixed NATS URL canary should be rejected");
+
+    assert_eq!(error, expected, "NATS URL diagnostic drift for {url:?}",);
+    assert!(
+        !error.trim().is_empty(),
+        "NATS URL rejection should expose a diagnostic for {url:?}"
+    );
+}
+
+fn assert_fixed_url_error_canaries() {
+    assert_url_rejection(
+        "http://localhost:4222",
+        "Invalid NATS URL: http://localhost:4222",
+    );
+    assert_url_rejection("nats://:4222", "Invalid NATS URL: host must not be empty");
+    assert_url_rejection(
+        "nats://localhost:not-a-port",
+        "Invalid NATS URL: invalid port: not-a-port",
+    );
+    assert_url_rejection("nats://[::1", "Invalid NATS URL: invalid IPv6 host");
+    assert_url_rejection(
+        "nats://[::1]tail:4222",
+        "Invalid NATS URL: invalid host/port: [::1]tail:4222",
+    );
+}
+
 fn observe_raw_parse_outcome(url: &str, result: ParseOutcome) {
     match result {
         Ok(config) => {
@@ -269,6 +300,8 @@ fn exercise_structured(url: &str, expectation: UrlExpectation) {
 }
 
 fuzz_target!(|input: FuzzInput| {
+    FIXED_CANARIES.get_or_init(assert_fixed_url_error_canaries);
+
     match input {
         FuzzInput::Raw(bytes) => {
             if bytes.len() > MAX_RAW_URL_BYTES {
