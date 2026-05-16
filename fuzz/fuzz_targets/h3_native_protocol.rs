@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 use asupersync::http::h3_native::{
     H3_SETTING_ENABLE_CONNECT_PROTOCOL, H3_SETTING_H3_DATAGRAM, H3_SETTING_MAX_FIELD_SECTION_SIZE,
@@ -171,6 +172,7 @@ const MAX_FRAME_SIZE: usize = 65536; // 64KB
 const MAX_PAYLOAD_SIZE: usize = 16384; // 16KB
 const MAX_OPERATIONS: usize = 100;
 const MAX_QPACK_DECODED_FIELDS: usize = 1000;
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 fuzz_target!(|input: H3ProtocolFuzz| {
     // Limit operations to prevent timeout
@@ -209,7 +211,7 @@ fuzz_target!(|input: H3ProtocolFuzz| {
         test_edge_case_operation(operation);
     }
 
-    test_h3_qpack_static_canaries();
+    FIXED_CANARIES.get_or_init(test_h3_qpack_static_canaries);
 });
 
 fn test_frame_operation(operation: FrameOperation) {
