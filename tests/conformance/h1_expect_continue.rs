@@ -1,7 +1,7 @@
 //! HTTP/1.1 Expect: 100-continue conformance tests against the live H1 server.
 //!
 //! These tests pin RFC 9110 Section 10.1.1 behavior using the production
-//! `Http1Server` expectation gate instead of a mock-only classifier. The older
+//! `Http1Server` expectation gate instead of a synthetic classifier. The older
 //! draft is preserved below as disabled archaeology until it can be mined for
 //! smaller follow-up cases.
 

@@ -299,6 +299,7 @@
         "tests/conformance/grpc_connect/src/service.rs",
         "tests/conformance/grpc_connect/src/test_cases.rs",
         "tests/conformance/grpc_status.rs",
+        "tests/conformance/grpc_status_mapping.rs",
         "tests/conformance/grpc_trailer_forwarding_rfc9113.rs",
         "tests/conformance/h1_body_framing.rs",
         "tests/conformance/h1_keepalive.rs",
