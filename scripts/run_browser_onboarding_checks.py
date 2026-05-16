@@ -42,6 +42,15 @@ class Step:
     trace_artifact_hint: str = ""
 
 
+def rch_cargo_command(target_slug: str, cargo_args: str) -> str:
+    if not all(char.isalnum() or char == "_" for char in target_slug):
+        raise ValueError("target_slug must contain only letters, numbers, or underscores")
+    return (
+        'rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/'
+        f'rch_target_browser_onboarding_{target_slug}" cargo {cargo_args}'
+    )
+
+
 SCENARIOS: dict[str, list[Step]] = {
     "vanilla": [
         Step(
@@ -80,7 +89,10 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "vanilla.browser_ready_handoff",
-            "rch exec -- cargo test -p asupersync browser_ready_handoff -- --nocapture",
+            rch_cargo_command(
+                "vanilla_browser_ready_handoff",
+                "test -p asupersync browser_ready_handoff -- --nocapture",
+            ),
             "Inspect scheduler fairness/handoff regressions in src/runtime/scheduler/three_lane.rs.",
             package_entrypoint="@asupersync/browser",
             adapter_path="none",
@@ -89,8 +101,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "vanilla.quiescence",
-            "rch exec -- cargo test --test close_quiescence_regression "
-            "browser_nested_cancel_cascade_reaches_quiescence -- --nocapture",
+            rch_cargo_command(
+                "vanilla_quiescence",
+                "test --test close_quiescence_regression "
+                "browser_nested_cancel_cascade_reaches_quiescence -- --nocapture",
+            ),
             "Verify region close drains cancellation/finalizers before close acknowledgement.",
             package_entrypoint="@asupersync/browser",
             adapter_path="none",
@@ -99,7 +114,10 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "vanilla.security_policy",
-            "rch exec -- cargo test --test security_invariants browser_fetch_security -- --nocapture",
+            rch_cargo_command(
+                "vanilla_security_policy",
+                "test --test security_invariants browser_fetch_security -- --nocapture",
+            ),
             "Review browser fetch capability defaults and allowlist policy in src/io/cap.rs.",
             package_entrypoint="@asupersync/browser",
             adapter_path="none",
@@ -110,8 +128,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "vanilla.behavior_loser_drain_replay",
-            "rch exec -- cargo test --test e2e_combinator "
-            "browser_spork_harness_deterministic_replay -- --nocapture",
+            rch_cargo_command(
+                "vanilla_behavior_loser_drain_replay",
+                "test --test e2e_combinator "
+                "browser_spork_harness_deterministic_replay -- --nocapture",
+            ),
             "Investigate browser loser-drain replay determinism regressions in tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs.",
             package_entrypoint="@asupersync/browser",
             adapter_path="none",
@@ -122,8 +143,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "vanilla.negative_skipped_loser_detection",
-            "rch exec -- cargo test --test e2e_combinator "
-            "browser_oracle_detects_skipped_loser -- --nocapture",
+            rch_cargo_command(
+                "vanilla_negative_skipped_loser_detection",
+                "test --test e2e_combinator "
+                "browser_oracle_detects_skipped_loser -- --nocapture",
+            ),
             "Ensure loser-drain oracle violations are surfaced with deterministic diagnostics.",
             package_entrypoint="@asupersync/browser",
             adapter_path="none",
@@ -134,8 +158,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "vanilla.timing_mid_computation_drain",
-            "rch exec -- cargo test --test e2e_combinator "
-            "browser_mid_computation_task_drained_on_region_close -- --nocapture",
+            rch_cargo_command(
+                "vanilla_timing_mid_computation_drain",
+                "test --test e2e_combinator "
+                "browser_mid_computation_task_drained_on_region_close -- --nocapture",
+            ),
             "Verify mid-computation cancellation drains under browser-style cooperative scheduling.",
             package_entrypoint="@asupersync/browser",
             adapter_path="none",
@@ -146,8 +173,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "vanilla.lifecycle_tab_suspension_multi_obligation",
-            "rch exec -- cargo test --test obligation_wasm_parity "
-            "wasm_host_interruption_tab_suspension_multi_obligation -- --nocapture",
+            rch_cargo_command(
+                "vanilla_lifecycle_tab_suspension_multi_obligation",
+                "test --test obligation_wasm_parity "
+                "wasm_host_interruption_tab_suspension_multi_obligation -- --nocapture",
+            ),
             "Investigate lifecycle chaos drift for multi-obligation tab suspension handling.",
             package_entrypoint="@asupersync/browser",
             adapter_path="none",
@@ -158,8 +188,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "vanilla.lifecycle_suspend_resume_cancel_drain",
-            "rch exec -- cargo test --test obligation_wasm_parity "
-            "wasm_host_interruption_during_cancel_drain -- --nocapture",
+            rch_cargo_command(
+                "vanilla_lifecycle_suspend_resume_cancel_drain",
+                "test --test obligation_wasm_parity "
+                "wasm_host_interruption_during_cancel_drain -- --nocapture",
+            ),
             "Verify suspend/resume cancel-drain path stays leak-free under lifecycle interruption.",
             package_entrypoint="@asupersync/browser",
             adapter_path="none",
@@ -195,8 +228,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "react.clock_start_zero",
-            "rch exec -- cargo test --test native_seam_parity "
-            "browser_clock_through_trait_starts_at_zero -- --nocapture",
+            rch_cargo_command(
+                "react_clock_start_zero",
+                "test --test native_seam_parity "
+                "browser_clock_through_trait_starts_at_zero -- --nocapture",
+            ),
             "Check BrowserMonotonicClock bootstrap semantics and time source trait wiring.",
             package_entrypoint="@asupersync/react",
             adapter_path="react/provider",
@@ -205,8 +241,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "react.clock_advances",
-            "rch exec -- cargo test --test native_seam_parity "
-            "browser_clock_through_trait_advances_with_host_samples -- --nocapture",
+            rch_cargo_command(
+                "react_clock_advances",
+                "test --test native_seam_parity "
+                "browser_clock_through_trait_advances_with_host_samples -- --nocapture",
+            ),
             "Check monotonic clamp policy and host-sample advancement path for browser clock.",
             package_entrypoint="@asupersync/react",
             adapter_path="react/provider",
@@ -215,8 +254,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "react.obligation_lifecycle",
-            "rch exec -- cargo test --test obligation_wasm_parity "
-            "wasm_full_browser_lifecycle_simulation -- --nocapture",
+            rch_cargo_command(
+                "react_obligation_lifecycle",
+                "test --test obligation_wasm_parity "
+                "wasm_full_browser_lifecycle_simulation -- --nocapture",
+            ),
             "Inspect obligation drain/commit lifecycle invariants in tests/obligation_wasm_parity.rs.",
             package_entrypoint="@asupersync/react",
             adapter_path="react/provider",
@@ -227,8 +269,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "react.behavior_strict_mode_double_invocation",
-            "rch exec -- cargo test --test react_wasm_strictmode_harness "
-            "strict_mode_double_invocation_is_leak_free_and_cancel_correct -- --nocapture",
+            rch_cargo_command(
+                "react_behavior_strict_mode_double_invocation",
+                "test --test react_wasm_strictmode_harness "
+                "strict_mode_double_invocation_is_leak_free_and_cancel_correct -- --nocapture",
+            ),
             "Fix React strict-mode lifecycle leaks or cancel/join sequencing drift.",
             package_entrypoint="@asupersync/react",
             adapter_path="react/provider",
@@ -239,8 +284,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "react.timing_restart_churn",
-            "rch exec -- cargo test --test react_wasm_strictmode_harness "
-            "rapid_restart_churn_keeps_event_sequence_balanced -- --nocapture",
+            rch_cargo_command(
+                "react_timing_restart_churn",
+                "test --test react_wasm_strictmode_harness "
+                "rapid_restart_churn_keeps_event_sequence_balanced -- --nocapture",
+            ),
             "Investigate restart-churn race regressions in React adapter task cancellation/join sequencing.",
             package_entrypoint="@asupersync/react",
             adapter_path="react/provider",
@@ -251,8 +299,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "react.lifecycle_background_throttle_suspend_resume",
-            "rch exec -- cargo test --test react_wasm_strictmode_harness "
-            "lifecycle_background_throttle_suspend_resume_navigation_churn_is_deterministic -- --nocapture",
+            rch_cargo_command(
+                "react_lifecycle_background_throttle_suspend_resume",
+                "test --test react_wasm_strictmode_harness "
+                "lifecycle_background_throttle_suspend_resume_navigation_churn_is_deterministic -- --nocapture",
+            ),
             "Investigate React lifecycle chaos regressions across background throttle, suspend/resume, and navigation churn.",
             package_entrypoint="@asupersync/react",
             adapter_path="react/provider",
@@ -265,8 +316,11 @@ SCENARIOS: dict[str, list[Step]] = {
     "worker": [
         Step(
             "worker.runtime_support_matrix",
-            "rch exec -- cargo test --test wasm_browser_feasibility_matrix "
-            "dedicated_worker_ -- --nocapture",
+            rch_cargo_command(
+                "worker_runtime_support_matrix",
+                "test --test wasm_browser_feasibility_matrix "
+                "dedicated_worker_ -- --nocapture",
+            ),
             "Inspect dedicated-worker support classification drift across packages/browser/src/index.ts, docs/WASM.md, and docs/integration.md.",
             package_entrypoint="@asupersync/browser",
             adapter_path="worker/bootstrap",
@@ -277,8 +331,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "worker.sdk_runtime_diagnostics",
-            "rch exec -- cargo test --test wasm_js_exports_coverage_contract "
-            "browser_src_index_ -- --nocapture",
+            rch_cargo_command(
+                "worker_sdk_runtime_diagnostics",
+                "test --test wasm_js_exports_coverage_contract "
+                "browser_src_index_ -- --nocapture",
+            ),
             "Verify dedicated-worker runtime diagnostics and actionable guidance in packages/browser/src/index.ts.",
             package_entrypoint="@asupersync/browser",
             adapter_path="worker/bootstrap",
@@ -289,8 +346,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "worker.storage_artifact_diagnostics",
-            "rch exec -- cargo test --test wasm_js_exports_coverage_contract "
-            "browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture",
+            rch_cargo_command(
+                "worker_storage_artifact_diagnostics",
+                "test --test wasm_js_exports_coverage_contract "
+                "browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture",
+            ),
             "Verify BrowserStorage and BrowserArtifactStore failure diagnostics, cleanup flows, and worker download guidance in packages/browser/src/index.ts.",
             package_entrypoint="@asupersync/browser",
             adapter_path="worker/bootstrap",
@@ -301,8 +361,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "worker.fetch_host_bridge",
-            "rch exec -- cargo test --test wasm_js_exports_coverage_contract "
-            "browser_core_fetch_bridge_supports_window_or_worker_hosts -- --nocapture",
+            rch_cargo_command(
+                "worker_fetch_host_bridge",
+                "test --test wasm_js_exports_coverage_contract "
+                "browser_core_fetch_bridge_supports_window_or_worker_hosts -- --nocapture",
+            ),
             "Confirm browser-core fetch host wiring still accepts dedicated-worker globals when window is unavailable.",
             package_entrypoint="@asupersync/browser",
             adapter_path="worker/bootstrap",
@@ -313,7 +376,10 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "worker.coordinator_protocol",
-            "rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
+            rch_cargo_command(
+                "worker_coordinator_protocol",
+                "test --lib worker_channel::tests::coordinator_ -- --nocapture",
+            ),
             "Investigate worker coordination protocol regressions in src/net/worker_channel.rs before touching browser-side bootstrap code.",
             package_entrypoint="@asupersync/browser",
             adapter_path="worker/bootstrap",
@@ -337,8 +403,11 @@ SCENARIOS: dict[str, list[Step]] = {
     "shared_worker": [
         Step(
             "shared_worker.support_matrix",
-            "rch exec -- cargo test --test wasm_browser_feasibility_matrix "
-            "shared_worker_ -- --nocapture",
+            rch_cargo_command(
+                "shared_worker_support_matrix",
+                "test --test wasm_browser_feasibility_matrix "
+                "shared_worker_ -- --nocapture",
+            ),
             "Inspect shared-worker fail-closed and bounded coordinator contract drift across docs, onboarding, and package helpers.",
             package_entrypoint="@asupersync/browser",
             adapter_path="shared_worker/coordinator",
@@ -395,8 +464,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "next.wasm_profile_check",
-            "rch exec -- cargo check --target wasm32-unknown-unknown "
-            "--no-default-features --features wasm-browser-dev",
+            rch_cargo_command(
+                "next_wasm_profile_check",
+                "check --target wasm32-unknown-unknown "
+                "--no-default-features --features wasm-browser-dev",
+            ),
             "Resolve wasm32 compile blockers (for example getrandom wasm_js gating) before Next onboarding.",
             package_entrypoint="@asupersync/next",
             adapter_path="next/app-router",
@@ -405,7 +477,10 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "next.bootstrap_state_machine_contract",
-            "rch exec -- cargo test --test wasm_abi_contract nextjs_bootstrap_ -- --nocapture",
+            rch_cargo_command(
+                "next_bootstrap_state_machine_contract",
+                "test --test wasm_abi_contract nextjs_bootstrap_ -- --nocapture",
+            ),
             "Fix Next.js bootstrap transition/recovery contract regressions and ensure deterministic log fields.",
             package_entrypoint="@asupersync/next",
             adapter_path="next/app-router",
@@ -416,7 +491,10 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "next.behavior_bootstrap_harness",
-            "rch exec -- cargo test --test nextjs_bootstrap_harness -- --nocapture",
+            rch_cargo_command(
+                "next_behavior_bootstrap_harness",
+                "test --test nextjs_bootstrap_harness -- --nocapture",
+            ),
             "Investigate Next.js hydration/bootstrap behavior regressions in harness tests.",
             package_entrypoint="@asupersync/next",
             adapter_path="next/app-router",
@@ -427,8 +505,11 @@ SCENARIOS: dict[str, list[Step]] = {
         ),
         Step(
             "next.timing_navigation_churn",
-            "rch exec -- cargo test --test nextjs_bootstrap_harness "
-            "rapid_navigation_churn_with_interleaved_recovery_remains_deterministic -- --nocapture",
+            rch_cargo_command(
+                "next_timing_navigation_churn",
+                "test --test nextjs_bootstrap_harness "
+                "rapid_navigation_churn_with_interleaved_recovery_remains_deterministic -- --nocapture",
+            ),
             "Investigate navigation-churn timing/recovery regressions in Next.js bootstrap state machine.",
             package_entrypoint="@asupersync/next",
             adapter_path="next/app-router",
