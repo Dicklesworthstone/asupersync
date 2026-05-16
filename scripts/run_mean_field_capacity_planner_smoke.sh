@@ -97,7 +97,7 @@ mkdir -p "$RUN_DIR"
 
 PROOF_COMMAND=(
     env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner" "ASUPERSYNC_MEAN_FIELD_CAPACITY_PLANNER_REPORT_PATH=${REPORT_PATH}"
-    cargo test -p asupersync --test mean_field_capacity_planner_contract mean_field_capacity_planner_smoke_emits_report --features test-internals -- --nocapture
+    "${CARGO_BIN:-cargo}" test -p asupersync --test mean_field_capacity_planner_contract mean_field_capacity_planner_smoke_emits_report --features test-internals -- --nocapture
 )
 RCH_COMMAND=("${RCH_BIN}" exec -- "${PROOF_COMMAND[@]}")
 RUN_COMMAND=(timeout "${RCH_WRAPPER_TIMEOUT}" "${RCH_COMMAND[@]}")
