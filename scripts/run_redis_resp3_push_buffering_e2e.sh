@@ -7,12 +7,17 @@ cd "$PROJECT_ROOT"
 
 GIT_REV="$(git rev-parse --short HEAD)"
 RCH_BIN="${RCH_BIN:-rch}"
-REDIS_PUSH_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_redis_resp3_push_buffering"
+REDIS_PUSH_TARGET_DIR="${REDIS_PUSH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_redis_resp3_push_buffering}"
+OUTPUT_ROOT="${REDIS_PUSH_OUTPUT_ROOT:-${PROJECT_ROOT}/target/e2e-results/redis_resp3_push_buffering}"
+RUN_ID="${REDIS_PUSH_RUN_ID:-$(date -u +%Y%m%d_%H%M%S)}"
+LOG_DIR="${OUTPUT_ROOT}/run_${RUN_ID}/logs"
 
 if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
   echo "FATAL: rch is required and was not found at: ${RCH_BIN}" >&2
   exit 1
 fi
+
+mkdir -p "$LOG_DIR"
 
 run_step() {
   local label="$1"
@@ -22,7 +27,9 @@ run_step() {
   local -a command_args=("$@")
   local command
   local log_file
-  log_file="$(mktemp)"
+  local safe_label="${label//[^A-Za-z0-9_]/_}"
+  log_file="${LOG_DIR}/${safe_label}.log"
+  : >"$log_file"
   local started_ms
   started_ms="$(date +%s%3N)"
   printf -v command '%q ' "${command_args[@]}"
@@ -35,9 +42,8 @@ run_step() {
     local ended_ms elapsed_ms
     ended_ms="$(date +%s%3N)"
     elapsed_ms="$((ended_ms - started_ms))"
-    printf 'PASS label="%s" git_rev="%s" feature_flags="%s" test_filter="%s" elapsed_ms="%s" command="%s"\n' \
-      "$label" "$GIT_REV" "$feature_flags" "$test_filter" "$elapsed_ms" "$command"
-    rm -f "$log_file"
+    printf 'PASS label="%s" git_rev="%s" feature_flags="%s" test_filter="%s" elapsed_ms="%s" log_file="%s" command="%s"\n' \
+      "$label" "$GIT_REV" "$feature_flags" "$test_filter" "$elapsed_ms" "$log_file" "$command"
     return 0
   fi
 
@@ -48,10 +54,9 @@ run_step() {
     grep -n -m1 -E 'error\[|error:|FAILED|panicked at|test result: FAILED' "$log_file" \
       || sed -n '1p' "$log_file"
   )"
-  printf 'FAIL label="%s" git_rev="%s" feature_flags="%s" test_filter="%s" elapsed_ms="%s" first_failure="%s" command="%s"\n' \
-    "$label" "$GIT_REV" "$feature_flags" "$test_filter" "$elapsed_ms" "${first_failure//\"/\\\"}" "$command"
+  printf 'FAIL label="%s" git_rev="%s" feature_flags="%s" test_filter="%s" elapsed_ms="%s" log_file="%s" first_failure="%s" command="%s"\n' \
+    "$label" "$GIT_REV" "$feature_flags" "$test_filter" "$elapsed_ms" "$log_file" "${first_failure//\"/\\\"}" "$command"
   cat "$log_file"
-  rm -f "$log_file"
   return 1
 }
 
@@ -72,7 +77,7 @@ run_step \
   CARGO_PROFILE_TEST_DEBUG=0 \
   "RUSTFLAGS=-D warnings -C debuginfo=0" \
   "CARGO_TARGET_DIR=${REDIS_PUSH_TARGET_DIR}" \
-  cargo test -p asupersync --lib redis_resp3_push --features test-internals -- --nocapture
+  cargo test -p asupersync --lib redis_resp3_push --features test-internals -- --nocapture --test-threads=1
 
 run_step \
   "integration-redis-resp3-push-buffering" \
@@ -84,4 +89,4 @@ run_step \
   CARGO_PROFILE_TEST_DEBUG=0 \
   "RUSTFLAGS=-D warnings -C debuginfo=0" \
   "CARGO_TARGET_DIR=${REDIS_PUSH_TARGET_DIR}" \
-  cargo test -p asupersync --test redis_resp3_push_buffering --features test-internals -- --nocapture
+  cargo test -p asupersync --test redis_resp3_push_buffering --features test-internals -- --nocapture --test-threads=1

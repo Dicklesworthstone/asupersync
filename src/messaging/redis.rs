@@ -2028,8 +2028,8 @@ impl RedisConnection {
             }
 
             let mut tmp = [0u8; 4096];
-            let n = std::future::poll_fn(|task_cx| {
-                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+            let read_result = std::future::poll_fn(|task_cx| {
+                if cx.checkpoint().is_err() {
                     return std::task::Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "cancelled",
@@ -2044,7 +2044,14 @@ impl RedisConnection {
                     std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
                 }
             })
-            .await?;
+            .await;
+            let n = match read_result {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    return Err(RedisError::Cancelled);
+                }
+                Err(e) => return Err(RedisError::Io(e)),
+            };
             if n == 0 {
                 return Err(RedisError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -5765,24 +5772,27 @@ mod tests {
         panic!("{label} never reached the expected in-flight state");
     }
 
-    fn read_resp_frame(stream: &mut std::net::TcpStream) -> RespValue {
-        let mut buf = Vec::new();
+    fn read_resp_frame_from_buffer(
+        stream: &mut std::net::TcpStream,
+        buf: &mut Vec<u8>,
+    ) -> RespValue {
         let mut chunk = [0u8; 1024];
         loop {
             if let Some((value, consumed)) =
-                RespValue::try_decode(&buf).expect("test server should decode RESP command")
+                RespValue::try_decode(buf).expect("test server should decode RESP command")
             {
-                assert_eq!(
-                    consumed,
-                    buf.len(),
-                    "test server expected exactly one RESP frame per phase"
-                );
+                buf.drain(..consumed);
                 return value;
             }
             let n = stream.read(&mut chunk).expect("read client command");
             assert!(n > 0, "client closed before sending full RESP command");
             buf.extend_from_slice(&chunk[..n]);
         }
+    }
+
+    fn read_resp_frame(stream: &mut std::net::TcpStream) -> RespValue {
+        let mut buf = Vec::new();
+        read_resp_frame_from_buffer(stream, &mut buf)
     }
 
     fn assert_resp_command(frame: RespValue, expected: &[&[u8]]) {
@@ -8299,9 +8309,10 @@ mod tests {
                 .expect("set read timeout");
             write_hello3_ok(&mut stream);
 
-            let first = read_resp_frame(&mut stream);
+            let mut read_buf = Vec::new();
+            let first = read_resp_frame_from_buffer(&mut stream, &mut read_buf);
             assert_resp_command(first, &[b"PING"]);
-            let second = read_resp_frame(&mut stream);
+            let second = read_resp_frame_from_buffer(&mut stream, &mut read_buf);
             assert_resp_command(second, &[b"PING"]);
             stream
                 .write_all(&combined_buffer)
