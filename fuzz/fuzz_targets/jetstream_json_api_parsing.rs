@@ -51,6 +51,46 @@ fn assert_visible_js_error(err: &JsError) {
     );
 }
 
+fn assert_js_parse_error(err: &JsError, expected_message: &str, expected_display: &str) {
+    assert!(
+        matches!(err, JsError::ParseError(message) if message == expected_message),
+        "expected ParseError({expected_message:?}), got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        expected_display,
+        "JetStream parse error display drifted"
+    );
+}
+
+fn assert_js_api_error(err: &JsError, expected_code: u32, expected_description: &str) {
+    assert!(
+        matches!(
+            err,
+            JsError::Api { code, description }
+                if *code == expected_code && description == expected_description
+        ),
+        "expected API error {expected_code}:{expected_description:?}, got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        format!("JetStream API error {expected_code}: {expected_description}"),
+        "JetStream API error display drifted"
+    );
+}
+
+fn assert_js_stream_not_found(err: &JsError, expected_description: &str) {
+    assert!(
+        matches!(err, JsError::StreamNotFound(description) if description == expected_description),
+        "expected StreamNotFound({expected_description:?}), got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        format!("JetStream stream not found: {expected_description}"),
+        "JetStream stream-not-found display drifted"
+    );
+}
+
 fn observe_stream_info_parse(bytes: &[u8]) {
     match fuzz_parse_stream_info(bytes) {
         Ok(info) => {
@@ -112,6 +152,51 @@ fn assert_known_json_parser_outputs() {
         api_error,
         JsError::StreamNotFound(description) if description == "stream not found"
     ));
+
+    let missing_stream_name = match fuzz_parse_stream_info(br#"{}"#) {
+        Ok(_) => panic!("stream info without a name should fail"),
+        Err(err) => err,
+    };
+    assert_js_parse_error(
+        &missing_stream_name,
+        "missing stream name",
+        "JetStream parse error: missing stream name",
+    );
+
+    let missing_pub_ack_stream = match fuzz_parse_pub_ack(br#"{}"#) {
+        Ok(_) => panic!("PubAck without a stream should fail"),
+        Err(err) => err,
+    };
+    assert_js_parse_error(
+        &missing_pub_ack_stream,
+        "missing stream in PubAck",
+        "JetStream parse error: missing stream in PubAck",
+    );
+
+    let missing_pub_ack_seq = match fuzz_parse_pub_ack(br#"{"stream":"ORDERS"}"#) {
+        Ok(_) => panic!("PubAck without a sequence should fail"),
+        Err(err) => err,
+    };
+    assert_js_parse_error(
+        &missing_pub_ack_seq,
+        "missing seq in PubAck",
+        "JetStream parse error: missing seq in PubAck",
+    );
+
+    let stream_info_api_error =
+        match fuzz_parse_stream_info(br#"{"error":{"code":400,"description":"bad request"}}"#) {
+            Ok(_) => panic!("stream info API error response should fail"),
+            Err(err) => err,
+        };
+    assert_js_api_error(&stream_info_api_error, 400, "bad request");
+
+    let pub_ack_stream_not_found = match fuzz_parse_pub_ack(
+        br#"{"error":{"code":404,"err_code":10059,"description":"stream not found"}}"#,
+    ) {
+        Ok(_) => panic!("PubAck stream-not-found API response should fail"),
+        Err(err) => err,
+    };
+    assert_js_stream_not_found(&pub_ack_stream_not_found, "stream not found");
 }
 
 fn assert_known_ack_subject_outputs(payload: &[u8]) {
