@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ARTIFACT="${PROJECT_ROOT}/artifacts/hindsight_logging_nondeterminism_capture_v1.json"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 MODE=""
 SCENARIO=""
 
@@ -166,7 +167,7 @@ set -e
 
 STATUS="passed"
 MESSAGE="hindsight logging smoke passed"
-if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG"; then
+if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RUN_LOG"; then
   EXITCODE=86
   STATUS="failed"
   MESSAGE="rch local fallback detected; refusing local cargo execution"
