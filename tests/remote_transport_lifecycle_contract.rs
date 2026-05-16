@@ -1288,6 +1288,33 @@ fn remote_transport_capability_denial_and_phase0_fallback_are_explicit() {
 }
 
 #[test]
+fn remote_transport_runner_rejects_full_rch_fallback_marker_set() {
+    let runner = fs::read_to_string(RUNNER_PATH).expect("read runner script");
+
+    assert!(
+        runner
+            .matches(r#"grep -Eiq "${RCH_LOCAL_FALLBACK_PATTERN}""#)
+            .count()
+            >= 1,
+        "runner must use the shared local fallback matcher at its rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            runner.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
+#[test]
 fn remote_transport_runner_dry_run_records_rch_plan() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let output_root = tempfile::tempdir().expect("temp output root");

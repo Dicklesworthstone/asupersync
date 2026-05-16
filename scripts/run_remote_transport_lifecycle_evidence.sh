@@ -10,6 +10,7 @@ CONTRACT_ONLY=0
 TIMEOUT_SEC="${REMOTE_TRANSPORT_LIFECYCLE_TIMEOUT_SEC:-180}"
 DRY_RUN=0
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
     cat <<'USAGE'
@@ -103,7 +104,7 @@ else
     timeout "${TIMEOUT_SEC}" "${RCH_COMMAND[@]}" >> "${RUN_LOG_PATH}" 2>&1
     TEST_STATUS=$?
     set -e
-    if grep -Eq '^\[RCH\] local \(|falling back to local' "${RUN_LOG_PATH}"; then
+    if grep -Eiq "${RCH_LOCAL_FALLBACK_PATTERN}" "${RUN_LOG_PATH}"; then
         TEST_STATUS=86
     fi
     echo "REMOTE_TRANSPORT_LIFECYCLE_COMMAND_STATUS status=${TEST_STATUS}" >> "${RUN_LOG_PATH}"
