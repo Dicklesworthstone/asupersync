@@ -31,6 +31,10 @@ LONG_WORD_RE = re.compile(r"\b[A-Za-z0-9._~/+=-]{96,}\b")
 SPACE_RE = re.compile(r"\s+")
 SAFE_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 CARGO_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])cargo(?![A-Za-z0-9_.-])", re.IGNORECASE)
+RCH_LOCAL_FALLBACK_RE = re.compile(
+    r"(?m)^\[RCH\] local \(|falling back to local",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -209,6 +213,14 @@ def unsafe_validation_commands(row: dict[str, Any]) -> list[str]:
     ]
 
 
+def local_fallback_validation_commands(row: dict[str, Any]) -> list[str]:
+    return [
+        command
+        for command in row["validation"]
+        if RCH_LOCAL_FALLBACK_RE.search(command)
+    ]
+
+
 def canonical_key(row: dict[str, Any]) -> tuple[int, int, int, str]:
     if is_superseded(row):
         tier = 3
@@ -273,7 +285,8 @@ def capability_summaries(
                 "needs_review": duplicate_active_count > 0
                 or bool(drafts)
                 or any(not is_covered(row) for row in rows)
-                or any(unsafe_validation_commands(row) for row in rows),
+                or any(unsafe_validation_commands(row) for row in rows)
+                or any(local_fallback_validation_commands(row) for row in rows),
             }
         )
     return summaries, canonical_by_capability
@@ -357,6 +370,17 @@ def review_cues(rows: list[dict[str, Any]], capabilities: list[dict[str, Any]]) 
                     "helper_id": row["helper_id"],
                     "command": command,
                     "recommendation": "route Cargo validation through rch exec before citing this helper",
+                }
+            )
+        for command in local_fallback_validation_commands(row):
+            cues.append(
+                {
+                    "kind": "rch-local-fallback-validation",
+                    "severity": "high",
+                    "capability_id": row["capability_id"],
+                    "helper_id": row["helper_id"],
+                    "command": command,
+                    "recommendation": "rerun validation remotely; local rch fallback is not acceptable proof",
                 }
             )
     return sorted(cues, key=lambda cue: (cue["severity"], cue["kind"], cue["capability_id"], cue.get("helper_id", "")))
