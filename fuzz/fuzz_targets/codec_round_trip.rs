@@ -25,6 +25,10 @@ use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{BytesCodec, Decoder, Encoder, LinesCodec, LinesCodecError};
 use libfuzzer_sys::fuzz_target;
+use std::error::Error;
+use std::sync::OnceLock;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 fn assert_visible_codec_error<E>(context: &str, error: &E)
 where
@@ -275,6 +279,8 @@ impl TestData {
 }
 
 fuzz_target!(|op: FuzzOperation| {
+    FIXED_CANARIES.get_or_init(assert_fixed_codec_error_canaries);
+
     // Input size guard (Hard Rule #10)
     let estimated_size = match &op {
         FuzzOperation::RoundTrip { data, .. } => data.to_bytes().len(),
@@ -326,6 +332,65 @@ fuzz_target!(|op: FuzzOperation| {
         }
     }
 });
+
+fn assert_fixed_codec_error_canaries() {
+    let mut max_len_codec = LinesCodec::new_with_max_length(3);
+    let mut oversized = BytesMut::from(&b"abcd"[..]);
+    let err = max_len_codec
+        .decode(&mut oversized)
+        .expect_err("oversized line without delimiter should fail");
+    assert_lines_codec_error(&err, "line exceeds maximum length", "max-length decode");
+
+    let mut utf8_codec = LinesCodec::new();
+    let mut invalid_utf8 = BytesMut::from(&b"\xff\n"[..]);
+    let err = utf8_codec
+        .decode(&mut invalid_utf8)
+        .expect_err("invalid UTF-8 line should fail");
+    assert_lines_codec_error(&err, "line is not valid UTF-8", "invalid UTF-8 decode");
+    assert!(
+        invalid_utf8.is_empty(),
+        "invalid UTF-8 newline-delimited canary should consume the invalid line"
+    );
+
+    let mut eof_codec = LinesCodec::new();
+    let mut invalid_utf8_eof = BytesMut::from(&b"\xff"[..]);
+    let err = eof_codec
+        .decode_eof(&mut invalid_utf8_eof)
+        .expect_err("invalid UTF-8 EOF line should fail");
+    assert_lines_codec_error(&err, "line is not valid UTF-8", "invalid UTF-8 EOF");
+    assert!(
+        invalid_utf8_eof.is_empty(),
+        "invalid UTF-8 EOF canary should consume the invalid line"
+    );
+}
+
+fn assert_lines_codec_error(error: &LinesCodecError, expected_display: &str, context: &str) {
+    match expected_display {
+        "line exceeds maximum length" => assert!(
+            matches!(error, LinesCodecError::MaxLineLengthExceeded),
+            "{context}: expected MaxLineLengthExceeded, got {error:?}"
+        ),
+        "line is not valid UTF-8" => assert!(
+            matches!(error, LinesCodecError::InvalidUtf8),
+            "{context}: expected InvalidUtf8, got {error:?}"
+        ),
+        other => panic!("{context}: unsupported expected LinesCodec display {other:?}"),
+    }
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "{context}: unexpected LinesCodec display text"
+    );
+    assert!(
+        error.source().is_none(),
+        "{context}: parser errors should not expose an IO source"
+    );
+    assert_eq!(
+        error.io_kind(),
+        None,
+        "{context}: parser errors should not expose an IO kind"
+    );
+}
 
 /// (1) Basic round-trip identity: decode(encode(x)) == x
 fn fuzz_round_trip(codec_type: CodecType, test_data: TestData) {
