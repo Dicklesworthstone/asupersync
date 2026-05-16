@@ -19,6 +19,7 @@ mkdir -p "$OUTPUT_DIR"
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RCH_TARGET_ROOT="${RCH_TARGET_ROOT:-${TMPDIR:-/tmp}/rch_target_phase6_e2e_${USER:-unknown}_${TIMESTAMP}}"
 REPORT_FILE="${OUTPUT_DIR}/report_${TIMESTAMP}.txt"
 SUMMARY_FILE="${OUTPUT_DIR}/summary_${TIMESTAMP}.json"
 
@@ -61,6 +62,7 @@ fi
 
 echo "==== Phase 6 End-to-End Test Suites ===="
 echo "Output: ${REPORT_FILE}"
+echo "RCH target root: ${RCH_TARGET_ROOT}"
 echo ""
 
 PASS=0
@@ -77,15 +79,17 @@ for name in "${SUITE_NAMES[@]}"; do
     target="${SUITE_TARGETS[$name]}"
     label="${SUITE_LABELS[$name]}"
     log_file="${OUTPUT_DIR}/${name}_${TIMESTAMP}.log"
+    safe_name="${name//[^A-Za-z0-9_]/_}"
+    suite_target_dir="${RCH_TARGET_ROOT}/${safe_name}"
 
     printf "%-45s" "$label"
     TOTAL=$((TOTAL + 1))
 
     set +e
     if [[ "$name" == "raptorq" ]]; then
-        timeout "$PHASE6_TIMEOUT" bash "${ROOT_DIR}/scripts/run_raptorq_e2e.sh" --profile full > "$log_file" 2>&1
+        timeout "$PHASE6_TIMEOUT" env "RCH_BIN=${RCH_BIN}" "RCH_TARGET_ROOT=${suite_target_dir}" bash "${ROOT_DIR}/scripts/run_raptorq_e2e.sh" --profile full > "$log_file" 2>&1
     else
-        timeout "$PHASE6_TIMEOUT" "$RCH_BIN" exec -- cargo test --test "$target" --all-features -- --nocapture > "$log_file" 2>&1
+        timeout "$PHASE6_TIMEOUT" "$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${suite_target_dir}" cargo test --test "$target" --all-features -- --nocapture > "$log_file" 2>&1
     fi
     rc=$?
     set -e
@@ -132,7 +136,7 @@ fi
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_ID="phase6_e2e"
 SCENARIO_ID="E2E-SUITE-PHASE6"
-REPRO_COMMAND="PHASE6_TIMEOUT=${PHASE6_TIMEOUT} bash ${ROOT_DIR}/scripts/$(basename "$0")${FILTER_ARG}"
+REPRO_COMMAND="PHASE6_TIMEOUT=${PHASE6_TIMEOUT} RCH_BIN=${RCH_BIN} RCH_TARGET_ROOT='${RCH_TARGET_ROOT}' bash ${ROOT_DIR}/scripts/$(basename "$0")${FILTER_ARG}"
 
 cat > "$SUMMARY_FILE" << ENDJSON
 {
@@ -150,6 +154,8 @@ cat > "$SUMMARY_FILE" << ENDJSON
   "suites_total": ${TOTAL},
   "suites_passed": ${PASS},
   "suites_failed": ${FAIL},
+  "rch_bin": "${RCH_BIN}",
+  "rch_target_root": "${RCH_TARGET_ROOT}",
   "report_file": "${REPORT_FILE}",
   "output_dir": "${OUTPUT_DIR}"
 }
