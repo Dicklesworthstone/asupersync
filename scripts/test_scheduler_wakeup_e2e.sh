@@ -54,6 +54,10 @@ run_timeout_cargo() {
     timeout "${timeout_sec}s" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
+record_rch_local_fallback() {
+    echo "rch local fallback detected; refusing local cargo execution" > "$LOG_DIR/rch_local_fallback.txt"
+}
+
 mkdir -p "$LOG_DIR"
 
 TOTAL_SUITES=0
@@ -161,6 +165,12 @@ fi
 if grep -rq "panicked at" "$LOG_DIR"/*.log 2>/dev/null; then
     echo "  WARNING: Panics detected"
     grep -rh "panicked at" "$LOG_DIR"/*.log | head -5
+    ISSUES=$((ISSUES + 1))
+fi
+
+if grep -rEq '^\[RCH\] local \(|falling back to local' "$LOG_DIR"/*.log 2>/dev/null; then
+    echo "  ERROR: rch local fallback detected"
+    record_rch_local_fallback
     ISSUES=$((ISSUES + 1))
 fi
 
