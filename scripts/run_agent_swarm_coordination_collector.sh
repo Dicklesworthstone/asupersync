@@ -259,6 +259,42 @@ def command_class_hash(job):
     return f"cmd:{h(basis, 12)}"
 
 
+RCH_LOCAL_FALLBACK_MARKERS = [
+    "[rch] local",
+    "falling back to local",
+    "local fallback",
+    "fallback to local",
+    "executing locally",
+]
+
+
+def rch_local_fallback_reason(job, status):
+    values = [
+        status,
+        job.get("routing"),
+        job.get("execution_mode"),
+        job.get("runner"),
+        job.get("summary"),
+        job.get("message"),
+        job.get("stderr"),
+        job.get("stdout"),
+        job.get("output"),
+        job.get("log"),
+        job.get("failure_reason"),
+        job.get("error_kind"),
+        job.get("refusal_reason"),
+    ]
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        if text in ["local", "executed locally"]:
+            return "rch_local_fallback"
+        if any(marker in text for marker in RCH_LOCAL_FALLBACK_MARKERS):
+            return "rch_local_fallback"
+    return ""
+
+
 def proof_refusal_reason(job, status):
     for key in ["refusal_reason", "timeout_reason", "failure_reason", "error_kind"]:
         if job.get(key):
@@ -540,7 +576,10 @@ def rch_events(raw, data):
                 continue
             status = str(job.get("status") or job.get("state") or "queued")
             status_lower = status.lower()
-            if "timeout" in status_lower:
+            local_fallback = rch_local_fallback_reason(job, status_lower)
+            if local_fallback:
+                kind = "rch_job_refused"
+            elif "timeout" in status_lower:
                 kind = "rch_job_timed_out"
             elif "refus" in status_lower or "fail" in status_lower or "error" in status_lower:
                 kind = "rch_job_refused"
@@ -579,10 +618,11 @@ def rch_events(raw, data):
                         "artifact_retrieval_tail_ms": tail_ms,
                         "artifact_retrieval_tail_bucket": tail_bucket(tail_ms),
                         "proof_fanout_count": proof_fanout,
-                        "proof_refusal_reason": proof_refusal_reason(job, status_lower),
+                        "proof_refusal_reason": local_fallback or proof_refusal_reason(job, status_lower),
                         "worker_pool": "redacted",
                     },
-                    redaction_verdict="redacted",
+                    redaction_verdict="refused" if local_fallback else "redacted",
+                    refusal_reason=local_fallback,
                 )
             )
     elif "No active builds" in raw:

@@ -51,7 +51,9 @@ The `rch` adapter models proof-queue pressure as redacted workload metadata,
 not as runtime linkage. It records deterministic queue-depth buckets,
 command-class hashes, artifact retrieval tail buckets, timeout/refusal reasons,
 and proof fanout counts so planners can replay validation pressure without raw
-commands, hostnames, or worker details.
+commands, hostnames, or worker details. RCH local fallback markers fail closed
+as refused proof events instead of being recorded as completed validation
+pressure.
 
 ## Output Artifacts
 
@@ -81,9 +83,9 @@ bucket, proof fanout count, and proof timeout/refusal reason.
 The collector keeps message bodies out of bundle content by default. Agent
 names, local paths, worker metadata, and artifact paths are pseudonymized or
 hashed. Inputs that contain token-like material, malformed JSON, unknown source
-kinds, missing required identifiers, or source events older than the
-deterministic freshness window fail closed with a refused event and a nonzero
-exit code.
+kinds, missing required identifiers, RCH local fallback evidence, or source
+events older than the deterministic freshness window fail closed with a refused
+event and a nonzero exit code.
 
 The redaction behavior is constrained by:
 
@@ -119,9 +121,11 @@ The validation checks:
    retaining raw commands or worker details.
 10. Unsupported nested worker data in `rch` sources fails closed with
    `unsupported_worker_data`.
-11. The collector artifact and root runtime manifest preserve the no-core-
+11. RCH local fallback markers fail closed with `rch_local_fallback` without
+   retaining raw fallback text or command details.
+12. The collector artifact and root runtime manifest preserve the no-core-
    runtime-dependency boundary for Agent Mail, Beads, `bv`, and `rch`.
-12. Repeated fixture runs produce identical bundle hashes.
+13. Repeated fixture runs produce identical bundle hashes.
 
 ## Cross-References
 

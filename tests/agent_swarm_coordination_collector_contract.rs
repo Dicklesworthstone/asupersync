@@ -343,6 +343,7 @@ fn artifact_lists_required_modes_adapters_outputs_and_fail_closed_cases() {
         BTreeSet::from([
             "malformed_json",
             "missing_required_identifier",
+            "rch_local_fallback",
             "stale_source",
             "unknown_source_kind",
             "unsupported_worker_data",
@@ -1023,5 +1024,67 @@ fn rch_nested_worker_data_fails_closed() {
             .as_str()
             .unwrap_or_default()
             .contains("unsupported_worker_data")
+    );
+}
+
+#[test]
+fn rch_local_fallback_source_fails_closed_without_retaining_raw_marker() {
+    let root = temp_root("rch-local-fallback");
+    let rch = root.join("rch-local-fallback.json");
+    fs::write(
+        &rch,
+        r#"{"jobs":[{"id":"job-local","status":"completed","bead_id":"asupersync-d87ytw.11","command":"cargo test -p asupersync --test secret_target","summary":"[RCH] local (all workers busy)","queue_depth":0,"finished_ts":"2026-05-05T05:00:01Z"}]}"#,
+    )
+    .expect("write rch local fallback source");
+
+    let out = run_script_owned(&[
+        "--execute".into(),
+        "--source".into(),
+        format!("rch:{}", rch.to_string_lossy()),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+        "--run-id".into(),
+        "rch-local-fallback".into(),
+    ]);
+    assert!(
+        !out.status.success(),
+        "local fallback source must fail closed"
+    );
+
+    let run_root = root.join("rch-local-fallback");
+    let bundle_raw = fs::read_to_string(run_root.join("coordination-workload-bundle.json"))
+        .expect("read rch local fallback bundle");
+    for forbidden in ["[RCH] local", "all workers busy", "secret_target"] {
+        assert!(
+            !bundle_raw.contains(forbidden),
+            "raw fallback detail {forbidden} must not be retained: {bundle_raw}"
+        );
+    }
+    let bundle: Value = serde_json::from_str(&bundle_raw).expect("parse rch fallback bundle");
+    let event = bundle["events"]
+        .as_array()
+        .expect("events")
+        .first()
+        .expect("fallback event");
+    assert_eq!(event["event_kind"], "rch_job_refused");
+    assert_eq!(event["redaction_verdict"], "refused");
+    assert_eq!(event["refusal_reason"], "rch_local_fallback");
+    assert_eq!(
+        event["queue_depth_or_lock_state"]["proof_refusal_reason"],
+        "rch_local_fallback"
+    );
+
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(run_root.join("coordination-collector-report.json"))
+            .expect("read rch local fallback report"),
+    )
+    .expect("parse rch local fallback report");
+    assert_eq!(report["privacy_verdict"], "fail_closed");
+    assert_eq!(report["refused_event_count"], 1);
+    assert!(
+        report["first_failure_line"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rch_local_fallback")
     );
 }
