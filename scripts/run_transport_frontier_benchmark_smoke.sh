@@ -490,6 +490,10 @@ if [[ "$RUN_ALL" == true ]]; then
   SCENARIO_IDS=$(jq -c '[.smoke_scenarios[].scenario_id]' "$ARTIFACT")
   SCENARIO_COUNT=$(jq '.smoke_scenarios | length' "$ARTIFACT")
   SCENARIOS=$(jq -s '.' "$SUMMARY_ENTRIES_PATH")
+  RCH_LOCAL_FALLBACKS=$(find "$RUN_ROOT" -name rch_local_fallback.txt -type f | wc -l | tr -d '[:space:]')
+  if [[ "$RCH_LOCAL_FALLBACKS" -ne 0 ]]; then
+    ALL_RCH_ROUTED=false
+  fi
 
   if [[ "$MODE" == "execute" ]]; then
     SUITE_STATUS="passed"
@@ -516,6 +520,7 @@ if [[ "$RUN_ALL" == true ]]; then
     --argjson scenario_count "$SCENARIO_COUNT" \
     --argjson scenario_ids "$SCENARIO_IDS" \
     --argjson all_rch_routed "$ALL_RCH_ROUTED" \
+    --argjson rch_local_fallbacks "$RCH_LOCAL_FALLBACKS" \
     --argjson rch_required true \
     --argjson validation_passed "$([[ "$MODE" == "dry-run" || "$SUITE_EXIT_CODE" -eq 0 ]] && printf true || printf false)" \
     --argjson suite_exit_code "$SUITE_EXIT_CODE_JSON" \
@@ -536,6 +541,7 @@ if [[ "$RUN_ALL" == true ]]; then
       scenario_count: $scenario_count,
       scenario_ids: $scenario_ids,
       all_rch_routed: $all_rch_routed,
+      rch_local_fallbacks: $rch_local_fallbacks,
       validation_passed: $validation_passed,
       suite_exit_code: $suite_exit_code,
       scenarios: $scenarios
