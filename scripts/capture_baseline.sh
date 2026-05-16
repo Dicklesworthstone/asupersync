@@ -29,6 +29,7 @@ SMOKE=0
 SMOKE_SEED=""
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_capture_baseline_phase0}"
+RUN_OUTPUT_LOG="${RUN_OUTPUT_LOG:-${TMPDIR:-/tmp}/asupersync_capture_baseline_run_$$.log}"
 
 usage() {
     cat <<'USAGE'
@@ -59,6 +60,14 @@ require_rch_for_default_benchmark_run() {
     if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
         echo "ERROR: benchmark execution requires RCH_BIN ('$RCH_BIN') to resolve to a working rch executable; refusing local cargo bench fallback." >&2
         exit 1
+    fi
+}
+
+reject_rch_local_fallback_log() {
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_OUTPUT_LOG" 2>/dev/null; then
+        echo "ERROR: rch local fallback detected; refusing local cargo execution." >&2
+        echo "rch local fallback detected; refusing local cargo execution" > "${RUN_OUTPUT_LOG}.rch_local_fallback"
+        exit 86
     fi
 }
 
@@ -135,9 +144,19 @@ if [[ "$RUN_CMD" -eq 1 ]]; then
         "$(json_escape "$RUN_SEED_FMT")"
     if [[ -n "$CMD_STRING" ]]; then
         # Preserve shell quoting without pulling in login/startup-file noise.
-        BASH_ENV='' "${BASH:-bash}" -c "$CMD_STRING"
+        if BASH_ENV='' "${BASH:-bash}" -c "$CMD_STRING" 2>&1 | tee "$RUN_OUTPUT_LOG"; then
+            reject_rch_local_fallback_log
+        else
+            reject_rch_local_fallback_log
+            exit 1
+        fi
     else
-        "${CMD[@]}"
+        if "${CMD[@]}" 2>&1 | tee "$RUN_OUTPUT_LOG"; then
+            reject_rch_local_fallback_log
+        else
+            reject_rch_local_fallback_log
+            exit 1
+        fi
     fi
     printf '{"event":"profiling_run_end","command":%s,"seed":%s}\n' \
         "$(json_escape "$RUN_COMMAND_DISPLAY")" \
