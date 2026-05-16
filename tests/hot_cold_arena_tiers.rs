@@ -724,6 +724,34 @@ fn large_page_policy_falls_back_cleanly_when_support_is_absent() {
 }
 
 #[test]
+fn hot_cold_arena_runner_rejects_full_rch_fallback_marker_set() {
+    let script = fs::read_to_string("scripts/run_hot_cold_arena_tiers_smoke.sh")
+        .expect("hot/cold arena smoke runner should load");
+
+    assert!(
+        script
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 2,
+        "runner must use the shared local fallback matcher at every rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            script.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
+#[test]
 fn hot_cold_arena_tiers_smoke_contract_emits_operator_report() {
     let scenario = load_contract_scenario();
     let report = build_report(&scenario);
