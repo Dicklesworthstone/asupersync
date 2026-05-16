@@ -50,7 +50,14 @@ jobs:
         run: sudo apt-get install -y jq
 
       - name: Run methodology baselines
-        run: cargo bench --bench methodology_baselines --all-features -- --noplot
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for methodology baseline benchmarks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_methodology_baselines" cargo bench -p asupersync --bench methodology_baselines --all-features -- --noplot
 
       - name: Compare against baseline
         id: compare
@@ -215,7 +222,7 @@ jobs:
               echo "To fix: Generate a flamegraph and commit it at:"
               echo "  $FLAMEGRAPH_PATH"
               echo ""
-              echo "Generate with: cargo flamegraph --freq 997 --bench methodology_baselines -o $FLAMEGRAPH_PATH"
+              echo "Generate with: rch exec -- env CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_methodology_flamegraph cargo flamegraph --package asupersync --freq 997 --bench methodology_baselines -o $FLAMEGRAPH_PATH"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
             echo "::error::Flamegraph gate FAILED: Hot-path changes require a flamegraph artifact"
@@ -251,12 +258,18 @@ jobs:
       - name: Run golden checksum benchmarks
         id: verify
         run: |
+          set -euo pipefail
           START_MS=$(date +%s%3N)
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for golden checksum benchmarks" >&2
+            exit 1
+          fi
 
           # Run the golden output benchmark which validates checksums internally
           # The bench harness asserts on checksum mismatches
           set +e
-          OUTPUT=$(cargo bench --bench golden_output --all-features -- --noplot 2>&1)
+          OUTPUT=$("$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_methodology_golden_bench" cargo bench -p asupersync --bench golden_output --all-features -- --noplot 2>&1)
           EXIT_CODE=$?
           set -e
 
@@ -283,7 +296,7 @@ jobs:
               echo "$MISMATCH_DETAILS"
               echo ""
               echo "To fix: If the behavioral change is intentional, run:"
-              echo "  GOLDEN_UPDATE=1 cargo bench --bench golden_output"
+              echo "  GOLDEN_UPDATE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_methodology_golden_update cargo bench -p asupersync --bench golden_output --all-features -- --noplot"
               echo "and commit the updated artifacts/golden_checksums.json"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
@@ -295,7 +308,14 @@ jobs:
           fi
 
       - name: Also run golden output integration tests
-        run: cargo test --test golden_outputs --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for golden output integration tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_methodology_golden_outputs" cargo test -p asupersync --test golden_outputs --all-features -- --nocapture
 
   # ===========================================================================
   # Gate 4: Proof Note Gate
@@ -465,7 +485,7 @@ jobs:
 
             - **Baseline Benchmarks**: Compares PR benchmarks against \`artifacts/baseline.json\`. Fails if any p50 regresses >5%.
             - **Flamegraph**: Required when hot-path files change (\`src/scheduler/\`, \`src/channel/\`, \`src/obligation/\`). Provide \`artifacts/flamegraphs/pr-<N>.svg\`.
-            - **Golden Checksums**: Verifies behavioral equivalence via \`artifacts/golden_checksums.json\`. Update with \`GOLDEN_UPDATE=1 cargo bench --bench golden_output\`.
+            - **Golden Checksums**: Verifies behavioral equivalence via \`artifacts/golden_checksums.json\`. Update with \`GOLDEN_UPDATE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_methodology_golden_update cargo bench -p asupersync --bench golden_output --all-features -- --noplot\`.
             - **Proof Notes**: Required when safety-critical files change (\`src/obligation/\`, \`src/safety/\`, files with \`unsafe\`). Provide \`artifacts/proof_notes/pr-<N>.md\`.
 
             </details>
