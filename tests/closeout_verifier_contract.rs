@@ -212,6 +212,39 @@ fn missing_master_sync_matches_full_output_golden() {
 }
 
 #[test]
+fn bare_cargo_validation_fails_validation_row() {
+    let report = report("bare_cargo_validation.json");
+    let validation = row(&report, "validation_reported");
+
+    assert_eq!(report["overall_status"].as_str(), Some("fail"));
+    assert_eq!(validation["status"].as_str(), Some("fail"));
+    assert!(
+        validation["summary"]
+            .as_str()
+            .expect("validation summary")
+            .contains("bare Cargo")
+    );
+    assert_eq!(
+        validation["evidence"]["bare_cargo_validation_segments"][0].as_str(),
+        Some("Validation: cargo test passed. Released reservations.")
+    );
+    assert!(
+        validation["remediation"]
+            .as_str()
+            .expect("validation remediation")
+            .contains("rch exec")
+    );
+}
+
+#[test]
+fn bare_cargo_validation_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "bare_cargo_validation.json",
+        "bare_cargo_validation_expected.json",
+    );
+}
+
+#[test]
 fn closed_bead_without_mail_fails_mail_row() {
     let report = report("closed_bead_without_mail.json");
     let mail = row(&report, "closeout_mail");

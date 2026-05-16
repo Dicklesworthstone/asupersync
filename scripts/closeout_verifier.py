@@ -11,6 +11,7 @@ sends mail, stages files, or edits tracker state.
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,12 @@ FORBIDDEN_ACTIONS = {
     "runs_destructive_command": False,
     "runs_cargo": False,
 }
+CARGO_PROOF_COMMAND = re.compile(
+    r"\bcargo(?:\s+fuzz)?\s+"
+    r"(?:build|check|clippy|doc|fmt|fuzz|run|test|tree)\b",
+    re.IGNORECASE,
+)
+COMMAND_SPLIT = re.compile(r"(?:\n|;|&&|\band\b)")
 
 
 def utc_now() -> str:
@@ -117,6 +124,23 @@ def text_field(row: dict[str, Any], *keys: str) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def command_segments(text: str) -> list[str]:
+    return [segment.strip(" `\t\r") for segment in COMMAND_SPLIT.split(text) if segment.strip()]
+
+
+def bare_cargo_validation_segments(text: str) -> list[str]:
+    bare_segments: list[str] = []
+    for segment in command_segments(text):
+        lowered = segment.lower()
+        for match in CARGO_PROOF_COMMAND.finditer(segment):
+            if "rch exec" not in lowered[: match.start()]:
+                validation_start = lowered.rfind("validation", 0, match.start())
+                reported = segment[validation_start:] if validation_start >= 0 else segment
+                bare_segments.append(reported.strip(" `\t\r"))
+                break
+    return bare_segments
 
 
 def closeout_mode(closeout: dict[str, Any]) -> str:
@@ -326,24 +350,44 @@ def verify_validation_reported(closeout: dict[str, Any], agent_mail: dict[str, A
     explicit = closeout.get("validation_reported")
     messages = rows_from(agent_mail, "messages", "outbox")
     matched = [message for message in messages if message_matches(message, closeout)]
+    matched_bodies = [text_field(message, "body_md", "body", "text") for message in matched]
     mail_mentions_validation = any(
-        "validation" in text_field(message, "body_md", "body", "text").lower()
-        for message in matched
+        "validation" in body.lower()
+        for body in matched_bodies
     )
-    status = "pass" if explicit is True or mail_mentions_validation else "fail"
+    bare_cargo_segments = [
+        segment
+        for body in matched_bodies
+        for segment in bare_cargo_validation_segments(body)
+    ]
+    validation_present = explicit is True or mail_mentions_validation
+    status = "pass" if validation_present and not bare_cargo_segments else "fail"
+    evidence = {
+        "closeout_validation_reported": explicit,
+        "mail_mentions_validation": mail_mentions_validation,
+    }
+    if bare_cargo_segments:
+        evidence["bare_cargo_validation_segments"] = bare_cargo_segments
+    if bare_cargo_segments:
+        summary = "validation evidence reports bare Cargo instead of rch exec"
+        remediation = "rerun and report Cargo validation through rch exec -- env CARGO_TARGET_DIR=... cargo ..."
+    else:
+        summary = (
+            "validation evidence is reported"
+            if status == "pass"
+            else "validation evidence is missing from closeout evidence"
+        )
+        remediation = (
+            "include exact validation commands and outcomes in closeout mail"
+            if status == "fail"
+            else ""
+        )
     return row(
         "validation_reported",
         status,
-        "validation evidence is reported"
-        if status == "pass"
-        else "validation evidence is missing from closeout evidence",
-        evidence={
-            "closeout_validation_reported": explicit,
-            "mail_mentions_validation": mail_mentions_validation,
-        },
-        remediation="include exact validation commands and outcomes in closeout mail"
-        if status == "fail"
-        else "",
+        summary,
+        evidence=evidence,
+        remediation=remediation,
     )
 
 

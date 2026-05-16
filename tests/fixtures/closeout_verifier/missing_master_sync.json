@@ -2,7 +2,7 @@
   "agent_mail": {
     "messages": [
       {
-        "body_md": "Closed and pushed `asupersync-master-drift` at `fedcba987`. Validation: cargo test passed. Released reservations.",
+        "body_md": "Closed and pushed `asupersync-master-drift` at `fedcba987`. Validation: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_master_drift cargo test passed. Released reservations.",
         "from": "GentleCitadel",
         "id": 1003,
         "subject": "Closed asupersync-master-drift",

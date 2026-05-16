@@ -2,7 +2,7 @@
   "agent_mail": {
     "messages": [
       {
-        "body_md": "Closed and pushed `asupersync-expired-reservation` at `bcd7890abc`. Validation: cargo test passed.",
+        "body_md": "Closed and pushed `asupersync-expired-reservation` at `bcd7890abc`. Validation: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_expired cargo test passed.",
         "from": "GentleCitadel",
         "id": 1007,
         "subject": "Closed asupersync-expired-reservation",
