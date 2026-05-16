@@ -7,8 +7,11 @@ use asupersync::messaging::nats::{
 };
 use libfuzzer_sys::fuzz_target;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::OnceLock;
 
 const MAX_FUZZ_SUBJECT_BYTES: usize = 4 * 1024 + 64;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug, Clone)]
 struct SubjectParserInput {
@@ -94,7 +97,61 @@ fn model_parse_publish_subject(subject: &str, max_subject_bytes: usize) -> Optio
     Some(tokens)
 }
 
+fn assert_publish_subject_rejection(subject: &str, expected: &str) {
+    let error = fuzz_validate_nats_publish_subject(subject)
+        .expect_err("fixed NATS publish subject canary should be rejected");
+
+    assert_eq!(
+        error, expected,
+        "NATS publish subject diagnostic drift for {subject:?}",
+    );
+    assert!(
+        !error.trim().is_empty(),
+        "NATS publish subject rejection should expose a diagnostic"
+    );
+    assert!(
+        error.len() <= 512,
+        "NATS publish subject rejection diagnostic should stay bounded: {} bytes",
+        error.len()
+    );
+}
+
+fn assert_fixed_publish_subject_error_canaries() {
+    assert_publish_subject_rejection("", "NATS protocol error: subject must not be empty");
+    assert_publish_subject_rejection(
+        "orders created",
+        "NATS protocol error: subject contains illegal whitespace/control characters",
+    );
+    assert_publish_subject_rejection(
+        "orders.\n.created",
+        "NATS protocol error: subject contains illegal whitespace/control characters",
+    );
+    assert_publish_subject_rejection(
+        "orders.*.created",
+        "NATS protocol error: subject must be a fully specified NATS subject without wildcards or empty tokens",
+    );
+    assert_publish_subject_rejection(
+        "orders..created",
+        "NATS protocol error: subject must be a fully specified NATS subject without wildcards or empty tokens",
+    );
+    assert_publish_subject_rejection(
+        "orders.>",
+        "NATS protocol error: subject must be a fully specified NATS subject without wildcards or empty tokens",
+    );
+
+    let max_subject_bytes = fuzz_nats_subject_max_bytes();
+    let oversized = "a".repeat(max_subject_bytes + 1);
+    assert_publish_subject_rejection(
+        &oversized,
+        &format!(
+            "NATS protocol error: subject exceeds the {max_subject_bytes}-byte NATS subject bound"
+        ),
+    );
+}
+
 fuzz_target!(|input: SubjectParserInput| {
+    FIXED_CANARIES.get_or_init(assert_fixed_publish_subject_error_canaries);
+
     let max_subject_bytes = fuzz_nats_subject_max_bytes();
     let subject = input.materialize(max_subject_bytes);
     let parse_result = catch_unwind(AssertUnwindSafe(|| {
