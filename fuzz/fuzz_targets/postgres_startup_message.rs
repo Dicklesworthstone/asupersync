@@ -14,11 +14,14 @@ use arbitrary::{Arbitrary, Unstructured};
 use asupersync::database::postgres::{PgError, fuzz_parse_startup_message};
 use libfuzzer_sys::fuzz_target;
 use std::hint::black_box;
+use std::sync::OnceLock;
 
 const MAX_FIELD_BYTES: usize = 64;
 const MAX_EXTRA_PARAMS: usize = 8;
 const MAX_PACKET_BYTES: usize = 2048;
 const POSTGRES_PROTOCOL_VERSION_3_0: i32 = 196_608;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Clone, Arbitrary)]
 struct StartupInput {
@@ -218,6 +221,18 @@ fn startup_packet_from_fields(fields: &[(Vec<u8>, Vec<u8>)], terminator: bool) -
     startup_packet_from_body(body)
 }
 
+fn startup_packet_from_parts(parts: &[&[u8]], terminator: bool) -> Vec<u8> {
+    let mut body = POSTGRES_PROTOCOL_VERSION_3_0.to_be_bytes().to_vec();
+    for part in parts {
+        body.extend_from_slice(part);
+        body.push(0);
+    }
+    if terminator {
+        body.push(0);
+    }
+    startup_packet_from_body(body)
+}
+
 fn startup_packet_from_body(mut body: Vec<u8>) -> Vec<u8> {
     body.truncate(MAX_PACKET_BYTES.saturating_sub(4));
     let len = i32::try_from(body.len() + 4).unwrap_or(i32::MAX);
@@ -252,7 +267,81 @@ fn error_kind(
     }
 }
 
+fn assert_protocol_rejection(bytes: &[u8], expected: &str) {
+    let error =
+        fuzz_parse_startup_message(bytes).expect_err("fixed startup-message canary should reject");
+
+    match &error {
+        PgError::Protocol(message) => assert_eq!(
+            message, expected,
+            "startup-message protocol payload changed"
+        ),
+        other => panic!("expected startup-message protocol error, got {other:?}"),
+    }
+
+    assert_eq!(
+        error.to_string(),
+        format!("PostgreSQL protocol error: {expected}"),
+        "startup-message Display diagnostic changed"
+    );
+}
+
+fn assert_fixed_startup_error_canaries() {
+    assert_protocol_rejection(&[], "startup message too short");
+
+    assert_protocol_rejection(
+        &startup_packet_from_body((POSTGRES_PROTOCOL_VERSION_3_0 + 1).to_be_bytes().to_vec()),
+        "unsupported startup protocol version: 196609",
+    );
+
+    assert_protocol_rejection(
+        &startup_packet_from_fields(&[(b"user".to_vec(), b"testuser".to_vec())], false),
+        "startup parameter list missing terminator",
+    );
+
+    assert_protocol_rejection(
+        &startup_packet_from_parts(&[b"user", b"testuser", b"database"], false),
+        "startup parameter \"database\" missing value",
+    );
+
+    assert_protocol_rejection(
+        &startup_packet_from_fields(
+            &[
+                (b"user".to_vec(), b"alice".to_vec()),
+                (b"user".to_vec(), b"admin".to_vec()),
+            ],
+            true,
+        ),
+        "duplicate startup parameter: user",
+    );
+
+    assert_protocol_rejection(
+        &startup_packet_from_fields(&[(b"user".to_vec(), Vec::new())], true),
+        "startup parameter user cannot be empty",
+    );
+
+    assert_protocol_rejection(
+        &startup_packet_from_fields(&[(b"database".to_vec(), b"fuzz_db".to_vec())], true),
+        "startup message missing required user parameter",
+    );
+
+    assert_protocol_rejection(
+        &startup_packet_from_fields(&[(b"bad-name".to_vec(), b"value".to_vec())], true),
+        "invalid startup parameter name: \"bad-name\"",
+    );
+
+    let mut body = POSTGRES_PROTOCOL_VERSION_3_0.to_be_bytes().to_vec();
+    body.push(0);
+    body.extend_from_slice(b"smuggled");
+    assert_protocol_rejection(
+        &startup_packet_from_body(body),
+        "StartupMessage message has 8 trailing byte(s)",
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
+    FIXED_CANARIES.get_or_init(assert_fixed_startup_error_canaries);
+
     let mut unstructured = Unstructured::new(data);
     let Ok(input) = StartupInput::arbitrary(&mut unstructured) else {
         return;
