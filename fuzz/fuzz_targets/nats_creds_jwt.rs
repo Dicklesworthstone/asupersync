@@ -9,6 +9,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use libfuzzer_sys::fuzz_target;
 use serde_json::{Map, Value, json};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::OnceLock;
 
 const MAX_TEXT_CHARS: usize = 64;
 const MAX_RAW_BYTES: usize = 256;
@@ -16,6 +17,8 @@ const NATS_CREDS_JWT_BEGIN: &str = "-----BEGIN NATS USER JWT-----";
 const NATS_CREDS_JWT_END: &str = "------END NATS USER JWT------";
 const NATS_CREDS_SEED_BEGIN: &str = "-----BEGIN USER NKEY SEED-----";
 const NATS_CREDS_SEED_END: &str = "------END USER NKEY SEED------";
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 type ClaimsTuple = (String, Option<String>, Option<String>, Option<i64>);
 type JwtParseResult = Result<ClaimsTuple, String>;
@@ -307,6 +310,91 @@ fn build_valid_jwt(claims: &ExpectedClaims) -> String {
     )
 }
 
+fn assert_jwt_rejection(jwt: &str, expected: &str) {
+    let error =
+        fuzz_parse_nats_jwt_claims(jwt).expect_err("fixed NATS JWT canary should be rejected");
+    assert_eq!(error, expected, "NATS JWT diagnostic drift for {jwt:?}");
+    assert!(
+        !error.trim().is_empty(),
+        "NATS JWT rejection should expose a diagnostic"
+    );
+    assert!(
+        error.len() <= 512,
+        "NATS JWT rejection diagnostic should stay bounded: {} bytes",
+        error.len()
+    );
+}
+
+fn assert_creds_rejection(creds: &str, expected: &str) {
+    let error =
+        fuzz_parse_nats_creds(creds).expect_err("fixed NATS creds canary should be rejected");
+    assert_eq!(error, expected, "NATS creds diagnostic drift for {creds:?}",);
+    assert!(
+        !error.trim().is_empty(),
+        "NATS creds rejection should expose a diagnostic"
+    );
+    assert!(
+        error.len() <= 512,
+        "NATS creds rejection diagnostic should stay bounded: {} bytes",
+        error.len()
+    );
+}
+
+fn assert_fixed_nats_creds_jwt_error_canaries() {
+    let header = encode_json(&json!({"alg":"ed25519-nkey","typ":"JWT"}));
+    let payload = encode_json(&json!({"sub":"UDXEXAMPLE"}));
+    let signature = URL_SAFE_NO_PAD.encode(b"sig");
+
+    assert_jwt_rejection(
+        "header.payload",
+        "NATS invalid auth configuration: JWT auth expects a compact JWT with exactly 3 non-empty segments",
+    );
+    assert_jwt_rejection(
+        &format!(
+            "{}.{payload}.{signature}",
+            encode_json(&json!(["not-an-object"]))
+        ),
+        "NATS invalid auth configuration: JWT header must decode to a JSON object",
+    );
+    assert_jwt_rejection(
+        &format!(
+            "{header}.{}.{signature}",
+            encode_json(&json!(["not-an-object"]))
+        ),
+        "NATS invalid auth configuration: JWT payload must decode to a JSON object",
+    );
+    assert_jwt_rejection(
+        &format!(
+            "{header}.{}.{signature}",
+            encode_json(&json!({"iss":"issuer"}))
+        ),
+        "NATS invalid auth configuration: JWT payload must contain a non-empty string sub claim",
+    );
+
+    assert_creds_rejection(
+        "",
+        "NATS invalid auth configuration: credentials are missing the JWT begin marker",
+    );
+    assert_creds_rejection(
+        &format!("{NATS_CREDS_JWT_BEGIN}\nabc\n"),
+        "NATS invalid auth configuration: credentials are missing the JWT end marker",
+    );
+    assert_creds_rejection(
+        &format!("{NATS_CREDS_JWT_BEGIN}\n{NATS_CREDS_JWT_END}\n"),
+        "NATS invalid auth configuration: credentials JWT block is empty",
+    );
+    assert_creds_rejection(
+        &format!("{NATS_CREDS_JWT_BEGIN}\nabc\n{NATS_CREDS_JWT_END}\n"),
+        "NATS invalid auth configuration: credentials are missing the USER NKEY SEED begin marker",
+    );
+    assert_creds_rejection(
+        &format!(
+            "{NATS_CREDS_JWT_BEGIN}\nabc\n{NATS_CREDS_JWT_END}\n{NATS_CREDS_SEED_BEGIN}\n{NATS_CREDS_SEED_END}\n"
+        ),
+        "NATS invalid auth configuration: credentials USER NKEY SEED block is empty",
+    );
+}
+
 // Real .creds files may wrap JWT/seed bodies over multiple lines; the parser
 // trims and joins non-empty lines, so valid wrapped encodings should round-trip.
 fn wrap_ascii_lines(text: &str, width_byte: u8, blank_lines: bool) -> String {
@@ -448,6 +536,8 @@ fn exercise_seed(seed: &str, expect_success: bool) {
 }
 
 fuzz_target!(|input: FuzzInput| {
+    FIXED_CANARIES.get_or_init(assert_fixed_nats_creds_jwt_error_canaries);
+
     match input {
         FuzzInput::RawJwt(bytes) => {
             let jwt = lossy_text(&bytes);
