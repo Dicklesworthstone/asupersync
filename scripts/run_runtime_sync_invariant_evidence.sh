@@ -256,6 +256,19 @@ first_failure_line_from() {
     grep -m1 -E 'error:|FAILED|FAIL|panicked at|blocked|unsupported|tripwire scan failed' "$path" 2>/dev/null || true
 }
 
+reject_rch_local_fallback_capture() {
+    local scenario_id="$1"
+    local combined_path="$2"
+    local marker_path
+    marker_path="$(dirname "$combined_path")/${scenario_id}.rch_local_fallback"
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$combined_path" 2>/dev/null; then
+        echo "FATAL: rch local fallback detected in ${scenario_id}; refusing local cargo execution" >&2
+        echo "rch local fallback detected in ${scenario_id}; refusing local cargo execution" > "$marker_path"
+        exit 86
+    fi
+}
+
 run_rch_command_capture() {
     local scenario_id="$1"
     local stdout_path="$2"
@@ -421,6 +434,7 @@ run_scenario() {
     end_ms="$(date +%s%3N)"
     duration_ms=$((end_ms - start_ms))
     cat "$stdout_path" "$stderr_path" > "$combined_path"
+    reject_rch_local_fallback_capture "$scenario_id" "$combined_path"
 
     verdict="pass"
     first_failure=""
