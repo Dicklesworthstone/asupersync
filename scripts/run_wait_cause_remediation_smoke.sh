@@ -185,7 +185,7 @@ COMMAND_ARGS=(
     "RUSTFLAGS=-D warnings -C debuginfo=0"
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wait_cause_remediation"
     "ASUPERSYNC_WAIT_CAUSE_REMEDIATION_REPORT_PATH=${SMOKE_REPORT_PATH}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
