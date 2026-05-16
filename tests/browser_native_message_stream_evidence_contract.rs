@@ -393,12 +393,17 @@ fn runner_uses_rch_and_preserves_timeout_after_remote_success_classification() {
     let runner = read_file(RUNNER_PATH);
     for marker in [
         "RCH_BIN=\"${RCH_BIN:-$HOME/.local/bin/rch}\"",
+        "RCH_LOCAL_FALLBACK_PATTERN=",
         "local -a rch_command=(\"${RCH_BIN}\" exec -- \"$@\")",
+        r#"grep -Eiq "${RCH_LOCAL_FALLBACK_PATTERN}""#,
         "cargo test -p asupersync --test browser_native_message_stream_evidence_contract",
         "Remote command finished: exit=0",
         "test result: ok",
         "retrieval_timeout_after_remote_success",
         "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
         "target/browser-native-message-stream-evidence",
         "run_report.json",
         "run.log",

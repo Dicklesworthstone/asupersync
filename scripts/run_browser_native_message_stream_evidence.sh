@@ -10,6 +10,7 @@ CONTRACT_ONLY=0
 TIMEOUT_SEC="${BROWSER_NATIVE_MESSAGE_STREAM_TIMEOUT_SEC:-180}"
 DRY_RUN=0
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
     cat <<'USAGE'
@@ -105,7 +106,7 @@ run_proof() {
     local status=$?
     set -e
 
-    if grep -Eq '^\[RCH\] local \(|falling back to local' "${RUN_LOG_PATH}"; then
+    if grep -Eiq "${RCH_LOCAL_FALLBACK_PATTERN}" "${RUN_LOG_PATH}"; then
         status=86
     fi
 
@@ -339,6 +340,9 @@ for marker in [
     "--dry-run",
     "BROWSER_NATIVE_MESSAGE_STREAM_DRY_RUN",
     "falling back to local",
+    "local fallback",
+    "fallback to local",
+    "executing locally",
 ]:
     if marker not in runner_text:
         drifts.append(f"runner_missing_marker:{marker}")
