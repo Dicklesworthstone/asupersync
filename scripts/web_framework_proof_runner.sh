@@ -16,6 +16,9 @@ LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
 BEAD_ID="asupersync-o74l7u"
+RCH_BIN="${RCH_BIN:-rch}"
+TARGET_DIR_SAFE_BEAD="${BEAD_ID//[^[:alnum:]_]/_}"
+RCH_TARGET_DIR="${ASUPERSYNC_WEB_FRAMEWORK_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_web_framework_${TARGET_DIR_SAFE_BEAD}}"
 
 EXPECTED_SCENARIOS=(
   "router-path-json-extractor"
@@ -60,12 +63,15 @@ log() {
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
 
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+  echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+  exit 1
+fi
+
 CMD=(
+  "$RCH_BIN" exec --
   env
-  -u
-  CARGO_TARGET_DIR
-  rch exec --
-  env
+  "CARGO_TARGET_DIR=$RCH_TARGET_DIR"
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
@@ -84,6 +90,8 @@ log "bead_id=$BEAD_ID"
 log "scenario_filter=web_framework_wave2_proof_runner_logs_required_scenarios"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
+log "rch_bin=$RCH_BIN"
+log "rch_target_dir=$RCH_TARGET_DIR"
 log "command=$(printf '%q ' "${CMD[@]}")"
 
 set +e
@@ -145,6 +153,8 @@ jq -n \
   --arg output_dir "$OUT_DIR" \
   --arg log_path "$LOG_FILE" \
   --arg rows_path "$ROWS_FILE" \
+  --arg rch_bin "$RCH_BIN" \
+  --arg rch_target_dir "$RCH_TARGET_DIR" \
   --arg command "$(printf '%q ' "${CMD[@]}")" \
   --argjson test_status "$TEST_STATUS" \
   --argjson row_count "$ROW_COUNT" \
@@ -163,6 +173,8 @@ jq -n \
     output_dir: $output_dir,
     run_log: $log_path,
     scenario_rows: $rows_path,
+    rch_bin: $rch_bin,
+    rch_target_dir: $rch_target_dir,
     command: $command,
     test_status: $test_status,
     row_count: $row_count,
