@@ -5,6 +5,15 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_lab_live_differential}"
 
+reject_rch_local_fallback_log() {
+  local log_path="$1"
+  local marker_path="$2"
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "${log_path}" 2>/dev/null; then
+    echo "rch local fallback detected; refusing local cargo execution" > "${marker_path}"
+    return 86
+  fi
+}
+
 run_differential() {
   cd "${ROOT_DIR}"
   "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR}" cargo run --features cli --bin asupersync -- lab differential "$@"
@@ -134,7 +143,20 @@ if [[ "${profile}" != "nightly-stress" ]]; then
     exit 2
   fi
   cd "${ROOT_DIR}"
-  exec "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR}" cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}"
+  set +e
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR}" cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}" 2>&1 \
+    | awk '
+        /^\[RCH\] local \(/ || tolower($0) ~ /falling back to local/ { fallback = 1 }
+        { print }
+        END { if (fallback) exit 86 }
+      '
+  pipe_status=("${PIPESTATUS[@]}")
+  set -e
+  if [[ "${pipe_status[1]}" -eq 86 ]]; then
+    echo "rch local fallback detected; refusing local cargo execution" >&2
+    exit 86
+  fi
+  exit "${pipe_status[0]}"
 fi
 
 if [[ "${show_help}" -eq 1 ]]; then
@@ -200,6 +222,9 @@ for ((offset = 0; offset < seed_count; offset++)); do
     2>&1 | tee "${run_log}"
   run_exit=${PIPESTATUS[0]}
   set -e
+  if ! reject_rch_local_fallback_log "${run_log}" "${seed_root}/rch_local_fallback.txt"; then
+    run_exit=86
+  fi
 
   runner_summary_path="${profile_root}/runner_summary.json"
   operator_summary_path="${profile_root}/operator_summary.txt"
