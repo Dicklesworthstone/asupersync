@@ -165,6 +165,7 @@ run_suite() {
   local category="${SUITE_CATEGORIES[$id]}"
   local env_vars="${SUITE_ENVS[$id]}"
   local log_file="$LOG_DIR/${id}.log"
+  local fallback_marker="$LOG_DIR/${id}_rch_local_fallback.txt"
   local suite_start suite_end duration exit_code tests_total tests_pass tests_fail
   local target_dir="${TMPDIR:-/tmp}/rch_target_nightly_stress_${id}"
   local target_args=()
@@ -204,6 +205,11 @@ run_suite() {
     popd >/dev/null
   fi
   set -e
+
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+    echo "rch local fallback detected; refusing local cargo execution" > "$fallback_marker"
+    exit_code=86
+  fi
 
   suite_end=$(date +%s)
   duration=$((suite_end - suite_start))
