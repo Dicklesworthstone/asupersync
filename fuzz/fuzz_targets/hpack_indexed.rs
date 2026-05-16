@@ -11,6 +11,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 use asupersync::{
     bytes::Bytes,
@@ -102,6 +103,8 @@ const STATIC_TABLE_ENTRIES: &[(&str, &str)] = &[
     ("www-authenticate", ""),             // 61
 ];
 
+static FIXED_INDEXED_CANARIES: OnceLock<()> = OnceLock::new();
+
 fuzz_target!(|input: HpackIndexedInput| {
     // Bound input size to prevent excessive memory allocation during fuzzing
     if input.header_data.len() > 64 * 1024 {
@@ -131,7 +134,7 @@ fuzz_target!(|input: HpackIndexedInput| {
     test_huffman_round_trip(&input.header_data);
 
     // Fixed parser-contract canaries for indexed and dynamic-table behavior.
-    test_indexed_decode_canaries();
+    FIXED_INDEXED_CANARIES.get_or_init(test_indexed_decode_canaries);
 });
 
 /// Setup dynamic table with bounded operations to avoid excessive state
