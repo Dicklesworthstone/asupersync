@@ -20,6 +20,7 @@ set -euo pipefail
 #   VALIDATION_TIMEOUT - timeout for optional bundle stages (default: 1200)
 #   TEST_THREADS   - cargo test thread count (default: 1)
 #   NO_PREFLIGHT   - set to 1 to skip cargo --no-run preflight
+#   RCH_TARGET_ROOT - root directory for remote Cargo target dirs
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -196,6 +197,12 @@ json_bool() {
     else
         printf 'false'
     fi
+}
+
+target_dir_for() {
+    local label="$1"
+    local safe_label="${label//[^A-Za-z0-9_]/_}"
+    printf '%s/%s\n' "$RCH_TARGET_ROOT" "$safe_label"
 }
 
 selected_for_run() {
@@ -509,11 +516,9 @@ run_validation_stage() {
     echo ">>> [bundle] ${stage_id}: ${stage_desc}"
     start_s="$(date +%s)"
     set +e
-    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
-        timeout "$VALIDATION_TIMEOUT" "$RCH_BIN" exec -- "${cmd[@]}" >"$stage_log" 2>&1
-    else
-        timeout "$VALIDATION_TIMEOUT" "${cmd[@]}" >"$stage_log" 2>&1
-    fi
+    local stage_target_dir
+    stage_target_dir="$(target_dir_for "bundle_${stage_id}")"
+    timeout "$VALIDATION_TIMEOUT" "$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${stage_target_dir}" "${cmd[@]}" >"$stage_log" 2>&1
     rc=$?
     set -e
     end_s="$(date +%s)"
@@ -625,18 +630,15 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
-RUN_WITH_RCH=1
 if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
-    RUN_WITH_RCH=0
-    echo "warning: '$RCH_BIN' not found; falling back to local cargo execution for this run" >&2
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
 fi
 
 REPRO_PREFIX="rch exec -- "
-if [[ "$RUN_WITH_RCH" -eq 0 ]]; then
-    REPRO_PREFIX=""
-fi
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+RCH_TARGET_ROOT="${RCH_TARGET_ROOT:-${TMPDIR:-/tmp}/rch_target_raptorq_e2e_${USER:-unknown}_${TIMESTAMP}}"
 RUN_DIR="${PROJECT_ROOT}/target/e2e-results/raptorq/${PROFILE}_${TIMESTAMP}"
 SCENARIO_LOG="${RUN_DIR}/scenarios.ndjson"
 SUMMARY_FILE="${RUN_DIR}/summary.json"
@@ -659,6 +661,7 @@ if [[ -n "$SCENARIO_FILTER" ]]; then
     echo "Scenario filter: ${SCENARIO_FILTER}"
 fi
 echo "Timeout:         ${E2E_TIMEOUT}s per scenario"
+echo "RCH target root: ${RCH_TARGET_ROOT}"
 echo "Artifact dir:    ${RUN_DIR}"
 echo "Scenario log:    ${SCENARIO_LOG}"
 if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
@@ -670,11 +673,7 @@ echo ""
 if [[ "${NO_PREFLIGHT:-0}" != "1" ]]; then
     echo ">>> [preflight] compile check..."
     set +e
-    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
-        "$RCH_BIN" exec -- cargo test --test raptorq_conformance --no-run >"$PREFLIGHT_LOG" 2>&1
-    else
-        cargo test --test raptorq_conformance --no-run >"$PREFLIGHT_LOG" 2>&1
-    fi
+    "$RCH_BIN" exec -- env "CARGO_TARGET_DIR=$(target_dir_for preflight)" cargo test --test raptorq_conformance --no-run >"$PREFLIGHT_LOG" 2>&1
     preflight_rc="$?"
     set -e
     if [[ "$preflight_rc" -ne 0 ]]; then
@@ -815,21 +814,13 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
     run_id="${scenario_id}-${PROFILE}"
     repro_cmd="${REPRO_PREFIX}cargo test --test raptorq_conformance ${test_filter} -- --nocapture --test-threads=${TEST_THREADS}"
     policy_snapshot_id="raptorq-e3-validation-policy-v1"
-    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
-        selected_path="rch::cargo-test::raptorq_conformance::${test_filter}"
-    else
-        selected_path="local::cargo-test::raptorq_conformance::${test_filter}"
-    fi
+    selected_path="rch::cargo-test::raptorq_conformance::${test_filter}"
 
     echo ">>> [${selected_count}] ${scenario_id} (${category})"
     start_s="$(date +%s)"
 
     set +e
-    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
-        timeout "$E2E_TIMEOUT" "$RCH_BIN" exec -- cargo test --test raptorq_conformance "$test_filter" -- --nocapture --test-threads="$TEST_THREADS" >"$scenario_log_file" 2>&1
-    else
-        timeout "$E2E_TIMEOUT" cargo test --test raptorq_conformance "$test_filter" -- --nocapture --test-threads="$TEST_THREADS" >"$scenario_log_file" 2>&1
-    fi
+    timeout "$E2E_TIMEOUT" "$RCH_BIN" exec -- env "CARGO_TARGET_DIR=$(target_dir_for "scenario_${scenario_id}")" cargo test --test raptorq_conformance "$test_filter" -- --nocapture --test-threads="$TEST_THREADS" >"$scenario_log_file" 2>&1
     rc=$?
     set -e
 
