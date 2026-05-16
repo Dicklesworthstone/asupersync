@@ -157,6 +157,11 @@ else
 fi
 popd >/dev/null
 
+if grep -Eq '^\[RCH\] local \(|falling back to local' "$LOG_FILE" "${ARTIFACT_DIR}/compile_errors.log" 2>/dev/null; then
+    echo "rch local fallback detected; refusing local cargo execution" > "${ARTIFACT_DIR}/rch_local_fallback.txt"
+    TEST_RESULT=86
+fi
+
 # --- Section: Failure Pattern Analysis ---
 echo ""
 echo ">>> [3/4] Checking output for failure patterns..."
@@ -215,6 +220,8 @@ if [ "$SUITE_STATUS" = "passed" ]; then
     FAILURE_CLASS="none"
 elif [ "$SUITE_STATUS" = "planned" ]; then
     FAILURE_CLASS="none"
+elif [ "$TEST_RESULT" -eq 86 ]; then
+    FAILURE_CLASS="rch_local_fallback"
 fi
 
 cat > "${SUMMARY_FILE}" << ENDJSON

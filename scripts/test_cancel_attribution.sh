@@ -80,10 +80,20 @@ run_test() {
     fi
 
     if "${test_command[@]}" 2>&1 | tee "$log_file"; then
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+            echo "rch local fallback detected; refusing local cargo execution" > "${OUTPUT_DIR}/${name}_rch_local_fallback.txt"
+            echo "  ✗ ${name}: RCH LOCAL FALLBACK" >> "$SUMMARY_TEXT_FILE"
+            return 86
+        fi
         local passed=$(grep -c "test .* ok" "$log_file" || true)
         echo "  ✓ ${name}: PASSED ($passed tests)" >> "$SUMMARY_TEXT_FILE"
         return 0
     else
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+            echo "rch local fallback detected; refusing local cargo execution" > "${OUTPUT_DIR}/${name}_rch_local_fallback.txt"
+            echo "  ✗ ${name}: RCH LOCAL FALLBACK" >> "$SUMMARY_TEXT_FILE"
+            return 86
+        fi
         local failed=$(grep -c "test .* FAILED" "$log_file" || true)
         echo "  ✗ ${name}: FAILED ($failed failures)" >> "$SUMMARY_TEXT_FILE"
         return 1
@@ -149,6 +159,8 @@ fi
 FAILURE_CLASS="test_or_pattern_failure"
 if [[ "${SUITE_STATUS}" == "passed" || "${SUITE_STATUS}" == "planned" ]]; then
     FAILURE_CLASS="none"
+elif grep -q "RCH LOCAL FALLBACK" "$SUMMARY_TEXT_FILE"; then
+    FAILURE_CLASS="rch_local_fallback"
 fi
 
 cat > "$SUMMARY_FILE" << ENDJSON
