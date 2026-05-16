@@ -290,10 +290,11 @@ COMMAND_ARGS=(
     exec
     --
     env
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_governor_state_snapshot_${SCENARIO}"
     "ASUPERSYNC_GOVERNOR_STATE_SNAPSHOT_CONTRACT_PATH=${ARTIFACT}"
     "ASUPERSYNC_GOVERNOR_STATE_SNAPSHOT_SCENARIO=${SCENARIO}"
     "ASUPERSYNC_GOVERNOR_STATE_SNAPSHOT_REPORT_PATH=${SCENARIO_REPORT_PATH}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
