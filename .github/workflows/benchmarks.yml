@@ -50,16 +50,25 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
+      - name: Require rch
+        run: |
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for benchmark jobs" >&2
+            exit 1
+          fi
+          echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"
+
       # Run current benchmarks
       - name: Run benchmarks (current)
         run: |
-          cargo bench --all-features -- --noplot --save-baseline current
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_bench_current cargo bench --all-features -- --noplot --save-baseline current
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-${{ github.sha }}
-          path: target/criterion/
+          path: /tmp/rch_target_bench_current/criterion/
           retention-days: 30
 
   # Regression detection for PRs
@@ -89,26 +98,39 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
+      - name: Require rch
+        run: |
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for benchmark regression jobs" >&2
+            exit 1
+          fi
+          echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"
+
       # Run baseline benchmarks from main
       - name: Checkout base branch
-        run: git checkout ${{ github.base_ref }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git checkout "$BASE_REF"
 
       - name: Run baseline benchmarks
         run: |
-          cargo bench --all-features -- --noplot
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_bench_baseline cargo bench --all-features -- --noplot
 
       # Switch back and compare
       - name: Checkout PR branch
-        run: git checkout ${{ github.head_ref }}
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: git checkout "$HEAD_REF"
 
       - name: Capture baseline (using PR script)
         run: |
-          ./scripts/capture_baseline.sh --save /tmp/bench_baseline
+          CRITERION_DIR=/tmp/rch_target_bench_baseline/criterion ./scripts/capture_baseline.sh --save /tmp/bench_baseline
 
       - name: Run PR benchmarks
         run: |
-          cargo bench --all-features -- --noplot
-          ./scripts/capture_baseline.sh --save /tmp/bench_current
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_bench_pr cargo bench --all-features -- --noplot
+          CRITERION_DIR=/tmp/rch_target_bench_pr/criterion ./scripts/capture_baseline.sh --save /tmp/bench_current
 
       - name: Compare benchmarks against baseline
         run: |
@@ -205,7 +227,8 @@ jobs:
             /tmp/bench_baseline/
             /tmp/bench_current/
             /tmp/bench_compare.json
-            target/criterion/
+            /tmp/rch_target_bench_baseline/criterion/
+            /tmp/rch_target_bench_pr/criterion/
           retention-days: 30
 
   # Scheduler-specific benchmarks with thresholds
@@ -229,9 +252,18 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-bench-scheduler-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Require rch
+        run: |
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for scheduler benchmark jobs" >&2
+            exit 1
+          fi
+          echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"
+
       - name: Run scheduler benchmarks
         run: |
-          cargo bench --all-features --bench scheduler_benchmark -- --noplot 2>&1 | tee scheduler-bench.txt
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_scheduler_benchmark cargo bench --all-features --bench scheduler_benchmark -- --noplot 2>&1 | tee scheduler-bench.txt
 
       - name: Check performance thresholds
         run: |
@@ -278,6 +310,15 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-bench-protocol-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Require rch
+        run: |
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for protocol benchmark jobs" >&2
+            exit 1
+          fi
+          echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"
+
       - name: Run protocol benchmarks
         run: |
-          cargo bench --all-fe
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_protocol_benchmark cargo bench --all-features --bench protocol_benchmark -- --noplot 2>&1 | tee protocol-bench.txt
