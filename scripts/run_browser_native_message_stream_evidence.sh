@@ -300,13 +300,20 @@ def effective_command_status(label, raw_status):
     return raw_status, ""
 
 
+def cargo_command_has_target_dir(command):
+    return "rch exec -- env " in command and re.search(r"(?:^|\s)CARGO_TARGET_DIR=", command)
+
+
 for source_path in contract["source_evidence_paths"]:
     if not (repo_root / source_path).exists():
         drifts.append(f"missing_source:{source_path}")
 
 for command in contract["validation_commands"]:
-    if "cargo " in command and "rch exec --" not in command:
-        drifts.append(f"missing_rch:{command}")
+    if "cargo " in command:
+        if "rch exec --" not in command:
+            drifts.append(f"missing_rch:{command}")
+        elif not cargo_command_has_target_dir(command):
+            drifts.append(f"missing_cargo_target_dir:{command}")
     lowered = command.lower()
     for marker in ("password=", "token=", "secret=", "bearer "):
         if marker in lowered:

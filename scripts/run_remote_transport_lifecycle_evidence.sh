@@ -153,6 +153,10 @@ def parse_log_line(line):
     return row
 
 
+def cargo_command_has_target_dir(command):
+    return "rch exec -- env " in command and re.search(r"(?:^|\s)CARGO_TARGET_DIR=", command)
+
+
 for source_path in contract["source_evidence_paths"]:
     if not (repo_root / source_path).exists():
         first_failure = first_failure or f"missing_source:{source_path}"
@@ -179,7 +183,12 @@ if test_status != 0 and not timed_out_after_success:
     first_failure = first_failure or f"cargo_test_status:{test_status}"
 
 for command in contract["validation_commands"]:
-    if ("cargo " in command or command.startswith("rustfmt ")) and "rch exec --" not in command:
+    if "cargo " in command:
+        if "rch exec --" not in command:
+            first_failure = first_failure or f"missing_rch:{command}"
+        elif not cargo_command_has_target_dir(command):
+            first_failure = first_failure or f"missing_cargo_target_dir:{command}"
+    elif command.startswith("rustfmt ") and "rch exec --" not in command:
         first_failure = first_failure or f"missing_rch:{command}"
     lowered = command.lower()
     for marker in ("password=", "token=", "secret=", "bearer "):

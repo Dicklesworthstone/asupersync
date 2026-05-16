@@ -73,6 +73,23 @@ fn artifact_pins_required_row_schema_and_complete_scenario_matrix() {
         Some("tests/fixtures/browser-native-message-stream-consumer")
     );
     assert_eq!(artifact["runner_script"].as_str(), Some(RUNNER_PATH));
+    let validation_commands = string_array(&artifact, "validation_commands");
+    let cargo_commands = validation_commands
+        .iter()
+        .copied()
+        .filter(|command| command.contains("cargo "))
+        .collect::<Vec<_>>();
+    assert!(
+        !cargo_commands.is_empty(),
+        "artifact must include Cargo validation commands"
+    );
+    assert!(
+        cargo_commands
+            .iter()
+            .all(|command| command.contains("rch exec -- env ")
+                && command.contains("CARGO_TARGET_DIR=")),
+        "Cargo validation commands must route through rch exec -- env CARGO_TARGET_DIR=..."
+    );
 
     let required_fields = string_array(&artifact, "required_log_fields");
     assert_eq!(

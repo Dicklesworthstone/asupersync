@@ -1349,12 +1349,28 @@ fn remote_transport_runner_dry_run_records_rch_plan() {
     let validation_commands = artifact["validation_commands"]
         .as_array()
         .expect("validation_commands array");
+    let cargo_commands = validation_commands
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|command| command.contains("cargo "))
+        .collect::<Vec<_>>();
+    assert!(
+        !cargo_commands.is_empty(),
+        "artifact must include Cargo validation commands"
+    );
+    assert!(
+        cargo_commands
+            .iter()
+            .all(|command| command.contains("rch exec -- env ")
+                && command.contains("CARGO_TARGET_DIR=")),
+        "Cargo validation commands must route through rch exec -- env CARGO_TARGET_DIR=..."
+    );
     assert!(
         validation_commands
             .iter()
             .filter_map(serde_json::Value::as_str)
-            .filter(|command| command.contains("cargo ") || command.starts_with("rustfmt "))
+            .filter(|command| command.contains("rustfmt "))
             .all(|command| command.contains("rch exec --")),
-        "cargo/rustfmt validation commands must be rch-routed"
+        "rustfmt validation commands must be rch-routed"
     );
 }
