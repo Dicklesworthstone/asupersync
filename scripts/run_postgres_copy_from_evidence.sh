@@ -441,7 +441,13 @@ run_scenario() {
     evidence_quality="live"
     blocker_bead_id=""
     first_failure=""
-    if [[ "$scenario_id" == "POSTGRES-COPY-REAL-SERVER-LIVE" ]]; then
+    if [[ "$USE_RCH" -eq 1 ]] && grep -Eq '^\[RCH\] local \(|falling back to local' "$combined_path" 2>/dev/null; then
+        verdict="fail"
+        rc=86
+        actual="rch local fallback detected; refusing local cargo execution"
+        first_failure="$actual"
+        printf '%s\n' "$actual" > "${run_dir}/${scenario_id}.rch_local_fallback.txt"
+    elif [[ "$scenario_id" == "POSTGRES-COPY-REAL-SERVER-LIVE" ]]; then
         if validation_result="$(validate_real_server_output "$combined_path")"; then
             actual="$validation_result"
         else
