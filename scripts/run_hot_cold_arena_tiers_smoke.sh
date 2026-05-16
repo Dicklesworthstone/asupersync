@@ -262,7 +262,7 @@ run_once() {
         "ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT}"
         "ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO}"
         "ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=${report_path}"
-        cargo
+        "${CARGO_BIN:-cargo}"
         test
         -p
         asupersync
