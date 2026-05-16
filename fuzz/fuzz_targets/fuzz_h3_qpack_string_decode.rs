@@ -23,7 +23,7 @@
 //! The harness must never panic. Decoder errors are expected; a process
 //! abort, OOM, or hang is the failure signal.
 //!
-//! Run with: `cargo +nightly fuzz run fuzz_h3_qpack_string_decode`
+//! Run with: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_h3_qpack_string_decode cargo +nightly fuzz run fuzz_h3_qpack_string_decode`
 
 #![no_main]
 

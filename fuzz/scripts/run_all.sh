@@ -6,6 +6,7 @@ set -euo pipefail
 
 DURATION="${1:-60}"
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RCH_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_fuzz_run_all}"
 
 cd "$FUZZ_DIR"
 
@@ -22,7 +23,7 @@ echo
 
 for target in "${TARGETS[@]}"; do
     echo "=== Fuzzing: $target ==="
-    cargo +nightly fuzz run "$target" -- -max_total_time="$DURATION" || {
+    rch exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo +nightly fuzz run "$target" -- -max_total_time="$DURATION" || {
         echo "CRASH FOUND in $target"
         exit 1
     }

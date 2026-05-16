@@ -20,6 +20,7 @@ fi
 TARGET="$1"
 SEED_FILE="$2"
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RCH_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_fuzz_replay_seed}"
 
 cd "$FUZZ_DIR"
 
@@ -36,6 +37,6 @@ xxd -l 64 "$SEED_FILE" 2>/dev/null || hexdump -C -n 64 "$SEED_FILE" 2>/dev/null 
 echo ""
 
 # Build with debug symbols
-cargo +nightly fuzz run "$TARGET" -- "$SEED_FILE" -runs=1
+rch exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo +nightly fuzz run "$TARGET" -- "$SEED_FILE" -runs=1
 
 echo "Replay completed successfully."

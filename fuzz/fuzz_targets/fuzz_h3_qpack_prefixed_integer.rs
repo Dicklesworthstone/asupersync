@@ -20,7 +20,7 @@
 //! The harness must never panic. Decoder errors are expected — the
 //! fail signal is a process abort, OOM, or hang.
 //!
-//! Run with: `cargo +nightly fuzz run fuzz_h3_qpack_prefixed_integer`
+//! Run with: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_h3_qpack_prefixed_integer cargo +nightly fuzz run fuzz_h3_qpack_prefixed_integer`
 
 #![no_main]
 
