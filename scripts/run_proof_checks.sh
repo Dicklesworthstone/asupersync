@@ -21,6 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+RCH_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_proof_checks}"
 cd "$PROJECT_DIR"
 
 # Parse args
@@ -96,6 +97,10 @@ run_check_optional() {
     RESULTS+=("{\"name\":\"$name\",\"category\":\"$category\",\"status\":\"$status\",\"elapsed_s\":$elapsed,\"log\":\"$(basename "$logfile")\"}")
 }
 
+run_cargo() {
+    rch exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo "$@"
+}
+
 echo "=== Asupersync Proof Verification Suite (bd-2rhiq) ==="
 echo "Artifacts: $ARTIFACTS_DIR"
 echo ""
@@ -103,41 +108,41 @@ echo ""
 # ---- Category: Rust Proof Tests ----
 
 run_check "Certificate verification" "rust-proofs" \
-    cargo test --lib plan::certificate --all-features -- --nocapture
+    run_cargo test --lib plan::certificate --all-features -- --nocapture
 
 run_check "Obligation formal checks" "rust-proofs" \
-    cargo test --lib obligation --all-features -- --nocapture
+    run_cargo test --lib obligation --all-features -- --nocapture
 
 run_check "Lab oracle invariant checks" "rust-proofs" \
-    cargo test --lib lab::oracle --all-features -- --nocapture
+    run_cargo test --lib lab::oracle --all-features -- --nocapture
 
 run_check "Cancellation protocol tests" "rust-proofs" \
-    cargo test --lib types::cancel --all-features -- --nocapture
+    run_cargo test --lib types::cancel --all-features -- --nocapture
 
 run_check "Combinator algebraic laws" "rust-proofs" \
-    cargo test --lib combinator::laws --all-features -- --nocapture
+    run_cargo test --lib combinator::laws --all-features -- --nocapture
 
 run_check "TLA+ export smoke test" "rust-proofs" \
-    cargo test --lib trace::tla_export --all-features -- --nocapture
+    run_cargo test --lib trace::tla_export --all-features -- --nocapture
 
 run_check "Trace canonicalization" "rust-proofs" \
-    cargo test --lib trace::canonicalize --all-features -- --nocapture
+    run_cargo test --lib trace::canonicalize --all-features -- --nocapture
 
 # ---- Category: Integration Proof Tests ----
 
 run_check "Lease semantics and liveness" "integration-proofs" \
-    cargo test --test lease_semantics -- --nocapture
+    run_cargo test --test lease_semantics -- --nocapture
 
 run_check "Close quiescence regression" "integration-proofs" \
-    cargo test --test close_quiescence_regression -- --nocapture
+    run_cargo test --test close_quiescence_regression -- --nocapture
 
 run_check "Refinement conformance" "integration-proofs" \
-    cargo test --test refinement_conformance -- --nocapture
+    run_cargo test --test refinement_conformance -- --nocapture
 
 # ---- Category: DPOR (optional, may not be present) ----
 
 run_check_optional "DPOR exploration" "dpor" \
-    cargo test --test dpor_exploration --all-features -- --nocapture
+    run_cargo test --test dpor_exploration --all-features -- --nocapture
 
 # ---- Category: TLA+ Model Checking (optional, requires TLC) ----
 
