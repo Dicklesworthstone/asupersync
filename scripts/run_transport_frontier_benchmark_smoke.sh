@@ -397,8 +397,9 @@ run_single_scenario() {
 
   exit_code=0
   timeout "$RCH_WRAPPER_TIMEOUT" "${COMMAND_ARGV[@]}" > "$run_log_path" 2>&1 || exit_code=$?
-  if grep -Eiq 'local fallback|fallback to local|executing locally' "$run_log_path"; then
+  if grep -Eiq '^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally' "$run_log_path"; then
     printf '\nerror: rch local fallback detected; refusing local cargo execution\n' >> "$run_log_path"
+    printf 'rch local fallback detected; refusing local cargo execution\n' > "$outdir/rch_local_fallback.txt"
     exit_code=86
   fi
   finished_at="${AA08_FINISHED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"

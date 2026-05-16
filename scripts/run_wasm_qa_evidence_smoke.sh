@@ -493,8 +493,9 @@ run_scenario_bundle() {
   if [[ "$EXITCODE" -eq 0 ]]; then
     timeout "$RCH_WRAPPER_TIMEOUT" "${COMMAND_ARGV[@]}" >> "$RUN_LOG_PATH" 2>&1 || EXITCODE=$?
   fi
-  if grep -Eiq 'local fallback|fallback to local|executing locally' "$RUN_LOG_PATH"; then
+  if grep -Eiq '^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally' "$RUN_LOG_PATH"; then
     printf '\nerror: rch local fallback detected; refusing local cargo execution\n' >> "$RUN_LOG_PATH"
+    printf 'rch local fallback detected; refusing local cargo execution\n' > "$OUTDIR/rch_local_fallback.txt"
     EXITCODE=86
   fi
 
