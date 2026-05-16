@@ -12,6 +12,7 @@ OUTPUT_ROOT_OVERRIDE="${NUMA_ARENA_LOCALITY_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${NUMA_ARENA_LOCALITY_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${NUMA_ARENA_LOCALITY_SMOKE_RUN_ID:-}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 REPLAY_CARGO_TOKEN='${CARGO_BIN:-cargo}'
 
 usage() {
@@ -261,7 +262,7 @@ run_once() {
         if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$log_path" 2>/dev/null; then
             break
         fi
-        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+        if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$log_path" 2>/dev/null; then
             kill "$command_pid" 2>/dev/null || true
             wait "$command_pid" 2>/dev/null || true
             command_exit_code=86
@@ -286,7 +287,7 @@ run_once() {
         set -e
     fi
 
-    if [ "$command_exit_code" -ne 86 ] && grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+    if [ "$command_exit_code" -ne 86 ] && grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$log_path" 2>/dev/null; then
         command_exit_code=86
         printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_path"
     fi
