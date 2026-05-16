@@ -24,9 +24,12 @@
   "dirty_clusters": [],
   "generated_at": "2026-05-08T04:30:00Z",
   "next_action": {
-    "category": "proof-only",
-    "lane": "rustfmt-check",
-    "reason": "no ready bead is available, but proof suggestions exist"
+    "age_hours": 28.5,
+    "assignee": "OlderAgent",
+    "bead_id": "asupersync-stale1",
+    "category": "reopen-stale-bead",
+    "reason": "stale in-progress bead needs owner or reclaim review",
+    "updated_at": "2026-05-07T00:00:00Z"
   },
   "proof_suggestions": [
     "rustfmt-check"

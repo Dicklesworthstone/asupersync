@@ -525,6 +525,15 @@ def choose_next_action(
             "reason": "ready bead exists and no blocking reservation was found",
             "bead_id": ready_ids[0],
         }
+    if stale:
+        return {
+            "category": "reopen-stale-bead",
+            "reason": "stale in-progress bead needs owner or reclaim review",
+            "bead_id": stale[0].get("id", ""),
+            "assignee": stale[0].get("assignee", ""),
+            "updated_at": stale[0].get("updated_at", ""),
+            "age_hours": stale[0].get("age_hours", 0),
+        }
     if proof_suggestions:
         return {
             "category": "proof-only",
@@ -537,15 +546,6 @@ def choose_next_action(
             "reason": "ready queue only contains a non-claimable epic; run the fallback work selector",
             "lane": "reservation-aware-work-finder",
             "bead_id": ready_epic_ids[0],
-        }
-    if stale:
-        return {
-            "category": "reopen-stale-bead",
-            "reason": "stale in-progress bead needs owner or reclaim review",
-            "bead_id": stale[0].get("id", ""),
-            "assignee": stale[0].get("assignee", ""),
-            "updated_at": stale[0].get("updated_at", ""),
-            "age_hours": stale[0].get("age_hours", 0),
         }
     if not agent_mail_available:
         return {

@@ -322,7 +322,7 @@ fn no_agent_mail_output_matches_full_reviewed_golden() {
 #[test]
 fn stale_in_progress_candidate_is_listed_without_mutation() {
     let receipt = receipt_json("stale_in_progress.json");
-    assert_eq!(next_action_category(&receipt), "proof-only");
+    assert_eq!(next_action_category(&receipt), "reopen-stale-bead");
     let stale = receipt["active_bead_ids"]["stale_in_progress"]
         .as_array()
         .expect("stale_in_progress must be array");
@@ -334,6 +334,14 @@ fn stale_in_progress_candidate_is_listed_without_mutation() {
             .as_f64()
             .expect("age_hours must be numeric")
             >= 24.0
+    );
+    assert_eq!(
+        receipt["next_action"]["bead_id"].as_str(),
+        Some("asupersync-stale1")
+    );
+    assert_eq!(
+        receipt["next_action"]["reason"].as_str(),
+        Some("stale in-progress bead needs owner or reclaim review")
     );
 }
 
