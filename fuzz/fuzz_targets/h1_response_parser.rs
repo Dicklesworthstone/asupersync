@@ -13,10 +13,15 @@ use asupersync::http::h1::codec::HttpError;
 use asupersync::http::h1::types::Response;
 use libfuzzer_sys::fuzz_target;
 use std::io::ErrorKind;
+use std::sync::OnceLock;
 
 const MAX_DATA_SIZE: usize = 10_000_000; // 10MB limit to prevent OOM
 
+static FIXED_RESPONSE_CANARIES: OnceLock<()> = OnceLock::new();
+
 fuzz_target!(|data: &[u8]| {
+    FIXED_RESPONSE_CANARIES.get_or_init(test_fixed_response_canaries);
+
     // Size guard to prevent OOM
     if data.len() > MAX_DATA_SIZE {
         return;
@@ -38,8 +43,6 @@ fuzz_target!(|data: &[u8]| {
     // Test codec reuse after potential error
     let mut buf3 = BytesMut::from(data);
     observe_decode_result(Http1ClientCodec::new().decode(&mut buf3));
-
-    test_fixed_response_canaries();
 });
 
 fn observe_decode_result(result: Result<Option<Response>, HttpError>) {
