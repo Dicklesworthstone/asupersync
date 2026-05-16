@@ -379,7 +379,13 @@ fn runner_script_exists_and_declares_modes() {
         "--execute",
         "--scenario",
         "RCH_BIN",
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#,
+        "[RCH\\] local",
+        "falling back to local",
         "local fallback",
+        "fallback to local",
+        "executing locally",
         "validation_passed",
     ] {
         assert!(runner.contains(mode), "runner must support {mode}");
