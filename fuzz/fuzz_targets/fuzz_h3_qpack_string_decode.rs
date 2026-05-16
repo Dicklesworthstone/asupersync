@@ -32,9 +32,11 @@ use asupersync::http::h3_native::{
     H3NativeError, H3QpackMode, QpackFieldPlan, qpack_decode_field_section,
 };
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const FIELD_SECTION_PREFIX: [u8; 2] = [0x00, 0x00];
+static FIXED_STRING_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug)]
 enum Scenario {
@@ -77,30 +79,30 @@ enum Scenario {
     },
 }
 
-fuzz_target!(|s: Scenario| match s {
-    Scenario::Arbitrary(bytes) => {
-        fuzz_arbitrary(&bytes);
-        test_fixed_string_canaries();
-    }
-    Scenario::LiteralNameWithPayload {
-        repr_high,
-        huffman,
-        declared_len,
-        payload,
-    } => {
-        fuzz_literal_name(repr_high, huffman, declared_len, &payload);
-        test_fixed_string_canaries();
-    }
-    Scenario::MultiSection { sections } => {
-        fuzz_multi_section(&sections);
-        test_fixed_string_canaries();
-    }
-    Scenario::OverlongDeclaredLength {
-        repr_high,
-        continuation_count,
-    } => {
-        fuzz_overlong_length(repr_high, continuation_count);
-        test_fixed_string_canaries();
+fuzz_target!(|s: Scenario| {
+    FIXED_STRING_CANARIES.get_or_init(test_fixed_string_canaries);
+
+    match s {
+        Scenario::Arbitrary(bytes) => {
+            fuzz_arbitrary(&bytes);
+        }
+        Scenario::LiteralNameWithPayload {
+            repr_high,
+            huffman,
+            declared_len,
+            payload,
+        } => {
+            fuzz_literal_name(repr_high, huffman, declared_len, &payload);
+        }
+        Scenario::MultiSection { sections } => {
+            fuzz_multi_section(&sections);
+        }
+        Scenario::OverlongDeclaredLength {
+            repr_high,
+            continuation_count,
+        } => {
+            fuzz_overlong_length(repr_high, continuation_count);
+        }
     }
 });
 
