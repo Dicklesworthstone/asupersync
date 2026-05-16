@@ -79,23 +79,41 @@ fuzz_target!(|data: &[u8]| {
     // Live parser precedence: stream-id errors are detected before ACK/payload
     // and before individual setting validation.
     if header.stream_id != 0 {
-        assert_error_code(result, ErrorCode::ProtocolError);
+        assert_error_shape(
+            result,
+            ExpectedSettingsError {
+                code: ErrorCode::ProtocolError,
+                message: "SETTINGS frame with non-zero stream ID",
+            },
+        );
         return;
     }
 
     let ack_flag_set = header.has_flag(SETTINGS_ACK_FLAG);
     if ack_flag_set && !payload.is_empty() {
-        assert_error_code(result, ErrorCode::FrameSizeError);
+        assert_error_shape(
+            result,
+            ExpectedSettingsError {
+                code: ErrorCode::FrameSizeError,
+                message: "SETTINGS ACK with non-zero length",
+            },
+        );
         return;
     }
 
     if !payload.len().is_multiple_of(6) {
-        assert_error_code(result, ErrorCode::FrameSizeError);
+        assert_error_shape(
+            result,
+            ExpectedSettingsError {
+                code: ErrorCode::FrameSizeError,
+                message: "SETTINGS frame length not multiple of 6",
+            },
+        );
         return;
     }
 
-    if let Some(code) = first_live_setting_error(&payload) {
-        assert_error_code(result, code);
+    if let Some(expected) = first_live_setting_error(&payload) {
+        assert_error_shape(result, expected);
         return;
     }
 
@@ -150,15 +168,34 @@ fn build_settings_payload(frame: &SettingsFrame) -> Vec<u8> {
     payload
 }
 
-fn first_live_setting_error(payload: &Bytes) -> Option<ErrorCode> {
+#[derive(Clone, Copy, Debug)]
+struct ExpectedSettingsError {
+    code: ErrorCode,
+    message: &'static str,
+}
+
+fn first_live_setting_error(payload: &Bytes) -> Option<ExpectedSettingsError> {
     for chunk in payload.chunks_exact(6) {
         let id = u16::from_be_bytes([chunk[0], chunk[1]]);
         let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
         match id {
-            0x2 if value > 1 => return Some(ErrorCode::ProtocolError),
-            0x4 if value > 0x7fff_ffff => return Some(ErrorCode::FlowControlError),
+            0x2 if value > 1 => {
+                return Some(ExpectedSettingsError {
+                    code: ErrorCode::ProtocolError,
+                    message: "SETTINGS_ENABLE_PUSH must be 0 or 1",
+                });
+            }
+            0x4 if value > 0x7fff_ffff => {
+                return Some(ExpectedSettingsError {
+                    code: ErrorCode::FlowControlError,
+                    message: "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum",
+                });
+            }
             0x5 if !(16_384..=16_777_215).contains(&value) => {
-                return Some(ErrorCode::ProtocolError);
+                return Some(ExpectedSettingsError {
+                    code: ErrorCode::ProtocolError,
+                    message: "SETTINGS_MAX_FRAME_SIZE out of bounds",
+                });
             }
             _ => {}
         }
@@ -177,10 +214,35 @@ fn expected_known_settings(payload: &Bytes) -> Vec<Setting> {
         .collect()
 }
 
-fn assert_error_code(result: Result<H2SettingsFrame, H2Error>, expected: ErrorCode) {
+fn assert_error_shape(result: Result<H2SettingsFrame, H2Error>, expected: ExpectedSettingsError) {
     match result {
         Ok(frame) => panic!("expected {expected:?}, parsed SETTINGS frame: {frame:?}"),
-        Err(err) => assert_eq!(err.code, expected, "unexpected SETTINGS parse error: {err}"),
+        Err(err) => {
+            assert_eq!(
+                err.code, expected.code,
+                "unexpected SETTINGS parse error code: {err}"
+            );
+            assert!(
+                err.is_connection_error(),
+                "SETTINGS parse errors should be connection-scoped: {err:?}"
+            );
+            assert_eq!(
+                err.stream_id, None,
+                "SETTINGS parse errors should not attach a stream id"
+            );
+            assert_eq!(
+                err.message, expected.message,
+                "SETTINGS parse error should keep the exact live diagnostic"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "HTTP/2 connection error ({}): {}",
+                    expected.code, expected.message
+                ),
+                "SETTINGS parse error should keep stable Display output"
+            );
+        }
     }
 }
 
