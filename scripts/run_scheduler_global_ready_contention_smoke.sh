@@ -9,6 +9,7 @@ LIST_ONLY=0
 MODE="execute"
 OUTPUT_ROOT_OVERRIDE="${SCHEDULER_GLOBAL_READY_CONTENTION_OUTPUT_DIR:-}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
     cat <<'USAGE'
@@ -420,7 +421,7 @@ else
     COMMAND_EXIT_CODE=$?
     set -e
 
-    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG"; then
+    if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RUN_LOG"; then
         COMMAND_EXIT_CODE=86
         SCRIPT_EXIT_CODE=86
         STATUS="failed"

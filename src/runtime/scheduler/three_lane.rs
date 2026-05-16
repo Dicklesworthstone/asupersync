@@ -6315,6 +6315,8 @@ mod tests {
 
     const GLOBAL_READY_CONTENTION_CONTRACT_JSON: &str =
         include_str!("../../../artifacts/scheduler_global_ready_contention_smoke_contract_v1.json");
+    const GLOBAL_READY_CONTENTION_RUNNER_SCRIPT: &str =
+        include_str!("../../../scripts/run_scheduler_global_ready_contention_smoke.sh");
     const GLOBAL_READY_CONTENTION_OUTPUT_DIR_ENV: &str =
         "ASUPERSYNC_GLOBAL_READY_CONTENTION_OUTPUT_DIR";
     const GLOBAL_READY_CONTENTION_SCENARIO_ENV: &str =
@@ -7907,6 +7909,31 @@ mod tests {
             assert!(
                 emitted_selected,
                 "selected scenario {selected_scenario} was not found in the contract"
+            );
+        }
+    }
+
+    #[test]
+    fn global_ready_contention_runner_rejects_full_rch_fallback_marker_set() {
+        let matcher_uses = GLOBAL_READY_CONTENTION_RUNNER_SCRIPT
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count();
+        assert!(
+            matcher_uses >= 1,
+            "runner must use the shared local fallback matcher at its rch gate"
+        );
+
+        for token in [
+            "RCH_LOCAL_FALLBACK_PATTERN=",
+            "[RCH\\] local",
+            "falling back to local",
+            "local fallback",
+            "fallback to local",
+            "executing locally",
+        ] {
+            assert!(
+                GLOBAL_READY_CONTENTION_RUNNER_SCRIPT.contains(token),
+                "runner missing local fallback marker: {token}"
             );
         }
     }
