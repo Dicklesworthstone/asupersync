@@ -55,6 +55,15 @@ mkdir -p "${STAGING_DIR}" "${PACKAGE_DIR}" "${WRAPPER_ROOT}"
 WORK_DIR="$(mktemp -d "${WRAPPER_ROOT}/${PROFILE}.XXXXXX")"
 CARGO_WRAPPER="${WORK_DIR}/cargo-rch"
 TARGET_DIR="${WORK_DIR}/target"
+BUILD_LOG="${WORK_DIR}/wasm-pack-build.log"
+
+reject_rch_local_fallback_log() {
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "${BUILD_LOG}" 2>/dev/null; then
+    echo "error: rch local fallback detected; refusing local cargo execution" >&2
+    echo "rch local fallback detected; refusing local cargo execution" > "${WORK_DIR}/rch_local_fallback.txt"
+    exit 86
+  fi
+}
 
 cat > "${CARGO_WRAPPER}" <<EOF
 #!/usr/bin/env bash
@@ -65,11 +74,16 @@ EOF
 chmod +x "${CARGO_WRAPPER}"
 
 echo "==> Building asupersync-browser-core (${PROFILE})"
-CARGO="${CARGO_WRAPPER}" wasm-pack build "${CRATE_DIR}" \
+if CARGO="${CARGO_WRAPPER}" wasm-pack build "${CRATE_DIR}" \
   --target web \
   --out-dir "${STAGING_DIR}" \
   --out-name asupersync \
-  "${BUILD_ARGS[@]}"
+  "${BUILD_ARGS[@]}" 2>&1 | tee "${BUILD_LOG}"; then
+  reject_rch_local_fallback_log
+else
+  reject_rch_local_fallback_log
+  exit 1
+fi
 
 major="$(rg -No 'WASM_ABI_MAJOR_VERSION[^=]*= ([0-9_]+);' "${ABI_FILE}" -r '$1' -m1 | tr -d '_')"
 minor="$(rg -No 'WASM_ABI_MINOR_VERSION[^=]*= ([0-9_]+);' "${ABI_FILE}" -r '$1' -m1 | tr -d '_')"
