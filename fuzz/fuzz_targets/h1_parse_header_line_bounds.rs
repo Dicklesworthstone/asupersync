@@ -75,33 +75,57 @@ fn assert_bounds(
 }
 
 fn assert_bad_header(line: &[u8]) {
-    assert!(
-        matches!(
-            fuzz_parse_header_line_bounds(line),
-            Err(HttpError::BadHeader)
-        ),
-        "expected BadHeader for {line:?}",
+    assert_header_error(
+        line,
+        matches_bad_header,
+        "malformed header",
+        "expected BadHeader for header-line candidate",
     );
 }
 
 fn assert_invalid_header_name(line: &[u8]) {
-    assert!(
-        matches!(
-            fuzz_parse_header_line_bounds(line),
-            Err(HttpError::InvalidHeaderName)
-        ),
-        "expected InvalidHeaderName for {line:?}",
+    assert_header_error(
+        line,
+        matches_invalid_header_name,
+        "invalid header name",
+        "expected InvalidHeaderName for header-line candidate",
     );
 }
 
 fn assert_invalid_header_value(line: &[u8]) {
-    assert!(
-        matches!(
-            fuzz_parse_header_line_bounds(line),
-            Err(HttpError::InvalidHeaderValue)
-        ),
-        "expected InvalidHeaderValue for {line:?}",
+    assert_header_error(
+        line,
+        matches_invalid_header_value,
+        "invalid header value",
+        "expected InvalidHeaderValue for header-line candidate",
     );
+}
+
+fn assert_header_error(
+    line: &[u8],
+    predicate: fn(&HttpError) -> bool,
+    expected_display: &str,
+    message: &str,
+) {
+    match fuzz_parse_header_line_bounds(line) {
+        Err(error) if predicate(&error) => {
+            assert_eq!(error.to_string(), expected_display, "{message}: {line:?}");
+        }
+        Ok(bounds) => panic!("{message}: unexpected bounds {bounds:?} for {line:?}"),
+        Err(error) => panic!("{message}: unexpected error {error:?} for {line:?}"),
+    }
+}
+
+fn matches_bad_header(error: &HttpError) -> bool {
+    matches!(error, HttpError::BadHeader)
+}
+
+fn matches_invalid_header_name(error: &HttpError) -> bool {
+    matches!(error, HttpError::InvalidHeaderName)
+}
+
+fn matches_invalid_header_value(error: &HttpError) -> bool {
+    matches!(error, HttpError::InvalidHeaderValue)
 }
 
 fn assert_consistent_bounds(line: &[u8]) {
