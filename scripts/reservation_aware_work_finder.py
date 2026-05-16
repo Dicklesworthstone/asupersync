@@ -86,6 +86,10 @@ FORBIDDEN_COMMAND_TOKENS = [
 ]
 SAFE_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 CARGO_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_-])cargo(?![A-Za-z0-9_-])")
+RCH_LOCAL_FALLBACK_RE = re.compile(
+    r"(?m)^\[RCH\] local \(|falling back to local",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -422,15 +426,25 @@ def command_routes_cargo_through_rch(command: str) -> bool:
 def proof_command_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     blockers = []
     for command in candidate.get("proof_commands", []):
-        collapsed = " ".join(str(command).lower().split())
+        command_text = str(command)
+        collapsed = " ".join(command_text.lower().split())
+        if RCH_LOCAL_FALLBACK_RE.search(command_text):
+            blockers.append(
+                {
+                    "kind": "rch-local-fallback-proof-command",
+                    "token": "rch-local-fallback",
+                    "command": command_text,
+                    "reason": "proof command evidence reports rch local fallback",
+                }
+            )
         for token in FORBIDDEN_COMMAND_TOKENS:
             if token == "cargo ":
-                if command_mentions_cargo(str(command)) and not command_routes_cargo_through_rch(str(command)):
+                if command_mentions_cargo(command_text) and not command_routes_cargo_through_rch(command_text):
                     blockers.append(
                         {
                             "kind": "unsafe-proof-command",
                             "token": "bare-cargo",
-                            "command": str(command),
+                            "command": command_text,
                             "reason": "Cargo proof commands must be routed through rch exec",
                         }
                     )
@@ -440,7 +454,7 @@ def proof_command_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
                     {
                         "kind": "unsafe-proof-command",
                         "token": token,
-                        "command": str(command),
+                        "command": command_text,
                         "reason": "proof command proposes a forbidden operation",
                     }
                 )

@@ -270,6 +270,54 @@ print(json.dumps({
 }
 
 #[test]
+fn proof_command_blockers_reject_rch_local_fallback_evidence() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import reservation_aware_work_finder as finder
+
+candidate = {
+    "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract\n[RCH] local (daemon unavailable)",
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo check -p asupersync\nfalling back to local execution",
+    ],
+}
+print(json.dumps(finder.proof_command_blockers(candidate), sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run rch local fallback proof blocker probe");
+    assert!(
+        output.status.success(),
+        "python fallback probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let blockers: Value =
+        serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    let blockers = blockers.as_array().expect("blockers array");
+    assert_eq!(blockers.len(), 2);
+    assert!(blockers.iter().all(|blocker| {
+        blocker["kind"].as_str() == Some("rch-local-fallback-proof-command")
+            && blocker["token"].as_str() == Some("rch-local-fallback")
+    }));
+    assert_eq!(
+        blockers[0]["reason"].as_str(),
+        Some("proof command evidence reports rch local fallback")
+    );
+}
+
+#[test]
 fn helper_declares_no_mutating_side_effects() {
     let receipt = finder_json("clean_workspace_candidates.json");
 
