@@ -49,7 +49,7 @@ use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::codec::MESSAGE_HEADER_SIZE;
-use asupersync::grpc::{GrpcCodec, GrpcError, GrpcMessage};
+use asupersync::grpc::{Code, GrpcCodec, GrpcError, GrpcMessage};
 use libfuzzer_sys::fuzz_target;
 use std::sync::OnceLock;
 
@@ -203,10 +203,9 @@ fn observe_decode_probe_outcome(result: Result<Option<GrpcMessage>, GrpcError>) 
 fn assert_fixed_rejection_canaries() {
     let mut complete_invalid = BytesMut::from(&b"\x02\0\0\0\x02no"[..]);
     let mut codec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
-    assert!(matches!(
-        observe_decode(&mut codec, &mut complete_invalid),
-        Err(GrpcError::Protocol(_))
-    ));
+    let err = observe_decode(&mut codec, &mut complete_invalid)
+        .expect_err("complete invalid compression-flag frame must reject");
+    assert_invalid_compression_flag_status(err, 2);
     assert!(
         complete_invalid.is_empty(),
         "complete invalid compression-flag frames should be consumed"
@@ -232,11 +231,56 @@ fn assert_fixed_rejection_canaries() {
     );
     let before = oversized.clone();
     let mut codec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
-    assert!(matches!(
-        observe_decode(&mut codec, &mut oversized),
-        Err(GrpcError::MessageTooLarge)
-    ));
+    let err =
+        observe_decode(&mut codec, &mut oversized).expect_err("oversized LPM prefix must reject");
+    assert_message_too_large_status(err);
     assert_eq!(oversized, before);
+}
+
+fn assert_invalid_compression_flag_status(error: GrpcError, flag: u8) {
+    let expected_message = format!("invalid gRPC compression flag: {flag}");
+    match &error {
+        GrpcError::Protocol(message) => {
+            assert_eq!(
+                message, &expected_message,
+                "invalid compression flag protocol message changed"
+            );
+        }
+        other => panic!("expected invalid compression flag Protocol error, got {other:?}"),
+    }
+
+    let expected_display = format!("protocol error: {expected_message}");
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "invalid compression flag display changed"
+    );
+    let status = error.into_status();
+    assert_eq!(status.code(), Code::Internal);
+    assert_eq!(
+        status.message(),
+        expected_display,
+        "invalid compression flag status message changed"
+    );
+}
+
+fn assert_message_too_large_status(error: GrpcError) {
+    assert!(
+        matches!(&error, GrpcError::MessageTooLarge),
+        "expected MessageTooLarge, got {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "message too large",
+        "MessageTooLarge display changed"
+    );
+    let status = error.into_status();
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    assert_eq!(
+        status.message(),
+        "message too large",
+        "MessageTooLarge status message changed"
+    );
 }
 
 fuzz_target!(|stream: Stream| {
