@@ -379,6 +379,44 @@ def lane_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def command_routes_cargo_through_rch(command: str) -> bool:
+    collapsed = " ".join(command.lower().split())
+    cargo_index = f" {collapsed} ".find(" cargo ")
+    if cargo_index < 0:
+        return True
+    rch_index = collapsed.find("rch exec --")
+    return 0 <= rch_index < cargo_index
+
+
+def proof_command_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
+    blockers = []
+    for command in candidate.get("proof_commands", []):
+        collapsed = " ".join(str(command).lower().split())
+        padded = f" {collapsed} "
+        for token in FORBIDDEN_COMMAND_TOKENS:
+            if token == "cargo ":
+                if " cargo " in padded and not command_routes_cargo_through_rch(str(command)):
+                    blockers.append(
+                        {
+                            "kind": "unsafe-proof-command",
+                            "token": "bare-cargo",
+                            "command": str(command),
+                            "reason": "Cargo proof commands must be routed through rch exec",
+                        }
+                    )
+                continue
+            if token in collapsed:
+                blockers.append(
+                    {
+                        "kind": "unsafe-proof-command",
+                        "token": token,
+                        "command": str(command),
+                        "reason": "proof command proposes a forbidden operation",
+                    }
+                )
+    return blockers
+
+
 def bead_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     if candidate["kind"] != "ready-bead":
         return []
@@ -403,6 +441,7 @@ def classify_candidate(
     paths = candidate["paths"]
     blockers = []
     blockers.extend(lane_blockers(candidate))
+    blockers.extend(proof_command_blockers(candidate))
     blockers.extend(bead_blockers(candidate))
     blockers.extend(reservation_blockers(paths, reservations, agent))
     blockers.extend(dirty_blockers(paths, dirty, reservations, agent))

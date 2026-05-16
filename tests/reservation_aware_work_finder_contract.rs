@@ -198,12 +198,22 @@ fn pathless_epic_without_snapshot_uses_default_fallback_catalog() {
 #[test]
 fn unapproved_fallback_lane_is_blocked_by_policy() {
     let receipt = finder_json("unapproved_lane.json");
-    let candidate = candidate(&receipt, "custom-scan:src");
+    let custom_scan = candidate(&receipt, "custom-scan:src");
+    let bare_cargo = candidate(&receipt, "testing-fuzzing:bare-cargo-proof");
 
-    assert_eq!(candidate["status"].as_str(), Some("blocked"));
+    assert_eq!(custom_scan["status"].as_str(), Some("blocked"));
     assert_eq!(
-        candidate["blockers"][0]["kind"].as_str(),
+        custom_scan["blockers"][0]["kind"].as_str(),
         Some("unapproved-fallback-lane")
+    );
+    assert_eq!(bare_cargo["status"].as_str(), Some("blocked"));
+    assert_eq!(
+        bare_cargo["blockers"][0]["kind"].as_str(),
+        Some("unsafe-proof-command")
+    );
+    assert_eq!(
+        bare_cargo["blockers"][0]["token"].as_str(),
+        Some("bare-cargo")
     );
     assert_eq!(
         receipt["recommendation"]["category"].as_str(),
