@@ -127,7 +127,7 @@ build_command_argv() {
         CARGO_PROFILE_TEST_DEBUG=0
         "RUSTFLAGS=-C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_${safe_sid}"
-        cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
+        "${CARGO_BIN:-cargo}" test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
         layer -- --nocapture
       )
       ;;
@@ -139,7 +139,7 @@ build_command_argv() {
         CARGO_PROFILE_TEST_DEBUG=0
         "RUSTFLAGS=-C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_${safe_sid}"
-        cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
+        "${CARGO_BIN:-cargo}" test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
         profile -- --nocapture
       )
       ;;
@@ -151,7 +151,7 @@ build_command_argv() {
         CARGO_PROFILE_TEST_DEBUG=0
         "RUSTFLAGS=-C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_${safe_sid}"
-        cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
+        "${CARGO_BIN:-cargo}" test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
         evidence -- --nocapture
       )
       ;;
@@ -163,7 +163,7 @@ build_command_argv() {
         CARGO_PROFILE_TEST_DEBUG=0
         "RUSTFLAGS=-C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_${safe_sid}"
-        cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals
+        "${CARGO_BIN:-cargo}" test -p asupersync --test wasm_cfg_compile_invariants --features test-internals
         wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
       )
       ;;
@@ -175,7 +175,7 @@ build_command_argv() {
         CARGO_PROFILE_TEST_DEBUG=0
         "RUSTFLAGS=-C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_${safe_sid}"
-        cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals
+        "${CARGO_BIN:-cargo}" test -p asupersync --test wasm_cfg_compile_invariants --features test-internals
         native_all_targets_backstop_holds -- --ignored --nocapture
       )
       ;;
