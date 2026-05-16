@@ -41,6 +41,15 @@ format_command() {
     printf '%s' "${rendered% }"
 }
 
+reject_rch_local_fallback_log() {
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "${LOG_FILE}" 2>/dev/null; then
+        echo ""
+        echo "FATAL: rch local fallback detected; refusing local cargo execution" >&2
+        echo "rch local fallback detected; refusing local cargo execution" > "${OUTPUT_DIR}/rch_local_fallback_${TIMESTAMP}.txt"
+        exit 86
+    fi
+}
+
 echo "==== Asupersync Property Test Suite ===="
 echo "Cases: ${PROPTEST_CASES}"
 echo "Seed:  ${PROPTEST_SEED}"
@@ -89,6 +98,8 @@ else
 fi
 popd >/dev/null
 set -e
+
+reject_rch_local_fallback_log
 
 if grep -q "FAILED" "${LOG_FILE}"; then
     echo ""
