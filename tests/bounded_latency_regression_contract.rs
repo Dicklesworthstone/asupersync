@@ -267,6 +267,20 @@ fn runner_script_exists_and_declares_modes() {
         runner.contains("--scenario"),
         "runner must support --scenario"
     );
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#,
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            runner.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
 }
 
 // ── Functional: fairness invariant checking ──────────────────────────
