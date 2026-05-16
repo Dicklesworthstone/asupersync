@@ -66,6 +66,7 @@ OUTDIR="${OUTPUT_ROOT}/${RUN_ID}"
 REPORT="${OUTDIR}/incident-proof-report-run.json"
 LOG="${OUTDIR}/incident-proof-report-events.ndjson"
 RCH_LOG="${OUTDIR}/incident-proof-report-rch.log"
+RCH_LOCAL_FALLBACK_MARKER="${OUTDIR}/incident-proof-report-rch-local-fallback.txt"
 mkdir -p "$OUTDIR"
 
 if [[ -n "$GATE_REPORT" ]]; then
@@ -247,6 +248,7 @@ for event in events:
 PY
 
 if [[ "$EXECUTE_RCH" -eq 1 ]]; then
+  set +e
   "${RCH_BIN}" exec -- \
     env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_incident_proof_report_script" \
       CARGO_INCREMENTAL=0 \
@@ -254,6 +256,16 @@ if [[ "$EXECUTE_RCH" -eq 1 ]]; then
       RUSTFLAGS="-D warnings -C debuginfo=0" \
       cargo test -p asupersync --test incident_proof_report --features test-internals -- --nocapture \
     >"$RCH_LOG" 2>&1
+  rch_status=$?
+  set -e
+
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "$RCH_LOG" 2>/dev/null; then
+    echo "rch local fallback detected; refusing local cargo execution" > "$RCH_LOCAL_FALLBACK_MARKER"
+    exit 86
+  fi
+  if [[ "$rch_status" -ne 0 ]]; then
+    exit "$rch_status"
+  fi
 fi
 
 echo "report=${REPORT}"
