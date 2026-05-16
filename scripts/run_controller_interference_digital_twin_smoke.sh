@@ -120,7 +120,7 @@ COMMAND_ARGS=(
     "RUSTFLAGS=-D warnings -C debuginfo=0"
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_interference_digital_twin"
     "ASUPERSYNC_CONTROLLER_INTERFERENCE_DIGITAL_TWIN_REPORT_PATH=${REPORT_PATH}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
