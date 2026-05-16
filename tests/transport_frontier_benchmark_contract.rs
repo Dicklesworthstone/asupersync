@@ -735,8 +735,14 @@ fn runner_script_exists_and_declares_modes() {
         "AA08_OUTPUT_ROOT",
         "RCH_BIN",
         "RCH_WRAPPER_TIMEOUT",
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#,
+        "[RCH\\] local",
+        "falling back to local",
         "timeout",
         "local fallback",
+        "fallback to local",
+        "executing locally",
         "validation_passed",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");

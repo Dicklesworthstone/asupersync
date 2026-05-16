@@ -22,6 +22,7 @@ SCENARIO=""
 RUN_ALL=false
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
   echo "Usage: $0 --list | --all (--dry-run | --execute) | --scenario <ID> (--dry-run | --execute)"
@@ -397,7 +398,7 @@ run_single_scenario() {
 
   exit_code=0
   timeout "$RCH_WRAPPER_TIMEOUT" "${COMMAND_ARGV[@]}" > "$run_log_path" 2>&1 || exit_code=$?
-  if grep -Eiq '^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally' "$run_log_path"; then
+  if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$run_log_path"; then
     printf '\nerror: rch local fallback detected; refusing local cargo execution\n' >> "$run_log_path"
     printf 'rch local fallback detected; refusing local cargo execution\n' > "$outdir/rch_local_fallback.txt"
     exit_code=86
