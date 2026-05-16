@@ -53,7 +53,7 @@ require_target_dir_rch_cargo_command() {
     local command="$2"
 
     if [[ "$command" == rch\ exec\ --\ cargo\ * ]]; then
-        echo "FATAL: $label must use \`rch exec -- env CARGO_TARGET_DIR=... cargo ...\`, not bare \`rch exec -- cargo ...\`" >&2
+        echo "FATAL: $label must use rch exec with env CARGO_TARGET_DIR before cargo, not bare rch cargo" >&2
         exit 1
     fi
     if [[ "$command" != rch\ exec\ --\ env\ *CARGO_TARGET_DIR=* ]]; then
