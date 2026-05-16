@@ -267,6 +267,34 @@ fn adaptive_batch_sizing_runner_executes_rch_without_local_shell_wrapper() {
     );
 }
 
+#[test]
+fn adaptive_batch_sizing_runner_rejects_full_rch_fallback_marker_set() {
+    let script = fs::read_to_string("scripts/run_adaptive_batch_sizing_smoke.sh")
+        .expect("adaptive batch sizing smoke runner should load");
+
+    assert!(
+        script
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 2,
+        "runner must use the shared local fallback matcher at every rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            script.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
 fn reason_label(reason: AdaptiveBatchDecisionReason) -> &'static str {
     match reason {
         AdaptiveBatchDecisionReason::Disabled => "disabled",
