@@ -40,13 +40,12 @@ log() {
 
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+RCH_TARGET_DIR="${ASUPERSYNC_HTTP3_QPACK_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_http3_qpack_instruction_proof}"
 
 CMD=(
-  env
-  -u
-  CARGO_TARGET_DIR
   rch exec --
   env
+  "CARGO_TARGET_DIR=$RCH_TARGET_DIR"
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
@@ -62,6 +61,7 @@ log "bead_id=$BEAD_ID"
 log "scenario_filter=qpack_instruction_stream"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
+log "rch_target_dir=$RCH_TARGET_DIR"
 log "command=$(printf '%q ' "${CMD[@]}")"
 
 set +e
