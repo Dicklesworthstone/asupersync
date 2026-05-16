@@ -14,14 +14,33 @@
 
 use asupersync::http::h1::codec::{HttpError, fuzz_parse_header_line_bounds};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_INPUT_LEN: usize = 8192;
 
+static FIXED_HEADER_LINE_CANARIES: OnceLock<()> = OnceLock::new();
+
 fuzz_target!(|data: &[u8]| {
+    FIXED_HEADER_LINE_CANARIES.get_or_init(assert_fixed_header_line_canaries);
+
     if data.len() > MAX_INPUT_LEN {
         return;
     }
 
+    assert_consistent_bounds(data);
+
+    // Stress: append boundary suffixes to the random input.
+    for suffix in &[b": value".as_ref(), b":\r\n".as_ref(), b"\r\n\r\n".as_ref()] {
+        let mut combined = data.to_vec();
+        combined.extend_from_slice(suffix);
+        if combined.len() > MAX_INPUT_LEN {
+            continue;
+        }
+        assert_consistent_bounds(&combined);
+    }
+});
+
+fn assert_fixed_header_line_canaries() {
     assert_bounds(b"Host: example.com", 4, 6, b"Host: example.com".len());
     assert_bounds(b"X-Test:\t value \t", 6, 9, 14);
     assert_bounds(b"Accept:*/*", 6, 7, b"Accept:*/*".len());
@@ -38,19 +57,7 @@ fuzz_target!(|data: &[u8]| {
     assert_invalid_header_value(b"X: \0");
     assert_invalid_header_value(b"X: \x1F");
     assert_invalid_header_value(b"X: \x7F");
-
-    assert_consistent_bounds(data);
-
-    // Stress: append boundary suffixes to the random input.
-    for suffix in &[b": value".as_ref(), b":\r\n".as_ref(), b"\r\n\r\n".as_ref()] {
-        let mut combined = data.to_vec();
-        combined.extend_from_slice(suffix);
-        if combined.len() > MAX_INPUT_LEN {
-            continue;
-        }
-        assert_consistent_bounds(&combined);
-    }
-});
+}
 
 fn assert_bounds(
     line: &[u8],
