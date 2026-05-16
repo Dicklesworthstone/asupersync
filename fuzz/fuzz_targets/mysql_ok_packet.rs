@@ -1,11 +1,14 @@
 #![no_main]
 
-use asupersync::database::mysql::fuzz_parse_ok_packet_fields;
+use asupersync::database::mysql::{MySqlError, fuzz_parse_ok_packet_fields};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_RAW_PACKET_LEN: usize = 256;
 const LENENC_SOURCE_WIDTH: usize = 8;
 const TAIL_SOURCE_OFFSET: usize = LENENC_SOURCE_WIDTH * 2;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 struct StructuredPacket {
     bytes: Vec<u8>,
@@ -13,6 +16,8 @@ struct StructuredPacket {
 }
 
 fuzz_target!(|data: &[u8]| {
+    FIXED_CANARIES.get_or_init(assert_fixed_ok_packet_error_canaries);
+
     if data.len() > MAX_RAW_PACKET_LEN {
         return;
     }
@@ -56,6 +61,67 @@ fn observe_ok_packet_fields(data: &[u8]) -> Option<(u64, u16)> {
             None
         }
     }
+}
+
+fn assert_ok_packet_rejection(data: &[u8], expected_protocol: &str, expected_display: &str) {
+    let error =
+        fuzz_parse_ok_packet_fields(data).expect_err("fixed MySQL OK packet canary should reject");
+    match &error {
+        MySqlError::Protocol(message) => assert_eq!(
+            message, expected_protocol,
+            "MySQL OK packet protocol diagnostic drift for {data:?}"
+        ),
+        other => panic!(
+            "MySQL OK packet should reject {data:?} with Protocol({expected_protocol:?}), got {other:?}"
+        ),
+    }
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "MySQL OK packet Display diagnostic drift for {data:?}"
+    );
+    assert!(
+        !expected_display.trim().is_empty(),
+        "MySQL OK packet rejection should expose a diagnostic"
+    );
+    assert!(
+        expected_display.len() <= 512,
+        "MySQL OK packet rejection diagnostic should stay bounded: {} bytes",
+        expected_display.len()
+    );
+}
+
+fn assert_fixed_ok_packet_error_canaries() {
+    assert_ok_packet_rejection(
+        b"",
+        "not an OK packet",
+        "MySQL protocol error: not an OK packet",
+    );
+    assert_ok_packet_rejection(
+        b"\x01",
+        "not an OK packet",
+        "MySQL protocol error: not an OK packet",
+    );
+    assert_ok_packet_rejection(
+        b"\x00",
+        "unexpected end of packet",
+        "MySQL protocol error: unexpected end of packet",
+    );
+    assert_ok_packet_rejection(
+        b"\x00\xfb",
+        "NULL in length-encoded int",
+        "MySQL protocol error: NULL in length-encoded int",
+    );
+    assert_ok_packet_rejection(
+        b"\x00\xff",
+        "invalid length-encoded int prefix: 255",
+        "MySQL protocol error: invalid length-encoded int prefix: 255",
+    );
+    assert_ok_packet_rejection(
+        b"\x00\x00\x00\x34",
+        "unexpected end of packet",
+        "MySQL protocol error: unexpected end of packet",
+    );
 }
 
 fn build_structured_packet(seed: &[u8]) -> Option<StructuredPacket> {
