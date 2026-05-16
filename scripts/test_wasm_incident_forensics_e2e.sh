@@ -177,6 +177,14 @@ run_replay_call() {
             rc=$?
         fi
 
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "${attempt_log}" 2>/dev/null; then
+            mkdir -p "$(dirname "${run_log}")"
+            cp "${attempt_log}" "${run_log}"
+            echo "rch local fallback detected; refusing local cargo execution" > "${attempt_log%.log}.rch_local_fallback.txt"
+            echo "  ERROR: ${run_label} attempted local cargo fallback through rch"
+            return 86
+        fi
+
         payload="$(grep -E "\"scenario_id\"[[:space:]]*:[[:space:]]*\"${SCENARIO_ID}\"" "${attempt_log}" | tail -n1 || true)"
         if [[ -n "${payload}" ]] && printf '%s\n' "${payload}" | jq -e . >/dev/null 2>&1; then
             mkdir -p "$(dirname "${run_log}")" "$(dirname "${run_json}")"
@@ -213,6 +221,7 @@ EOF
     fi
 
     local target_dir="/tmp/rch-incident-forensics-${TIMESTAMP}-failure-probe"
+    local probe_rc=0
     local -a fail_cmd=(
         env "CARGO_TARGET_DIR=${target_dir}" \
         cargo run --quiet --features cli --bin asupersync --
@@ -228,6 +237,18 @@ EOF
 
     mkdir -p "$(dirname "${FAILURE_LOG}")"
     if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${fail_cmd[@]}" >"${FAILURE_LOG}" 2>&1; then
+        probe_rc=0
+    else
+        probe_rc=$?
+    fi
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "${FAILURE_LOG}" 2>/dev/null; then
+        echo "rch local fallback detected; refusing local cargo execution" > "${FAILURE_LOG%.log}.rch_local_fallback.txt"
+        echo "  ERROR: expected failure probe attempted local cargo fallback through rch"
+        return 86
+    fi
+
+    if [[ "${probe_rc}" -eq 0 ]]; then
         echo "  ERROR: expected failure probe unexpectedly succeeded"
         return 1
     fi
