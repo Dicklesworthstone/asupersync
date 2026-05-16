@@ -570,6 +570,38 @@ fn observe_decode_observation(
     }
 }
 
+fn assert_decode_rejection(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+    expected_kind: io::ErrorKind,
+    expected_message: &str,
+    expected_remaining: &[u8],
+) {
+    let before_len = buf.len();
+    let err = codec
+        .decode(buf)
+        .expect_err("fixed canary should reject this length-delimited frame");
+    assert!(
+        buf.len() <= before_len,
+        "rejected length-delimited decode grew the input buffer"
+    );
+    assert_eq!(
+        err.kind(),
+        expected_kind,
+        "length-delimited rejection kind changed"
+    );
+    assert_eq!(
+        err.to_string(),
+        expected_message,
+        "length-delimited rejection diagnostic changed"
+    );
+    assert_eq!(
+        buf.as_ref(),
+        expected_remaining,
+        "length-delimited rejection left unexpected bytes buffered"
+    );
+}
+
 fn assert_general_decode_observation(
     context: &str,
     observation: &DecodeObservation,
@@ -640,8 +672,13 @@ fn assert_fixed_decode_canaries() {
     let mut codec = LengthDelimitedCodec::builder()
         .max_frame_length(2)
         .new_codec();
-    assert!(observe_decode(&mut codec, &mut too_large, 2).is_none());
-    assert_eq!(too_large.as_ref(), b"abc");
+    assert_decode_rejection(
+        &mut codec,
+        &mut too_large,
+        io::ErrorKind::InvalidData,
+        "frame length exceeds max_frame_length",
+        b"abc",
+    );
     assert!(observe_decode(&mut codec, &mut too_large, 2).is_none());
     assert!(too_large.is_empty());
 
