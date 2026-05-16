@@ -9,6 +9,7 @@
 
 use asupersync::runtime::reactor::Interest;
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const DEFINED_FLAGS: [(Interest, u8); 8] = [
     (Interest::READABLE, 1 << 0),
@@ -20,6 +21,8 @@ const DEFINED_FLAGS: [(Interest, u8); 8] = [
     (Interest::EDGE_TRIGGERED, 1 << 6),
     (Interest::DISPATCH, 1 << 7),
 ];
+
+static FIXED_ORACLES: OnceLock<()> = OnceLock::new();
 
 fn assert_fixed_oracles() {
     assert_eq!(Interest::NONE.bits(), 0);
@@ -100,7 +103,7 @@ fn assert_pairwise_operations(a_bits: u8, b_bits: u8) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    assert_fixed_oracles();
+    FIXED_ORACLES.get_or_init(assert_fixed_oracles);
 
     if data.is_empty() {
         return;
