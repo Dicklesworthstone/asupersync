@@ -53,7 +53,10 @@ fn assert_fixed_oracles() {
         fuzz_parse_nats_server_info("[]"),
         "malformed INFO JSON from server: expected object",
     );
-    assert!(fuzz_parse_nats_server_info(r#"{"server_id":"truncated\u12"}"#).is_err());
+    assert_nats_protocol_error(
+        fuzz_parse_nats_server_info(r#"{"server_id":"truncated\u12"}"#),
+        "malformed INFO JSON from server: invalid escape at line 1 column 29",
+    );
 
     let headers = b"NATS/1.0\r\nStatus: 503\r\nDescription: No Responders\r\n\r\n";
     let payload = b"hello";
