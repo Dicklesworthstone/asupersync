@@ -87,6 +87,10 @@ def repo_path(relative):
     return repo_root / relative
 
 
+def cargo_command_has_target_dir(command):
+    return "rch exec -- env " in command and "CARGO_TARGET_DIR=" in command
+
+
 def is_promoted(state):
     return state in promoted_states
 
@@ -249,7 +253,12 @@ for row in signoff_rows:
 
     for command_row in unit_proofs + e2e_proofs:
         command = command_row.get("command", "")
-        if ("cargo " in command or "lake build" in command) and "rch exec --" not in command:
+        if "cargo " in command:
+            if "rch exec --" not in command:
+                fail(f"{capability_id}:heavy_command_without_rch:{command}")
+            elif not cargo_command_has_target_dir(command):
+                fail(f"{capability_id}:cargo_command_without_target_dir:{command}")
+        elif "lake build" in command and "rch exec --" not in command:
             fail(f"{capability_id}:heavy_command_without_rch:{command}")
         lowered = command.lower()
         for marker in ["password=", "token=", "secret=", "bearer "]:

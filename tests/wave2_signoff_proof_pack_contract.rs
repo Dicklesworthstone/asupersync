@@ -47,6 +47,10 @@ fn nonempty_string<'a>(value: &'a JsonValue, key: &str) -> &'a str {
     item
 }
 
+fn cargo_command_has_target_dir(command: &str) -> bool {
+    command.contains("rch exec -- env ") && command.contains("CARGO_TARGET_DIR=")
+}
+
 fn string_set(value: &JsonValue, key: &str) -> BTreeSet<String> {
     array(value, key)
         .iter()
@@ -210,9 +214,13 @@ fn validate_signoff_artifact(
 
         for command_row in unit_proofs.iter().chain(e2e_proofs.iter()) {
             let command = nonempty_string(command_row, "command");
-            if (command.contains("cargo ") || command.contains("lake build"))
-                && !command.contains("rch exec --")
-            {
+            if command.contains("cargo ") {
+                if !command.contains("rch exec --") {
+                    failures.push(format!("{capability_id}:heavy_command_without_rch"));
+                } else if !cargo_command_has_target_dir(command) {
+                    failures.push(format!("{capability_id}:cargo_command_without_target_dir"));
+                }
+            } else if command.contains("lake build") && !command.contains("rch exec --") {
                 failures.push(format!("{capability_id}:heavy_command_without_rch"));
             }
             if command.contains("lake build") {
@@ -446,7 +454,7 @@ fn control_plane_checks_record_graph_health_and_degraded_cycle_fallback() {
 }
 
 #[test]
-fn cargo_and_lake_proof_commands_are_rch_offloaded_and_redacted() {
+fn cargo_and_lake_proof_commands_are_rch_offloaded_isolated_and_redacted() {
     let signoff = signoff();
     let registry = registry();
     let failures = validate_signoff_artifact(&signoff, &registry, false);
@@ -454,6 +462,7 @@ fn cargo_and_lake_proof_commands_are_rch_offloaded_and_redacted() {
         .iter()
         .filter(|failure| {
             failure.contains("heavy_command_without_rch")
+                || failure.contains("cargo_command_without_target_dir")
                 || failure.contains("sensitive_command_marker")
         })
         .collect::<Vec<_>>();
@@ -574,6 +583,21 @@ fn negative_cargo_command_without_rch_is_rejected() {
         failures
             .iter()
             .any(|failure| failure.contains("heavy_command_without_rch")),
+        "{failures:?}"
+    );
+}
+
+#[test]
+fn negative_cargo_command_without_target_dir_is_rejected() {
+    let mut signoff = signoff();
+    let registry = registry();
+    let row = first_row_mut(&mut signoff, |_| true);
+    row["unit_proofs"][0]["command"] = json!("rch exec -- cargo test -p asupersync --test bad");
+    let failures = validate_signoff_artifact(&signoff, &registry, false);
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.contains("cargo_command_without_target_dir")),
         "{failures:?}"
     );
 }
