@@ -8,6 +8,13 @@ use std::process::Command;
 const REGISTRY_PATH: &str = "artifacts/wave2_capability_evidence_registry_v1.json";
 const TRACKER_ISSUES_PATH: &str = ".beads/issues.jsonl";
 const DIRECT_LEAN_BUILD_COMMAND: &str = "rch exec -- lake --dir formal/lean build";
+const RCH_LOCAL_FALLBACK_MARKERS: &[&str] = &[
+    "[rch] local",
+    "falling back to local",
+    "local fallback",
+    "fallback to local",
+    "executing locally",
+];
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -82,6 +89,13 @@ fn log_contract_event(scenario_id: &str, fields: &[(&str, String)]) {
     ];
     parts.extend(fields.iter().map(|(key, value)| format!("{key}={value}")));
     println!("{}", parts.join(" "));
+}
+
+fn contains_rch_local_fallback_evidence(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    RCH_LOCAL_FALLBACK_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
 }
 
 #[test]
@@ -328,10 +342,20 @@ fn cargo_backed_commands_are_rch_offloaded_and_sensitive_fields_are_redacted() {
             "{capability_id}: proof commands must not be empty"
         );
         for command in commands {
+            assert!(
+                !contains_rch_local_fallback_evidence(command),
+                "{capability_id}: command contains rch local fallback evidence: {command}"
+            );
             if command.contains("cargo ") || command.contains("lake build") {
                 assert!(
                     command.contains("rch exec --"),
                     "{capability_id}: cargo/proof-heavy command must use rch: {command}"
+                );
+            }
+            if command.contains("cargo ") {
+                assert!(
+                    command.contains("CARGO_TARGET_DIR="),
+                    "{capability_id}: cargo command must set CARGO_TARGET_DIR before execution: {command}"
                 );
             }
             if command.contains("lake build") {
@@ -371,6 +395,73 @@ fn cargo_backed_commands_are_rch_offloaded_and_sensitive_fields_are_redacted() {
             "{capability_id}: unknown redaction verdict {redaction_verdict}"
         );
     }
+}
+
+#[test]
+fn runner_rejects_rch_local_fallback_evidence_in_proof_commands() {
+    let mut mutated = registry();
+    let rows = mutated
+        .get_mut("capability_rows")
+        .and_then(JsonValue::as_array_mut)
+        .expect("capability_rows array");
+    let row = rows
+        .iter_mut()
+        .find(|row| {
+            row.get("unit_proof_commands")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|commands| {
+                    commands
+                        .iter()
+                        .any(|command| command.as_str().is_some_and(|text| text.contains("cargo ")))
+                })
+        })
+        .expect("at least one cargo-backed proof command");
+    let commands = row
+        .get_mut("unit_proof_commands")
+        .and_then(JsonValue::as_array_mut)
+        .expect("unit_proof_commands array");
+    let first_command = commands
+        .iter_mut()
+        .find(|command| command.as_str().is_some_and(|text| text.contains("cargo ")))
+        .expect("cargo-backed proof command");
+    let original = first_command
+        .as_str()
+        .expect("proof command string")
+        .to_string();
+    *first_command = JsonValue::String(format!("{original}\n[RCH] local (daemon unavailable)"));
+
+    let output_root = repo_path("target/wave2-capability-evidence-registry-negative-test");
+    std::fs::create_dir_all(&output_root)
+        .unwrap_or_else(|err| panic!("create {}: {err}", output_root.display()));
+    let registry_path = output_root.join("registry-local-fallback.json");
+    std::fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&mutated).expect("serialize mutated registry") + "\n",
+    )
+    .unwrap_or_else(|err| panic!("write {}: {err}", registry_path.display()));
+
+    let baseline_registry = registry();
+    let runner = nonempty_string(&baseline_registry, "runner_script");
+    let output = Command::new("bash")
+        .arg(repo_path(runner))
+        .arg("--registry")
+        .arg(&registry_path)
+        .arg("--output-root")
+        .arg(output_root.join("runner-output"))
+        .output()
+        .unwrap_or_else(|err| panic!("run {runner}: {err}"));
+
+    assert!(
+        !output.status.success(),
+        "runner must fail closed on local fallback evidence\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rch_local_fallback_evidence"),
+        "runner stdout must name the local fallback drift\nstdout:\n{stdout}"
+    );
 }
 
 #[test]

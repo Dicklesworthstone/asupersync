@@ -55,6 +55,14 @@ registry = json.loads(registry_path.read_text())
 drifts = []
 rows = []
 
+RCH_LOCAL_FALLBACK_MARKERS = (
+    "[rch] local",
+    "falling back to local",
+    "local fallback",
+    "fallback to local",
+    "executing locally",
+)
+
 
 def repo_path(relative):
     return repo_root / relative
@@ -163,9 +171,15 @@ for row in capability_rows:
 
     for command in unit_commands + e2e_commands:
         lowered = command.lower()
+        if any(marker in lowered for marker in RCH_LOCAL_FALLBACK_MARKERS):
+            first_failure = first_failure or f"rch_local_fallback_evidence:{command}"
+            drifts.append(f"{capability_id}:rch_local_fallback_evidence")
         if ("cargo " in command or "lake build" in command) and "rch exec --" not in command:
             first_failure = first_failure or f"missing_rch:{command}"
             drifts.append(f"{capability_id}:missing_rch:{command}")
+        if "cargo " in command and "CARGO_TARGET_DIR=" not in command:
+            first_failure = first_failure or f"missing_cargo_target_dir:{command}"
+            drifts.append(f"{capability_id}:missing_cargo_target_dir:{command}")
         for marker in ("password=", "token=", "secret=", "bearer "):
             if marker in lowered:
                 first_failure = first_failure or f"sensitive_command_marker:{marker}"
