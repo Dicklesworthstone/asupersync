@@ -70,22 +70,22 @@ The fuzzer tracks expected state alongside actual state to catch divergences:
 
 ### Basic Fuzzing
 ```bash
-cargo fuzz run fuzz_quic_tls_state_machine
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_tls_state_machine_fuzz_docs cargo fuzz run fuzz_quic_tls_state_machine
 ```
 
 ### Corpus Management  
 ```bash
 # Minimize corpus (recommended weekly)
-cargo fuzz cmin fuzz_quic_tls_state_machine
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_tls_state_machine_fuzz_docs cargo fuzz cmin fuzz_quic_tls_state_machine
 
 # Minimize crash inputs for debugging
-cargo fuzz tmin fuzz_quic_tls_state_machine artifacts/fuzz_quic_tls_state_machine/crash-...
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_tls_state_machine_fuzz_docs cargo fuzz tmin fuzz_quic_tls_state_machine artifacts/fuzz_quic_tls_state_machine/crash-...
 ```
 
 ### CI Integration
 ```bash
 # Short fuzzing run for CI
-cargo fuzz run fuzz_quic_tls_state_machine -- -max_total_time=60 -runs=1000
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_tls_state_machine_fuzz_docs cargo fuzz run fuzz_quic_tls_state_machine -- -max_total_time=60 -runs=1000
 ```
 
 ## Expected Findings

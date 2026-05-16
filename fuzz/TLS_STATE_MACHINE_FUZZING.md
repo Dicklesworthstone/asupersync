@@ -152,16 +152,16 @@ fuzz/TLS_STATE_MACHINE_FUZZING.md                    # Documentation (this file)
 
 ```bash
 # Run comprehensive state machine fuzzing
-cargo fuzz run tls_state_machine_handshake -- -max_total_time=300
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tls_state_machine_fuzz_docs cargo fuzz run tls_state_machine_handshake -- -max_total_time=300
 
 # Run simplified state machine fuzzing  
-cargo fuzz run tls_state_machine_simple -- -max_total_time=300
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tls_state_machine_fuzz_docs cargo fuzz run tls_state_machine_simple -- -max_total_time=300
 
 # Generate seed corpus for TLS state machine testing
 cd fuzz && python3 create_tls_seeds.py --state-machine
 
 # View fuzzing results and coverage
-cargo fuzz coverage tls_state_machine_handshake
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tls_state_machine_fuzz_docs cargo fuzz coverage tls_state_machine_handshake
 ```
 
 ---
