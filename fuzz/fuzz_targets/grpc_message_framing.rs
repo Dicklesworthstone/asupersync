@@ -323,11 +323,12 @@ fn observe_length_mismatch_decode(
                 "incomplete gRPC frame should remain fully buffered"
             );
         }
-        Err(GrpcError::MessageTooLarge) => {
+        Err(error @ GrpcError::MessageTooLarge) => {
             assert!(
                 declared_len > DEFAULT_MAX_MESSAGE_SIZE,
                 "default codec reported MessageTooLarge below its decode limit"
             );
+            assert_message_too_large_status(error);
             assert_eq!(
                 remaining_len, before_len,
                 "oversized declared gRPC frame should remain buffered"
@@ -391,6 +392,11 @@ fn observe_grpc_decode(
             );
         }
         Err(GrpcError::MessageTooLarge) => {
+            assert_eq!(
+                GrpcError::MessageTooLarge.to_string(),
+                "message too large",
+                "gRPC MessageTooLarge display drifted"
+            );
             assert_eq!(
                 buf.len(),
                 before_len,
@@ -463,9 +469,27 @@ fn assert_fixed_decode_canaries() {
     let mut codec = GrpcCodec::with_max_size(2);
     let oversized_err =
         observe_grpc_decode(&mut codec, &mut oversized).expect_err("oversized frame should fail");
-    assert!(matches!(oversized_err, GrpcError::MessageTooLarge));
-    assert_eq!(oversized_err.into_status().code(), Code::ResourceExhausted);
+    assert_message_too_large_status(oversized_err);
     assert_eq!(oversized.as_ref(), b"\0\0\0\0\x03");
+}
+
+fn assert_message_too_large_status(error: GrpcError) {
+    assert!(
+        matches!(&error, GrpcError::MessageTooLarge),
+        "expected MessageTooLarge, got {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "message too large",
+        "MessageTooLarge display changed"
+    );
+    let status = error.into_status();
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    assert_eq!(
+        status.message(),
+        "message too large",
+        "MessageTooLarge status message changed"
+    );
 }
 
 fn assert_invalid_compression_flag_status(
@@ -480,8 +504,19 @@ fn assert_invalid_compression_flag_status(
         }
         error => panic!("expected invalid compression flag Protocol error, got {error:?}"),
     }
+    let expected_display = format!("protocol error: invalid gRPC compression flag: {invalid_flag}");
+    assert_eq!(
+        err.to_string(),
+        expected_display,
+        "invalid compression flag display changed"
+    );
     let status = err.into_status();
     assert_eq!(status.code(), Code::Internal);
+    assert_eq!(
+        status.message(),
+        expected_display,
+        "invalid compression flag status message changed"
+    );
 }
 
 fn test_invalid_compression_flag_status(data: &[u8]) {
@@ -513,8 +548,7 @@ fn test_frame_limit_status_mapping(data: &[u8]) {
     let mut encode_buf = BytesMut::new();
     let encode_result = encode_codec.encode(GrpcMessage::new(payload.clone()), &mut encode_buf);
     let encode_err = encode_result.expect_err("oversized encode should fail");
-    assert!(matches!(encode_err, GrpcError::MessageTooLarge));
-    assert_eq!(encode_err.into_status().code(), Code::ResourceExhausted);
+    assert_message_too_large_status(encode_err);
 
     let mut decode_codec = GrpcCodec::with_max_size(limit);
     let mut decode_buf = BytesMut::new();
@@ -522,8 +556,7 @@ fn test_frame_limit_status_mapping(data: &[u8]) {
     decode_buf.extend_from_slice(&(oversized_len as u32).to_be_bytes());
     let decode_result = observe_grpc_decode(&mut decode_codec, &mut decode_buf);
     let decode_err = decode_result.expect_err("oversized decode should fail");
-    assert!(matches!(decode_err, GrpcError::MessageTooLarge));
-    assert_eq!(decode_err.into_status().code(), Code::ResourceExhausted);
+    assert_message_too_large_status(decode_err);
 }
 
 fn test_explicit_framing_statuses(
@@ -543,8 +576,7 @@ fn test_explicit_framing_statuses(
         let result = observe_grpc_decode(&mut codec, &mut invalid_flag_frame);
         if declared_len > DEFAULT_MAX_MESSAGE_SIZE {
             let err = result.expect_err("oversized invalid-flag frame should fail on length");
-            assert!(matches!(err, GrpcError::MessageTooLarge));
-            assert_eq!(err.into_status().code(), Code::ResourceExhausted);
+            assert_message_too_large_status(err);
             assert_eq!(
                 invalid_flag_frame, original,
                 "oversized invalid-flag frame should remain buffered"
@@ -579,8 +611,7 @@ fn test_explicit_framing_statuses(
     oversized_frame.extend_from_slice(&oversized_length.to_be_bytes());
     let result = observe_grpc_decode(&mut limited_codec, &mut oversized_frame);
     let err = result.expect_err("oversized declared frame should fail");
-    assert!(matches!(err, GrpcError::MessageTooLarge));
-    assert_eq!(err.into_status().code(), Code::ResourceExhausted);
+    assert_message_too_large_status(err);
 }
 
 /// Test gRPC codec encode/decode roundtrip.
