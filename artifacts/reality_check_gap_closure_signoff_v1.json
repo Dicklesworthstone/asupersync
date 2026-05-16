@@ -90,7 +90,7 @@
   "fresh_signoff_commands": [
     {
       "command_id": "no-tokio-default-normal-graph-rerun",
-      "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rcktok_default_tree cargo tree -e normal -p asupersync -i tokio",
       "status": "passed",
       "observed_signal": "warning: nothing to print.",
       "required_by": "asupersync-rcksgn acceptance"
@@ -168,7 +168,7 @@
       "stale_closed_tracker_repair": false,
       "proof_commands": [
         {
-          "command": "rch exec -- cargo test -p asupersync --test conformance websocket_rfc6455 --features test-internals -- --nocapture",
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckwsf_conformance cargo test -p asupersync --test conformance websocket_rfc6455 --features test-internals -- --nocapture",
           "status": "passed",
           "observed_signal": "RFC6455 registry live for framing/control/close/masking/fragmentation harnesses"
         }
@@ -341,12 +341,12 @@
       "stale_closed_tracker_repair": true,
       "proof_commands": [
         {
-          "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rcktok_default_tree cargo tree -e normal -p asupersync -i tokio",
           "status": "passed",
           "observed_signal": "warning: nothing to print."
         },
         {
-          "command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rcktok_metrics_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
           "status": "passed",
           "observed_signal": "warning: nothing to print."
         },

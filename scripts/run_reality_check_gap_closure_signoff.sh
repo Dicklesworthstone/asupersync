@@ -56,6 +56,12 @@ def commit_exists(commit):
     return result.returncode == 0
 
 
+def cargo_command_has_target_dir(command):
+    return "cargo " not in command or (
+        "rch exec -- env " in command and "CARGO_TARGET_DIR=" in command
+    )
+
+
 required_gap_ids = set(signoff.get("required_gap_ids", []))
 gap_rows = signoff.get("gap_rows", [])
 actual_gap_ids = {row.get("gap_id") for row in gap_rows}
@@ -142,6 +148,12 @@ for row in gap_rows:
     commands = row.get("proof_commands", [])
     proof_command_count += len(commands)
     passing_commands = [cmd for cmd in commands if cmd.get("status") == "passed"]
+    for cmd in commands:
+        command_text = cmd.get("command", "")
+        require(
+            cargo_command_has_target_dir(command_text),
+            f"bare_cargo_proof_command:{gap_id}:{command_text}",
+        )
     non_passing = [
         f"{gap_id}:{cmd.get('command', '')}"
         for cmd in commands
@@ -168,6 +180,13 @@ for row in gap_rows:
     )
 
 fresh = signoff.get("fresh_signoff_commands", [])
+for cmd in fresh:
+    command_text = cmd.get("command", "")
+    command_id = cmd.get("command_id", "")
+    require(
+        cargo_command_has_target_dir(command_text),
+        f"bare_cargo_fresh_signoff_command:{command_id}:{command_text}",
+    )
 no_tokio = next(
     (cmd for cmd in fresh if cmd.get("command_id") == "no-tokio-default-normal-graph-rerun"),
     {},

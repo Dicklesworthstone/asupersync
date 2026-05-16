@@ -58,6 +58,11 @@ fn is_full_hex_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn cargo_proof_command_has_target_dir(command: &str) -> bool {
+    !command.contains("cargo ")
+        || (command.contains("rch exec -- env ") && command.contains("CARGO_TARGET_DIR="))
+}
+
 fn commit_exists(commit: &str) -> bool {
     if !repo_path(".git").exists() {
         return true;
@@ -292,6 +297,10 @@ fn every_fully_closed_gap_has_commit_artifacts_passing_proof_and_residual_risk_f
                 !proof_command.contains("bash -lc"),
                 "{gap_id}: proof command must not shell-wrap proof execution: {proof_command}"
             );
+            assert!(
+                cargo_proof_command_has_target_dir(proof_command),
+                "{gap_id}: cargo proof command must route through `rch exec -- env CARGO_TARGET_DIR=...`: {proof_command}"
+            );
             nonempty_string(command, "observed_signal");
             assert_eq!(
                 command.get("status").and_then(JsonValue::as_str),
@@ -353,6 +362,13 @@ fn every_fully_closed_gap_has_commit_artifacts_passing_proof_and_residual_risk_f
 fn no_tokio_rerun_and_signoff_invariants_are_recorded() {
     let signoff = signoff();
     let fresh = array(&signoff, "fresh_signoff_commands");
+    for command in fresh {
+        let command_text = nonempty_string(command, "command");
+        assert!(
+            cargo_proof_command_has_target_dir(command_text),
+            "fresh signoff cargo command must route through `rch exec -- env CARGO_TARGET_DIR=...`: {command_text}"
+        );
+    }
     let no_tokio = fresh
         .iter()
         .find(|row| row["command_id"].as_str() == Some("no-tokio-default-normal-graph-rerun"))
