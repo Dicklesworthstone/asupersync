@@ -68,23 +68,35 @@ fn exercise_frame(frame: &FuzzSettingsFrame) {
     let result = H2SettingsFrame::parse(&header, &payload);
 
     if header.stream_id != 0 {
-        assert_error_code(result, ErrorCode::ProtocolError);
+        assert_settings_error(
+            result,
+            ErrorCode::ProtocolError,
+            "SETTINGS frame with non-zero stream ID",
+        );
         return;
     }
 
     let ack_flag_set = header.has_flag(settings_flags::ACK);
     if ack_flag_set && !payload.is_empty() {
-        assert_error_code(result, ErrorCode::FrameSizeError);
+        assert_settings_error(
+            result,
+            ErrorCode::FrameSizeError,
+            "SETTINGS ACK with non-zero length",
+        );
         return;
     }
 
     if !payload.len().is_multiple_of(6) {
-        assert_error_code(result, ErrorCode::FrameSizeError);
+        assert_settings_error(
+            result,
+            ErrorCode::FrameSizeError,
+            "SETTINGS frame length not multiple of 6",
+        );
         return;
     }
 
-    if let Some(code) = first_live_setting_error(&payload) {
-        assert_error_code(result, code);
+    if let Some((code, message)) = first_live_setting_error(&payload) {
+        assert_settings_error(result, code, message);
         return;
     }
 
@@ -180,15 +192,28 @@ fn build_settings_payload(frame: &FuzzSettingsFrame) -> Vec<u8> {
     payload
 }
 
-fn first_live_setting_error(payload: &Bytes) -> Option<ErrorCode> {
+fn first_live_setting_error(payload: &Bytes) -> Option<(ErrorCode, &'static str)> {
     for chunk in payload.chunks_exact(6) {
         let id = u16::from_be_bytes([chunk[0], chunk[1]]);
         let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
         match id {
-            0x2 if value > 1 => return Some(ErrorCode::ProtocolError),
-            0x4 if value > 0x7fff_ffff => return Some(ErrorCode::FlowControlError),
+            0x2 if value > 1 => {
+                return Some((
+                    ErrorCode::ProtocolError,
+                    "SETTINGS_ENABLE_PUSH must be 0 or 1",
+                ));
+            }
+            0x4 if value > 0x7fff_ffff => {
+                return Some((
+                    ErrorCode::FlowControlError,
+                    "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum",
+                ));
+            }
             0x5 if !(MIN_MAX_FRAME_SIZE..=MAX_FRAME_SIZE).contains(&value) => {
-                return Some(ErrorCode::ProtocolError);
+                return Some((
+                    ErrorCode::ProtocolError,
+                    "SETTINGS_MAX_FRAME_SIZE out of bounds",
+                ));
             }
             _ => {}
         }
@@ -244,10 +269,37 @@ fn unknown_setting_id(id: u16) -> u16 {
     }
 }
 
-fn assert_error_code(result: Result<H2SettingsFrame, H2Error>, expected: ErrorCode) {
+fn assert_settings_error(
+    result: Result<H2SettingsFrame, H2Error>,
+    expected_code: ErrorCode,
+    expected_message: &str,
+) {
     match result {
-        Ok(frame) => panic!("expected {expected:?}, parsed SETTINGS frame: {frame:?}"),
-        Err(err) => assert_eq!(err.code, expected, "unexpected SETTINGS parse error: {err}"),
+        Ok(frame) => panic!("expected {expected_code:?}, parsed SETTINGS frame: {frame:?}"),
+        Err(err) => {
+            assert_eq!(
+                err.code, expected_code,
+                "unexpected SETTINGS parse error: {err}"
+            );
+            assert_eq!(
+                err.stream_id, None,
+                "SETTINGS parser errors are connection-level"
+            );
+            assert_eq!(
+                err.message.as_str(),
+                expected_message,
+                "unexpected SETTINGS parse diagnostic"
+            );
+            assert!(
+                err.is_connection_error(),
+                "SETTINGS parser error level changed: {err}"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!("HTTP/2 connection error ({expected_code}): {expected_message}"),
+                "SETTINGS parser error display changed"
+            );
+        }
     }
 }
 
