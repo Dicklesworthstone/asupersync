@@ -584,6 +584,7 @@ fn e2e_dp_11a_pg_error_classification_data_path() {
         message: "serialization_failure".into(),
         detail: None,
         hint: None,
+        diagnostic: Default::default(),
     };
     assert!(err.is_serialization_failure());
     assert!(err.is_transient());
@@ -601,6 +602,7 @@ fn e2e_dp_11a_pg_error_classification_data_path() {
         message: "deadlock_detected".into(),
         detail: None,
         hint: None,
+        diagnostic: Default::default(),
     };
     assert!(err.is_deadlock());
     assert!(err.is_transient());
@@ -611,6 +613,7 @@ fn e2e_dp_11a_pg_error_classification_data_path() {
         message: "unique_violation".into(),
         detail: None,
         hint: None,
+        diagnostic: Default::default(),
     };
     assert!(err.is_unique_violation());
     assert!(err.is_constraint_violation());
@@ -744,6 +747,7 @@ fn e2e_dp_12_cross_backend_error_normalization() {
                 message: "serialization".into(),
                 detail: None,
                 hint: None,
+                diagnostic: Default::default(),
             };
             ErrorClassification {
                 backend: "postgres",

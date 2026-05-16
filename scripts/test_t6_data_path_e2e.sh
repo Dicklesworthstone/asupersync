@@ -35,6 +35,7 @@ ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 RCH_BIN="${RCH_BIN:-rch}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_t6_data_path_e2e}"
 DRY_RUN=0
+LOCAL_FALLBACKS=0
 
 if [[ "${1:-}" == "--dry-run" ]]; then
     DRY_RUN=1
@@ -66,6 +67,20 @@ json_escape() {
     value="${value//\"/\\\"}"
     value="${value//$'\n'/\\n}"
     printf '%s' "${value}"
+}
+
+local_fallback_pattern='^\[RCH\] local \(|local fallback|fallback to local|executing locally'
+
+record_local_fallbacks() {
+    local log_path="$1"
+    local label="$2"
+    local artifact_path="${ARTIFACT_DIR}/${label// /_}.txt"
+
+    if grep -Eiq "$local_fallback_pattern" "$log_path" 2>/dev/null; then
+        echo "  ERROR: rch local fallback detected in ${label}"
+        grep -Ein "$local_fallback_pattern" "$log_path" | head -5 > "$artifact_path" 2>/dev/null || true
+        ((LOCAL_FALLBACKS++)) || true
+    fi
 }
 
 run_or_print() {
@@ -116,6 +131,11 @@ CHECK_COMMAND=(
 if ! run_or_print "${CHECK_COMMAND[@]}" 2>"${ARTIFACT_DIR}/compile_errors.log"; then
     echo "  FATAL: compilation failed — see ${ARTIFACT_DIR}/compile_errors.log"
     exit 1
+fi
+record_local_fallbacks "${ARTIFACT_DIR}/compile_errors.log" "compile local fallback"
+if [[ "$LOCAL_FALLBACKS" -ne 0 ]]; then
+    echo "  FATAL: rch local fallback detected during pre-flight; refusing local cargo execution"
+    exit 86
 fi
 echo "  OK"
 
@@ -183,8 +203,9 @@ check_pattern "Busy loop detected"   "busy loop detected"
 check_pattern "Task leak detected"   "task leak detected"
 check_pattern "OBLIGATION TOKEN"     "obligation token leak"
 check_pattern "resource.*leak"       "resource leak"
+record_local_fallbacks "$LOG_FILE" "test local fallback"
 
-if [ "$PATTERN_FAILURES" -eq 0 ]; then
+if [ "$PATTERN_FAILURES" -eq 0 ] && [ "$LOCAL_FALLBACKS" -eq 0 ]; then
     echo "  No failure patterns found"
 fi
 
@@ -223,7 +244,7 @@ SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
 REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} CARGO_TARGET_DIR=${CARGO_TARGET_DIR} bash ${SCRIPT_DIR}/$(basename "$0")"
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
-if [ "$TEST_RESULT" -eq 0 ] && [ "$PATTERN_FAILURES" -eq 0 ]; then
+if [ "$TEST_RESULT" -eq 0 ] && [ "$PATTERN_FAILURES" -eq 0 ] && [ "$LOCAL_FALLBACKS" -eq 0 ]; then
     SUITE_STATUS="passed"
 fi
 if [[ "${DRY_RUN}" -eq 1 ]]; then
@@ -238,6 +259,12 @@ if [ "$SUITE_STATUS" = "passed" ]; then
     FAILURE_CLASS="none"
 elif [ "$SUITE_STATUS" = "planned" ]; then
     FAILURE_CLASS="none"
+elif [ "$LOCAL_FALLBACKS" -ne 0 ]; then
+    FAILURE_CLASS="rch_local_fallback"
+fi
+RCH_ROUTED_JSON=true
+if [[ "$LOCAL_FALLBACKS" -ne 0 ]]; then
+    RCH_ROUTED_JSON=false
 fi
 
 cat > "${SUMMARY_FILE}" << ENDJSON
@@ -252,7 +279,8 @@ cat > "${SUMMARY_FILE}" << ENDJSON
   "failure_class": "${FAILURE_CLASS}",
   "dry_run": ${DRY_RUN_JSON},
   "runner": "rch exec",
-  "all_rch_routed": true,
+  "all_rch_routed": ${RCH_ROUTED_JSON},
+  "rch_local_fallbacks": ${LOCAL_FALLBACKS},
   "repro_command": "$(json_escape "${REPRO_COMMAND}")",
   "artifact_path": "$(json_escape "${SUMMARY_FILE}")",
   "suite": "${SUITE_ID}",
@@ -300,6 +328,6 @@ echo "==================================================================="
 
 echo "  Diagnostic artifacts are retained for auditability, including empty files."
 
-if [ "$TEST_RESULT" -ne 0 ] || [ "$PATTERN_FAILURES" -ne 0 ]; then
+if [ "$TEST_RESULT" -ne 0 ] || [ "$PATTERN_FAILURES" -ne 0 ] || [ "$LOCAL_FALLBACKS" -ne 0 ]; then
     exit 1
 fi
