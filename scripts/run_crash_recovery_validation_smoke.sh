@@ -86,7 +86,7 @@ run_scenario() {
         "CARGO_INCREMENTAL=0"
         "RUSTFLAGS=-D warnings"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crash_recovery_validation"
-        cargo
+        "${CARGO_BIN:-cargo}"
         test
         --test
         crash_recovery_validation_contract
