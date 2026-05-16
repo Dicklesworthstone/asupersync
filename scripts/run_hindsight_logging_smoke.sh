@@ -100,7 +100,7 @@ COMMAND_ARGS=(
   "CARGO_PROFILE_TEST_DEBUG=0"
   "RUSTFLAGS=-D warnings -C debuginfo=0"
   "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_hindsight_logging"
-  cargo
+  "${CARGO_BIN:-cargo}"
   test
   -p
   asupersync
