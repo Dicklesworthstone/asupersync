@@ -1,0 +1,18 @@
+{
+  "helpers": [
+    {
+      "capability_id": "proof-lane-routing",
+      "commit": "6acfc0012345",
+      "fixture_root": "tests/fixtures/proof_runner",
+      "helper_id": "local-cargo-proof-receipt",
+      "owner": "CoralGorge",
+      "script_path": "scripts/proof_runner.py",
+      "status": "shipped",
+      "summary": "Proof helper advertises a local Cargo validation command that must not be cited by swarm agents.",
+      "test_path": "tests/proof_runner_contract.rs",
+      "validation": [
+        "cargo test -p asupersync --test proof_runner_contract"
+      ]
+    }
+  ]
+}

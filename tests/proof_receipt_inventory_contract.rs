@@ -233,6 +233,35 @@ fn missing_fixture_root_matches_full_output_golden() {
 }
 
 #[test]
+fn unsafe_validation_command_is_actionable() {
+    let receipt = receipt_json("unsafe_validation_command.json");
+    let row = helper(&receipt, "local-cargo-proof-receipt");
+
+    assert_eq!(row["classification"].as_str(), Some("canonical"));
+    assert_eq!(
+        receipt["capabilities"][0]["needs_review"].as_bool(),
+        Some(true)
+    );
+
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    assert!(cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("unsafe-validation-command")
+            && cue["helper_id"].as_str() == Some("local-cargo-proof-receipt")
+            && cue["command"].as_str()
+                == Some("cargo test -p asupersync --test proof_runner_contract")
+    }));
+}
+
+#[test]
+fn unsafe_validation_command_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "unsafe_validation_command.json",
+        "unsafe_validation_command_expected.json",
+        "proof receipt inventory unsafe-validation-command golden changed; update only after reviewing rch-routing actionability semantics",
+    );
+}
+
+#[test]
 fn redaction_and_missing_contract_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "redaction_and_missing_contract.json",

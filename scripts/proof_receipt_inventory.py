@@ -162,6 +162,24 @@ def is_covered(row: dict[str, Any]) -> bool:
     return bool(row["script_path"] and row["test_path"] and row["fixture_root"])
 
 
+def command_routes_cargo_through_rch(command: str) -> bool:
+    collapsed = " ".join(command.lower().split())
+    cargo_index = f" {collapsed} ".find(" cargo ")
+    if cargo_index < 0:
+        return True
+    rch_index = collapsed.find("rch exec --")
+    return 0 <= rch_index < cargo_index
+
+
+def unsafe_validation_commands(row: dict[str, Any]) -> list[str]:
+    return [
+        command
+        for command in row["validation"]
+        if f" {' '.join(command.lower().split())} ".find(" cargo ") >= 0
+        and not command_routes_cargo_through_rch(command)
+    ]
+
+
 def canonical_key(row: dict[str, Any]) -> tuple[int, int, int, str]:
     if is_superseded(row):
         tier = 3
@@ -225,7 +243,8 @@ def capability_summaries(
                 "canonical_helper": canonical["helper_id"],
                 "needs_review": duplicate_active_count > 0
                 or bool(drafts)
-                or any(not is_covered(row) for row in rows),
+                or any(not is_covered(row) for row in rows)
+                or any(unsafe_validation_commands(row) for row in rows),
             }
         )
     return summaries, canonical_by_capability
@@ -298,6 +317,17 @@ def review_cues(rows: list[dict[str, Any]], capabilities: list[dict[str, Any]]) 
                     "capability_id": row["capability_id"],
                     "helper_id": row["helper_id"],
                     "recommendation": "add fixture-backed contract coverage before citing this helper",
+                }
+            )
+        for command in unsafe_validation_commands(row):
+            cues.append(
+                {
+                    "kind": "unsafe-validation-command",
+                    "severity": "high",
+                    "capability_id": row["capability_id"],
+                    "helper_id": row["helper_id"],
+                    "command": command,
+                    "recommendation": "route Cargo validation through rch exec before citing this helper",
                 }
             )
     return sorted(cues, key=lambda cue: (cue["severity"], cue["kind"], cue["capability_id"], cue.get("helper_id", "")))
