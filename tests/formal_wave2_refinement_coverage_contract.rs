@@ -202,10 +202,16 @@ fn cargo_and_lean_commands_are_rch_offloaded() {
                 !command.trim().is_empty(),
                 "{lane_id}: proof command must be nonempty"
             );
-            if command.contains("cargo ") || command.contains("lake build") {
+            if command.contains("cargo ") {
+                assert!(
+                    command.contains("rch exec -- env ") && command.contains("CARGO_TARGET_DIR="),
+                    "{lane_id}: Cargo proof command must use rch env target dir: {command}"
+                );
+            }
+            if command.contains("lake build") {
                 assert!(
                     command.contains("rch exec --"),
-                    "{lane_id}: proof-heavy command must use rch: {command}"
+                    "{lane_id}: Lean proof command must use rch: {command}"
                 );
             }
             for forbidden in ["password=", "token=", "secret=", "bearer "] {

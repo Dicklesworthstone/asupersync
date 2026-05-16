@@ -61,6 +61,10 @@ def repo_path(relative):
     return repo_root / relative
 
 
+def cargo_command_has_target_dir(command):
+    return "rch exec -- env " in command and "CARGO_TARGET_DIR=" in command
+
+
 def as_list(value, key, ctx):
     item = value.get(key, [])
     if not isinstance(item, list):
@@ -164,7 +168,14 @@ for lane in as_list(manifest, "lane_rows", "manifest"):
             failures.append(f"{lane_id}:command:blank")
             continue
         lower = command.lower()
-        if ("cargo " in command or "lake build" in command) and "rch exec --" not in command:
+        if "cargo " in command:
+            if "rch exec --" not in command:
+                first_failure = first_failure or f"missing_rch:{command}"
+                failures.append(f"{lane_id}:missing_rch:{command}")
+            elif not cargo_command_has_target_dir(command):
+                first_failure = first_failure or f"missing_cargo_target_dir:{command}"
+                failures.append(f"{lane_id}:missing_cargo_target_dir:{command}")
+        elif "lake build" in command and "rch exec --" not in command:
             first_failure = first_failure or f"missing_rch:{command}"
             failures.append(f"{lane_id}:missing_rch:{command}")
         for marker in ("password=", "token=", "secret=", "bearer "):
