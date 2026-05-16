@@ -53368,6 +53368,7 @@ mod otlp_122_tests {
 fn otlp_158_kinesis_consumer_shard_id_conformance() {
     // Enum to represent OTLP attribute value types
     #[derive(Debug, Clone)]
+    #[allow(clippy::enum_variant_names)]
     enum AttributeValue {
         StringValue(String),
         IntValue(i64),
@@ -53425,9 +53426,10 @@ fn otlp_158_kinesis_consumer_shard_id_conformance() {
                 span_kind: "CONSUMER".to_string(),
                 messaging_system: Some("kinesis".to_string()),
                 shard_id: None,
-                additional_attributes: [
-                    ("messaging.kinesis.stream_name".to_string(), AttributeValue::StringValue("order-events".to_string())),
-                ].iter().cloned().collect(),
+                additional_attributes: HashMap::from([(
+                    "messaging.kinesis.stream_name".to_string(),
+                    AttributeValue::StringValue("order-events".to_string()),
+                )]),
                 should_pass_validation: false,
                 expected_error_pattern: Some("messaging.kinesis.shard_id attribute is required".to_string()),
             },
@@ -53435,7 +53437,7 @@ fn otlp_158_kinesis_consumer_shard_id_conformance() {
                 description: "Empty string shard ID".to_string(),
                 span_kind: "CONSUMER".to_string(),
                 messaging_system: Some("kinesis".to_string()),
-                shard_id: Some(AttributeValue::StringValue("".to_string())),
+                shard_id: Some(AttributeValue::StringValue(String::new())),
                 additional_attributes: HashMap::new(),
                 should_pass_validation: false,
                 expected_error_pattern: Some("messaging.kinesis.shard_id must be non-empty".to_string()),
@@ -53476,9 +53478,10 @@ fn otlp_158_kinesis_consumer_shard_id_conformance() {
                 span_kind: "PRODUCER".to_string(),
                 messaging_system: Some("kinesis".to_string()),
                 shard_id: None,
-                additional_attributes: [
-                    ("messaging.kinesis.stream_name".to_string(), AttributeValue::StringValue("order-events".to_string())),
-                ].iter().cloned().collect(),
+                additional_attributes: HashMap::from([(
+                    "messaging.kinesis.stream_name".to_string(),
+                    AttributeValue::StringValue("order-events".to_string()),
+                )]),
                 should_pass_validation: true,
                 expected_error_pattern: None,
             },
@@ -53487,9 +53490,10 @@ fn otlp_158_kinesis_consumer_shard_id_conformance() {
                 span_kind: "CONSUMER".to_string(),
                 messaging_system: Some("kafka".to_string()),
                 shard_id: None,
-                additional_attributes: [
-                    ("messaging.kafka.topic".to_string(), AttributeValue::StringValue("orders".to_string())),
-                ].iter().cloned().collect(),
+                additional_attributes: HashMap::from([(
+                    "messaging.kafka.topic".to_string(),
+                    AttributeValue::StringValue("orders".to_string()),
+                )]),
                 should_pass_validation: true,
                 expected_error_pattern: None,
             },
@@ -53720,6 +53724,7 @@ fn otlp_158_kinesis_consumer_shard_id_conformance() {
 fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
     // Enum to represent OTLP attribute value types
     #[derive(Debug, Clone)]
+    #[allow(clippy::enum_variant_names)]
     enum AttributeValue {
         StringValue(String),
         IntValue(i64),
@@ -53788,13 +53793,10 @@ fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
             span_kind: "PRODUCER".to_string(),
             messaging_system: Some("aws_kinesis_firehose".to_string()),
             delivery_stream_name: None,
-            additional_attributes: [(
+            additional_attributes: HashMap::from([(
                 "messaging.aws_kinesis_firehose.destination".to_string(),
                 AttributeValue::StringValue("redshift".to_string()),
-            )]
-            .iter()
-            .cloned()
-            .collect(),
+            )]),
             should_pass_validation: false,
             expected_error_pattern: Some(
                 "messaging.aws_kinesis_firehose.delivery_stream_name attribute is required"
@@ -53805,7 +53807,7 @@ fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
             description: "Empty string delivery stream name".to_string(),
             span_kind: "PRODUCER".to_string(),
             messaging_system: Some("aws_kinesis_firehose".to_string()),
-            delivery_stream_name: Some(AttributeValue::StringValue("".to_string())),
+            delivery_stream_name: Some(AttributeValue::StringValue(String::new())),
             additional_attributes: HashMap::new(),
             should_pass_validation: false,
             expected_error_pattern: Some(
@@ -53908,13 +53910,10 @@ fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
             span_kind: "PRODUCER".to_string(),
             messaging_system: Some("kinesis".to_string()),
             delivery_stream_name: None,
-            additional_attributes: [(
+            additional_attributes: HashMap::from([(
                 "messaging.kinesis.stream_name".to_string(),
                 AttributeValue::StringValue("regular-kinesis-stream".to_string()),
-            )]
-            .iter()
-            .cloned()
-            .collect(),
+            )]),
             should_pass_validation: true,
             expected_error_pattern: None,
         },
@@ -54198,6 +54197,7 @@ fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
 fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
     // Enum to represent OTLP attribute value types
     #[derive(Debug, Clone)]
+    #[allow(clippy::enum_variant_names)]
     enum AttributeValue {
         StringValue(String),
         IntValue(i64),
@@ -54266,13 +54266,10 @@ fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
             span_kind: "PRODUCER".to_string(),
             messaging_system: Some("azure_servicebus".to_string()),
             queue_name: None,
-            additional_attributes: [(
+            additional_attributes: HashMap::from([(
                 "messaging.azure_servicebus.namespace".to_string(),
                 AttributeValue::StringValue("production-servicebus".to_string()),
-            )]
-            .iter()
-            .cloned()
-            .collect(),
+            )]),
             should_pass_validation: false,
             expected_error_pattern: Some(
                 "messaging.azure_servicebus.queue_name attribute is required".to_string(),
@@ -54282,7 +54279,7 @@ fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
             description: "Empty string queue name".to_string(),
             span_kind: "PRODUCER".to_string(),
             messaging_system: Some("azure_servicebus".to_string()),
-            queue_name: Some(AttributeValue::StringValue("".to_string())),
+            queue_name: Some(AttributeValue::StringValue(String::new())),
             additional_attributes: HashMap::new(),
             should_pass_validation: false,
             expected_error_pattern: Some(
@@ -54383,13 +54380,10 @@ fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
             span_kind: "CONSUMER".to_string(),
             messaging_system: Some("azure_servicebus".to_string()),
             queue_name: None,
-            additional_attributes: [(
+            additional_attributes: HashMap::from([(
                 "messaging.azure_servicebus.namespace".to_string(),
                 AttributeValue::StringValue("servicebus-namespace".to_string()),
-            )]
-            .iter()
-            .cloned()
-            .collect(),
+            )]),
             should_pass_validation: true,
             expected_error_pattern: None,
         },
@@ -54398,15 +54392,12 @@ fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
             span_kind: "PRODUCER".to_string(),
             messaging_system: Some("aws_sqs".to_string()),
             queue_name: None,
-            additional_attributes: [(
+            additional_attributes: HashMap::from([(
                 "messaging.aws_sqs.queue_url".to_string(),
                 AttributeValue::StringValue(
                     "https://sqs.us-east-1.amazonaws.com/123456789012/orders".to_string(),
                 ),
-            )]
-            .iter()
-            .cloned()
-            .collect(),
+            )]),
             should_pass_validation: true,
             expected_error_pattern: None,
         },
@@ -54770,9 +54761,8 @@ mod xfail_coverage_tracker {
                 XfailValidationResult::ValidationSkipped { .. } => {
                     // This is an error - XFAIL tests must be validated
                     panic!(
-                        "XFAIL test validation skipped for {}: {:?} - this violates fail-closed coverage",
-                        format!("{}::{}", test_function, scenario_name),
-                        result
+                        "XFAIL test validation skipped for {}::{}: {:?} - this violates fail-closed coverage",
+                        test_function, scenario_name, result
                     );
                 }
             }
@@ -54827,7 +54817,7 @@ mod xfail_coverage_tracker {
         /// Generate a detailed coverage report
         pub fn generate_report(&self) -> String {
             let mut report = String::new();
-            report.push_str(&format!("XFAIL Coverage Summary:\n"));
+            report.push_str("XFAIL Coverage Summary:\n");
             report.push_str(&format!(
                 "  Total Expected Failures: {}\n",
                 self.total_expected_failures
@@ -54924,14 +54914,14 @@ fn test_xfail_coverage_fail_closed_validation() {
     println!("\n{}", report);
 
     // FAIL-CLOSED: If any expected failures were not validated, fail the test
-    if !summary.is_coverage_complete() {
-        panic!(
-            "XFAIL Coverage FAIL-CLOSED Violation: {} expected failures were not validated.\n\
+    assert!(
+        summary.is_coverage_complete(),
+        "XFAIL Coverage FAIL-CLOSED Violation: {} expected failures were not validated.\n\
              All tests marked with expected_validation_failure: true MUST be executed and validated.\n\
              \n{}",
-            summary.unvalidated_failures, report
-        );
-    }
+        summary.unvalidated_failures,
+        report
+    );
 
     // Report unexpected passes (these might indicate bugs were fixed)
     if summary.unexpected_passes > 0 {
