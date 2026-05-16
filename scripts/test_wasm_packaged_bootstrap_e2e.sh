@@ -531,6 +531,11 @@ for idx in "${!STEP_IDS[@]}"; do
         set -e
     fi
 
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "${step_log}" 2>/dev/null; then
+        echo "rch local fallback detected; refusing local cargo execution" > "${RUN_DIR}/${step_id}.rch_local_fallback.txt"
+        step_rc=86
+    fi
+
     step_end_epoch="$(date +%s)"
     step_duration_ms=$(((step_end_epoch - step_start_epoch) * 1000))
     step_outcome="pass"
