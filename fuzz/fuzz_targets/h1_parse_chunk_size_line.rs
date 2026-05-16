@@ -14,6 +14,19 @@ use asupersync::http::h1::codec::{HttpError, fuzz_parse_chunk_size_line};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_LEN: usize = 4096;
+const BAD_CHUNKED_ENCODING_DISPLAY: &str = "malformed chunked encoding";
+
+fn assert_bad_chunked_encoding(error: HttpError) {
+    assert!(
+        matches!(error, HttpError::BadChunkedEncoding),
+        "chunk-size parser should fail closed with BadChunkedEncoding, got {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        BAD_CHUNKED_ENCODING_DISPLAY,
+        "chunk-size parser should preserve the exact BadChunkedEncoding diagnostic"
+    );
+}
 
 fn observe_chunk_size_parse(data: &[u8]) {
     match fuzz_parse_chunk_size_line(data) {
@@ -53,10 +66,7 @@ fn observe_chunk_size_parse(data: &[u8]) {
             );
         }
         Err(error) => {
-            assert!(
-                matches!(error, HttpError::BadChunkedEncoding),
-                "chunk-size parser should fail closed with BadChunkedEncoding, got {error:?}"
-            );
+            assert_bad_chunked_encoding(error);
         }
     }
 }
@@ -106,10 +116,9 @@ fuzz_target!(|data: &[u8]| {
         b"100000000000000000000000000000000".as_ref(),
         overflow.as_bytes(),
     ] {
-        assert!(matches!(
-            fuzz_parse_chunk_size_line(candidate),
-            Err(HttpError::BadChunkedEncoding)
-        ));
+        let error = fuzz_parse_chunk_size_line(candidate)
+            .expect_err("malformed chunk-size candidate should be rejected");
+        assert_bad_chunked_encoding(error);
         observe_chunk_size_parse(candidate);
     }
 });
