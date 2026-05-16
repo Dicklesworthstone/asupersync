@@ -26,7 +26,7 @@ Usage: ./scripts/alloc_census.sh [options]
 
 Options:
   --tool <heaptrack|valgrind>   Allocation tool (default: heaptrack)
-  --cmd  "<command>"             Command to profile (required; prebuild Cargo targets through rch first)
+  --cmd  "<command>"             Command to profile (required; pass a prebuilt binary path)
   --out  <dir>                   Output directory (default: baselines/alloc_census)
   --flamegraph                   Attempt a flamegraph capture (cargo-flamegraph)
   -h, --help                     Show help
@@ -54,10 +54,12 @@ if [[ ${#CMD[@]} -eq 0 ]]; then
     exit 2
 fi
 
-if [[ "${CMD[0]}" == "cargo" && "${ALLOW_LOCAL_CARGO}" != "1" ]]; then
-    echo "ERROR: local cargo profiling is disabled by default. Prebuild through rch and pass a binary path, or set ALLOW_LOCAL_CARGO=1 intentionally." >&2
-    exit 2
-fi
+for token in "${CMD[@]}"; do
+    if [[ "$token" == "cargo" && "${ALLOW_LOCAL_CARGO}" != "1" ]]; then
+        echo "ERROR: local cargo profiling is disabled by default. Prebuild through rch and pass a binary path, or set ALLOW_LOCAL_CARGO=1 intentionally." >&2
+        exit 2
+    fi
+done
 
 if ! command -v python3 &>/dev/null; then
     echo "ERROR: python3 is required for report generation" >&2
