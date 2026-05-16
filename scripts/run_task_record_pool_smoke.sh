@@ -228,7 +228,7 @@ run_once() {
         "ASUPERSYNC_TASK_RECORD_POOL_CONTRACT_PATH=${ARTIFACT}"
         "ASUPERSYNC_TASK_RECORD_POOL_SCENARIO_ID=${SCENARIO}"
         "ASUPERSYNC_TASK_RECORD_POOL_REPORT_PATH=${report_path}"
-        cargo
+        "${CARGO_BIN:-cargo}"
         test
         -p
         asupersync
@@ -425,7 +425,8 @@ if [ "$EXPECTED_REPORT_PROJECTION_JSON" = "null" ]; then
     exit 1
 fi
 
-COMMAND_STRING="${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_task_record_pool_<run> ASUPERSYNC_TASK_RECORD_POOL_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_TASK_RECORD_POOL_SCENARIO_ID=${SCENARIO} ASUPERSYNC_TASK_RECORD_POOL_REPORT_PATH=<report> cargo test -p asupersync --test task_record_pool_contract task_record_pool_smoke_contract_emits_report --features test-internals -- --nocapture"
+REPLAY_CARGO_TOKEN='${CARGO_BIN:-cargo}'
+COMMAND_STRING="${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_task_record_pool_<run> ASUPERSYNC_TASK_RECORD_POOL_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_TASK_RECORD_POOL_SCENARIO_ID=${SCENARIO} ASUPERSYNC_TASK_RECORD_POOL_REPORT_PATH=<report> ${REPLAY_CARGO_TOKEN} test -p asupersync --test task_record_pool_contract task_record_pool_smoke_contract_emits_report --features test-internals -- --nocapture"
 
 set +e
 run_once "run1" "$REPORT_PATH" "$RUN_LOG_PATH"
