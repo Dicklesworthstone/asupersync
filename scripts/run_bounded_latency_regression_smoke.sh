@@ -91,7 +91,7 @@ run_scenario() {
         "CARGO_INCREMENTAL=0"
         "RUSTFLAGS=-D warnings"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_latency_regression"
-        cargo
+        "${CARGO_BIN:-cargo}"
         test
         --test
         bounded_latency_regression_contract
