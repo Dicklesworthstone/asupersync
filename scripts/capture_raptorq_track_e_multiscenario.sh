@@ -29,6 +29,10 @@ run_case() {
         --warm-up-time "$WARM_UP_TIME" \
         --measurement-time "$MEASUREMENT_TIME" \
         >"$log_file" 2>&1
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file"; then
+        printf '%s\n' "FATAL: rch local fallback detected; refusing local cargo execution" >>"$log_file"
+        return 86
+    fi
 
     CRITERION_DIR="$target_dir/criterion" ./scripts/capture_baseline.sh >"$capture_file"
 }
