@@ -173,6 +173,26 @@ emit_gate_event() {
         "$(json_escape "$message")" >> "$GATE_EVENTS_FILE"
 }
 
+reject_rch_local_fallback_log() {
+    local label="$1"
+    local log_file="$2"
+    local safe_label="${label//[^A-Za-z0-9_]/_}"
+    local marker_file="${ARTIFACT_DIR}/${safe_label}_rch_local_fallback.txt"
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+        echo "FATAL: rch local fallback detected in ${label}; refusing local cargo execution" >&2
+        echo "rch local fallback detected in ${label}; refusing local cargo execution" > "$marker_file"
+        emit_gate_event \
+            "rch_local_fallback" \
+            "fail" \
+            "$label" \
+            "Refusing local cargo execution after rch local fallback" \
+            "$marker_file" \
+            "$RUN_REPRO_COMMAND"
+        exit 86
+    fi
+}
+
 echo "==================================================================="
 echo "                 Asupersync Perf E2E Runner                        "
 echo "==================================================================="
@@ -245,6 +265,7 @@ for bench in "${BENCHES[@]}"; do
         rc=${PIPESTATUS[0]}
     fi
     set -e
+    reject_rch_local_fallback_log "$bench" "$log_file"
     end_ts=$(date +%s)
     duration=$((end_ts - start_ts))
 
@@ -335,7 +356,16 @@ if command -v git &>/dev/null; then
     GIT_SHA=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || true)
 fi
 RUSTC_VER=$(rustc -V 2>/dev/null || echo "")
-CARGO_VER=$("$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${RCH_TARGET_ROOT}/cargo_version" cargo -V 2>/dev/null | tail -n 1 || echo "")
+CARGO_VERSION_LOG="${ARTIFACT_DIR}/cargo_version.log"
+set +e
+"$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${RCH_TARGET_ROOT}/cargo_version" cargo -V > "$CARGO_VERSION_LOG" 2>&1
+CARGO_VERSION_STATUS=$?
+set -e
+reject_rch_local_fallback_log "cargo-version" "$CARGO_VERSION_LOG"
+CARGO_VER=""
+if [[ "$CARGO_VERSION_STATUS" -eq 0 ]]; then
+    CARGO_VER=$(tail -n 1 "$CARGO_VERSION_LOG" || echo "")
+fi
 OS_NAME=$(uname -s 2>/dev/null || echo "")
 OS_ARCH=$(uname -m 2>/dev/null || echo "")
 OS_RELEASE=$(uname -r 2>/dev/null || echo "")
