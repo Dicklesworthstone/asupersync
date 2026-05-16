@@ -9,6 +9,7 @@ SAMPLE_SIZE="${SAMPLE_SIZE:-40}"
 WARM_UP_TIME="${WARM_UP_TIME:-0.2}"
 MEASUREMENT_TIME="${MEASUREMENT_TIME:-0.2}"
 TARGET_ROOT="${TARGET_ROOT:-/tmp/rch-e5-long-v5}"
+RCH_BIN="${RCH_BIN:-rch}"
 
 cd "$PROJECT_ROOT"
 
@@ -20,7 +21,7 @@ run_case() {
     local capture_file="/tmp/asupersync-${name}.baseline.json"
     local log_file="/tmp/asupersync-${name}.remote.log"
 
-    env "$@" \
+    "$RCH_BIN" exec -- env "$@" \
         CARGO_TARGET_DIR="$target_dir" \
         cargo bench --bench raptorq_benchmark --features simd-intrinsics -- \
         "$BENCH_FILTER" \
