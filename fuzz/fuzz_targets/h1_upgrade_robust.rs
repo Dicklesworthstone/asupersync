@@ -5,12 +5,15 @@ use asupersync::codec::Decoder;
 use asupersync::http::h1::codec::{Http1Codec, HttpError};
 use asupersync::http::h1::types::{Method, Request, Version};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 // Maximum data size to prevent timeouts
 const MAX_DATA_SIZE: usize = 1024 * 1024; // 1MB
 
+static FIXED_UPGRADE_CANARIES: OnceLock<()> = OnceLock::new();
+
 fuzz_target!(|data: &[u8]| {
-    run_fixed_upgrade_canaries();
+    FIXED_UPGRADE_CANARIES.get_or_init(run_fixed_upgrade_canaries);
 
     if data.len() > MAX_DATA_SIZE {
         return;
