@@ -16,6 +16,9 @@ use asupersync::http::h1::types::Version;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_LEN: usize = 8192; // HTTP/1.1 request line limit
+const BAD_REQUEST_LINE_DISPLAY: &str = "malformed request line";
+const BAD_METHOD_DISPLAY: &str = "unrecognised HTTP method";
+const UNSUPPORTED_VERSION_DISPLAY: &str = "unsupported HTTP version";
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_LEN {
@@ -135,31 +138,44 @@ fn is_visible_uri(uri: &str) -> bool {
 }
 
 fn assert_bad_request_line(line: &[u8]) {
-    assert!(
-        matches!(
-            fuzz_parse_request_line_bytes(line),
-            Err(HttpError::BadRequestLine)
-        ),
-        "expected BadRequestLine for {line:?}",
+    assert_request_line_error(
+        line,
+        HttpError::BadRequestLine,
+        BAD_REQUEST_LINE_DISPLAY,
+        "BadRequestLine",
     );
 }
 
 fn assert_bad_method(line: &[u8]) {
-    assert!(
-        matches!(
-            fuzz_parse_request_line_bytes(line),
-            Err(HttpError::BadMethod)
-        ),
-        "expected BadMethod for {line:?}",
-    );
+    assert_request_line_error(line, HttpError::BadMethod, BAD_METHOD_DISPLAY, "BadMethod");
 }
 
 fn assert_unsupported_version(line: &[u8]) {
-    assert!(
-        matches!(
-            fuzz_parse_request_line_bytes(line),
-            Err(HttpError::UnsupportedVersion)
-        ),
-        "expected UnsupportedVersion for {line:?}",
+    assert_request_line_error(
+        line,
+        HttpError::UnsupportedVersion,
+        UNSUPPORTED_VERSION_DISPLAY,
+        "UnsupportedVersion",
+    );
+}
+
+fn assert_request_line_error(
+    line: &[u8],
+    expected: HttpError,
+    expected_display: &str,
+    label: &str,
+) {
+    let Err(error) = fuzz_parse_request_line_bytes(line) else {
+        panic!("expected {label} for {line:?}");
+    };
+    assert_eq!(
+        std::mem::discriminant(&error),
+        std::mem::discriminant(&expected),
+        "expected {label} for {line:?}, got {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "request-line parser diagnostic changed for {label}"
     );
 }
