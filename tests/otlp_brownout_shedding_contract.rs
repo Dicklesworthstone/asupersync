@@ -496,6 +496,34 @@ fn build_otlp_brownout_report(scenario: &OtlpBrownoutScenario, include_hash_prob
 }
 
 #[test]
+fn otlp_brownout_runner_rejects_full_rch_fallback_marker_set() {
+    let script = fs::read_to_string("scripts/run_otlp_brownout_shedding_smoke.sh")
+        .expect("OTLP brownout smoke runner should load");
+
+    assert!(
+        script
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 1,
+        "runner must use the shared local fallback matcher at its rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            script.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
+#[test]
 fn otlp_brownout_shedding_smoke_contract_emits_report() {
     let contract = load_otlp_brownout_contract();
     let scenario_id = selected_otlp_brownout_scenario();
