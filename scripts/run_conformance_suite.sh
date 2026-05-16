@@ -33,6 +33,26 @@ JSON_FILE="${OUTPUT_DIR}/conformance_${TIMESTAMP}.json"
 LATEST_LOG="${OUTPUT_DIR}/latest.log"
 LATEST_JSON="${OUTPUT_DIR}/latest.json"
 
+reject_rch_local_fallback_log() {
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "${LOG_FILE}" 2>/dev/null; then
+        echo "FATAL: rch local fallback detected; refusing local cargo execution" >&2
+        echo "rch local fallback detected; refusing local cargo execution" > "${OUTPUT_DIR}/rch_local_fallback_${TIMESTAMP}.txt"
+        cat > "${JSON_FILE}" <<EOF
+{
+  "timestamp": "$(date -Iseconds)",
+  "suite": "asupersync-conformance",
+  "runner": "rch exec",
+  "replay_command": "$(json_escape "${REPLAY_COMMAND}")",
+  "target_dir": "$(json_escape "${CARGO_TARGET_DIR}")",
+  "log_file": "$(json_escape "${LOG_FILE}")",
+  "status": "rch_local_fallback"
+}
+EOF
+        cp "${JSON_FILE}" "${LATEST_JSON}"
+        exit 86
+    fi
+}
+
 export RUST_LOG="${RUST_LOG:-trace}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
@@ -82,6 +102,8 @@ set +e
 "${TEST_COMMAND[@]}" 2>&1 | tee "${LOG_FILE}"
 STATUS=${PIPESTATUS[0]}
 set -e
+
+reject_rch_local_fallback_log
 
 PASSED=$(grep -c "test .* ok" "${LOG_FILE}" 2>/dev/null || echo "0")
 FAILED=$(grep -c "test .* FAILED" "${LOG_FILE}" 2>/dev/null || echo "0")
