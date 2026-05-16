@@ -12,9 +12,12 @@
 
 use asupersync::http::h1::codec::{HttpError, fuzz_parse_chunk_size_line};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_INPUT_LEN: usize = 4096;
 const BAD_CHUNKED_ENCODING_DISPLAY: &str = "malformed chunked encoding";
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 fn assert_bad_chunked_encoding(error: HttpError) {
     assert!(
@@ -71,13 +74,7 @@ fn observe_chunk_size_parse(data: &[u8]) {
     }
 }
 
-fuzz_target!(|data: &[u8]| {
-    if data.len() > MAX_INPUT_LEN {
-        return;
-    }
-
-    observe_chunk_size_parse(data);
-
+fn assert_fixed_chunk_size_canaries() {
     // The parser receives the field bytes after CRLF splitting.
     for (candidate, expected) in [
         (b"0".as_ref(), 0),
@@ -121,4 +118,14 @@ fuzz_target!(|data: &[u8]| {
         assert_bad_chunked_encoding(error);
         observe_chunk_size_parse(candidate);
     }
+}
+
+fuzz_target!(|data: &[u8]| {
+    FIXED_CANARIES.get_or_init(assert_fixed_chunk_size_canaries);
+
+    if data.len() > MAX_INPUT_LEN {
+        return;
+    }
+
+    observe_chunk_size_parse(data);
 });
