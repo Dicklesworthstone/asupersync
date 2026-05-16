@@ -81,8 +81,8 @@ struct LocalQueueInner {
 /// from the other end (FIFO).
 ///
 /// br-asupersync-pvbwxm: `cached_len` is an `AtomicUsize` mirror of
-/// `inner.queue.len()` updated under the same lock that mutates the
-/// queue. The owner's backoff loop reads `is_empty()` / `len()` very
+/// `inner.queue.len()` published while holding the same lock that mutates
+/// the queue. The owner's backoff loop reads `is_empty()` / `len()` very
 /// frequently while looking for work to park on; routing those reads
 /// through a single `Acquire` atomic load lets the worker decide whether
 /// to spin / yield / park without ever taking the deque mutex (which
@@ -196,14 +196,10 @@ impl LocalQueue {
     #[inline]
     pub fn push(&self, task: TaskId) {
         let mut inner = self.inner.lock();
-        inner.queue.push(task);
-        inner.presence.insert(task);
-        let new_len = inner.queue.len();
-        // Release lock immediately to minimize contention
-        drop(inner);
-        // Use Relaxed ordering for better performance - only steal coordination
-        // requires Release ordering, local operations can use Relaxed
-        self.cached_len.store(new_len, Ordering::Relaxed);
+        if inner.presence.insert(task) {
+            inner.queue.push(task);
+        }
+        self.cached_len.store(inner.queue.len(), Ordering::Release);
     }
 
     /// Pushes a task from the TLS scheduling fast path.
@@ -251,10 +247,7 @@ impl LocalQueue {
         // SmallVec::contains scan.
         if inner.presence.insert(task) {
             inner.queue.push(task);
-            let new_len = inner.queue.len();
-            drop(inner);
-            // Use Relaxed ordering for TLS fast path - better performance
-            self.cached_len.store(new_len, Ordering::Relaxed);
+            self.cached_len.store(inner.queue.len(), Ordering::Release);
         }
     }
 
@@ -280,12 +273,7 @@ impl LocalQueue {
                 inner.queue.push(*task);
             }
         }
-        let new_len = inner.queue.len();
-        // Release lock immediately to minimize contention
-        drop(inner);
-        // Use Relaxed ordering for better performance - batch operations
-        // can use relaxed consistency for local queue operations
-        self.cached_len.store(new_len, Ordering::Relaxed);
+        self.cached_len.store(inner.queue.len(), Ordering::Release);
     }
 
     /// Pops a task from the local queue (LIFO).
@@ -307,12 +295,7 @@ impl LocalQueue {
         if let Some(task) = popped {
             inner.presence.remove(&task);
         }
-        let new_len = inner.queue.len();
-        // Release lock immediately to minimize contention
-        drop(inner);
-        // Use Relaxed ordering for better performance - local operations
-        // don't need Release ordering for steal coordination
-        self.cached_len.store(new_len, Ordering::Relaxed);
+        self.cached_len.store(inner.queue.len(), Ordering::Release);
         popped
     }
 
@@ -566,9 +549,7 @@ impl Stealer {
             if let Some(task) = stolen {
                 inner.presence.remove(&task);
             }
-            let new_len = inner.queue.len();
-            drop(inner);
-            self.cached_len.store(new_len, Ordering::Release);
+            self.cached_len.store(inner.queue.len(), Ordering::Release);
             stolen
         })
     }
@@ -587,7 +568,7 @@ impl Stealer {
         }
         debug_assert!(self.tasks.same_underlying_tasks(&dest.tasks));
 
-        let stole = self.tasks.with_tasks_arena_mut(|arena| {
+        self.tasks.with_tasks_arena_mut(|arena| {
             // Avoid lock inversion when two workers concurrently steal from each
             // other by acquiring queue locks in a deterministic pointer order.
             let src_addr = Arc::as_ptr(&self.inner) as usize;
@@ -597,27 +578,20 @@ impl Stealer {
                 let mut src = self.inner.lock();
                 let mut dest_inner = dest.inner.lock();
                 let stole = Self::steal_batch_locked(&mut src, &mut dest_inner, arena);
-                let src_len = src.queue.len();
-                let dest_len = dest_inner.queue.len();
-                drop(dest_inner);
-                drop(src);
-                (stole, src_len, dest_len)
+                self.cached_len.store(src.queue.len(), Ordering::Release);
+                dest.cached_len
+                    .store(dest_inner.queue.len(), Ordering::Release);
+                stole
             } else {
                 let mut dest_inner = dest.inner.lock();
                 let mut src = self.inner.lock();
                 let stole = Self::steal_batch_locked(&mut src, &mut dest_inner, arena);
-                let src_len = src.queue.len();
-                let dest_len = dest_inner.queue.len();
-                drop(src);
-                drop(dest_inner);
-                (stole, src_len, dest_len)
+                self.cached_len.store(src.queue.len(), Ordering::Release);
+                dest.cached_len
+                    .store(dest_inner.queue.len(), Ordering::Release);
+                stole
             }
-        });
-        // br-asupersync-pvbwxm: publish updated cached lengths after
-        // dropping all queue locks.
-        self.cached_len.store(stole.1, Ordering::Release);
-        dest.cached_len.store(stole.2, Ordering::Release);
-        stole.0
+        })
     }
 }
 
@@ -1619,6 +1593,29 @@ mod tests {
 
         queue.push(task(3));
         assert_eq!(queue.pop(), Some(task(3)));
+        assert_eq!(queue.pop(), Some(task(1)));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn test_local_queue_push_dedups_duplicate_task() {
+        let queue = queue(1);
+        queue.push(task(1));
+        queue.push(task(1));
+
+        assert_eq!(queue.len(), 1, "duplicate push must not inflate cached len");
+        assert_eq!(queue.pop(), Some(task(1)));
+        assert_eq!(
+            queue.pop(),
+            None,
+            "duplicate push must not leave a second queued entry"
+        );
+
+        let _guard = LocalQueue::set_current(queue.clone());
+        assert!(
+            LocalQueue::schedule_local(task(1)),
+            "presence should be clear after draining the queued task"
+        );
         assert_eq!(queue.pop(), Some(task(1)));
         assert_eq!(queue.pop(), None);
     }
