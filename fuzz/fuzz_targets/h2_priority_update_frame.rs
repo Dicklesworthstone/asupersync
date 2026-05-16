@@ -21,7 +21,7 @@ use asupersync::{
     bytes::{Bytes, BytesMut},
     codec::Decoder,
     http::h2::{
-        Frame, FrameCodec,
+        ErrorCode, Frame, FrameCodec,
         frame::{DEFAULT_MAX_FRAME_SIZE, FrameHeader, parse_frame},
     },
 };
@@ -195,10 +195,50 @@ fn observe_oversized_priority_update_rejected() {
     let wire = encode_frame_header(DEFAULT_MAX_FRAME_SIZE + 1, PRIORITY_UPDATE_FRAME_TYPE, 0, 0);
     let mut bytes = BytesMut::from(wire.as_slice());
     let mut codec = FrameCodec::new();
+    let expected_message = format!(
+        "frame too large: {} > {DEFAULT_MAX_FRAME_SIZE}",
+        DEFAULT_MAX_FRAME_SIZE + 1
+    );
 
+    assert_codec_connection_error(
+        codec.decode(&mut bytes),
+        ErrorCode::FrameSizeError,
+        &expected_message,
+        "oversized PRIORITY_UPDATE",
+    );
     assert!(
-        codec.decode(&mut bytes).is_err(),
-        "oversized PRIORITY_UPDATE should fail frame-size validation",
+        bytes.is_empty(),
+        "oversized PRIORITY_UPDATE rejection should consume the parsed frame header"
+    );
+}
+
+fn assert_codec_connection_error(
+    result: Result<Option<Frame>, asupersync::http::h2::H2Error>,
+    expected_code: ErrorCode,
+    expected_message: &str,
+    context: &str,
+) {
+    let error = result.expect_err("malformed H2 frame should fail at decode boundary");
+    assert_eq!(
+        error.code, expected_code,
+        "{context}: unexpected H2 error code"
+    );
+    assert_eq!(
+        error.message, expected_message,
+        "{context}: unexpected H2 error message"
+    );
+    assert!(
+        error.stream_id.is_none(),
+        "{context}: codec boundary error should be connection-level: {error:?}"
+    );
+    assert!(
+        error.is_connection_error(),
+        "{context}: codec boundary error should classify as connection-level: {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("HTTP/2 connection error ({expected_code}): {expected_message}"),
+        "{context}: unexpected H2 error display text"
     );
 }
 
