@@ -16,6 +16,7 @@ OUT_DIR="${1:-$PROJECT_DIR/target/kafka-broker-parity-proof/$BEAD_ID}"
 LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
+RCH_BIN="${RCH_BIN:-rch}"
 
 INCLUDE_OFFSET_ACK_PROOF=false
 case "${ASUPERSYNC_KAFKA_BROKER_PARITY_INCLUDE_OFFSET_ACK_PROOF:-}" in
@@ -124,23 +125,26 @@ KAFKA_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_kafk
 OFFSET_ACK_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_offset_ack"
 RESILIENCE_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_resilience"
 
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+  echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+  exit 1
+fi
+
 DEFAULT_CMD=(
   env
-  -u
-  CARGO_TARGET_DIR
   RCH_FORCE_REMOTE=1
   RCH_QUEUE_WHEN_BUSY=1
   RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900
   RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900
-  rch exec --
+  "$RCH_BIN" exec --
   env
+  "CARGO_TARGET_DIR=$DEFAULT_TARGET_DIR"
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
   cargo test -p asupersync
-  --target-dir "$DEFAULT_TARGET_DIR"
   --test kafka_real_broker
   --features test-internals
   kafka_broker_parity_default_feature_gate_logs_required_fields
@@ -151,21 +155,19 @@ DEFAULT_CMD=(
 
 KAFKA_CMD=(
   env
-  -u
-  CARGO_TARGET_DIR
   RCH_FORCE_REMOTE=1
   RCH_QUEUE_WHEN_BUSY=1
   RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900
   RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900
-  rch exec --
+  "$RCH_BIN" exec --
   env
+  "CARGO_TARGET_DIR=$KAFKA_TARGET_DIR"
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
   cargo test -p asupersync
-  --target-dir "$KAFKA_TARGET_DIR"
   --test kafka_real_broker
   --features "test-internals,kafka"
   kafka_broker_parity_real_broker_proof_row
@@ -176,21 +178,19 @@ KAFKA_CMD=(
 
 OFFSET_ACK_CMD=(
   env
-  -u
-  CARGO_TARGET_DIR
   RCH_FORCE_REMOTE=1
   RCH_QUEUE_WHEN_BUSY=1
   RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900
   RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900
-  rch exec --
+  "$RCH_BIN" exec --
   env
+  "CARGO_TARGET_DIR=$OFFSET_ACK_TARGET_DIR"
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
   cargo test -p asupersync
-  --target-dir "$OFFSET_ACK_TARGET_DIR"
   --test kafka_real_broker
   --features "test-internals,kafka"
   kafka_broker_parity_offset_ack_redaction_row
@@ -201,21 +201,19 @@ OFFSET_ACK_CMD=(
 
 RESILIENCE_CMD=(
   env
-  -u
-  CARGO_TARGET_DIR
   RCH_FORCE_REMOTE=1
   RCH_QUEUE_WHEN_BUSY=1
   RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900
   RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900
-  rch exec --
+  "$RCH_BIN" exec --
   env
+  "CARGO_TARGET_DIR=$RESILIENCE_TARGET_DIR"
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
   cargo test -p asupersync
-  --target-dir "$RESILIENCE_TARGET_DIR"
   --test kafka_real_broker
   --features "test-internals,kafka"
   kafka_broker_parity_resilience_taxonomy_row
@@ -227,6 +225,11 @@ RESILIENCE_CMD=(
 log "bead_id=$BEAD_ID"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
+log "rch_bin=$RCH_BIN"
+log "default_target_dir=$DEFAULT_TARGET_DIR"
+log "kafka_target_dir=$KAFKA_TARGET_DIR"
+log "offset_ack_target_dir=$OFFSET_ACK_TARGET_DIR"
+log "resilience_target_dir=$RESILIENCE_TARGET_DIR"
 log "include_offset_ack_proof=$INCLUDE_OFFSET_ACK_PROOF"
 log "include_resilience_proof=$INCLUDE_RESILIENCE_PROOF"
 
