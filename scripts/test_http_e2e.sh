@@ -12,6 +12,8 @@
 #   RUST_LOG       - tracing filter (default: asupersync=debug)
 #   RUST_BACKTRACE - 1 to enable backtraces (default: 1)
 #   TEST_SEED      - deterministic seed override (default: 0xDEADBEEF)
+#   RCH_BIN        - rch executable used for all Cargo commands (default: rch)
+#   RCH_TARGET_DIR - remote Cargo target directory
 #
 # Pass/Fail Semantics:
 #   PASS when cargo test exits 0 and no failure patterns are detected.
@@ -33,6 +35,7 @@ ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 TEST_FILTER="${1:-}"
 SUITE_TIMEOUT="${SUITE_TIMEOUT:-180}"
 RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch-target-http-e2e-${USER:-unknown}-${TIMESTAMP}-$$}"
 WORKLOAD_ID="${WORKLOAD_ID:-AA01-WL-IO-HTTP-EX1}"
 RUNTIME_PROFILE="${RUNTIME_PROFILE:-native-e2e}"
 WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/test_http_e2e.sh::http_e2e/all_features}"
@@ -42,29 +45,20 @@ export RUST_LOG="${RUST_LOG:-asupersync=debug}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
 
-RUN_WITH_RCH=0
-RUN_WITH_RCH_BOOL="false"
-if command -v "$RCH_BIN" >/dev/null 2>&1; then
-    RUN_WITH_RCH=1
-    RUN_WITH_RCH_BOOL="true"
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
 fi
+RUN_WITH_RCH_BOOL="true"
 
 run_cargo() {
-    if [ "$RUN_WITH_RCH" -eq 1 ]; then
-        "$RCH_BIN" exec -- cargo "$@"
-    else
-        cargo "$@"
-    fi
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
 run_timeout_cargo() {
     local timeout_sec="$1"
     shift
-    if [ "$RUN_WITH_RCH" -eq 1 ]; then
-        timeout "$timeout_sec" "$RCH_BIN" exec -- cargo "$@"
-    else
-        timeout "$timeout_sec" cargo "$@"
-    fi
+    timeout "$timeout_sec" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
 mkdir -p "$OUTPUT_DIR" "$ARTIFACT_DIR"
@@ -83,7 +77,9 @@ echo "  Output:          ${LOG_FILE}"
 echo "  Artifacts:       ${ARTIFACT_DIR}"
 echo "  Workload:        ${WORKLOAD_ID}"
 echo "  Profile:         ${RUNTIME_PROFILE}"
-echo "  RCH mode:        $([ "$RUN_WITH_RCH" -eq 1 ] && printf "enabled" || printf "disabled")"
+echo "  RCH_BIN:         ${RCH_BIN}"
+echo "  RCH target dir:  ${RCH_TARGET_DIR}"
+echo "  RCH mode:        enabled"
 echo ""
 
 # --- [1/4] Pre-flight: compilation check ---
@@ -150,7 +146,7 @@ FAILED=$(grep -c "^test .* FAILED$" "$LOG_FILE" 2>/dev/null || echo "0")
 SUITE_ID="http_e2e"
 SCENARIO_ID="E2E-SUITE-HTTP"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
-REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")${TEST_FILTER:+ ${TEST_FILTER}}"
+REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} RCH_TARGET_DIR='${RCH_TARGET_DIR}' bash ${SCRIPT_DIR}/$(basename "$0")${TEST_FILTER:+ ${TEST_FILTER}}"
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
 if [ "$TEST_RESULT" -eq 0 ] && [ "$PATTERN_FAILURES" -eq 0 ]; then
@@ -181,6 +177,7 @@ cat > "${SUMMARY_FILE}" << ENDJSON
   "test_log_level": "${TEST_LOG_LEVEL}",
   "test_filter": "${TEST_FILTER}",
   "rch_bin": "${RCH_BIN}",
+  "rch_target_dir": "${RCH_TARGET_DIR}",
   "run_with_rch": ${RUN_WITH_RCH_BOOL},
   "tests_passed": ${PASSED},
   "tests_failed": ${FAILED},
@@ -215,8 +212,6 @@ else
     echo "  Artifacts: ${ARTIFACT_DIR}"
 fi
 echo "==================================================================="
-
-find "$ARTIFACT_DIR" -name "*.txt" -empty -delete 2>/dev/null || true
 
 if [ "$TEST_RESULT" -ne 0 ] || [ "$PATTERN_FAILURES" -ne 0 ]; then
     exit 1

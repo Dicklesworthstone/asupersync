@@ -12,6 +12,8 @@
 #   RUST_LOG       - tracing filter (default: asupersync=debug)
 #   RUST_BACKTRACE - 1 to enable backtraces (default: 1)
 #   TEST_SEED      - deterministic seed override (default: 0xDEADBEEF)
+#   RCH_BIN        - rch executable used for all Cargo commands (default: rch)
+#   RCH_TARGET_DIR - remote Cargo target directory
 
 set -euo pipefail
 
@@ -35,29 +37,20 @@ export RUST_LOG="${RUST_LOG:-asupersync=debug}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
 
-RUN_WITH_RCH=0
-RUN_WITH_RCH_BOOL="false"
-if command -v "$RCH_BIN" >/dev/null 2>&1; then
-    RUN_WITH_RCH=1
-    RUN_WITH_RCH_BOOL="true"
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
 fi
+RUN_WITH_RCH_BOOL="true"
 
 run_cargo() {
-    if [ "$RUN_WITH_RCH" -eq 1 ]; then
-        "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
-    else
-        cargo "$@"
-    fi
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
 run_timeout_cargo() {
     local timeout_sec="$1"
     shift
-    if [ "$RUN_WITH_RCH" -eq 1 ]; then
-        timeout "$timeout_sec" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
-    else
-        timeout "$timeout_sec" cargo "$@"
-    fi
+    timeout "$timeout_sec" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
 mkdir -p "$OUTPUT_DIR" "$ARTIFACT_DIR"
@@ -76,8 +69,9 @@ echo "  Artifacts:       ${ARTIFACT_DIR}"
 echo "  Workload:        ${WORKLOAD_ID}"
 echo "  Profile:         ${RUNTIME_PROFILE}"
 echo "  Features:        ${FABRIC_FEATURES}"
+echo "  RCH_BIN:         ${RCH_BIN}"
 echo "  RCH target dir:  ${RCH_TARGET_DIR}"
-echo "  RCH mode:        $([ "$RUN_WITH_RCH" -eq 1 ] && printf "enabled" || printf "disabled")"
+echo "  RCH mode:        enabled"
 echo ""
 
 echo ">>> [1/4] Pre-flight: checking compilation..."
@@ -212,8 +206,6 @@ else
     echo "  Artifacts: ${ARTIFACT_DIR}"
 fi
 echo "==================================================================="
-
-find "$ARTIFACT_DIR" -name "*.txt" -empty -delete 2>/dev/null || true
 
 if [ "$TEST_RESULT" -ne 0 ] || [ "$PATTERN_FAILURES" -ne 0 ]; then
     exit 1

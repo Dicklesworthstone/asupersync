@@ -15,6 +15,8 @@
 #   SKIP_LOOM      - Set to 1 to skip Loom tests
 #   STRESS_TIMEOUT - Timeout for stress tests in seconds (default: 600)
 #   RUST_LOG       - Standard Rust logging level
+#   RCH_BIN        - rch executable used for all Cargo commands (default: rch)
+#   RCH_TARGET_DIR - remote Cargo target directory
 
 set -euo pipefail
 
@@ -27,6 +29,7 @@ RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG_DIR="$OUTPUT_DIR/$TIMESTAMP"
 STRESS_TIMEOUT="${STRESS_TIMEOUT:-600}"
 RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch-target-scheduler-e2e-${USER:-unknown}-${TIMESTAMP}-$$}"
 WORKLOAD_ID="${WORKLOAD_ID:-AA01-WL-BURST-001}"
 RUNTIME_PROFILE="${RUNTIME_PROFILE:-native-e2e}"
 WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/test_scheduler_wakeup_e2e.sh::scheduler_backoff+scheduler_lane_fairness+scheduler_stress_tests}"
@@ -35,29 +38,20 @@ export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
 
-RUN_WITH_RCH=0
-RUN_WITH_RCH_BOOL="false"
-if command -v "$RCH_BIN" >/dev/null 2>&1; then
-    RUN_WITH_RCH=1
-    RUN_WITH_RCH_BOOL="true"
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
 fi
+RUN_WITH_RCH_BOOL="true"
 
 run_cargo() {
-    if [ "$RUN_WITH_RCH" -eq 1 ]; then
-        "$RCH_BIN" exec -- cargo "$@"
-    else
-        cargo "$@"
-    fi
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
 run_timeout_cargo() {
     local timeout_sec="$1"
     shift
-    if [ "$RUN_WITH_RCH" -eq 1 ]; then
-        timeout "${timeout_sec}s" "$RCH_BIN" exec -- cargo "$@"
-    else
-        timeout "${timeout_sec}s" cargo "$@"
-    fi
+    timeout "${timeout_sec}s" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
 mkdir -p "$LOG_DIR"
@@ -77,7 +71,9 @@ echo "  Skip stress:     ${SKIP_STRESS:-no}"
 echo "  Skip loom:       ${SKIP_LOOM:-no}"
 echo "  Workload:        ${WORKLOAD_ID}"
 echo "  Profile:         ${RUNTIME_PROFILE}"
-echo "  RCH mode:        $([ "$RUN_WITH_RCH" -eq 1 ] && printf "enabled" || printf "disabled")"
+echo "  RCH_BIN:         ${RCH_BIN}"
+echo "  RCH target dir:  ${RCH_TARGET_DIR}"
+echo "  RCH mode:        enabled"
 echo "  Start time:      $(date -Iseconds)"
 echo ""
 
@@ -176,7 +172,7 @@ FAILED_TESTS=$(grep -rh -c "^test .* FAILED$" "$LOG_DIR"/*.log 2>/dev/null | awk
 SUITE_ID="scheduler_e2e"
 SCENARIO_ID="E2E-SUITE-SCHEDULER-WAKEUP"
 SUMMARY_FILE="$LOG_DIR/summary.json"
-REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' TEST_SEED=${TEST_SEED} RUST_LOG=${RUST_LOG} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")"
+REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' TEST_SEED=${TEST_SEED} RUST_LOG=${RUST_LOG} RCH_BIN=${RCH_BIN} RCH_TARGET_DIR='${RCH_TARGET_DIR}' bash ${SCRIPT_DIR}/$(basename "$0")"
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
 if [ "$FAILED_SUITES" -eq 0 ] && [ "$ISSUES" -eq 0 ]; then
@@ -200,6 +196,7 @@ cat > "$SUMMARY_FILE" << ENDJSON
   "suite": "${SUITE_ID}",
   "timestamp": "${TIMESTAMP}",
   "rch_bin": "${RCH_BIN}",
+  "rch_target_dir": "${RCH_TARGET_DIR}",
   "run_with_rch": ${RUN_WITH_RCH_BOOL},
   "tests_passed": ${PASSED_TESTS},
   "tests_failed": ${FAILED_TESTS},
