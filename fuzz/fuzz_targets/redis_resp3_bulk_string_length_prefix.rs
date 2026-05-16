@@ -130,7 +130,13 @@ fn assert_protocol_message(
     expected_message: &str,
 ) {
     match result {
-        Err(RedisError::Protocol(message)) => assert_eq!(message, expected_message),
+        Err(RedisError::Protocol(message)) => {
+            assert_eq!(message, expected_message);
+            assert_eq!(
+                RedisError::Protocol(message).to_string(),
+                format!("Redis protocol error: {expected_message}")
+            );
+        }
         other => panic!("expected Redis protocol error `{expected_message}`, got {other:?}"),
     }
 }
