@@ -3,10 +3,13 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::database::mysql::{MySqlError, fuzz_decode_packet_header, fuzz_parse_error_packet};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_CASES: usize = 32;
 const MAX_MESSAGE_LEN: usize = 512;
 const MAX_PACKET_LEN_24BIT: u32 = 0x00FF_FFFF;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Arbitrary)]
 struct FuzzInput {
@@ -38,6 +41,8 @@ struct ErrorCase {
 }
 
 fuzz_target!(|data: &[u8]| {
+    FIXED_CANARIES.get_or_init(assert_fixed_packet_error_canaries);
+
     let Ok(mut input) = FuzzInput::arbitrary(&mut Unstructured::new(data)) else {
         return;
     };
@@ -134,6 +139,92 @@ fn run_error_case(mut case: ErrorCase) {
         }
         other => panic!("unexpected error packet result: {other:?}"),
     }
+}
+
+fn assert_fixed_packet_error_canaries() {
+    assert_header_protocol_rejection(
+        [0, 0, 0, 7],
+        8,
+        "packet sequence mismatch: expected 8, got 7",
+    );
+    assert_error_packet_protocol_rejection(&[], "not an error packet");
+    assert_error_packet_protocol_rejection(&[0x00, 0x34, 0x12], "not an error packet");
+    assert_error_packet_protocol_rejection(&[0xFF], "unexpected end of packet");
+    assert_error_packet_protocol_rejection(&[0xFF, 0x34], "unexpected end of packet");
+
+    assert_error_packet_server_diagnostic(
+        &[
+            0xFF, 0x34, 0x12, b'#', b'H', b'Y', b'0', b'0', b'1', b'o', b'o', b'p', b's',
+        ],
+        0x1234,
+        "HY001",
+        "oops",
+    );
+    assert_error_packet_server_diagnostic(
+        &[0xFF, 0x34, 0x12, b'o', b'o', b'p', b's'],
+        0x1234,
+        "HY000",
+        "oops",
+    );
+}
+
+fn assert_header_protocol_rejection(header: [u8; 4], expected_sequence: u8, expected: &str) {
+    let error = fuzz_decode_packet_header(header, expected_sequence)
+        .expect_err("fixed packet-header canary should reject");
+    assert_mysql_protocol_error(error, expected);
+}
+
+fn assert_error_packet_protocol_rejection(packet: &[u8], expected: &str) {
+    assert_mysql_protocol_error(fuzz_parse_error_packet(packet), expected);
+}
+
+fn assert_mysql_protocol_error(error: MySqlError, expected: &str) {
+    match &error {
+        MySqlError::Protocol(message) => assert_eq!(
+            message, expected,
+            "MySQL protocol diagnostic payload changed"
+        ),
+        other => panic!("expected MySQL protocol error, got {other:?}"),
+    }
+
+    assert_eq!(
+        error.to_string(),
+        format!("MySQL protocol error: {expected}"),
+        "MySQL protocol Display diagnostic changed"
+    );
+}
+
+fn assert_error_packet_server_diagnostic(
+    packet: &[u8],
+    expected_code: u16,
+    expected_sql_state: &str,
+    expected_message: &str,
+) {
+    let error = fuzz_parse_error_packet(packet);
+    match &error {
+        MySqlError::Server {
+            code,
+            sql_state,
+            message,
+        } => {
+            assert_eq!(*code, expected_code, "MySQL ERR packet code changed");
+            assert_eq!(
+                sql_state, expected_sql_state,
+                "MySQL ERR packet SQL state changed"
+            );
+            assert_eq!(
+                message, expected_message,
+                "MySQL ERR packet message changed"
+            );
+        }
+        other => panic!("expected MySQL server error packet, got {other:?}"),
+    }
+
+    assert_eq!(
+        error.to_string(),
+        format!("MySQL error [{expected_code}] ({expected_sql_state}): {expected_message}"),
+        "MySQL server Display diagnostic changed"
+    );
 }
 
 fn expected_sql_state(packet: &[u8]) -> String {
