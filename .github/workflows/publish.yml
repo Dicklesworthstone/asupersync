@@ -262,6 +262,15 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
 
+      - name: Require rch
+        run: |
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for publish WASM cargo jobs" >&2
+            exit 1
+          fi
+          echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"
+
       - name: Run WASM optimization policy gate
         run: |
           mkdir -p artifacts
@@ -282,30 +291,30 @@ jobs:
 
       - name: Build WASM profile checks (dev/prod/deterministic)
         run: |
-          cargo check --target wasm32-unknown-unknown \
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_wasm_check_dev cargo check --target wasm32-unknown-unknown \
             --no-default-features --features wasm-browser-dev
-          cargo check --target wasm32-unknown-unknown \
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_wasm_check_prod cargo check --target wasm32-unknown-unknown \
             --no-default-features --features wasm-browser-prod
-          cargo check --target wasm32-unknown-unknown \
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_wasm_check_deterministic cargo check --target wasm32-unknown-unknown \
             --no-default-features --features wasm-browser-deterministic
 
       - name: Build release-grade WASM artifacts
         run: |
           mkdir -p artifacts/wasm/release
 
-          cargo build --target wasm32-unknown-unknown --release \
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_wasm_build_prod cargo build --target wasm32-unknown-unknown --release \
             --no-default-features --features wasm-browser-prod
-          cp target/wasm32-unknown-unknown/release/asupersync.wasm \
+          cp /tmp/rch_target_publish_wasm_build_prod/wasm32-unknown-unknown/release/asupersync.wasm \
             artifacts/wasm/release/asupersync.release.wasm
 
-          cargo build --target wasm32-unknown-unknown --release \
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_wasm_build_deterministic cargo build --target wasm32-unknown-unknown --release \
             --no-default-features --features wasm-browser-deterministic
-          cp target/wasm32-unknown-unknown/release/asupersync.wasm \
+          cp /tmp/rch_target_publish_wasm_build_deterministic/wasm32-unknown-unknown/release/asupersync.wasm \
             artifacts/wasm/release/asupersync.deterministic.wasm
 
-          cargo build --target wasm32-unknown-unknown --release \
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_publish_wasm_build_minimal cargo build --target wasm32-unknown-unknown --release \
             --no-default-features --features wasm-browser-minimal
-          cp target/wasm32-unknown-unknown/release/asupersync.wasm \
+          cp /tmp/rch_target_publish_wasm_build_minimal/wasm32-unknown-unknown/release/asupersync.wasm \
             artifacts/wasm/release/asupersync.minimal.wasm
 
       - name: Generate WASM release manifest
