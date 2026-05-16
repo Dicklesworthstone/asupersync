@@ -1231,6 +1231,73 @@ fn proof_runner_rank_fallback_beads_reports_fileless_reservation_snapshot() {
 }
 
 #[test]
+fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
+    let fallback = write_json_fixture(&json!({"beads": [
+        {"id": "bare-cargo", "title": "bare cargo validation", "priority": 1,
+         "validation_command": "cargo test -p asupersync --test proof_runner_contract"},
+        {"id": "rch-cargo", "title": "rch cargo validation", "priority": 1,
+         "validation_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"}
+    ]}));
+    let fallback_path = fallback.path().to_str().expect("fallback path utf8");
+
+    let result = proof_runner_json(&[
+        "--rank-fallback-beads",
+        "--fallback-bead-snapshot",
+        fallback_path,
+        "--output",
+        "json",
+    ]);
+
+    let ids: Vec<&str> = result["ranked_fallback_beads"]
+        .as_array()
+        .expect("ranked fallback beads")
+        .iter()
+        .map(|row| row["id"].as_str().expect("bead id"))
+        .collect();
+    assert_eq!(ids, ["rch-cargo", "bare-cargo"]);
+    assert_eq!(
+        result["summary"]["unsafe_validation_block_count"].as_i64(),
+        Some(1)
+    );
+
+    let safe = &result["ranked_fallback_beads"][0];
+    assert_eq!(safe["id"].as_str(), Some("rch-cargo"));
+    assert_eq!(safe["eligible"].as_bool(), Some(true));
+    assert_eq!(safe["unsafe_validation_blocked"].as_bool(), Some(false));
+
+    let blocked = &result["ranked_fallback_beads"][1];
+    assert_eq!(blocked["id"].as_str(), Some("bare-cargo"));
+    assert_eq!(blocked["eligible"].as_bool(), Some(false));
+    assert_eq!(blocked["unsafe_validation_blocked"].as_bool(), Some(true));
+    assert_eq!(
+        blocked["unsafe_validation_commands"][0].as_str(),
+        Some("cargo test -p asupersync --test proof_runner_contract")
+    );
+    assert_eq!(
+        blocked["validation_command_policy"].as_str(),
+        Some("cargo validation must route through rch exec --")
+    );
+
+    let plan = proof_runner_json(&[
+        "--autopilot-proof-plan",
+        "--fallback-bead-snapshot",
+        fallback_path,
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--output",
+        "json",
+    ]);
+    assert_eq!(
+        plan["selected_fallback_bead"]["id"].as_str(),
+        Some("rch-cargo")
+    );
+    assert_eq!(
+        plan["selected_fallback_bead"]["eligible"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
 fn proof_runner_autopilot_plan_combines_lanes_disk_and_fallbacks() {
     let fallback = write_json_fixture(&json!({"beads": [
         {"id": "cargo-heavy", "title": "run clippy frontier", "priority": 1,

@@ -270,6 +270,48 @@ def fallback_validation_text(bead: Dict[str, Any]) -> str:
     return " ".join(part for part in parts if part).lower()
 
 
+def fallback_validation_commands(bead: Dict[str, Any]) -> List[str]:
+    commands = []
+    for key in ("command", "validation_command", "proof_command"):
+        value = bead.get(key)
+        if isinstance(value, str) and value.strip():
+            commands.append(value.strip())
+    for key in ("validation", "validation_commands", "proof_commands"):
+        commands.extend(command.strip() for command in _string_list(bead.get(key)) if command.strip())
+    return commands
+
+
+def _first_non_assignment(argv: List[str], start: int = 0) -> int:
+    index = start
+    while index < len(argv) and "=" in argv[index]:
+        name, _value = argv[index].split("=", 1)
+        if not SAFE_ENV_NAME.fullmatch(name):
+            break
+        index += 1
+    return index
+
+
+def command_routes_cargo_through_rch(command: str) -> bool:
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return "cargo" not in command.split()
+
+    if "cargo" not in argv:
+        return True
+
+    program_index = _first_non_assignment(argv)
+    if program_index >= len(argv):
+        return False
+    if argv[program_index:program_index + 3] != ["rch", "exec", "--"]:
+        return False
+
+    remote_index = program_index + 3
+    if remote_index < len(argv) and argv[remote_index] == "env":
+        remote_index = _first_non_assignment(argv, remote_index + 1)
+    return remote_index < len(argv) and argv[remote_index] == "cargo"
+
+
 def fallback_disk_safety(bead: Dict[str, Any]) -> str:
     explicit = str(bead.get("disk_safety", "")).strip().lower()
     if explicit in {"disk-safe", "cargo-heavy", "neutral"}:
@@ -325,6 +367,11 @@ def rank_fallback_beads_for_disk(
         disk_safety = fallback_disk_safety(bead)
         warning = FALLBACK_CARGO_HEAVY_WARNING if disk_low and disk_safety == "cargo-heavy" else ""
         touched_files = fallback_touched_files(bead)
+        unsafe_validation_commands = [
+            command
+            for command in fallback_validation_commands(bead)
+            if not command_routes_cargo_through_rch(command)
+        ]
         reservation_overlaps = []
         if reservation_checker and touched_files:
             reservation_checker.check_file_reservations(touched_files)
@@ -342,13 +389,16 @@ def rank_fallback_beads_for_disk(
             "title": str(bead.get("title", "")),
             "priority": _non_negative_int(bead.get("priority", 2)),
             "input_order": input_order,
-            "eligible": not hard_overlaps,
+            "eligible": not hard_overlaps and not unsafe_validation_commands,
             "disk_safety": disk_safety,
             "disk_pressure_warning": warning,
             "touched_files": touched_files,
             "reservation_overlaps": reservation_overlaps,
             "reservation_demoted": bool(peer_overlaps),
             "reservation_hard_blocked": bool(hard_overlaps),
+            "unsafe_validation_blocked": bool(unsafe_validation_commands),
+            "unsafe_validation_commands": unsafe_validation_commands,
+            "validation_command_policy": "cargo validation must route through rch exec --",
             "reservation_warning": (
                 f"peer-active reservation overlaps {peer_overlaps[0]['path']} held by {peer_overlaps[0]['holder']}"
                 if peer_overlaps else ""
@@ -361,11 +411,12 @@ def rank_fallback_beads_for_disk(
                 or ""
             ),
         })
-    def sort_key(row: Dict[str, Any]) -> Tuple[int, int, int, int]:
+    def sort_key(row: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
         disk_rank = class_rank[row["disk_safety"]] if disk_low else 0
         hard_rank = 1 if row["reservation_hard_blocked"] else 0
+        unsafe_rank = 1 if row["unsafe_validation_blocked"] else 0
         peer_rank = 1 if row["reservation_demoted"] else 0
-        return (hard_rank, disk_rank, peer_rank, row["input_order"])
+        return (hard_rank, unsafe_rank, disk_rank, peer_rank, row["input_order"])
 
     if disk_low:
         return sorted(ranked, key=sort_key)
@@ -2520,7 +2571,8 @@ class ProofRunner:
             "source": "fixture",
             "rank_policy": (
                 "input-order-when-healthy; disk-safe-neutral-cargo-heavy-when-low; "
-                "peer-active reservation overlaps demote; tracker/unknown reservations hard-block"
+                "bare Cargo validation commands hard-block; peer-active reservation overlaps demote; "
+                "tracker/unknown reservations hard-block"
             ),
             "disk_pressure_preflight": disk_preflight,
             "warning_wording": FALLBACK_CARGO_HEAVY_WARNING,
@@ -2540,6 +2592,10 @@ class ProofRunner:
                     1 for row in ranked_beads
                     if row["reservation_hard_blocked"]
                 ),
+                "unsafe_validation_block_count": sum(
+                    1 for row in ranked_beads
+                    if row["unsafe_validation_blocked"]
+                ),
             },
             "ranked_fallback_beads": ranked_beads,
         }
@@ -2551,7 +2607,10 @@ class ProofRunner:
     ) -> Dict[str, Any]:
         fallback_ranking = self.rank_fallback_beads(fallback_snapshot_path)
         ranked_fallbacks = fallback_ranking["ranked_fallback_beads"]
-        selected_fallback = ranked_fallbacks[0] if ranked_fallbacks else None
+        selected_fallback = next(
+            (row for row in ranked_fallbacks if row["eligible"]),
+            None,
+        )
         return {
             "schema_version": AUTOPILOT_PLAN_SCHEMA_VERSION,
             "mode": "dry-run",
