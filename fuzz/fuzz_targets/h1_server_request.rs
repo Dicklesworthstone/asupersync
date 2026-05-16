@@ -5,9 +5,12 @@ use asupersync::codec::Decoder;
 use asupersync::http::h1::codec::{Http1Codec, HttpError};
 use asupersync::http::h1::{Method, Request, Version};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 // Maximum data size to prevent timeouts on extremely large inputs
 const MAX_DATA_SIZE: usize = 10 * 1024 * 1024; // 10MB
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 fn decode_once(raw: &[u8]) -> Result<Option<Request>, HttpError> {
     let mut codec = Http1Codec::new();
@@ -198,7 +201,7 @@ fn run_fixed_canaries() {
 }
 
 fuzz_target!(|data: &[u8]| {
-    run_fixed_canaries();
+    FIXED_CANARIES.get_or_init(run_fixed_canaries);
 
     // Size guard to prevent timeout on massive inputs
     if data.len() > MAX_DATA_SIZE {
