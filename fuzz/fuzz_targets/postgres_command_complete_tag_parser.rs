@@ -12,9 +12,12 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::database::postgres::{PgError, fuzz_parse_command_complete_tag};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Maximum tag length for reasonable fuzzing performance
 const MAX_TAG_LENGTH: usize = 1024;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// Structure-aware generator for PostgreSQL CommandComplete tags
 #[derive(Arbitrary, Debug, Clone)]
@@ -241,9 +244,7 @@ impl TagCorruption {
                 // No null terminator
             }
             NullHandling::Multiple(count) => {
-                for _ in 0..*count {
-                    bytes.push(0);
-                }
+                bytes.extend(std::iter::repeat_n(0, usize::from(*count)));
             }
             NullHandling::Embedded => {
                 // Insert null in the middle
@@ -417,7 +418,62 @@ fn exercise_command_complete_parser(
     }
 }
 
+fn assert_protocol_rejection(data: &[u8], expected: &str) {
+    let error = fuzz_parse_command_complete_tag(data)
+        .expect_err("fixed CommandComplete tag canary should reject");
+
+    match &error {
+        PgError::Protocol(message) => assert_eq!(
+            message, expected,
+            "CommandComplete protocol diagnostic payload changed"
+        ),
+        other => panic!("expected CommandComplete protocol error, got {other:?}"),
+    }
+
+    assert_eq!(
+        error.to_string(),
+        format!("PostgreSQL protocol error: {expected}"),
+        "CommandComplete Display diagnostic changed"
+    );
+}
+
+fn assert_fixed_command_complete_error_canaries() {
+    assert_protocol_rejection(b"\xff\xfe\x00", "CommandComplete tag must be valid UTF-8");
+    assert_protocol_rejection(
+        b"UPDATE\0",
+        "CommandComplete tag missing numeric row count: \"UPDATE\"",
+    );
+    assert_protocol_rejection(
+        b"INSERT 123\0",
+        "CommandComplete tag missing numeric row count: \"INSERT 123\"",
+    );
+    assert_protocol_rejection(
+        b"INSERT 1 2 3\0",
+        "CommandComplete tag missing numeric row count: \"INSERT 1 2 3\"",
+    );
+    assert_protocol_rejection(
+        b"UPDATE 18446744073709551616\0",
+        "CommandComplete tag missing numeric row count: \"UPDATE 18446744073709551616\"",
+    );
+    assert_protocol_rejection(
+        b"UPDATE -1\0",
+        "CommandComplete tag missing numeric row count: \"UPDATE -1\"",
+    );
+    assert_protocol_rejection(
+        b"UPDATE 1 trailing\0",
+        "CommandComplete tag missing numeric row count: \"UPDATE 1 trailing\"",
+    );
+    assert_protocol_rejection(
+        b"UNKNOWN 1\0",
+        "CommandComplete tag missing numeric row count: \"UNKNOWN 1\"",
+    );
+    assert_protocol_rejection(b"", "CommandComplete tag missing numeric row count: \"\"");
+    assert_protocol_rejection(b"\0", "CommandComplete tag missing numeric row count: \"\"");
+}
+
 fuzz_target!(|data: &[u8]| {
+    FIXED_CANARIES.get_or_init(assert_fixed_command_complete_error_canaries);
+
     exercise_command_complete_parser(data, ParseExpectation::Unconstrained, None);
 
     if data.len() >= std::mem::size_of::<CommandCompleteTag>() {
