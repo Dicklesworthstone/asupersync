@@ -222,6 +222,54 @@ fn unapproved_fallback_lane_is_blocked_by_policy() {
 }
 
 #[test]
+fn proof_command_rch_routing_rejects_shell_prefix_spoofing() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import reservation_aware_work_finder as finder
+
+commands = {
+    "safe_direct": "rch exec -- cargo test -p asupersync --test reservation_aware_work_finder_contract",
+    "safe_env": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract",
+    "spoofed_prefix": "echo rch exec --; cargo test -p asupersync",
+    "nested_shell": "rch exec -- sh -c 'cargo test -p asupersync'",
+    "bare_cargo": "cargo test -p asupersync",
+    "no_cargo": "python3 -m py_compile scripts/reservation_aware_work_finder.py",
+}
+print(json.dumps({
+    key: finder.command_routes_cargo_through_rch(command)
+    for key, command in commands.items()
+}, sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run proof-command routing probe");
+    assert!(
+        output.status.success(),
+        "python routing probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value = serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    assert_eq!(receipt["safe_direct"].as_bool(), Some(true));
+    assert_eq!(receipt["safe_env"].as_bool(), Some(true));
+    assert_eq!(receipt["spoofed_prefix"].as_bool(), Some(false));
+    assert_eq!(receipt["nested_shell"].as_bool(), Some(false));
+    assert_eq!(receipt["bare_cargo"].as_bool(), Some(false));
+    assert_eq!(receipt["no_cargo"].as_bool(), Some(true));
+}
+
+#[test]
 fn helper_declares_no_mutating_side_effects() {
     let receipt = finder_json("clean_workspace_candidates.json");
 

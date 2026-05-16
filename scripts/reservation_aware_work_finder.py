@@ -11,6 +11,8 @@ import argparse
 import datetime as dt
 import fnmatch
 import json
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -82,6 +84,8 @@ FORBIDDEN_COMMAND_TOKENS = [
     "cargo ",
     "rm -rf",
 ]
+SAFE_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CARGO_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_-])cargo(?![A-Za-z0-9_-])")
 
 
 def utc_now() -> str:
@@ -379,23 +383,49 @@ def lane_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def _first_non_assignment(argv: list[str], start: int = 0) -> int:
+    index = start
+    while index < len(argv) and "=" in argv[index]:
+        name, _value = argv[index].split("=", 1)
+        if not SAFE_ENV_NAME.fullmatch(name):
+            break
+        index += 1
+    return index
+
+
+def command_mentions_cargo(command: str) -> bool:
+    return CARGO_COMMAND_RE.search(command.lower()) is not None
+
+
 def command_routes_cargo_through_rch(command: str) -> bool:
-    collapsed = " ".join(command.lower().split())
-    cargo_index = f" {collapsed} ".find(" cargo ")
-    if cargo_index < 0:
-        return True
-    rch_index = collapsed.find("rch exec --")
-    return 0 <= rch_index < cargo_index
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return not command_mentions_cargo(command)
+
+    lowered = [arg.lower() for arg in argv]
+    if "cargo" not in lowered:
+        return not command_mentions_cargo(command)
+
+    program_index = _first_non_assignment(argv)
+    if program_index >= len(argv):
+        return False
+    if lowered[program_index:program_index + 3] != ["rch", "exec", "--"]:
+        return False
+
+    remote_index = program_index + 3
+    if remote_index < len(argv) and lowered[remote_index] == "env":
+        remote_index = _first_non_assignment(argv, remote_index + 1)
+    return remote_index < len(argv) and lowered[remote_index] == "cargo"
 
 
 def proof_command_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     blockers = []
     for command in candidate.get("proof_commands", []):
         collapsed = " ".join(str(command).lower().split())
-        padded = f" {collapsed} "
         for token in FORBIDDEN_COMMAND_TOKENS:
             if token == "cargo ":
-                if " cargo " in padded and not command_routes_cargo_through_rch(str(command)):
+                if command_mentions_cargo(str(command)) and not command_routes_cargo_through_rch(str(command)):
                     blockers.append(
                         {
                             "kind": "unsafe-proof-command",
