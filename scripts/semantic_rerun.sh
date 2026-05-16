@@ -104,7 +104,20 @@ run_tests() {
 
 # shellcheck disable=SC2317 # Invoked indirectly through run_tests dispatch.
 run_cargo() {
-    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo "$@"
+    local output=""
+    local status=0
+
+    set +e
+    output=$("$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo "$@" 2>&1)
+    status=$?
+    set -e
+
+    printf '%s\n' "$output"
+    if printf '%s\n' "$output" | grep -Eq '^\[RCH\] local \(|falling back to local'; then
+        printf '%s\n' "FATAL: rch local fallback detected; refusing local cargo execution" >&2
+        return 86
+    fi
+    return "$status"
 }
 
 case "$SUITE" in
