@@ -47,6 +47,19 @@ declare -A SUITE_LABELS=(
     [plan]="PLAN - Certified rewrite pipeline"
 )
 
+reject_rch_local_fallback_log() {
+    local suite_name="$1"
+    local log_file="$2"
+    local marker_file="${OUTPUT_DIR}/${suite_name}_${TIMESTAMP}_rch_local_fallback.txt"
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+        echo "FATAL: rch local fallback detected in suite ${suite_name}; refusing local cargo execution"
+        echo "FATAL: rch local fallback detected in suite ${suite_name}; refusing local cargo execution" >> "$REPORT_FILE"
+        echo "rch local fallback detected in suite ${suite_name}; refusing local cargo execution" > "$marker_file"
+        exit 86
+    fi
+}
+
 # Parse args
 FILTER=""
 FILTER_ARG=""
@@ -93,6 +106,8 @@ for name in "${SUITE_NAMES[@]}"; do
     fi
     rc=$?
     set -e
+
+    reject_rch_local_fallback_log "$name" "$log_file"
 
     passed="$(grep -c "^test .* ok$" "$log_file" 2>/dev/null || true)"
     failed="$(grep -c "^test .* FAILED$" "$log_file" 2>/dev/null || true)"
