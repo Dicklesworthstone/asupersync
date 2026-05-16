@@ -10,6 +10,7 @@ export RUST_BACKTRACE=1
 RCH_BIN="${RCH_BIN:-rch}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cancel_attribution}"
 DRY_RUN=0
+LOCAL_FALLBACKS=0
 
 if [[ "${1:-}" == "--dry-run" ]]; then
     DRY_RUN=1
@@ -48,6 +49,22 @@ json_escape() {
     printf '%s' "${value}"
 }
 
+local_fallback_pattern='^\[RCH\] local \(|local fallback|fallback to local|falling back to local|executing locally'
+
+record_local_fallback() {
+    local name="$1"
+    local log_file="$2"
+    local artifact_path="${OUTPUT_DIR}/${name}_rch_local_fallback.txt"
+
+    if grep -Eiq "$local_fallback_pattern" "$log_file" 2>/dev/null; then
+        echo "rch local fallback detected; refusing local cargo execution" > "$artifact_path"
+        grep -Ein "$local_fallback_pattern" "$log_file" | head -5 >> "$artifact_path" 2>/dev/null || true
+        ((LOCAL_FALLBACKS += 1))
+        return 0
+    fi
+    return 1
+}
+
 run_test() {
     local name="$1"
     local pattern="$2"
@@ -80,8 +97,7 @@ run_test() {
     fi
 
     if "${test_command[@]}" 2>&1 | tee "$log_file"; then
-        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
-            echo "rch local fallback detected; refusing local cargo execution" > "${OUTPUT_DIR}/${name}_rch_local_fallback.txt"
+        if record_local_fallback "$name" "$log_file"; then
             echo "  ✗ ${name}: RCH LOCAL FALLBACK" >> "$SUMMARY_TEXT_FILE"
             return 86
         fi
@@ -89,8 +105,7 @@ run_test() {
         echo "  ✓ ${name}: PASSED ($passed tests)" >> "$SUMMARY_TEXT_FILE"
         return 0
     else
-        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
-            echo "rch local fallback detected; refusing local cargo execution" > "${OUTPUT_DIR}/${name}_rch_local_fallback.txt"
+        if record_local_fallback "$name" "$log_file"; then
             echo "  ✗ ${name}: RCH LOCAL FALLBACK" >> "$SUMMARY_TEXT_FILE"
             return 86
         fi
@@ -159,8 +174,12 @@ fi
 FAILURE_CLASS="test_or_pattern_failure"
 if [[ "${SUITE_STATUS}" == "passed" || "${SUITE_STATUS}" == "planned" ]]; then
     FAILURE_CLASS="none"
-elif grep -q "RCH LOCAL FALLBACK" "$SUMMARY_TEXT_FILE"; then
+elif [ "$LOCAL_FALLBACKS" -ne 0 ]; then
     FAILURE_CLASS="rch_local_fallback"
+fi
+RCH_ROUTED_JSON=true
+if [ "$LOCAL_FALLBACKS" -ne 0 ]; then
+    RCH_ROUTED_JSON=false
 fi
 
 cat > "$SUMMARY_FILE" << ENDJSON
@@ -175,7 +194,8 @@ cat > "$SUMMARY_FILE" << ENDJSON
   "failure_class": "${FAILURE_CLASS}",
   "dry_run": ${DRY_RUN_JSON},
   "runner": "rch exec",
-  "all_rch_routed": true,
+  "all_rch_routed": ${RCH_ROUTED_JSON},
+  "rch_local_fallbacks": ${LOCAL_FALLBACKS},
   "repro_command": "$(json_escape "${REPRO_COMMAND}")",
   "artifact_path": "$(json_escape "${SUMMARY_FILE}")",
   "suite": "${SUITE_ID}",
