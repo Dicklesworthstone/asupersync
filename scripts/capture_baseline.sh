@@ -28,6 +28,7 @@ RUN_CMD=0
 SMOKE=0
 SMOKE_SEED=""
 RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_capture_baseline_phase0}"
 
 usage() {
     cat <<'USAGE'
@@ -88,7 +89,7 @@ if [[ -n "$CMD_B64" ]]; then
 fi
 
 if [[ -z "$CMD_STRING" ]]; then
-    CMD=("$RCH_BIN" exec -- cargo bench --bench phase0_baseline)
+    CMD=("$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${RCH_TARGET_DIR}" cargo bench --bench phase0_baseline)
 fi
 
 if ! command -v jq &>/dev/null; then
@@ -134,7 +135,7 @@ if [[ "$RUN_CMD" -eq 1 ]]; then
         "$(json_escape "$RUN_SEED_FMT")"
     if [[ -n "$CMD_STRING" ]]; then
         # Preserve shell quoting without pulling in login/startup-file noise.
-        BASH_ENV= "${BASH:-bash}" -c "$CMD_STRING"
+        BASH_ENV='' "${BASH:-bash}" -c "$CMD_STRING"
     else
         "${CMD[@]}"
     fi
@@ -149,12 +150,9 @@ if [[ ! -d "$CRITERION_DIR" ]]; then
     exit 1
 fi
 
-# Build baseline JSON
-BASELINES="[]"
-
 find "$CRITERION_DIR" -path '*/new/estimates.json' -type f | sort | while read -r est_file; do
     # Extract benchmark name from path: criterion/<group>/<name>/new/estimates.json
-    rel="${est_file#$CRITERION_DIR/}"
+    rel="${est_file#"$CRITERION_DIR"/}"
     bench_path="${rel%/new/estimates.json}"
     sample_file="${est_file%/estimates.json}/sample.json"
 

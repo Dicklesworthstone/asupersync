@@ -133,6 +133,7 @@ fi
 BENCH_ARGS=($BENCH_ARGS_STR)
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+RCH_TARGET_ROOT="${RCH_TARGET_ROOT:-${TMPDIR:-/tmp}/rch_target_perf_e2e_${USER:-unknown}_${TIMESTAMP}}"
 RUN_DIR="${OUTPUT_DIR}/perf_${TIMESTAMP}"
 LOG_DIR="${RUN_DIR}/logs"
 ARTIFACT_DIR="${RUN_DIR}/artifacts"
@@ -142,7 +143,7 @@ COMPARE_STDOUT="${ARTIFACT_DIR}/compare.txt"
 BASELINE_CURRENT="${ARTIFACT_DIR}/baseline_current.json"
 GATE_EVENTS_FILE="${ARTIFACT_DIR}/gate_events.ndjson"
 GATE_SCHEMA_VERSION="raptorq-g2-perf-gate-v1"
-RUN_REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' RCH_BIN=${RCH_BIN} PERF_TIMEOUT=${TIMEOUT_SEC} PERF_BENCH_ARGS='${BENCH_ARGS_STR}' ./scripts/run_perf_e2e.sh"
+RUN_REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' RCH_BIN=${RCH_BIN} RCH_TARGET_ROOT='${RCH_TARGET_ROOT}' PERF_TIMEOUT=${TIMEOUT_SEC} PERF_BENCH_ARGS='${BENCH_ARGS_STR}' ./scripts/run_perf_e2e.sh"
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 : > "$GATE_EVENTS_FILE"
@@ -187,6 +188,7 @@ echo "  Timeout:           ${TIMEOUT_SEC}s per bench"
 echo "  Seed:              ${ASUPERSYNC_SEED:-<unset>}"
 echo "  Workload:          ${WORKLOAD_ID}"
 echo "  Profile:           ${RUNTIME_PROFILE}"
+echo "  RCH target root:   ${RCH_TARGET_ROOT}"
 echo "  RCH mode:          enabled"
 echo ""
 
@@ -213,7 +215,9 @@ append_result() {
 for bench in "${BENCHES[@]}"; do
     log_file="${LOG_DIR}/${bench}_${TIMESTAMP}.log"
     bench_repro_command="${RUN_REPRO_COMMAND} --bench ${bench}"
-    cmd=("$RCH_BIN" exec -- cargo bench --bench "$bench")
+    safe_bench="${bench//[^A-Za-z0-9_]/_}"
+    bench_target_dir="${RCH_TARGET_ROOT}/${safe_bench}"
+    cmd=("$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${bench_target_dir}" cargo bench --bench "$bench")
     if [[ ${#BENCH_ARGS[@]} -gt 0 ]]; then
         cmd+=("${BENCH_ARGS[@]}")
         bench_repro_command="${bench_repro_command} --bench-args '${BENCH_ARGS_STR}'"
@@ -221,6 +225,7 @@ for bench in "${BENCHES[@]}"; do
 
     echo ">>> Running ${bench}"
     echo "    Command: ${cmd[*]}"
+    echo "    Target:  ${bench_target_dir}"
 
     emit_gate_event \
         "bench_start" \
@@ -262,7 +267,7 @@ for bench in "${BENCHES[@]}"; do
             "$bench_repro_command"
     fi
 
-    append_result "{\"name\":\"${bench}\",\"exit_code\":${rc},\"duration_sec\":${duration},\"log_file\":\"${log_file}\"}"
+    append_result "{\"name\":\"${bench}\",\"exit_code\":${rc},\"duration_sec\":${duration},\"log_file\":\"${log_file}\",\"target_dir\":\"${bench_target_dir}\"}"
 done
 
 COMPARE_EXIT=0
@@ -319,7 +324,9 @@ SAVED_BASELINE=""
 if [[ -n "$SAVE_DIR" ]]; then
     ./scripts/capture_baseline.sh --save "$SAVE_DIR" > /tmp/asupersync_save_stdout.txt
     if [[ -d "$SAVE_DIR" ]]; then
-        SAVED_BASELINE=$(ls -1t "$SAVE_DIR"/baseline_*.json 2>/dev/null | head -n 1 || true)
+        SAVED_BASELINE=$(find "$SAVE_DIR" -maxdepth 1 -type f -name 'baseline_*.json' -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn \
+            | awk 'NR == 1 { sub(/^[^ ]+ /, ""); print }')
     fi
 fi
 
@@ -328,7 +335,7 @@ if command -v git &>/dev/null; then
     GIT_SHA=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || true)
 fi
 RUSTC_VER=$(rustc -V 2>/dev/null || echo "")
-CARGO_VER=$(cargo -V 2>/dev/null || echo "")
+CARGO_VER=$("$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${RCH_TARGET_ROOT}/cargo_version" cargo -V 2>/dev/null | tail -n 1 || echo "")
 OS_NAME=$(uname -s 2>/dev/null || echo "")
 OS_ARCH=$(uname -m 2>/dev/null || echo "")
 OS_RELEASE=$(uname -r 2>/dev/null || echo "")
@@ -357,6 +364,7 @@ cat > "$REPORT_FILE" <<EOF
     "timeout_sec": ${TIMEOUT_SEC},
     "bench_args": "${BENCH_ARGS_STR}",
     "rch_bin": "${RCH_BIN}",
+    "rch_target_root": "${RCH_TARGET_ROOT}",
     "run_with_rch": ${RUN_WITH_RCH_BOOL}
   },
   "env": {
