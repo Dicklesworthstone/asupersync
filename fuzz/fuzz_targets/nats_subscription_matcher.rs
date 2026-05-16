@@ -9,12 +9,18 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::messaging::nats::subscription_matches_subject;
+use asupersync::messaging::nats::{
+    fuzz_nats_subject_max_bytes, fuzz_validate_nats_subscription_pattern,
+    subscription_matches_subject,
+};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_TOKENS: usize = 24;
 const MAX_LITERAL_LEN: usize = 32;
 const MAX_REPEAT_TAIL: usize = 48;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug, Clone)]
 enum PatternTokenSpec {
@@ -214,7 +220,61 @@ fn reference_match(pattern: &str, subject: &str) -> bool {
     subject_index == subject_tokens.len()
 }
 
+fn assert_subscription_pattern_rejection(pattern: &str, expected: &str) {
+    let error = fuzz_validate_nats_subscription_pattern(pattern)
+        .expect_err("fixed NATS subscription pattern canary should be rejected");
+
+    assert_eq!(
+        error, expected,
+        "NATS subscription pattern diagnostic drift for {pattern:?}",
+    );
+    assert!(
+        !error.trim().is_empty(),
+        "NATS subscription pattern rejection should expose a diagnostic"
+    );
+    assert!(
+        error.len() <= 512,
+        "NATS subscription pattern rejection diagnostic should stay bounded: {} bytes",
+        error.len()
+    );
+}
+
+fn assert_fixed_subscription_pattern_error_canaries() {
+    assert_subscription_pattern_rejection("", "NATS protocol error: subject must not be empty");
+    assert_subscription_pattern_rejection(
+        "orders created",
+        "NATS protocol error: subject contains illegal whitespace/control characters",
+    );
+    assert_subscription_pattern_rejection(
+        "orders.\n.created",
+        "NATS protocol error: subject contains illegal whitespace/control characters",
+    );
+    assert_subscription_pattern_rejection(
+        "orders.>.created",
+        "NATS protocol error: subject contains an invalid NATS wildcard placement or empty token",
+    );
+    assert_subscription_pattern_rejection(
+        "orders..created",
+        "NATS protocol error: subject contains an invalid NATS wildcard placement or empty token",
+    );
+    assert_subscription_pattern_rejection(
+        "orders*created",
+        "NATS protocol error: subject contains an invalid NATS wildcard placement or empty token",
+    );
+
+    let max_subject_bytes = fuzz_nats_subject_max_bytes();
+    let oversized = "a".repeat(max_subject_bytes + 1);
+    assert_subscription_pattern_rejection(
+        &oversized,
+        &format!(
+            "NATS protocol error: subject exceeds the {max_subject_bytes}-byte NATS subject bound"
+        ),
+    );
+}
+
 fuzz_target!(|input: MatcherFuzzInput| {
+    FIXED_CANARIES.get_or_init(assert_fixed_subscription_pattern_error_canaries);
+
     let pattern = render_pattern(&input);
     let subject = render_subject(&input);
 
