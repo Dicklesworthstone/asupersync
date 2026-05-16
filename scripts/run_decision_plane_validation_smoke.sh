@@ -16,6 +16,7 @@ LIST_ONLY=0
 DRY_RUN=1
 COMMAND_TIMEOUT_SECONDS="${DECISION_PLANE_SMOKE_TIMEOUT_SECONDS:-120}"
 RCH_BIN="${RCH_BIN:-rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -273,7 +274,7 @@ run_scenario() {
             cd "$PROJECT_ROOT"
             timeout --kill-after=10s "${COMMAND_TIMEOUT_SECONDS}s" "${command_args[@]}"
         ) > "$log_file" 2>&1 || command_exit_code=$?
-        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+        if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$log_file" 2>/dev/null; then
             command_exit_code=86
             printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
         fi
