@@ -27,12 +27,15 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 use asupersync::messaging::nats::{
     NatsError, fuzz_parse_nats_hmsg_frame, fuzz_parse_nats_server_info,
 };
 
 const MAX_INPUT: usize = 64 * 1024;
+
+static FIXED_ORACLES: OnceLock<()> = OnceLock::new();
 
 fn assert_fixed_oracles() {
     let info = fuzz_parse_nats_server_info(
@@ -183,7 +186,7 @@ fn observe_hmsg_frame(frame: &[u8]) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    assert_fixed_oracles();
+    FIXED_ORACLES.get_or_init(assert_fixed_oracles);
 
     if data.len() > MAX_INPUT || data.len() < 2 {
         return;

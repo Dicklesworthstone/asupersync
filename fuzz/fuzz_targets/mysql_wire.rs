@@ -28,6 +28,7 @@ use asupersync::database::mysql::{
     fuzz_parse_data_row_or_terminator, fuzz_parse_error_packet, fuzz_parse_ok_packet_fields,
 };
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_INPUT_SIZE: usize = 100_000;
@@ -37,6 +38,8 @@ const PACKET_HEADER_SIZE: usize = 4;
 
 /// MySQL maximum packet size (16MB - 1 byte).
 const MAX_PACKET_SIZE: u32 = 16_777_215;
+
+static FIXED_REGRESSIONS: OnceLock<()> = OnceLock::new();
 
 /// MySQL command constants for command phase testing.
 mod command {
@@ -87,7 +90,7 @@ enum FuzzScenario {
 }
 
 fuzz_target!(|data: &[u8]| {
-    test_fixed_real_seam_regressions();
+    FIXED_REGRESSIONS.get_or_init(test_fixed_real_seam_regressions);
 
     // Guard against excessively large inputs
     if data.len() > MAX_INPUT_SIZE {
