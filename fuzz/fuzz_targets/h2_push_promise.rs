@@ -13,6 +13,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::error::ErrorCode;
@@ -22,6 +23,8 @@ use asupersync::http::h2::frame::{
 
 /// Maximum reasonable payload size for testing
 const MAX_PAYLOAD_SIZE: usize = 65536;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// HTTP/2 connection role for PUSH_PROMISE validation
 #[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,7 +260,7 @@ fn test_push_promise_parser_canaries() {
 }
 
 fuzz_target!(|input: PushPromiseFuzzInput| {
-    test_push_promise_parser_canaries();
+    FIXED_CANARIES.get_or_init(test_push_promise_parser_canaries);
 
     // Limit input sizes to reasonable bounds
     if input.header_block.len() > MAX_PAYLOAD_SIZE {
