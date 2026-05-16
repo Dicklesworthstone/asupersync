@@ -163,12 +163,19 @@ fn assert_map_parse_canaries() {
         b"%?\r\n+odd\r\n.\r\n",
         &limits,
         "streamed map key without value",
+        "RESP3 streamed map ended after a key without a value",
     );
-    assert_protocol_error(b"%-1\r\n", &limits, "negative map length");
+    assert_protocol_error(
+        b"%-1\r\n",
+        &limits,
+        "negative map length",
+        "invalid aggregate length: -1",
+    );
     assert_protocol_error(
         b"%999999999999999999999999\r\n",
         &limits,
         "overflow map length",
+        "integer overflow",
     );
 }
 
@@ -195,10 +202,24 @@ fn assert_map_decodes_to_pair_count(
     }
 }
 
-fn assert_protocol_error(wire: &[u8], limits: &RedisProtocolLimits, label: &str) {
+fn assert_protocol_error(
+    wire: &[u8],
+    limits: &RedisProtocolLimits,
+    label: &str,
+    expected_message: &str,
+) {
     match RespValue::try_decode_with_limits(wire, limits) {
-        Err(RedisError::Protocol(_)) => {}
-        other => panic!("{label} should be rejected as a RESP protocol error, got {other:?}"),
+        Err(RedisError::Protocol(message)) => {
+            assert_eq!(message, expected_message);
+            assert_eq!(
+                RedisError::Protocol(message).to_string(),
+                format!("Redis protocol error: {expected_message}")
+            );
+        }
+        other => panic!(
+            "{label} should be rejected as Redis protocol error {expected_message:?}, \
+             got {other:?}"
+        ),
     }
 }
 
