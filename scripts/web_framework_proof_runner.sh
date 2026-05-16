@@ -60,6 +60,14 @@ log() {
   printf '%s\n' "$*" | tee -a "$LOG_FILE"
 }
 
+reject_rch_local_fallback_log() {
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "$LOG_FILE" 2>/dev/null; then
+    log "rch_local_fallback=true"
+    echo "rch local fallback detected; refusing local cargo execution" > "$OUT_DIR/rch_local_fallback.txt"
+    exit 86
+  fi
+}
+
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
 
@@ -98,6 +106,8 @@ set +e
 "${CMD[@]}" 2>&1 | tee -a "$LOG_FILE"
 TEST_STATUS="${PIPESTATUS[0]}"
 set -e
+
+reject_rch_local_fallback_log
 
 sed -n 's/^.*\({.*"bead_id":"asupersync-o74l7u".*}\).*$/\1/p' "$LOG_FILE" > "$ROWS_FILE" || true
 
