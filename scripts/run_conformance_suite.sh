@@ -44,7 +44,7 @@ TEST_COMMAND=(
     "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
     "RUST_LOG=${RUST_LOG}"
     "RUST_BACKTRACE=${RUST_BACKTRACE}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync-conformance
