@@ -10,6 +10,7 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
+use asupersync::grpc::Code;
 use asupersync::grpc::codec::{FramedCodec, GrpcCodec, IdentityCodec, MESSAGE_HEADER_SIZE};
 use asupersync::grpc::status::GrpcError;
 use libfuzzer_sys::fuzz_target;
@@ -64,7 +65,7 @@ fn assert_direct_codec_rejects_without_waiting(frame: &[u8], decode_limit: usize
     let original_len = buf.len();
 
     match codec.decode(&mut buf) {
-        Err(GrpcError::MessageTooLarge) => {}
+        Err(error) => assert_message_too_large(error, "direct compressed MAX_INT frame"),
         other => panic!("compressed MAX_INT frame must reject as MessageTooLarge, got {other:?}"),
     }
 
@@ -82,7 +83,7 @@ fn assert_framed_codec_rejects_and_poison_clears(frame: &[u8], decode_limit: usi
     let mut buf = BytesMut::from(frame);
 
     match codec.decode_message(&mut buf) {
-        Err(GrpcError::MessageTooLarge) => {}
+        Err(error) => assert_message_too_large(error, "framed compressed MAX_INT frame"),
         other => panic!("framed codec must reject bomb frame as MessageTooLarge, got {other:?}"),
     }
 
@@ -90,5 +91,28 @@ fn assert_framed_codec_rejects_and_poison_clears(frame: &[u8], decode_limit: usi
     assert!(
         codec.is_poisoned(),
         "framed codec should poison after bomb rejection"
+    );
+}
+
+fn assert_message_too_large(error: GrpcError, context: &str) {
+    assert!(
+        matches!(&error, GrpcError::MessageTooLarge),
+        "{context} must reject as MessageTooLarge, got {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "message too large",
+        "{context} MessageTooLarge display changed"
+    );
+    let status = error.into_status();
+    assert_eq!(
+        status.code(),
+        Code::ResourceExhausted,
+        "{context} MessageTooLarge status code changed"
+    );
+    assert_eq!(
+        status.message(),
+        "message too large",
+        "{context} MessageTooLarge status message changed"
     );
 }
