@@ -5,6 +5,7 @@ use asupersync::database::mysql::{
     FuzzHandshakeProtocol41, MySqlError, fuzz_parse_handshake_protocol_41,
 };
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_CASES: usize = 16;
 const MAX_RAW_HANDSHAKE_LEN: usize = 512;
@@ -27,6 +28,8 @@ const BASE_CLIENT_CAPS: u32 = CLIENT_PROTOCOL_41
     | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
     | CLIENT_TRANSACTIONS
     | CLIENT_MULTI_RESULTS;
+
+static FIXED_DISAGREEMENT_CASES: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Arbitrary)]
 struct FuzzInput {
@@ -75,10 +78,10 @@ fuzz_target!(|data: &[u8]| {
         run_handshake_case(&payload, input.client_has_database);
     }
 
-    run_fixed_disagreement_cases(input.client_has_database);
+    FIXED_DISAGREEMENT_CASES.get_or_init(run_fixed_disagreement_cases);
 });
 
-fn run_fixed_disagreement_cases(client_has_database: bool) {
+fn run_fixed_disagreement_cases() {
     let required = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION;
     let cases = [
         required | CLIENT_PLUGIN_AUTH | CLIENT_DEPRECATE_EOF | CLIENT_SSL | CLIENT_LOCAL_FILES,
@@ -88,9 +91,11 @@ fn run_fixed_disagreement_cases(client_has_database: bool) {
         CLIENT_PROTOCOL_41 | CLIENT_PLUGIN_AUTH | CLIENT_DEPRECATE_EOF,
     ];
 
-    for server_capabilities in cases {
-        let payload = build_minimal_handshake(server_capabilities);
-        run_handshake_case(&payload, client_has_database);
+    for client_has_database in [false, true] {
+        for server_capabilities in cases {
+            let payload = build_minimal_handshake(server_capabilities);
+            run_handshake_case(&payload, client_has_database);
+        }
     }
 }
 
