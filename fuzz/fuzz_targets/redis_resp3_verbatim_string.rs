@@ -168,6 +168,10 @@ fn assert_protocol_error(
     match result {
         Err(RedisError::Protocol(message)) => {
             assert_eq!(message, expected_message);
+            assert_eq!(
+                RedisError::Protocol(message).to_string(),
+                format!("Redis protocol error: {expected_message}")
+            );
         }
         Err(error) => panic!("expected protocol error {expected_message:?}, got {error:?}"),
         Ok(decoded) => panic!("expected protocol error {expected_message:?}, got {decoded:?}"),
