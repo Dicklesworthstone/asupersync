@@ -12,6 +12,7 @@ OUTPUT_ROOT_OVERRIDE="${SIGNED_PROFILE_BUNDLE_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${SIGNED_PROFILE_BUNDLE_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${SIGNED_PROFILE_BUNDLE_SMOKE_RUN_ID:-}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
     cat <<'EOF'
@@ -249,7 +250,7 @@ else
         if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$RUN_LOG_PATH" 2>/dev/null; then
             break
         fi
-        if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RUN_LOG_PATH" 2>/dev/null; then
             kill "$COMMAND_PID" 2>/dev/null || true
             wait "$COMMAND_PID" 2>/dev/null || true
             COMMAND_EXIT_CODE=86
@@ -275,7 +276,7 @@ else
     fi
 
     if [ "$COMMAND_EXIT_CODE" -ne 86 ] \
-        && grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        && grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RUN_LOG_PATH" 2>/dev/null; then
         COMMAND_EXIT_CODE=86
         printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
     fi

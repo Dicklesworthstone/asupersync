@@ -1450,6 +1450,34 @@ fn signed_profile_bundle_shadow_run_holds_when_candidate_is_no_win() {
 }
 
 #[test]
+fn signed_profile_bundle_runner_rejects_full_rch_fallback_marker_set() {
+    let script = fs::read_to_string("scripts/run_signed_profile_bundle_smoke.sh")
+        .expect("signed profile bundle smoke runner should load");
+
+    assert!(
+        script
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 2,
+        "runner must use the shared local fallback matcher at every rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            script.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
+#[test]
 fn signed_profile_bundle_smoke_contract_emits_report() {
     let contract = load_contract();
     let scenario = selected_scenario(&contract);
