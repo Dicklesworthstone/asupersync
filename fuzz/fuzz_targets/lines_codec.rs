@@ -23,6 +23,8 @@ use libfuzzer_sys::fuzz_target;
 use std::sync::OnceLock;
 
 static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
+const MAX_LINE_LENGTH_EXCEEDED_DISPLAY: &str = "line exceeds maximum length";
+const INVALID_UTF8_DISPLAY: &str = "line is not valid UTF-8";
 
 #[derive(Arbitrary, Debug)]
 struct FuzzConfig {
@@ -153,9 +155,20 @@ fn expect_error(
     result: Result<Option<String>, LinesCodecError>,
     matches_expected: impl FnOnce(&LinesCodecError) -> bool,
     label: &str,
+    expected_display: &str,
 ) {
     match result {
-        Err(error) if matches_expected(&error) => {}
+        Err(error) => {
+            assert!(
+                matches_expected(&error),
+                "expected {label} error, got {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                expected_display,
+                "fixed {label} canary should preserve the exact LinesCodecError diagnostic"
+            );
+        }
         other => panic!("expected {label} error, got {other:?}"),
     }
 }
@@ -175,6 +188,7 @@ fn assert_fixed_decode_canaries() {
         observe_decode(&mut limited, &mut too_long, false),
         |error| matches!(error, LinesCodecError::MaxLineLengthExceeded),
         "max-line-length",
+        MAX_LINE_LENGTH_EXCEEDED_DISPLAY,
     );
     expect_line(observe_decode(&mut limited, &mut too_long, false), "ok");
     assert!(
@@ -188,6 +202,7 @@ fn assert_fixed_decode_canaries() {
         observe_decode(&mut invalid_utf8, &mut invalid_buf, false),
         |error| matches!(error, LinesCodecError::InvalidUtf8),
         "invalid-utf8",
+        INVALID_UTF8_DISPLAY,
     );
     assert!(
         invalid_buf.is_empty(),
