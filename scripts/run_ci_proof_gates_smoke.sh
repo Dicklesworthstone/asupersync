@@ -11,6 +11,7 @@ LIST_ONLY=0
 DRY_RUN=1
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -128,7 +129,7 @@ run_scenario() {
     else
         rc=0
         timeout "$RCH_WRAPPER_TIMEOUT" "${command[@]}" >"$log_file" 2>&1 || rc=$?
-        if grep -Eiq '^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally' "$log_file"; then
+        if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$log_file"; then
             printf '\nFATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
             printf 'rch local fallback detected; refusing local cargo execution\n' > "${scenario_dir}/rch_local_fallback.txt"
             rc=86
