@@ -205,6 +205,19 @@ target_dir_for() {
     printf '%s/%s\n' "$RCH_TARGET_ROOT" "$safe_label"
 }
 
+reject_rch_local_fallback_log() {
+    local label="$1"
+    local log_file="$2"
+    local safe_label="${label//[^A-Za-z0-9_]/_}"
+    local marker_file="${RUN_DIR}/${safe_label}_rch_local_fallback.txt"
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+        echo "FATAL: rch local fallback detected in ${label}; refusing local cargo execution" >&2
+        echo "rch local fallback detected in ${label}; refusing local cargo execution" > "$marker_file"
+        exit 86
+    fi
+}
+
 selected_for_run() {
     local scenario_id="$1"
     if [[ -n "$SCENARIO_FILTER" ]]; then
@@ -521,6 +534,7 @@ run_validation_stage() {
     timeout "$VALIDATION_TIMEOUT" "$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${stage_target_dir}" "${cmd[@]}" >"$stage_log" 2>&1
     rc=$?
     set -e
+    reject_rch_local_fallback_log "$stage_id" "$stage_log"
     end_s="$(date +%s)"
     duration_ms=$(((end_s - start_s) * 1000))
     tests_passed="$(grep -c "^test .* ok$" "$stage_log" 2>/dev/null || true)"
@@ -676,6 +690,7 @@ if [[ "${NO_PREFLIGHT:-0}" != "1" ]]; then
     "$RCH_BIN" exec -- env "CARGO_TARGET_DIR=$(target_dir_for preflight)" cargo test --test raptorq_conformance --no-run >"$PREFLIGHT_LOG" 2>&1
     preflight_rc="$?"
     set -e
+    reject_rch_local_fallback_log "preflight" "$PREFLIGHT_LOG"
     if [[ "$preflight_rc" -ne 0 ]]; then
         echo "Preflight compilation failed. See ${PREFLIGHT_LOG}" >&2
         cat > "$SUMMARY_FILE" <<EOF
@@ -823,6 +838,7 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
     timeout "$E2E_TIMEOUT" "$RCH_BIN" exec -- env "CARGO_TARGET_DIR=$(target_dir_for "scenario_${scenario_id}")" cargo test --test raptorq_conformance "$test_filter" -- --nocapture --test-threads="$TEST_THREADS" >"$scenario_log_file" 2>&1
     rc=$?
     set -e
+    reject_rch_local_fallback_log "$scenario_id" "$scenario_log_file"
 
     end_s="$(date +%s)"
     duration_ms=$(((end_s - start_s) * 1000))
