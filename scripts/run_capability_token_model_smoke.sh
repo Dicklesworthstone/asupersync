@@ -132,8 +132,9 @@ run_scenario() {
     else
         rc=0
         timeout "$RCH_WRAPPER_TIMEOUT" "${command[@]}" >"$log_file" 2>&1 || rc=$?
-        if grep -Eiq 'local fallback|fallback to local|executing locally' "$log_file"; then
+        if grep -Eiq '^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally' "$log_file"; then
             printf '\nFATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
+            printf 'rch local fallback detected; refusing local cargo execution\n' > "${scenario_dir}/rch_local_fallback.txt"
             rc=86
         fi
         status="$( [[ "$rc" -eq 0 ]] && printf "passed" || printf "failed" )"
