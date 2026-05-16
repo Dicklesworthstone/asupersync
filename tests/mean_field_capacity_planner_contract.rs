@@ -457,7 +457,12 @@ fn mean_field_runner_dry_run_records_rch_plan() {
     for marker in [
         "RCH_BIN=\"${RCH_BIN:-$HOME/.local/bin/rch}\"",
         "RCH_COMMAND=(\"${RCH_BIN}\" exec -- \"${PROOF_COMMAND[@]}\")",
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
         "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
         "--dry-run",
     ] {
         assert!(runner.contains(marker), "runner missing marker: {marker}");
