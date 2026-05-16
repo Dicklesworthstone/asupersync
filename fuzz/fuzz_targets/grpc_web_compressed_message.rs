@@ -37,9 +37,12 @@ use asupersync::grpc::web::{
     Base64StreamDecoder, WebFrame, WebFrameCodec, base64_decode, decode_trailers,
 };
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Maximum frame size for testing (16KB, reasonable for fuzzing)
 const MAX_FUZZ_FRAME_SIZE: usize = 16 * 1024;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// Fuzzing strategies for gRPC-Web frame generation
 #[derive(Debug, Clone, Copy, Arbitrary)]
@@ -139,7 +142,7 @@ impl FuzzWebFrame {
 }
 
 fuzz_target!(|data: &[u8]| {
-    run_fixed_canaries();
+    FIXED_CANARIES.get_or_init(run_fixed_canaries);
 
     // Fuzz target entry point with input size guard
     if data.is_empty() || data.len() > MAX_FUZZ_FRAME_SIZE {
