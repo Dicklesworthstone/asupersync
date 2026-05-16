@@ -28,6 +28,8 @@ LOG_DIR="$OUTPUT_DIR/$TIMESTAMP"
 RCH_BIN="${RCH_BIN:-rch}"
 CARGO_TARGET_DIR_BASE="${CARGO_TARGET_DIR_BASE:-${TMPDIR:-/tmp}/rch_target_net_hardening_e2e}"
 DRY_RUN=0
+LOCAL_FALLBACKS=0
+LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|local fallback|fallback to local|falling back to local|executing locally'
 
 if [[ "${1:-}" == "--dry-run" ]]; then
     DRY_RUN=1
@@ -65,6 +67,8 @@ json_escape() {
 
 record_rch_local_fallback() {
     echo "rch local fallback detected; refusing local cargo execution" > "$LOG_DIR/rch_local_fallback.txt"
+    grep -rEin "$LOCAL_FALLBACK_PATTERN" "$LOG_DIR"/*.log 2>/dev/null | head -5 >> "$LOG_DIR/rch_local_fallback.txt" || true
+    LOCAL_FALLBACKS=$({ grep -rEic "$LOCAL_FALLBACK_PATTERN" "$LOG_DIR"/*.log 2>/dev/null || true; } | awk -F: '{s+=$NF}END{print s+0}')
 }
 
 run_cargo() {
@@ -191,7 +195,7 @@ if grep -rqi "leak" "$LOG_DIR"/*.log 2>/dev/null; then
     ISSUES=$((ISSUES + 1))
 fi
 
-if grep -rEq '^\[RCH\] local \(|falling back to local' "$LOG_DIR"/*.log 2>/dev/null; then
+if grep -rEq "$LOCAL_FALLBACK_PATTERN" "$LOG_DIR"/*.log 2>/dev/null; then
     echo "  ERROR: rch local fallback detected"
     record_rch_local_fallback
     ISSUES=$((ISSUES + 1))
@@ -218,6 +222,10 @@ DRY_RUN_JSON=false
 if [[ "${DRY_RUN}" -eq 1 ]]; then
     DRY_RUN_JSON=true
 fi
+RCH_ROUTED_JSON=true
+if [ "$LOCAL_FALLBACKS" -ne 0 ]; then
+    RCH_ROUTED_JSON=false
+fi
 
 cat > "$SUMMARY_FILE" << ENDJSON
 {
@@ -230,7 +238,8 @@ cat > "$SUMMARY_FILE" << ENDJSON
   "status": "${SUITE_STATUS}",
   "dry_run": ${DRY_RUN_JSON},
   "runner": "rch exec",
-  "all_rch_routed": true,
+  "all_rch_routed": ${RCH_ROUTED_JSON},
+  "rch_local_fallbacks": ${LOCAL_FALLBACKS},
   "repro_command": "$(json_escape "${REPRO_COMMAND}")",
   "rch_bin": "$(json_escape "${RCH_BIN}")",
   "target_dir_base": "$(json_escape "${CARGO_TARGET_DIR_BASE}")",
