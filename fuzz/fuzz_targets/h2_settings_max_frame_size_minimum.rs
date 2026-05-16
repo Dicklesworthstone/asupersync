@@ -118,8 +118,8 @@ fn exercise_frame(frame: &FuzzSettingsFrame) {
     assert_eq!(header.length as usize, payload.len());
 
     let result = H2SettingsFrame::parse(&header, &payload);
-    if let Some(code) = expected_error_code(&header, &payload) {
-        assert_error_code(result, code);
+    if let Some(expected) = expected_error(&header, &payload) {
+        assert_error_shape(result, expected);
         return;
     }
 
@@ -153,7 +153,13 @@ fn exercise_single_max_frame_size(value: u32) {
     let result = H2SettingsFrame::parse(&header, &payload);
 
     if !(MIN_MAX_FRAME_SIZE..=MAX_FRAME_SIZE).contains(&value) {
-        assert_error_code(result, ErrorCode::ProtocolError);
+        assert_error_shape(
+            result,
+            ExpectedSettingsError {
+                code: ErrorCode::ProtocolError,
+                message: "SETTINGS_MAX_FRAME_SIZE out of bounds",
+            },
+        );
         return;
     }
 
@@ -207,31 +213,59 @@ fn append_setting(payload: &mut Vec<u8>, id: u16, value: u32) {
     payload.extend_from_slice(&value.to_be_bytes());
 }
 
-fn expected_error_code(header: &FrameHeader, payload: &Bytes) -> Option<ErrorCode> {
+#[derive(Clone, Copy, Debug)]
+struct ExpectedSettingsError {
+    code: ErrorCode,
+    message: &'static str,
+}
+
+fn expected_error(header: &FrameHeader, payload: &Bytes) -> Option<ExpectedSettingsError> {
     if header.stream_id != 0 {
-        return Some(ErrorCode::ProtocolError);
+        return Some(ExpectedSettingsError {
+            code: ErrorCode::ProtocolError,
+            message: "SETTINGS frame with non-zero stream ID",
+        });
     }
 
     if header.has_flag(settings_flags::ACK) && !payload.is_empty() {
-        return Some(ErrorCode::FrameSizeError);
+        return Some(ExpectedSettingsError {
+            code: ErrorCode::FrameSizeError,
+            message: "SETTINGS ACK with non-zero length",
+        });
     }
 
     if !payload.len().is_multiple_of(6) {
-        return Some(ErrorCode::FrameSizeError);
+        return Some(ExpectedSettingsError {
+            code: ErrorCode::FrameSizeError,
+            message: "SETTINGS frame length not multiple of 6",
+        });
     }
 
     first_live_setting_error(payload)
 }
 
-fn first_live_setting_error(payload: &Bytes) -> Option<ErrorCode> {
+fn first_live_setting_error(payload: &Bytes) -> Option<ExpectedSettingsError> {
     for chunk in payload.chunks_exact(6) {
         let id = u16::from_be_bytes([chunk[0], chunk[1]]);
         let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
         match id {
-            0x2 if value > 1 => return Some(ErrorCode::ProtocolError),
-            0x4 if value > 0x7fff_ffff => return Some(ErrorCode::FlowControlError),
+            0x2 if value > 1 => {
+                return Some(ExpectedSettingsError {
+                    code: ErrorCode::ProtocolError,
+                    message: "SETTINGS_ENABLE_PUSH must be 0 or 1",
+                });
+            }
+            0x4 if value > 0x7fff_ffff => {
+                return Some(ExpectedSettingsError {
+                    code: ErrorCode::FlowControlError,
+                    message: "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum",
+                });
+            }
             0x5 if !(MIN_MAX_FRAME_SIZE..=MAX_FRAME_SIZE).contains(&value) => {
-                return Some(ErrorCode::ProtocolError);
+                return Some(ExpectedSettingsError {
+                    code: ErrorCode::ProtocolError,
+                    message: "SETTINGS_MAX_FRAME_SIZE out of bounds",
+                });
             }
             _ => {}
         }
@@ -286,10 +320,35 @@ fn assert_parsed_max_frame_sizes_are_in_range(parsed: &H2SettingsFrame) {
     }
 }
 
-fn assert_error_code(result: Result<H2SettingsFrame, H2Error>, expected: ErrorCode) {
+fn assert_error_shape(result: Result<H2SettingsFrame, H2Error>, expected: ExpectedSettingsError) {
     match result {
         Ok(frame) => panic!("expected {expected:?}, parsed SETTINGS frame: {frame:?}"),
-        Err(err) => assert_eq!(err.code, expected, "unexpected SETTINGS parse error: {err}"),
+        Err(err) => {
+            assert_eq!(
+                err.code, expected.code,
+                "unexpected SETTINGS parse error code: {err}"
+            );
+            assert!(
+                err.is_connection_error(),
+                "SETTINGS parse errors should be connection-scoped: {err:?}"
+            );
+            assert_eq!(
+                err.stream_id, None,
+                "SETTINGS parse errors should not attach a stream id"
+            );
+            assert_eq!(
+                err.message, expected.message,
+                "SETTINGS parse error should keep the exact live diagnostic"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "HTTP/2 connection error ({}): {}",
+                    expected.code, expected.message
+                ),
+                "SETTINGS parse error should keep stable Display output"
+            );
+        }
     }
 }
 
