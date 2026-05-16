@@ -68,9 +68,19 @@ run_test_suite() {
     fi
 
     if "${test_command[@]}" 2>&1 | tee "$log_file"; then
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+            echo "rch local fallback detected; refusing local cargo execution" > "${OUTPUT_DIR}/${name}_rch_local_fallback.txt"
+            echo "  ✗ ${name}: RCH LOCAL FALLBACK" >> "$SUMMARY_FILE"
+            return 86
+        fi
         echo "  ✓ ${name}: PASSED" >> "$SUMMARY_FILE"
         return 0
     else
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+            echo "rch local fallback detected; refusing local cargo execution" > "${OUTPUT_DIR}/${name}_rch_local_fallback.txt"
+            echo "  ✗ ${name}: RCH LOCAL FALLBACK" >> "$SUMMARY_FILE"
+            return 86
+        fi
         echo "  ✗ ${name}: FAILED" >> "$SUMMARY_FILE"
         return 1
     fi
