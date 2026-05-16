@@ -1,8 +1,8 @@
 #![no_main]
 
 use asupersync::types::typed_symbol::{
-    SerializationFormat, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TypeMismatchError,
-    TypedSymbol,
+    DeserializationError, SerializationFormat, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC,
+    TypeMismatchError, TypedSymbol,
 };
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
@@ -80,7 +80,11 @@ fn assert_fixed_oracles() {
     );
     let reparsed = TypedSymbol::<TestData>::try_from_symbol(truncated_payload)
         .expect("header remains valid after payload truncation");
-    assert!(reparsed.value().is_err());
+    let err = reparsed
+        .value()
+        .expect_err("header-only typed symbol must reject missing payload");
+    assert!(matches!(err, DeserializationError::CorruptData));
+    assert_eq!(err.to_string(), "corrupt symbol data");
 }
 
 fn expected_type_id_bytes() -> [u8; 8] {
