@@ -31,6 +31,10 @@ CARGO_PROOF_COMMAND = re.compile(
     r"(?:build|check|clippy|doc|fmt|fuzz|run|test|tree)\b",
     re.IGNORECASE,
 )
+RCH_LOCAL_FALLBACK = re.compile(
+    r"(?m)^\[RCH\] local \(|falling back to local",
+    re.IGNORECASE,
+)
 COMMAND_SPLIT = re.compile(r"(?:\n|;|&&|\band\b)")
 
 
@@ -141,6 +145,14 @@ def bare_cargo_validation_segments(text: str) -> list[str]:
                 bare_segments.append(reported.strip(" `\t\r"))
                 break
     return bare_segments
+
+
+def rch_local_fallback_segments(text: str) -> list[str]:
+    fallback_segments: list[str] = []
+    for segment in command_segments(text):
+        if RCH_LOCAL_FALLBACK.search(segment):
+            fallback_segments.append(segment.strip(" `\t\r"))
+    return fallback_segments
 
 
 def closeout_mode(closeout: dict[str, Any]) -> str:
@@ -360,15 +372,29 @@ def verify_validation_reported(closeout: dict[str, Any], agent_mail: dict[str, A
         for body in matched_bodies
         for segment in bare_cargo_validation_segments(body)
     ]
+    rch_local_segments = [
+        segment
+        for body in matched_bodies
+        for segment in rch_local_fallback_segments(body)
+    ]
     validation_present = explicit is True or mail_mentions_validation
-    status = "pass" if validation_present and not bare_cargo_segments else "fail"
+    status = (
+        "pass"
+        if validation_present and not bare_cargo_segments and not rch_local_segments
+        else "fail"
+    )
     evidence = {
         "closeout_validation_reported": explicit,
         "mail_mentions_validation": mail_mentions_validation,
     }
     if bare_cargo_segments:
         evidence["bare_cargo_validation_segments"] = bare_cargo_segments
-    if bare_cargo_segments:
+    if rch_local_segments:
+        evidence["rch_local_fallback_segments"] = rch_local_segments
+    if rch_local_segments:
+        summary = "validation evidence reports rch local fallback"
+        remediation = "rerun and report remote rch validation; local fallback is not acceptable proof"
+    elif bare_cargo_segments:
         summary = "validation evidence reports bare Cargo instead of rch exec"
         remediation = "rerun and report Cargo validation through rch exec -- env CARGO_TARGET_DIR=... cargo ..."
     else:
