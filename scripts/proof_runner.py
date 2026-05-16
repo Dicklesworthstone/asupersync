@@ -62,7 +62,7 @@ REMOTE_EXIT_RE = re.compile(
     re.IGNORECASE,
 )
 RCH_LOCAL_FALLBACK_RE = re.compile(
-    r"(?m)^\[RCH\] local \(|falling back to local",
+    r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
 )
 CARGO_LOCATION_RE = re.compile(r"^\s*-->\s+([^:\s]+):(\d+):(\d+)")

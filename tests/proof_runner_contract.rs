@@ -58,6 +58,12 @@ fn write_build_slot_snapshot(raw: &str) -> tempfile::NamedTempFile {
     file
 }
 
+fn write_text_fixture(raw: &str) -> tempfile::NamedTempFile {
+    let mut file = tempfile::NamedTempFile::new().expect("create text fixture");
+    file.write_all(raw.as_bytes()).expect("write text fixture");
+    file
+}
+
 fn write_json_fixture(value: &Value) -> tempfile::NamedTempFile {
     let mut file = tempfile::NamedTempFile::new().expect("create JSON fixture");
     serde_json::to_writer_pretty(&mut file, value).expect("write JSON fixture");
@@ -1919,6 +1925,60 @@ fn proof_runner_classifies_local_cargo_error_blocker() {
         result["validation_frontier_record"]["decision"].as_str(),
         Some("failed-local")
     );
+}
+
+#[test]
+fn proof_runner_classifies_full_local_fallback_marker_set_as_failed_local() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture";
+
+    for marker in [
+        "[RCH] local (daemon unavailable)",
+        "falling back to local execution",
+        "local fallback selected",
+        "fallback to local execution",
+        "executing locally after remote failure",
+    ] {
+        let log = write_text_fixture(&format!(
+            "Compiling asupersync v0.3.1\n{marker}\nRemote command finished: exit=0\n"
+        ));
+        let path = log.path().to_str().expect("text fixture path utf8");
+        let output = run_proof_runner(&[
+            "--classify-rch-log",
+            path,
+            "--command",
+            command,
+            "--touched-files",
+            "tests/proof_runner_contract.rs",
+            "--output",
+            "json",
+        ])
+        .expect("classify local fallback marker");
+        assert!(
+            output.status.success(),
+            "proof runner failed for marker {marker}: {}\nstdout: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = output_json(&output);
+        let outcome = &result["rch_outcome"];
+
+        assert_eq!(
+            outcome["outcome_class"].as_str(),
+            Some("failed_local"),
+            "marker should fail closed: {marker}"
+        );
+        assert_eq!(
+            outcome["decision"].as_str(),
+            Some("failed-local"),
+            "marker should fail closed: {marker}"
+        );
+        assert_eq!(
+            outcome["first_blocker"]["file"].as_str(),
+            Some("rch-local-fallback"),
+            "marker should surface local fallback blocker: {marker}"
+        );
+    }
 }
 
 #[test]
