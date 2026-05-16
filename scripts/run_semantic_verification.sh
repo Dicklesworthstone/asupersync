@@ -238,6 +238,10 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+is_rch_local_fallback() {
+  grep -Eq '^\[RCH\] local \(|falling back to local'
+}
+
 build_space_list_json() {
   local list="$1"
   local json="["
@@ -379,7 +383,13 @@ for suite in $SUITES; do
 
   suite_output=""
   suite_exit=0
+  suite_local_fallback=false
   suite_output=$(cd "$PROJECT_ROOT" && run_suite_command "$suite" 2>&1) || suite_exit=$?
+  if printf '%s\n' "$suite_output" | is_rch_local_fallback; then
+    suite_local_fallback=true
+    suite_exit=86
+    suite_output="${suite_output}"$'\n'"FATAL: rch local fallback detected; refusing local cargo execution"
+  fi
 
   SUITE_END=$(date +%s)
   SUITE_DURATION=$((SUITE_END - SUITE_START))
@@ -390,7 +400,14 @@ for suite in $SUITES; do
     log "  $suite: PASSED (${SUITE_DURATION}s)"
   else
     # Check if it was a graceful skip
-    if echo "$suite_output" | grep -q "SKIP:"; then
+    if [ "$suite_local_fallback" = true ]; then
+      status="failed"
+      ((FAILED++)) || true
+      log "  $suite: FAILED (${SUITE_DURATION}s, rch local fallback)"
+      if [ "$VERBOSE" = true ]; then
+        echo "$suite_output" | tail -20
+      fi
+    elif echo "$suite_output" | grep -q "SKIP:"; then
       status="skipped"
       ((SKIPPED++)) || true
       log "  $suite: SKIPPED (${SUITE_DURATION}s)"
