@@ -1,8 +1,11 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
-use asupersync::messaging::{Subject, SubjectPattern, SubjectToken};
+use asupersync::messaging::{Subject, SubjectPattern, SubjectPatternError, SubjectToken};
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 fn concrete_subject_for(pattern: &SubjectPattern) -> String {
     pattern
@@ -56,11 +59,64 @@ fn observe_parse_error(input: &str, error: &impl std::fmt::Display) {
     );
 }
 
+fn assert_subject_pattern_error(
+    input: &str,
+    expected_error: SubjectPatternError,
+    expected_display: &str,
+) {
+    let error =
+        SubjectPattern::parse(input).expect_err("fixed subject pattern canary should be rejected");
+    assert_eq!(
+        error, expected_error,
+        "subject pattern parser returned the wrong error variant for {input:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "subject pattern parser display text drifted for {input:?}"
+    );
+}
+
+fn assert_fixed_subject_pattern_error_canaries() {
+    assert_subject_pattern_error(
+        "",
+        SubjectPatternError::EmptyPattern,
+        "subject pattern must contain at least one segment",
+    );
+    assert_subject_pattern_error(
+        "tenant..orders",
+        SubjectPatternError::EmptySegment,
+        "subject pattern must not contain empty segments",
+    );
+    assert_subject_pattern_error(
+        "tenant.order status",
+        SubjectPatternError::WhitespaceInSegment("order status".to_string()),
+        "subject segment `order status` must not contain whitespace",
+    );
+    assert_subject_pattern_error(
+        "tenant.>.orders",
+        SubjectPatternError::TailWildcardMustBeTerminal,
+        "tail wildcard `>` must be terminal",
+    );
+    assert_subject_pattern_error(
+        "tenant.>.>",
+        SubjectPatternError::MultipleTailWildcards,
+        "subject pattern may not contain more than one tail wildcard",
+    );
+    assert_subject_pattern_error(
+        "tenant.or*ders",
+        SubjectPatternError::EmbeddedWildcard("or*ders".to_string()),
+        "literal segment `or*ders` embeds wildcard characters",
+    );
+}
+
 // Fuzz target for messaging subject pattern parser.
 //
 // Tests the SubjectPattern::parse function with arbitrary byte inputs,
 // ensuring it handles malformed input gracefully without panicking.
 fuzz_target!(|data: &[u8]| {
+    FIXED_CANARIES.get_or_init(assert_fixed_subject_pattern_error_canaries);
+
     // Convert raw bytes to string (lossy conversion is fine for fuzzing)
     let input = String::from_utf8_lossy(data);
 
