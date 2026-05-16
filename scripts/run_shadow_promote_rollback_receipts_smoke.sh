@@ -120,7 +120,7 @@ COMMAND_ARGS=(
     "RUSTFLAGS=-D warnings -C debuginfo=0"
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_shadow_promote_rollback_receipts"
     "ASUPERSYNC_SHADOW_PROMOTE_ROLLBACK_RECEIPT_PATH=${REPORT_PATH}"
-    cargo
+    "${CARGO_BIN:-cargo}"
     test
     -p
     asupersync
