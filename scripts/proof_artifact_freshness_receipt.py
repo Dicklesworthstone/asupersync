@@ -30,6 +30,10 @@ CARGO_PROOF_COMMAND = re.compile(
     r"(?:build|check|clippy|doc|fmt|fuzz|run|test|tree)\b",
     re.IGNORECASE,
 )
+RCH_LOCAL_FALLBACK_RE = re.compile(
+    r"(?m)^\[RCH\] local \(|falling back to local",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -157,6 +161,22 @@ def first_string_list(value: Any, paths: list[tuple[str, ...]]) -> list[str]:
     return []
 
 
+def string_values(value: Any, paths: list[tuple[str, ...]]) -> list[str]:
+    values = []
+    for path in paths:
+        cursor = value
+        for key in path:
+            if not isinstance(cursor, dict) or key not in cursor:
+                cursor = None
+                break
+            cursor = cursor[key]
+        if isinstance(cursor, str) and cursor:
+            values.append(cursor)
+        elif isinstance(cursor, list):
+            values.extend(item for item in cursor if isinstance(item, str) and item)
+    return values
+
+
 def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {
@@ -236,6 +256,29 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
                 ("metadata", "generated_at"),
             ],
         ),
+        "proof_text": string_values(
+            raw,
+            [
+                ("stdout",),
+                ("stderr",),
+                ("output",),
+                ("log",),
+                ("run_log",),
+                ("command_output",),
+                ("proof_output",),
+                ("validation",),
+                ("validation_output",),
+                ("metadata", "stdout"),
+                ("metadata", "stderr"),
+                ("metadata", "output"),
+                ("metadata", "log"),
+                ("metadata", "validation_output"),
+                ("proof", "stdout"),
+                ("proof", "stderr"),
+                ("result", "stdout"),
+                ("result", "stderr"),
+            ],
+        ),
     }
 
 
@@ -313,6 +356,16 @@ def proof_command_uses_bare_cargo(command: str) -> bool:
     )
 
 
+def rch_local_fallback_segments(texts: list[str]) -> list[str]:
+    segments = []
+    for text in texts:
+        for segment in text.splitlines() or [text]:
+            compact = segment.strip()
+            if compact and RCH_LOCAL_FALLBACK_RE.search(compact):
+                segments.append(compact[:260])
+    return segments
+
+
 def dirty_overlaps(touched_files: list[str], entries: list[dict[str, str]]) -> list[dict[str, str]]:
     overlaps = []
     for touched in touched_files:
@@ -336,6 +389,9 @@ def classify_artifact(
     touched_files = artifact["touched_files"]
     overlaps = dirty_overlaps(touched_files, dirty)
     bare_cargo_command = proof_command_uses_bare_cargo(command)
+    local_fallback_segments = rch_local_fallback_segments(
+        [command, *artifact.get("proof_text", [])]
+    )
 
     evidence = {
         "artifact_git_sha": git_sha,
@@ -347,6 +403,9 @@ def classify_artifact(
     }
     if bare_cargo_command:
         evidence["bare_cargo_command"] = True
+    if local_fallback_segments:
+        evidence["rch_local_fallback"] = True
+        evidence["rch_local_fallback_segments"] = local_fallback_segments
 
     if not git_sha or not current_head:
         classification = "unverifiable-head"
@@ -372,6 +431,10 @@ def classify_artifact(
         classification = "unsafe-proof-command"
         decision = "rerun-required"
         reason = "artifact proof command bypasses rch exec"
+    elif local_fallback_segments:
+        classification = "rch-local-fallback-proof"
+        decision = "rerun-required"
+        reason = "artifact proof evidence reports rch local fallback"
     elif overlaps:
         classification = "dirty-surface-overlap"
         decision = "rerun-required"
@@ -420,6 +483,15 @@ def remediation_for(classification: str, command: str) -> dict[str, Any]:
                 "replace the artifact command before citing it",
             ],
             "rerun_command": f"rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR {command}",
+        }
+    if classification == "rch-local-fallback-proof":
+        return {
+            "operator_note": "Do not cite green output from an rch local fallback proof.",
+            "next_steps": [
+                "rerun the proof remotely and require an [RCH] remote summary",
+                "replace the artifact output before citing it",
+            ],
+            "rerun_command": command,
         }
     if classification in {"superseded-head", "wrong-branch", "repo-not-main"}:
         return {

@@ -262,6 +262,83 @@ fn bare_cargo_command_requires_rerun_even_at_current_head() {
 }
 
 #[test]
+fn rch_local_fallback_output_requires_rerun_even_at_current_head() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("proof_artifact_freshness_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+artifact = module.normalize_artifact({
+    "artifact_path": "artifacts/proof/local-fallback.json",
+    "git_sha": "2222222222222222222222222222222222222222",
+    "git_branch": "main",
+    "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+    "stderr": "[RCH] local (daemon unavailable)\nfalling back to local execution\n",
+    "touched_files": [
+        "scripts/proof_artifact_freshness_receipt.py",
+        "tests/proof_artifact_freshness_receipt_contract.rs"
+    ],
+    "status": "pass",
+    "generated_at": "2026-05-08T05:15:00Z",
+})
+row = module.classify_artifact(
+    artifact,
+    "2222222222222222222222222222222222222222",
+    "main",
+    [],
+)
+print(json.dumps(row, sort_keys=True))
+"#;
+    let mut child = Command::new("python3")
+        .arg("-")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn proof-artifact rch local fallback classifier smoke");
+    child
+        .stdin
+        .as_mut()
+        .expect("classifier smoke stdin")
+        .write_all(script.as_bytes())
+        .expect("write classifier smoke script");
+    let output = child
+        .wait_with_output()
+        .expect("run proof-artifact rch local fallback classifier smoke");
+    assert!(
+        output.status.success(),
+        "rch local fallback classifier smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("classifier smoke JSON");
+    assert_eq!(
+        parsed["classification"].as_str(),
+        Some("rch-local-fallback-proof")
+    );
+    assert_eq!(parsed["decision"].as_str(), Some("rerun-required"));
+    assert_eq!(parsed["safe_to_cite"].as_bool(), Some(false));
+    assert_eq!(
+        parsed["evidence"]["rch_local_fallback"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        parsed["evidence"]["rch_local_fallback_segments"][0].as_str(),
+        Some("[RCH] local (daemon unavailable)")
+    );
+}
+
+#[test]
 fn bare_cargo_command_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "bare_cargo_command.json",
