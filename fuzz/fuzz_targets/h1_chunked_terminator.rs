@@ -20,6 +20,7 @@ use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
 use asupersync::http::h1::codec::{Http1Codec, HttpError};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 64 * 1024;
@@ -36,6 +37,8 @@ const CHUNK_PATTERNS: &[&[u8]] = &[
     b"ff\r\n",                                // Large chunk size but no data
 ];
 
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
+
 #[derive(Debug)]
 enum ChunkedParseOutcome {
     Complete(Vec<u8>),
@@ -44,9 +47,7 @@ enum ChunkedParseOutcome {
 }
 
 fuzz_target!(|data: &[u8]| {
-    test_chunk_extension_parsing_canaries();
-    test_terminator_corruption();
-    test_incomplete_chunked_canaries();
+    FIXED_CANARIES.get_or_init(assert_fixed_chunked_canaries);
 
     // Guard against excessive input sizes
     if data.is_empty() || data.len() > MAX_INPUT_SIZE {
@@ -268,6 +269,12 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+fn assert_fixed_chunked_canaries() {
+    test_chunk_extension_parsing_canaries();
+    test_terminator_corruption();
+    test_incomplete_chunked_canaries();
+}
 
 /// Test chunked terminator parsing with arbitrary data
 fn test_chunked_terminator(chunked_data: &[u8]) -> ChunkedParseOutcome {
