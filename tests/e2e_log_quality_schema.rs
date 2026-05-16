@@ -311,6 +311,25 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
 }
 
 #[test]
+fn shell_runner_summaries_do_not_hardcode_rch_routed_success() {
+    let scripts_dir = repo_root().join("scripts");
+
+    for entry in fs::read_dir(&scripts_dir).expect("read scripts directory") {
+        let path = entry.expect("read scripts directory entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("sh") {
+            continue;
+        }
+
+        let content = fs::read_to_string(&path).expect("read shell runner script");
+        assert!(
+            !content.contains("\"all_rch_routed\": true"),
+            "script '{}' must compute all_rch_routed from rch fallback evidence instead of hardcoding success",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn wasm_cross_framework_runner_keeps_replay_corpus_and_delta_steps() {
     let content = fs::read_to_string("scripts/test_wasm_cross_framework_e2e.sh")
         .expect("read wasm cross-framework e2e runner script");
