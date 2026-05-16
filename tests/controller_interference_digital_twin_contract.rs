@@ -34,6 +34,10 @@ fn contract() -> ControllerInterferenceContract {
     .expect("controller-interference digital-twin contract must parse")
 }
 
+fn runner_script() -> &'static str {
+    include_str!("../scripts/run_controller_interference_digital_twin_smoke.sh")
+}
+
 fn controllers() -> [&'static str; 6] {
     [
         "admission",
@@ -389,5 +393,31 @@ fn controller_interference_digital_twin_smoke_emits_report() {
             serde_json::to_string_pretty(&report).expect("report renders"),
         )
         .expect("report writes");
+    }
+}
+
+#[test]
+fn controller_interference_digital_twin_runner_rejects_full_rch_fallback_marker_set() {
+    let runner = runner_script();
+    let matcher_uses = runner
+        .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+        .count();
+    assert!(
+        matcher_uses >= 1,
+        "runner must use the shared local fallback matcher at its rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            runner.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
     }
 }
