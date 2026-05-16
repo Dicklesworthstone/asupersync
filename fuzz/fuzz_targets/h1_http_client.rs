@@ -33,6 +33,10 @@ use libfuzzer_sys::fuzz_target;
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_FUZZ_SIZE: usize = 64_000;
 const MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
+const BAD_REQUEST_LINE_DISPLAY: &str = "malformed request line";
+const INVALID_HEADER_NAME_DISPLAY: &str = "invalid header name";
+const INVALID_HEADER_VALUE_DISPLAY: &str = "invalid header value";
+const BODY_TOO_LARGE_DISPLAY: &str = "body exceeds size limit";
 
 /// HTTP/1.1 client response fuzzing scenarios covering critical parsing paths.
 #[derive(Arbitrary, Debug, Clone)]
@@ -446,6 +450,22 @@ fn observe_client_response_error(error: &HttpError, context: &str) {
     );
 }
 
+fn assert_client_response_error(raw: &[u8], expected: HttpError, expected_display: &str) {
+    let Err(error) = decode_response_bytes(raw) else {
+        panic!("expected client response error {expected:?} for {raw:?}");
+    };
+    assert_eq!(
+        std::mem::discriminant(&error),
+        std::mem::discriminant(&expected),
+        "expected client response error {expected:?} for {raw:?}, got {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "client response parser diagnostic changed for {expected:?}"
+    );
+}
+
 fn validate_decoded_response(response: &Response) {
     assert!(
         (100..=999).contains(&response.status),
@@ -485,26 +505,31 @@ fn assert_known_client_response_outputs() {
     assert_eq!(response.reason, "OK");
     assert_eq!(response.body, b"hello");
 
-    assert!(matches!(
-        decode_response_bytes(b"HTTP/1.1 99 Nope\r\n\r\n"),
-        Err(HttpError::BadRequestLine)
-    ));
-    assert!(matches!(
-        decode_response_bytes(b"HTTP/1.1 1000 Nope\r\n\r\n"),
-        Err(HttpError::BadRequestLine)
-    ));
-    assert!(matches!(
-        decode_response_bytes(b"HTTP/1.1 200 OK\r\nBad Name: x\r\n\r\n"),
-        Err(HttpError::InvalidHeaderName)
-    ));
-    assert!(matches!(
-        decode_response_bytes(b"HTTP/1.1 200 OK\r\nX-Test: bad\0value\r\n\r\n"),
-        Err(HttpError::InvalidHeaderValue)
-    ));
-    assert!(matches!(
-        decode_response_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 16777217\r\n\r\n"),
-        Err(HttpError::BodyTooLarge)
-    ));
+    assert_client_response_error(
+        b"HTTP/1.1 99 Nope\r\n\r\n",
+        HttpError::BadRequestLine,
+        BAD_REQUEST_LINE_DISPLAY,
+    );
+    assert_client_response_error(
+        b"HTTP/1.1 1000 Nope\r\n\r\n",
+        HttpError::BadRequestLine,
+        BAD_REQUEST_LINE_DISPLAY,
+    );
+    assert_client_response_error(
+        b"HTTP/1.1 200 OK\r\nBad Name: x\r\n\r\n",
+        HttpError::InvalidHeaderName,
+        INVALID_HEADER_NAME_DISPLAY,
+    );
+    assert_client_response_error(
+        b"HTTP/1.1 200 OK\r\nX-Test: bad\0value\r\n\r\n",
+        HttpError::InvalidHeaderValue,
+        INVALID_HEADER_VALUE_DISPLAY,
+    );
+    assert_client_response_error(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 16777217\r\n\r\n",
+        HttpError::BodyTooLarge,
+        BODY_TOO_LARGE_DISPLAY,
+    );
     assert!(matches!(
         decode_response_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe"),
         Ok(None)
