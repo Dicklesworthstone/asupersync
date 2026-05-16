@@ -293,6 +293,11 @@ for case_id in "${CASE_IDS[@]}"; do
         set -e
     fi
 
+    if [[ "$run_with_rch" == "true" ]] && grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+        echo "rch local fallback detected; refusing local cargo execution" > "$LOG_DIR/${case_id}.rch_local_fallback.txt"
+        rc=86
+    fi
+
     diagnostics_ok=true
     mapfile -t expected_needles < <(jq -r --arg id "$case_id" '.cases[] | select(.fixture_id == $id) | .expected_substrings[]' "$FIXTURE_FILE")
     missing_needles=()

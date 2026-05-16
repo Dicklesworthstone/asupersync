@@ -254,6 +254,11 @@ for suite in "${SUITES[@]}"; do
     end_ns="$(date +%s%N)"
     duration_ms=$(((end_ns - start_ns) / 1000000))
 
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+      echo "rch local fallback detected; refusing local cargo execution" > "$suite_dir/run_${i}_rch_local_fallback.txt"
+      exit_code=86
+    fi
+
     status="pass"
     if [ "$exit_code" -ne 0 ]; then
       status="fail"
