@@ -69,12 +69,23 @@ run_cargo() {
         cargo "$@"
 }
 
+reject_rch_local_fallback_log() {
+    local log_path="$1"
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+        echo "  FATAL: rch local fallback detected; refusing local cargo execution"
+        echo "rch local fallback detected; refusing local cargo execution" > "${ARTIFACT_DIR}/rch_local_fallback.txt"
+        return 86
+    fi
+}
+
 # --- [1/4] Pre-flight: compilation check ---
 echo ">>> [1/4] Pre-flight: checking compilation..."
-if ! run_cargo compile_check check --tests --all-features 2>"${ARTIFACT_DIR}/compile_errors.log"; then
+if ! run_cargo compile_check check --tests --all-features >"${ARTIFACT_DIR}/compile_errors.log" 2>&1; then
+    reject_rch_local_fallback_log "${ARTIFACT_DIR}/compile_errors.log" || exit $?
     echo "  FATAL: compilation failed — see ${ARTIFACT_DIR}/compile_errors.log"
     exit 1
 fi
+reject_rch_local_fallback_log "${ARTIFACT_DIR}/compile_errors.log"
 echo "  OK"
 
 # --- [2/4] Run suites ---
@@ -141,6 +152,12 @@ check_pattern "overflow"         "overflow detected"
 check_pattern "out of bounds"    "out of bounds"
 check_pattern "index out of range" "index out of range"
 check_pattern "stack overflow"   "stack overflow"
+
+if grep -rEq '^\[RCH\] local \(|falling back to local' "$LOG_DIR"/*.log 2>/dev/null; then
+    echo "  ERROR: rch local fallback detected"
+    echo "rch local fallback detected; refusing local cargo execution" > "${ARTIFACT_DIR}/rch_local_fallback.txt"
+    ((PATTERN_FAILURES++)) || true
+fi
 
 if [ "$PATTERN_FAILURES" -eq 0 ]; then
     echo "  No failure patterns found"
