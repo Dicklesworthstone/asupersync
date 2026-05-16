@@ -4,7 +4,8 @@
 
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const SCRIPT_PATH: &str = "scripts/proof_receipt_inventory.py";
@@ -20,10 +21,14 @@ fn run_receipt(fixture: &str) -> Output {
 }
 
 fn run_receipt_with_repo_path(fixture: &str, repo_path: &str) -> Output {
+    run_receipt_path_with_repo_path(&repo_root().join(FIXTURE_ROOT).join(fixture), repo_path)
+}
+
+fn run_receipt_path_with_repo_path(fixture_path: &Path, repo_path: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--fixture")
-        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg(fixture_path)
         .arg("--repo-path")
         .arg(repo_path)
         .arg("--agent")
@@ -47,6 +52,25 @@ fn receipt_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn receipt_json_from_path(fixture_path: &Path) -> Value {
+    let output = run_receipt_path_with_repo_path(fixture_path, "/repo");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn write_json_fixture(value: &Value) -> tempfile::NamedTempFile {
+    let mut file = tempfile::NamedTempFile::new().expect("create inventory fixture");
+    serde_json::to_writer_pretty(&mut file, value).expect("write inventory fixture");
+    file.flush().expect("flush inventory fixture");
+    file
 }
 
 fn fixture_text(fixture: &str) -> String {
@@ -314,6 +338,55 @@ fn rch_validation_with_target_dir_is_not_flagged() {
         cue["kind"].as_str() == Some("missing-cargo-target-dir-validation")
             && cue["command"].as_str() == Some(safe_command)
     }));
+}
+
+#[test]
+fn local_fallback_validation_commands_match_full_marker_set() {
+    let validation_commands = [
+        "[RCH] local (daemon unavailable)",
+        "falling back to local execution",
+        "local fallback selected",
+        "fallback to local execution",
+        "executing locally after remote failure",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<_>>();
+    let fixture = write_json_fixture(&serde_json::json!({
+        "helpers": [
+            {
+                "capability_id": "proof-lane-routing",
+                "commit": "06f808100",
+                "fixture_root": "tests/fixtures/proof_receipt_inventory",
+                "helper_id": "proof-receipt-inventory-fallback-canary",
+                "owner": "RubyRobin",
+                "script_path": "scripts/proof_receipt_inventory.py",
+                "status": "shipped",
+                "summary": "Fixture rows with every supported rch local fallback marker must fail closed.",
+                "test_path": "tests/proof_receipt_inventory_contract.rs",
+                "validation": validation_commands,
+            }
+        ]
+    }));
+    let receipt = receipt_json_from_path(fixture.path());
+
+    assert_eq!(
+        receipt["capabilities"][0]["needs_review"].as_bool(),
+        Some(true)
+    );
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    let fallback_commands = cues
+        .iter()
+        .filter(|cue| cue["kind"].as_str() == Some("rch-local-fallback-validation"))
+        .filter_map(|cue| cue["command"].as_str())
+        .collect::<Vec<_>>();
+
+    for command in &validation_commands {
+        assert!(
+            fallback_commands.contains(&command.as_str()),
+            "missing fallback cue for validation command: {command}"
+        );
+    }
 }
 
 #[test]
