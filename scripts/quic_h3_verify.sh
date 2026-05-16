@@ -226,7 +226,7 @@ echo -e "${BOLD}═════════════════════�
 if [ "$FAIL" -gt 0 ]; then
     echo -e "\n${RED}VERIFICATION FAILED${NC}"
     echo "Run individual tests with --nocapture for details:"
-    echo "  RCH_BIN=${RCH_BIN} ${RCH_BIN} exec -- cargo test --test quic_h3_e2e -- --nocapture"
+    echo "  RCH_BIN=${RCH_BIN} ${RCH_BIN} exec -- env CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_quic_h3_verify_manual cargo test --test quic_h3_e2e -- --nocapture"
     echo "  python3 scripts/quic_h3_triage.py --catalog --verbose"
     exit 1
 else
