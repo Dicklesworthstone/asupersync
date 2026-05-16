@@ -141,6 +141,13 @@ run_export_call() {
             rc_smoke=$?
         fi
 
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "${attempt_log}" "${contract_tmp}" "${smoke_tmp}" 2>/dev/null; then
+            cp "${attempt_log}" "${run_log}"
+            echo "rch local fallback detected; refusing local cargo execution" > "${run_log%.log}.rch_local_fallback.txt"
+            echo "  ERROR: ${run_label} attempted local cargo fallback through rch"
+            return 86
+        fi
+
         if ! jq -e . "${contract_tmp}" >/dev/null 2>&1; then
             local contract_payload=""
             contract_payload="$(grep -E 'doctor-scenario-coverage-packs-v1' "${attempt_log}" | tail -n1 || true)"
@@ -205,6 +212,13 @@ run_unit_slice() {
             rc=0
         else
             rc=$?
+        fi
+
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "${attempt_log}" 2>/dev/null; then
+            cp "${attempt_log}" "${run_log}"
+            echo "rch local fallback detected; refusing local cargo execution" > "${run_log%.log}.rch_local_fallback.txt"
+            echo "  ERROR: unit-slice attempted local cargo fallback through rch"
+            return 86
         fi
 
         running_count="$(
