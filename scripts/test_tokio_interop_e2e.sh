@@ -82,6 +82,20 @@ format_command() {
     printf '%s' "${rendered% }"
 }
 
+record_rch_local_fallback() {
+    echo "rch local fallback detected; refusing local cargo execution" > "${ARTIFACT_DIR}/rch_local_fallback.txt"
+}
+
+reject_rch_local_fallback_log() {
+    local log_path="$1"
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+        echo "  FATAL: rch local fallback detected; refusing local cargo execution" | tee -a "$LOG_FILE"
+        record_rch_local_fallback
+        log_compat "FAIL" "rch-local-fallback" "all" "rch local fallback detected" "0"
+        exit 86
+    fi
+}
+
 run_cargo() {
     local lane="$1"
     shift
@@ -175,30 +189,36 @@ echo "-------------------------------------------------------------------" | tee
 
 echo "  [QG] rch cargo check -p asupersync-tokio-compat --all-targets" | tee -a "$LOG_FILE"
 if ! run_cargo qg_check check -p asupersync-tokio-compat --all-targets >> "$LOG_FILE" 2>&1; then
+    reject_rch_local_fallback_log "$LOG_FILE"
     echo "  FAIL: cargo check failed. See ${LOG_FILE}" | tee -a "$LOG_FILE"
     log_compat "FAIL" "quality-gate-check" "all" "cargo check failed" "0"
     exit 1
 fi
+reject_rch_local_fallback_log "$LOG_FILE"
 echo "        PASS" | tee -a "$LOG_FILE"
 log_compat "PASS" "quality-gate-check" "all" "cargo check passed" "0"
 
 if [ "$SKIP_CLIPPY" != "1" ]; then
     echo "  [QG] rch cargo clippy -p asupersync-tokio-compat --all-targets -- -D warnings" | tee -a "$LOG_FILE"
     if ! run_cargo qg_clippy clippy -p asupersync-tokio-compat --all-targets -- -D warnings >> "$LOG_FILE" 2>&1; then
+        reject_rch_local_fallback_log "$LOG_FILE"
         echo "  FAIL: clippy failed. See ${LOG_FILE}" | tee -a "$LOG_FILE"
         log_compat "FAIL" "quality-gate-clippy" "all" "clippy failed" "0"
         exit 1
     fi
+    reject_rch_local_fallback_log "$LOG_FILE"
     echo "        PASS" | tee -a "$LOG_FILE"
     log_compat "PASS" "quality-gate-clippy" "all" "clippy passed" "0"
 fi
 
 echo "  [QG] rch cargo fmt --check -p asupersync-tokio-compat" | tee -a "$LOG_FILE"
 if ! run_cargo qg_fmt fmt --check -p asupersync-tokio-compat >> "$LOG_FILE" 2>&1; then
+    reject_rch_local_fallback_log "$LOG_FILE"
     echo "  FAIL: fmt check failed. See ${LOG_FILE}" | tee -a "$LOG_FILE"
     log_compat "FAIL" "quality-gate-fmt" "all" "fmt check failed" "0"
     exit 1
 fi
+reject_rch_local_fallback_log "$LOG_FILE"
 echo "        PASS" | tee -a "$LOG_FILE"
 log_compat "PASS" "quality-gate-fmt" "all" "fmt check passed" "0"
 
@@ -307,6 +327,13 @@ else
 fi
 
 echo "" | tee -a "$LOG_FILE"
+
+if grep -Eq '^\[RCH\] local \(|falling back to local' "$LOG_FILE" "$UNIT_LOG" "$ARTIFACT_DIR"/scenario_*.log 2>/dev/null; then
+    echo "  ERROR: rch local fallback detected" | tee -a "$LOG_FILE"
+    record_rch_local_fallback
+    log_compat "FAIL" "rch-local-fallback" "all" "rch local fallback detected" "0"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
 
 # ─── Summary ───────────────────────────────────────────────────────
 
