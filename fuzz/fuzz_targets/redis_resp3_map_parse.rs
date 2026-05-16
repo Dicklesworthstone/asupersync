@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 use asupersync::messaging::redis::{RedisError, RedisProtocolLimits, RespValue};
 
@@ -9,6 +10,8 @@ const MAX_WIRE_LEN: usize = 16 * 1024;
 const MAX_PAYLOAD_LEN: usize = 256;
 const MAX_PAIRS: usize = 32;
 const MAX_DEPTH: usize = 48;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Arbitrary)]
 struct MapParseCase {
@@ -71,7 +74,7 @@ enum LengthPrefix {
 fuzz_target!(|case: MapParseCase| {
     let limits = case.limits.normalized();
 
-    assert_map_parse_canaries();
+    FIXED_CANARIES.get_or_init(assert_map_parse_canaries);
 
     observe_map_decode(b"%0\r\n", &limits);
     observe_map_decode(b"%?\r\n.\r\n", &limits);
