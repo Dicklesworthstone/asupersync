@@ -1619,16 +1619,29 @@ jobs:
         env:
           COVERAGE_MIN_LINE_PCT: 5
         run: |
-          mkdir -p coverage
-          cargo llvm-cov --lib --all-features \
-            --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
-            --fail-under-lines "$COVERAGE_MIN_LINE_PCT" \
-            --lcov --output-path coverage/lcov.info
-          cargo llvm-cov --lib --all-features \
-            --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
-            --text --output-path coverage/coverage.txt --no-run
-          cargo llvm-cov report --json --output-path coverage/llvm_cov.json \
-            --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/'
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for coverage" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env \
+            CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_coverage" \
+            COVERAGE_MIN_LINE_PCT="$COVERAGE_MIN_LINE_PCT" \
+            bash -lc "
+              set -euo pipefail
+              rustup component add llvm-tools-preview
+              cargo install cargo-llvm-cov --locked
+              mkdir -p coverage
+              cargo llvm-cov --lib --all-features \
+                --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+                --fail-under-lines \"\$COVERAGE_MIN_LINE_PCT\" \
+                --lcov --output-path coverage/lcov.info
+              cargo llvm-cov --lib --all-features \
+                --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+                --text --output-path coverage/coverage.txt --no-run
+              cargo llvm-cov report --json --output-path coverage/llvm_cov.json \
+                --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/'
+            "
 
       - name: Coverage ratchet gate (D1)
         run: |
@@ -2513,8 +2526,20 @@ jobs:
 
       - name: Run QUIC/H3 coverage
         run: |
-          cargo llvm-cov test -p asupersync --all-features \
-            --summary-only 2>&1 | tee ci-summaries/quic_h3_coverage.txt
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for QUIC/H3 coverage" >&2
+            exit 1
+          fi
+          mkdir -p ci-summaries
+          "$RCH_BIN" exec -- env \
+            CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_quic_h3_coverage" \
+            bash -lc "
+              set -euo pipefail
+              rustup component add llvm-tools-preview
+              cargo install cargo-llvm-cov --locked
+              cargo llvm-cov test -p asupersync --all-features --summary-only
+            " 2>&1 | tee ci-summaries/quic_h3_coverage.txt
 
       - name: Check coverage ratchet (90% floor)
         run: |
