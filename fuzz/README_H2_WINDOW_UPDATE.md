@@ -77,29 +77,29 @@ WINDOW_UPDATE Frame {
 ```bash
 # Run the WINDOW_UPDATE frame fuzz target
 cd fuzz/
-cargo +nightly fuzz run h2_window_update_frame
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h2_window_update_frame_fuzz cargo +nightly fuzz run h2_window_update_frame
 
 # Run for specific duration
-cargo +nightly fuzz run h2_window_update_frame -- -max_total_time=60
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h2_window_update_frame_fuzz cargo +nightly fuzz run h2_window_update_frame -- -max_total_time=60
 
 # Run with specific corpus
-cargo +nightly fuzz run h2_window_update_frame corpus/h2_window_update_frame/
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h2_window_update_frame_fuzz cargo +nightly fuzz run h2_window_update_frame corpus/h2_window_update_frame/
 ```
 
 ### Advanced Options
 
 ```bash
 # Run with AddressSanitizer (default for fuzzing)
-RUSTFLAGS="-Zsanitizer=address" cargo +nightly fuzz run h2_window_update_frame
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h2_window_update_frame_fuzz RUSTFLAGS="-Zsanitizer=address" cargo +nightly fuzz run h2_window_update_frame
 
 # Run with MemorySanitizer (for unsafe code)
-RUSTFLAGS="-Zsanitizer=memory" cargo +nightly fuzz run h2_window_update_frame
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h2_window_update_frame_fuzz RUSTFLAGS="-Zsanitizer=memory" cargo +nightly fuzz run h2_window_update_frame
 
 # Minimize crash inputs
-cargo +nightly fuzz tmin h2_window_update_frame artifacts/h2_window_update_frame/crash-<hash>
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h2_window_update_frame_fuzz cargo +nightly fuzz tmin h2_window_update_frame artifacts/h2_window_update_frame/crash-<hash>
 
 # Coverage information
-cargo +nightly fuzz coverage h2_window_update_frame
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_h2_window_update_frame_fuzz cargo +nightly fuzz coverage h2_window_update_frame
 ```
 
 ## Test Categories
