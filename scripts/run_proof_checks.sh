@@ -21,6 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+RCH_BIN="${RCH_BIN:-rch}"
 RCH_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_proof_checks}"
 cd "$PROJECT_DIR"
 
@@ -98,7 +99,20 @@ run_check_optional() {
 }
 
 run_cargo() {
-    rch exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo "$@"
+    local output=""
+    local status=0
+
+    set +e
+    output=$("$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" cargo "$@" 2>&1)
+    status=$?
+    set -e
+
+    printf '%s\n' "$output"
+    if printf '%s\n' "$output" | grep -Eq '^\[RCH\] local \(|falling back to local'; then
+        printf '%s\n' "FATAL: rch local fallback detected; refusing local cargo execution" >&2
+        return 86
+    fi
+    return "$status"
 }
 
 echo "=== Asupersync Proof Verification Suite (bd-2rhiq) ==="
