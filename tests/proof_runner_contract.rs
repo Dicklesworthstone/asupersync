@@ -227,12 +227,12 @@ fn assert_low_disk_guidance(disk: &Value, classification: &str) {
     assert_eq!(
         disk["guidance"]["preferred_next_action"].as_str(),
         Some(
-            "rerun with env -u CARGO_TARGET_DIR or capture an artifact-free proof receipt; do not delete files automatically"
+            "defer Cargo-heavy validation or capture an artifact-free proof receipt; do not delete files automatically"
         )
     );
     assert_eq!(
         disk["guidance"]["cargo_target_dir_guidance"].as_str(),
-        Some("prefer env -u CARGO_TARGET_DIR")
+        Some("keep lane-specific CARGO_TARGET_DIR on any later Cargo rerun")
     );
     assert_eq!(
         disk["guidance"]["proof_receipt_guidance"].as_str(),
@@ -992,7 +992,7 @@ fn proof_runner_disk_preflight_classifies_low_dev_shm_space() {
 fn proof_runner_rank_fallback_beads_prefers_disk_safe_under_pressure() {
     let fallback = write_json_fixture(&json!({"beads": [
         {"id": "cargo-heavy", "title": "run clippy frontier", "priority": 1,
-         "validation_command": "rch exec -- cargo clippy -p asupersync --all-targets -- -D warnings"},
+         "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_clippy cargo clippy -p asupersync --all-targets -- -D warnings"},
         {"id": "docs-safe", "title": "docs-only policy note", "priority": 2,
          "disk_safe": true, "validation_command": "python3 scripts/proof_runner.py --suggest-lanes --touched-files docs/proof_runner_usage.md --output json"},
         {"id": "receipt-safe", "title": "artifact-free receipt fixture", "priority": 1,
@@ -1235,8 +1235,10 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
     let fallback = write_json_fixture(&json!({"beads": [
         {"id": "bare-cargo", "title": "bare cargo validation", "priority": 1,
          "validation_command": "cargo test -p asupersync --test proof_runner_contract"},
+        {"id": "bare-rch-cargo", "title": "bare rch cargo validation", "priority": 1,
+         "validation_command": "rch exec -- cargo test -p asupersync --test proof_runner_contract"},
         {"id": "rch-cargo", "title": "rch cargo validation", "priority": 1,
-         "validation_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"}
+         "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"}
     ]}));
     let fallback_path = fallback.path().to_str().expect("fallback path utf8");
 
@@ -1254,10 +1256,10 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
         .iter()
         .map(|row| row["id"].as_str().expect("bead id"))
         .collect();
-    assert_eq!(ids, ["rch-cargo", "bare-cargo"]);
+    assert_eq!(ids, ["rch-cargo", "bare-cargo", "bare-rch-cargo"]);
     assert_eq!(
         result["summary"]["unsafe_validation_block_count"].as_i64(),
-        Some(1)
+        Some(2)
     );
 
     let safe = &result["ranked_fallback_beads"][0];
@@ -1275,7 +1277,16 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
     );
     assert_eq!(
         blocked["validation_command_policy"].as_str(),
-        Some("cargo validation must route through rch exec --")
+        Some("cargo validation must route through rch exec -- env CARGO_TARGET_DIR=... cargo")
+    );
+
+    let blocked = &result["ranked_fallback_beads"][2];
+    assert_eq!(blocked["id"].as_str(), Some("bare-rch-cargo"));
+    assert_eq!(blocked["eligible"].as_bool(), Some(false));
+    assert_eq!(blocked["unsafe_validation_blocked"].as_bool(), Some(true));
+    assert_eq!(
+        blocked["unsafe_validation_commands"][0].as_str(),
+        Some("rch exec -- cargo test -p asupersync --test proof_runner_contract")
     );
 
     let plan = proof_runner_json(&[
@@ -1301,7 +1312,7 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
 fn proof_runner_autopilot_plan_combines_lanes_disk_and_fallbacks() {
     let fallback = write_json_fixture(&json!({"beads": [
         {"id": "cargo-heavy", "title": "run clippy frontier", "priority": 1,
-         "validation_command": "rch exec -- cargo clippy -p asupersync --all-targets -- -D warnings"},
+         "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_clippy cargo clippy -p asupersync --all-targets -- -D warnings"},
         {"id": "docs-safe", "title": "docs-only policy note", "priority": 2,
          "disk_safe": true, "validation_command": "python3 scripts/proof_runner.py --suggest-lanes --touched-files docs/proof_runner_usage.md --output json"},
         {"id": "receipt-safe", "title": "artifact-free receipt fixture", "priority": 1,
@@ -1620,6 +1631,39 @@ fn proof_runner_generates_appropriate_supplemental_proofs() {
     assert!(
         supplemental.contains("cargo check") || supplemental.contains("rustfmt"),
         "supplemental proof should be narrower than all-targets: {supplemental}"
+    );
+    assert!(
+        !supplemental.contains("rch exec -- cargo"),
+        "supplemental Cargo proof must not use bare rch cargo routing: {supplemental}"
+    );
+    if supplemental.contains("cargo ") {
+        assert!(
+            supplemental.contains("rch exec -- env")
+                && supplemental.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+            "supplemental Cargo proof must preserve a target dir: {supplemental}"
+        );
+    }
+
+    let result = proof_runner_json(&[
+        "--lane",
+        "lib-tests",
+        "--touched-files",
+        "tests/proof_runner_contract.rs",
+        "--output",
+        "json",
+    ]);
+    let supplemental = result["validation_frontier_record"]["supplemental_proof_command"]
+        .as_str()
+        .expect("should have supplemental proof command");
+    assert!(
+        supplemental.contains("cargo test")
+            && supplemental.contains("rch exec -- env")
+            && supplemental.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+        "test supplemental proof must route through rch target dir: {supplemental}"
+    );
+    assert!(
+        !supplemental.contains("rch exec -- cargo"),
+        "test supplemental proof must not use bare rch cargo routing: {supplemental}"
     );
 }
 
@@ -2567,7 +2611,7 @@ fn release_proof_pack_verifier_fail_closes_on_stale_copied_artifact() {
 
 #[test]
 fn release_proof_pack_rch_log_bundles_and_verifies_source_logs() {
-    let command = "rch exec -- cargo tree -e normal -p asupersync -i tokio";
+    let command = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_release_pack cargo tree -e normal -p asupersync -i tokio";
     let classified = classify_fixture(
         "rch_pass.log",
         command,
@@ -2636,7 +2680,7 @@ fn release_proof_pack_rch_log_bundles_and_verifies_source_logs() {
 
 #[test]
 fn release_proof_pack_rch_log_verifier_fail_closes_on_stale_copy() {
-    let command = "rch exec -- cargo tree -e normal -p asupersync -i tokio";
+    let command = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_release_pack cargo tree -e normal -p asupersync -i tokio";
     let classified = classify_fixture(
         "rch_pass.log",
         command,
@@ -2699,7 +2743,7 @@ fn release_proof_pack_rch_log_verifier_fail_closes_on_stale_copy() {
 
 #[test]
 fn release_proof_pack_rch_log_e2e_smoke_fixture_writes_and_verifies_pack() {
-    let command = "rch exec -- cargo tree -e normal -p asupersync -i tokio";
+    let command = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_release_pack cargo tree -e normal -p asupersync -i tokio";
     let tempdir = tempfile::tempdir().expect("create release proof pack smoke tempdir");
     let output_dir = tempdir.path().join("smoke");
     let output_dir_text = output_dir

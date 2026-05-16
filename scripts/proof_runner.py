@@ -100,7 +100,7 @@ OPERATOR_ACTION_RECIPE_IDS = (
 )
 DISK_HEALTHY_NEXT_ACTION = "run requested proof lane as planned"
 DISK_SAFE_NEXT_ACTION = (
-    "rerun with env -u CARGO_TARGET_DIR or capture an artifact-free proof receipt; "
+    "defer Cargo-heavy validation or capture an artifact-free proof receipt; "
     "do not delete files automatically"
 )
 DISK_CLEANUP_PERMISSION_RECORD = "cleanup requires explicit user permission"
@@ -202,7 +202,7 @@ def classify_disk_pressure(
         recommendation = "run_requested_proof_lane"
     else:
         preferred_next_action = DISK_SAFE_NEXT_ACTION
-        cargo_target_dir_guidance = "prefer env -u CARGO_TARGET_DIR"
+        cargo_target_dir_guidance = "keep lane-specific CARGO_TARGET_DIR on any later Cargo rerun"
         proof_receipt_guidance = "prefer artifact-free proof receipt"
         recommendation = "use_disk_safe_proof_path"
 
@@ -291,6 +291,19 @@ def _first_non_assignment(argv: List[str], start: int = 0) -> int:
     return index
 
 
+def proof_target_slug(raw: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_").lower()
+    return slug or "supplemental"
+
+
+def rch_cargo_command(target_slug: str, cargo_args: str) -> str:
+    return (
+        "rch exec -- env "
+        f"CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_proof_runner_{proof_target_slug(target_slug)} "
+        f"cargo {cargo_args}"
+    )
+
+
 def command_routes_cargo_through_rch(command: str) -> bool:
     try:
         argv = shlex.split(command, posix=True)
@@ -307,9 +320,19 @@ def command_routes_cargo_through_rch(command: str) -> bool:
         return False
 
     remote_index = program_index + 3
+    command_uses_target_dir = False
     if remote_index < len(argv) and argv[remote_index] == "env":
-        remote_index = _first_non_assignment(argv, remote_index + 1)
-    return remote_index < len(argv) and argv[remote_index] == "cargo"
+        env_start = remote_index + 1
+        remote_index = _first_non_assignment(argv, env_start)
+        command_uses_target_dir = any(
+            arg.startswith("CARGO_TARGET_DIR=")
+            for arg in argv[env_start:remote_index]
+        )
+    return (
+        remote_index < len(argv)
+        and argv[remote_index] == "cargo"
+        and command_uses_target_dir
+    )
 
 
 def fallback_disk_safety(bead: Dict[str, Any]) -> str:
@@ -398,7 +421,10 @@ def rank_fallback_beads_for_disk(
             "reservation_hard_blocked": bool(hard_overlaps),
             "unsafe_validation_blocked": bool(unsafe_validation_commands),
             "unsafe_validation_commands": unsafe_validation_commands,
-            "validation_command_policy": "cargo validation must route through rch exec --",
+            "validation_command_policy": (
+                "cargo validation must route through "
+                "rch exec -- env CARGO_TARGET_DIR=... cargo"
+            ),
             "reservation_warning": (
                 f"peer-active reservation overlaps {peer_overlaps[0]['path']} held by {peer_overlaps[0]['holder']}"
                 if peer_overlaps else ""
@@ -2507,16 +2533,19 @@ class ProofRunner:
                     test_files = [f for f in rust_files if 'test' in f]
                     if test_files:
                         test_name = Path(test_files[0]).stem
-                        return f"rch exec -- cargo test {test_name} -- --nocapture"
+                        return rch_cargo_command(
+                            f"test_{test_name}",
+                            f"test {test_name} -- --nocapture",
+                        )
 
                 # Otherwise, try library check
-                return "rch exec -- cargo check --lib"
+                return rch_cargo_command("lib_check", "check --lib")
 
         elif lane_kind == "lint_frontier":
             # For linting, check only specific files if possible
             rust_files = [f for f in touched_files if f.endswith('.rs')]
             if rust_files and len(rust_files) <= 3:
-                return f"rch exec -- cargo clippy --lib -- -D warnings"
+                return rch_cargo_command("lib_clippy", "clippy --lib -- -D warnings")
 
         # Fallback: basic format check
         return f"rch exec -- rustfmt --edition 2024 --check {' '.join(touched_files[:3])}"
