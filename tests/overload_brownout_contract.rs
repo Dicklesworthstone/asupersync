@@ -657,6 +657,34 @@ fn build_overload_brownout_report(
 }
 
 #[test]
+fn overload_brownout_runner_rejects_full_rch_fallback_marker_set() {
+    let script = fs::read_to_string("scripts/run_overload_brownout_smoke.sh")
+        .expect("overload brownout smoke runner should load");
+
+    assert!(
+        script
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 1,
+        "runner must use the shared local fallback matcher at its rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            script.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
+#[test]
 fn overload_brownout_smoke_contract_emits_report() {
     let scenarios = load_overload_brownout_scenarios();
     let scenario_id = selected_overload_brownout_scenario();
