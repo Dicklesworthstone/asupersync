@@ -20,10 +20,13 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
-use asupersync::messaging::redis::RespValue;
+use asupersync::messaging::redis::{RedisError, RespValue};
 
 const MAX_NUMBER_LENGTH: usize = 100_000; // Reasonable limit to avoid OOM
+
+static FIXED_BIG_NUMBER_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Arbitrary)]
 struct BigNumberInput {
@@ -246,8 +249,61 @@ struct DecodingEdgeCases {
 }
 
 fuzz_target!(|input: BigNumberInput| {
+    FIXED_BIG_NUMBER_CANARIES.get_or_init(assert_fixed_big_number_canaries);
+
     fuzz_resp3_big_number(input);
 });
+
+fn assert_fixed_big_number_canaries() {
+    assert_big_number_ok(b"(0\r\n", "0");
+    assert_big_number_ok(b"(+42\r\n", "+42");
+    assert_big_number_ok(b"(-0\r\n", "-0");
+    assert_big_number_ok(b"(000123\r\n", "000123");
+
+    assert_big_number_protocol_error(b"(\r\n", "RESP3 big number must not be empty");
+    assert_big_number_protocol_error(
+        b"(+\r\n",
+        "RESP3 big number sign must be followed by digits",
+    );
+    assert_big_number_protocol_error(
+        b"(-\r\n",
+        "RESP3 big number sign must be followed by digits",
+    );
+    assert_big_number_protocol_error(
+        b"(12a\r\n",
+        "RESP3 big number must contain only decimal digits after an optional sign",
+    );
+    assert_big_number_protocol_error(b"(\xff\r\n", "invalid UTF-8 in big number");
+}
+
+fn assert_big_number_ok(wire: &[u8], expected: &str) {
+    let decoded = RespValue::try_decode(wire).expect("RESP3 big number decode should not IO-fail");
+    match decoded {
+        Some((RespValue::BigNumber(value), consumed)) => {
+            assert_eq!(value, expected);
+            assert_eq!(consumed, wire.len());
+        }
+        other => panic!("expected RESP3 big number {expected:?}, got {other:?}"),
+    }
+}
+
+fn assert_big_number_protocol_error(wire: &[u8], expected_message: &str) {
+    match RespValue::try_decode(wire) {
+        Err(RedisError::Protocol(message)) => {
+            assert_eq!(message, expected_message);
+            assert_eq!(
+                RedisError::Protocol(message).to_string(),
+                format!("Redis protocol error: {expected_message}")
+            );
+        }
+        Err(error) => panic!("expected RESP3 big-number protocol error, got {error:?}"),
+        Ok(decoded) => {
+            panic!(
+                "expected RESP3 big-number protocol error {expected_message:?}, got {decoded:?}"
+            );
+        }
+    }
+}
 
 fn fuzz_resp3_big_number(input: BigNumberInput) {
     // Step 1: Generate the number string based on the specification
