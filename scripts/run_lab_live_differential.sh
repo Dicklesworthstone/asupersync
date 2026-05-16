@@ -2,22 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-LOCAL_BIN="${ROOT_DIR}/target/debug/asupersync"
-RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_lab_live_differential}"
 
 run_differential() {
-  if [[ -x "${LOCAL_BIN}" ]]; then
-    "${LOCAL_BIN}" lab differential "$@"
-    return
-  fi
-
   cd "${ROOT_DIR}"
-  if [[ -x "${RCH_BIN}" ]]; then
-    "${RCH_BIN}" exec -- cargo run --features cli --bin asupersync -- lab differential "$@"
-    return
-  fi
-
-  cargo run --features cli --bin asupersync -- lab differential "$@"
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR}" cargo run --features cli --bin asupersync -- lab differential "$@"
 }
 
 resolve_out_dir() {
@@ -143,14 +133,8 @@ if [[ "${profile}" != "nightly-stress" ]]; then
     echo "nightly-stress-only flags require --profile nightly-stress" >&2
     exit 2
   fi
-  if [[ -x "${LOCAL_BIN}" ]]; then
-    exec "${LOCAL_BIN}" lab differential "${pass_through[@]}"
-  fi
   cd "${ROOT_DIR}"
-  if [[ -x "${RCH_BIN}" ]]; then
-    exec "${RCH_BIN}" exec -- cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}"
-  fi
-  exec cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}"
+  exec "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR}" cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}"
 fi
 
 if [[ "${show_help}" -eq 1 ]]; then
