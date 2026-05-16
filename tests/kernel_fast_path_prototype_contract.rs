@@ -288,6 +288,12 @@ fn runner_script_exists_and_declares_modes() {
         "--execute",
         "kernel-fast-path-prototype-smoke-bundle-v1",
         "kernel-fast-path-prototype-smoke-run-report-v1",
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
