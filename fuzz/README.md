@@ -63,13 +63,13 @@ cargo +nightly install cargo-fuzz
 cd fuzz
 
 # Run a specific target
-cargo +nightly fuzz run fuzz_http2_frame
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_http2_frame cargo +nightly fuzz run fuzz_http2_frame
 
 # Run with timeout (e.g., 60 seconds)
-cargo +nightly fuzz run fuzz_http2_frame -- -max_total_time=60
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_http2_frame cargo +nightly fuzz run fuzz_http2_frame -- -max_total_time=60
 
 # Run with specific number of jobs (parallel)
-cargo +nightly fuzz run fuzz_http2_frame -- -jobs=4 -workers=4
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_http2_frame cargo +nightly fuzz run fuzz_http2_frame -- -jobs=4 -workers=4
 ```
 
 ## Corpus Management
@@ -78,10 +78,10 @@ Corpora are stored in `corpus/<target_name>/`. To merge and minimize:
 
 ```bash
 # Merge new findings into corpus
-cargo +nightly fuzz cmin fuzz_http2_frame
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_http2_frame cargo +nightly fuzz cmin fuzz_http2_frame
 
 # Minimize a specific crash
-cargo +nightly fuzz tmin fuzz_http2_frame <crash_file>
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_http2_frame cargo +nightly fuzz tmin fuzz_http2_frame <crash_file>
 ```
 
 ## Seed Files
@@ -133,7 +133,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 To run with seeds:
 
 ```bash
-cargo +nightly fuzz run fuzz_http2_frame seeds/http2/
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_http2_frame cargo +nightly fuzz run fuzz_http2_frame seeds/http2/
 ```
 
 ## Coverage
@@ -142,7 +142,7 @@ Generate coverage report:
 
 ```bash
 # Build with coverage instrumentation
-cargo +nightly fuzz coverage fuzz_http2_frame
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_http2_frame cargo +nightly fuzz coverage fuzz_http2_frame
 
 # View coverage report
 # (Output in fuzz/coverage/fuzz_http2_frame/)
@@ -156,7 +156,7 @@ Fuzzing runs in CI using:
 # Example GitHub Actions snippet
 - name: Run fuzz tests
   run: |
-    cargo +nightly fuzz run fuzz_http2_frame -- -max_total_time=300
+    rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_http2_frame cargo +nightly fuzz run fuzz_http2_frame -- -max_total_time=300
 ```
 
 ## Security Notes
