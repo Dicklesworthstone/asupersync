@@ -49,7 +49,14 @@ jobs:
 
       - name: Build conformance package
         working-directory: conformance
-        run: cargo build
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for conformance package builds" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_conformance_package_build" cargo build
 
       - name: Run conformance suite
         run: ./scripts/run_conformance_suite.sh
@@ -137,7 +144,13 @@ jobs:
       - name: Run performance benchmarks
         working-directory: conformance
         run: |
-          cargo bench 2>&1 | tee ../perf_output.log || true
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for conformance performance benchmarks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_conformance_performance_bounds" cargo bench 2>&1 | tee ../perf_output.log || true
 
       - name: Check for performance regressions
         run: |
@@ -193,8 +206,14 @@ jobs:
 
       - name: Run tests with ${{ matrix.runtime }} runtime
         run: |
+          set -euo pipefail
           echo "Testing with runtime: ${{ matrix.runtime }}"
-          cargo test --features ${{ matrix.features }} -- --nocapture
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for conformance runtime matrix tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_conformance_runtime_${ASUPERSYNC_RUNTIME}" cargo test --features ${{ matrix.features }} -- --nocapture
         env:
           ASUPERSYNC_RUNTIME: ${{ matrix.runtime }}
 
@@ -221,8 +240,14 @@ jobs:
       - name: Run negative conformance tests
         working-directory: conformance
         run: |
+          set -euo pipefail
           # Negative tests verify that certain patterns correctly fail
-          cargo test negative -- --nocapture 2>&1 | tee ../negative_output.log || true
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for negative conformance tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_conformance_negative_tests" cargo test negative -- --nocapture 2>&1 | tee ../negative_output.log || true
 
       - name: Upload negative test log
         uses: actions/upload-artifact@v4
