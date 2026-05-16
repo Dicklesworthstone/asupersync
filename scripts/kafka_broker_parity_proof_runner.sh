@@ -85,6 +85,17 @@ log() {
   printf '%s\n' "$*" | tee -a "$LOG_FILE"
 }
 
+reject_rch_local_fallback_file() {
+  local lane_name="$1"
+  local log_path="$2"
+
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+    log "lane=$lane_name rch_local_fallback=true"
+    echo "rch local fallback detected in $lane_name; refusing local cargo execution" > "$OUT_DIR/rch_local_fallback.txt"
+    exit 86
+  fi
+}
+
 run_lane() {
   local lane_name="$1"
   shift
@@ -109,6 +120,7 @@ run_lane() {
   local status="$?"
   set -e
   tee -a "$LOG_FILE" < "$lane_log"
+  reject_rch_local_fallback_file "$lane_name" "$lane_log"
   if [ "$status" -ne 0 ] \
     && grep -q 'Remote command finished: exit=0' "$lane_log"; then
     log "lane=$lane_name remote_exit=0 local_status=$status artifact_retrieval_timeout=true"
