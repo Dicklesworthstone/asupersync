@@ -4,8 +4,11 @@ use arbitrary::Arbitrary;
 use asupersync::messaging::jetstream::{fuzz_stream_name_max_bytes, fuzz_validate_stream_name};
 use libfuzzer_sys::fuzz_target;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::OnceLock;
 
 const MAX_FUZZ_NAME_BYTES: usize = 256 + 64;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug, Clone)]
 struct SubjectNameInput {
@@ -73,7 +76,57 @@ fn has_invalid_stream_name_chars(name: &str) -> bool {
         .any(|ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_'))
 }
 
+fn assert_stream_name_rejection(name: &str, expected: &str) {
+    let error = fuzz_validate_stream_name(name)
+        .expect_err("fixed JetStream stream-name canary should be rejected");
+
+    assert_eq!(
+        error, expected,
+        "JetStream stream-name diagnostic drift for {name:?}",
+    );
+    assert!(
+        !error.trim().is_empty(),
+        "stream-name rejection should expose a diagnostic"
+    );
+    assert!(
+        error.len() <= 512,
+        "stream-name rejection diagnostic should stay bounded: {} bytes",
+        error.len()
+    );
+}
+
+fn assert_fixed_stream_name_error_canaries() {
+    assert_stream_name_rejection(
+        "",
+        "JetStream invalid config: stream name must be non-empty",
+    );
+    assert_stream_name_rejection(
+        "orders.prod",
+        "JetStream invalid config: stream name must contain only ASCII letters, digits, '-' or '_' (fingerprint bytes=11,fnv1a64=3328319bcfa5ee6b)",
+    );
+    assert_stream_name_rejection(
+        "orders/prod",
+        "JetStream invalid config: stream name must contain only ASCII letters, digits, '-' or '_' (fingerprint bytes=11,fnv1a64=433ecda5fa00b168)",
+    );
+    assert_stream_name_rejection(
+        "orders*prod",
+        "JetStream invalid config: stream name must contain only ASCII letters, digits, '-' or '_' (fingerprint bytes=11,fnv1a64=1428f10d6f08bcd7)",
+    );
+
+    let max_name_bytes = fuzz_stream_name_max_bytes();
+    let oversized = "a".repeat(max_name_bytes + 1);
+    assert_stream_name_rejection(
+        &oversized,
+        &format!(
+            "JetStream invalid config: stream name exceeds {max_name_bytes}-byte cap (got {} bytes)",
+            oversized.len()
+        ),
+    );
+}
+
 fuzz_target!(|input: SubjectNameInput| {
+    FIXED_CANARIES.get_or_init(assert_fixed_stream_name_error_canaries);
+
     let max_name_bytes = fuzz_stream_name_max_bytes();
     let name = input.materialize(max_name_bytes);
     let parse_result = catch_unwind(AssertUnwindSafe(|| fuzz_validate_stream_name(&name)));
