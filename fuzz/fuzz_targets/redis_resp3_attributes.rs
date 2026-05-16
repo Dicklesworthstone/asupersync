@@ -130,6 +130,24 @@ fn assert_attribute_canaries() {
         &malformed_attribute_prefix(LengthPrefix::TruncatedPair, b"key".to_vec()),
         &limits,
     );
+
+    assert_protocol_message(b"|-1\r\n", "invalid aggregate length: -1", &limits);
+    assert_protocol_message(
+        b"|17\r\n",
+        "aggregate length 17 exceeds maximum 16",
+        &limits,
+    );
+    assert_protocol_message(b"|abc\r\n", "invalid integer byte: 0x61", &limits);
+    assert_protocol_message(
+        b"|?\r\n+meta\r\n.\r\n",
+        "RESP3 streamed aggregate not supported for type byte 0x7c",
+        &limits,
+    );
+    assert_protocol_message(
+        b"|1\r\n+key\r\n.\r\n",
+        "unknown RESP type byte: 0x2e",
+        &limits,
+    );
 }
 
 fn fuzz_attribute_parse(scenario: AttributeScenario, limits: &RedisProtocolLimits) {
@@ -186,6 +204,22 @@ fn assert_no_complete_decode(wire: &[u8], limits: &RedisProtocolLimits) {
         Err(error) => observe_decode_error(&error, "malformed RESP3 attribute canary"),
         Ok(Some((decoded, used))) => {
             panic!("malformed RESP3 attribute decoded as {decoded:?} using {used} bytes");
+        }
+    }
+}
+
+fn assert_protocol_message(wire: &[u8], expected_message: &str, limits: &RedisProtocolLimits) {
+    match RespValue::try_decode_with_limits(wire, limits) {
+        Err(RedisError::Protocol(message)) => {
+            assert_eq!(message, expected_message);
+            assert_eq!(
+                RedisError::Protocol(message).to_string(),
+                format!("Redis protocol error: {expected_message}")
+            );
+        }
+        Err(error) => panic!("expected RESP3 attribute protocol error, got {error:?}"),
+        Ok(decoded) => {
+            panic!("expected RESP3 attribute protocol error {expected_message:?}, got {decoded:?}");
         }
     }
 }
