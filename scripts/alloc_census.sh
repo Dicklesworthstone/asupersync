@@ -2,9 +2,9 @@
 # alloc_census.sh — Allocation census tooling for Asupersync.
 #
 # Usage:
-#   ./scripts/alloc_census.sh
+#   ./scripts/alloc_census.sh --cmd "path/to/prebuilt-benchmark"
 #   ./scripts/alloc_census.sh --tool heaptrack
-#   ./scripts/alloc_census.sh --tool valgrind --cmd "cargo bench --bench phase0_baseline"
+#   ./scripts/alloc_census.sh --tool valgrind --cmd "path/to/prebuilt-benchmark"
 #   ./scripts/alloc_census.sh --out baselines/alloc_census
 #   ./scripts/alloc_census.sh --flamegraph
 #
@@ -18,6 +18,7 @@ TOOL="heaptrack"
 OUT_DIR="baselines/alloc_census"
 CMD=()
 FLAMEGRAPH=0
+ALLOW_LOCAL_CARGO="${ALLOW_LOCAL_CARGO:-0}"
 
 usage() {
     cat <<'USAGE'
@@ -25,14 +26,14 @@ Usage: ./scripts/alloc_census.sh [options]
 
 Options:
   --tool <heaptrack|valgrind>   Allocation tool (default: heaptrack)
-  --cmd  "<command>"             Command to profile (default: cargo bench --bench phase0_baseline)
+  --cmd  "<command>"             Command to profile (required; prebuild Cargo targets through rch first)
   --out  <dir>                   Output directory (default: baselines/alloc_census)
   --flamegraph                   Attempt a flamegraph capture (cargo-flamegraph)
   -h, --help                     Show help
 
 Examples:
-  ./scripts/alloc_census.sh
-  ./scripts/alloc_census.sh --tool valgrind --cmd "cargo bench --bench scheduler_benchmark"
+  rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_alloc_census" cargo bench --bench scheduler_benchmark --no-run
+  ./scripts/alloc_census.sh --tool valgrind --cmd "path/to/prebuilt-benchmark"
   ./scripts/alloc_census.sh --flamegraph
 USAGE
 }
@@ -49,7 +50,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#CMD[@]} -eq 0 ]]; then
-    CMD=(cargo bench --bench phase0_baseline)
+    echo "ERROR: --cmd is required; prebuild Cargo benchmarks through rch, then profile the binary path." >&2
+    exit 2
+fi
+
+if [[ "${CMD[0]}" == "cargo" && "${ALLOW_LOCAL_CARGO}" != "1" ]]; then
+    echo "ERROR: local cargo profiling is disabled by default. Prebuild through rch and pass a binary path, or set ALLOW_LOCAL_CARGO=1 intentionally." >&2
+    exit 2
 fi
 
 if ! command -v python3 &>/dev/null; then
@@ -104,7 +111,12 @@ if [[ "$FLAMEGRAPH" -eq 1 ]]; then
     if command -v cargo-flamegraph &>/dev/null; then
         FLAMEGRAPH_FILE="$OUT_DIR/flamegraph_${TIMESTAMP}.svg"
         if [[ "${CMD[0]}" == "cargo" ]]; then
-            cargo flamegraph --output "$FLAMEGRAPH_FILE" -- ${CMD[@]:1}
+            if [[ "${ALLOW_LOCAL_CARGO}" != "1" ]]; then
+                echo "WARN: local cargo flamegraph requires ALLOW_LOCAL_CARGO=1; skipping" >&2
+                FLAMEGRAPH_FILE=""
+            else
+                cargo flamegraph --output "$FLAMEGRAPH_FILE" -- ${CMD[@]:1}
+            fi
         else
             echo "WARN: flamegraph capture only supports cargo commands; skipping" >&2
             FLAMEGRAPH_FILE=""
