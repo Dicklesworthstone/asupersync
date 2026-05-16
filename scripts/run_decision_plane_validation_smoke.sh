@@ -186,7 +186,7 @@ build_command_args() {
         "RUSTFLAGS=-D warnings -C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_validation_${safe_sid}"
         "${extra_env[@]}"
-        cargo
+        "${CARGO_BIN:-cargo}"
         test
         -p
         asupersync
