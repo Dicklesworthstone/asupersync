@@ -12,6 +12,7 @@ OUTPUT_ROOT_OVERRIDE="${NUMA_ARENA_LOCALITY_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${NUMA_ARENA_LOCALITY_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${NUMA_ARENA_LOCALITY_SMOKE_RUN_ID:-}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+REPLAY_CARGO_TOKEN='${CARGO_BIN:-cargo}'
 
 usage() {
     cat <<'EOF'
@@ -228,7 +229,7 @@ run_once() {
         "ASUPERSYNC_NUMA_ARENA_LOCALITY_CONTRACT_PATH=${ARTIFACT}"
         "ASUPERSYNC_NUMA_ARENA_LOCALITY_SCENARIO=${SCENARIO}"
         "ASUPERSYNC_NUMA_ARENA_LOCALITY_REPORT_PATH=${report_path}"
-        cargo
+        "${CARGO_BIN:-cargo}"
         test
         -p
         asupersync
@@ -431,7 +432,7 @@ fi
 ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 write_bundle_manifest \
     "$BUNDLE_MANIFEST_PATH" \
-    "${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_numa_arena_locality_<run> ASUPERSYNC_NUMA_ARENA_LOCALITY_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_NUMA_ARENA_LOCALITY_SCENARIO=${SCENARIO} ASUPERSYNC_NUMA_ARENA_LOCALITY_REPORT_PATH=<report> cargo test -p asupersync --test numa_arena_locality_contract numa_arena_locality_smoke_contract_emits_report --features test-internals -- --nocapture" \
+    "${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_numa_arena_locality_<run> ASUPERSYNC_NUMA_ARENA_LOCALITY_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_NUMA_ARENA_LOCALITY_SCENARIO=${SCENARIO} ASUPERSYNC_NUMA_ARENA_LOCALITY_REPORT_PATH=<report> ${REPLAY_CARGO_TOKEN} test -p asupersync --test numa_arena_locality_contract numa_arena_locality_smoke_contract_emits_report --features test-internals -- --nocapture" \
     "$COMMAND_EXIT_CODE" \
     "$SCRIPT_EXIT_CODE" \
     "$VALIDATION_PASSED" \
