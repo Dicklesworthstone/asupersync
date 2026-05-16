@@ -55,13 +55,13 @@ Created `fuzz/fuzz_targets/websocket_fragmentation_state_machine.rs` with the fo
 
 ```bash
 # Run the fuzzer
-cargo fuzz run websocket_fragmentation_state_machine -- -runs=1000 -max_len=256
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_websocket_fragmentation_fuzz_docs cargo fuzz run websocket_fragmentation_state_machine -- -runs=1000 -max_len=256
 
 # With coverage feedback
-cargo fuzz run websocket_fragmentation_state_machine -- -runs=10000 -print_coverage=1
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_websocket_fragmentation_fuzz_docs cargo fuzz run websocket_fragmentation_state_machine -- -runs=10000 -print_coverage=1
 
 # Generate corpus
-cargo fuzz run websocket_fragmentation_state_machine -- -only_ascii=1 -dict=ws.dict
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_websocket_fragmentation_fuzz_docs cargo fuzz run websocket_fragmentation_state_machine -- -only_ascii=1 -dict=ws.dict
 ```
 
 ## Test Scenarios Generated

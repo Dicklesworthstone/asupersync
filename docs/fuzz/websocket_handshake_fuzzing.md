@@ -56,13 +56,13 @@ The fuzzer implements seven distinct operation types, each targeting specific vu
 
 ```bash
 # From the fuzz directory
-cargo fuzz run websocket_handshake_parser
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_websocket_handshake_fuzz_docs cargo fuzz run websocket_handshake_parser
 
 # With time limit
-cargo fuzz run websocket_handshake_parser -- -max_total_time=300
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_websocket_handshake_fuzz_docs cargo fuzz run websocket_handshake_parser -- -max_total_time=300
 
 # With specific number of runs
-cargo fuzz run websocket_handshake_parser -- -runs=10000
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_websocket_handshake_fuzz_docs cargo fuzz run websocket_handshake_parser -- -runs=10000
 ```
 
 ## Security Properties Verified
