@@ -31,6 +31,9 @@ use libfuzzer_sys::fuzz_target;
 
 /// Maximum fuzz input size to prevent timeouts
 const MAX_FUZZ_INPUT_SIZE: usize = 100_000;
+const BAD_REQUEST_LINE_DISPLAY: &str = "malformed request line";
+const UNSUPPORTED_VERSION_DISPLAY: &str = "unsupported HTTP version";
+const INVALID_HEADER_NAME_DISPLAY: &str = "invalid header name";
 
 /// HTTP version generation strategy for fuzzing
 #[derive(Arbitrary, Debug, Clone)]
@@ -578,6 +581,22 @@ fn decode_response(input: &[u8]) -> Result<Option<Response>, HttpError> {
     codec.decode(&mut buffer)
 }
 
+fn assert_status_line_error(raw: &[u8], expected: HttpError, expected_display: &str) {
+    let Err(error) = decode_response(raw) else {
+        panic!("expected status-line error {expected:?} for {raw:?}");
+    };
+    assert_eq!(
+        std::mem::discriminant(&error),
+        std::mem::discriminant(&expected),
+        "expected status-line error {expected:?} for {raw:?}, got {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        expected_display,
+        "status-line parser diagnostic changed for {expected:?}"
+    );
+}
+
 fn assert_known_status_line_outputs() {
     let response = decode_response(b"HTTP/1.1 999 Custom\r\nContent-Length: 0\r\n\r\n")
         .expect("valid RFC 9110 three-digit status should decode")
@@ -586,26 +605,31 @@ fn assert_known_status_line_outputs() {
     assert_eq!(response.status, 999);
     assert_eq!(response.reason, "Custom");
 
-    assert!(matches!(
-        decode_response(b"HTTP/1.1 99 Nope\r\n\r\n"),
-        Err(HttpError::BadRequestLine)
-    ));
-    assert!(matches!(
-        decode_response(b"HTTP/1.1 1000 Nope\r\n\r\n"),
-        Err(HttpError::BadRequestLine)
-    ));
-    assert!(matches!(
-        decode_response(b"HTTP/2.0 200 OK\r\n\r\n"),
-        Err(HttpError::UnsupportedVersion)
-    ));
-    assert!(matches!(
-        decode_response(b"HTTP/1.1 abc Nope\r\n\r\n"),
-        Err(HttpError::BadRequestLine)
-    ));
-    assert!(matches!(
-        decode_response(b"HTTP/1.1 200 OK\r\n invalid: fold\r\n\r\n"),
-        Err(HttpError::InvalidHeaderName)
-    ));
+    assert_status_line_error(
+        b"HTTP/1.1 99 Nope\r\n\r\n",
+        HttpError::BadRequestLine,
+        BAD_REQUEST_LINE_DISPLAY,
+    );
+    assert_status_line_error(
+        b"HTTP/1.1 1000 Nope\r\n\r\n",
+        HttpError::BadRequestLine,
+        BAD_REQUEST_LINE_DISPLAY,
+    );
+    assert_status_line_error(
+        b"HTTP/2.0 200 OK\r\n\r\n",
+        HttpError::UnsupportedVersion,
+        UNSUPPORTED_VERSION_DISPLAY,
+    );
+    assert_status_line_error(
+        b"HTTP/1.1 abc Nope\r\n\r\n",
+        HttpError::BadRequestLine,
+        BAD_REQUEST_LINE_DISPLAY,
+    );
+    assert_status_line_error(
+        b"HTTP/1.1 200 OK\r\n invalid: fold\r\n\r\n",
+        HttpError::InvalidHeaderName,
+        INVALID_HEADER_NAME_DISPLAY,
+    );
 }
 
 fn validate_reason_phrase_consistency(reason_phrase: &str) {
