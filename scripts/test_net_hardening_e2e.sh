@@ -63,6 +63,10 @@ json_escape() {
     printf '%s' "${value}"
 }
 
+record_rch_local_fallback() {
+    echo "rch local fallback detected; refusing local cargo execution" > "$LOG_DIR/rch_local_fallback.txt"
+}
+
 run_cargo() {
     local lane="$1"
     shift
@@ -184,6 +188,12 @@ fi
 
 if grep -rqi "leak" "$LOG_DIR"/*.log 2>/dev/null; then
     echo "  WARNING: Potential leak detected"
+    ISSUES=$((ISSUES + 1))
+fi
+
+if grep -rEq '^\[RCH\] local \(|falling back to local' "$LOG_DIR"/*.log 2>/dev/null; then
+    echo "  ERROR: rch local fallback detected"
+    record_rch_local_fallback
     ISSUES=$((ISSUES + 1))
 fi
 
