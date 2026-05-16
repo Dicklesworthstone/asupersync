@@ -83,7 +83,7 @@ run_scenario() {
         CARGO_PROFILE_TEST_DEBUG=0
         "RUSTFLAGS=-C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis_${safe_sid}"
-        cargo test -p asupersync --test bounded_controller_synthesis_contract
+        "${CARGO_BIN:-cargo}" test -p asupersync --test bounded_controller_synthesis_contract
     )
     if [[ -n "$test_filter" ]]; then
         command+=("$test_filter")
