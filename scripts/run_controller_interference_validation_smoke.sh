@@ -111,7 +111,7 @@ run_scenario() {
         "CARGO_PROFILE_TEST_DEBUG=0"
         "RUSTFLAGS=-D warnings -C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_interference_validation"
-        cargo
+        "${CARGO_BIN:-cargo}"
         test
         -p
         asupersync
