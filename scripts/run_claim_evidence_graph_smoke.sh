@@ -83,7 +83,7 @@ run_scenario() {
         CARGO_PROFILE_TEST_DEBUG=0
         "RUSTFLAGS=-C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph_${safe_sid}"
-        cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals
+        "${CARGO_BIN:-cargo}" test -p asupersync --test claim_evidence_graph_contract --features test-internals
     )
     if [[ -n "$test_filter" ]]; then
         command+=("$test_filter")
