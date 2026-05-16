@@ -3,11 +3,14 @@
 use arbitrary::Arbitrary;
 use asupersync::messaging::redis::{RedisError, RedisProtocolLimits, RespValue};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_WIRE_LEN: usize = 16 * 1024;
 const MAX_PAYLOAD_LEN: usize = 256;
 const MAX_PAIRS: usize = 16;
 const MAX_DEPTH: usize = 48;
+
+static FIXED_ATTRIBUTE_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Arbitrary)]
 struct AttributeCase {
@@ -53,7 +56,7 @@ enum LengthPrefix {
 fuzz_target!(|case: AttributeCase| {
     let limits = case.limits.normalized();
 
-    assert_attribute_canaries();
+    FIXED_ATTRIBUTE_CANARIES.get_or_init(assert_attribute_canaries);
     assert_empty_attribute_map(&limits);
     parse_without_harness_panic(&deep_attribute_wire(24, b"seed"), &limits);
     parse_adjacent_values_without_harness_panic(
