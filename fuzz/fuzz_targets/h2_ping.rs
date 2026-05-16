@@ -2,10 +2,13 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{FrameHeader, FrameType, PingFrame, ping_flags};
+
+static PING_PARSE_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// Comprehensive fuzz input for HTTP/2 PING frame parsing and handling
 #[derive(Arbitrary, Debug, Clone)]
@@ -404,10 +407,12 @@ fn assert_ping_parse_canaries() -> Result<(), String> {
     Ok(())
 }
 
+fn run_ping_parse_canaries() {
+    assert_ping_parse_canaries().expect("fixed PING parse canaries must hold");
+}
+
 /// Test PING frame parsing with the 5 required assertions
 fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
-    assert_ping_parse_canaries()?;
-
     let mut shadow = PingShadowModel::new(input.connection_config.max_pending_pings as u32);
 
     // Execute operation sequence
@@ -669,6 +674,8 @@ fuzz_target!(|data: &[u8]| {
     if data.len() > 8_000 {
         return;
     }
+
+    PING_PARSE_CANARIES.get_or_init(run_ping_parse_canaries);
 
     let mut unstructured = arbitrary::Unstructured::new(data);
 
