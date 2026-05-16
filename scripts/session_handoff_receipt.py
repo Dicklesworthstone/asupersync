@@ -222,7 +222,7 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
         },
         "dirty_tree": dirty_tree,
         "beads": {
-            "ready": ready if ready_status == "ok" and isinstance(ready, list) else [],
+            "ready": extract_issues(ready) if ready_status == "ok" else [],
             "in_progress": extract_issues(progress),
             "status": {
                 "ready": ready_status,

@@ -455,6 +455,91 @@ fn source_peer_reservation_epic_only_routes_to_fallback_selector() {
 }
 
 #[test]
+fn live_probe_preserves_object_shaped_ready_queue() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import session_handoff_receipt as receipt
+
+def fake_run_text(repo_path, command, timeout):
+    if command == ["git", "branch", "--show-current"]:
+        return "ok", "main"
+    if command == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+        return "ok", "origin/main"
+    if command == ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"]:
+        return "ok", "0 0"
+    if command == ["am", "file_reservations", "active", str(repo_path)]:
+        return "ok", "No active reservations."
+    if command == ["rch", "queue"]:
+        return "ok", "queued=0 running=0"
+    raise AssertionError(f"unexpected text command: {command!r}")
+
+def fake_run_json(repo_path, command, timeout):
+    if command == ["bash", "scripts/classify_dirty_tree.sh", "--json"]:
+        return "ok", {"entries": [], "staged_count": 0, "unstaged_tracked_count": 0, "untracked_count": 0}
+    if command == ["br", "ready", "--json"]:
+        return "ok", {"issues": [
+            {
+                "id": "asupersync-lhx6m4",
+                "issue_type": "epic",
+                "title": "[idea-wizard] Swarm responsiveness and proof-lane autopilot",
+            }
+        ]}
+    if command == ["br", "list", "--status", "in_progress", "--json"]:
+        return "ok", {"issues": []}
+    if command[:3] == ["python3", "scripts/proof_runner.py", "--suggest-lanes"]:
+        return "ok", {"suggested_lanes": []}
+    raise AssertionError(f"unexpected json command: {command!r}")
+
+receipt.run_text = fake_run_text
+receipt.run_json = fake_run_json
+source = receipt.live_probe(repo, 2.0)
+handoff = receipt.build_receipt(
+    source=source,
+    repo_path=str(repo),
+    agent="RubyRobin",
+    generated_at="2026-05-08T04:30:00Z",
+    stale_after_hours=12,
+)
+print(json.dumps(handoff, sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run handoff object-shaped ready probe");
+    assert!(
+        output.status.success(),
+        "python object-shaped ready probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value = serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    assert_eq!(next_action_category(&receipt), "proof-only");
+    assert_eq!(
+        receipt["next_action"]["lane"].as_str(),
+        Some("reservation-aware-work-finder")
+    );
+    assert_eq!(
+        receipt["next_action"]["bead_id"].as_str(),
+        Some("asupersync-lhx6m4")
+    );
+    assert_eq!(
+        receipt["active_bead_ids"]["ready"][0].as_str(),
+        Some("asupersync-lhx6m4"),
+        "live br ready object output must not be collapsed to an empty ready queue"
+    );
+}
+
+#[test]
 fn source_peer_reservation_epic_only_output_matches_full_reviewed_golden() {
     assert_receipt_output_matches_golden(
         "source_peer_reservation_epic_only.json",
