@@ -9,7 +9,7 @@
   },
   "differential_profile_manifest": {
     "schema_version": "lab-live-differential-profile-manifest-v1",
-    "command": "rch exec -- cargo run --features cli --bin asupersync -- lab differential-profile-manifest --json",
+    "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_differential_profile_manifest cargo run --features cli --bin asupersync -- lab differential-profile-manifest --json",
     "profile_ids": [
       "smoke",
       "phase1-core",
@@ -19,7 +19,7 @@
     ]
   },
   "rch_defaults": {
-    "fallback_phrase": "falling back to local"
+    "forbidden_fallback_phrase": "falling back to local"
   },
   "threshold_defaults": {
     "max_failures": 0,
@@ -33,7 +33,7 @@
       "required_job_ids": ["test"],
       "required_step_names": ["Run unit tests"],
       "required_artifact_names": [],
-      "replay_command": "rch exec -- cargo test --lib --all-features",
+      "replay_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_unit cargo test --lib --all-features",
       "require_rch": true,
       "rch_required_step_names": ["Run unit tests"],
       "failure_taxonomy": ["compile_failure", "unit_assertion_failure", "nondeterministic_seed_behavior"],
@@ -49,7 +49,7 @@
       "required_job_ids": ["check"],
       "required_step_names": ["Clippy lints", "Check compilation"],
       "required_artifact_names": [],
-      "replay_command": "rch exec -- cargo clippy --all-targets --all-features -- -D warnings && rch exec -- cargo check --all-targets --all-features",
+      "replay_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_clippy cargo clippy --all-targets --all-features -- -D warnings && rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_check cargo check --all-targets --all-features",
       "require_rch": true,
       "rch_required_step_names": ["Clippy lints", "Check compilation"],
       "failure_taxonomy": ["lint_failure", "compile_failure", "rch_routing_violation"],
@@ -65,7 +65,7 @@
       "required_job_ids": ["test"],
       "required_step_names": ["Run integration tests"],
       "required_artifact_names": [],
-      "replay_command": "rch exec -- cargo test --test '*' --all-features",
+      "replay_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_integration cargo test --test '*' --all-features",
       "require_rch": true,
       "rch_required_step_names": ["Run integration tests"],
       "failure_taxonomy": ["integration_contract_failure", "cross_component_regression"],
@@ -232,7 +232,7 @@
         "wasm-ga-readiness-review-board-certification",
         "wasm-launch-rollout-support-stabilization-certification"
       ],
-      "replay_command": "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture && rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture && rch exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture && rch exec -- cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
+      "replay_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_compatibility cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture && rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_incident_playbook cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture && rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_readiness_review_board_checklist cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture && rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_launch_rollout_support_stabilization cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
       "require_rch": true,
       "rch_required_step_names": [
         "WASM bundler compatibility certification",
@@ -257,8 +257,10 @@
       "required_job_ids": ["test", "docs"],
       "required_step_names": ["Run doc tests", "Build documentation"],
       "required_artifact_names": [],
-      "replay_command": "cargo test --doc --all-features && cargo doc --all-features --no-deps",
-      "failure_taxonomy": ["doctest_failure", "rustdoc_warning", "documentation_build_regression"],
+      "replay_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_doctest cargo test --doc --all-features && rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_rustdoc cargo doc --all-features --no-deps",
+      "require_rch": true,
+      "rch_required_step_names": ["Run doc tests", "Build documentation"],
+      "failure_taxonomy": ["doctest_failure", "rustdoc_warning", "documentation_build_regression", "rch_routing_violation"],
       "thresholds": {
         "max_failures": 0,
         "required_artifacts_min": 0

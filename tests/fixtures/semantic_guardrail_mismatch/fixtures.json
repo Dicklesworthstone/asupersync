@@ -134,22 +134,22 @@
       ]
     },
     {
-      "fixture_id": "lint-build-step-fallback-phrase-drift",
+      "fixture_id": "lint-build-step-local-cargo-drift",
       "surface": "e2e",
-      "purpose": "CI matrix policy gate must fail when an rch-required step loses the mandated fallback phrase contract.",
+      "purpose": "CI matrix policy gate must fail when an rch-required step drifts back to local Cargo execution.",
       "heavy": false,
       "run_via_rch": false,
       "mutation": {
         "operation": "replace_first",
         "file": ".github/workflows/ci.yml",
-        "find": "echo \"rch unavailable; falling back to local cargo check --all-targets --all-features\"",
-        "replace": "echo \"rch unavailable; local cargo check --all-targets --all-features\""
+        "find": "\"$RCH_BIN\" exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_ci_check\" cargo check --all-targets --all-features",
+        "replace": "cargo check --all-targets --all-features"
       },
       "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
       "expected_exit": 1,
       "expected_substrings": [
         "CI matrix lane failed: lint-build",
-        "step_fallback:Check compilation"
+        "step_local_cargo:Check compilation"
       ]
     },
     {

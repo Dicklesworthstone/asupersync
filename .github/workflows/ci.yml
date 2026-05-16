@@ -27,7 +27,14 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for formatting checks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_fmt" cargo fmt --all --check
 
       - name: No-mock policy (allowlist + waiver expiry)
         run: |
@@ -146,11 +153,11 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/wasm/release
           RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-wasm-size-gate cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod
-          else
-            cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for WASM size-budget artifact builds" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-wasm-size-gate cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod
           cp target/wasm32-unknown-unknown/release/asupersync.wasm artifacts/wasm/release/asupersync.release.wasm
           python3 - <<'PY'
           import gzip
@@ -193,7 +200,7 @@ jobs:
                   },
               ],
               "commands": [
-                  "cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod",
+                  "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-wasm-size-gate cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod",
                   "gzip -9 -c artifacts/wasm/release/asupersync.release.wasm | wc -c",
               ],
               "artifact_paths": [
@@ -287,15 +294,13 @@ jobs:
         run: |
           set -euo pipefail
           # Validate performance budget schema and governance integration
-          if command -v rch >/dev/null 2>&1; then
-            echo "Running RaptorQ performance validation with rch..."
-            rch exec -- cargo test --test raptorq_perf_invariants g1_performance_budgets_schema_and_coverage -- --nocapture
-            rch exec -- cargo test --test raptorq_perf_invariants g1_performance_gates_script_validation -- --nocapture
-          else
-            echo "rch unavailable; running local cargo test"
-            cargo test --test raptorq_perf_invariants g1_performance_budgets_schema_and_coverage -- --nocapture
-            cargo test --test raptorq_perf_invariants g1_performance_gates_script_validation -- --nocapture
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for RaptorQ performance validation" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_raptorq_perf_invariants_schema" cargo test --test raptorq_perf_invariants g1_performance_budgets_schema_and_coverage -- --nocapture
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_raptorq_perf_invariants_gate" cargo test --test raptorq_perf_invariants g1_performance_gates_script_validation -- --nocapture
 
       - name: Upload RaptorQ performance gate report
         if: always()
@@ -445,12 +450,11 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
-          else
-            echo "rch unavailable; falling back to local cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture"
-            cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for WASM bundler compatibility certification" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_bundler_compatibility" cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -462,7 +466,7 @@ jobs:
               "test_target": "wasm_bundler_compatibility",
               "matrix_doc": "docs/wasm_bundler_compatibility_matrix.md",
               "log_artifact": "artifacts/wasm_bundler_compatibility_test.log",
-              "repro_command": "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_compatibility cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
               "required_bundlers": ["Vite", "Webpack", "Turbopack", "esbuild"],
               "required_browsers": ["Chrome", "Firefox", "Safari", "Edge"],
           }
@@ -486,12 +490,11 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
-          else
-            echo "rch unavailable; falling back to local cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture"
-            cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for WASM rollback and incident playbook certification" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_incident_playbook" cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -505,7 +508,7 @@ jobs:
               "release_strategy_doc": "docs/wasm_release_channel_strategy.md",
               "publish_workflow": ".github/workflows/publish.yml",
               "log_artifact": "artifacts/wasm_release_rollback_playbook_test.log",
-              "repro_command": "rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_incident_playbook cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
               "required_release_artifacts": [
                   "artifacts/security_release_gate_report.json",
                   "artifacts/wasm_dependency_audit_summary.json",
@@ -534,12 +537,11 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
-          else
-            echo "rch unavailable; falling back to local cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture"
-            cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for WASM GA readiness review board certification" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_ga_readiness_review_board_checklist" cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -552,7 +554,7 @@ jobs:
               "checklist_doc": "docs/wasm_ga_readiness_review_board_checklist.md",
               "decision_packet_artifact": "artifacts/wasm_ga_readiness_decision_packet.json",
               "log_artifact": "artifacts/wasm_ga_readiness_review_board_test.log",
-              "repro_command": "rch exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_readiness_review_board_checklist cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture",
               "blocker_beads": [
                   "asupersync-umelq.17.2",
                   "asupersync-umelq.15.5",
@@ -584,12 +586,11 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
-          else
-            echo "rch unavailable; falling back to local cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture"
-            cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for WASM launch rollout and support stabilization certification" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_launch_rollout_support_stabilization" cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -602,7 +603,7 @@ jobs:
               "contract_doc": "docs/wasm_launch_rollout_support_stabilization.md",
               "log_artifact": "artifacts/wasm_launch_rollout_support_stabilization_test.log",
               "summary_artifact": "artifacts/wasm_launch_rollout_support_stabilization_summary.json",
-              "repro_command": "rch exec -- cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_launch_rollout_support_stabilization cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
               "upstream_contracts": [
                   "asupersync-umelq.17.4",
                   "asupersync-umelq.15.5",
@@ -634,23 +635,21 @@ jobs:
         run: |
           set -euo pipefail
           RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo clippy --all-targets --all-features -- -D warnings
-          else
-            echo "rch unavailable; falling back to local cargo clippy --all-targets --all-features -- -D warnings"
-            cargo clippy --all-targets --all-features -- -D warnings
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Clippy lints" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_clippy" cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Check compilation
         run: |
           set -euo pipefail
           RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo check --all-targets --all-features
-          else
-            echo "rch unavailable; falling back to local cargo check --all-targets --all-features"
-            cargo check --all-targets --all-features
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Check compilation" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_check" cargo check --all-targets --all-features
 
   differential-fast:
     name: Differential Fast Gate
@@ -863,39 +862,50 @@ jobs:
           fi
 
           printf '%s\n' "${smoke_commands[@]}" > "$artifact_dir/commands.txt"
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Lean smoke profile Cargo commands" >&2
+            exit 1
+          fi
+
+          run_rch_cargo() {
+            local target_suffix="$1"
+            shift
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_lean_smoke_${target_suffix}" cargo "$@"
+          }
 
           run_lean_profile_command() {
             local cmd="$1"
             case "$cmd" in
               "cargo fmt --check")
-                cargo fmt --check
+                run_rch_cargo fmt fmt --check
                 ;;
               "cargo check --all-targets")
-                cargo check --all-targets
+                run_rch_cargo check check --all-targets
                 ;;
               "cargo clippy --all-targets -- -D warnings")
-                cargo clippy --all-targets -- -D warnings
+                run_rch_cargo clippy clippy --all-targets -- -D warnings
                 ;;
               "cargo test")
-                cargo test
+                run_rch_cargo test test
                 ;;
               "cargo test --test lean_preservation_constructor_total")
-                cargo test --test lean_preservation_constructor_total
+                run_rch_cargo lean_preservation_constructor_total test --test lean_preservation_constructor_total
                 ;;
               "cargo test --test lean_theorem_rule_traceability")
-                cargo test --test lean_theorem_rule_traceability
+                run_rch_cargo lean_theorem_rule_traceability test --test lean_theorem_rule_traceability
                 ;;
               "cargo test --test lean_theorem_surface_inventory")
-                cargo test --test lean_theorem_surface_inventory
+                run_rch_cargo lean_theorem_surface_inventory test --test lean_theorem_surface_inventory
                 ;;
               "cargo test --test lean_gap_risk_sequencing_plan")
-                cargo test --test lean_gap_risk_sequencing_plan
+                run_rch_cargo lean_gap_risk_sequencing_plan test --test lean_gap_risk_sequencing_plan
                 ;;
               "cargo test --test lean_invariant_status_inventory")
-                cargo test --test lean_invariant_status_inventory
+                run_rch_cargo lean_invariant_status_inventory test --test lean_invariant_status_inventory
                 ;;
               "cargo test --test lean_baseline_report")
-                cargo test --test lean_baseline_report
+                run_rch_cargo lean_baseline_report test --test lean_baseline_report
                 ;;
               "ubs --only=rust --diff .")
                 ubs --only=rust --diff .
@@ -1233,39 +1243,50 @@ jobs:
 
           run_status="success"
           : > "$artifact_dir/run.log"
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Lean full profile Cargo commands" >&2
+            exit 1
+          fi
+
+          run_rch_cargo() {
+            local target_suffix="$1"
+            shift
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_lean_full_${target_suffix}" cargo "$@"
+          }
 
           run_lean_profile_command() {
             local cmd="$1"
             case "$cmd" in
               "cargo fmt --check")
-                cargo fmt --check
+                run_rch_cargo fmt fmt --check
                 ;;
               "cargo check --all-targets")
-                cargo check --all-targets
+                run_rch_cargo check check --all-targets
                 ;;
               "cargo clippy --all-targets -- -D warnings")
-                cargo clippy --all-targets -- -D warnings
+                run_rch_cargo clippy clippy --all-targets -- -D warnings
                 ;;
               "cargo test")
-                cargo test
+                run_rch_cargo test test
                 ;;
               "cargo test --test lean_preservation_constructor_total")
-                cargo test --test lean_preservation_constructor_total
+                run_rch_cargo lean_preservation_constructor_total test --test lean_preservation_constructor_total
                 ;;
               "cargo test --test lean_theorem_rule_traceability")
-                cargo test --test lean_theorem_rule_traceability
+                run_rch_cargo lean_theorem_rule_traceability test --test lean_theorem_rule_traceability
                 ;;
               "cargo test --test lean_theorem_surface_inventory")
-                cargo test --test lean_theorem_surface_inventory
+                run_rch_cargo lean_theorem_surface_inventory test --test lean_theorem_surface_inventory
                 ;;
               "cargo test --test lean_gap_risk_sequencing_plan")
-                cargo test --test lean_gap_risk_sequencing_plan
+                run_rch_cargo lean_gap_risk_sequencing_plan test --test lean_gap_risk_sequencing_plan
                 ;;
               "cargo test --test lean_invariant_status_inventory")
-                cargo test --test lean_invariant_status_inventory
+                run_rch_cargo lean_invariant_status_inventory test --test lean_invariant_status_inventory
                 ;;
               "cargo test --test lean_baseline_report")
-                cargo test --test lean_baseline_report
+                run_rch_cargo lean_baseline_report test --test lean_baseline_report
                 ;;
               "ubs --only=rust --diff .")
                 ubs --only=rust --diff .
@@ -1540,26 +1561,31 @@ jobs:
         run: |
           set -euo pipefail
           RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo test --lib --all-features
-          else
-            echo "rch unavailable; falling back to local cargo test --lib --all-features"
-            cargo test --lib --all-features
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Run unit tests" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_unit" cargo test --lib --all-features
 
       - name: Run integration tests
         run: |
           set -euo pipefail
           RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo test --test '*' --all-features
-          else
-            echo "rch unavailable; falling back to local cargo test --test '*' --all-features"
-            cargo test --test '*' --all-features
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Run integration tests" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_integration" cargo test --test '*' --all-features
 
       - name: Run doc tests
-        run: cargo test --doc --all-features
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Run doc tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_doctest" cargo test --doc --all-features
 
   coverage:
     name: Coverage (llvm-cov)
@@ -1648,13 +1674,26 @@ jobs:
       - name: Run conformance tests
         working-directory: conformance
         run: |
-          cargo test -- --nocapture
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for conformance tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_conformance" cargo test -- --nocapture
         continue-on-error: true
 
       - name: Generate conformance report
         run: |
+          set -euo pipefail
           mkdir -p conformance-reports
-          cd conformance && cargo test -- --format json 2>&1 | tee ../conformance-reports/results.json || true
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for conformance report generation" >&2
+            exit 1
+          fi
+          cd conformance
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_conformance_report" cargo test -- --format json 2>&1 | tee ../conformance-reports/results.json || true
 
       - name: Upload conformance report
         uses: actions/upload-artifact@v4
@@ -1686,7 +1725,14 @@ jobs:
       - name: Run property tests with limited cases
         env:
           PROPTEST_CASES: 256
-        run: cargo test --test algebraic_laws --test property_region_ops --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for property tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_property_tests" cargo test --test algebraic_laws --test property_region_ops --all-features -- --nocapture
 
   benchmarks:
     name: Benchmark Baseline
@@ -1710,7 +1756,14 @@ jobs:
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run benchmarks
-        run: cargo bench --all-features -- --noplot
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for benchmarks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_benchmarks" cargo bench --all-features -- --noplot
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
@@ -1742,7 +1795,12 @@ jobs:
       - name: Run G2 CI regression gates
         run: |
           mkdir -p artifacts
-          cargo test --test ci_regression_gates -- --nocapture 2> artifacts/ci_regression_gate_report.ndjson
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for G2 CI regression gates" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_regression_gates" cargo test --test ci_regression_gates -- --nocapture 2> artifacts/ci_regression_gate_report.ndjson
           echo "G2 regression gate exit: $?"
 
       - name: Upload G2 regression gate report
@@ -1774,22 +1832,55 @@ jobs:
           key: ${{ runner.os }}-cargo-phase6-e2e-${{ hashFiles('**/Cargo.lock') }}
 
       - name: GEO – Geodesic normalization E2E
-        run: cargo test --test e2e_geodesic_normalization --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for geodesic normalization E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_e2e_geodesic_normalization" cargo test --test e2e_geodesic_normalization --all-features -- --nocapture
 
       - name: HOMO – Topology-guided exploration E2E
-        run: cargo test --test topology_benchmark --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for topology-guided exploration E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_topology_benchmark" cargo test --test topology_benchmark --all-features -- --nocapture
 
       - name: LYAP – Governor vs baseline E2E
-        run: cargo test --test e2e_governor_vs_baseline --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for governor vs baseline E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_e2e_governor_vs_baseline" cargo test --test e2e_governor_vs_baseline --all-features -- --nocapture
 
       - name: RAPTORQ – Encode/decode conformance E2E
-        run: cargo test --test raptorq_conformance --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for RaptorQ conformance E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_raptorq_conformance" cargo test --test raptorq_conformance --all-features -- --nocapture
 
       - name: RAPTORQ – G2 correctness/comparator CI gate
         run: |
           set -euo pipefail
           mkdir -p phase6-artifacts/raptorq-g2
-          cargo test --test ci_regression_gates --all-features -- --nocapture 2>&1 \
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for RaptorQ G2 correctness/comparator CI gate" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_raptorq_g2" cargo test --test ci_regression_gates --all-features -- --nocapture 2>&1 \
             | tee phase6-artifacts/raptorq-g2/ci_regression_gates.log
           grep -E '^\{"schema_version":"raptorq-g2-ci-regression-gate-v1"' \
             phase6-artifacts/raptorq-g2/ci_regression_gates.log > phase6-artifacts/raptorq-g2/g2_events.ndjson || true
@@ -1837,7 +1928,7 @@ jobs:
               "false_positives": false_positives,
               "fpr_threshold": 0.10,
               "artifact_path": "phase6-artifacts/raptorq-g2/ci_regression_gates.log",
-              "repro_command": "cargo test --test ci_regression_gates --all-features -- --nocapture",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_raptorq_g2 cargo test --test ci_regression_gates --all-features -- --nocapture",
           }
 
           errors = []
@@ -1880,12 +1971,11 @@ jobs:
         run: |
           set -euo pipefail
           RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- env NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
-          else
-            echo "rch unavailable; falling back to local forensic profile execution"
-            NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for forensic profile execution" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
           latest_dir="$(ls -1dt target/e2e-results/raptorq/forensics_* | head -n1)"
           mkdir -p phase6-artifacts/raptorq-forensics
           cp "$latest_dir/summary.json" phase6-artifacts/raptorq-forensics/summary.json
@@ -1897,26 +1987,18 @@ jobs:
           mkdir -p phase6-artifacts/raptorq-perf
           set +e
           RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- ./scripts/run_perf_e2e.sh \
-              --bench raptorq_benchmark \
-              --bench phase0_baseline \
-              --seed 424242 \
-              --compare baselines/baseline_latest.json \
-              --metric median_ns \
-              --max-regression-pct 10 \
-              --timeout 1200 2>&1 | tee phase6-artifacts/raptorq-perf/run.log
-          else
-            echo "rch unavailable; falling back to local perf e2e execution" | tee phase6-artifacts/raptorq-perf/run.log
-            ./scripts/run_perf_e2e.sh \
-              --bench raptorq_benchmark \
-              --bench phase0_baseline \
-              --seed 424242 \
-              --compare baselines/baseline_latest.json \
-              --metric median_ns \
-              --max-regression-pct 10 \
-              --timeout 1200 2>&1 | tee -a phase6-artifacts/raptorq-perf/run.log
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for perf e2e execution" | tee phase6-artifacts/raptorq-perf/run.log
+            exit 1
           fi
+          "$RCH_BIN" exec -- ./scripts/run_perf_e2e.sh \
+            --bench raptorq_benchmark \
+            --bench phase0_baseline \
+            --seed 424242 \
+            --compare baselines/baseline_latest.json \
+            --metric median_ns \
+            --max-regression-pct 10 \
+            --timeout 1200 2>&1 | tee phase6-artifacts/raptorq-perf/run.log
           perf_rc=${PIPESTATUS[0]}
           set -e
 
@@ -1964,12 +2046,11 @@ jobs:
         run: |
           set -euo pipefail
           RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- bash ./scripts/run_all_e2e.sh --verify-matrix
-          else
-            echo "rch unavailable; falling back to local run_all_e2e matrix verification"
-            bash ./scripts/run_all_e2e.sh --verify-matrix
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for run_all_e2e matrix verification" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- bash ./scripts/run_all_e2e.sh --verify-matrix
           latest_dir="$(ls -1dt target/e2e-results/orchestrator_* | head -n1)"
           mkdir -p phase6-artifacts/e2e-scenario-matrix
           cp "$latest_dir/scenario_matrix_validation.json" phase6-artifacts/e2e-scenario-matrix/scenario_matrix_validation.json
@@ -2009,15 +2090,28 @@ jobs:
           echo "Trace telemetry privacy policy gate passed for $lifecycle_file"
 
       - name: PLAN – Certified rewrite pipeline E2E
-        run: cargo test --test golden_outputs --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for certified rewrite pipeline E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_golden_outputs" cargo test --test golden_outputs --all-features -- --nocapture
 
       - name: Generate E2E report artifacts
         if: always()
         run: |
+          set -euo pipefail
           mkdir -p phase6-artifacts
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for E2E report artifact generation" >&2
+            exit 1
+          fi
           echo '{"ci_run": "${{ github.run_id }}", "commit": "${{ github.sha }}"}' > phase6-artifacts/metadata.json
           for suite in e2e_geodesic_normalization topology_benchmark e2e_governor_vs_baseline raptorq_conformance golden_outputs; do
-            cargo test --test "$suite" --all-features -- --format json 2>&1 \
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_report_${suite}" cargo test --test "$suite" --all-features -- --format json 2>&1 \
               | tee "phase6-artifacts/${suite}.json" || true
           done
 
@@ -2101,41 +2195,125 @@ jobs:
           key: ${{ runner.os }}-cargo-proofs-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Certificate verification tests
-        run: cargo test --lib plan::certificate --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for certificate verification tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_certificate" cargo test --lib plan::certificate --all-features -- --nocapture
 
       - name: Obligation formal checks (dialectica, graded, marking, guarded)
-        run: cargo test --lib obligation --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for obligation formal checks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_obligation" cargo test --lib obligation --all-features -- --nocapture
 
       - name: Lab oracle invariant checks
-        run: cargo test --lib lab::oracle --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for lab oracle invariant checks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_lab_oracle" cargo test --lib lab::oracle --all-features -- --nocapture
 
       - name: Cancellation protocol formalization tests
-        run: cargo test --lib types::cancel --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for cancellation protocol formalization tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_cancel" cargo test --lib types::cancel --all-features -- --nocapture
 
       - name: Combinator algebraic law tests
-        run: cargo test --lib combinator::laws --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for combinator algebraic law tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_combinator_laws" cargo test --lib combinator::laws --all-features -- --nocapture
 
       - name: DPOR exploration tests
-        run: cargo test --test dpor_exploration --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for DPOR exploration tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_dpor_exploration" cargo test --test dpor_exploration --all-features -- --nocapture
         continue-on-error: true
 
       - name: TLA+ export smoke test
-        run: cargo test --lib trace::tla_export --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for TLA+ export smoke test" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_tla_export" cargo test --lib trace::tla_export --all-features -- --nocapture
 
       - name: Trace canonicalization tests
-        run: cargo test --lib trace::canonicalize --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for trace canonicalization tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_trace_canonicalize" cargo test --lib trace::canonicalize --all-features -- --nocapture
 
       - name: Lease semantics and liveness tests (bd-yj06g)
-        run: cargo test --test lease_semantics -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for lease semantics and liveness tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_lease_semantics" cargo test --test lease_semantics -- --nocapture
 
       - name: Close quiescence regression tests (bd-sbi6e)
-        run: cargo test --test close_quiescence_regression -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for close quiescence regression tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_close_quiescence" cargo test --test close_quiescence_regression -- --nocapture
 
       - name: Refinement conformance tests (bd-3g13z)
-        run: cargo test --test refinement_conformance -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for refinement conformance tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_refinement_conformance" cargo test --test refinement_conformance -- --nocapture
 
       - name: Proof artifact manifest validation
-        run: cargo test --test proof_artifact_manifest -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for proof artifact manifest validation" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_manifest" cargo test --test proof_artifact_manifest -- --nocapture
 
       - name: TLA+ bounded model check (bd-11g3i)
         run: bash scripts/run_model_check.sh --ci
@@ -2144,14 +2322,20 @@ jobs:
       - name: Generate proof artifacts report
         if: always()
         run: |
+          set -euo pipefail
           mkdir -p proof-artifacts
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for proof artifact generation" >&2
+            exit 1
+          fi
           echo '{"ci_run": "${{ github.run_id }}", "commit": "${{ github.sha }}"}' > proof-artifacts/metadata.json
-          cargo test --lib plan::certificate --all-features -- --format json 2>&1 | tee proof-artifacts/certificate-tests.json || true
-          cargo test --lib obligation --all-features -- --format json 2>&1 | tee proof-artifacts/obligation-tests.json || true
-          cargo test --lib lab::oracle --all-features -- --format json 2>&1 | tee proof-artifacts/oracle-tests.json || true
-          cargo test --test lease_semantics -- --format json 2>&1 | tee proof-artifacts/lease-semantics.json || true
-          cargo test --test close_quiescence_regression -- --format json 2>&1 | tee proof-artifacts/close-quiescence.json || true
-          cargo test --test refinement_conformance -- --format json 2>&1 | tee proof-artifacts/refinement-conformance.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_certificate" cargo test --lib plan::certificate --all-features -- --format json 2>&1 | tee proof-artifacts/certificate-tests.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_obligation" cargo test --lib obligation --all-features -- --format json 2>&1 | tee proof-artifacts/obligation-tests.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_oracle" cargo test --lib lab::oracle --all-features -- --format json 2>&1 | tee proof-artifacts/oracle-tests.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_lease" cargo test --test lease_semantics -- --format json 2>&1 | tee proof-artifacts/lease-semantics.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_close_quiescence" cargo test --test close_quiescence_regression -- --format json 2>&1 | tee proof-artifacts/close-quiescence.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_refinement" cargo test --test refinement_conformance -- --format json 2>&1 | tee proof-artifacts/refinement-conformance.json || true
           # Copy TLA+ results if available
           cp formal/tla/output/result.json proof-artifacts/tla-model-check.json 2>/dev/null || true
 
@@ -2175,7 +2359,14 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Build documentation
-        run: cargo doc --all-features --no-deps
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Build documentation" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_rustdoc" cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -2200,16 +2391,44 @@ jobs:
           key: ${{ runner.os }}-cargo-quic-h3-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run quic_core unit tests
-        run: cargo test -p asupersync quic_core --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for quic_core unit tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_quic_core" cargo test -p asupersync quic_core --all-features -- --nocapture
 
       - name: Run quic_native unit tests
-        run: cargo test -p asupersync quic_native --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for quic_native unit tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_quic_native" cargo test -p asupersync quic_native --all-features -- --nocapture
 
       - name: Run h3_native unit tests
-        run: cargo test -p asupersync h3_native --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for h3_native unit tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_h3_native" cargo test -p asupersync h3_native --all-features -- --nocapture
 
       - name: Run forensic_log unit tests
-        run: cargo test -p asupersync forensic_log --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for forensic_log unit tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_forensic_log" cargo test -p asupersync forensic_log --all-features -- --nocapture
 
   quic-h3-e2e:
     name: QUIC/H3 E2E Suite
@@ -2242,7 +2461,14 @@ jobs:
           key: ${{ runner.os }}-cargo-quic-h3-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run ${{ matrix.test_crate }}
-        run: cargo test --test ${{ matrix.test_crate }} --all-features -- --nocapture
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for ${{ matrix.test_crate }}" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_${{ matrix.test_crate }}" cargo test --test ${{ matrix.test_crate }} --all-features -- --nocapture
 
       - name: Persist forensic artifacts on failure
         if: failure()

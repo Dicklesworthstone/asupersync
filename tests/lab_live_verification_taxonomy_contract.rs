@@ -594,7 +594,7 @@ fn ci_matrix_policy_tracks_fast_differential_lane() -> std::io::Result<()> {
     assert_eq!(
         manifest["command"],
         json!(
-            "rch exec -- cargo run --features cli --bin asupersync -- lab differential-profile-manifest --json"
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_differential_profile_manifest cargo run --features cli --bin asupersync -- lab differential-profile-manifest --json"
         )
     );
     assert_eq!(

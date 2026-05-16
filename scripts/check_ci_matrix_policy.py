@@ -14,12 +14,19 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import shlex
 from typing import Any
 
 
 JOB_ID_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 STEP_NAME_RE = re.compile(r"^\s*-\s+name:\s*(.+?)\s*$", re.MULTILINE)
-STEP_RCH_RE = re.compile(r'(?m)(?:\brch\b|"\$RCH_BIN"|\$\{RCH_BIN\}|\$RCH_BIN)\s+exec\s+--')
+RCH_EXEC_RE = re.compile(r'(?m)(?:\brch\b|"\$RCH_BIN"|\$\{RCH_BIN\}|\$RCH_BIN)\s+exec\s+--')
+RCH_EXEC_COMMAND_RE = re.compile(
+    r'(?m)(?:\brch\b|"\$RCH_BIN"|\$\{RCH_BIN\}|\$RCH_BIN)\s+exec\s+--\s+([^&;\n|]+)'
+)
+CARGO_WORD_RE = re.compile(r"\bcargo\b")
+SHELL_COMMAND_SPLIT_RE = re.compile(r"(?:&&|\|\||;|\n)")
+ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 class PolicyError(ValueError):
@@ -37,7 +44,7 @@ class LanePolicy:
     replay_command: str
     require_rch: bool
     rch_required_step_names: tuple[str, ...]
-    rch_fallback_phrase: str
+    rch_forbidden_fallback_phrase: str
     failure_taxonomy: tuple[str, ...]
     max_failures: int
     required_artifacts_min: int
@@ -59,6 +66,94 @@ def utc_now() -> str:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def normalize_shell_text(text: str) -> str:
+    return re.sub(r"\\\s*\n\s*", " ", text)
+
+
+def shell_tokens(text: str) -> list[str]:
+    candidates = [text, text.rstrip('",\''), text.strip().rstrip('",\'')]
+    for candidate in candidates:
+        try:
+            return shlex.split(candidate, posix=True)
+        except ValueError:
+            continue
+    return []
+
+
+def token_is_env_assignment(token: str) -> bool:
+    return ENV_ASSIGNMENT_RE.match(token) is not None
+
+
+def command_starts_with_local_cargo(command: str) -> bool:
+    tokens = shell_tokens(command.strip())
+    if not tokens:
+        return False
+
+    index = 0
+    while index < len(tokens) and token_is_env_assignment(tokens[index]):
+        index += 1
+
+    if index < len(tokens) and tokens[index] == "env":
+        index += 1
+        while index < len(tokens) and token_is_env_assignment(tokens[index]):
+            index += 1
+
+    return index < len(tokens) and tokens[index] == "cargo"
+
+
+def has_local_cargo_command(text: str) -> bool:
+    normalized = normalize_shell_text(text)
+    return any(command_starts_with_local_cargo(segment) for segment in SHELL_COMMAND_SPLIT_RE.split(normalized))
+
+
+def rch_exec_cargo_violations(text: str) -> list[str]:
+    normalized = normalize_shell_text(text)
+    violations: list[str] = []
+    for match in RCH_EXEC_COMMAND_RE.finditer(normalized):
+        body = match.group(1).strip()
+        if not CARGO_WORD_RE.search(body):
+            continue
+
+        tokens = shell_tokens(body)
+        if not tokens:
+            violations.append("rch_cargo_unparseable")
+            continue
+
+        if tokens[0] in {"bash", "sh"} and "-c" in tokens and any(CARGO_WORD_RE.search(token) for token in tokens):
+            violations.append("rch_nested_shell_cargo")
+            continue
+
+        if tokens[0] == "cargo":
+            violations.append("rch_cargo_missing_env")
+            continue
+
+        if tokens[0] != "env":
+            violations.append("rch_cargo_unstructured")
+            continue
+
+        try:
+            cargo_index = tokens.index("cargo")
+        except ValueError:
+            violations.append("rch_cargo_unparseable")
+            continue
+
+        if not any(token.startswith("CARGO_TARGET_DIR=") for token in tokens[1:cargo_index]):
+            violations.append("rch_cargo_missing_target_dir")
+
+    return violations
+
+
+def cargo_routing_violations(text: str) -> list[str]:
+    violations = rch_exec_cargo_violations(text)
+    if has_local_cargo_command(text):
+        violations.append("local_cargo")
+    return sorted(set(violations))
+
+
+def rch_replay_compliant(command: str) -> bool:
+    return bool(RCH_EXEC_RE.search(command)) and not cargo_routing_violations(command)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -118,9 +213,12 @@ def load_policy(policy_path: Path) -> tuple[dict[str, Any], list[LanePolicy], Pa
     rch_defaults = policy.get("rch_defaults", {})
     if not isinstance(rch_defaults, dict):
         raise PolicyError("rch_defaults must be an object")
-    default_rch_fallback_phrase = require_str(
-        rch_defaults.get("fallback_phrase", "falling back to local"),
-        "rch_defaults.fallback_phrase",
+    default_rch_forbidden_fallback_phrase = require_str(
+        rch_defaults.get(
+            "forbidden_fallback_phrase",
+            rch_defaults.get("fallback_phrase", "falling back to local"),
+        ),
+        "rch_defaults.forbidden_fallback_phrase",
     )
 
     lanes_raw = policy.get("lanes")
@@ -160,9 +258,12 @@ def load_policy(policy_path: Path) -> tuple[dict[str, Any], list[LanePolicy], Pa
                 rch_required_step_names=require_str_list(
                     lane_raw.get("rch_required_step_names", []), f"lanes[{idx}].rch_required_step_names"
                 ),
-                rch_fallback_phrase=require_str(
-                    lane_raw.get("rch_fallback_phrase", default_rch_fallback_phrase),
-                    f"lanes[{idx}].rch_fallback_phrase",
+                rch_forbidden_fallback_phrase=require_str(
+                    lane_raw.get(
+                        "rch_forbidden_fallback_phrase",
+                        lane_raw.get("rch_fallback_phrase", default_rch_forbidden_fallback_phrase),
+                    ),
+                    f"lanes[{idx}].rch_forbidden_fallback_phrase",
                 ),
                 failure_taxonomy=require_str_list(
                     lane_raw.get("failure_taxonomy", []), f"lanes[{idx}].failure_taxonomy"
@@ -264,9 +365,12 @@ def evaluate_lane(
         *[f"step:{item}" for item in missing_steps],
         *[f"artifact:{item}" for item in missing_artifacts],
     ]
-    rch_compliant = "rch exec --" in lane.replay_command
-    if lane.require_rch and not rch_compliant:
+    replay_routing_violations = cargo_routing_violations(lane.replay_command)
+    rch_compliant = rch_replay_compliant(lane.replay_command)
+    if lane.require_rch and not RCH_EXEC_RE.search(lane.replay_command):
         missing_contracts.append("replay:rch_prefix")
+    if lane.require_rch:
+        missing_contracts.extend(f"replay:{violation}" for violation in replay_routing_violations)
 
     artifact_contract_count = len(lane.required_artifact_names) - len(missing_artifacts)
     if artifact_contract_count < lane.required_artifacts_min:
@@ -275,17 +379,30 @@ def evaluate_lane(
         )
 
     rch_noncompliant_steps: list[str] = []
-    rch_missing_fallback_steps: list[str] = []
+    rch_local_fallback_steps: list[str] = []
     for step_name in lane.rch_required_step_names:
         if step_name not in step_names:
             continue
         step_runs = step_run_blocks.get(step_name, [])
-        if not any(STEP_RCH_RE.search(script) for script in step_runs):
+        if not any(RCH_EXEC_RE.search(script) for script in step_runs):
             rch_noncompliant_steps.append(step_name)
             missing_contracts.append(f"step_rch:{step_name}")
-        if not any(lane.rch_fallback_phrase in script for script in step_runs):
-            rch_missing_fallback_steps.append(step_name)
-            missing_contracts.append(f"step_fallback:{step_name}")
+        step_routing_violations = sorted(
+            {
+                violation
+                for script in step_runs
+                for violation in cargo_routing_violations(script)
+            }
+        )
+        if step_routing_violations:
+            if step_name not in rch_noncompliant_steps:
+                rch_noncompliant_steps.append(step_name)
+            missing_contracts.extend(
+                f"step_{violation}:{step_name}" for violation in step_routing_violations
+            )
+        if any(lane.rch_forbidden_fallback_phrase in script for script in step_runs):
+            rch_local_fallback_steps.append(step_name)
+            missing_contracts.append(f"step_local_fallback:{step_name}")
 
     status = "pass" if not missing_contracts else "fail"
     return {
@@ -299,7 +416,8 @@ def evaluate_lane(
         "require_rch": lane.require_rch,
         "rch_required_step_names": list(lane.rch_required_step_names),
         "rch_noncompliant_step_names": rch_noncompliant_steps,
-        "rch_missing_fallback_step_names": rch_missing_fallback_steps,
+        "rch_local_fallback_step_names": rch_local_fallback_steps,
+        "replay_routing_violations": replay_routing_violations,
         "rch_compliant": rch_compliant,
         "missing_job_ids": missing_job_ids,
         "missing_steps": missing_steps,
@@ -341,7 +459,10 @@ def run_self_tests() -> int:
                 "required_job_ids": ["test"],
                 "required_step_names": ["Run unit tests"],
                 "required_artifact_names": ["ci-summary-report"],
-                "replay_command": "rch exec -- cargo test --lib --all-features",
+                "replay_command": (
+                    "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_ci_policy_selftest "
+                    "cargo test --lib --all-features"
+                ),
                 "require_rch": True,
                 "rch_required_step_names": ["Run unit tests"],
                 "failure_taxonomy": ["unit_assertion_failure"],
@@ -359,12 +480,11 @@ jobs:
     steps:
       - name: Run unit tests
         run: |
-          if [[ -x "$RCH_BIN" ]]; then
-            "$RCH_BIN" exec -- cargo test --lib --all-features
-          else
-            echo "rch unavailable; falling back to local cargo test --lib --all-features"
-            cargo test --lib --all-features
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for unit tests" >&2
+            exit 1
           fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_ci_policy_selftest cargo test --lib --all-features
   ci-summary-d5:
     steps:
       - name: Upload
@@ -403,7 +523,7 @@ jobs:
         replay_command="cargo test --lib --all-features",
         require_rch=True,
         rch_required_step_names=("Run unit tests",),
-        rch_fallback_phrase="falling back to local",
+        rch_forbidden_fallback_phrase="falling back to local",
         failure_taxonomy=("unit_assertion_failure",),
         max_failures=0,
         required_artifacts_min=1,
@@ -413,6 +533,27 @@ jobs:
         raise AssertionError("expected fail lane status when require_rch is true but replay command is non-rch")
     if "replay:rch_prefix" not in lane_non_rch["missing_contracts"]:
         raise AssertionError("expected replay:rch_prefix contract failure")
+
+    bare_rch_lane = LanePolicy(
+        lane_id="unit-bare-rch",
+        title="Unit lane with bare rch cargo",
+        owner="runtime-core",
+        required_job_ids=("test",),
+        required_step_names=("Run unit tests",),
+        required_artifact_names=("ci-summary-report",),
+        replay_command="rch exec -- cargo test --lib --all-features",
+        require_rch=True,
+        rch_required_step_names=("Run unit tests",),
+        rch_forbidden_fallback_phrase="falling back to local",
+        failure_taxonomy=("unit_assertion_failure",),
+        max_failures=0,
+        required_artifacts_min=1,
+    )
+    lane_bare_rch = evaluate_lane(bare_rch_lane, workflow_pass, jobs_pass, steps_pass, step_runs_pass)
+    if lane_bare_rch["status"] != "fail":
+        raise AssertionError("expected fail lane status when replay command uses bare rch cargo")
+    if "replay:rch_cargo_missing_env" not in lane_bare_rch["missing_contracts"]:
+        raise AssertionError("expected replay:rch_cargo_missing_env contract failure")
 
     workflow_step_fail = """
 jobs:
@@ -424,11 +565,31 @@ jobs:
     jobs_step, steps_step, step_runs_step = collect_workflow_contracts(workflow_step_fail)
     lane_step_fail = evaluate_lane(lanes[0], workflow_step_fail, jobs_step, steps_step, step_runs_step)
     if lane_step_fail["status"] != "fail":
-        raise AssertionError("expected fail lane status when required step lacks rch/fallback")
+        raise AssertionError("expected fail lane status when required step lacks rch and runs local cargo")
     if "step_rch:Run unit tests" not in lane_step_fail["missing_contracts"]:
         raise AssertionError("expected step_rch failure for required step")
-    if "step_fallback:Run unit tests" not in lane_step_fail["missing_contracts"]:
-        raise AssertionError("expected step_fallback failure for required step")
+    if "step_local_cargo:Run unit tests" not in lane_step_fail["missing_contracts"]:
+        raise AssertionError("expected step_local_cargo failure for required step")
+
+    workflow_local_fallback_fail = """
+jobs:
+  test:
+    steps:
+      - name: Run unit tests
+        run: |
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_ci_policy_selftest cargo test --lib --all-features
+          else
+            echo "rch unavailable; falling back to local cargo test --lib --all-features"
+            cargo test --lib --all-features
+          fi
+"""
+    jobs_fallback, steps_fallback, step_runs_fallback = collect_workflow_contracts(workflow_local_fallback_fail)
+    lane_fallback_fail = evaluate_lane(lanes[0], workflow_local_fallback_fail, jobs_fallback, steps_fallback, step_runs_fallback)
+    if lane_fallback_fail["status"] != "fail":
+        raise AssertionError("expected fail lane status when required step falls back to local cargo")
+    if "step_local_fallback:Run unit tests" not in lane_fallback_fail["missing_contracts"]:
+        raise AssertionError("expected step_local_fallback failure for required step")
 
     artifact_threshold_lane = LanePolicy(
         lane_id="artifact-threshold",
@@ -437,10 +598,10 @@ jobs:
         required_job_ids=("test",),
         required_step_names=("Run unit tests",),
         required_artifact_names=(),
-        replay_command="rch exec -- cargo test --lib --all-features",
+        replay_command="rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_ci_policy_selftest cargo test --lib --all-features",
         require_rch=True,
         rch_required_step_names=("Run unit tests",),
-        rch_fallback_phrase="falling back to local",
+        rch_forbidden_fallback_phrase="falling back to local",
         failure_taxonomy=("artifact_contract_failure",),
         max_failures=0,
         required_artifacts_min=1,
@@ -493,10 +654,10 @@ def main() -> int:
         for lane in lane_reports
         for step_name in lane.get("rch_noncompliant_step_names", [])
     )
-    rch_missing_fallback_step_refs = sorted(
+    rch_local_fallback_step_refs = sorted(
         f"{lane['lane_id']}::{step_name}"
         for lane in lane_reports
-        for step_name in lane.get("rch_missing_fallback_step_names", [])
+        for step_name in lane.get("rch_local_fallback_step_names", [])
     )
 
     summary_path = args.summary_output if str(args.summary_output) else default_summary_path
@@ -518,8 +679,10 @@ def main() -> int:
         "rch_noncompliant_lane_ids": rch_noncompliant_lane_ids,
         "rch_noncompliant_step_count": len(rch_noncompliant_step_refs),
         "rch_noncompliant_step_refs": rch_noncompliant_step_refs,
-        "rch_missing_fallback_step_count": len(rch_missing_fallback_step_refs),
-        "rch_missing_fallback_step_refs": rch_missing_fallback_step_refs,
+        "rch_local_fallback_step_count": len(rch_local_fallback_step_refs),
+        "rch_local_fallback_step_refs": rch_local_fallback_step_refs,
+        "rch_missing_fallback_step_count": 0,
+        "rch_missing_fallback_step_refs": [],
         "lanes": lane_reports,
     }
 
@@ -534,6 +697,7 @@ def main() -> int:
                 "status": lane["status"],
                 "missing_contracts": lane["missing_contracts"],
                 "replay_command": lane["replay_command"],
+                "replay_routing_violations": lane["replay_routing_violations"],
                 "require_rch": lane["require_rch"],
                 "rch_compliant": lane["rch_compliant"],
                 "failure_taxonomy": lane["failure_taxonomy"],
