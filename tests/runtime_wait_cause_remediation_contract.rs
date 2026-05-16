@@ -297,6 +297,33 @@ fn runner_exists_and_routes_execute_through_rch() {
 }
 
 #[test]
+fn runner_rejects_full_rch_fallback_marker_set() {
+    let runner = load_runner();
+
+    assert!(
+        runner
+            .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+            .count()
+            >= 1,
+        "runner must use the shared local fallback matcher at its rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            runner.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
+}
+
+#[test]
 fn verifier_emits_actionable_investigate_and_refused_reports() {
     let actionable = actionable_report();
     assert_eq!(actionable.verdict, WaitCauseRemediationVerdict::Actionable);
