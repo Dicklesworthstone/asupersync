@@ -463,7 +463,7 @@ fn smoke_scenarios_declare_required_log_markers() {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let markers = scenario["required_log_markers"]
             .as_array()
-            .unwrap_or_else(|| panic!("{sid}: required_log_markers must be array"));
+            .expect("required_log_markers must be array");
         assert!(
             markers.len() >= 3,
             "{sid}: must require scenario-specific test markers plus rch success markers"
@@ -571,6 +571,32 @@ fn runner_enforces_bounded_execute_mode_with_marker_logging() {
         runner.contains("passed_after_rch_retrieval_timeout"),
         "runner must classify rch retrieval timeout after remote success"
     );
+}
+
+#[test]
+fn runner_rejects_full_rch_fallback_marker_set() {
+    let runner = load_runner();
+    let matcher_uses = runner
+        .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+        .count();
+    assert!(
+        matcher_uses >= 1,
+        "runner must use the shared local fallback matcher at every rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            runner.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
 }
 
 // ── Functional: interference oscillation detection ──────────────────
