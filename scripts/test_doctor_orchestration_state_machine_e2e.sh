@@ -36,6 +36,7 @@ RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-360}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 if [[ ! -x "${RCH_BIN}" ]]; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
     exit 1
@@ -147,7 +148,7 @@ run_suite_call() {
         local target_dir="/tmp/rch-doctor-orch-sm-${TIMESTAMP}-${run_id}-attempt${attempt}"
         local -a run_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo test --quiet --features cli --lib "${TEST_FILTER}" -- --nocapture
+            "${CARGO_BIN}" test --quiet --features cli --lib "${TEST_FILTER}" -- --nocapture
         )
 
         attempt_log="${run_log%.log}.attempt${attempt}.log"
