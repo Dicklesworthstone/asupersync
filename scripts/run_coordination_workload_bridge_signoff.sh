@@ -682,10 +682,10 @@ def build_fail_closed_diagnostics(smoke_report):
 
 
 def dependency_keys_from_cargo():
-    cargo = PROJECT_ROOT / "Cargo.toml"
+    manifest = PROJECT_ROOT / "Cargo.toml"
     keys = []
     section = ""
-    for raw in cargo.read_text(encoding="utf-8").splitlines():
+    for raw in manifest.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
