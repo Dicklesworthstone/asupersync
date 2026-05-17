@@ -14,6 +14,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONTRACT="${PROJECT_ROOT}/artifacts/mock_code_finder_verification_contract_v1.json"
 VALIDATOR="${PROJECT_ROOT}/scripts/validate_mock_code_finder_evidence.py"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600s}"
 RUN_ID="${RUN_ID:-current}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts/mock-code-finder/asupersync-zftrj9}"
@@ -101,16 +102,16 @@ scenario_command() {
     local scenario_id="$1"
     case "$scenario_id" in
         POSTGRES-COPY-REAL-SERVER-LIVE)
-            printf '%s REAL_POSTGRES_TESTS=true POSTGRES_URL=<redacted> cargo test -p asupersync --test postgres_real_server pg_real_copy_from_chunks_streams_and_recovers --features postgres,test-internals -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s REAL_POSTGRES_TESTS=true POSTGRES_URL=<redacted> %s test -p asupersync --test postgres_real_server pg_real_copy_from_chunks_streams_and_recovers --features postgres,test-internals -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         POSTGRES-COPY-WIRE-API-LIVE)
-            printf '%s cargo test -p asupersync --lib copy_from_chunks --features test-internals,postgres -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib copy_from_chunks --features test-internals,postgres -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         POSTGRES-COPY-AUDIT-DIAGNOSTICS-LIVE)
-            printf '%s cargo test -p asupersync --lib postgres_copy_from_error_audit --features test-internals,postgres -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib postgres_copy_from_error_audit --features test-internals,postgres -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         POSTGRES-COPY-CONFORMANCE-PARSER-LIVE)
-            printf '%s cargo test -p asupersync --test conformance test_postgres_copy_conformance_integration --features test-internals,postgres -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --test conformance test_postgres_copy_conformance_integration --features test-internals,postgres -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         *)
             echo "unknown scenario: $scenario_id" >&2
@@ -261,7 +262,7 @@ run_rch_command_capture() {
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" REAL_POSTGRES_TESTS=true POSTGRES_URL="${POSTGRES_URL:-}" \
                 ALLOW_NON_LOCALHOST_POSTGRES="${ALLOW_NON_LOCALHOST_POSTGRES:-}" \
-                cargo test -p asupersync --test postgres_real_server \
+                "$CARGO_BIN" test -p asupersync --test postgres_real_server \
                 pg_real_copy_from_chunks_streams_and_recovers \
                 --features postgres,test-internals -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
@@ -270,7 +271,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib copy_from_chunks \
+                "$CARGO_BIN" test -p asupersync --lib copy_from_chunks \
                 --features test-internals,postgres -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -278,7 +279,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib postgres_copy_from_error_audit \
+                "$CARGO_BIN" test -p asupersync --lib postgres_copy_from_error_audit \
                 --features test-internals,postgres -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -286,7 +287,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --test conformance \
+                "$CARGO_BIN" test -p asupersync --test conformance \
                 test_postgres_copy_conformance_integration \
                 --features test-internals,postgres -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
@@ -314,7 +315,7 @@ run_command_capture() {
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_zftrj9_postgres_copy" \
                 REAL_POSTGRES_TESTS=true POSTGRES_URL="${POSTGRES_URL:-}" \
                 ALLOW_NON_LOCALHOST_POSTGRES="${ALLOW_NON_LOCALHOST_POSTGRES:-}" \
-                cargo test -p asupersync --test postgres_real_server \
+                "$CARGO_BIN" test -p asupersync --test postgres_real_server \
                 pg_real_copy_from_chunks_streams_and_recovers \
                 --features postgres,test-internals -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
@@ -322,21 +323,21 @@ run_command_capture() {
         POSTGRES-COPY-WIRE-API-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_zftrj9_postgres_copy" \
-                cargo test -p asupersync --lib copy_from_chunks \
+                "$CARGO_BIN" test -p asupersync --lib copy_from_chunks \
                 --features test-internals,postgres -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         POSTGRES-COPY-AUDIT-DIAGNOSTICS-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_zftrj9_postgres_copy" \
-                cargo test -p asupersync --lib postgres_copy_from_error_audit \
+                "$CARGO_BIN" test -p asupersync --lib postgres_copy_from_error_audit \
                 --features test-internals,postgres -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         POSTGRES-COPY-CONFORMANCE-PARSER-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_zftrj9_postgres_copy" \
-                cargo test -p asupersync --test conformance \
+                "$CARGO_BIN" test -p asupersync --test conformance \
                 test_postgres_copy_conformance_integration \
                 --features test-internals,postgres -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
