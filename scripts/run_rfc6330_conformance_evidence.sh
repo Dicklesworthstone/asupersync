@@ -12,6 +12,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONTRACT="${PROJECT_ROOT}/artifacts/mock_code_finder_verification_contract_v1.json"
 VALIDATOR="${PROJECT_ROOT}/scripts/validate_mock_code_finder_evidence.py"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-240s}"
 RUN_ID="${RUN_ID:-current}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts/mock-code-finder/asupersync-kokw3m}"
@@ -148,12 +149,12 @@ git_state() {
 
 cli_base_command() {
     local args="$1"
-    printf 'cargo run -p asupersync-conformance --bin raptorq_rfc6330_conformance -- %s' "$args"
+    printf '%s run -p asupersync-conformance --bin raptorq_rfc6330_conformance -- %s' "$CARGO_BIN" "$args"
 }
 
 rch_command_string() {
     local args="$1"
-    printf "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_asupersync_kokw3m_rfc6330 cargo run -p asupersync-conformance --bin raptorq_rfc6330_conformance -- %s" "$args"
+    printf "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_asupersync_kokw3m_rfc6330 %s run -p asupersync-conformance --bin raptorq_rfc6330_conformance -- %s" "$CARGO_BIN" "$args"
 }
 
 write_evidence_record() {
@@ -171,7 +172,7 @@ write_evidence_record() {
     local duration_ms="${12}"
 
     cat >> "$jsonl_path" <<EOF
-{"schema_version":"${SCHEMA_VERSION}","bead_id":"${BEAD_ID}","scenario_id":"$(json_escape "$scenario_id")","subsystem":"${SUBSYSTEM}","support_class":"production_live","source_files_inspected":["conformance/src/bin/raptorq_rfc6330_conformance.rs","conformance/src/raptorq_rfc6330.rs","conformance/src/rfc6330_tests.rs","src/raptorq/rfc6330.rs","src/raptorq/systematic.rs"],"command":"$(json_escape "$command")","rch_command_if_used":"$(json_escape "$rch_command")","cargo_features":[],"test_filter":"$(json_escape "$test_filter")","env_keys_required":["ARTIFACT_ROOT","RUN_ID","RCH_BIN","RCH_WRAPPER_TIMEOUT"],"deterministic_seed_or_fixture_id":"rfc6330-cli-seed-42","input_artifact":"$(json_escape "$input_artifact")","output_artifact":"$(json_escape "$output_artifact")","expected_behavior":"$(json_escape "$expected_behavior")","actual_behavior":"$(json_escape "$actual_behavior")","verdict":"${verdict}","first_failure_line":"$(json_escape "$first_failure_line")","duration_ms":${duration_ms},"git_sha_or_tree_state":"$(git_state)","blocker_bead_id":"","evidence_quality":"live"}
+{"schema_version":"${SCHEMA_VERSION}","bead_id":"${BEAD_ID}","scenario_id":"$(json_escape "$scenario_id")","subsystem":"${SUBSYSTEM}","support_class":"production_live","source_files_inspected":["conformance/src/bin/raptorq_rfc6330_conformance.rs","conformance/src/raptorq_rfc6330.rs","conformance/src/rfc6330_tests.rs","src/raptorq/rfc6330.rs","src/raptorq/systematic.rs"],"command":"$(json_escape "$command")","rch_command_if_used":"$(json_escape "$rch_command")","cargo_features":[],"test_filter":"$(json_escape "$test_filter")","env_keys_required":["ARTIFACT_ROOT","RUN_ID","RCH_BIN","CARGO_BIN","RCH_WRAPPER_TIMEOUT"],"deterministic_seed_or_fixture_id":"rfc6330-cli-seed-42","input_artifact":"$(json_escape "$input_artifact")","output_artifact":"$(json_escape "$output_artifact")","expected_behavior":"$(json_escape "$expected_behavior")","actual_behavior":"$(json_escape "$actual_behavior")","verdict":"${verdict}","first_failure_line":"$(json_escape "$first_failure_line")","duration_ms":${duration_ms},"git_sha_or_tree_state":"$(git_state)","blocker_bead_id":"","evidence_quality":"live"}
 EOF
 }
 
@@ -185,10 +186,10 @@ run_command_capture() {
         timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
             CARGO_TARGET_DIR="$target_dir" \
-            cargo run -p asupersync-conformance --bin raptorq_rfc6330_conformance -- $args \
+            "$CARGO_BIN" run -p asupersync-conformance --bin raptorq_rfc6330_conformance -- $args \
             > "$stdout_path" 2> "$stderr_path"
     else
-        cargo run -p asupersync-conformance --bin raptorq_rfc6330_conformance -- $args \
+        "$CARGO_BIN" run -p asupersync-conformance --bin raptorq_rfc6330_conformance -- $args \
             > "$stdout_path" 2> "$stderr_path"
     fi
 }
