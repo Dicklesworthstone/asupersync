@@ -37,6 +37,7 @@ RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-240}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 if [[ ! -x "${RCH_BIN}" ]]; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
     exit 1
@@ -95,7 +96,7 @@ run_export_call() {
         local target_dir="/tmp/rch-doctor-frankensuite-export-${TIMESTAMP}-${run_id}-attempt${attempt}"
         local -a export_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo run --quiet --features cli --bin asupersync --
+            "${CARGO_BIN}" run --quiet --features cli --bin asupersync --
             --format json
             --color never
             doctor franken-export
@@ -155,7 +156,7 @@ run_report_export_call() {
         local target_dir="/tmp/rch-doctor-integration-export-${TIMESTAMP}-attempt${attempt}"
         local -a export_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo run --quiet --features cli --bin asupersync --
+            "${CARGO_BIN}" run --quiet --features cli --bin asupersync --
             --format json
             --color never
             doctor report-export
