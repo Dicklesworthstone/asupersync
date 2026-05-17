@@ -16,6 +16,9 @@ OUT_DIR="${1:-$PROJECT_DIR/target/messaging-broker-proof/$BEAD_ID}"
 LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
+RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 EXPECTED_SCENARIOS=(
   "nats-pub-sub-roundtrip"
@@ -227,7 +230,7 @@ env \
   CARGO_PROFILE_TEST_DEBUG=0 \
   "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_${bead_id}_${label}" \
   "RUSTFLAGS=-C debuginfo=0" \
-  cargo test -p asupersync \
+  "${CARGO_BIN:-cargo}" test -p asupersync \
     --test "$target" \
     --features test-internals \
     -- \
@@ -252,7 +255,8 @@ run_cargo_test() {
     RCH_FORCE_REMOTE=1
     RCH_QUEUE_WHEN_BUSY=1
     RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900
-    rch exec --
+    "CARGO_BIN=$CARGO_BIN"
+    "$RCH_BIN" exec --
     bash
     -lc
     "$remote_script"
@@ -270,7 +274,7 @@ run_cargo_test() {
   local status="${PIPESTATUS[0]}"
   set -e
 
-  if grep -Eq '^\[RCH\] local \(|falling back to local' "$cmd_log"; then
+  if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$cmd_log"; then
     log "rch_local_fallback_detected[$label]=true"
     return 125
   fi
