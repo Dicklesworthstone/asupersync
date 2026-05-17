@@ -15,6 +15,8 @@ INPUT_JSONL=""
 EXECUTE_RCH=0
 CHECK_RCH_LOG=""
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|local fallback|fallback to local|falling back to local|executing locally'
 
 usage() {
   cat <<'USAGE'
@@ -655,7 +657,7 @@ raise SystemExit(0 if not validation_errors else 1)
 PY
 
 if [[ -n "$CHECK_RCH_LOG" ]]; then
-  if grep -Eiq 'local fallback|fallback to local|executing locally' "$CHECK_RCH_LOG"; then
+  if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$CHECK_RCH_LOG"; then
     printf '{"accepted":false,"issue_kinds":["local_rch_fallback"],"path":%s}\n' \
       "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$CHECK_RCH_LOG")" >&2
     exit 86
@@ -674,7 +676,7 @@ if [[ "$EXECUTE_RCH" -eq 1 ]]; then
     CARGO_INCREMENTAL=0
     CARGO_PROFILE_TEST_DEBUG=0
     "RUSTFLAGS=-C debuginfo=0"
-    cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture
+    "$CARGO_BIN" test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture
   )
   printf '%q ' "${RCH_CMD[@]}" > "$RCH_LOG"
   printf '\n' >> "$RCH_LOG"
@@ -682,7 +684,7 @@ if [[ "$EXECUTE_RCH" -eq 1 ]]; then
   "${RCH_CMD[@]}" 2>&1 | tee -a "$RCH_LOG"
   rch_status=${PIPESTATUS[0]}
   set -e
-  if grep -Eiq 'local fallback|fallback to local|executing locally' "$RCH_LOG"; then
+  if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RCH_LOG"; then
     exit 86
   fi
   exit "$rch_status"
