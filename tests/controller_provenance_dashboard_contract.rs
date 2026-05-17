@@ -326,6 +326,26 @@ fn controller_provenance_dashboard_rch_rows_use_target_dirs() {
 }
 
 #[test]
+fn controller_provenance_dashboard_runner_rejects_full_rch_fallback_marker_set() {
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/run_controller_provenance_dashboard_smoke.sh");
+    let script = fs::read_to_string(&script_path).expect("runner script must load");
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#,
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+        "rch local fallback detected; refusing local cargo execution",
+    ] {
+        assert!(script.contains(token), "runner missing token: {token}");
+    }
+}
+
+#[test]
 fn controller_provenance_dashboard_rejects_missing_child_rows() {
     let mut request = base_request();
     request

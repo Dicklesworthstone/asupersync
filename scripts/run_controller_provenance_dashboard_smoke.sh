@@ -9,6 +9,7 @@ RUN_ID="${CONTROLLER_PROVENANCE_DASHBOARD_RUN_ID:-manual}"
 MODE="dry-run"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-900}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
     cat <<'USAGE'
@@ -157,7 +158,7 @@ if [[ "$MODE" == "execute" ]]; then
     COMMAND_STATUS=$?
     set -e
 
-    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH"; then
+    if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$RUN_LOG_PATH"; then
         COMMAND_STATUS=86
         SCRIPT_EXIT_CODE=86
         STATUS="failed"

@@ -29,6 +29,8 @@ const UNIFIED_ADMISSION_BROWNOUT_REPORT_SCHEMA_VERSION: &str =
     "unified-admission-brownout-report-v1";
 const UNIFIED_ADMISSION_BROWNOUT_PROJECTION_SCHEMA_VERSION: &str =
     "unified-admission-brownout-projection-v1";
+const UNIFIED_ADMISSION_BROWNOUT_RUNNER_SCRIPT: &str =
+    include_str!("../scripts/run_unified_admission_brownout_smoke.sh");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UnifiedAdmissionBrownoutSmokeContract {
@@ -755,6 +757,31 @@ fn disabled_policy_matches_conservative_fully_admitted_baseline() {
             .reason_codes
             .contains(&UnifiedAdmissionBrownoutReason::Disabled)
     );
+}
+
+#[test]
+fn unified_admission_brownout_runner_rejects_full_rch_fallback_marker_set() {
+    let matcher_uses = UNIFIED_ADMISSION_BROWNOUT_RUNNER_SCRIPT
+        .matches(r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#)
+        .count();
+    assert!(
+        matcher_uses >= 1,
+        "runner must use the shared local fallback matcher at its rch gate"
+    );
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+    ] {
+        assert!(
+            UNIFIED_ADMISSION_BROWNOUT_RUNNER_SCRIPT.contains(token),
+            "runner missing local fallback marker: {token}"
+        );
+    }
 }
 
 #[test]
