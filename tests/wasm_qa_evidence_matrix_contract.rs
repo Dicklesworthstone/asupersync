@@ -814,6 +814,26 @@ fn runner_script_exists_and_declares_modes() {
 }
 
 #[test]
+fn runner_rejects_full_rch_fallback_marker_set() {
+    let root = repo_root();
+    let script_path = root.join(RUNNER_SCRIPT_PATH);
+    let script = std::fs::read_to_string(&script_path).expect("runner script must load");
+
+    for token in [
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#,
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+        "rch local fallback detected; refusing local cargo execution",
+    ] {
+        assert!(script.contains(token), "runner missing token: {token}");
+    }
+}
+
+#[test]
 fn runner_is_wired_into_primary_e2e_orchestrator() {
     let root = repo_root();
     let script_path = root.join(PRIMARY_E2E_SCRIPT_PATH);
