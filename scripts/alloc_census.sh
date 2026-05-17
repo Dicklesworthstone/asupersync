@@ -19,6 +19,7 @@ OUT_DIR="baselines/alloc_census"
 CMD=()
 FLAMEGRAPH=0
 ALLOW_LOCAL_CARGO="${ALLOW_LOCAL_CARGO:-0}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 
 usage() {
     cat <<'USAGE'
@@ -117,7 +118,7 @@ if [[ "$FLAMEGRAPH" -eq 1 ]]; then
                 echo "WARN: local cargo flamegraph requires ALLOW_LOCAL_CARGO=1; skipping" >&2
                 FLAMEGRAPH_FILE=""
             else
-                cargo flamegraph --output "$FLAMEGRAPH_FILE" -- ${CMD[@]:1}
+                "$CARGO_BIN" flamegraph --output "$FLAMEGRAPH_FILE" -- ${CMD[@]:1}
             fi
         else
             echo "WARN: flamegraph capture only supports cargo commands; skipping" >&2
