@@ -16,6 +16,7 @@
 # Environment Variables:
 #   RUST_LOG       - Standard Rust logging level
 #   RCH_BIN        - Remote compilation helper executable (default: rch)
+#   CARGO_BIN      - Cargo executable routed through rch (default: cargo)
 
 set -euo pipefail
 
@@ -26,6 +27,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG_DIR="$OUTPUT_DIR/$TIMESTAMP"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 CARGO_TARGET_DIR_BASE="${CARGO_TARGET_DIR_BASE:-${TMPDIR:-/tmp}/rch_target_net_hardening_e2e}"
 DRY_RUN=0
 LOCAL_FALLBACKS=0
@@ -84,7 +86,7 @@ run_cargo() {
         "RUST_LOG=${RUST_LOG}"
         "RUST_BACKTRACE=${RUST_BACKTRACE}"
         "TEST_SEED=${TEST_SEED}"
-        cargo
+        "${CARGO_BIN}"
         "$@"
     )
 
