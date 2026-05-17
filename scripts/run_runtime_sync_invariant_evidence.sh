@@ -12,6 +12,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONTRACT="${PROJECT_ROOT}/artifacts/mock_code_finder_verification_contract_v1.json"
 VALIDATOR="${PROJECT_ROOT}/scripts/validate_mock_code_finder_evidence.py"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-240s}"
 RUN_ID="${RUN_ID:-current}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts/mock-code-finder/asupersync-a5d34a}"
@@ -94,22 +95,22 @@ scenario_command() {
     local scenario_id="$1"
     case "$scenario_id" in
         RUNTIME-SCHEDULER-SHUTDOWN-BOUNDARY-LIVE)
-            printf '%s cargo test -p asupersync --lib scheduler_shutdown -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib scheduler_shutdown -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         RUNTIME-FINALIZER-QUIESCENCE-LIVE)
-            printf '%s cargo test -p asupersync --lib cancel_drain_finalize_nested_regions -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib cancel_drain_finalize_nested_regions -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         RUNTIME-FINALIZER-DRAIN-SOURCE-LIVE)
-            printf '%s cargo test -p asupersync --lib drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         RUNTIME-OBLIGATION-CANCEL-DRAIN-FINALIZE-LIVE)
-            printf '%s cargo test -p asupersync --lib multiple_tasks_obligations_cancel_drain_finalize -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib multiple_tasks_obligations_cancel_drain_finalize -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         SYNC-RWLOCK-UPGRADE-CANCEL-LIVE)
-            printf '%s cargo test -p asupersync --lib audit_rwlock_no_read_to_write_upgrade -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib audit_rwlock_no_read_to_write_upgrade -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         SYNC-RWLOCK-WRITER-FAIRNESS-LIVE)
-            printf '%s cargo test -p asupersync --lib audit_rwlock_writer_starvation_prevention -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib audit_rwlock_writer_starvation_prevention -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         CHANNEL-ONESHOT-TRIPWIRE-SCAN-LIVE)
             printf 'bash scripts/run_runtime_sync_invariant_evidence.sh --internal-oneshot-scan\n'
@@ -247,7 +248,7 @@ write_evidence_record() {
     local source_files_json="${13}"
 
     cat >> "$jsonl_path" <<EOF
-{"schema_version":"${SCHEMA_VERSION}","bead_id":"${BEAD_ID}","scenario_id":"$(json_escape "$scenario_id")","subsystem":"${SUBSYSTEM}","support_class":"production_live","source_files_inspected":${source_files_json},"command":"$(json_escape "$command")","rch_command_if_used":"$(json_escape "$rch_command")","cargo_features":["test-internals"],"test_filter":"$(json_escape "$test_filter")","env_keys_required":["ARTIFACT_ROOT","RUN_ID","RCH_BIN","RCH_WRAPPER_TIMEOUT"],"deterministic_seed_or_fixture_id":"runtime-sync-a5d34a-fixed-filters","input_artifact":"$(json_escape "$input_artifact")","output_artifact":"$(json_escape "$output_artifact")","expected_behavior":"$(json_escape "$expected_behavior")","actual_behavior":"$(json_escape "$actual_behavior")","verdict":"${verdict}","first_failure_line":"$(json_escape "$first_failure_line")","duration_ms":${duration_ms},"git_sha_or_tree_state":"$(git_state)","blocker_bead_id":"","evidence_quality":"live"}
+{"schema_version":"${SCHEMA_VERSION}","bead_id":"${BEAD_ID}","scenario_id":"$(json_escape "$scenario_id")","subsystem":"${SUBSYSTEM}","support_class":"production_live","source_files_inspected":${source_files_json},"command":"$(json_escape "$command")","rch_command_if_used":"$(json_escape "$rch_command")","cargo_features":["test-internals"],"test_filter":"$(json_escape "$test_filter")","env_keys_required":["ARTIFACT_ROOT","RUN_ID","RCH_BIN","CARGO_BIN","RCH_WRAPPER_TIMEOUT"],"deterministic_seed_or_fixture_id":"runtime-sync-a5d34a-fixed-filters","input_artifact":"$(json_escape "$input_artifact")","output_artifact":"$(json_escape "$output_artifact")","expected_behavior":"$(json_escape "$expected_behavior")","actual_behavior":"$(json_escape "$actual_behavior")","verdict":"${verdict}","first_failure_line":"$(json_escape "$first_failure_line")","duration_ms":${duration_ms},"git_sha_or_tree_state":"$(git_state)","blocker_bead_id":"","evidence_quality":"live"}
 EOF
 }
 
@@ -280,21 +281,21 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib scheduler_shutdown -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib scheduler_shutdown -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         RUNTIME-FINALIZER-QUIESCENCE-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib cancel_drain_finalize_nested_regions -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib cancel_drain_finalize_nested_regions -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         RUNTIME-FINALIZER-DRAIN-SOURCE-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib \
+                "$CARGO_BIN" test -p asupersync --lib \
                 drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -302,7 +303,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib \
+                "$CARGO_BIN" test -p asupersync --lib \
                 multiple_tasks_obligations_cancel_drain_finalize -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -310,14 +311,14 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib audit_rwlock_no_read_to_write_upgrade -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib audit_rwlock_no_read_to_write_upgrade -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         SYNC-RWLOCK-WRITER-FAIRNESS-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib audit_rwlock_writer_starvation_prevention -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib audit_rwlock_writer_starvation_prevention -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         *)
@@ -337,39 +338,39 @@ run_local_command_capture() {
         RUNTIME-SCHEDULER-SHUTDOWN-BOUNDARY-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib scheduler_shutdown -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib scheduler_shutdown -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         RUNTIME-FINALIZER-QUIESCENCE-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib cancel_drain_finalize_nested_regions -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib cancel_drain_finalize_nested_regions -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         RUNTIME-FINALIZER-DRAIN-SOURCE-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib \
+                "$CARGO_BIN" test -p asupersync --lib \
                 drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         RUNTIME-OBLIGATION-CANCEL-DRAIN-FINALIZE-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib \
+                "$CARGO_BIN" test -p asupersync --lib \
                 multiple_tasks_obligations_cancel_drain_finalize -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         SYNC-RWLOCK-UPGRADE-CANCEL-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib audit_rwlock_no_read_to_write_upgrade -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib audit_rwlock_no_read_to_write_upgrade -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         SYNC-RWLOCK-WRITER-FAIRNESS-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib audit_rwlock_writer_starvation_prevention -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib audit_rwlock_writer_starvation_prevention -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         *)
