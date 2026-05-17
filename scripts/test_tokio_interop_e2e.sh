@@ -15,6 +15,7 @@
 #   TEST_SEED      - deterministic seed override (default: 0x7011C0DE)
 #   SKIP_CLIPPY    - set to 1 to skip clippy gate (default: 0)
 #   RCH_BIN        - remote compilation helper executable (default: rch)
+#   CARGO_BIN      - cargo executable passed to rch (default: cargo)
 
 set -euo pipefail
 
@@ -28,7 +29,9 @@ ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 COMPAT_LOG="${ARTIFACT_DIR}/compatibility_log.jsonl"
 SUMMARY_FILE="${ARTIFACT_DIR}/e2e_summary.md"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 CARGO_TARGET_DIR_BASE="${CARGO_TARGET_DIR_BASE:-${TMPDIR:-/tmp}/rch_target_tokio_interop_e2e}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 DRY_RUN=0
 
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -88,7 +91,7 @@ record_rch_local_fallback() {
 
 reject_rch_local_fallback_log() {
     local log_path="$1"
-    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+    if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$log_path" 2>/dev/null; then
         echo "  FATAL: rch local fallback detected; refusing local cargo execution" | tee -a "$LOG_FILE"
         record_rch_local_fallback
         log_compat "FAIL" "rch-local-fallback" "all" "rch local fallback detected" "0"
@@ -110,7 +113,7 @@ run_cargo() {
         "RUST_LOG=${RUST_LOG}"
         "RUST_BACKTRACE=${RUST_BACKTRACE}"
         "TEST_SEED=${TEST_SEED}"
-        cargo
+        "$CARGO_BIN"
         "$@"
     )
 
@@ -328,7 +331,7 @@ fi
 
 echo "" | tee -a "$LOG_FILE"
 
-if grep -Eq '^\[RCH\] local \(|falling back to local' "$LOG_FILE" "$UNIT_LOG" "$ARTIFACT_DIR"/scenario_*.log 2>/dev/null; then
+if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$LOG_FILE" "$UNIT_LOG" "$ARTIFACT_DIR"/scenario_*.log 2>/dev/null; then
     echo "  ERROR: rch local fallback detected" | tee -a "$LOG_FILE"
     record_rch_local_fallback
     log_compat "FAIL" "rch-local-fallback" "all" "rch local fallback detected" "0"
