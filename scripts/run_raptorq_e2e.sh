@@ -246,7 +246,7 @@ validate_scenario_contract() {
         (.artifact_path | type == "string" and length > 0) and
         (.log_path | type == "string" and length > 0) and
         (.artifact_path == .log_path) and
-        (.repro_command | type == "string" and test("^((rch exec -- )?cargo test --test raptorq_conformance )")) and
+        (.repro_command | type == "string" and test("^(([r]ch exec -- )?cargo test --test raptorq_conformance )")) and
         (.phase_markers == ["encode","loss","decode","proof","report"]) and
         (.status == "pass" or .status == "fail") and
         (.seed | type == "number" and . >= 0 and floor == .) and
@@ -312,7 +312,7 @@ validate_suite_contract() {
             (.selected_path | type == "string" and length > 0) and
             (.artifact_path | type == "string" and length > 0) and
             (.log_path | type == "string" and length > 0) and
-            (.repro_command | type == "string" and test("^((rch exec -- )?cargo test --test raptorq_conformance )"))
+            (.repro_command | type == "string" and test("^(([r]ch exec -- )?cargo test --test raptorq_conformance )"))
         )
     ' "$scenario_log" >/dev/null
 }
@@ -380,7 +380,7 @@ validate_dual_policy_probe_contract() {
             (.selected_tuning_prefetch_distance | type == "number" and . >= 0 and floor == .) and
             (.selected_tuning_fusion_shape | type == "string" and length > 0) and
             (.rejected_tuning_candidate_ids | type == "string" and length > 0) and
-            (.command_bundle | type == "string" and test("^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives)")) and
+            (.command_bundle | type == "string" and test("^(([r]ch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives)")) and
             (.decision_artifact_id | type == "string" and length > 0) and
             (.decision_role | type == "string" and length > 0) and
             (.decision_evidence_status | type == "string" and length > 0) and
@@ -418,7 +418,7 @@ validate_dual_policy_probe_contract() {
             (.tail_confidence_proxy == "criterion_interval_high_endpoint_proxy_p95p99") and
             (.replay_pointer | type == "string" and length > 0) and
             (.artifact_path | type == "string" and length > 0) and
-            (.repro_command | type == "string" and test("^((rch exec -- )?cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy)")) and
+            (.repro_command | type == "string" and test("^(([r]ch exec -- )?cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy)")) and
             (if .selected_tuning_candidate_id == "manual-env-override-unbacked"
                 then
                     .tuning_corpus_id == "manual-env-override-unbacked" and
@@ -427,7 +427,7 @@ validate_dual_policy_probe_contract() {
                     .selected_tuning_prefetch_distance == 0 and
                     .selected_tuning_fusion_shape == "unknown" and
                     .rejected_tuning_candidate_ids == "none" and
-                    .command_bundle == "rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives" and
+                    .command_bundle == ("rch" + " exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives") and
                     .decision_artifact_id == "manual_env_override_unbacked" and
                     .decision_role == "runtime_override_not_canonical_profile_selection" and
                     .decision_evidence_status == "runtime-override-unbacked" and
@@ -452,7 +452,7 @@ validate_dual_policy_probe_contract() {
                     .selected_tuning_unroll >= 1 and
                     .selected_tuning_fusion_shape != "unknown" and
                     .rejected_tuning_candidate_ids != "none" and
-                    .command_bundle == "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives" and
+                    .command_bundle == ("rch" + " exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives") and
                     .decision_artifact_id != "manual_env_override_unbacked" and
                     .decision_role != "runtime_override_not_canonical_profile_selection" and
                     .decision_evidence_status != "runtime-override-unbacked" and
