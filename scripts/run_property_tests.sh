@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${ROOT_DIR}/target/proptest-results"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_property_tests}"
 DRY_RUN=0
 
@@ -74,7 +75,7 @@ TEST_COMMAND=(
     "PROPTEST_MAX_SHRINK_ITERS=${PROPTEST_MAX_SHRINK_ITERS}"
     "ASUPERSYNC_PROPTEST_SEED=${ASUPERSYNC_PROPTEST_SEED}"
     "ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS=${ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS}"
-    cargo
+    "${CARGO_BIN}"
     test
     --test
     algebraic_laws
