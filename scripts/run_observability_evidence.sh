@@ -12,6 +12,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONTRACT="${PROJECT_ROOT}/artifacts/mock_code_finder_verification_contract_v1.json"
 VALIDATOR="${PROJECT_ROOT}/scripts/validate_mock_code_finder_evidence.py"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600s}"
 RUN_ID="${RUN_ID:-current}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts/mock-code-finder/asupersync-uw9zg9}"
@@ -98,34 +99,34 @@ scenario_command() {
     local scenario_id="$1"
     case "$scenario_id" in
         OTEL-HISTOGRAM-AGGREGATOR-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_histogram_aggregator_conformance\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_histogram_aggregator_conformance\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-HISTOGRAM-RECORD-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_histogram_record_conformance\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_histogram_record_conformance\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-RESOURCE-DETECTION-MERGE-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_resource_detection_conformance\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_resource_detection_conformance\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-LOG-SEVERITY-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_logs_severity_range_conformance\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_logs_severity_range_conformance\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-TRACE-ID-RANDOMNESS-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_trace_id_randomness_conformance\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_trace_id_randomness_conformance\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-SPAN-ID-RANDOMNESS-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_span_id_randomness_conformance\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_span_id_randomness_conformance\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-METRIC-BATCHING-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_metric_exporter_batching_conformance\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_metric_exporter_batching_conformance\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-TRACE-CONTEXT-PROPAGATION-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_trace_context_propagation_conformance -- all\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_trace_context_propagation_conformance -- all\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-W3C-BAGGAGE-PRODUCTION-LIVE)
-            printf '%s cargo test -p asupersync --lib baggage_ --features test-internals,tracing-integration -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib baggage_ --features test-internals,tracing-integration -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-TAIL-SAMPLING-UNSUPPORTED)
-            printf '%s cargo test -p asupersync --lib tail_based_sampling_scope --features metrics,tracing-integration,test-internals -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib tail_based_sampling_scope --features metrics,tracing-integration,test-internals -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-EVIDENCE-REDACTION-SELF-TEST-LIVE)
             printf 'python3 scripts/validate_mock_code_finder_evidence.py --contract artifacts/mock_code_finder_verification_contract_v1.json --self-test\n'
@@ -260,44 +261,44 @@ rch_invocation() {
     local scenario_id="$1"
     case "$scenario_id" in
         OTEL-HISTOGRAM-AGGREGATOR-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_histogram_aggregator_conformance\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_histogram_aggregator_conformance\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-HISTOGRAM-RECORD-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_histogram_record_conformance\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_histogram_record_conformance\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-RESOURCE-DETECTION-MERGE-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_resource_detection_conformance\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_resource_detection_conformance\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-LOG-SEVERITY-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_logs_severity_range_conformance\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_logs_severity_range_conformance\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-TRACE-ID-RANDOMNESS-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_trace_id_randomness_conformance\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_trace_id_randomness_conformance\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-SPAN-ID-RANDOMNESS-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_span_id_randomness_conformance\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_span_id_randomness_conformance\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-METRIC-BATCHING-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_metric_exporter_batching_conformance\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_metric_exporter_batching_conformance\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-TRACE-CONTEXT-PROPAGATION-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin otel_trace_context_propagation_conformance -- all\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin otel_trace_context_propagation_conformance -- all\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-W3C-BAGGAGE-PRODUCTION-LIVE)
-            printf '%s cargo test -p asupersync --lib baggage_ --features test-internals,tracing-integration -- --nocapture\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib baggage_ --features test-internals,tracing-integration -- --nocapture\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         OTEL-TAIL-SAMPLING-UNSUPPORTED)
-            printf '%s cargo test -p asupersync --lib tail_based_sampling_scope --features metrics,tracing-integration,test-internals -- --nocapture\n' \
-                "rch exec -- $(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --lib tail_based_sampling_scope --features metrics,tracing-integration,test-internals -- --nocapture\n' \
+                "rch exec -- $(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         *)
             echo "unknown rch scenario: $scenario_id" >&2
@@ -325,7 +326,7 @@ write_evidence_record() {
     local evidence_quality="${16}"
 
     cat >> "$jsonl_path" <<EOF
-{"schema_version":"${SCHEMA_VERSION}","bead_id":"${BEAD_ID}","scenario_id":"$(json_escape "$scenario_id")","subsystem":"${SUBSYSTEM}","support_class":"${support_class}","source_files_inspected":${source_files_json},"command":"$(json_escape "$command")","rch_command_if_used":"$(json_escape "$rch_command")","cargo_features":["metrics","test-internals","tracing-integration"],"test_filter":"$(json_escape "$test_filter")","env_keys_required":["ARTIFACT_ROOT","RUN_ID","RCH_BIN","RCH_WRAPPER_TIMEOUT"],"deterministic_seed_or_fixture_id":"otel-w3c-uw9zg9-fixed-scenarios","input_artifact":"$(json_escape "$input_artifact")","output_artifact":"$(json_escape "$output_artifact")","expected_behavior":"$(json_escape "$expected_behavior")","actual_behavior":"$(json_escape "$actual_behavior")","verdict":"${verdict}","first_failure_line":"$(json_escape "$first_failure_line")","duration_ms":${duration_ms},"git_sha_or_tree_state":"$(git_state)","blocker_bead_id":"$(json_escape "$blocker_bead_id")","evidence_quality":"${evidence_quality}"}
+{"schema_version":"${SCHEMA_VERSION}","bead_id":"${BEAD_ID}","scenario_id":"$(json_escape "$scenario_id")","subsystem":"${SUBSYSTEM}","support_class":"${support_class}","source_files_inspected":${source_files_json},"command":"$(json_escape "$command")","rch_command_if_used":"$(json_escape "$rch_command")","cargo_features":["metrics","test-internals","tracing-integration"],"test_filter":"$(json_escape "$test_filter")","env_keys_required":["ARTIFACT_ROOT","RUN_ID","RCH_BIN","CARGO_BIN","RCH_WRAPPER_TIMEOUT"],"deterministic_seed_or_fixture_id":"otel-w3c-uw9zg9-fixed-scenarios","input_artifact":"$(json_escape "$input_artifact")","output_artifact":"$(json_escape "$output_artifact")","expected_behavior":"$(json_escape "$expected_behavior")","actual_behavior":"$(json_escape "$actual_behavior")","verdict":"${verdict}","first_failure_line":"$(json_escape "$first_failure_line")","duration_ms":${duration_ms},"git_sha_or_tree_state":"$(git_state)","blocker_bead_id":"$(json_escape "$blocker_bead_id")","evidence_quality":"${evidence_quality}"}
 EOF
 }
 
@@ -344,61 +345,61 @@ run_rch_command_capture() {
         OTEL-HISTOGRAM-AGGREGATOR-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_histogram_aggregator_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_histogram_aggregator_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-HISTOGRAM-RECORD-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_histogram_record_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_histogram_record_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-RESOURCE-DETECTION-MERGE-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_resource_detection_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_resource_detection_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-LOG-SEVERITY-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_logs_severity_range_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_logs_severity_range_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-TRACE-ID-RANDOMNESS-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_trace_id_randomness_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_trace_id_randomness_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-SPAN-ID-RANDOMNESS-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_span_id_randomness_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_span_id_randomness_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-METRIC-BATCHING-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_metric_exporter_batching_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_metric_exporter_batching_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-TRACE-CONTEXT-PROPAGATION-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_trace_context_propagation_conformance -- all \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_trace_context_propagation_conformance -- all \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-W3C-BAGGAGE-PRODUCTION-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib baggage_ --features test-internals,tracing-integration -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib baggage_ --features test-internals,tracing-integration -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-TAIL-SAMPLING-UNSUPPORTED)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 \
                 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib tail_based_sampling_scope --features metrics,tracing-integration,test-internals -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib tail_based_sampling_scope --features metrics,tracing-integration,test-internals -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         *)
@@ -418,61 +419,61 @@ run_local_command_capture() {
         OTEL-HISTOGRAM-AGGREGATOR-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_histogram_aggregator_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_histogram_aggregator_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-HISTOGRAM-RECORD-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_histogram_record_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_histogram_record_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-RESOURCE-DETECTION-MERGE-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_resource_detection_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_resource_detection_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-LOG-SEVERITY-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_logs_severity_range_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_logs_severity_range_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-TRACE-ID-RANDOMNESS-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_trace_id_randomness_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_trace_id_randomness_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-SPAN-ID-RANDOMNESS-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_span_id_randomness_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_span_id_randomness_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-METRIC-BATCHING-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_metric_exporter_batching_conformance \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_metric_exporter_batching_conformance \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-TRACE-CONTEXT-PROPAGATION-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin otel_trace_context_propagation_conformance -- all \
+                "$CARGO_BIN" run -p asupersync-conformance --bin otel_trace_context_propagation_conformance -- all \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-W3C-BAGGAGE-PRODUCTION-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib baggage_ --features test-internals,tracing-integration -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib baggage_ --features test-internals,tracing-integration -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-TAIL-SAMPLING-UNSUPPORTED)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib tail_based_sampling_scope --features metrics,tracing-integration,test-internals -- --nocapture \
+                "$CARGO_BIN" test -p asupersync --lib tail_based_sampling_scope --features metrics,tracing-integration,test-internals -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         OTEL-EVIDENCE-REDACTION-SELF-TEST-LIVE)
