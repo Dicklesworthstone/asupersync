@@ -14,6 +14,7 @@
 #   RUST_BACKTRACE - 1 to enable backtraces (default: 1)
 #   TEST_SEED      - deterministic seed override (default: 0xDEADBEEF)
 #   RCH_BIN        - remote compilation helper executable (default: rch)
+#   CARGO_BIN      - Cargo executable routed through rch (default: cargo)
 #
 # Pass/Fail Semantics:
 #   PASS when cargo test exits 0 and no failure patterns are detected.
@@ -33,6 +34,7 @@ RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG_FILE="${OUTPUT_DIR}/t6_data_path_e2e_${TIMESTAMP}.log"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_t6_data_path_e2e}"
 DRY_RUN=0
 LOCAL_FALLBACKS=0
@@ -121,7 +123,7 @@ CHECK_COMMAND=(
     "RUST_LOG=${RUST_LOG}"
     "RUST_BACKTRACE=${RUST_BACKTRACE}"
     "TEST_SEED=${TEST_SEED}"
-    cargo
+    "${CARGO_BIN}"
     check
     --test
     e2e_t6_data_path
@@ -161,7 +163,7 @@ TEST_COMMAND=(
     "RUST_LOG=${RUST_LOG}"
     "RUST_BACKTRACE=${RUST_BACKTRACE}"
     "TEST_SEED=${TEST_SEED}"
-    cargo
+    "${CARGO_BIN}"
     test
     "${CARGO_ARGS[@]}"
     --
