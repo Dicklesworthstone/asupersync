@@ -16,6 +16,9 @@ LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
 BEAD_ID="asupersync-1xxmyo"
+RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 EXPECTED_SCENARIOS=(
   "static-only-rejection"
@@ -39,7 +42,7 @@ log() {
 }
 
 reject_rch_local_fallback_log() {
-  if grep -Eq '^\[RCH\] local \(|falling back to local' "$LOG_FILE" 2>/dev/null; then
+  if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$LOG_FILE" 2>/dev/null; then
     log "rch_local_fallback=true"
     echo "rch local fallback detected; refusing local cargo execution" > "$OUT_DIR/rch_local_fallback.txt"
     exit 86
@@ -51,13 +54,13 @@ GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
 RCH_TARGET_DIR="${ASUPERSYNC_HTTP3_QPACK_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_http3_qpack_instruction_proof}"
 
 CMD=(
-  rch exec --
+  "$RCH_BIN" exec --
   env
   "CARGO_TARGET_DIR=$RCH_TARGET_DIR"
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
-  cargo test -p asupersync
+  "$CARGO_BIN" test -p asupersync
   --lib
   --features test-internals,http3
   qpack_instruction_stream
