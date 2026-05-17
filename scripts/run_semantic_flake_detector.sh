@@ -103,6 +103,8 @@ mkdir -p "$REPORT_DIR"
 : > "$EVENTS_FILE"
 
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 declare -A SUITE_WITNESS
 declare -A SUITE_SCENARIO
 
@@ -140,7 +142,7 @@ build_suite_command_argv() {
         "CARGO_PROFILE_TEST_DEBUG=0"
         "RUSTFLAGS=-D warnings -C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_flake_${safe_suite}"
-        cargo
+        "$CARGO_BIN"
         test
         -p
         asupersync
@@ -161,7 +163,7 @@ build_suite_command_argv() {
         "CARGO_PROFILE_TEST_DEBUG=0"
         "RUSTFLAGS=-D warnings -C debuginfo=0"
         "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_flake_${safe_suite}"
-        cargo
+        "$CARGO_BIN"
         test
         -p
         asupersync
@@ -254,7 +256,7 @@ for suite in "${SUITES[@]}"; do
     end_ns="$(date +%s%N)"
     duration_ms=$(((end_ns - start_ns) / 1000000))
 
-    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+    if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$log_file" 2>/dev/null; then
       echo "rch local fallback detected; refusing local cargo execution" > "$suite_dir/run_${i}_rch_local_fallback.txt"
       exit_code=86
     fi
