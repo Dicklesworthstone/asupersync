@@ -12,6 +12,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONTRACT="${PROJECT_ROOT}/artifacts/mock_code_finder_verification_contract_v1.json"
 VALIDATOR="${PROJECT_ROOT}/scripts/validate_mock_code_finder_evidence.py"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600s}"
 RUN_ID="${RUN_ID:-current}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts/mock-code-finder/asupersync-hxi1ga}"
@@ -94,22 +95,22 @@ scenario_command() {
     local scenario_id="$1"
     case "$scenario_id" in
         H2-LIVE-ADAPTER-INTEGRATION-LIVE)
-            printf '%s cargo test -p asupersync --test conformance test_h2_conformance_integration --features test-internals -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s %s test -p asupersync --test conformance test_h2_conformance_integration --features test-internals -- --nocapture\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         H2-GOAWAY-STATE-MACHINE-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin h2_goaway_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin h2_goaway_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         H2-PING-ACK-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin h2_ping_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin h2_ping_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         H2-DATA-END-STREAM-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin h2_data_end_stream_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin h2_data_end_stream_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         H2-PRIORITY-STATE-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin h2_priority_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin h2_priority_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         H2-ENABLE-PUSH-LIVE)
-            printf '%s cargo run -p asupersync-conformance --bin h2_enable_push_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
+            printf '%s %s run -p asupersync-conformance --bin h2_enable_push_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)" "$CARGO_BIN"
             ;;
         H2-SIMULATE-HELPER-SCAN-LIVE)
             printf 'bash scripts/run_h2_conformance_evidence.sh --internal-simulate-scan\n'
@@ -325,7 +326,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --test conformance \
+                "$CARGO_BIN" test -p asupersync --test conformance \
                 test_h2_conformance_integration \
                 --features test-internals -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
@@ -334,7 +335,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin h2_goaway_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_goaway_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -342,7 +343,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin h2_ping_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_ping_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -350,7 +351,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin h2_data_end_stream_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_data_end_stream_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -358,7 +359,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin h2_priority_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_priority_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -366,7 +367,7 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo run -p asupersync-conformance --bin h2_enable_push_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_enable_push_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
@@ -396,7 +397,7 @@ run_command_capture() {
         H2-LIVE-ADAPTER-INTEGRATION-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo test -p asupersync --test conformance \
+                "$CARGO_BIN" test -p asupersync --test conformance \
                 test_h2_conformance_integration \
                 --features test-internals -- --nocapture \
                 > "$stdout_path" 2> "$stderr_path"
@@ -404,35 +405,35 @@ run_command_capture() {
         H2-GOAWAY-STATE-MACHINE-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo run -p asupersync-conformance --bin h2_goaway_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_goaway_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-PING-ACK-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo run -p asupersync-conformance --bin h2_ping_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_ping_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-DATA-END-STREAM-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo run -p asupersync-conformance --bin h2_data_end_stream_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_data_end_stream_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-PRIORITY-STATE-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo run -p asupersync-conformance --bin h2_priority_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_priority_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-ENABLE-PUSH-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo run -p asupersync-conformance --bin h2_enable_push_conformance -- \
+                "$CARGO_BIN" run -p asupersync-conformance --bin h2_enable_push_conformance -- \
                 --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
