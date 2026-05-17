@@ -14,6 +14,7 @@ COORDINATION_BUNDLE=""
 COORDINATION_FIXTURE_ID=""
 COORDINATION_GENERATED_AT="${WORKLOAD_CORPUS_GENERATED_AT:-2026-05-05T05:00:00Z}"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 
 declare -a SELECTED_WORKLOADS=()
 
@@ -108,7 +109,7 @@ build_workload_command_argv() {
                 --
                 env
                 "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_runtime_workload_corpus_cancel}"
-                cargo
+                "${CARGO_BIN}"
                 test
                 --test
                 cancellation_stress_e2e
@@ -155,7 +156,7 @@ build_workload_command_argv() {
                 --
                 env
                 "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_runtime_workload_corpus_timer}"
-                cargo
+                "${CARGO_BIN}"
                 test
                 --test
                 time_e2e
