@@ -279,7 +279,13 @@ artifact = module.normalize_artifact({
     "git_sha": "2222222222222222222222222222222222222222",
     "git_branch": "main",
     "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
-    "stderr": "[RCH] local (daemon unavailable)\nfalling back to local execution\n",
+    "stderr": "\n".join([
+        "[RCH] local (daemon unavailable)",
+        "falling back to local execution",
+        "local fallback forced by wrapper",
+        "fallback to local after remote queue timeout",
+        "executing locally after remote failure",
+    ]),
     "touched_files": [
         "scripts/proof_artifact_freshness_receipt.py",
         "tests/proof_artifact_freshness_receipt_contract.rs"
@@ -336,6 +342,23 @@ print(json.dumps(row, sort_keys=True))
         parsed["evidence"]["rch_local_fallback_segments"][0].as_str(),
         Some("[RCH] local (daemon unavailable)")
     );
+    let segments = parsed["evidence"]["rch_local_fallback_segments"]
+        .as_array()
+        .expect("fallback segments must be array");
+    for expected in [
+        "[RCH] local (daemon unavailable)",
+        "falling back to local execution",
+        "local fallback forced by wrapper",
+        "fallback to local after remote queue timeout",
+        "executing locally after remote failure",
+    ] {
+        assert!(
+            segments
+                .iter()
+                .any(|segment| segment.as_str() == Some(expected)),
+            "missing fallback segment: {expected}"
+        );
+    }
 }
 
 #[test]
