@@ -43,6 +43,7 @@ RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-900}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 if [[ ! -x "${RCH_BIN}" ]]; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
     exit 1
@@ -100,7 +101,7 @@ run_verification_slice() {
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         local -a run_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo test -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --nocapture
+            "${CARGO_BIN}" test -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --nocapture
         )
         attempt_log="${run_log%.log}.attempt${attempt}.log"
         mkdir -p "$(dirname "${attempt_log}")"
@@ -126,7 +127,7 @@ run_verification_slice() {
                 echo "  WARN: ${run_label} contained no explicit test-name lines; deriving from --list output"
                 local -a list_cmd=(
                     env "CARGO_TARGET_DIR=${target_dir}" \
-                    cargo test -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --list
+                    "${CARGO_BIN}" test -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --list
                 )
                 list_log="${attempt_log%.log}.list.log"
                 if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${list_cmd[@]}" >"${list_log}" 2>&1; then
