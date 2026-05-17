@@ -496,6 +496,48 @@ jobs:
     if lane_pass["status"] != "pass":
         raise AssertionError("expected pass lane status")
 
+    cargo_bin_lane = LanePolicy(
+        lane_id="unit-cargo-bin",
+        title="Unit lane with configurable cargo binary",
+        owner="runtime-core",
+        required_job_ids=("test",),
+        required_step_names=("Run unit tests",),
+        required_artifact_names=("ci-summary-report",),
+        replay_command=(
+            'rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_ci_policy_selftest "$CARGO_BIN" '
+            "test --lib --all-features"
+        ),
+        require_rch=True,
+        rch_required_step_names=("Run unit tests",),
+        rch_forbidden_fallback_phrase="falling back to local",
+        failure_taxonomy=("unit_assertion_failure",),
+        max_failures=0,
+        required_artifacts_min=1,
+    )
+    workflow_cargo_bin_pass = """
+jobs:
+  test:
+    steps:
+      - name: Run unit tests
+        run: |
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_ci_policy_selftest "$CARGO_BIN" test --lib --all-features
+  ci-summary-d5:
+    steps:
+      - name: Upload
+        with:
+          name: ci-summary-report
+"""
+    jobs_cargo_bin, steps_cargo_bin, step_runs_cargo_bin = collect_workflow_contracts(workflow_cargo_bin_pass)
+    lane_cargo_bin = evaluate_lane(
+        cargo_bin_lane,
+        workflow_cargo_bin_pass,
+        jobs_cargo_bin,
+        steps_cargo_bin,
+        step_runs_cargo_bin,
+    )
+    if lane_cargo_bin["status"] != "pass":
+        raise AssertionError("expected pass lane status for rch-routed CARGO_BIN replay")
+
     workflow_fail = """
 jobs:
   docs:
