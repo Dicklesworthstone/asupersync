@@ -9,6 +9,7 @@ echo ""
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE=1
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_unified_test_runner}"
 DRY_RUN=0
 
@@ -49,7 +50,7 @@ run_test_suite() {
         "RUST_LOG=${RUST_LOG}"
         "RUST_BACKTRACE=${RUST_BACKTRACE}"
         "PROPTEST_CASES=${PROPTEST_CASES:-1000}"
-        cargo
+        "${CARGO_BIN}"
         test
     )
 
