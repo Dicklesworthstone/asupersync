@@ -39,6 +39,7 @@ RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-360}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 if [[ ! -x "${RCH_BIN}" ]]; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
     exit 1
@@ -100,14 +101,14 @@ run_export_call() {
 
         local -a contract_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo run --quiet --features cli --bin asupersync --
+            "${CARGO_BIN}" run --quiet --features cli --bin asupersync --
             --format json
             --color never
             doctor evidence-timeline-contract
         )
         local -a smoke_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo run --quiet --features cli --bin asupersync --
+            "${CARGO_BIN}" run --quiet --features cli --bin asupersync --
             --format json
             --color never
             doctor evidence-timeline-smoke
@@ -166,7 +167,7 @@ run_unit_slice() {
         local target_dir="/tmp/rch-doctor-timeline-unit-${TIMESTAMP}-attempt${attempt}"
         local -a unit_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo test --quiet --features cli --lib "${UNIT_FILTER}" -- --nocapture
+            "${CARGO_BIN}" test --quiet --features cli --lib "${UNIT_FILTER}" -- --nocapture
         )
 
         attempt_log="${run_log%.log}.attempt${attempt}.log"
