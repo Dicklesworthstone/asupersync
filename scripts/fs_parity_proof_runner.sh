@@ -16,6 +16,9 @@ LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
 BEAD_ID="asupersync-oc0ybw"
+RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 EXPECTED_SCENARIOS=(
   "open-options-seek-sync"
@@ -72,7 +75,7 @@ log() {
 }
 
 reject_rch_local_fallback_log() {
-  if grep -Eq '^\[RCH\] local \(|falling back to local' "$LOG_FILE" 2>/dev/null; then
+  if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$LOG_FILE" 2>/dev/null; then
     log "rch_local_fallback=true"
     echo "rch local fallback detected; refusing local cargo execution" > "$OUT_DIR/rch_local_fallback.txt"
     exit 86
@@ -87,7 +90,7 @@ TARGET_DIR_SAFE_FEATURES="${FEATURES//[^[:alnum:]_]/_}"
 RCH_TARGET_DIR="${ASUPERSYNC_FS_PARITY_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_fs_parity_${TARGET_DIR_SAFE_BEAD}_${TARGET_DIR_SAFE_FEATURES}}"
 
 CMD=(
-  rch exec --
+  "$RCH_BIN" exec --
   env
   "CARGO_TARGET_DIR=$RCH_TARGET_DIR"
   CARGO_INCREMENTAL=0
@@ -95,7 +98,7 @@ CMD=(
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_FS_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_FS_PARITY_BEAD_ID=$BEAD_ID"
-  cargo test -p asupersync
+  "$CARGO_BIN" test -p asupersync
   --test e2e_fs
   --features "$FEATURES"
   fs_parity_wave2_proof_runner_logs_required_scenarios
