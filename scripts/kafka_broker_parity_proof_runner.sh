@@ -17,6 +17,7 @@ LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 
 INCLUDE_OFFSET_ACK_PROOF=false
 case "${ASUPERSYNC_KAFKA_BROKER_PARITY_INCLUDE_OFFSET_ACK_PROOF:-}" in
@@ -156,7 +157,7 @@ DEFAULT_CMD=(
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
-  cargo test -p asupersync
+  "$CARGO_BIN" test -p asupersync
   --test kafka_real_broker
   --features test-internals
   kafka_broker_parity_default_feature_gate_logs_required_fields
@@ -179,7 +180,7 @@ KAFKA_CMD=(
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
-  cargo test -p asupersync
+  "$CARGO_BIN" test -p asupersync
   --test kafka_real_broker
   --features "test-internals,kafka"
   kafka_broker_parity_real_broker_proof_row
@@ -202,7 +203,7 @@ OFFSET_ACK_CMD=(
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
-  cargo test -p asupersync
+  "$CARGO_BIN" test -p asupersync
   --test kafka_real_broker
   --features "test-internals,kafka"
   kafka_broker_parity_offset_ack_redaction_row
@@ -225,7 +226,7 @@ RESILIENCE_CMD=(
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
-  cargo test -p asupersync
+  "$CARGO_BIN" test -p asupersync
   --test kafka_real_broker
   --features "test-internals,kafka"
   kafka_broker_parity_resilience_taxonomy_row
@@ -238,6 +239,7 @@ log "bead_id=$BEAD_ID"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
 log "rch_bin=$RCH_BIN"
+log "cargo_bin=$CARGO_BIN"
 log "default_target_dir=$DEFAULT_TARGET_DIR"
 log "kafka_target_dir=$KAFKA_TARGET_DIR"
 log "offset_ack_target_dir=$OFFSET_ACK_TARGET_DIR"
