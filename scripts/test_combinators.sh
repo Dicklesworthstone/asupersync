@@ -11,6 +11,7 @@
 #   RUST_LOG - Log level (default: info)
 #   RUST_BACKTRACE - Enable backtraces (default: 1)
 #   RCH_BIN - Remote compilation helper executable (default: rch)
+#   CARGO_BIN - Cargo executable routed through rch (default: cargo)
 
 set -euo pipefail
 
@@ -19,6 +20,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$PROJECT_ROOT/test_logs/combinators_$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 CARGO_TARGET_DIR_BASE="${CARGO_TARGET_DIR_BASE:-${TMPDIR:-/tmp}/rch_target_combinators_e2e}"
 DRY_RUN=0
 
@@ -66,7 +68,7 @@ run_cargo() {
         "RUST_LOG=${RUST_LOG}"
         "RUST_BACKTRACE=${RUST_BACKTRACE}"
         "TEST_SEED=${TEST_SEED}"
-        cargo
+        "${CARGO_BIN}"
         "$@"
     )
 
