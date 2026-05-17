@@ -245,6 +245,62 @@ fn bare_cargo_validation_matches_full_output_golden() {
 }
 
 #[test]
+fn rch_local_fallback_segments_match_full_marker_set() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import closeout_verifier
+
+markers = [
+    "[RCH] local (daemon unavailable)",
+    "falling back to local execution",
+    "local fallback selected",
+    "fallback to local execution",
+    "executing locally after remote failure",
+]
+print(json.dumps({
+    marker: closeout_verifier.rch_local_fallback_segments("Validation:\n" + marker + ".")
+    for marker in markers
+}, sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run closeout local fallback classifier probe");
+    assert!(
+        output.status.success(),
+        "python fallback probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let classified: Value =
+        serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    let classified = classified.as_object().expect("classified marker map");
+    assert_eq!(classified.len(), 5);
+    for (marker, segments) in classified {
+        assert!(
+            segments
+                .as_array()
+                .expect("segments array")
+                .iter()
+                .any(|segment| segment
+                    .as_str()
+                    .is_some_and(|segment| segment.contains(marker))),
+            "marker should be classified as rch local fallback: {marker}"
+        );
+    }
+}
+
+#[test]
 fn closed_bead_without_mail_fails_mail_row() {
     let report = report("closed_bead_without_mail.json");
     let mail = row(&report, "closeout_mail");
