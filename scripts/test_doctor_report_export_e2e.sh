@@ -31,6 +31,7 @@ RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-/tmp/rch-doctor-report-export-${TIMESTAMP}}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 if [[ ! -x "${RCH_BIN}" ]]; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
     exit 1
@@ -81,7 +82,7 @@ run_export_call() {
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         local -a export_cmd=(
             env "CARGO_TARGET_DIR=${RCH_TARGET_DIR}" \
-            cargo run --quiet --features cli --bin asupersync --
+            "${CARGO_BIN}" run --quiet --features cli --bin asupersync --
             --format json
             --color never
             doctor report-export
