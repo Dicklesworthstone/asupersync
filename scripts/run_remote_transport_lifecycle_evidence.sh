@@ -10,6 +10,7 @@ CONTRACT_ONLY=0
 TIMEOUT_SEC="${REMOTE_TRANSPORT_LIFECYCLE_TIMEOUT_SEC:-180}"
 DRY_RUN=0
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 usage() {
@@ -72,7 +73,7 @@ mkdir -p "${REPORT_DIR}"
 
 TEST_COMMAND=(
     env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle"
-    cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture
+    "${CARGO_BIN}" test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture
 )
 RCH_COMMAND=("${RCH_BIN}" exec -- "${TEST_COMMAND[@]}")
 
