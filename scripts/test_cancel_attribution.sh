@@ -8,6 +8,7 @@ echo "════════════════════════�
 export RUST_LOG="${RUST_LOG:-trace}"
 export RUST_BACKTRACE=1
 RCH_BIN="${RCH_BIN:-rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cancel_attribution}"
 DRY_RUN=0
 LOCAL_FALLBACKS=0
@@ -78,7 +79,7 @@ run_test() {
         "RUST_LOG=${RUST_LOG}"
         "RUST_BACKTRACE=${RUST_BACKTRACE}"
         "TEST_SEED=${TEST_SEED:-0xDEADBEEF}"
-        cargo
+        "${CARGO_BIN}"
         test
         "$pattern"
         --test
