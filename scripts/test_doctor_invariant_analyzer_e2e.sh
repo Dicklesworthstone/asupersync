@@ -15,6 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 FIXTURE_TEMPLATE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_workspace_scan_e2e"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 
 if [[ "${1:-}" == "__remote_analyze" ]]; then
     REMOTE_STAGE_ROOT="${2:?remote stage root required}"
@@ -28,7 +29,7 @@ if [[ "${1:-}" == "__remote_analyze" ]]; then
         'edition = "2024"' \
         > "${REMOTE_STAGE_ROOT}/beta/Cargo.toml"
     env CARGO_TARGET_DIR="${REMOTE_TARGET_DIR}" \
-        cargo run --quiet --features cli --bin asupersync -- \
+        "${CARGO_BIN}" run --quiet --features cli --bin asupersync -- \
         --format json \
         --color never \
         doctor analyze-invariants \
