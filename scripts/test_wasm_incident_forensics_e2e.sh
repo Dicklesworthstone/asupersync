@@ -50,6 +50,7 @@ WINDOW_EVENTS="${WINDOW_EVENTS:-10}"
 RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-240}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
 DRY_RUN="${INCIDENT_FORENSICS_DRY_RUN:-0}"
 
 if [[ ! -x "${RCH_BIN}" ]]; then
@@ -157,7 +158,7 @@ run_replay_call() {
         local target_dir="/tmp/rch-incident-forensics-${TIMESTAMP}-${run_id}-attempt${attempt}"
         local -a replay_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo run --quiet --features cli --bin asupersync --
+            "${CARGO_BIN}" run --quiet --features cli --bin asupersync --
             --format json
             --color never
             lab replay "${SCENARIO_PATH}"
@@ -224,7 +225,7 @@ EOF
     local probe_rc=0
     local -a fail_cmd=(
         env "CARGO_TARGET_DIR=${target_dir}" \
-        cargo run --quiet --features cli --bin asupersync --
+        "${CARGO_BIN}" run --quiet --features cli --bin asupersync --
         --format json
         --color never
         lab replay "${MISSING_SCENARIO_PATH}"
