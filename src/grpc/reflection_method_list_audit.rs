@@ -108,7 +108,7 @@ fn audit_reflection_returns_real_method_list_for_known_service() {
         described_service.methods.len()
     );
 
-    // AUDIT: Method names must be real/correct (not placeholder/empty)
+    // AUDIT: Method names must be concrete/correct (not empty)
     let method_names: Vec<&str> = described_service
         .methods
         .iter()
