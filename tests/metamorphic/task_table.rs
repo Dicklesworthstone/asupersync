@@ -34,25 +34,25 @@ use std::time::Duration;
 
 use asupersync::cx::{Cx, Scope};
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::observability::{ObservabilityConfig, metrics::NoOpMetrics};
 use asupersync::record::task::TaskRecord;
-use asupersync::runtime::sharded_state::{ShardedState, ShardGuard};
-use asupersync::runtime::task_table::TaskTable;
 use asupersync::runtime::TaskTable as RuntimeTaskTable;
+use asupersync::runtime::config::RuntimeConfig;
+use asupersync::runtime::sharded_state::{ShardGuard, ShardedState};
+use asupersync::runtime::task_table::TaskTable;
+use asupersync::trace::{TraceBufferHandle, TraceConfig};
 use asupersync::types::{ArenaIndex, Budget, RegionId, TaskId, Time};
 use asupersync::util::EntropySource;
-use asupersync::observability::{ObservabilityConfig, metrics::NoOpMetrics};
-use asupersync::trace::{TraceBufferHandle, TraceConfig};
-use asupersync::runtime::config::RuntimeConfig;
 
 // =============================================================================
 // Test Infrastructure
 // =============================================================================
 
-/// Mock entropy source for deterministic testing
+/// Deterministic entropy source for repeatable testing.
 #[derive(Debug, Clone)]
-struct MockEntropySource;
+struct DeterministicEntropySource;
 
-impl EntropySource for MockEntropySource {
+impl EntropySource for DeterministicEntropySource {
     fn generate(&self) -> u64 {
         42 // Deterministic value for testing
     }
@@ -70,7 +70,8 @@ fn create_test_task_table() -> TaskTable {
 /// Creates a test ShardedState for testing TaskTable within the sharded runtime
 fn create_test_sharded_state() -> Arc<ShardedState> {
     let trace_handle = TraceBufferHandle::new(1024);
-    let metrics: Arc<dyn asupersync::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+    let metrics: Arc<dyn asupersync::observability::metrics::MetricsProvider> =
+        Arc::new(NoOpMetrics);
 
     let config = Arc::new(asupersync::runtime::ShardedConfig {
         runtime: RuntimeConfig::default(),
@@ -82,14 +83,14 @@ fn create_test_sharded_state() -> Arc<ShardedState> {
 
 /// Helper to create a test TaskRecord
 fn make_task_record(owner: RegionId) -> TaskRecord {
-    // Use placeholder TaskId - will be canonicalized during insertion
-    let placeholder = TaskId::from_arena(ArenaIndex::new(0, 0));
-    TaskRecord::new(placeholder, owner, Budget::INFINITE)
+    // Seed TaskId is canonicalized during insertion.
+    let seed_id = TaskId::from_arena(ArenaIndex::new(0, 0));
+    TaskRecord::new(seed_id, owner, Budget::INFINITE)
 }
 
 /// Helper to create test RegionId
-fn make_region_id(gen: u32, idx: u32) -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(gen, idx))
+fn make_region_id(generation: u32, idx: u32) -> RegionId {
+    RegionId::from_arena(ArenaIndex::new(generation, idx))
 }
 
 /// Test harness for deterministic TaskTable operations
@@ -113,9 +114,9 @@ impl TaskTableTestHarness {
     where
         F: FnOnce(&Arc<ShardedState>) -> R + Send,
     {
-        self.runtime.block_on(|_cx| async {
-            test_fn(&self.shards)
-        }).into_ok()
+        self.runtime
+            .block_on(|_cx| async { test_fn(&self.shards) })
+            .into_ok()
     }
 }
 
@@ -134,17 +135,18 @@ impl Arbitrary for TaskTableTestConfig {
     fn arbitrary_with(_args: Self::Parameters) -> impl Strategy<Value = Self> {
         (
             any::<u64>(),
-            1u8..=20,  // operation_count
-            1u8..=4,   // thread_count
+            1u8..=20,                                                    // operation_count
+            1u8..=4,                                                     // thread_count
             prop::collection::vec((any::<u32>(), any::<u32>()), 1..=10), // region_variants
-        ).prop_map(|(seed, operation_count, thread_count, region_variants)| {
-            TaskTableTestConfig {
-                seed,
-                operation_count,
-                thread_count,
-                region_variants,
-            }
-        })
+        )
+            .prop_map(|(seed, operation_count, thread_count, region_variants)| {
+                TaskTableTestConfig {
+                    seed,
+                    operation_count,
+                    thread_count,
+                    region_variants,
+                }
+            })
     }
 }
 
