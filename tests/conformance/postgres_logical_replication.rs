@@ -740,13 +740,123 @@ impl PgLogicalReplicationHarness {
         });
     }
     #[allow(dead_code)]
-    fn test_relation_column_metadata(&mut self) { /* Implementation */
+    fn test_relation_column_metadata(&mut self) {
+        let start = std::time::Instant::now();
+        let columns = [
+            ("sku", 25, 0),
+            ("quantity", 23, 4),
+            ("metadata", 114, u32::MAX),
+        ];
+        let relation = self.create_relation_message(
+            24_576,
+            "inventory",
+            "products",
+            ReplicaIdentity::Full,
+            &columns,
+        );
+
+        let result = match self.parse_relation_message(&relation) {
+            Ok((oid, _, _, _, parsed_columns))
+                if oid == 24_576
+                    && parsed_columns.len() == columns.len()
+                    && parsed_columns[0] == ("sku".to_string(), 25, 0)
+                    && parsed_columns[1] == ("quantity".to_string(), 23, 4)
+                    && parsed_columns[2] == ("metadata".to_string(), 114, u32::MAX) =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_016".to_string(),
+            description: "RELATION column metadata preservation".to_string(),
+            category: TestCategory::RelationMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests RELATION column names, type OIDs, and type modifiers are parsed from bytes"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_relation_replica_identity(&mut self) { /* Implementation */
+    fn test_relation_replica_identity(&mut self) {
+        let start = std::time::Instant::now();
+        let identities = [
+            ReplicaIdentity::Default,
+            ReplicaIdentity::Nothing,
+            ReplicaIdentity::Full,
+            ReplicaIdentity::Index,
+        ];
+
+        let result = if identities.iter().copied().all(|identity| {
+            let relation = self.create_relation_message(
+                24_576,
+                "public",
+                "replica_identity_cases",
+                identity,
+                &[("id", 23, 0)],
+            );
+            matches!(
+                self.parse_relation_message(&relation),
+                Ok((_, _, _, parsed, _)) if parsed == identity
+            )
+        }) {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_017".to_string(),
+            description: "RELATION replica identity preservation".to_string(),
+            category: TestCategory::RelationMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests all RELATION replica identity markers are decoded without hardcoding"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_relation_namespace_handling(&mut self) { /* Implementation */
+    fn test_relation_namespace_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let relation = self.create_relation_message(
+            24_577,
+            "tenant_42_reporting",
+            "orders_2026_q2",
+            ReplicaIdentity::Default,
+            &[("order_id", 20, 8)],
+        );
+
+        let result = match self.parse_relation_message(&relation) {
+            Ok((oid, namespace, name, _, columns))
+                if oid == 24_577
+                    && namespace == "tenant_42_reporting"
+                    && name == "orders_2026_q2"
+                    && columns == vec![("order_id".to_string(), 20, 8)] =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_018".to_string(),
+            description: "RELATION namespace and name preservation".to_string(),
+            category: TestCategory::RelationMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests RELATION namespace and relation C strings are parsed from message bytes"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
     fn test_type_message_format(&mut self) { /* Implementation */
@@ -983,20 +1093,78 @@ impl PgLogicalReplicationHarness {
         ),
         String,
     > {
-        if data.is_empty() || data[0] != b'R' {
+        if data.len() < 7 || data[0] != b'R' {
             return Err("Invalid RELATION message format".to_string());
         }
 
-        // This is a simplified parser for testing
-        let oid = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-        let namespace = "public".to_string(); // Simplified
-        let name = "users".to_string(); // Simplified
-        let replica_identity = ReplicaIdentity::Default;
-        let columns = vec![
-            ("id".to_string(), 23, 0),
-            ("name".to_string(), 25, 0),
-            ("email".to_string(), 25, 0),
-        ];
+        fn read_cstring(data: &[u8], pos: &mut usize, field: &str) -> Result<String, String> {
+            let start = *pos;
+            let Some(relative_end) = data[start..].iter().position(|byte| *byte == 0) else {
+                return Err(format!("RELATION {field} missing null terminator"));
+            };
+            let end = start + relative_end;
+            let value = std::str::from_utf8(&data[start..end])
+                .map_err(|err| format!("RELATION {field} is not UTF-8: {err}"))?
+                .to_string();
+            *pos = end + 1;
+            Ok(value)
+        }
+
+        let mut pos = 1;
+        let oid = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+
+        let namespace = read_cstring(data, &mut pos, "namespace")?;
+        let name = read_cstring(data, &mut pos, "relation name")?;
+
+        let Some(identity_byte) = data.get(pos).copied() else {
+            return Err("RELATION missing replica identity".to_string());
+        };
+        pos += 1;
+        let replica_identity = match identity_byte {
+            b'd' => ReplicaIdentity::Default,
+            b'n' => ReplicaIdentity::Nothing,
+            b'f' => ReplicaIdentity::Full,
+            b'i' => ReplicaIdentity::Index,
+            other => {
+                return Err(format!(
+                    "RELATION has unknown replica identity 0x{other:02X}"
+                ));
+            }
+        };
+
+        if data.len().saturating_sub(pos) < 2 {
+            return Err("RELATION missing column count".to_string());
+        }
+        let column_count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        let mut columns = Vec::with_capacity(column_count);
+
+        for column_index in 0..column_count {
+            let Some(_flags) = data.get(pos).copied() else {
+                return Err(format!("RELATION column {column_index} missing flags"));
+            };
+            pos += 1;
+
+            let column_name = read_cstring(data, &mut pos, "column name")?;
+
+            if data.len().saturating_sub(pos) < 8 {
+                return Err(format!(
+                    "RELATION column {column_index} missing type metadata"
+                ));
+            }
+            let type_oid =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            pos += 4;
+            let type_modifier =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            pos += 4;
+            columns.push((column_name, type_oid, type_modifier));
+        }
+
+        if pos != data.len() {
+            return Err("RELATION message has trailing bytes".to_string());
+        }
 
         Ok((oid, namespace, name, replica_identity, columns))
     }
