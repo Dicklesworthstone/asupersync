@@ -355,7 +355,7 @@ pub struct RegionRecord {
     /// Tracing span for region lifecycle (only active with tracing-integration feature).
     #[cfg(feature = "tracing-integration")]
     span: Span,
-    /// Placeholder for when tracing is disabled.
+    /// Disabled-tracing span value for builds without tracing integration.
     #[cfg(not(feature = "tracing-integration"))]
     span: Span,
 }
