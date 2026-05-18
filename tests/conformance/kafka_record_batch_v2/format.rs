@@ -338,12 +338,12 @@ impl RecordBatchV2 {
         buffer.extend_from_slice(&self.base_offset.to_be_bytes());
         // Skip batch_length for now - we'll write it later
         let length_pos = buffer.len();
-        buffer.extend_from_slice(&0i32.to_be_bytes()); // Placeholder
+        buffer.extend_from_slice(&0i32.to_be_bytes()); // Reserved for batch_length backpatch
         buffer.extend_from_slice(&self.partition_leader_epoch.to_be_bytes());
         buffer.push(self.magic as u8);
         // Skip CRC for now - we'll calculate it later
         let crc_pos = buffer.len();
-        buffer.extend_from_slice(&0u32.to_be_bytes()); // Placeholder
+        buffer.extend_from_slice(&0u32.to_be_bytes()); // Reserved for CRC backpatch
         buffer.push(self.attributes.as_u8());
         buffer.extend_from_slice(&self.last_offset_delta.to_be_bytes());
         buffer.extend_from_slice(&self.base_timestamp.to_be_bytes());
@@ -439,8 +439,8 @@ impl RecordBatchV2 {
 fn encode_record(record: &RecordV2, buffer: &mut Vec<u8>) {
     let record_start = buffer.len();
 
-    // Skip length field for now
-    encode_varint(0, buffer); // Placeholder
+    // Reserve length field for backpatch after encoding the record body
+    encode_varint(0, buffer);
 
     buffer.push(record.attributes.as_u8());
     encode_varint_i64(record.timestamp_delta, buffer);
@@ -474,7 +474,7 @@ fn encode_record(record: &RecordV2, buffer: &mut Vec<u8>) {
     let mut length_bytes = Vec::new();
     encode_varint(record_length, &mut length_bytes);
 
-    // Replace placeholder length
+    // Backpatch encoded record length
     buffer[record_start..record_start + length_bytes.len()].copy_from_slice(&length_bytes);
 }
 
