@@ -3529,7 +3529,7 @@ mod tests {
 
     #[test]
     fn m4oxsk_supported_probe_reporting_records_sampled_value() {
-        let state = ResourceProbeState::new("fake-linux/x86_64");
+        let state = ResourceProbeState::new("test-linux/x86_64");
 
         state.record_supported(ResourceProbe::ProcessRssBytes, Some(4096));
 
@@ -3547,10 +3547,10 @@ mod tests {
 
     #[test]
     fn m4oxsk_unsupported_probe_reporting_is_typed() {
-        let state = ResourceProbeState::new("fake-unsupported/wasm32");
+        let state = ResourceProbeState::new("test-unsupported/wasm32");
         let error = std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "not implemented on fake platform",
+            "not implemented on test platform",
         );
 
         state.record_probe_failure(
@@ -3573,12 +3573,12 @@ mod tests {
             ResourceProbeFallback::CustomCollectorRequired
         );
         assert_eq!(probe.probe, ResourceProbe::ProcessFdCount);
-        assert!(probe.error_message.as_deref().unwrap().contains("fake"));
+        assert!(probe.error_message.as_deref().unwrap().contains("test"));
     }
 
     #[test]
     fn m4oxsk_fallback_aggregation_preserves_operator_semantics() {
-        let state = ResourceProbeState::new("fake-bsd/aarch64");
+        let state = ResourceProbeState::new("test-bsd/aarch64");
         let error = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "fd rlimit inaccessible",
@@ -3606,7 +3606,7 @@ mod tests {
 
     #[test]
     fn m4oxsk_warning_throttling_suppresses_repeated_probe_failures() {
-        let state = ResourceProbeState::new("fake-linux/x86_64");
+        let state = ResourceProbeState::new("test-linux/x86_64");
 
         for attempt in 0..9 {
             let error = std::io::Error::other(format!("transient probe failure {attempt}"));
@@ -3626,7 +3626,7 @@ mod tests {
 
     #[test]
     fn m4oxsk_unavailable_probe_report_serializes_operator_fields() {
-        let state = ResourceProbeState::new("fake-windows/x86_64");
+        let state = ResourceProbeState::new("test-windows/x86_64");
         let error =
             std::io::Error::new(std::io::ErrorKind::Unsupported, "load average unavailable");
 
@@ -3655,7 +3655,7 @@ mod tests {
 
     #[test]
     fn m4oxsk_disabled_monitor_probe_report_is_explicit() {
-        let state = ResourceProbeState::new("fake-disabled/noarch");
+        let state = ResourceProbeState::new("test-disabled/noarch");
 
         state.record_disabled(ResourceProbe::ProcessRssBytes);
         state.record_disabled(ResourceProbe::LoadAvg1MinScaled);
