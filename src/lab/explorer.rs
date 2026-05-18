@@ -1975,7 +1975,7 @@ mod tests {
 
     #[test]
     fn golden_exploration_report_with_violations_transcript() {
-        // Create a mock scenario with violations for golden testing
+        // Create a synthetic violation scenario for golden testing
         let violations = vec![ViolationReport {
             seed: 123,
             steps: 45,
