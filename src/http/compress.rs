@@ -603,12 +603,12 @@ impl Decompressor for GzipDecompressor {
                 "GzipDecompressor poisoned by prior error (br-asupersync-8vcp64)",
             ));
         }
-        let mut dummy = flate2::write::GzDecoder::new(LimitedWriter::new(None));
-        std::mem::swap(&mut self.decoder, &mut dummy);
-        dummy.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
+        let mut finishing_decoder = flate2::write::GzDecoder::new(LimitedWriter::new(None));
+        std::mem::swap(&mut self.decoder, &mut finishing_decoder);
+        finishing_decoder.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
 
         let result: io::Result<()> = (|| {
-            let mut buf = dummy.finish()?.inner;
+            let mut buf = finishing_decoder.finish()?.inner;
             update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
             output.append(&mut buf);
             Ok(())
@@ -785,12 +785,12 @@ impl Decompressor for DeflateDecompressor {
                 "DeflateDecompressor poisoned by prior error (br-asupersync-8vcp64)",
             ));
         }
-        let mut dummy = flate2::write::DeflateDecoder::new(LimitedWriter::new(None));
-        std::mem::swap(&mut self.decoder, &mut dummy);
-        dummy.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
+        let mut finishing_decoder = flate2::write::DeflateDecoder::new(LimitedWriter::new(None));
+        std::mem::swap(&mut self.decoder, &mut finishing_decoder);
+        finishing_decoder.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
 
         let result: io::Result<()> = (|| {
-            let mut buf = dummy.finish()?.inner;
+            let mut buf = finishing_decoder.finish()?.inner;
             update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
             output.append(&mut buf);
             Ok(())
