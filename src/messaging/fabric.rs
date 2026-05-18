@@ -4904,7 +4904,7 @@ pub struct SubjectCell {
     pub steward_set: Vec<NodeId>,
     /// Current bounded control-plane capsule for the cell.
     pub control_capsule: ControlCapsuleV1,
-    /// Current data-plane capsule placeholder for the cell.
+    /// Current data-plane capsule for the cell.
     pub data_capsule: DataCapsule,
     /// Repair and recoverability policy attached to the cell.
     pub repair_policy: RepairPolicy,
