@@ -28,12 +28,10 @@ implementation:
 
 ### 🔴 CRITICAL: No SASL Authentication Implementation  
 **File**: `src/messaging/kafka.rs:191-193`  
-**Evidence**: 
-```rust
-// src/messaging/kafka.rs does not yet expose TLS or SASL settings.
-// TODO(jeffrey): These settings are needed for production use.
-// For now, the producer connects to localhost:9092 without auth.
-```
+**Historical evidence**: The pre-fix `KafkaConfig` did not expose TLS or
+SASL settings, carried a source comment that those settings were needed for
+production use, and defaulted the producer to unauthenticated localhost
+bootstrap servers.
 
 **Impact**: 
 - **SCRAM-SHA-256 server-final verification**: Cannot be verified because no SASL implementation exists
@@ -71,7 +69,7 @@ fn validate(&self) -> Result<(), ConfigError> {
 
 ### 🔴 CRITICAL: No TLS Implementation
 **File**: `src/messaging/kafka.rs:191-193`  
-**Evidence**: Same TODO comment as above  
+**Historical evidence**: Same pre-fix source comment as above
 
 **Impact**: 
 - **TLS-downgrade protection**: Cannot be verified because no TLS implementation exists
