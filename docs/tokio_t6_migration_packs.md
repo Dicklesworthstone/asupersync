@@ -714,13 +714,14 @@ while let Some(msg) = subscriber.next().await {
 ```rust
 client.publish(&cx, "subject", b"payload").await?;
 
-// Subscribe is Phase 0 — returns stub error
-// Use request/reply pattern instead:
-let reply = client.request(&cx, "subject", b"request").await?;
-println!("Reply: {:?}", reply.payload);
+let mut subscriber = client.subscribe(&cx, "subject").await?;
+client.process(&cx).await?;
+while let Some(msg) = subscriber.try_next() {
+    println!("Received: {:?}", msg.payload);
+}
 ```
 
-> **Caveat**: NATS subscription is currently a stub (Phase 0). For request/reply patterns, use `client.request()` which auto-generates inbox subjects and handles response routing. Full pub/sub subscription will be available in a future release.
+> **Caveat**: NATS subscription is implemented, but it follows the single-owner `NatsClient` design. The owning client must keep calling `process(&cx)` to parse and dispatch server frames; use separate clients or a `Mutex` when a design needs concurrent publishers and subscribers.
 
 #### Request/Reply
 
@@ -812,9 +813,12 @@ let ack = jetstream.publish("orders.new", payload.into()).await?.await?;
 let ack = js.publish(&cx, "orders.new", payload).await?;
 // Single await — returns PubAck with stream, seq, duplicate fields
 assert!(!ack.duplicate);
+
+let dedup_ack = js.publish_with_id(&cx, "orders.new", "order-123", payload).await?;
+assert!(dedup_ack.seq >= ack.seq);
 ```
 
-> **Caveat**: async-nats JetStream publish returns a `PublishAckFuture` that requires a second `.await` for the server acknowledgement. Asupersync combines send + ack into a single await.
+> **Caveat**: async-nats JetStream publish returns a `PublishAckFuture` that requires a second `.await` for the server acknowledgement. Asupersync combines send + ack into a single await. `publish_with_id()` sends the `Nats-Msg-Id` header for broker-side deduplication and requires a NATS server that advertises `headers:true` (NATS 2.2+); older brokers fail with a protocol error instead of silently dropping deduplication.
 
 #### Consumer Management
 
@@ -869,7 +873,7 @@ use rdkafka::ClientConfig;
 use asupersync::messaging::{
     KafkaProducer, ProducerConfig, Compression, Acks,
     KafkaConsumer, KafkaConsumerConfig, AutoOffsetReset,
-    RecordMetadata, KafkaError,
+    RecordMetadata, KafkaError, TopicPartitionOffset,
 };
 ```
 
@@ -899,11 +903,11 @@ let config = ProducerConfig::new(vec!["localhost:9092".into()])
 let producer = KafkaProducer::new(config)?;
 let metadata = producer.send(
     &cx, "topic", Some(b"key"), b"value", None
-)?;
+).await?;
 // metadata.topic, metadata.partition, metadata.offset
 ```
 
-> **Caveat**: rdkafka wraps librdkafka (C library) and provides a full-featured async producer. Asupersync's Kafka integration is Phase 0 — send operations are synchronous stubs that will be backed by rdkafka in a future release. The API surface is stable.
+> **Caveat**: Real broker I/O is gated behind the `kafka` feature and uses rdkafka/librdkafka under the hood. Without that feature, downstream production builds fail loudly with `KafkaError::FeatureDisabled`; the deterministic in-process broker path is limited to crate-local tests and contract validation.
 
 #### Transactional Producer
 
@@ -928,13 +932,13 @@ let config = TransactionalConfig::new()
 // Note: transaction_id is auto-generated
 
 let tx_producer = TransactionalProducer::new(config)?;
-let tx = tx_producer.begin_transaction(&cx)?;
-tx.send(&cx, "topic", Some(b"key"), b"value")?;
+let tx = tx_producer.begin_transaction(&cx).await?;
+tx.send(&cx, "topic", Some(b"key"), b"value").await?;
 tx.commit(&cx).await?;
 // Or tx.abort(&cx).await? on failure
 ```
 
-> **Caveat**: Phase 0 — transactional operations are stubs. The RAII `Transaction` guard warns on drop if not explicitly committed/aborted.
+> **Caveat**: Transactional state is implemented with explicit begin/send/commit/abort phases. With the `kafka` feature enabled, begin/commit/abort are delegated to rdkafka and failed commits poison the producer until abort recovery runs; without the feature, only the deterministic crate-local test backend can stage records.
 
 #### Consumer
 
@@ -962,7 +966,14 @@ let config = KafkaConsumerConfig::new(
 .auto_offset_reset(AutoOffsetReset::Earliest);
 
 let consumer = KafkaConsumer::new(config)?;
-// Consumer API follows same pattern — Phase 0 stubs
+consumer.subscribe(&cx, &["topic"]).await?;
+while let Some(record) = consumer.poll(&cx, Duration::from_secs(1)).await? {
+    println!("Received: {:?}", record.payload);
+    consumer.commit_offsets(
+        &cx,
+        &[TopicPartitionOffset::new(&record.topic, record.partition, record.offset + 1)],
+    ).await?;
+}
 ```
 
 ---
@@ -1103,17 +1114,17 @@ Unlike sqlx/deadpool/bb8 which use async pools, `DbPool` uses `std::sync::Mutex`
 - **Constraint**: `pool.get()` blocks the calling thread during acquire
 - **Recommendation**: Use `pool.try_get()` when you need immediate capacity feedback without retrying, or use `pool.get_with_retry()` for fault-tolerant acquisition
 
-### 11.3 Phase 0 Stubs
+### 11.3 Messaging Feature Gates
 
-The following APIs are Phase 0 stubs (API-stable but return stub errors):
+The messaging APIs below are implemented, but have operational boundaries that differ from the Tokio ecosystem crates they replace:
 
-| Module | Stub Operations |
-|--------|----------------|
-| Kafka | `KafkaProducer::send()`, `Transaction::commit/abort()` |
-| NATS | `NatsClient::subscribe()` |
-| JetStream | `publish_with_id()` (dedup via Nats-Msg-Id header) |
+| Module | Boundary |
+|--------|----------|
+| Kafka | Real broker I/O requires the `kafka` feature; production builds without it return `KafkaError::FeatureDisabled` instead of writing to a test backend |
+| NATS | `NatsClient::subscribe()` is available, but the owning client must keep driving `process(&cx)` to dispatch messages |
+| JetStream | `publish_with_id()` depends on broker header support (`headers:true`) for `Nats-Msg-Id` deduplication |
 
-**Recommendation**: For Kafka, continue using rdkafka directly until Phase 1 integration. For NATS pub/sub, use `request()`/`publish()` which are fully functional.
+**Recommendation**: Enable `--features kafka` for real Kafka deployments, keep NATS subscription processing in the same owner task or behind a `Mutex`, and verify JetStream brokers support headers before relying on deduplication.
 
 ### 11.4 Type System Differences
 

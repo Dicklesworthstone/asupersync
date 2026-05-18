@@ -82,7 +82,7 @@
       "feature_gate": null,
       "categories": ["connection", "publish", "request_reply", "subscribe"],
       "api_mappings": 5,
-      "caveats": ["mut_self_required", "subscribe_phase0_stub"],
+      "caveats": ["mut_self_required", "subscribe_requires_process_driver"],
       "status": "complete"
     },
     {
@@ -92,7 +92,7 @@
       "feature_gate": null,
       "categories": ["context", "streams", "consumers", "publish", "error_classification"],
       "api_mappings": 8,
-      "caveats": ["single_await_publish", "publish_with_id_stub"],
+      "caveats": ["single_await_publish", "publish_with_id_requires_headers"],
       "status": "complete"
     },
     {
@@ -102,7 +102,7 @@
       "feature_gate": "kafka",
       "categories": ["producer", "consumer", "transactional", "config"],
       "api_mappings": 8,
-      "caveats": ["phase0_stubs", "sync_send", "raii_transaction_guard"],
+      "caveats": ["feature_gated_broker_io", "async_send", "raii_transaction_guard"],
       "status": "complete"
     },
     {
@@ -153,17 +153,17 @@
     },
     {
       "id": "CAV-02",
-      "title": "Phase 0 Kafka stubs",
+      "title": "Kafka feature-gated broker I/O",
       "severity": "high",
-      "description": "KafkaProducer::send() and Transaction operations are stubs",
-      "workaround": "Continue using rdkafka directly until Phase 1"
+      "description": "KafkaProducer, KafkaConsumer, and TransactionalProducer require the `kafka` feature for real broker I/O; production builds without it return FeatureDisabled for broker operations.",
+      "workaround": "Build with `--features kafka` for real Kafka deployments"
     },
     {
       "id": "CAV-03",
-      "title": "NATS subscribe stub",
+      "title": "NATS subscription driver",
       "severity": "medium",
-      "description": "NatsClient::subscribe() returns stub error",
-      "workaround": "Use request/reply pattern via client.request()"
+      "description": "NatsClient::subscribe() is implemented, but the owning client must continue calling process(&cx) to parse and dispatch messages.",
+      "workaround": "Drive process(&cx) in the owner task, or put the client behind a Mutex when sharing ownership"
     },
     {
       "id": "CAV-04",

@@ -229,12 +229,57 @@ fn doc_has_sync_pool_caveat() {
 }
 
 #[test]
-fn doc_has_phase0_stub_caveat() {
+fn doc_has_messaging_boundary_caveats() {
     let doc = load_doc();
-    assert!(
-        doc.contains("Phase 0") || doc.contains("stub"),
-        "document must discuss Phase 0 stub limitations"
-    );
+    let required_tokens = [
+        "KafkaError::FeatureDisabled",
+        "process(&cx)",
+        "headers:true",
+        "publish_with_id()",
+    ];
+    for token in required_tokens {
+        assert!(
+            doc.contains(token),
+            "document must discuss messaging boundary token: {token}"
+        );
+    }
+}
+
+#[test]
+fn doc_does_not_describe_completed_messaging_as_incomplete() {
+    let doc = load_doc();
+    let forbidden_phrases = [
+        concat!("Subscribe is ", "Phase 0"),
+        concat!("NATS subscription is currently a ", "stu", "b"),
+        concat!("Phase 0 ", "stu", "bs"),
+        concat!("send operations are synchronous ", "stu", "bs"),
+        concat!("transactional operations are ", "stu", "bs"),
+        concat!("Consumer API follows same ", "pattern"),
+    ];
+    for phrase in forbidden_phrases {
+        assert!(
+            !doc.contains(phrase),
+            "document still contains stale messaging implementation claim: {phrase}"
+        );
+    }
+}
+
+#[test]
+fn json_does_not_describe_completed_messaging_as_incomplete() {
+    let json = load_json().to_string();
+    let forbidden_tokens = [
+        concat!("subscribe_phase0_", "stu", "b"),
+        concat!("publish_with_id_", "stu", "b"),
+        concat!("phase0_", "stu", "bs"),
+        concat!("Phase 0 Kafka ", "stu", "bs"),
+        concat!("NATS subscribe ", "stu", "b"),
+    ];
+    for token in forbidden_tokens {
+        assert!(
+            !json.contains(token),
+            "JSON artifact still contains stale messaging implementation claim: {token}"
+        );
+    }
 }
 
 #[test]
