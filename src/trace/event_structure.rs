@@ -295,7 +295,7 @@ impl EventStructure {
     }
 }
 
-/// A simple HDA cell (conceptual placeholder).
+/// A minimal HDA cell used by the single-trace 0-cell model.
 #[derive(Debug, Clone)]
 pub struct HdaCell {
     /// Dimension of the cell.
