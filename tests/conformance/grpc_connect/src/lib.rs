@@ -496,8 +496,12 @@ impl ConformanceTestSuite {
     async fn run_timeout_tests(&mut self, cx: &Cx) -> Result<()> {
         info!("Running timeout tests");
 
-        // Placeholder for timeout tests
-        // Implementation would test deadline propagation and timeout handling
+        self.record_skipped_category_result(
+            "timeout_deadline_propagation_contract",
+            TestCategory::Timeout,
+            "requires_connect_reference_client_timeout_fixture",
+            "timeout conformance execution requires a Connect reference-client deadline propagation fixture",
+        );
 
         Ok(())
     }
@@ -669,6 +673,30 @@ mod tests {
                 .error_message
                 .as_deref()
                 .is_some_and(|message| message.contains("compression negotiation fixture"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timeout_conformance_records_fixture_gap() {
+        let cx = Cx::root();
+        let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
+
+        suite.run_timeout_tests(&cx).await.unwrap();
+
+        assert_eq!(suite.results.len(), 1);
+        let result = &suite.results[0];
+        assert_eq!(result.test_name, "timeout_deadline_propagation_contract");
+        assert_eq!(result.category, TestCategory::Timeout);
+        assert_eq!(result.status, TestStatus::Skipped);
+        assert_eq!(
+            result.metadata.headers.get("coverage_status"),
+            Some(&"requires_connect_reference_client_timeout_fixture".to_string())
+        );
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("deadline propagation fixture"))
         );
     }
 }
