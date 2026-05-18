@@ -1873,7 +1873,7 @@ fn parse_otlp_retry_after(headers: &[(String, String)]) -> Option<Duration> {
     headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
 }
 
@@ -2150,6 +2150,16 @@ mod otlp_retry_tests {
                     retry_after_secs: Some(30),
                 },
                 "otlp_429_retry_after_audit_test.rs",
+            ),
+            (
+                "429-retry-after-delay-seconds-whitespace",
+                429,
+                &[("Retry-After", "  60  ")][..],
+                Expected::Retryable {
+                    status: 429,
+                    retry_after_secs: Some(60),
+                },
+                "RFC 9110 delay-seconds with optional field-value whitespace",
             ),
             (
                 "502-bad-gateway-retryable",

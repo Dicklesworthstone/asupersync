@@ -69,7 +69,7 @@ mod tests {
                     .headers
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                    .and_then(|(_, value)| value.parse::<u64>().ok())
+                    .and_then(|(_, value)| value.trim().parse::<u64>().ok())
                     .map(Duration::from_secs);
                 Err(OtlpError::retryable(response.status, retry_after))
             }
@@ -169,43 +169,46 @@ mod tests {
                 "Standard seconds format",
                 vec![("Retry-After".to_string(), "30".to_string())],
                 Some(Duration::from_secs(30)),
-                "Basic delay-seconds format per RFC 9110"
+                "Basic delay-seconds format per RFC 9110",
             ),
             (
                 "Zero delay (immediate retry allowed)",
                 vec![("Retry-After".to_string(), "0".to_string())],
                 Some(Duration::from_secs(0)),
-                "Server allows immediate retry"
+                "Server allows immediate retry",
             ),
             (
                 "Large delay value",
                 vec![("Retry-After".to_string(), "300".to_string())],
                 Some(Duration::from_secs(300)),
-                "5-minute delay for severe rate limiting"
+                "5-minute delay for severe rate limiting",
             ),
             (
                 "Case-insensitive header name",
                 vec![("retry-after".to_string(), "60".to_string())],
                 Some(Duration::from_secs(60)),
-                "RFC 9110 requires case-insensitive header matching"
+                "RFC 9110 requires case-insensitive header matching",
             ),
             (
                 "Missing header",
                 vec![],
                 None,
-                "No Retry-After header present - use exponential backoff"
+                "No Retry-After header present - use exponential backoff",
             ),
             (
                 "Invalid format (non-numeric)",
                 vec![("Retry-After".to_string(), "invalid".to_string())],
                 None,
-                "Malformed header should fallback to exponential backoff"
+                "Malformed header should fallback to exponential backoff",
             ),
             (
                 "HTTP Date format (not supported)",
-                vec![("Retry-After".to_string(), "Wed, 21 Oct 2015 07:28:00 GMT".to_string())],
+                vec![(
+                    "Retry-After".to_string(),
+                    "Wed, 21 Oct 2015 07:28:00 GMT".to_string(),
+                )],
                 None,
-                "Date format parsing not implemented - fallback to exponential backoff"
+                "Date format parsing not implemented - fallback to exponential backoff",
             ),
         ];
 
@@ -222,13 +225,20 @@ mod tests {
             eprintln!("    Description: {}", description);
 
             match result {
-                Err(OtlpError::Retryable { status_code, retry_after }) => {
+                Err(OtlpError::Retryable {
+                    status_code,
+                    retry_after,
+                }) => {
                     eprintln!("    Status: {} (retryable)", status_code);
                     eprintln!("    Parsed Retry-After: {:?}", retry_after);
                     eprintln!("    Expected: {:?}", expected_duration);
 
                     assert_eq!(status_code, 429, "Status should be 429");
-                    assert_eq!(retry_after, expected_duration, "Retry-After parsing mismatch in {}", test_name);
+                    assert_eq!(
+                        retry_after, expected_duration,
+                        "Retry-After parsing mismatch in {}",
+                        test_name
+                    );
 
                     if retry_after == expected_duration {
                         eprintln!("    Result: ✅ CORRECT parsing");
@@ -288,13 +298,17 @@ mod tests {
         eprintln!("  Calculated delay: {:?}", calculated_delay);
         eprintln!("  Max delay cap: {:?}", exporter.max_retry_delay);
 
-        assert_eq!(calculated_delay, Duration::from_secs(45), "Should use Retry-After value");
+        assert_eq!(
+            calculated_delay,
+            Duration::from_secs(45),
+            "Should use Retry-After value"
+        );
         eprintln!("  Result: ✅ RETRY-AFTER HONORED");
 
         // Test Case 2: 429 without Retry-After (exponential backoff)
         eprintln!("\n📋 Case 2: 429 without Retry-After header");
         let calculated_delay_no_header = exporter.calculate_retry_delay(
-            1, // retry_count
+            1,    // retry_count
             None, // No Retry-After
             current_delay,
         );
@@ -303,7 +317,10 @@ mod tests {
         eprintln!("  Current exponential delay: {:?}", current_delay);
         eprintln!("  Calculated delay: {:?}", calculated_delay_no_header);
 
-        assert!(calculated_delay_no_header > current_delay, "Should apply backoff when no Retry-After");
+        assert!(
+            calculated_delay_no_header > current_delay,
+            "Should apply backoff when no Retry-After"
+        );
         eprintln!("  Result: ✅ EXPONENTIAL BACKOFF APPLIED");
 
         // Test Case 3: Retry-After exceeds max delay (should be capped)
@@ -319,7 +336,10 @@ mod tests {
         eprintln!("  Max delay cap: {:?}", exporter.max_retry_delay);
         eprintln!("  Calculated delay: {:?}", capped_delay);
 
-        assert_eq!(capped_delay, exporter.max_retry_delay, "Should cap at max delay");
+        assert_eq!(
+            capped_delay, exporter.max_retry_delay,
+            "Should cap at max delay"
+        );
         eprintln!("  Result: ✅ MAX DELAY CAP ENFORCED");
 
         eprintln!("\n🎯 IMPLEMENTATION BEHAVIOR ASSESSMENT:");
@@ -349,7 +369,8 @@ mod tests {
 
         // Retry 1: 429 with Retry-After
         eprintln!("\n  Retry 1: 429 with Retry-After: 30s");
-        let delay_1 = exporter.calculate_retry_delay(1, Some(Duration::from_secs(30)), current_delay);
+        let delay_1 =
+            exporter.calculate_retry_delay(1, Some(Duration::from_secs(30)), current_delay);
         current_delay = exporter.next_exponential_delay(current_delay);
         eprintln!("    Delay used: {:?}", delay_1);
         eprintln!("    Next exponential base: {:?}", current_delay);
@@ -367,13 +388,26 @@ mod tests {
         eprintln!("    Delay used: {:?}", delay_3);
 
         eprintln!("\n📊 SEQUENCE ANALYSIS:");
-        eprintln!("  Delay progression: {:?} → {:?} → {:?}", delay_1, delay_2, delay_3);
+        eprintln!(
+            "  Delay progression: {:?} → {:?} → {:?}",
+            delay_1, delay_2, delay_3
+        );
         eprintln!("  Pattern: Retry-After → Exponential → Exponential");
 
         // Verify behavior is consistent with OTLP best practices
-        assert_eq!(delay_1, Duration::from_secs(30), "First retry should honor Retry-After");
-        assert!(delay_2 > Duration::from_millis(100), "Second retry should use exponential backoff");
-        assert!(delay_3 > delay_2 || delay_3 == exporter.max_retry_delay, "Third retry should increase or hit cap");
+        assert_eq!(
+            delay_1,
+            Duration::from_secs(30),
+            "First retry should honor Retry-After"
+        );
+        assert!(
+            delay_2 > Duration::from_millis(100),
+            "Second retry should use exponential backoff"
+        );
+        assert!(
+            delay_3 > delay_2 || delay_3 == exporter.max_retry_delay,
+            "Third retry should increase or hit cap"
+        );
 
         eprintln!("\n✅ SUSTAINED RATE LIMITING BEHAVIOR:");
         eprintln!("  ✅ Initial server hint (Retry-After) respected");
@@ -393,14 +427,14 @@ mod tests {
             (
                 "Retry-After: 0 (immediate retry allowed)",
                 vec![("Retry-After".to_string(), "0".to_string())],
-                Duration::from_secs(0),
-                "Server indicates rate limit lifted"
+                Some(Duration::from_secs(0)),
+                "Server indicates rate limit lifted",
             ),
             (
                 "Very short Retry-After (1 second)",
                 vec![("Retry-After".to_string(), "1".to_string())],
-                Duration::from_secs(1),
-                "Minimal delay for brief rate limit"
+                Some(Duration::from_secs(1)),
+                "Minimal delay for brief rate limit",
             ),
             (
                 "Multiple Retry-After headers (use first)",
@@ -408,20 +442,20 @@ mod tests {
                     ("Retry-After".to_string(), "30".to_string()),
                     ("Retry-After".to_string(), "60".to_string()),
                 ],
-                Duration::from_secs(30),
-                "RFC specifies first header value should be used"
+                Some(Duration::from_secs(30)),
+                "RFC specifies first header value should be used",
             ),
             (
                 "Case variations",
                 vec![("RETRY-AFTER".to_string(), "45".to_string())],
-                Duration::from_secs(45),
-                "Header names are case-insensitive per RFC"
+                Some(Duration::from_secs(45)),
+                "Header names are case-insensitive per RFC",
             ),
             (
                 "Whitespace in value",
                 vec![("Retry-After".to_string(), "  60  ".to_string())],
-                None, // Current parser might not handle whitespace
-                "Robust parsing should handle whitespace"
+                Some(Duration::from_secs(60)),
+                "Robust parsing should handle whitespace",
             ),
         ];
 
@@ -436,7 +470,10 @@ mod tests {
 
             let result = current_otlp_status_classifier(&response);
             match result {
-                Err(OtlpError::Retryable { status_code: _, retry_after }) => {
+                Err(OtlpError::Retryable {
+                    status_code: _,
+                    retry_after,
+                }) => {
                     eprintln!("  Parsed value: {:?}", retry_after);
                     eprintln!("  Expected: {:?}", expected);
 
@@ -455,9 +492,10 @@ mod tests {
         eprintln!("\n📊 RFC 9110 COMPLIANCE SUMMARY:");
         eprintln!("  ✅ Basic delay-seconds format supported");
         eprintln!("  ✅ Case-insensitive header name matching");
+        eprintln!("  ✅ Optional field-value whitespace around delay-seconds handled");
         eprintln!("  ✅ Graceful fallback on malformed values");
         eprintln!("  ⚠️  HTTP-date format not implemented (acceptable for OTLP)");
-        eprintln!("  ⚠️  Some whitespace/multi-header edge cases may need improvement");
+        eprintln!("  ⚠️  Multi-header edge cases may need improvement");
     }
 
     /// Demonstrate complete 429 retry behavior correctness.
@@ -480,7 +518,10 @@ mod tests {
         eprintln!("  Response: 429 + Retry-After: 120s");
 
         match result {
-            Err(OtlpError::Retryable { status_code, retry_after }) => {
+            Err(OtlpError::Retryable {
+                status_code,
+                retry_after,
+            }) => {
                 eprintln!("  Classification: RETRYABLE ✅");
                 eprintln!("  Status: {}", status_code);
                 eprintln!("  Retry-After: {:?}", retry_after);
@@ -505,12 +546,11 @@ mod tests {
         eprintln!("  Server-specified delay (Retry-After): {:?}", server_delay);
 
         // Scenario: Client calculates exponential backoff
-        let client_delay = exporter.calculate_retry_delay(
-            1,
-            None,
-            Duration::from_millis(200),
+        let client_delay = exporter.calculate_retry_delay(1, None, Duration::from_millis(200));
+        eprintln!(
+            "  Client-calculated delay (exponential): {:?}",
+            client_delay
         );
-        eprintln!("  Client-calculated delay (exponential): {:?}", client_delay);
 
         eprintln!("\n🔄 RETRY STRATEGY ASSESSMENT:");
         eprintln!("  ✅ HONORS SERVER HINTS: Uses Retry-After when provided");
