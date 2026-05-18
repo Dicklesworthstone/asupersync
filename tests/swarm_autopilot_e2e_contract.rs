@@ -113,10 +113,12 @@ fn happy_path_composes_autopilot_helpers() {
         proof["observed"]["target_dir_audit_status"].as_str(),
         Some("pass")
     );
-    assert!(proof["command"]
-        .as_str()
-        .expect("command")
-        .contains("scripts/rch_retrieval_receipt.py"));
+    assert!(
+        proof["command"]
+            .as_str()
+            .expect("command")
+            .contains("scripts/rch_retrieval_receipt.py")
+    );
 
     let finder = stage(&receipt, "work_finder");
     assert_eq!(
