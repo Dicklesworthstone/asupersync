@@ -340,7 +340,7 @@ impl ConnectMethodConformanceTester {
         test_case: &ConnectMethodConformanceCase,
     ) -> Result<(u16, bool), String> {
         Err(format!(
-            "asupersync HTTP/2 CONNECT backend not wired; refusing to synthesize placeholder result for {}",
+            "asupersync HTTP/2 CONNECT backend not wired; refusing to synthesize comparison result for {}",
             test_case.id
         ))
     }
@@ -351,7 +351,7 @@ impl ConnectMethodConformanceTester {
         test_case: &ConnectMethodConformanceCase,
     ) -> Result<(u16, bool), String> {
         Err(format!(
-            "h2 HTTP/2 CONNECT backend not wired; refusing to synthesize placeholder result for {}",
+            "h2 HTTP/2 CONNECT backend not wired; refusing to synthesize comparison result for {}",
             test_case.id
         ))
     }
@@ -541,7 +541,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn connect_harness_does_not_report_placeholder_passes() {
+    async fn connect_harness_does_not_report_synthetic_passes() {
         let mut tester = ConnectMethodConformanceTester::new();
         let total_cases = tester.test_cases.len();
 
@@ -577,6 +577,6 @@ mod tests {
         assert!(markdown.contains("## Skipped Tests"));
         assert!(markdown.contains("asupersync HTTP/2 CONNECT backend not wired"));
         assert!(markdown.contains("h2 HTTP/2 CONNECT backend not wired"));
-        assert!(markdown.contains("refusing to synthesize placeholder result"));
+        assert!(markdown.contains("refusing to synthesize comparison result"));
     }
 }
