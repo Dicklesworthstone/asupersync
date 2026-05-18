@@ -140,8 +140,10 @@ from detached source files.
 
 ### Surface 18: API skeleton in project root
 - **File**: `asupersync_v4_api_skeleton.rs`
-- **Disposition**: **RETIRE** → Track I (I3/v2ofj7.9.3)
-- **Target**: Move to `docs/design/` or archive.
+- **Disposition**: **RESOLVED** (Track I / I3 / v2ofj7.9.3)
+- **Evidence**: The root-level file is absent from `rg --files`; git history
+  records `f5f34b7e0 chore: remove root-level API skeleton after migration to
+  docs/design/`.
 
 ## Reality-Check Overlay (2026-05-05)
 
@@ -155,12 +157,12 @@ from detached source files.
 
 | Disposition | Count | Surfaces |
 |-------------|-------|----------|
-| RESOLVED | 8 | #2, #3, #4, #11, #12, #14, #16, #17 |
+| RESOLVED | 9 | #2, #3, #4, #11, #12, #14, #16, #17, #18 |
 | IMPLEMENT | 2 | #6, #7 |
 | DOCUMENT | 4 | #5, #9, #10, #19 |
 | CONVERGE | 1 | #1 |
 | QUARANTINE | 1 | #13 |
-| RETIRE | 3 | #8, #15, #18 |
+| RETIRE | 2 | #8, #15 |
 | **Total** | **19** | |
 
 ## Track-to-Surface Mapping
@@ -175,6 +177,6 @@ from detached source files.
 | F | #6 | IMPLEMENT |
 | G | #7 | IMPLEMENT |
 | H | #8, #9, #10 | RETIRE, DOCUMENT, DOCUMENT |
-| I | #13, #17, #18 | QUARANTINE, RESOLVED, RETIRE |
+| I | #13, #17, #18 | QUARANTINE, RESOLVED, RESOLVED |
 | Z | All, #19 | Verification of above plus live marker classification ratchet |
 | Hygiene | #14, #15, #16 | #14 RESOLVED, #15 RETIRE, #16 RESOLVED |
