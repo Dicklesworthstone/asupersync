@@ -978,7 +978,7 @@ impl KafkaConsumer {
                 // the kafka-feature broker-backend path. Pre-fix this
                 // path read `wall_now()` directly, defeating
                 // `LabRuntime::advance` (mirroring the same defect that
-                // br-asupersync-my0rls fixed for the no-kafka stub path).
+                // br-asupersync-my0rls fixed for the no-kafka fallback path).
                 let now_fn = || {
                     cx.timer_driver()
                         .map_or_else(crate::time::wall_now, |d| d.now())
@@ -1104,7 +1104,7 @@ impl KafkaConsumer {
 
         #[cfg(feature = "kafka")]
         {
-            // Fall back to stub behavior if we're in test mode and force_real_kafka is false
+            // Fall back to deterministic test-mode behavior when force_real_kafka is false.
             if timeout.is_zero() {
                 return Ok(None);
             }
@@ -1115,7 +1115,7 @@ impl KafkaConsumer {
             // even though the kafka feature is enabled — typically a
             // test harness with force_real_kafka=false). Same defect
             // shape as br-asupersync-mskwk7 (kafka broker backend
-            // path) and br-asupersync-my0rls (no-kafka stub path).
+            // path) and br-asupersync-my0rls (no-kafka fallback path).
             let now_fn = || {
                 cx.timer_driver()
                     .map_or_else(crate::time::wall_now, |d| d.now())
@@ -1164,7 +1164,7 @@ impl KafkaConsumer {
             // VirtualClock-backed lab harness can advance time and
             // unblock the poll deterministically. The previous shape
             // pinned the deadline to wall-clock via `wall_now()` even
-            // in the no-kafka stub path, defeating
+            // in the no-kafka fallback path, defeating
             // `LabRuntime::advance` for any test that relied on
             // exercising poll-timeout flow without the kafka feature.
             // Mirrors the pattern at messaging/kafka.rs line 522-524.
