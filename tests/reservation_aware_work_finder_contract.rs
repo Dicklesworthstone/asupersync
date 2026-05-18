@@ -360,6 +360,83 @@ fn unapproved_fallback_lane_is_blocked_by_policy() {
 }
 
 #[test]
+fn stale_in_progress_is_report_only_and_tracker_lock_blocks_claim() {
+    let receipt = finder_json("stale_in_progress_tracker_lock.json");
+    let tracker_claim = candidate(&receipt, "asupersync-ready-needs-tracker");
+    let source_only = candidate(&receipt, "mock-code-finder:source-only-finder");
+
+    assert_eq!(receipt["tracker_lock"]["active"].as_bool(), Some(true));
+    assert_eq!(
+        receipt["tracker_lock"]["holder"].as_str(),
+        Some("BoldTower")
+    );
+    assert_eq!(tracker_claim["status"].as_str(), Some("blocked"));
+    assert!(
+        tracker_claim["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|blocker| blocker["kind"].as_str() == Some("tracker-active-reservation"))
+    );
+    assert_eq!(
+        tracker_claim["files_to_reserve"][0].as_str(),
+        Some(".beads/issues.jsonl")
+    );
+
+    assert_eq!(source_only["status"].as_str(), Some("ready-fallback"));
+    assert_eq!(
+        source_only["validation_class"].as_str(),
+        Some("source-only")
+    );
+    assert_eq!(
+        source_only["files_to_reserve"][0].as_str(),
+        Some("scripts/reservation_aware_work_finder.py")
+    );
+    assert!(
+        source_only["blockers"]
+            .as_array()
+            .expect("blockers")
+            .is_empty(),
+        "expired reservations must not block a source-only fallback"
+    );
+
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("mock-code-finder:source-only-finder")
+    );
+    assert_eq!(
+        receipt["recommendation"]["validation_class"].as_str(),
+        Some("source-only")
+    );
+    assert_eq!(
+        receipt["recommendation"]["files_to_reserve"][0].as_str(),
+        Some("scripts/reservation_aware_work_finder.py")
+    );
+    assert!(
+        receipt["recommendation"]["safety_reason"]
+            .as_str()
+            .expect("safety reason")
+            .contains("no tracker mutation required")
+    );
+
+    let stale = receipt["stale_in_progress"].as_array().expect("stale rows");
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0]["id"].as_str(), Some("asupersync-stale-agent"));
+    assert_eq!(stale[0]["owner"].as_str(), Some("DormantAgent"));
+    assert_eq!(
+        stale[0]["recommended_action"].as_str(),
+        Some("coordinate-before-reopen-or-force-release")
+    );
+    assert_eq!(stale[0]["requires_explicit_action"].as_bool(), Some(true));
+    assert_eq!(stale[0]["force_release_performed"].as_bool(), Some(false));
+    assert_eq!(stale[0]["reopen_performed"].as_bool(), Some(false));
+    assert_eq!(
+        receipt["summary"]["stale_in_progress_count"].as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
 fn proof_command_rch_routing_rejects_shell_prefix_spoofing() {
     let probe = r#"
 import json

@@ -1,0 +1,68 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": [
+      {
+        "agent_name": "BoldTower",
+        "path_pattern": ".beads/issues.jsonl",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:30:00Z"
+      },
+      {
+        "agent_name": "BeigeSnow",
+        "path_pattern": "scripts/reservation_aware_work_finder.py",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:00:00Z"
+      }
+    ]
+  },
+  "beads": {
+    "status": "fixture",
+    "stale_after_minutes": 90,
+    "ready": [
+      {
+        "id": "asupersync-ready-needs-tracker",
+        "title": "Claimable finder helper bead",
+        "priority": 1,
+        "paths": [
+          "scripts/reservation_aware_work_finder.py"
+        ]
+      }
+    ],
+    "in_progress": [
+      {
+        "id": "asupersync-stale-agent",
+        "title": "Old in-progress work from an inactive agent",
+        "status": "in_progress",
+        "owner": "DormantAgent",
+        "updated_at": "2026-05-10T06:45:00Z"
+      },
+      {
+        "id": "asupersync-active-agent",
+        "title": "Recent in-progress work",
+        "status": "in_progress",
+        "owner": "ActiveAgent",
+        "updated_at": "2026-05-10T08:30:00Z"
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "fixture",
+    "entries": []
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "mock-code-finder:source-only-finder",
+      "lane": "mock-code-finder",
+      "title": "Inspect reservation-aware finder without tracker mutation",
+      "priority": 2,
+      "no_build_validation": true,
+      "paths": [
+        "scripts/reservation_aware_work_finder.py"
+      ],
+      "proof_commands": [
+        "python3 -m py_compile scripts/reservation_aware_work_finder.py"
+      ]
+    }
+  ]
+}

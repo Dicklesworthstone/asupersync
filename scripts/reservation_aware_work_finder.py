@@ -92,6 +92,8 @@ RCH_LOCAL_FALLBACK_RE = re.compile(
 )
 DISK_CRITICAL_BYTES = 1 * 1024 * 1024 * 1024
 DISK_LOW_BYTES = 5 * 1024 * 1024 * 1024
+DEFAULT_STALE_IN_PROGRESS_MINUTES = 120
+TRACKER_PATHS = (".beads/issues.jsonl", ".beads/beads.db")
 
 
 def utc_now() -> str:
@@ -262,6 +264,23 @@ def ready_issues(source: dict[str, Any]) -> list[dict[str, Any]]:
     return unique
 
 
+def in_progress_issues(source: dict[str, Any]) -> list[dict[str, Any]]:
+    beads = source.get("beads", {}) if isinstance(source, dict) else {}
+    rows = rows_from(beads, ("in_progress", "in_progress_issues"))
+    for row in rows_from(beads, ("issues", "ready")):
+        if str(row.get("status") or "") == "in_progress":
+            rows.append(row)
+
+    seen: set[str] = set()
+    unique = []
+    for row in rows:
+        issue_id = str(row.get("id") or "")
+        if issue_id and issue_id not in seen:
+            seen.add(issue_id)
+            unique.append(row)
+    return unique
+
+
 def candidate_paths(row: dict[str, Any]) -> list[str]:
     paths: list[str] = []
     value = row.get("paths")
@@ -295,6 +314,8 @@ def fallback_candidates(source: dict[str, Any]) -> list[dict[str, Any]]:
                 "no_build_validation": bool(
                     row.get("no_build_validation") or row.get("source_only_validation")
                 ),
+                "requires_tracker_update": bool(row.get("requires_tracker_update")),
+                "create_bead": bool(row.get("create_bead")),
                 "proof_commands": [
                     str(command)
                     for command in row.get("proof_commands", [])
@@ -324,6 +345,8 @@ def ready_candidates(source: dict[str, Any]) -> list[dict[str, Any]]:
                 "no_build_validation": bool(
                     issue.get("no_build_validation") or issue.get("source_only_validation")
                 ),
+                "requires_tracker_update": True,
+                "create_bead": False,
                 "proof_commands": [
                     str(command)
                     for command in issue.get("proof_commands", [])
@@ -356,6 +379,54 @@ def reservation_blockers(
             }
         )
     return blockers
+
+
+def tracker_lock_from(
+    reservations: list[dict[str, Any]],
+    agent: str,
+) -> dict[str, Any]:
+    for reservation in reservations:
+        if not reservation["active"] or not reservation["exclusive"]:
+            continue
+        if reservation["holder"] == agent:
+            continue
+        if not any(path_matches(reservation["path_pattern"], tracker) for tracker in TRACKER_PATHS):
+            continue
+        return {
+            "active": True,
+            "holder": reservation["holder"],
+            "path_pattern": reservation["path_pattern"],
+            "expires_ts": reservation["expires_ts"],
+        }
+    return {
+        "active": False,
+        "holder": "",
+        "path_pattern": "",
+        "expires_ts": "",
+    }
+
+
+def candidate_requires_tracker(candidate: dict[str, Any]) -> bool:
+    if candidate["kind"] == "ready-bead":
+        return True
+    return bool(candidate.get("requires_tracker_update") or candidate.get("create_bead"))
+
+
+def tracker_blockers(
+    candidate: dict[str, Any],
+    tracker_lock: dict[str, Any],
+) -> list[dict[str, str]]:
+    if not tracker_lock["active"] or not candidate_requires_tracker(candidate):
+        return []
+    return [
+        {
+            "kind": "tracker-active-reservation",
+            "holder": str(tracker_lock["holder"]),
+            "path_pattern": str(tracker_lock["path_pattern"]),
+            "expires_ts": str(tracker_lock["expires_ts"]),
+            "reason": "candidate requires a Beads tracker mutation while the tracker ledger is reserved",
+        }
+    ]
 
 
 def dirty_blockers(
@@ -514,12 +585,38 @@ def bead_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def files_to_reserve(candidate: dict[str, Any]) -> list[str]:
+    paths = list(candidate["paths"])
+    if candidate_requires_tracker(candidate):
+        paths.append(".beads/issues.jsonl")
+    return sorted(set(normalize_path(path) for path in paths if path))
+
+
+def validation_class(candidate: dict[str, Any]) -> str:
+    if candidate_has_no_build_validation(candidate):
+        return "source-only"
+    if proof_commands_require_rch_heavy_work(candidate):
+        return "rch-cargo"
+    if candidate.get("proof_commands"):
+        return "non-cargo"
+    return "inspection-only"
+
+
+def safety_reason(candidate: dict[str, Any], blockers: list[dict[str, str]]) -> str:
+    if blockers:
+        kinds = ", ".join(sorted({blocker["kind"] for blocker in blockers}))
+        return f"blocked by {kinds}"
+    tracker_text = "tracker mutation required" if candidate_requires_tracker(candidate) else "no tracker mutation required"
+    return f"no active peer reservation or dirty path blocks the candidate; {tracker_text}"
+
+
 def classify_candidate(
     candidate: dict[str, Any],
     reservations: list[dict[str, Any]],
     dirty: list[dict[str, Any]],
     agent: str,
     disk_pressure: dict[str, Any],
+    tracker_lock: dict[str, Any],
 ) -> dict[str, Any]:
     paths = candidate["paths"]
     blockers = []
@@ -527,6 +624,7 @@ def classify_candidate(
     blockers.extend(proof_command_blockers(candidate))
     blockers.extend(disk_pressure_blockers(candidate, disk_pressure))
     blockers.extend(bead_blockers(candidate))
+    blockers.extend(tracker_blockers(candidate, tracker_lock))
     blockers.extend(reservation_blockers(paths, reservations, agent))
     blockers.extend(dirty_blockers(paths, dirty, reservations, agent))
 
@@ -544,6 +642,10 @@ def classify_candidate(
     row["status"] = status
     row["blockers"] = blockers
     row["recommended_action"] = action
+    row["files_to_reserve"] = files_to_reserve(candidate)
+    row["validation_class"] = validation_class(candidate)
+    row["tracker_mutation_required"] = candidate_requires_tracker(candidate)
+    row["safety_reason"] = safety_reason(candidate, blockers)
     return row
 
 
@@ -566,7 +668,10 @@ def recommendation(candidates: list[dict[str, Any]], disk_pressure: dict[str, An
             "lane": chosen["lane"],
             "title": chosen["title"],
             "paths": chosen["paths"],
+            "files_to_reserve": chosen["files_to_reserve"],
+            "validation_class": chosen["validation_class"],
             "reason": "first unblocked candidate by kind and priority",
+            "safety_reason": chosen["safety_reason"],
         }
     cleanup_candidates = disk_pressure.get("cleanup_candidates", [])
     if disk_pressure["level"] == "critical" and cleanup_candidates:
@@ -577,7 +682,10 @@ def recommendation(candidates: list[dict[str, Any]], disk_pressure: dict[str, An
             "lane": "disk-pressure-cleanup-authorization",
             "title": str(chosen.get("title") or "Request authorization for stale artifact cleanup"),
             "paths": [str(chosen["path"])] if chosen.get("path") else [],
+            "files_to_reserve": [],
+            "validation_class": "human-authorization",
             "reason": "critical disk pressure leaves no safe work candidate; ask for explicit cleanup authorization",
+            "safety_reason": "cleanup is report-only and requires explicit user authorization",
         }
     if candidates:
         first = sorted(candidates, key=candidate_sort_key)[0]
@@ -587,7 +695,10 @@ def recommendation(candidates: list[dict[str, Any]], disk_pressure: dict[str, An
             "lane": first["lane"],
             "title": first["title"],
             "paths": first["paths"],
+            "files_to_reserve": first["files_to_reserve"],
+            "validation_class": first["validation_class"],
             "reason": "all candidates are blocked by reservations, dirty paths, or policy",
+            "safety_reason": first["safety_reason"],
         }
     return {
         "category": "blocked-no-candidates",
@@ -595,7 +706,10 @@ def recommendation(candidates: list[dict[str, Any]], disk_pressure: dict[str, An
         "lane": "",
         "title": "",
         "paths": [],
+        "files_to_reserve": [],
+        "validation_class": "none",
         "reason": "no ready beads or fallback candidates were provided",
+        "safety_reason": "no candidates were supplied",
     }
 
 
@@ -808,7 +922,10 @@ def build_closeout_handoff(
             "lane": recommendation_row["lane"],
             "title": recommendation_row["title"],
             "paths": recommendation_row["paths"],
+            "files_to_reserve": recommendation_row["files_to_reserve"],
+            "validation_class": recommendation_row["validation_class"],
             "reason": recommendation_row["reason"],
+            "safety_reason": recommendation_row["safety_reason"],
         },
         "remote_proof_result": proof_result_from(source),
         "artifact_retrieval_blocker": retrieval_blocker_from(source),
@@ -832,6 +949,58 @@ def build_closeout_handoff(
         "non_mutating": True,
         "preserves_peer_dirty_paths": True,
     }
+
+
+def stale_after_minutes_from(source: dict[str, Any]) -> int:
+    beads = source.get("beads", {}) if isinstance(source, dict) else {}
+    parsed = _first_int(
+        beads.get("stale_after_minutes"),
+        source.get("stale_in_progress_after_minutes"),
+    )
+    return parsed if parsed is not None and parsed > 0 else DEFAULT_STALE_IN_PROGRESS_MINUTES
+
+
+def issue_owner(issue: dict[str, Any]) -> str:
+    for key in ("assignee", "owner", "agent", "claimed_by", "updated_by", "created_by"):
+        value = issue.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "unknown"
+
+
+def stale_in_progress_reports(
+    source: dict[str, Any],
+    generated_at: str,
+) -> list[dict[str, Any]]:
+    now = parse_timestamp(generated_at) or dt.datetime.now(dt.timezone.utc)
+    threshold = stale_after_minutes_from(source)
+    reports = []
+    for issue in in_progress_issues(source):
+        updated_at = parse_timestamp(
+            str(issue.get("updated_at") or issue.get("claimed_at") or issue.get("created_at") or "")
+        )
+        if updated_at is None:
+            continue
+        age_minutes = int((now - updated_at).total_seconds() // 60)
+        if age_minutes < threshold:
+            continue
+        issue_id = str(issue.get("id") or "")
+        reports.append(
+            {
+                "id": issue_id,
+                "title": str(issue.get("title") or issue_id),
+                "owner": issue_owner(issue),
+                "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
+                "age_minutes": age_minutes,
+                "threshold_minutes": threshold,
+                "status": "stale-report-only",
+                "recommended_action": "coordinate-before-reopen-or-force-release",
+                "requires_explicit_action": True,
+                "force_release_performed": False,
+                "reopen_performed": False,
+            }
+        )
+    return sorted(reports, key=lambda row: (-row["age_minutes"], row["id"]))
 
 
 def run_text(repo_path: Path, command: list[str], timeout: float) -> tuple[str, str]:
@@ -921,9 +1090,11 @@ def build_receipt(
     reservations = reservation_rows(source, generated_at)
     dirty = dirty_entries(source)
     disk_pressure = disk_pressure_from_source(source)
+    tracker_lock = tracker_lock_from(reservations, agent)
+    stale_in_progress = stale_in_progress_reports(source, generated_at)
     candidates = ready_candidates(source) + fallback_candidates(source)
     classified = [
-        classify_candidate(candidate, reservations, dirty, agent, disk_pressure)
+        classify_candidate(candidate, reservations, dirty, agent, disk_pressure, tracker_lock)
         for candidate in sorted(candidates, key=candidate_sort_key)
     ]
     disk_pressure["non_build_fallback_candidates"] = disk_pressure_non_build_candidates(classified)
@@ -951,11 +1122,14 @@ def build_receipt(
             "blocked_count": len(blocked),
             "ready_bead_count": sum(1 for row in classified if row["kind"] == "ready-bead"),
             "fallback_count": sum(1 for row in classified if row["kind"] == "fallback-lane"),
+            "stale_in_progress_count": len(stale_in_progress),
         },
         "recommendation": rec,
         "closeout_handoff": closeout_handoff,
         "disk_pressure": disk_pressure,
         "candidates": classified,
+        "stale_in_progress": stale_in_progress,
+        "tracker_lock": tracker_lock,
         "active_reservations": [row for row in reservations if row["active"]],
         "dirty_paths": dirty,
         "approved_fallback_lanes": sorted(APPROVED_FALLBACK_LANES),
