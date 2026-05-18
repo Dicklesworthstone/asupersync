@@ -44,7 +44,7 @@
 //! use asupersync::obligation::graded::{CommittedProof, SendPermit};
 //! use std::marker::PhantomData;
 //!
-//! let fake: CommittedProof<SendPermit> = CommittedProof { _kind: PhantomData };
+//! let forged: CommittedProof<SendPermit> = CommittedProof { _kind: PhantomData };
 //! ```
 
 use crate::channel::{mpsc, oneshot};
