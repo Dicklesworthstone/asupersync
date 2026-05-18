@@ -40,7 +40,7 @@ impl Default for StackTraceConfig {
 /// * `config` - Configuration for trace capture and formatting
 ///
 /// # Returns
-/// Formatted stack trace string, or placeholder if feature disabled
+/// Formatted stack trace string, or a disabled-feature diagnostic when unavailable.
 ///
 /// # Example
 /// ```
@@ -251,7 +251,7 @@ mod tests_feature_disabled {
     use super::*;
 
     #[test]
-    fn test_disabled_feature_returns_placeholder() {
+    fn test_disabled_feature_returns_disabled_feature_diagnostic() {
         let trace = capture_stack_trace_default();
         assert_eq!(
             trace,
