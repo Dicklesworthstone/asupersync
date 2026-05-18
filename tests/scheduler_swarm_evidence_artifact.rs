@@ -707,7 +707,7 @@ fn scheduler_recommend_smoke_contract_declares_real_host_template() {
     assert_eq!(
         scenario["expected_report"],
         serde_json::Value::Null,
-        "template scenario should not pin a fake report projection"
+        "template scenario should not pin a synthetic report projection"
     );
     assert!(
         scenario["template_env"]["ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE"]
