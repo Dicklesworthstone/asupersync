@@ -865,10 +865,55 @@ impl PgLogicalReplicationHarness {
     fn test_type_namespace_handling(&mut self) { /* Implementation */
     }
     #[allow(dead_code)]
-    fn test_delete_message_format(&mut self) { /* Implementation */
+    fn test_delete_message_format(&mut self) {
+        let start = std::time::Instant::now();
+        let expected_tuple = vec![
+            TupleData::Text("123".to_string()),
+            TupleData::Text("deleted@example.com".to_string()),
+        ];
+        let delete_message = self.create_delete_message(16_384, &expected_tuple);
+
+        let result = match self.parse_delete_message(&delete_message) {
+            Ok((relation_oid, old_tuple))
+                if relation_oid == 16_384 && old_tuple == expected_tuple =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_019".to_string(),
+            description: "DELETE message format with old tuple data".to_string(),
+            category: TestCategory::ChangeDataCapture,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests DELETE relation OID and old tuple payload decoding".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_truncate_message_format(&mut self) { /* Implementation */
+    fn test_truncate_message_format(&mut self) {
+        let start = std::time::Instant::now();
+        let relation_oids = vec![16_384, 16_385, 16_386];
+        let truncate_message = self.create_truncate_message(&relation_oids, 0x01);
+
+        let result = match self.parse_truncate_message(&truncate_message) {
+            Ok((parsed_oids, options)) if parsed_oids == relation_oids && options == 0x01 => {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_020".to_string(),
+            description: "TRUNCATE message format with relation list".to_string(),
+            category: TestCategory::ChangeDataCapture,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests TRUNCATE options byte and relation OID list decoding".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
     fn test_transaction_ordering(&mut self) { /* Implementation */
@@ -969,6 +1014,28 @@ impl PgLogicalReplicationHarness {
 
         msg.push(b'N'); // new tuple
         msg.extend_from_slice(&self.create_tuple_data(new_tuple));
+        msg
+    }
+
+    /// Create a DELETE message with old tuple data.
+    #[allow(dead_code)]
+    fn create_delete_message(&self, relation_oid: u32, old_tuple: &[TupleData]) -> Vec<u8> {
+        let mut msg = vec![b'D'];
+        msg.extend_from_slice(&relation_oid.to_be_bytes());
+        msg.push(b'O'); // old tuple
+        msg.extend_from_slice(&self.create_tuple_data(old_tuple));
+        msg
+    }
+
+    /// Create a TRUNCATE message with affected relation OIDs.
+    #[allow(dead_code)]
+    fn create_truncate_message(&self, relation_oids: &[u32], options: u8) -> Vec<u8> {
+        let mut msg = vec![b'T'];
+        msg.extend_from_slice(&(relation_oids.len() as u32).to_be_bytes());
+        msg.push(options);
+        for oid in relation_oids {
+            msg.extend_from_slice(&oid.to_be_bytes());
+        }
         msg
     }
 
@@ -1177,11 +1244,10 @@ impl PgLogicalReplicationHarness {
         }
 
         let relation_oid = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-        let tuple = vec![
-            TupleData::Text("123".to_string()),
-            TupleData::Text("john_doe".to_string()),
-            TupleData::Text("john@example.com".to_string()),
-        ];
+        if data[5] != b'N' {
+            return Err("INSERT message missing new tuple marker".to_string());
+        }
+        let tuple = self.parse_tuple_data(&data[6..])?;
 
         Ok((relation_oid, tuple))
     }
@@ -1197,15 +1263,94 @@ impl PgLogicalReplicationHarness {
         }
 
         let relation_oid = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-        let old_tuple = Some(vec![TupleData::Text("old_value".to_string())]);
-        let new_tuple = vec![TupleData::Text("new_value".to_string())];
+        let mut pos = 5;
+        let old_tuple = match data.get(pos).copied() {
+            Some(b'O' | b'K') => {
+                let (tuple, consumed) = self.parse_tuple_data_prefix(&data[pos + 1..])?;
+                pos += 1 + consumed;
+                Some(tuple)
+            }
+            Some(b'N') => None,
+            Some(other) => {
+                return Err(format!(
+                    "UPDATE message has unknown tuple marker 0x{other:02X}"
+                ));
+            }
+            None => return Err("UPDATE message missing tuple marker".to_string()),
+        };
+
+        let Some(b'N') = data.get(pos).copied() else {
+            return Err("UPDATE message missing new tuple marker".to_string());
+        };
+        pos += 1;
+        let new_tuple = self.parse_tuple_data(&data[pos..])?;
 
         Ok((relation_oid, old_tuple, new_tuple))
+    }
+
+    /// Parse a DELETE message and return (relation_oid, old_tuple).
+    #[allow(dead_code)]
+    fn parse_delete_message(&self, data: &[u8]) -> Result<(u32, Vec<TupleData>), String> {
+        if data.len() < 6 || data[0] != b'D' {
+            return Err("Invalid DELETE message format".to_string());
+        }
+
+        let relation_oid = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        match data[5] {
+            b'O' | b'K' => Ok((relation_oid, self.parse_tuple_data(&data[6..])?)),
+            other => Err(format!(
+                "DELETE message has unknown old tuple marker 0x{other:02X}"
+            )),
+        }
+    }
+
+    /// Parse a TRUNCATE message and return (relation_oids, options).
+    #[allow(dead_code)]
+    fn parse_truncate_message(&self, data: &[u8]) -> Result<(Vec<u32>, u8), String> {
+        if data.len() < 6 || data[0] != b'T' {
+            return Err("Invalid TRUNCATE message format".to_string());
+        }
+
+        let relation_count = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+        let options = data[5];
+        let expected_len = relation_count
+            .checked_mul(4)
+            .and_then(|oid_bytes| oid_bytes.checked_add(6))
+            .ok_or_else(|| "TRUNCATE message relation count overflows length".to_string())?;
+        if data.len() != expected_len {
+            return Err("TRUNCATE message relation OID list length mismatch".to_string());
+        }
+
+        let mut pos = 6;
+        let mut relation_oids = Vec::with_capacity(relation_count);
+        for _ in 0..relation_count {
+            relation_oids.push(u32::from_be_bytes([
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+            ]));
+            pos += 4;
+        }
+
+        Ok((relation_oids, options))
     }
 
     /// Parse tuple data from binary format.
     #[allow(dead_code)]
     fn parse_tuple_data(&self, data: &[u8]) -> Result<Vec<TupleData>, String> {
+        let (tuple, consumed) = self.parse_tuple_data_prefix(data)?;
+
+        if consumed != data.len() {
+            return Err("Tuple data has trailing bytes after declared columns".to_string());
+        }
+
+        Ok(tuple)
+    }
+
+    /// Parse tuple data from the start of a larger message and return consumed bytes.
+    #[allow(dead_code)]
+    fn parse_tuple_data_prefix(&self, data: &[u8]) -> Result<(Vec<TupleData>, usize), String> {
         if data.len() < 2 {
             return Err("Tuple data missing column count".to_string());
         }
@@ -1256,11 +1401,7 @@ impl PgLogicalReplicationHarness {
             }
         }
 
-        if pos != data.len() {
-            return Err("Tuple data has trailing bytes after declared columns".to_string());
-        }
-
-        Ok(tuple)
+        Ok((tuple, pos))
     }
 
     /// Parse any logical replication message.
@@ -1277,6 +1418,8 @@ impl PgLogicalReplicationHarness {
             b'R' => self.parse_relation_message(data).map(|_| ()),
             b'I' => self.parse_insert_message(data).map(|_| ()),
             b'U' => self.parse_update_message(data).map(|_| ()),
+            b'D' => self.parse_delete_message(data).map(|_| ()),
+            b'T' => self.parse_truncate_message(data).map(|_| ()),
             _ => Err("Unknown message type".to_string()),
         }
     }
