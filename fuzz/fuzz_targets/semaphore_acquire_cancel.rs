@@ -5,7 +5,7 @@ use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::{TaskHandle, yield_now};
 use asupersync::sync::Semaphore;
-use asupersync::types::{Budget, CancelReason};
+use asupersync::types::{Budget, CancelKind, CancelReason};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -298,18 +298,30 @@ async fn run_acquire_task(
         }
     }
 
-    // Self-cancellation probability check - simplified approach
+    let cx = Cx::current().unwrap_or_else(Cx::for_testing);
+
+    // Self-cancellation probability check. Exercise the real acquire
+    // cancellation seam instead of only adding scheduler noise.
     if plan.cancel_probability > 200 {
-        // High probability self-cancel - just yield and return early
-        for _ in 0..3 {
-            yield_now().await;
+        cx.cancel_fast(CancelKind::User);
+        match semaphore.acquire(&cx, permit_count).await {
+            Ok(permit) => {
+                let acquired = permit.count();
+                drop(permit);
+                assert_eq!(
+                    acquired, 0,
+                    "self-cancelled semaphore acquire unexpectedly acquired permits"
+                );
+                return 0;
+            }
+            Err(_) => {
+                tracker.record_cancel(permit_count);
+                return 0;
+            }
         }
-        tracker.record_cancel(permit_count);
-        return 0;
     }
 
     // Normal acquire path
-    let cx = Cx::current().unwrap_or_else(Cx::for_testing);
     let permit = match semaphore.acquire(&cx, permit_count).await {
         Ok(permit) => {
             let actual_count = permit.count();
