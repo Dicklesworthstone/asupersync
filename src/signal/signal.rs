@@ -142,14 +142,29 @@ impl std::fmt::Debug for WindowsEventHandle {
     }
 }
 
+#[cfg(windows)]
+impl WindowsEventHandle {
+    #[allow(unsafe_code)] // Win32 Event HANDLE FFI.
+    fn set_event(self) -> bool {
+        unsafe { windows_sys::Win32::System::Threading::SetEvent(self.0) != 0 }
+    }
+
+    #[allow(unsafe_code)] // Win32 Event HANDLE FFI.
+    fn close(self) -> bool {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) != 0 }
+    }
+}
+
 // SAFETY: Win32 Event objects accessed via SetEvent / WaitForMultipleObjects
 // / CloseHandle are documented to be safe to use from arbitrary threads
 // (the kernel-side state is the synchronization domain). The HANDLE
 // itself is just an opaque pointer to a kernel object, not into thread-
 // local memory.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 unsafe impl Send for WindowsEventHandle {}
 #[cfg(windows)]
+#[allow(unsafe_code)]
 unsafe impl Sync for WindowsEventHandle {}
 
 #[cfg(windows)]
@@ -166,28 +181,21 @@ impl Drop for SignalDispatcher {
         // Order matters: SetEvent → join → CloseHandle. Closing the
         // handles before the thread joins would invalidate the handles
         // the WaitForMultipleObjects call is referencing.
-        unsafe {
-            // SAFETY: shutdown_event is a valid manual-reset Event we
-            // created in start(); SetEvent is safe to call repeatedly.
-            let _ = windows_sys::Win32::System::Threading::SetEvent(self.shutdown_event.0);
-        }
+        let _ = self.shutdown_event.set_event();
         if let Some(handle) = self.poller_handle.take() {
             // Best-effort join: if the poller thread panicked we still
             // want shutdown to proceed cleanly rather than propagate
             // the panic from a destructor.
             let _ = handle.join();
         }
-        unsafe {
-            // SAFETY: both handles were created by CreateEventW in
-            // start() and have not been closed elsewhere. Any signal
-            // handlers that captured signal_pending_event by Copy will
-            // still hold the (now-stale) HANDLE value; once the
-            // dispatcher is dropped the process is shutting down and
-            // CRT signal handlers should not fire — see start() docs
-            // for the lifecycle contract.
-            let _ = windows_sys::Win32::Foundation::CloseHandle(self.shutdown_event.0);
-            let _ = windows_sys::Win32::Foundation::CloseHandle(self.signal_pending_event.0);
-        }
+        // Both handles were created by CreateEventW in start() and have
+        // not been closed elsewhere. Any signal handlers that captured
+        // signal_pending_event by Copy will still hold the now-stale
+        // HANDLE value; once the dispatcher is dropped the process is
+        // shutting down and CRT signal handlers should not fire. See
+        // start() docs for the lifecycle contract.
+        let _ = self.shutdown_event.close();
+        let _ = self.signal_pending_event.close();
     }
 }
 
@@ -326,7 +334,7 @@ impl SignalDispatcher {
             unsafe {
                 signal_hook::low_level::register(raw, move || {
                     slot.record_delivery_signal_safe();
-                    let _ = SetEvent(pending.0);
+                    let _ = pending.set_event();
                 })?;
             }
         }
