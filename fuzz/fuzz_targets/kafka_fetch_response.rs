@@ -40,6 +40,18 @@ const MAX_RECORD_SIZE: usize = 64 * 1024;
 /// Maximum topic name length
 const MAX_TOPIC_NAME_LEN: usize = 249; // Kafka limit
 
+fn crc32c(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0x82F6_3B78 & mask);
+        }
+    }
+    !crc
+}
+
 /// Structure-aware generator for Kafka FetchResponse
 #[derive(Arbitrary, Debug, Clone)]
 struct KafkaFetchResponse {
@@ -322,13 +334,8 @@ impl KafkaFetchResponse {
         };
         buf.extend_from_slice(&magic.to_be_bytes());
 
-        // CRC placeholder - we'll calculate later
-        let crc = if self.params.corrupt_crc {
-            0xDEADBEEF_u32
-        } else {
-            batch.crc
-        };
-        buf.extend_from_slice(&crc.to_be_bytes());
+        let crc_pos = buf.len();
+        buf.extend_from_slice(&0_u32.to_be_bytes());
 
         buf.extend_from_slice(&batch.attributes.to_be_bytes());
         buf.extend_from_slice(&batch.last_offset_delta.to_be_bytes());
@@ -350,6 +357,13 @@ impl KafkaFetchResponse {
         let actual_length = (buf.len() - batch_start - 12) as i32; // Subtract offset + length fields
         let length_bytes = actual_length.to_be_bytes();
         buf[length_pos..length_pos + 4].copy_from_slice(&length_bytes);
+
+        let crc = if self.params.corrupt_crc {
+            batch.crc ^ 0xDEAD_BEEF
+        } else {
+            crc32c(&buf[crc_pos + 4..])
+        };
+        buf[crc_pos..crc_pos + 4].copy_from_slice(&crc.to_be_bytes());
     }
 
     fn serialize_record(&self, buf: &mut Vec<u8>, record: &Record) {
