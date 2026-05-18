@@ -1040,10 +1040,83 @@ impl PgLogicalReplicationHarness {
         });
     }
     #[allow(dead_code)]
-    fn test_large_tuple_performance(&mut self) { /* Implementation */
+    fn test_large_tuple_performance(&mut self) {
+        let start = std::time::Instant::now();
+        let tuple: Vec<_> = (0..512)
+            .map(|column| match column % 3 {
+                0 => TupleData::Text(format!("value-{column:03}")),
+                1 => TupleData::Null,
+                _ => TupleData::Binary(vec![(column & 0xFF) as u8, ((column >> 8) & 0xFF) as u8]),
+            })
+            .collect();
+        let encoded = self.create_tuple_data(&tuple);
+
+        let result = match self.parse_tuple_data(&encoded) {
+            Ok(parsed)
+                if parsed.len() == 512
+                    && parsed.first() == Some(&TupleData::Text("value-000".to_string()))
+                    && parsed[1] == TupleData::Null
+                    && parsed[511] == TupleData::Binary(vec![0xFF, 0x01])
+                    && parsed == tuple =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_025".to_string(),
+            description: "Large tuple parser stress check".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Should,
+            verdict: result,
+            notes: Some(
+                "Tests a 512-column mixed tuple without relying on timing thresholds".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_high_volume_transaction_parsing(&mut self) { /* Implementation */
+    fn test_high_volume_transaction_parsing(&mut self) {
+        let start = std::time::Instant::now();
+        let transaction_count = 256_u32;
+        let base_lsn = 0x1000_0000_0000_0000_u64;
+        let base_timestamp = 1_640_995_260_000_000_u64;
+
+        let parsed_all = (0..transaction_count).all(|index| {
+            let xid = 10_000 + index;
+            let begin_lsn = base_lsn + u64::from(index) * 0x1_000;
+            let commit_lsn = begin_lsn + 0x100;
+            let end_lsn = begin_lsn + 0x200;
+            let begin = self.create_begin_message(begin_lsn, base_timestamp + u64::from(index), xid);
+            let commit =
+                self.create_commit_message(0, commit_lsn, end_lsn, base_timestamp + u64::from(index) + 1);
+
+            matches!(
+                (self.parse_begin_message(&begin), self.parse_commit_message(&commit)),
+                (Ok((parsed_begin_lsn, _, parsed_xid)), Ok((0, parsed_commit_lsn, parsed_end_lsn, _)))
+                    if parsed_xid == xid
+                        && parsed_begin_lsn == begin_lsn
+                        && parsed_begin_lsn < parsed_commit_lsn
+                        && parsed_commit_lsn < parsed_end_lsn
+            )
+        });
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_026".to_string(),
+            description: "High-volume transaction parser stress check".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Should,
+            verdict: if parsed_all {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            },
+            notes: Some(
+                "Tests 256 deterministic BEGIN/COMMIT pairs without a timing threshold".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
 
     // Helper methods for creating test message data
