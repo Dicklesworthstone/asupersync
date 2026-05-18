@@ -516,16 +516,134 @@ impl PgLogicalReplicationHarness {
     fn test_lsn_ordering(&mut self) { /* Implementation */
     }
     #[allow(dead_code)]
-    fn test_tuple_text_encoding(&mut self) { /* Implementation */
+    fn test_tuple_text_encoding(&mut self) {
+        let start = std::time::Instant::now();
+        let tuple = self.create_tuple_data(&[
+            TupleData::Text("logical".to_string()),
+            TupleData::Text("replication".to_string()),
+        ]);
+
+        let result = match self.parse_tuple_data(&tuple) {
+            Ok(parsed) => {
+                if parsed
+                    == vec![
+                        TupleData::Text("logical".to_string()),
+                        TupleData::Text("replication".to_string()),
+                    ]
+                {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_009".to_string(),
+            description: "Tuple text column encoding".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests 't' text fields with length-prefixed UTF-8 payloads".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_tuple_binary_encoding(&mut self) { /* Implementation */
+    fn test_tuple_binary_encoding(&mut self) {
+        let start = std::time::Instant::now();
+        let tuple = self.create_tuple_data(&[
+            TupleData::Binary(vec![0x00, 0x01, 0xFF]),
+            TupleData::Binary(vec![b'p', b'g']),
+        ]);
+
+        let result = match self.parse_tuple_data(&tuple) {
+            Ok(parsed) => {
+                if parsed
+                    == vec![
+                        TupleData::Binary(vec![0x00, 0x01, 0xFF]),
+                        TupleData::Binary(vec![b'p', b'g']),
+                    ]
+                {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_010".to_string(),
+            description: "Tuple binary column encoding".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests 'b' binary fields with length-prefixed raw bytes".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_tuple_column_count(&mut self) { /* Implementation */
+    fn test_tuple_column_count(&mut self) {
+        let start = std::time::Instant::now();
+        let empty_tuple = self.create_tuple_data(&[]);
+        let mixed_tuple = self.create_tuple_data(&[
+            TupleData::Text("one".to_string()),
+            TupleData::Null,
+            TupleData::Binary(vec![0x02]),
+        ]);
+        let truncated_declared_count = vec![0x00, 0x02, b'n'];
+
+        let result = match (
+            self.parse_tuple_data(&empty_tuple),
+            self.parse_tuple_data(&mixed_tuple),
+            self.parse_tuple_data(&truncated_declared_count),
+        ) {
+            (Ok(empty), Ok(mixed), Err(_)) if empty.is_empty() && mixed.len() == 3 => {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_011".to_string(),
+            description: "Tuple column-count enforcement".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests declared tuple column count, including truncated payload rejection"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_tuple_mixed_types(&mut self) { /* Implementation */
+    fn test_tuple_mixed_types(&mut self) {
+        let start = std::time::Instant::now();
+        let expected = vec![
+            TupleData::Text("id-7".to_string()),
+            TupleData::Null,
+            TupleData::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        ];
+        let tuple = self.create_tuple_data(&expected);
+
+        let result = match self.parse_tuple_data(&tuple) {
+            Ok(parsed) if parsed == expected => TestVerdict::Pass,
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_012".to_string(),
+            description: "Tuple mixed text/null/binary fields".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests mixed tuple payloads preserve field order and typed values".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
     fn test_relation_column_metadata(&mut self) { /* Implementation */
@@ -825,13 +943,62 @@ impl PgLogicalReplicationHarness {
 
     /// Parse tuple data from binary format.
     #[allow(dead_code)]
-    fn parse_tuple_data(&self, _data: &[u8]) -> Result<Vec<TupleData>, String> {
-        // Simplified parser
-        Ok(vec![
-            TupleData::Text("123".to_string()),
-            TupleData::Null,
-            TupleData::Text("active".to_string()),
-        ])
+    fn parse_tuple_data(&self, data: &[u8]) -> Result<Vec<TupleData>, String> {
+        if data.len() < 2 {
+            return Err("Tuple data missing column count".to_string());
+        }
+
+        let column_count = u16::from_be_bytes([data[0], data[1]]) as usize;
+        let mut pos = 2;
+        let mut tuple = Vec::with_capacity(column_count);
+
+        for column_index in 0..column_count {
+            let Some(kind) = data.get(pos).copied() else {
+                return Err(format!("Tuple column {column_index} missing data kind"));
+            };
+            pos += 1;
+
+            match kind {
+                b'n' => tuple.push(TupleData::Null),
+                b't' | b'b' => {
+                    if data.len().saturating_sub(pos) < 4 {
+                        return Err(format!("Tuple column {column_index} missing value length"));
+                    }
+                    let len = u32::from_be_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]) as usize;
+                    pos += 4;
+                    if data.len().saturating_sub(pos) < len {
+                        return Err(format!("Tuple column {column_index} payload truncated"));
+                    }
+                    let payload = &data[pos..pos + len];
+                    pos += len;
+
+                    if kind == b't' {
+                        let text = String::from_utf8(payload.to_vec()).map_err(|err| {
+                            format!("Tuple column {column_index} text is not UTF-8: {err}")
+                        })?;
+                        tuple.push(TupleData::Text(text));
+                    } else {
+                        tuple.push(TupleData::Binary(payload.to_vec()));
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "Tuple column {column_index} has unknown data kind 0x{other:02X}"
+                    ));
+                }
+            }
+        }
+
+        if pos != data.len() {
+            return Err("Tuple data has trailing bytes after declared columns".to_string());
+        }
+
+        Ok(tuple)
     }
 
     /// Parse any logical replication message.
