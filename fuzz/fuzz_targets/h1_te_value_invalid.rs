@@ -1,6 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::BytesMut;
+use asupersync::codec::Decoder;
+use asupersync::http::h1::codec::Http1Codec;
 use libfuzzer_sys::fuzz_target;
 
 /// Fuzz target for HTTP/1.1 Transfer-Encoding header validation.
@@ -62,8 +65,8 @@ struct TeInfo {
     warnings: Vec<String>,
 }
 
-/// Mock HTTP/1.1 Transfer-Encoding validator
-struct MockTeValidator {
+/// Fuzz-local Transfer-Encoding oracle.
+struct TransferEncodingOracle {
     policy: TeValidationPolicy,
     stats: TeValidationStats,
 }
@@ -117,7 +120,7 @@ impl Default for TeValidationPolicy {
     }
 }
 
-impl MockTeValidator {
+impl TransferEncodingOracle {
     fn new() -> Self {
         Self {
             policy: TeValidationPolicy::default(),
@@ -449,6 +452,61 @@ fn generate_test_cases() -> Vec<(String, String, bool, bool, TeValidationResult)
     ]
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveH1Outcome {
+    Accepted,
+    Rejected,
+    NeedMore,
+}
+
+impl LiveH1Outcome {
+    fn accepted(self) -> bool {
+        matches!(self, Self::Accepted)
+    }
+}
+
+fn is_safe_single_header_value(value: &str) -> bool {
+    value.len() <= 1024 && !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+}
+
+fn is_single_chunked_token(value: &str) -> bool {
+    let mut tokens = value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+    matches!(tokens.next(), Some(token) if token.eq_ignore_ascii_case("chunked"))
+        && tokens.next().is_none()
+}
+
+fn live_h1_request_outcome(
+    te_value: &str,
+    has_content_length: bool,
+    content_length: u64,
+) -> LiveH1Outcome {
+    let mut request = Vec::new();
+    request.extend_from_slice(b"POST /upload HTTP/1.1\r\nHost: fuzz.local\r\n");
+    request.extend_from_slice(b"Transfer-Encoding: ");
+    request.extend_from_slice(te_value.as_bytes());
+    request.extend_from_slice(b"\r\n");
+    if has_content_length {
+        request.extend_from_slice(b"Content-Length: ");
+        request.extend_from_slice(content_length.min(1024).to_string().as_bytes());
+        request.extend_from_slice(b"\r\n");
+    }
+    request.extend_from_slice(b"\r\n");
+    if is_single_chunked_token(te_value) && !has_content_length {
+        request.extend_from_slice(b"0\r\n\r\n");
+    }
+
+    let mut codec = Http1Codec::new();
+    let mut bytes = BytesMut::from(request.as_slice());
+    match codec.decode(&mut bytes) {
+        Ok(Some(_)) => LiveH1Outcome::Accepted,
+        Ok(None) => LiveH1Outcome::NeedMore,
+        Err(_) => LiveH1Outcome::Rejected,
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Limit input size to prevent timeouts
     if data.len() > 512 {
@@ -468,13 +526,31 @@ fuzz_target!(|data: &[u8]| {
     let _content_length_observation = test.content_length;
 
     // Test with default (strict) policy
-    let mut validator = MockTeValidator::new();
+    let mut validator = TransferEncodingOracle::new();
 
     let result = validator.validate_transfer_encoding(
         &test.te_value,
         test.is_request,
         test.has_content_length,
     );
+    let strict_oracle_accepts = matches!(&result, Ok(TeValidationResult::Valid(_)));
+    if test.is_request && is_safe_single_header_value(&test.te_value) {
+        let live_outcome =
+            live_h1_request_outcome(&test.te_value, test.has_content_length, test.content_length);
+        if strict_oracle_accepts {
+            assert!(
+                live_outcome.accepted(),
+                "strict TE oracle accepted a request value rejected by the live H1 codec: {:?}",
+                live_outcome
+            );
+        }
+        if test.has_content_length {
+            assert!(
+                !live_outcome.accepted(),
+                "live H1 codec must reject request TE plus Content-Length"
+            );
+        }
+    }
 
     // Validate result consistency
     match result {
@@ -586,7 +662,7 @@ fuzz_target!(|data: &[u8]| {
         allow_empty_header: true,
     };
 
-    let mut permissive_validator = MockTeValidator::with_policy(permissive_policy);
+    let mut permissive_validator = TransferEncodingOracle::with_policy(permissive_policy);
     let _permissive_result = permissive_validator.validate_transfer_encoding(
         &test.te_value,
         test.is_request,
@@ -597,7 +673,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Run predefined test cases to ensure correctness
     for (test_name, te_value, is_request, has_content_length, expected) in generate_test_cases() {
-        let mut test_validator = MockTeValidator::new();
+        let mut test_validator = TransferEncodingOracle::new();
         let test_result =
             test_validator.validate_transfer_encoding(&te_value, is_request, has_content_length);
 
@@ -636,7 +712,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             (Ok(TeValidationResult::NotImplemented(_)), TeValidationResult::NotImplemented(_)) => {
-                // Both not implemented - acceptable
+                // Unknown transfer-codings should map to an explicit 501-class outcome.
             }
 
             _ => {
