@@ -33,6 +33,9 @@ ARTIFACTS_RETRIEVED_RE = re.compile(
 )
 RETRIEVAL_STAGE_RE = re.compile(r"(?m)^\s*.*Retrieving artifacts from .*$")
 TIMEOUT_RE = re.compile(r"(?i)(timed out|timeout|terminated|signal TERM|exit code -1)")
+DISK_FULL_RE = re.compile(
+    r"(?i)(ENOSPC|No space left on device|os error 28|error 28)"
+)
 
 
 def utc_now() -> str:
@@ -61,6 +64,35 @@ def line_number(text: str, needle: str) -> int:
     if index < 0:
         return 0
     return text.count("\n", 0, index) + 1
+
+
+def first_matching_line(text: str, pattern: re.Pattern[str]) -> dict[str, Any] | None:
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if pattern.search(line):
+            return {"line": line_no, "text": line.strip()}
+    return None
+
+
+def retrieval_blocker_from_log(text: str) -> dict[str, Any] | None:
+    disk_full = first_matching_line(text, DISK_FULL_RE)
+    if disk_full is not None:
+        return {
+            "kind": "local-disk-full",
+            "line": disk_full["line"],
+            "text": disk_full["text"],
+            "local_disk_pressure": "critical",
+        }
+
+    timeout = first_matching_line(text, TIMEOUT_RE)
+    if timeout is not None:
+        return {
+            "kind": "wrapper-timeout",
+            "line": timeout["line"],
+            "text": timeout["text"],
+            "local_disk_pressure": "unknown",
+        }
+
+    return None
 
 
 def last_remote_exit(text: str) -> int | None:
@@ -211,6 +243,10 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
         retrieval_stage_count = 1
     retrieval_completed = retrieval_completed_count > 0 and retrieval_completed_count >= retrieval_stage_count
     retrieval_partial = retrieval_started and retrieval_completed_count < retrieval_stage_count
+    retrieval_blocker = retrieval_blocker_from_log(text)
+    disk_full_observed = (
+        retrieval_blocker is not None and retrieval_blocker["kind"] == "local-disk-full"
+    )
     timeout_observed = TIMEOUT_RE.search(text) is not None or wrapper_exit_code in {124, 143, -1}
 
     if local_fallback:
@@ -219,6 +255,9 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     elif remote_failed:
         classification = "remote_failure"
         decision = "failed"
+    elif remote_success and retrieval_partial and disk_full_observed:
+        classification = "passed_after_retrieval_enospc"
+        decision = "pass-with-retrieval-blocker"
     elif remote_success and retrieval_partial and timeout_observed:
         classification = "passed_after_retrieval_timeout"
         decision = "pass-with-retrieval-blocker"
@@ -258,6 +297,7 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     return {
         "classification": classification,
         "decision": decision,
+        "retrieval_blocker": retrieval_blocker,
         "markers": {
             "local_fallback": local_fallback,
             "remote_exit_code": remote_exit,
@@ -379,6 +419,20 @@ def artifact_budget(args: argparse.Namespace, markers: dict[str, Any]) -> dict[s
 
 
 def remediation_for(classification: str) -> dict[str, Any]:
+    if classification == "passed_after_retrieval_enospc":
+        return {
+            "summary": "remote proof passed, but local artifact retrieval hit disk pressure",
+            "operator_note": (
+                "Record the remote command as passed only when the remote success marker "
+                "is present; record local ENOSPC during artifact retrieval as a separate "
+                "disk-pressure blocker."
+            ),
+            "next_steps": [
+                "capture the remote success line and test summary in the closeout",
+                "record the exact ENOSPC retrieval blocker line",
+                "recover local disk space before rerunning or retrieving artifacts",
+            ],
+        }
     if classification == "passed_after_retrieval_timeout":
         return {
             "summary": "remote proof passed, but artifact retrieval did not finish",
@@ -450,10 +504,80 @@ def artifact_status(markers: dict[str, Any]) -> tuple[str, str]:
     return ("not_available", "no remote proof verdict was available")
 
 
+def remote_command_result(markers: dict[str, Any]) -> dict[str, Any]:
+    if markers["local_fallback"]:
+        status = "invalid"
+        reason = "rch used local fallback"
+    elif markers["remote_success"]:
+        status = "pass"
+        reason = "remote command finished with exit 0"
+    elif markers["remote_failure"]:
+        status = "fail"
+        reason = "remote command finished with nonzero exit"
+    else:
+        status = "unknown"
+        reason = "no remote command verdict marker was captured"
+
+    return {
+        "status": status,
+        "exit_code": markers["remote_exit_code"],
+        "line": markers["remote_success_line"],
+        "reason": reason,
+    }
+
+
+def artifact_retrieval_result(
+    markers: dict[str, Any], retrieval_blocker: dict[str, Any] | None
+) -> dict[str, Any]:
+    status, reason = artifact_status(markers)
+    if markers["retrieval_completed"]:
+        result_status = "pass"
+    elif retrieval_blocker is not None:
+        result_status = "blocked"
+    elif markers["retrieval_started"]:
+        result_status = "unknown"
+    elif markers["remote_failure"]:
+        result_status = "not_requested"
+    else:
+        result_status = "not_available"
+
+    return {
+        "status": result_status,
+        "detail": status,
+        "reason": reason,
+        "started": markers["retrieval_started"],
+        "completed": markers["retrieval_completed"],
+        "partial": markers["retrieval_partial"],
+        "started_line": markers["retrieval_started_line"],
+        "blocker_kind": retrieval_blocker["kind"] if retrieval_blocker else None,
+        "blocker_line": retrieval_blocker["line"] if retrieval_blocker else 0,
+        "blocker_text": retrieval_blocker["text"] if retrieval_blocker else "",
+    }
+
+
+def local_disk_pressure_result(
+    retrieval_blocker: dict[str, Any] | None
+) -> dict[str, Any]:
+    if retrieval_blocker is not None and retrieval_blocker["kind"] == "local-disk-full":
+        return {
+            "status": "critical",
+            "signal": "enospc",
+            "evidence_line": retrieval_blocker["line"],
+            "evidence_text": retrieval_blocker["text"],
+        }
+    return {
+        "status": "unknown",
+        "signal": "",
+        "evidence_line": 0,
+        "evidence_text": "",
+    }
+
+
 def artifact_free_proof_receipt(
     args: argparse.Namespace, text: str, analysis: dict[str, Any], target_dir: str | None
 ) -> dict[str, Any]:
     markers = analysis["markers"]
+    retrieval_blocker = analysis.get("retrieval_blocker")
     status, status_reason = artifact_status(markers)
     return {
         "schema_version": "artifact-free-rch-proof-receipt-v1",
@@ -468,6 +592,11 @@ def artifact_free_proof_receipt(
         "wrapper_exit_code": args.wrapper_exit_code,
         "classification": analysis["classification"],
         "decision": analysis["decision"],
+        "remote_command_result": remote_command_result(markers),
+        "artifact_retrieval_result": artifact_retrieval_result(
+            markers, retrieval_blocker
+        ),
+        "local_disk_pressure": local_disk_pressure_result(retrieval_blocker),
         "artifact_status": status,
         "artifact_status_reason": status_reason,
         "artifact_retrieval": {
