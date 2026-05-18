@@ -629,7 +629,10 @@ fn stub_broker() -> &'static StubBroker {
         );
     }
 
-    STUB_BROKER.get_or_init(StubBroker::default)
+    #[cfg(any(test, debug_assertions))]
+    {
+        STUB_BROKER.get_or_init(StubBroker::default)
+    }
 }
 
 #[cfg(not(feature = "kafka"))]

@@ -159,6 +159,7 @@ const ADAPTIVE_EPROCESS_LAMBDA: f64 = 0.5;
 const SPIN_LIMIT: u32 = 8;
 const YIELD_LIMIT: u32 = 2;
 const SHORT_WAIT_LE_5MS_NANOS: u64 = 5_000_000;
+const IDLE_IO_POLL_MAX_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(any(test, feature = "test-internals"))]
 const DEFAULT_SCHEDULER_EVIDENCE_MAX_INFLIGHT_MULTIPLIER: usize = 4;
 
@@ -3895,13 +3896,15 @@ impl ThreeLaneWorker {
             .flatten()
             .min();
 
-        let timeout = next_deadline.map(|deadline| {
-            if deadline > now {
-                Duration::from_nanos(deadline.duration_since(now))
-            } else {
-                Duration::ZERO
-            }
-        });
+        let timeout = next_deadline
+            .map(|deadline| {
+                if deadline > now {
+                    Duration::from_nanos(deadline.duration_since(now))
+                } else {
+                    Duration::ZERO
+                }
+            })
+            .or(Some(IDLE_IO_POLL_MAX_TIMEOUT));
 
         // We only block in I/O if we have no fast_queue work.
         let io_timeout = if self.fast_queue.is_empty() {
@@ -3909,6 +3912,10 @@ impl ThreeLaneWorker {
         } else {
             Some(Duration::ZERO)
         };
+
+        if self.shutdown.load(Ordering::Acquire) {
+            return IoPhaseOutcome::NoProgress;
+        }
 
         match io.try_turn_with(io_timeout, |_, _| {}) {
             Ok(Some(n)) => {

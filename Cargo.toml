@@ -14,7 +14,7 @@ exclude = ["fuzz", "asupersync-wasm"]
 
 [package]
 name = "asupersync"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 license-file = "LICENSE"
 description = "Spec-first, cancel-correct, capability-secure async runtime for Rust."
