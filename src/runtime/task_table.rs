@@ -642,9 +642,9 @@ mod tests {
 
     #[inline]
     fn make_task_record(owner: RegionId) -> TaskRecord {
-        // Use placeholder TaskId (0,0) - will be updated after insertion
-        let placeholder = TaskId::from_arena(ArenaIndex::new(0, 0));
-        TaskRecord::new(placeholder, owner, Budget::INFINITE)
+        // Use a provisional TaskId (0,0); insert_task canonicalizes it.
+        let provisional_id = TaskId::from_arena(ArenaIndex::new(0, 0));
+        TaskRecord::new(provisional_id, owner, Budget::INFINITE)
     }
 
     fn live_phase_sum(table: &TaskTable) -> usize {
@@ -794,7 +794,7 @@ mod tests {
         let mut table = TaskTable::new();
         let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        // Model a caller inserting a placeholder/stale id.
+        // Model a caller inserting a provisional/stale id.
         let stale = TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             owner,
@@ -835,7 +835,7 @@ mod tests {
         let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
 
         let idx = table.insert_task_with(|_idx| {
-            // Intentionally stale placeholder to verify table-side canonicalization.
+            // Intentionally stale provisional id to verify table-side canonicalization.
             TaskRecord::new(
                 TaskId::from_arena(ArenaIndex::new(0, 0)),
                 owner,
