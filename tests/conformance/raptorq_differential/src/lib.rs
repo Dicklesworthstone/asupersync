@@ -298,8 +298,8 @@ mod tests {
     #[test]
     #[allow(dead_code)]
     fn test_single_test_success() {
-        let temp_dir = TempDir::new().unwrap();
-        // This would test the single test runner, but requires fixture setup
-        // Left as integration test placeholder
+        let _temp_dir = TempDir::new().unwrap();
+        // Fixture-backed single-test runner coverage lives in the integration
+        // harness; this unit keeps direct fixture setup out of the library test.
     }
 }
