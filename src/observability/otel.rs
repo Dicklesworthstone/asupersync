@@ -6681,7 +6681,7 @@ pub mod span_semantics {
     //! Enable the `tracing-integration` feature to access OpenTelemetry span semantics
     //! conformance testing functionality.
 
-    /// Placeholder result when tracing is disabled.
+    /// Disabled-feature result shape used when tracing is unavailable.
     #[derive(Debug)]
     pub struct SpanConformanceResult {
         /// Total number of tests executed.
@@ -6728,7 +6728,7 @@ pub mod span_semantics {
         }
     }
 
-    /// Placeholder function when tracing is disabled.
+    /// Disabled-feature entry point used when tracing is unavailable.
     pub fn run_span_conformance_tests() -> Result<SpanConformanceResult, Box<dyn std::error::Error>>
     {
         Err("OpenTelemetry span semantics testing requires 'tracing-integration' feature".into())
