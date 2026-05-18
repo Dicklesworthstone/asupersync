@@ -507,13 +507,107 @@ impl PgLogicalReplicationHarness {
 
     // Additional test methods for remaining test cases...
     #[allow(dead_code)]
-    fn test_commit_message_timestamp_handling(&mut self) { /* Implementation */
+    fn test_commit_message_timestamp_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let first_timestamp = 1_640_995_260_000_000;
+        let second_timestamp = first_timestamp + 30_000_000;
+        let first_commit = self.create_commit_message(
+            0x00,
+            0x1000_0000_0000_0100,
+            0x1000_0000_0000_0200,
+            first_timestamp,
+        );
+        let second_commit = self.create_commit_message(
+            0x01,
+            0x1000_0000_0000_0300,
+            0x1000_0000_0000_0400,
+            second_timestamp,
+        );
+
+        let result = match (
+            self.parse_commit_message(&first_commit),
+            self.parse_commit_message(&second_commit),
+        ) {
+            (Ok((_, _, _, first)), Ok((_, _, _, second)))
+                if first == first_timestamp && second == second_timestamp && second > first =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_013".to_string(),
+            description: "COMMIT timestamp preservation".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests 64-bit COMMIT timestamps are parsed exactly and preserve ordering"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_transaction_xid_handling(&mut self) { /* Implementation */
+    fn test_transaction_xid_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let min_xid = self.create_begin_message(0x1000_0000_0000_0000, 1, 1);
+        let max_xid = self.create_begin_message(0x1000_0000_0000_0100, 2, u32::MAX);
+
+        let result = match (
+            self.parse_begin_message(&min_xid),
+            self.parse_begin_message(&max_xid),
+        ) {
+            (Ok((_, _, low)), Ok((_, _, high))) if low == 1 && high == u32::MAX => {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_014".to_string(),
+            description: "BEGIN transaction XID preservation".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests BEGIN preserves 32-bit transaction identifiers".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_lsn_ordering(&mut self) { /* Implementation */
+    fn test_lsn_ordering(&mut self) {
+        let start = std::time::Instant::now();
+        let begin = self.create_begin_message(0x1000_0000_0000_0000, 1, 42);
+        let commit =
+            self.create_commit_message(0x00, 0x1000_0000_0000_0100, 0x1000_0000_0000_0200, 2);
+        let reversed_commit =
+            self.create_commit_message(0x00, 0x0FFF_FFFF_FFFF_FF00, 0x0FFF_FFFF_FFFF_FF10, 3);
+
+        let result = match (
+            self.parse_begin_message(&begin),
+            self.parse_commit_message(&commit),
+            self.parse_commit_message(&reversed_commit),
+        ) {
+            (Ok((begin_lsn, _, _)), Ok((_, commit_lsn, end_lsn, _)), Ok((_, bad_lsn, _, _)))
+                if begin_lsn <= commit_lsn && commit_lsn <= end_lsn && bad_lsn < begin_lsn =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_015".to_string(),
+            description: "Logical sequence number ordering".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests BEGIN/COMMIT LSNs preserve monotonic transaction ordering".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
     fn test_tuple_text_encoding(&mut self) {
