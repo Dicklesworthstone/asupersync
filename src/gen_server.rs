@@ -6150,7 +6150,7 @@ mod tests {
         let mut lease = handle.take_lease().unwrap();
         assert!(handle.take_lease().is_none(), "second take returns None");
 
-        // name() returns placeholder when lease is taken.
+        // name() returns the released-name sentinel when the lease is taken.
         assert_eq!(handle.name(), "(released)");
 
         // Resolve the full manual lifecycle: remove the matching registry entry,
