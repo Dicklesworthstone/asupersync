@@ -1619,7 +1619,7 @@ mod tests {
                 rule: RewriteRule::DedupRaceJoin,
                 before: race,
                 after: PlanId::new(999), // doesn't exist
-                detail: "fake".to_string(),
+                detail: "missing-after-node".to_string(),
             }],
         };
 
@@ -1655,7 +1655,7 @@ mod tests {
                 rule: RewriteRule::DedupRaceJoin,
                 before: race,
                 after: shared, // points to a Leaf, not a Join
-                detail: "fake".to_string(),
+                detail: "leaf-after-node".to_string(),
             }],
         };
 
@@ -1689,7 +1689,7 @@ mod tests {
                 rule: RewriteRule::DedupRaceJoin,
                 before: race,
                 after: shared,
-                detail: "fake".to_string(),
+                detail: "invalid-step-shape".to_string(),
             }],
         };
 
