@@ -1091,9 +1091,9 @@ mod tests {
     #[test]
     fn stream_table_unknown_stream() {
         let mut tbl = StreamTable::new(StreamRole::Client, 1, 1, 100, 100);
-        let fake_id = StreamId(999);
-        let err = tbl.stream_mut(fake_id).unwrap_err();
-        assert_eq!(err, StreamTableError::UnknownStream(fake_id));
+        let unknown_stream_id = StreamId(999);
+        let err = tbl.stream_mut(unknown_stream_id).unwrap_err();
+        assert_eq!(err, StreamTableError::UnknownStream(unknown_stream_id));
     }
 
     #[test]
