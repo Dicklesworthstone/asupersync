@@ -26,22 +26,22 @@ struct WebSocketFrameFuzz {
 /// Frame operations for structured fuzzing
 #[derive(Arbitrary, Debug)]
 enum FrameOperation {
-    /// Create text frame with potentially invalid UTF-8
-    CreateText {
+    /// Text frame with potentially invalid UTF-8
+    Text {
         fin: bool,
         payload: Vec<u8>, // May contain invalid UTF-8
     },
-    /// Create binary frame
-    CreateBinary { fin: bool, payload: Vec<u8> },
-    /// Create control frame
-    CreateControl {
+    /// Binary frame
+    Binary { fin: bool, payload: Vec<u8> },
+    /// Control frame
+    Control {
         opcode: ControlOpcode,
         payload: Vec<u8>,
     },
-    /// Create fragmented frame sequence
-    CreateFragmented { fragments: Vec<FragmentData> },
-    /// Create frame with malformed headers
-    CreateMalformed {
+    /// Fragmented frame sequence
+    Fragmented { fragments: Vec<FragmentData> },
+    /// Frame with malformed headers
+    Malformed {
         raw_header: Vec<u8>,
         payload: Vec<u8>,
     },
@@ -142,7 +142,7 @@ fuzz_target!(|input: WebSocketFrameFuzz| {
         if raw_frame.len() > MAX_PAYLOAD_SIZE {
             continue;
         }
-        test_raw_frame_parsing(&raw_frame);
+        test_raw_frame_parsing(raw_frame);
     }
 
     // Test structured frame operations
@@ -201,7 +201,7 @@ fn decode_with_role(bytes: &[u8], role: WebSocketRole) -> Result<Frame, WsError>
 fn verify_frame_invariants(frame: &Frame) {
     // Control frames must have fin=true
     if frame.opcode.is_control() {
-        assert_eq!(frame.fin, true, "Control frames must have FIN=1");
+        assert!(frame.fin, "Control frames must have FIN=1");
 
         // Control frames must have payload <= 125 bytes
         assert!(
@@ -220,32 +220,32 @@ fn verify_frame_invariants(frame: &Frame) {
 /// Test structured frame operations using WebSocket APIs
 fn test_frame_operation(operation: &FrameOperation) {
     match operation {
-        FrameOperation::CreateText { fin, payload } => {
+        FrameOperation::Text { fin, payload } => {
             if payload.len() > MAX_PAYLOAD_SIZE {
                 return;
             }
             test_text_frame_creation(*fin, payload);
         }
-        FrameOperation::CreateBinary { fin, payload } => {
+        FrameOperation::Binary { fin, payload } => {
             if payload.len() > MAX_PAYLOAD_SIZE {
                 return;
             }
             test_binary_frame_creation(*fin, payload);
         }
-        FrameOperation::CreateControl { opcode, payload } => {
+        FrameOperation::Control { opcode, payload } => {
             if payload.len() > MAX_CONTROL_PAYLOAD {
                 return;
             }
             test_control_frame_creation(opcode, payload);
         }
-        FrameOperation::CreateFragmented { fragments } => {
+        FrameOperation::Fragmented { fragments } => {
             if fragments.len() > 20 {
                 // Limit fragments to prevent timeout
                 return;
             }
             test_fragmented_frame_sequence(fragments);
         }
-        FrameOperation::CreateMalformed {
+        FrameOperation::Malformed {
             raw_header,
             payload,
         } => {
@@ -302,7 +302,7 @@ fn test_close_frame_payload_validation(payload: &[u8]) {
             1000..=1003 | 1007..=1011 | 3000..=4999 => {
                 // Valid status codes
             }
-            1004 | 1005 | 1006 => {
+            1004..=1006 => {
                 // Reserved codes that must not be sent
                 // Implementation should reject these
             }
