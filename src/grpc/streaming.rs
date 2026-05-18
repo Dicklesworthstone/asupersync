@@ -671,7 +671,7 @@ impl<T> Default for ClientStreaming<T> {
 }
 
 // br-asupersync-iuoayq: deleted the `Bidirectional<Req, Resp>` PhantomData
-// stub. It carried no state, did no I/O, and had zero internal users
+// marker-only type. It carried no state, did no I/O, and had zero internal users
 // other than a Debug-print test. The real bidirectional surface is
 // reached via `crate::grpc::client::Channel::client_bidirectional` →
 // `(RequestSink, ResponseStream)` (both from `crate::grpc::client`).
@@ -828,7 +828,7 @@ impl<T: Send + std::marker::Unpin> Streaming for ResponseStream<T> {
 /// codec-aware, integrates with `Channel::client_streaming` /
 /// `Channel::client_bidirectional`). It is **not** re-exported from
 /// `crate::grpc`, so callers that mistakenly type
-/// `use crate::grpc::streaming::RequestSink` and reach this stub will
+/// `use crate::grpc::streaming::RequestSink` and reach this test sink will
 /// observe silently dropped sends; importing
 /// `crate::grpc::client::RequestSink` is the only correct production
 /// path (br-asupersync-iuoayq).
@@ -3591,7 +3591,7 @@ mod tests {
         let client_streaming = ClientStreaming::<u32>::new();
         outputs.push(format!("=== Client Streaming ===\n{client_streaming:?}\n"));
 
-        // Bidirectional streaming: the in-file stub was removed
+        // Bidirectional streaming: the in-file marker-only type was removed
         // (br-asupersync-iuoayq); the real bidirectional surface lives
         // in `crate::grpc::client`. The previous Debug-print line is
         // intentionally omitted from the snapshot.

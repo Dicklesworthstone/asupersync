@@ -105,11 +105,11 @@ pub use service::{
     ServerStreamingMethod, ServiceDescriptor, ServiceHandler, UnaryMethod,
 };
 pub use status::{Code, GrpcError, Status};
-// br-asupersync-iuoayq: the `Bidirectional<Req, Resp>` PhantomData stub
+// br-asupersync-iuoayq: the `Bidirectional<Req, Resp>` marker-only type
 // was removed from `streaming::`; the production bidirectional surface
 // is reached via `Channel::client_bidirectional` →
 // `(client::RequestSink, client::ResponseStream)`. Do not re-add a
-// `Bidirectional` re-export here without first wiring a non-stub type.
+// `Bidirectional` re-export here without first wiring a real stateful type.
 pub use streaming::{
     ClientStreaming, Metadata, MetadataValue, Request, Response, ServerStreaming, Streaming,
     StreamingRequest,
