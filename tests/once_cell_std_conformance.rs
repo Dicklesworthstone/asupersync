@@ -131,7 +131,7 @@ impl OnceCellConformanceContext {
                             operation: operation.clone(),
                             operation_index,
                             asupersync_result: asupersync_result.clone(),
-                            std_result: asupersync_result, // Placeholder - will be overwritten
+                            std_result: asupersync_result, // Mirror counterpart slot; not read for this run
                             final_value,
                         });
                     }
@@ -195,7 +195,7 @@ impl OnceCellConformanceContext {
                             thread_id,
                             operation: operation.clone(),
                             operation_index,
-                            asupersync_result: std_result.clone(), // Placeholder
+                            asupersync_result: std_result.clone(), // Mirror counterpart slot; not read for this run
                             std_result,
                             final_value,
                         });
