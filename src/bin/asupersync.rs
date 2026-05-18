@@ -9277,7 +9277,7 @@ lab:
         let rel_dir = cwd.join("target/test-temp-doctor-package");
         fs::create_dir_all(&rel_dir).expect("create rel dir");
         let rel_binary = PathBuf::from("target/test-temp-doctor-package/doctor_asupersync");
-        fs::write(&rel_binary, b"mock-binary").expect("write rel binary");
+        fs::write(&rel_binary, b"fixture-binary").expect("write rel binary");
 
         let resolved = resolve_install_smoke_binary_path(&rel_binary, "doctor_package_smoke_error")
             .expect("canonicalize relative smoke path");
