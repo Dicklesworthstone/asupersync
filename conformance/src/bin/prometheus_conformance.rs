@@ -32,6 +32,7 @@ struct ConformanceCase {
 }
 
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 enum RequirementLevel {
     Must,   // Prometheus spec MUST clause
     Should, // Prometheus spec SHOULD clause
@@ -70,7 +71,7 @@ fn main() {
     let test_name = matches.get_one::<String>("test").unwrap();
     let verbose = matches.get_flag("verbose");
 
-    match test_name.as_str() {
+    let result = match test_name.as_str() {
         "counter-basic" => run_counter_basic_test(verbose),
         "gauge-basic" => run_gauge_basic_test(verbose),
         "histogram-basic" => run_histogram_basic_test(verbose),
@@ -85,10 +86,12 @@ fn main() {
             eprintln!("Unknown test: {}", test_name);
             std::process::exit(1);
         }
-    }
+    };
+
+    exit_if_failed(&result);
 }
 
-fn run_all_tests(verbose: bool) {
+fn run_all_tests(verbose: bool) -> ConformanceTestResult {
     println!("=== Prometheus Exposition Format Conformance Testing ===\n");
 
     let mut total = 0;
@@ -135,7 +138,25 @@ fn run_all_tests(verbose: bool) {
 
     if failed > 0 {
         println!("\nDifferences documented in DISCREPANCIES.md");
-        std::process::exit(1);
+        ConformanceTestResult::Fail {
+            reason: format!("{failed} Prometheus conformance test(s) failed"),
+        }
+    } else {
+        ConformanceTestResult::Pass
+    }
+}
+
+fn exit_if_failed(result: &ConformanceTestResult) {
+    let exit_code = exit_code_for_result(result);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
+    match result {
+        ConformanceTestResult::Fail { .. } => 1,
+        ConformanceTestResult::Pass | ConformanceTestResult::ExpectedFailure { .. } => 0,
     }
 }
 
@@ -634,4 +655,29 @@ fn generate_compliance_report() {
     }
     println!("\nRun 'prometheus_conformance all -v' for detailed test execution.");
     println!("Any differences will be documented in DISCREPANCIES.md");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_single_test_verdict_exits_nonzero() {
+        let result = ConformanceTestResult::Fail {
+            reason: "format mismatch".to_string(),
+        };
+
+        assert_eq!(exit_code_for_result(&result), 1);
+    }
+
+    #[test]
+    fn pass_and_expected_failure_verdicts_exit_zero() {
+        assert_eq!(exit_code_for_result(&ConformanceTestResult::Pass), 0);
+        assert_eq!(
+            exit_code_for_result(&ConformanceTestResult::ExpectedFailure {
+                reason: "documented divergence".to_string(),
+            }),
+            0
+        );
+    }
 }
