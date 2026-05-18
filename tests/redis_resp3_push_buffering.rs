@@ -16,12 +16,12 @@ fn read_resp_frame(stream: &mut std::net::TcpStream) -> RespValue {
     let mut chunk = [0u8; 1024];
     loop {
         if let Some((value, consumed)) =
-            RespValue::try_decode(&buf).expect("fake redis server should decode RESP command")
+            RespValue::try_decode(&buf).expect("scripted redis peer should decode RESP command")
         {
             assert_eq!(
                 consumed,
                 buf.len(),
-                "fake redis server expected exactly one RESP frame per phase"
+                "scripted redis peer expected exactly one RESP frame per phase"
             );
             return value;
         }
@@ -69,11 +69,11 @@ fn buffer_fingerprint(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn redis_resp3_push_buffering_e2e_fake_server_interleaves_pushes_and_responses() {
-    let name = "redis_resp3_push_buffering_e2e_fake_server_interleaves_pushes_and_responses";
+fn redis_resp3_push_buffering_e2e_scripted_server_interleaves_pushes_and_responses() {
+    let name = "redis_resp3_push_buffering_e2e_scripted_server_interleaves_pushes_and_responses";
     init_test(name);
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake redis server");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted redis peer");
     let addr = listener.local_addr().expect("listener addr");
 
     let first_buffer = {
