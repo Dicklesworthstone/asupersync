@@ -233,7 +233,6 @@ impl TokenSlab {
     pub fn insert(&mut self, waker: Waker) -> SlabToken {
         if self.free_head == FREE_LIST_END {
             // Allocate a new slot.
-            let index = self.entries.len() as u32;
             #[cfg(target_pointer_width = "32")]
             assert!(
                 self.entries.len() <= SlabToken::MAX_INDEX as usize,
@@ -244,6 +243,7 @@ impl TokenSlab {
                 self.entries.len() < u32::MAX as usize,
                 "TokenSlab capacity exceeded u32::MAX - 1 (conflicts with FREE_LIST_END)"
             );
+            let index = self.entries.len() as u32;
             let generation = 0;
 
             self.entries.push(Entry::Occupied { waker, generation });

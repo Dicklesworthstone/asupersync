@@ -154,7 +154,7 @@ impl SchedulerEvidenceArtifact {
         };
 
         let confidence_percent = 55u8
-            .saturating_add((reason_codes.len() as u8).saturating_mul(10))
+            .saturating_add((u8::try_from(reason_codes.len()).unwrap_or(u8::MAX)).saturating_mul(10))
             .min(90);
 
         Ok(SchedulerTuneReport {
