@@ -337,7 +337,9 @@ impl CancellationTracer {
         cancel_kind: CancelKind,
     ) -> CancellationTraceId {
         if !self.config.enable_tracing {
-            return CancellationTraceId::new(); // Return dummy ID
+            // Return an untracked ID so callers can keep a uniform lifecycle
+            // without recording trace state when tracing is disabled.
+            return CancellationTraceId::new();
         }
 
         // Sample based on the configured rate.
