@@ -574,8 +574,9 @@ pub trait MetricsProviderPanicExt {
 impl<T: ?Sized + MetricsProvider> MetricsProviderPanicExt for T {
     /// br-asupersync-zcu3c4 — Routes the panic to
     /// [`MetricsProvider::record_panic`] with the canonical location tag.
-    /// Was previously a no-op stub; production metrics providers can now
-    /// override `record_panic` to count panics by location.
+    /// The previous implementation ignored the computed tag; production
+    /// metrics providers can now override `record_panic` to count panics by
+    /// location.
     fn record_panic(&self, context: &PanicContext) {
         let location_tag: &'static str = match &context.location {
             PanicLocation::TaskExecution { .. } => "task_execution",
@@ -921,10 +922,10 @@ mod tests {
         assert!(matches!(other_region, PanicIsolationResult::Success(7)));
     }
 
-    /// br-asupersync-zcu3c4 — verifies that the previously-stubbed
+    /// br-asupersync-zcu3c4 — verifies that the previously inert
     /// `MetricsProviderPanicExt::record_panic` now actually delegates to
     /// `MetricsProvider::record_panic`, with the canonical location tag.
-    /// Stub used to compute `_location_tag` and discard it; production
+    /// The old code path computed `_location_tag` and discarded it; production
     /// dashboards never observed any panic-rate signal.
     #[test]
     fn record_panic_routes_to_metrics_provider() {
@@ -1152,7 +1153,7 @@ mod tests {
     }
 
     /// Test that instrumentation callbacks properly capture runtime lifecycle events
-    /// during panic isolation scenarios. This verifies that the previously-stubbed
+    /// during panic isolation scenarios. This verifies that the previously inert
     /// MetricsProvider implementation now collects observability data for monitoring
     /// region creation, task spawning, obligation tracking, and cancellation events.
     #[test]
