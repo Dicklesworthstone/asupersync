@@ -747,7 +747,7 @@ impl WsExtensionConformanceHarness {
 
         let malicious_extensions = vec![
             "permessage-deflate\r\nX-Injected: malicious".to_string(),
-            "permessage-deflate\nSec-WebSocket-Key: fake".to_string(),
+            "permessage-deflate\nSec-WebSocket-Key: forged".to_string(),
         ];
 
         let mut negotiation = ProductionExtensionNegotiation::new()
