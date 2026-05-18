@@ -7723,14 +7723,14 @@ mod tests {
 
     #[test]
     fn sanitize_cancel_message_strips_crlf_to_space() {
-        let raw = "user cancelled\r\n[ERROR] FAKE LOG SPLICE";
+        let raw = "user cancelled\r\n[ERROR] FORGED LOG SPLICE";
         let sanitized = sanitize_cancel_message(raw);
         assert!(
             !sanitized.contains('\r') && !sanitized.contains('\n'),
             "CR/LF must be stripped, got {sanitized:?}"
         );
         // The injected text remains visible (just on the same log line).
-        assert!(sanitized.contains("FAKE LOG SPLICE"));
+        assert!(sanitized.contains("FORGED LOG SPLICE"));
     }
 
     #[test]
