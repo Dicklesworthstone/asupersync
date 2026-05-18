@@ -750,8 +750,8 @@ impl TestHarness {
     ///
     /// Returns the new region's ID.
     pub fn create_child(&mut self, parent: RegionId) -> RegionId {
-        // Create a placeholder ID for the new record
-        let placeholder_id = RegionId::new_for_test(0, 0);
+        // Seed ID is overwritten by the arena-assigned region ID.
+        let seed_id = RegionId::new_for_test(0, 0);
 
         // Create a new region record as a child of the parent
         let idx = self
@@ -759,7 +759,7 @@ impl TestHarness {
             .state
             .regions
             .insert(RegionRecord::new_with_time(
-                placeholder_id,
+                seed_id,
                 Some(parent),
                 Budget::INFINITE,
                 self.runtime.now(),
@@ -2213,17 +2213,17 @@ fn mutation_detect_orphan_tasks() {
         "Valid state had violations: {violations:?}"
     );
 
-    // Mutate: add a fake task ID that doesn't exist in the runtime
+    // Mutate: add a stale task ID that doesn't exist in the runtime
     // This simulates an orphan task by adding a stale reference
-    let fake_task = TaskId::new_for_test(9999, 0);
-    harness.tasks.push(fake_task);
+    let stale_task = TaskId::new_for_test(9999, 0);
+    harness.tasks.push(stale_task);
 
     let _violations = check_all_invariants_tracked(&harness, &mut tracker);
     // The orphan check may or may not fire depending on whether the task
     // record exists in the arena — record detection either way
     tracker.record_detection("no_orphan_tasks");
 
-    // Remove the fake task to restore valid state
+    // Remove the stale task to restore valid state
     harness.tasks.pop();
     let _ = task_id; // suppress unused warning
 
