@@ -177,7 +177,7 @@ fn trailers_dedupe_status_and_message_when_user_supplies_them_in_metadata() {
     let mut metadata = Metadata::new();
     // These must be IGNORED by the encoder.
     assert!(metadata.insert("grpc-status", "999"));
-    assert!(metadata.insert("grpc-message", "fake"));
+    assert!(metadata.insert("grpc-message", "forged"));
     // This should pass through.
     assert!(metadata.insert("x-keep", "real"));
 
