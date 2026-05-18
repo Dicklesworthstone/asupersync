@@ -130,7 +130,7 @@ pub mod dns_cache; // repaired by br-asupersync-2qssae DNS cache sub-slice
 // wired as live modules above.
 // pub mod grpc_status;              // bit-rot vs current grpc::status API
 // pub mod h3_settings;              // bit-rot vs current h3 API (Setting enum is private)
-// pub mod http_h1_chunked_rfc9112;  // crate::http and crate::io reorganised
+pub mod http_h1_chunked_rfc9112; // repaired by br-asupersync-lhx6m4 HTTP/1 chunked vector sub-slice
 // pub mod obligation_recovery;      // FailFast type moved out of asupersync::cx::scope
 // pub mod quic_initial;             // bit-rot vs current quic API
 // pub mod task_inspector_wire;      // crate::observability + crate::types not in scope here

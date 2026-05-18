@@ -19,12 +19,6 @@
 //! | §7.1.3 case insensitive | SHOULD | Hex digits case insensitive | ✓ |
 //! | Error handling | MUST | Reject malformed chunks | ✓ |
 
-use crate::http::h1::server::{Http1Server, Http1Config};
-use crate::http::h1::types::{Request, Response, Method, Version};
-use crate::io::{AsyncRead, AsyncWrite};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 /// RFC 9112 §7 conformance test case
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -66,142 +60,133 @@ enum RequirementLevel {
     May,
 }
 
-/// Test cases covering RFC 9112 §7.1 chunked encoding requirements
-const RFC9112_CHUNKED_CASES: &[ChunkedConformanceCase] = &[
-    // Valid chunked encoding cases (MUST requirements)
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-simple-chunk",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "Simple chunked body with hex size and CRLF",
-        input: b"5\r\nhello\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::Success(b"hello".to_vec()),
-        expected_trailers: vec![],
-    },
+/// Test cases covering RFC 9112 §7.1 chunked encoding requirements.
+#[allow(dead_code)]
+fn rfc9112_chunked_cases() -> Vec<ChunkedConformanceCase> {
+    vec![
+        // Valid chunked encoding cases (MUST requirements)
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-simple-chunk",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "Simple chunked body with hex size and CRLF",
+            input: b"5\r\nhello\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::Success(b"hello".to_vec()),
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-multiple-chunks",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "Multiple chunks concatenated",
+            input: b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::Success(b"hello world".to_vec()),
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-zero-final-chunk",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "Final chunk MUST have size 0",
+            input: b"3\r\nfoo\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::Success(b"foo".to_vec()),
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-uppercase-hex",
+            section: "7.1.3",
+            level: RequirementLevel::Should,
+            description: "Hex digits SHOULD be case insensitive",
+            input: b"A\r\n0123456789\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::Success(b"0123456789".to_vec()),
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-lowercase-hex",
+            section: "7.1.3",
+            level: RequirementLevel::Should,
+            description: "Lowercase hex digits",
+            input: b"a\r\n0123456789\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::Success(b"0123456789".to_vec()),
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-chunk-extensions",
+            section: "7.1.1",
+            level: RequirementLevel::May,
+            description: "Chunk extensions MAY be present after semicolon",
+            input: b"5;name=value;foo=bar\r\nhello\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::Success(b"hello".to_vec()),
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-trailers",
+            section: "7.1.1",
+            level: RequirementLevel::May,
+            description: "Trailer fields MAY follow final chunk",
+            input: b"5\r\nhello\r\n0\r\nX-Checksum: abc123\r\nX-Source: test\r\n\r\n",
+            expected: ChunkedParseResult::Success(b"hello".to_vec()),
+            expected_trailers: vec![("X-Checksum", "abc123"), ("X-Source", "test")],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-empty-chunk",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "Zero-length chunk in middle is valid",
+            input: b"3\r\nfoo\r\n0\r\n\r\n3\r\nbar\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::Success(b"foo".to_vec()), // Only first complete message
+            expected_trailers: vec![],
+        },
+        // Error cases (MUST reject)
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-missing-crlf-after-size",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "MUST reject chunk without CRLF after size",
+            input: b"5\rhello\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::MalformedChunk,
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-missing-crlf-after-data",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "MUST reject chunk without CRLF after data",
+            input: b"5\r\nhello0\r\n\r\n",
+            expected: ChunkedParseResult::MalformedChunk,
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-invalid-hex-chars",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "MUST reject non-hex characters in chunk size",
+            input: b"G\r\nhello\r\n0\r\n\r\n",
+            expected: ChunkedParseResult::InvalidChunkSize,
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-size-too-large",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "MUST handle chunk size larger than available data",
+            input: b"10\r\nhello\r\n0\r\n\r\n", // Claims 16 bytes but only 5 provided
+            expected: ChunkedParseResult::MalformedChunk,
+            expected_trailers: vec![],
+        },
+        ChunkedConformanceCase {
+            id: "RFC9112-7.1.1-missing-final-chunk",
+            section: "7.1.1",
+            level: RequirementLevel::Must,
+            description: "MUST reject stream without final 0-size chunk",
+            input: b"5\r\nhello\r\n",
+            expected: ChunkedParseResult::MissingFinalChunk,
+            expected_trailers: vec![],
+        },
+    ]
+}
 
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-multiple-chunks",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "Multiple chunks concatenated",
-        input: b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::Success(b"hello world".to_vec()),
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-zero-final-chunk",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "Final chunk MUST have size 0",
-        input: b"3\r\nfoo\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::Success(b"foo".to_vec()),
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-uppercase-hex",
-        section: "7.1.3",
-        level: RequirementLevel::Should,
-        description: "Hex digits SHOULD be case insensitive",
-        input: b"A\r\n0123456789\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::Success(b"0123456789".to_vec()),
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-lowercase-hex",
-        section: "7.1.3",
-        level: RequirementLevel::Should,
-        description: "Lowercase hex digits",
-        input: b"a\r\n0123456789\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::Success(b"0123456789".to_vec()),
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-chunk-extensions",
-        section: "7.1.1",
-        level: RequirementLevel::May,
-        description: "Chunk extensions MAY be present after semicolon",
-        input: b"5;name=value;foo=bar\r\nhello\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::Success(b"hello".to_vec()),
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-trailers",
-        section: "7.1.1",
-        level: RequirementLevel::May,
-        description: "Trailer fields MAY follow final chunk",
-        input: b"5\r\nhello\r\n0\r\nX-Checksum: abc123\r\nX-Source: test\r\n\r\n",
-        expected: ChunkedParseResult::Success(b"hello".to_vec()),
-        expected_trailers: vec![("X-Checksum", "abc123"), ("X-Source", "test")],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-empty-chunk",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "Zero-length chunk in middle is valid",
-        input: b"3\r\nfoo\r\n0\r\n\r\n3\r\nbar\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::Success(b"foo".to_vec()), // Only first complete message
-        expected_trailers: vec![],
-    },
-
-    // Error cases (MUST reject)
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-missing-crlf-after-size",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "MUST reject chunk without CRLF after size",
-        input: b"5hello\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::MalformedChunk,
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-missing-crlf-after-data",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "MUST reject chunk without CRLF after data",
-        input: b"5\r\nhello0\r\n\r\n",
-        expected: ChunkedParseResult::MalformedChunk,
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-invalid-hex-chars",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "MUST reject non-hex characters in chunk size",
-        input: b"G\r\nhello\r\n0\r\n\r\n",
-        expected: ChunkedParseResult::InvalidChunkSize,
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-size-too-large",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "MUST handle chunk size larger than available data",
-        input: b"10\r\nhello\r\n0\r\n\r\n", // Claims 16 bytes but only 5 provided
-        expected: ChunkedParseResult::MalformedChunk,
-        expected_trailers: vec![],
-    },
-
-    ChunkedConformanceCase {
-        id: "RFC9112-7.1.1-missing-final-chunk",
-        section: "7.1.1",
-        level: RequirementLevel::Must,
-        description: "MUST reject stream without final 0-size chunk",
-        input: b"5\r\nhello\r\n",
-        expected: ChunkedParseResult::MissingFinalChunk,
-        expected_trailers: vec![],
-    },
-];
-
-/// Mock chunked transfer encoding parser for testing
+/// Local chunked transfer-encoding parser for RFC vector validation.
 #[allow(dead_code)]
 struct ChunkedParser {
     input: Vec<u8>,
@@ -272,6 +257,10 @@ impl ChunkedParser {
             self.position += 1;
         }
 
+        if start_pos == self.position && self.position >= self.input.len() {
+            return Err(ChunkedParseResult::MissingFinalChunk);
+        }
+
         if start_pos == self.position {
             return Err(ChunkedParseResult::InvalidChunkSize);
         }
@@ -307,7 +296,11 @@ impl ChunkedParser {
 
     #[allow(dead_code)]
 
-    fn read_chunk_data(&mut self, size: usize, body: &mut Vec<u8>) -> Result<(), ChunkedParseResult> {
+    fn read_chunk_data(
+        &mut self,
+        size: usize,
+        body: &mut Vec<u8>,
+    ) -> Result<(), ChunkedParseResult> {
         if self.position + size > self.input.len() {
             return Err(ChunkedParseResult::MalformedChunk);
         }
@@ -382,8 +375,9 @@ mod tests {
     #[allow(dead_code)]
     fn rfc9112_section7_full_conformance() {
         let mut results = ConformanceResults::new();
+        let cases = rfc9112_chunked_cases();
 
-        for case in RFC9112_CHUNKED_CASES {
+        for case in &cases {
             let verdict = run_conformance_case(case);
             results.record(case, verdict);
         }
@@ -414,9 +408,9 @@ mod tests {
             true // Don't require exact trailer match for error cases
         } else {
             case.expected_trailers.iter().all(|(name, value)| {
-                trailers.iter().any(|(t_name, t_value)| {
-                    t_name.eq_ignore_ascii_case(name) && t_value == value
-                })
+                trailers
+                    .iter()
+                    .any(|(t_name, t_value)| t_name.eq_ignore_ascii_case(name) && t_value == value)
             })
         };
 
@@ -448,7 +442,8 @@ mod tests {
 
     #[allow(dead_code)]
     struct CaseResult {
-        case: &'static ChunkedConformanceCase,
+        id: &'static str,
+        level: RequirementLevel,
         verdict: TestVerdict,
     }
 
@@ -462,8 +457,12 @@ mod tests {
 
         #[allow(dead_code)]
 
-        fn record(&mut self, case: &'static ChunkedConformanceCase, verdict: TestVerdict) {
-            self.cases.push(CaseResult { case, verdict });
+        fn record(&mut self, case: &ChunkedConformanceCase, verdict: TestVerdict) {
+            self.cases.push(CaseResult {
+                id: case.id,
+                level: case.level,
+                verdict,
+            });
         }
 
         #[allow(dead_code)]
@@ -478,7 +477,7 @@ mod tests {
             let mut failures = Vec::new();
 
             for result in &self.cases {
-                match result.case.level {
+                match result.level {
                     RequirementLevel::Must => {
                         must_total += 1;
                         if matches!(result.verdict, TestVerdict::Pass) {
@@ -500,17 +499,23 @@ mod tests {
                 }
 
                 if let TestVerdict::Fail { reason } = &result.verdict {
-                    failures.push((result.case.id, reason));
+                    failures.push((result.id, reason));
                 }
             }
 
             eprintln!("\n=== RFC 9112 §7 Chunked Transfer Encoding Conformance ===");
-            eprintln!("MUST requirements:   {must_pass}/{must_total} pass ({:.1}%)",
-                     (must_pass as f64 / must_total as f64) * 100.0);
-            eprintln!("SHOULD requirements: {should_pass}/{should_total} pass ({:.1}%)",
-                     (should_pass as f64 / should_total as f64) * 100.0);
-            eprintln!("MAY requirements:    {may_pass}/{may_total} pass ({:.1}%)",
-                     (may_pass as f64 / may_total as f64) * 100.0);
+            eprintln!(
+                "MUST requirements:   {must_pass}/{must_total} pass ({:.1}%)",
+                (must_pass as f64 / must_total as f64) * 100.0
+            );
+            eprintln!(
+                "SHOULD requirements: {should_pass}/{should_total} pass ({:.1}%)",
+                (should_pass as f64 / should_total as f64) * 100.0
+            );
+            eprintln!(
+                "MAY requirements:    {may_pass}/{may_total} pass ({:.1}%)",
+                (may_pass as f64 / may_total as f64) * 100.0
+            );
 
             if !failures.is_empty() {
                 eprintln!("\nFailures:");
@@ -523,10 +528,12 @@ mod tests {
         #[allow(dead_code)]
 
         fn assert_compliance(&self) {
-            let must_failures: Vec<_> = self.cases.iter()
-                .filter(|r| r.case.level == RequirementLevel::Must)
+            let must_failures: Vec<_> = self
+                .cases
+                .iter()
+                .filter(|r| r.level == RequirementLevel::Must)
                 .filter(|r| !matches!(r.verdict, TestVerdict::Pass))
-                .map(|r| r.case.id)
+                .map(|r| r.id)
                 .collect();
 
             if !must_failures.is_empty() {
@@ -540,65 +547,97 @@ mod tests {
     #[test]
     #[allow(dead_code)]
     fn rfc9112_simple_chunked_body() {
-        let case = &RFC9112_CHUNKED_CASES[0]; // simple-chunk
+        let cases = rfc9112_chunked_cases();
+        let case = &cases[0]; // simple-chunk
         let verdict = run_conformance_case(case);
-        assert!(matches!(verdict, TestVerdict::Pass), "Simple chunk test failed: {:?}", verdict);
+        assert!(
+            matches!(verdict, TestVerdict::Pass),
+            "Simple chunk test failed: {:?}",
+            verdict
+        );
     }
 
     #[test]
     #[allow(dead_code)]
     fn rfc9112_multiple_chunks() {
-        let case = &RFC9112_CHUNKED_CASES[1]; // multiple-chunks
+        let cases = rfc9112_chunked_cases();
+        let case = &cases[1]; // multiple-chunks
         let verdict = run_conformance_case(case);
-        assert!(matches!(verdict, TestVerdict::Pass), "Multiple chunks test failed: {:?}", verdict);
+        assert!(
+            matches!(verdict, TestVerdict::Pass),
+            "Multiple chunks test failed: {:?}",
+            verdict
+        );
     }
 
     #[test]
     #[allow(dead_code)]
     fn rfc9112_case_insensitive_hex() {
         // Test both uppercase and lowercase hex
-        for case in &RFC9112_CHUNKED_CASES[3..=4] {
+        let cases = rfc9112_chunked_cases();
+        for case in &cases[3..=4] {
             let verdict = run_conformance_case(case);
-            assert!(matches!(verdict, TestVerdict::Pass),
-                    "Case insensitive hex test {} failed: {:?}", case.id, verdict);
+            assert!(
+                matches!(verdict, TestVerdict::Pass),
+                "Case insensitive hex test {} failed: {:?}",
+                case.id,
+                verdict
+            );
         }
     }
 
     #[test]
     #[allow(dead_code)]
     fn rfc9112_chunk_extensions() {
-        let case = &RFC9112_CHUNKED_CASES[5]; // chunk-extensions
+        let cases = rfc9112_chunked_cases();
+        let case = &cases[5]; // chunk-extensions
         let verdict = run_conformance_case(case);
-        assert!(matches!(verdict, TestVerdict::Pass), "Chunk extensions test failed: {:?}", verdict);
+        assert!(
+            matches!(verdict, TestVerdict::Pass),
+            "Chunk extensions test failed: {:?}",
+            verdict
+        );
     }
 
     #[test]
     #[allow(dead_code)]
     fn rfc9112_trailer_headers() {
-        let case = &RFC9112_CHUNKED_CASES[6]; // trailers
+        let cases = rfc9112_chunked_cases();
+        let case = &cases[6]; // trailers
         let verdict = run_conformance_case(case);
-        assert!(matches!(verdict, TestVerdict::Pass), "Trailers test failed: {:?}", verdict);
+        assert!(
+            matches!(verdict, TestVerdict::Pass),
+            "Trailers test failed: {:?}",
+            verdict
+        );
     }
 
     #[test]
     #[allow(dead_code)]
     fn rfc9112_error_cases() {
         // Test all error cases should be properly rejected
-        for case in &RFC9112_CHUNKED_CASES[8..] {
-            if case.id.contains("missing") || case.id.contains("invalid") || case.id.contains("malformed") {
+        let cases = rfc9112_chunked_cases();
+        for case in &cases[8..] {
+            if case.id.contains("missing")
+                || case.id.contains("invalid")
+                || case.id.contains("malformed")
+            {
                 let verdict = run_conformance_case(case);
-                assert!(matches!(verdict, TestVerdict::Pass),
-                        "Error case {} should be rejected: {:?}", case.id, verdict);
+                assert!(
+                    matches!(verdict, TestVerdict::Pass),
+                    "Error case {} should be rejected: {:?}",
+                    case.id,
+                    verdict
+                );
             }
         }
     }
 
-    /// Integration test with actual HTTP/1.1 server
+    /// Inventory guard for local RFC 9112 chunked vectors.
     #[test]
     #[allow(dead_code)]
-    fn rfc9112_integration_with_h1_server() {
-        // This would test the actual server implementation
-        // For now, placeholder that the mock parser covers the RFC requirements
-        assert!(RFC9112_CHUNKED_CASES.len() >= 12, "Comprehensive test coverage");
+    fn rfc9112_local_vector_inventory_is_explicit() {
+        let cases = rfc9112_chunked_cases();
+        assert!(cases.len() >= 12, "Comprehensive test coverage");
     }
 }
