@@ -2754,7 +2754,7 @@ mod platform {
     pub fn process_rss_bytes() -> std::io::Result<u64> {
         // SAFETY: `getrusage(RUSAGE_SELF, &mut usage)` writes into a
         // zeroed `rusage` we own; the libc call is well-defined.
-        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        let mut usage: libc::rusage = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
         let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
         if rc == -1 {
             return Err(std::io::Error::last_os_error());
@@ -2923,7 +2923,7 @@ mod platform {
     pub fn fd_rlimit() -> std::io::Result<(u64, u64)> {
         // SAFETY: `getrlimit(RLIMIT_NOFILE, &mut rlim)` writes into a
         // zeroed `rlimit` we own.
-        let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+        let mut rlim: libc::rlimit = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
         let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
         if rc == -1 {
             return Err(std::io::Error::last_os_error());
@@ -2937,7 +2937,7 @@ mod platform {
     #[allow(unsafe_code)]
     pub fn address_space_rlimit() -> std::io::Result<(u64, u64)> {
         // SAFETY: same shape as `fd_rlimit`.
-        let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+        let mut rlim: libc::rlimit = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
         let rc = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut rlim) };
         if rc == -1 {
             return Err(std::io::Error::last_os_error());
