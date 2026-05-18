@@ -1364,16 +1364,18 @@ mod tests {
         let layer = SessionLayer::new(store.clone());
         let handler = layer.wrap(TestHandler);
 
-        let fake_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0"; // valid format, not in store
+        let unknown_attacker_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0"; // valid format, not in store
         let mut req = Request::new("GET", "/");
-        req.headers
-            .insert("cookie".to_string(), format!("session_id={fake_id}"));
+        req.headers.insert(
+            "cookie".to_string(),
+            format!("session_id={unknown_attacker_id}"),
+        );
         let resp = handler.call(req);
 
         // The response must set a NEW session cookie, not reuse the attacker's ID.
         let cookie = resp.set_cookies.first().unwrap();
         assert!(
-            !cookie.contains(fake_id),
+            !cookie.contains(unknown_attacker_id),
             "must not reuse attacker-supplied ID"
         );
         assert_eq!(store.len(), 1);
