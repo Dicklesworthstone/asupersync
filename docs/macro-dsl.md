@@ -32,9 +32,9 @@ use asupersync::proc_macros::{scope, spawn, join, join_all, race};
 |------|----------------------|------------------------|-------------------|
 | `scope!` | Supported and re-exported by `asupersync` | Unavailable | Binds a `Scope` for the current region; does not create a fresh child-region boundary |
 | `spawn!` | Supported and re-exported by `asupersync` | Unavailable | Expands to `Scope::spawn_registered`; requires ambient `__state` and `__cx` |
-| `join!` | Supported and re-exported by `asupersync` | Present only as an intentional `compile_error!` placeholder | Awaits branches sequentially today |
+| `join!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Awaits branches sequentially today |
 | `join_all!` | Supported and re-exported by `asupersync` | Unavailable | Awaits branches sequentially today |
-| `race!` | Supported and re-exported by `asupersync` | Present only as an intentional `compile_error!` placeholder | Expands to `Cx::race*`; losers are dropped, not drained |
+| `race!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Expands to `Cx::race*`; losers are dropped, not drained |
 
 `session_protocol!` and `#[conformance]` exist in `asupersync-macros`, but they
 are not part of the root `asupersync` macro contract.
