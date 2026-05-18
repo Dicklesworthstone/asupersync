@@ -307,7 +307,7 @@ fn browser_boundary_docs_keep_single_owner_language_aligned() {
             "`asupersync-wasm` is no longer comment-only; it is a retained non-canonical scaffold",
             "Keep `asupersync-browser-core` as the sole live boundary owner",
         ],
-        "stub disposition matrix",
+        "scaffold disposition matrix",
     );
 
     let migration = read("docs/wasm_quickstart_migration.md");
