@@ -1,18 +1,14 @@
-use asupersync::observability::otel::OtelMetrics;
 use clap::{Arg, Command};
-use opentelemetry::metrics::{Histogram as OtelHistogram, Meter};
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::metrics::{ManualReader, PeriodicReader, SdkMeterProvider};
 use prometheus_client::encoding::text::encode;
-use prometheus_client::metrics::{family::Family, histogram::Histogram};
+use prometheus_client::metrics::{
+    family::Family,
+    histogram::{Histogram, exponential_buckets},
+};
 use prometheus_client::registry::Registry;
-use std::collections::HashMap;
-use std::io::Cursor;
-use std::sync::Arc;
 
 /// Prometheus histogram conformance testing.
-/// Compares our histogram implementation against prometheus-client reference
-/// for identical bucket counts and sum given the same observations.
+/// Validates the histogram extraction and comparison helpers against
+/// prometheus-client reference bucket accounting.
 fn main() {
     env_logger::init();
 
@@ -37,7 +33,7 @@ fn main() {
     let verbose = matches.get_flag("verbose");
     let test_name = matches.get_one::<String>("test");
 
-    let test_cases = vec![
+    let test_cases: Vec<(&str, HistogramTestFn)> = vec![
         ("basic-observations", test_basic_observations),
         ("custom-buckets", test_custom_buckets),
         ("large-dataset", test_large_dataset),
@@ -80,6 +76,16 @@ fn main() {
 }
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+type LabelSet = Vec<(String, String)>;
+type HistogramTestFn = fn(bool) -> TestResult;
+
+fn default_histogram() -> Histogram {
+    Histogram::new(exponential_buckets(0.005, 2.0, 12))
+}
+
+fn default_histogram_family() -> Family<LabelSet, Histogram> {
+    Family::new_with_constructor(default_histogram)
+}
 
 // =============================================================================
 // Histogram Data Extraction and Comparison
@@ -223,7 +229,7 @@ fn test_basic_observations(verbose: bool) -> TestResult {
 
     // Create reference Prometheus histogram
     let mut registry = Registry::default();
-    let histogram: Family<Vec<(String, String)>, Histogram> = Family::default();
+    let histogram = default_histogram_family();
     registry.register("test_histogram", "Test histogram", histogram.clone());
 
     // Record observations in reference
@@ -239,22 +245,15 @@ fn test_basic_observations(verbose: bool) -> TestResult {
     // Extract reference histogram data
     let ref_data = extract_prometheus_histogram(&ref_output, "test_histogram")?;
 
-    // Create our histogram (using OpenTelemetry SDK as our implementation)
-    let exporter = opentelemetry_sdk::metrics::ManualReader::builder().build();
-    let provider = SdkMeterProvider::builder()
-        .with_reader(exporter)
-        .with_resource(Resource::default())
-        .build();
-    let meter = provider.meter("test");
-    let our_histogram = meter.f64_histogram("test_histogram").init();
-
-    // Record the same observations
-    for &value in &observations {
-        our_histogram.record(value, &[]);
-    }
-
-    // Note: For a complete test, we would need to export our histogram data
-    // and compare. This is a simplified version that validates the structure.
+    assert_eq!(ref_data.count, observations.len() as u64);
+    let expected_sum: f64 = observations.iter().sum();
+    let sum_diff = (ref_data.sum - expected_sum).abs();
+    assert!(
+        sum_diff < 1e-6,
+        "Sum should match observations: {} vs {}",
+        ref_data.sum,
+        expected_sum
+    );
 
     if verbose {
         println!("  Reference histogram:");
@@ -264,17 +263,6 @@ fn test_basic_observations(verbose: bool) -> TestResult {
         for (i, (bound, count)) in ref_data.buckets.iter().take(5).enumerate() {
             println!("      Bucket {}: le={:.3}, count={}", i, bound, count);
         }
-
-        // Verify basic properties
-        assert_eq!(ref_data.count, observations.len() as u64);
-        let expected_sum: f64 = observations.iter().sum();
-        let sum_diff = (ref_data.sum - expected_sum).abs();
-        assert!(
-            sum_diff < 1e-6,
-            "Sum should match observations: {} vs {}",
-            ref_data.sum,
-            expected_sum
-        );
     }
 
     Ok(())
@@ -291,9 +279,10 @@ fn test_custom_buckets(verbose: bool) -> TestResult {
 
     // Create reference with custom buckets
     let mut registry = Registry::default();
-    let buckets = &[0.1, 0.5, 1.0, 2.5, 5.0, 10.0];
-    let histogram: Family<Vec<(String, String)>, Histogram> =
-        Family::new_with_constructor(|| Histogram::new(buckets.iter().cloned()));
+    let buckets = vec![0.1, 0.5, 1.0, 2.5, 5.0, 10.0];
+    let constructor_buckets = buckets.clone();
+    let histogram: Family<LabelSet, Histogram, _> =
+        Family::new_with_constructor(move || Histogram::new(constructor_buckets.iter().copied()));
     registry.register("custom_histogram", "Custom histogram", histogram.clone());
 
     let ref_metric = histogram.get_or_create(&vec![]);
@@ -329,13 +318,15 @@ fn test_custom_buckets(verbose: bool) -> TestResult {
                 return Err(format!(
                     "Bucket {} count mismatch: got {}, expected {}",
                     i, actual_count, expected_count
-                ));
+                )
+                .into());
             }
         } else {
             return Err(format!(
                 "Bucket {} boundary mismatch: got {}, expected {}",
                 i, actual_bound, expected_bound
-            ));
+            )
+            .into());
         }
     }
 
@@ -360,16 +351,16 @@ fn test_large_dataset(verbose: bool) -> TestResult {
     let mut observations = Vec::new();
     for i in 0..10_000 {
         let value = match i % 4 {
-            0 => (i as f64 / 1000.0), // Small values
-            1 => (i as f64 / 100.0),  // Medium values
-            2 => (i as f64 / 10.0),   // Large values
-            _ => (i as f64),          // Very large values
+            0 => i as f64 / 1000.0, // Small values
+            1 => i as f64 / 100.0,  // Medium values
+            2 => i as f64 / 10.0,   // Large values
+            _ => i as f64,          // Very large values
         };
         observations.push(value);
     }
 
     let mut registry = Registry::default();
-    let histogram: Family<Vec<(String, String)>, Histogram> = Family::default();
+    let histogram = default_histogram_family();
     registry.register(
         "large_histogram",
         "Large dataset histogram",
@@ -424,7 +415,7 @@ fn test_edge_values(verbose: bool) -> TestResult {
     ];
 
     let mut registry = Registry::default();
-    let histogram: Family<Vec<(String, String)>, Histogram> = Family::default();
+    let histogram = default_histogram_family();
     registry.register("edge_histogram", "Edge values histogram", histogram.clone());
 
     let ref_metric = histogram.get_or_create(&vec![]);
@@ -481,14 +472,16 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     let mut registry = Registry::default();
     let mut histogram_data = Vec::new();
 
-    for (name, buckets, observations) in scenarios {
+    for (name, buckets, observations) in &scenarios {
         // Create histogram with specific buckets
-        let histogram: Family<Vec<(String, String)>, Histogram> =
-            Family::new_with_constructor(|| Histogram::new(buckets.iter().cloned()));
-        registry.register(name, &format!("{} histogram", name), histogram.clone());
+        let constructor_buckets = buckets.clone();
+        let histogram: Family<LabelSet, Histogram, _> = Family::new_with_constructor(move || {
+            Histogram::new(constructor_buckets.iter().copied())
+        });
+        registry.register(*name, &format!("{} histogram", name), histogram.clone());
 
         let metric = histogram.get_or_create(&vec![]);
-        for &value in &observations {
+        for &value in observations {
             metric.observe(value);
         }
 
