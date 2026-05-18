@@ -1557,7 +1557,7 @@ impl<H: Handler> CatchPanicMiddleware<H> {
 /// Best-effort string extraction from a `catch_unwind` payload.
 ///
 /// `panic!` payloads are commonly `&'static str` or `String`; we
-/// downcast to both. Anything else surfaces as a placeholder so the
+/// downcast to both. Anything else surfaces as a sentinel string so the
 /// log site never panics on the panic — the recovery path must be
 /// totally infallible.
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {

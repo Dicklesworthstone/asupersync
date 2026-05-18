@@ -302,7 +302,7 @@ pub enum PluginRegistrationError {
     /// A required descriptor field is empty or invalid.
     #[error("invalid descriptor for plugin `{plugin_id}`: {reason}")]
     InvalidDescriptor {
-        /// Plugin id (or placeholder when absent).
+        /// Plugin id, or the fallback diagnostic label when absent.
         plugin_id: String,
         /// Deterministic reason string.
         reason: String,
