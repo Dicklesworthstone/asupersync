@@ -162,8 +162,8 @@ from detached source files.
 
 | Disposition | Count | Surfaces |
 |-------------|-------|----------|
-| RESOLVED | 9 | #2, #3, #4, #11, #12, #14, #16, #17, #18 |
-| IMPLEMENT | 2 | #6, #7 |
+| RESOLVED | 11 | #2, #3, #4, #6, #7, #11, #12, #14, #16, #17, #18 |
+| IMPLEMENT | 0 | — |
 | DOCUMENT | 4 | #5, #9, #10, #19 |
 | CONVERGE | 1 | #1 |
 | QUARANTINE | 1 | #13 |
@@ -179,8 +179,8 @@ from detached source files.
 | C | #2, #3 | RESOLVED (both done) |
 | D | #4, #11, #12 | #4 RESOLVED, #11 RESOLVED, #12 RESOLVED |
 | E | #5 | DOCUMENT |
-| F | #6 | IMPLEMENT |
-| G | #7 | IMPLEMENT |
+| F | #6 | RESOLVED |
+| G | #7 | RESOLVED |
 | H | #8, #9, #10 | RETIRE, DOCUMENT, DOCUMENT |
 | I | #13, #17, #18 | QUARANTINE, RESOLVED, RESOLVED |
 | Z | All, #19 | Verification of above plus live marker classification ratchet |
