@@ -998,7 +998,7 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         results.extend(pg_copy_results);
     }
 
-    // TODO: Add other conformance suites when implemented:
+    // Additional conformance suites can be wired here when their adapters are active:
     /*
     // HTTP/2 RFC 7540 conformance
     let h2_harness = H2ConformanceHarness::new();
