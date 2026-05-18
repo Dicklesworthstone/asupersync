@@ -1143,7 +1143,7 @@ impl H2PriorityConformanceHarness {
                 }
                 assert!(
                     adapter.connection().stream(99).is_none(),
-                    "asupersync currently ignores PRIORITY for unknown idle streams instead of creating a fake stream"
+                    "asupersync currently ignores PRIORITY for unknown idle streams instead of creating a synthesized stream"
                 );
                 Ok(())
             },
