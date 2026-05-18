@@ -211,8 +211,8 @@ impl Default for None {
 /// ```compile_fail
 /// use asupersync::cx::HasSpawn;
 ///
-/// struct FakeCaps;
-/// impl HasSpawn for FakeCaps {}
+/// struct ExternalCaps;
+/// impl HasSpawn for ExternalCaps {}
 /// ```
 pub trait HasSpawn: sealed::Sealed {}
 impl<const TIME: bool, const RANDOM: bool, const IO: bool, const REMOTE: bool> HasSpawn
@@ -273,8 +273,8 @@ impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool> Ha
 /// ```compile_fail
 /// use asupersync::cx::SubsetOf;
 ///
-/// struct FakeCaps;
-/// impl SubsetOf<FakeCaps> for FakeCaps {}
+/// struct ExternalCaps;
+/// impl SubsetOf<ExternalCaps> for ExternalCaps {}
 /// ```
 pub trait SubsetOf<Super>: sealed::Sealed {}
 
