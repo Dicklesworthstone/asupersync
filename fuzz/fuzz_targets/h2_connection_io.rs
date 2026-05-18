@@ -32,8 +32,8 @@ use asupersync::codec::Decoder;
 use asupersync::http::h2::connection::ReceivedFrame;
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{
-    DataFrame, GoAwayFrame, HeadersFrame, PingFrame, RstStreamFrame, Setting, SettingsFrame,
-    WindowUpdateFrame,
+    ContinuationFrame, DataFrame, GoAwayFrame, HeadersFrame, PingFrame, RstStreamFrame, Setting,
+    SettingsFrame, WindowUpdateFrame,
 };
 use asupersync::http::h2::{Connection, Frame, FrameCodec, H2Error, Settings};
 use libfuzzer_sys::fuzz_target;
@@ -406,19 +406,13 @@ fuzz_target!(|s: Scenario| match s {
             observe_process_frame(&mut conn, frame, "continuation intervening frame");
         }
         // Now the (possibly mismatched) CONTINUATION.
-        // We can't construct a ContinuationFrame directly via the
-        // public surface, so emit one via SettingsAck-shaped placeholder
-        // (HEADERS with END_HEADERS=true on the wrong stream still
-        // exercises the "expected CONTINUATION on stream X, got HEADERS
-        // on stream Y" branch).
         observe_process_frame(
             &mut conn,
-            Frame::Headers(HeadersFrame::new(
-                continuation_stream_id,
-                Bytes::from_static(&[]),
-                false,
-                true,
-            )),
+            Frame::Continuation(ContinuationFrame {
+                stream_id: continuation_stream_id,
+                header_block: Bytes::from_static(&[]),
+                end_headers: true,
+            }),
             "continuation final frame",
         );
     }
