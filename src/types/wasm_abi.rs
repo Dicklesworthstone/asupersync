@@ -3390,8 +3390,8 @@ pub struct ReactHookDiagnosticEvent {
 //    Route Handlers CANNOT import or use the runtime directly.
 //
 // 2. **No SSR execution**: The runtime initializes after hydration. During
-//    SSR, the provider renders a placeholder (loading/skeleton). There is
-//    no server-side WASM execution.
+//    SSR, the provider renders a loading/skeleton shell. There is no
+//    server-side WASM execution.
 //
 // 3. **Edge/Node split**: Edge Runtime has no WASM support in this model.
 //    Node.js middleware/API routes interact only through serialized messages,
@@ -3613,7 +3613,7 @@ impl NextjsAntiPattern {
                 "Edge Runtime does not support WASM execution in this integration model."
             }
             Self::BlockingHydration => {
-                "Never block hydration on WASM init. Render a placeholder, then initialize async."
+                "Never block hydration on WASM init. Render the loading shell, then initialize async."
             }
             Self::HandlesInServerActions => {
                 "WasmHandleRef values are opaque client-side references. They cannot be serialized for server actions."
@@ -4770,13 +4770,13 @@ mod tests {
     #[test]
     fn handle_table_out_of_range() {
         let table = WasmHandleTable::new();
-        let fake = WasmHandleRef {
+        let out_of_range = WasmHandleRef {
             kind: WasmHandleKind::Runtime,
             slot: 999,
             generation: 0,
             owner_token: 0,
         };
-        let err = table.get(&fake).unwrap_err();
+        let err = table.get(&out_of_range).unwrap_err();
         assert!(matches!(
             err,
             WasmHandleError::SlotOutOfRange {
