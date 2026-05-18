@@ -2,11 +2,11 @@
 #![allow(clippy::all)]
 //! Channel state consistency validation during cancellation scenarios.
 
-use crate::cancel_harness::{ChannelType, CancelScenario, ProtocolViolation};
+use crate::cancel_harness::{CancelScenario, ChannelType, ProtocolViolation};
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::fmt::Debug;
 
 /// Validates that channel state remains consistent during cancellation operations.
 #[allow(dead_code)]
@@ -71,7 +71,9 @@ impl StateValidator {
                 operation_context: None,
             };
 
-            let channel_snapshots = snapshots.entry(channel_id.to_string()).or_insert_with(Vec::new);
+            let channel_snapshots = snapshots
+                .entry(channel_id.to_string())
+                .or_insert_with(Vec::new);
 
             // Add snapshot
             channel_snapshots.push(snapshot);
@@ -158,9 +160,13 @@ impl StateValidator {
         // Channel-specific transition validation
         match (prev.channel_type, curr.channel_type) {
             (ChannelType::Mpsc, ChannelType::Mpsc) => self.validate_mpsc_transition(prev, curr),
-            (ChannelType::Broadcast, ChannelType::Broadcast) => self.validate_broadcast_transition(prev, curr),
+            (ChannelType::Broadcast, ChannelType::Broadcast) => {
+                self.validate_broadcast_transition(prev, curr)
+            }
             (ChannelType::Watch, ChannelType::Watch) => self.validate_watch_transition(prev, curr),
-            (ChannelType::Oneshot, ChannelType::Oneshot) => self.validate_oneshot_transition(prev, curr),
+            (ChannelType::Oneshot, ChannelType::Oneshot) => {
+                self.validate_oneshot_transition(prev, curr)
+            }
             _ => Some(ProtocolViolation::StateInconsistency {
                 channel_type: curr.channel_type,
                 expected_state: format!("{}", prev.channel_type),
@@ -188,8 +194,8 @@ impl StateValidator {
         prev: &StateSnapshot,
         curr: &StateSnapshot,
     ) -> Option<ProtocolViolation> {
-        // MPSC-specific validation logic would go here
-        // For now, placeholder validation
+        // Generic timestamp and type checks run before dispatch. The current
+        // snapshot model does not expose additional MPSC transition fields.
         None
     }
 
@@ -200,7 +206,8 @@ impl StateValidator {
         prev: &StateSnapshot,
         curr: &StateSnapshot,
     ) -> Option<ProtocolViolation> {
-        // Broadcast-specific validation logic would go here
+        // Generic timestamp and type checks run before dispatch. The current
+        // snapshot model does not expose additional broadcast transition fields.
         None
     }
 
@@ -211,7 +218,8 @@ impl StateValidator {
         prev: &StateSnapshot,
         curr: &StateSnapshot,
     ) -> Option<ProtocolViolation> {
-        // Watch-specific validation logic would go here
+        // Generic timestamp and type checks run before dispatch. The current
+        // snapshot model does not expose additional watch transition fields.
         None
     }
 
@@ -222,36 +230,49 @@ impl StateValidator {
         prev: &StateSnapshot,
         curr: &StateSnapshot,
     ) -> Option<ProtocolViolation> {
-        // Oneshot-specific validation logic would go here
+        // Generic timestamp and type checks run before dispatch. The current
+        // snapshot model does not expose additional oneshot transition fields.
         None
     }
 
     /// Validate MPSC state invariants.
     #[allow(dead_code)]
     fn validate_mpsc_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
-        // MPSC invariant validation would go here
-        None
+        self.validate_common_state_invariants(snapshot)
     }
 
     /// Validate broadcast state invariants.
     #[allow(dead_code)]
     fn validate_broadcast_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
-        // Broadcast invariant validation would go here
-        None
+        self.validate_common_state_invariants(snapshot)
     }
 
     /// Validate watch state invariants.
     #[allow(dead_code)]
     fn validate_watch_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
-        // Watch invariant validation would go here
-        None
+        self.validate_common_state_invariants(snapshot)
     }
 
     /// Validate oneshot state invariants.
     #[allow(dead_code)]
     fn validate_oneshot_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
-        // Oneshot invariant validation would go here
-        None
+        self.validate_common_state_invariants(snapshot)
+    }
+
+    #[allow(dead_code)]
+    fn validate_common_state_invariants(
+        &self,
+        snapshot: &StateSnapshot,
+    ) -> Option<ProtocolViolation> {
+        if snapshot.state.is_consistent() {
+            return None;
+        }
+
+        Some(ProtocolViolation::StateInconsistency {
+            channel_type: snapshot.channel_type,
+            expected_state: "consistent channel state".to_string(),
+            actual_state: snapshot.state.describe(),
+        })
     }
 }
 
@@ -389,13 +410,24 @@ impl<T: Debug + Clone + Send + Sync + 'static> StateContainer for ChannelState<T
         metrics.insert("sender_count".to_string(), self.sender_count as f64);
         metrics.insert("receiver_count".to_string(), self.receiver_count as f64);
         metrics.insert("queue_length".to_string(), self.queue_length as f64);
-        metrics.insert("waiting_operations".to_string(), self.waiting_operations as f64);
-        metrics.insert("is_closed".to_string(), if self.is_closed { 1.0 } else { 0.0 });
-        metrics.insert("is_cancelled".to_string(), if self.is_cancelled { 1.0 } else { 0.0 });
+        metrics.insert(
+            "waiting_operations".to_string(),
+            self.waiting_operations as f64,
+        );
+        metrics.insert(
+            "is_closed".to_string(),
+            if self.is_closed { 1.0 } else { 0.0 },
+        );
+        metrics.insert(
+            "is_cancelled".to_string(),
+            if self.is_cancelled { 1.0 } else { 0.0 },
+        );
         if let Some(capacity) = self.capacity {
             metrics.insert("capacity".to_string(), capacity as f64);
-            metrics.insert("utilization".to_string(),
-                          self.queue_length as f64 / capacity as f64);
+            metrics.insert(
+                "utilization".to_string(),
+                self.queue_length as f64 / capacity as f64,
+            );
         }
         metrics
     }
@@ -494,8 +526,10 @@ impl<'a> Drop for StateValidationScope<'a> {
         if self.validator.config.immediate_validation {
             let violations = self.validate();
             if !violations.is_empty() {
-                eprintln!("State validation failures in scope for channel '{}': {:?}",
-                         self.channel_id, violations);
+                eprintln!(
+                    "State validation failures in scope for channel '{}': {:?}",
+                    self.channel_id, violations
+                );
             }
         }
     }
@@ -568,7 +602,7 @@ mod tests {
         let bad_state = ChannelState {
             sender_count: 1,
             receiver_count: 1,
-            queue_length: 15,  // Exceeds capacity
+            queue_length: 15, // Exceeds capacity
             capacity: Some(10),
             is_closed: false,
             is_cancelled: false,
@@ -599,5 +633,46 @@ mod tests {
         };
 
         assert!(good_state.is_consistent());
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_state_validator_reports_inconsistent_snapshot() {
+        let validator = StateValidator::new(StateValidationConfig::default());
+
+        let bad_state = ChannelState {
+            sender_count: 1,
+            receiver_count: 1,
+            queue_length: 15,
+            capacity: Some(10),
+            is_closed: false,
+            is_cancelled: false,
+            waiting_operations: 0,
+            specific_state: MpscChannelState {
+                reserved_permits: 0,
+                available_permits: 0,
+                receiver_polling: false,
+            },
+        };
+
+        validator.snapshot_state("bad_mpsc", ChannelType::Mpsc, bad_state);
+
+        let violations = validator.validate_consistency("bad_mpsc");
+        assert_eq!(violations.len(), 1);
+        match &violations[0] {
+            ProtocolViolation::StateInconsistency {
+                channel_type,
+                expected_state,
+                actual_state,
+            } => {
+                assert_eq!(*channel_type, ChannelType::Mpsc);
+                assert_eq!(expected_state, "consistent channel state");
+                assert!(
+                    actual_state.contains("queue: 15/Some(10)"),
+                    "actual state should describe the invalid queue/capacity pair: {actual_state}"
+                );
+            }
+            other => panic!("expected StateInconsistency, got {other:?}"),
+        }
     }
 }
