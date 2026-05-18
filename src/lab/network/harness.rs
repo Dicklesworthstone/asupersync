@@ -104,7 +104,7 @@ impl RemoteRuntime for VirtualNetworkRuntime {
         envelope: MessageEnvelope<RemoteMessage>,
     ) -> Result<(), RemoteError> {
         // The harness owns sender identity per SimNode. Rewrite protocol-origin fields so
-        // reply routing uses this node's actual ID instead of placeholder defaults.
+        // reply routing uses this node's actual ID instead of initialized defaults.
         let message = match envelope.payload {
             RemoteMessage::SpawnRequest(mut req) => {
                 req.origin_node = self.local_node.clone();
