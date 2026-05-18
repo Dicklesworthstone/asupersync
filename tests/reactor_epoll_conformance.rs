@@ -659,7 +659,7 @@ mod linux_tests {
     }
 }
 
-/// Placeholder test for non-Linux platforms.
+/// Platform marker test for non-Linux platforms.
 /// This ensures the module compiles on all platforms but only runs the actual
 /// epoll tests on Linux systems where epoll is available.
 #[cfg(not(target_os = "linux"))]
@@ -668,5 +668,5 @@ fn epoll_conformance_requires_linux_platform() {
     // This test serves as documentation that epoll conformance tests
     // are only available on Linux platforms.
     println!("epoll conformance tests require Linux");
-    assert!(true, "Placeholder test for non-Linux platforms");
+    assert!(true, "Platform marker test for non-Linux platforms");
 }
