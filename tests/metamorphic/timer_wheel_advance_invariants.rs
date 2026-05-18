@@ -3,12 +3,13 @@
 //! These tests verify that wheel advancement behaves correctly under
 //! transformations, without needing to compute exact expected outputs.
 
-use asupersync::lab::virtual_time_wheel::{VirtualTimerWheel, VirtualTimerHandle};
-use proptest::prelude::*;
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
+
+use asupersync::lab::virtual_time_wheel::{ExpiredTimer, VirtualTimerWheel};
+use proptest::prelude::*;
 
 // ============================================================================
 // Test Infrastructure
@@ -16,7 +17,6 @@ use std::task::{Wake, Waker};
 
 /// A waker that records its ID when woken for deterministic checking.
 struct TestWaker {
-    id: usize,
     wake_count: Arc<AtomicUsize>,
 }
 
@@ -30,10 +30,9 @@ impl Wake for TestWaker {
     }
 }
 
-fn test_waker(id: usize) -> (Waker, Arc<AtomicUsize>) {
+fn test_waker(_id: usize) -> (Waker, Arc<AtomicUsize>) {
     let counter = Arc::new(AtomicUsize::new(0));
     let waker = Waker::from(Arc::new(TestWaker {
-        id,
         wake_count: counter.clone(),
     }));
     (waker, counter)
@@ -53,11 +52,8 @@ enum OpType {
 }
 
 /// Extract comparable state from expired timers for assertions.
-fn expired_signatures(expired: &[asupersync::lab::virtual_time_wheel::ExpiredTimer]) -> Vec<(u64, u64)> {
-    expired
-        .iter()
-        .map(|t| (t.deadline, t.timer_id))
-        .collect()
+fn expired_signatures(expired: &[ExpiredTimer]) -> Vec<(u64, u64)> {
+    expired.iter().map(|t| (t.deadline, t.timer_id)).collect()
 }
 
 // ============================================================================
@@ -449,35 +445,81 @@ fn mr9_next_deadline_consistency() {
 mod validation_tests {
     use super::*;
 
+    type WheelMutation = Box<dyn Fn(&mut VirtualTimerWheel, u64) -> Vec<ExpiredTimer>>;
+
     /// Validate MR suite catches planted bugs via mutation testing
     #[test]
     fn validate_mr_suite_catches_mutations() {
         // Plant known bugs and verify MRs catch them
-        let mutations = vec![
-            ("time_regression", Box::new(|wheel: &mut VirtualTimerWheel, tick| {
-                // Bug: allow time to go backwards
-                wheel.advance_to(tick.saturating_sub(10))
-            }) as Box<dyn Fn(&mut VirtualTimerWheel, u64) -> _>),
-            ("wrong_ordering", Box::new(|wheel: &mut VirtualTimerWheel, tick| {
-                // Bug: return timers in wrong order
-                let mut expired = wheel.advance_to(tick);
-                expired.reverse();
-                expired
-            })),
+        let mutations: Vec<(&str, WheelMutation)> = vec![
+            (
+                "time_regression",
+                Box::new(|wheel: &mut VirtualTimerWheel, tick| {
+                    // Bug: allow time to go backwards
+                    wheel.advance_to(tick.saturating_sub(10))
+                }),
+            ),
+            (
+                "wrong_ordering",
+                Box::new(|wheel: &mut VirtualTimerWheel, tick| {
+                    // Bug: return timers in wrong order
+                    let mut expired = wheel.advance_to(tick);
+                    expired.reverse();
+                    expired
+                }),
+            ),
         ];
 
         for (name, mutant) in &mutations {
-            // Test if any MR would catch this mutation
-            // For brevity, testing one representative MR per mutation
-            let caught = test_mutation_detection(name);
-            assert!(caught,
-                "MR suite failed to detect '{}' mutation — MRs are too weak", name);
+            let caught = test_mutation_detection(name, mutant.as_ref());
+            assert!(
+                caught,
+                "MR suite failed to detect '{}' mutation — MRs are too weak",
+                name
+            );
         }
     }
 
-    fn test_mutation_detection(_mutation_name: &str) -> bool {
-        // Simplified validation - in practice would inject mutations
-        // and run full MR suite to verify detection
-        true // Placeholder - assume MRs catch mutations
+    fn test_mutation_detection(
+        mutation_name: &str,
+        mutant: &dyn Fn(&mut VirtualTimerWheel, u64) -> Vec<ExpiredTimer>,
+    ) -> bool {
+        match mutation_name {
+            "time_regression" => mutation_breaks_direct_advance_oracle(mutant),
+            "wrong_ordering" => mutation_breaks_same_deadline_ordering_oracle(mutant),
+            _ => false,
+        }
+    }
+
+    fn mutation_breaks_direct_advance_oracle(
+        mutant: &dyn Fn(&mut VirtualTimerWheel, u64) -> Vec<ExpiredTimer>,
+    ) -> bool {
+        let mut wheel = VirtualTimerWheel::new();
+        for (deadline, waker_id) in [(45, 0), (50, 1)] {
+            let (waker, _) = test_waker(waker_id);
+            wheel.insert(deadline, waker);
+        }
+
+        let expired = mutant(&mut wheel, 50);
+
+        wheel.current_tick() != 50 || expired_signatures(&expired) != vec![(45, 0), (50, 1)]
+    }
+
+    fn mutation_breaks_same_deadline_ordering_oracle(
+        mutant: &dyn Fn(&mut VirtualTimerWheel, u64) -> Vec<ExpiredTimer>,
+    ) -> bool {
+        let mut wheel = VirtualTimerWheel::new();
+        for waker_id in 0..3 {
+            let (waker, _) = test_waker(waker_id);
+            wheel.insert(100, waker);
+        }
+
+        let expired = mutant(&mut wheel, 100);
+        let signatures = expired_signatures(&expired);
+
+        signatures.len() != 3
+            || signatures
+                .windows(2)
+                .any(|window| window[0].1 >= window[1].1)
     }
 }

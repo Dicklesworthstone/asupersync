@@ -343,6 +343,10 @@ path = "tests/integration/kafka_real_broker.rs"
 name = "lock_contention_atlas_contract"
 path = "tests/lock_contention_atlas_contract.rs"
 
+[[test]]
+name = "timer_wheel_advance_invariants"
+path = "tests/metamorphic/timer_wheel_advance_invariants.rs"
+
 [[bench]]
 name = "phase0_baseline"
 harness = false
