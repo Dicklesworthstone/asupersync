@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use walkdir::WalkDir;
 
 /// Overall coverage matrix with section-by-section breakdown
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -218,32 +219,17 @@ impl CoverageMatrixCalculator {
         &self,
         golden_dir: P,
     ) -> Result<CoverageMatrix, CoverageError> {
-        // For now, create a simple mock coverage matrix
-        // In a real implementation, this would parse golden files and extract test results
-        let mock_results = vec![
-            ConformanceTestResult {
-                test_id: "test_001".to_string(),
-                test_name: "Basic encoding test".to_string(),
-                rfc_section: "5.3.1".to_string(),
-                requirement_level: RequirementLevel::Must,
-                passed: true,
-                error_message: None,
-                execution_time_ms: 10,
-                failure_type: None,
-            },
-            ConformanceTestResult {
-                test_id: "test_002".to_string(),
-                test_name: "Symbol alignment test".to_string(),
-                rfc_section: "5.3.2".to_string(),
-                requirement_level: RequirementLevel::Should,
-                passed: true,
-                error_message: None,
-                execution_time_ms: 15,
-                failure_type: None,
-            },
-        ];
+        let golden_dir = golden_dir.as_ref();
+        let test_results = Self::collect_test_results(golden_dir)?;
 
-        self.calculate_coverage_from_results(&mock_results)
+        if test_results.is_empty() {
+            return Err(CoverageError::InvalidData(format!(
+                "no conformance test result records found under {}",
+                golden_dir.display()
+            )));
+        }
+
+        self.calculate_coverage_from_results(&test_results)
     }
 
     /// Calculate coverage matrix from test results
@@ -462,8 +448,11 @@ impl CoverageMatrixCalculator {
         path: P,
     ) -> Result<Vec<ConformanceTestResult>, CoverageError> {
         let content = std::fs::read_to_string(path)?;
-        let results: Vec<ConformanceTestResult> = serde_json::from_str(&content)?;
-        Ok(results)
+        Self::parse_test_results_document(&content)?.ok_or_else(|| {
+            CoverageError::InvalidData(
+                "JSON document does not contain conformance test results".to_string(),
+            )
+        })
     }
 
     /// Save coverage matrix to JSON file
@@ -476,6 +465,86 @@ impl CoverageMatrixCalculator {
         std::fs::write(path, json)?;
         Ok(())
     }
+
+    fn collect_test_results(path: &Path) -> Result<Vec<ConformanceTestResult>, CoverageError> {
+        let mut results = Vec::new();
+
+        for entry in WalkDir::new(path).follow_links(false).sort_by_file_name() {
+            let entry = entry?;
+
+            if !entry.file_type().is_file() || !Self::is_result_candidate(entry.path()) {
+                continue;
+            }
+
+            let content = std::fs::read_to_string(entry.path())?;
+            if let Some(mut file_results) = Self::parse_test_results_document(&content)? {
+                results.append(&mut file_results);
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn is_result_candidate(path: &Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("json") || extension.eq_ignore_ascii_case("golden")
+            })
+    }
+
+    fn parse_test_results_document(
+        content: &str,
+    ) -> Result<Option<Vec<ConformanceTestResult>>, CoverageError> {
+        let value: serde_json::Value = serde_json::from_str(content)?;
+
+        if Self::looks_like_result_array(&value) {
+            return Ok(Some(serde_json::from_value(value)?));
+        }
+
+        if Self::looks_like_result_object(&value) {
+            return Ok(Some(vec![serde_json::from_value(value)?]));
+        }
+
+        if let Some(object) = value.as_object() {
+            for key in ["test_results", "results", "conformance_results"] {
+                if let Some(results_value) = object.get(key) {
+                    if !results_value.is_array() {
+                        return Err(CoverageError::InvalidData(format!(
+                            "{key} must contain an array of conformance test results"
+                        )));
+                    }
+
+                    return Ok(Some(serde_json::from_value(results_value.clone())?));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn looks_like_result_array(value: &serde_json::Value) -> bool {
+        value.as_array().is_some_and(|entries| {
+            entries.is_empty() || entries.iter().all(Self::looks_like_result_object)
+        })
+    }
+
+    fn looks_like_result_object(value: &serde_json::Value) -> bool {
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+
+        [
+            "test_id",
+            "test_name",
+            "rfc_section",
+            "requirement_level",
+            "passed",
+            "execution_time_ms",
+        ]
+        .into_iter()
+        .all(|field| object.contains_key(field))
+    }
 }
 
 /// Errors that can occur during coverage calculation
@@ -487,6 +556,9 @@ pub enum CoverageError {
 
     #[error("JSON serialization error: {0}")]
     JsonError(#[from] serde_json::Error),
+
+    #[error("Directory traversal error: {0}")]
+    WalkdirError(#[from] walkdir::Error),
 
     #[error("Invalid test result data: {0}")]
     InvalidData(String),
@@ -524,6 +596,63 @@ mod tests {
                 Some(FailureType::IncorrectBehavior)
             },
         }
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_parse_test_results_document_accepts_result_array() {
+        let expected = vec![
+            create_test_result("5.3.1", RequirementLevel::Must, true),
+            create_test_result("5.3.2", RequirementLevel::Should, false),
+        ];
+        let json = serde_json::to_string(&expected).unwrap();
+
+        let results = CoverageMatrixCalculator::parse_test_results_document(&json)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].test_id, expected[0].test_id);
+        assert_eq!(results[1].rfc_section, "5.3.2");
+        assert!(!results[1].passed);
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_parse_test_results_document_accepts_result_envelope() {
+        let result = create_test_result("5.4.2", RequirementLevel::May, true);
+        let document = serde_json::json!({
+            "generated_by": "raptorq-conformance-reporting",
+            "results": [serde_json::to_value(&result).unwrap()]
+        })
+        .to_string();
+
+        let results = CoverageMatrixCalculator::parse_test_results_document(&document)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].test_name, result.test_name);
+        assert_eq!(results[0].requirement_level, RequirementLevel::May);
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_parse_test_results_document_ignores_golden_metadata_without_result() {
+        let document = serde_json::json!({
+            "metadata": {
+                "test_name": "round trip fixture",
+                "rfc_section": "5.3.1"
+            },
+            "data": {
+                "symbols": [1, 2, 3]
+            }
+        })
+        .to_string();
+
+        let results = CoverageMatrixCalculator::parse_test_results_document(&document).unwrap();
+
+        assert!(results.is_none());
     }
 
     #[test]
