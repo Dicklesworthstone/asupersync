@@ -233,7 +233,6 @@ pub fn otlp_001_protobuf_validation<RT: RuntimeInterface>() -> ConformanceTest<R
                     "metric_type": format!("{:?}", vector.expected_metric.metric_type)
                 }));
 
-                // Mock validation for demonstration
                 let validation_result = validate_otlp_message(&vector);
 
                 if validation_result == vector.should_pass {
@@ -288,7 +287,6 @@ pub fn otlp_002_resource_attributes<RT: RuntimeInterface>() -> ConformanceTest<R
                     "value_length": value.len()
                 }));
 
-                // Mock encoding/decoding round-trip
                 let encoded = encode_resource_attribute(key, value);
                 let (decoded_key, decoded_value) = decode_resource_attribute(&encoded);
 
@@ -332,7 +330,6 @@ pub fn otlp_003_temporality<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     "expected_temporality": expected_temporality
                 }));
 
-                // Mock temporality validation
                 let actual_temporality = get_metric_temporality(metric_type);
 
                 if actual_temporality != *expected_temporality {
@@ -449,7 +446,6 @@ pub fn otlp_005_compatibility<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                         .as_millis()
                 }));
 
-                // Mock compatibility validation
                 let is_compatible = validate_compatibility(implementation);
 
                 if !is_compatible {
@@ -1313,33 +1309,143 @@ pub fn otlp_006_log_record_body_mapping<RT: RuntimeInterface>() -> ConformanceTe
 }
 
 // =============================================================================
-// Helper Functions (Mock Implementations)
+// Helper Functions
 // =============================================================================
 
-/// Mock OTLP message validation.
+/// Validate the local OTLP metric test-vector model before protobuf export.
 fn validate_otlp_message(vector: &OtlpTestVector) -> bool {
-    // For mock: pass if name is non-empty, fail otherwise
-    !vector.expected_metric.name.is_empty()
+    if vector.name.trim().is_empty() {
+        return false;
+    }
+
+    validate_test_metric(&vector.expected_metric).is_ok()
 }
 
-/// Mock resource attribute encoding.
+fn validate_test_metric(metric: &TestMetric) -> Result<(), &'static str> {
+    if metric.name.trim().is_empty() {
+        return Err("metric name is required");
+    }
+
+    if metric.scope_name.trim().is_empty() {
+        return Err("instrumentation scope name is required");
+    }
+
+    if metric.data_points.is_empty() {
+        return Err("at least one data point is required");
+    }
+
+    if metric
+        .resource_attributes
+        .iter()
+        .any(|(key, _)| key.trim().is_empty())
+    {
+        return Err("resource attribute keys must be nonempty");
+    }
+
+    for point in &metric.data_points {
+        if point.labels.iter().any(|(key, _)| key.trim().is_empty()) {
+            return Err("data point label keys must be nonempty");
+        }
+
+        match (&metric.metric_type, &point.value) {
+            (TestMetricType::Counter | TestMetricType::Gauge, TestMetricValue::Int64(_)) => {}
+            (
+                TestMetricType::Histogram,
+                TestMetricValue::Histogram {
+                    count,
+                    sum,
+                    buckets,
+                },
+            ) => validate_histogram_point(*count, *sum, buckets)?,
+            (TestMetricType::Histogram, TestMetricValue::Int64(_)) => {
+                return Err("histogram metric requires histogram data points");
+            }
+            (
+                TestMetricType::Counter | TestMetricType::Gauge,
+                TestMetricValue::Histogram { .. },
+            ) => {
+                return Err("counter and gauge metrics require scalar data points");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_histogram_point(
+    count: u64,
+    sum: f64,
+    buckets: &[TestHistogramBucket],
+) -> Result<(), &'static str> {
+    if !sum.is_finite() || sum < 0.0 {
+        return Err("histogram sum must be finite and non-negative");
+    }
+
+    if buckets.is_empty() {
+        return Err("histogram must contain at least one bucket");
+    }
+
+    let mut previous_bound = f64::NEG_INFINITY;
+    let mut previous_count = 0;
+    for bucket in buckets {
+        if bucket.upper_bound < previous_bound {
+            return Err("histogram bucket bounds must be ordered");
+        }
+        if bucket.count < previous_count {
+            return Err("histogram bucket counts must be cumulative");
+        }
+        if bucket.count > count {
+            return Err("histogram bucket counts must not exceed total count");
+        }
+
+        previous_bound = bucket.upper_bound;
+        previous_count = bucket.count;
+    }
+
+    if previous_count != count {
+        return Err("final histogram bucket count must equal total count");
+    }
+
+    Ok(())
+}
+
+/// Encode a resource attribute as the OTLP protobuf `KeyValue` wire shape.
 fn encode_resource_attribute(key: &str, value: &str) -> Vec<u8> {
-    // Real implementation would use OTLP protobuf KeyValue message
-    format!("{}={}", key, value).into_bytes()
+    use opentelemetry_proto::tonic::common::v1::{
+        AnyValue, KeyValue, any_value::Value as AnyValueKind,
+    };
+    use prost::Message as _;
+
+    let attribute = KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(AnyValueKind::StringValue(value.to_string())),
+        }),
+    };
+
+    attribute.encode_to_vec()
 }
 
-/// Mock resource attribute decoding.
+/// Decode an OTLP protobuf `KeyValue` resource attribute.
 fn decode_resource_attribute(encoded: &[u8]) -> (String, String) {
-    // Real implementation would decode OTLP protobuf
-    let decoded = String::from_utf8_lossy(encoded);
-    if let Some((key, value)) = decoded.split_once('=') {
-        (key.to_string(), value.to_string())
-    } else {
-        ("".to_string(), "".to_string())
+    use opentelemetry_proto::tonic::common::v1::{KeyValue, any_value::Value as AnyValueKind};
+    use prost::Message as _;
+
+    let Some(attribute) = KeyValue::decode(encoded).ok() else {
+        return (String::new(), String::new());
+    };
+
+    let Some(value) = attribute.value.and_then(|value| value.value) else {
+        return (attribute.key, String::new());
+    };
+
+    match value {
+        AnyValueKind::StringValue(value) => (attribute.key, value),
+        _ => (attribute.key, String::new()),
     }
 }
 
-/// Mock temporality determination.
+/// Temporality policy for local metric fixture types.
 fn get_metric_temporality(metric_type: &TestMetricType) -> &'static str {
     match metric_type {
         TestMetricType::Counter | TestMetricType::Histogram => "cumulative",
@@ -1347,21 +1453,22 @@ fn get_metric_temporality(metric_type: &TestMetricType) -> &'static str {
     }
 }
 
-/// Mock metric series acceptance.
-fn accept_metric_series(_metric_name: &str, _label_value: &str) -> bool {
-    // Real implementation would check against cardinality limits
-    true
+/// Validate a metric series identity before the fixture's cardinality counter accepts it.
+fn accept_metric_series(metric_name: &str, label_value: &str) -> bool {
+    !metric_name.trim().is_empty() && !label_value.trim().is_empty()
 }
 
-/// Mock cardinality overflow handling.
-fn handle_cardinality_overflow(_metric_name: &str, _label_value: &str) -> bool {
-    // Real implementation would apply overflow strategy
-    true
+/// Apply the fixture overflow policy after the cardinality limit is reached.
+fn handle_cardinality_overflow(metric_name: &str, label_value: &str) -> bool {
+    accept_metric_series(metric_name, label_value)
 }
 
-/// Mock compatibility validation.
-fn validate_compatibility(_implementation: &str) -> bool {
-    true
+/// Validate the set of reference implementations supported by this conformance fixture.
+fn validate_compatibility(implementation: &str) -> bool {
+    matches!(
+        implementation,
+        "opentelemetry_collector_v0.95.0" | "prometheus_remote_write" | "grafana_agent_v0.32.1"
+    )
 }
 
 /// Serialize AnyValue to bytes for comparison testing.
@@ -19035,6 +19142,51 @@ mod tests {
 
         assert_eq!(decoded_key, key);
         assert_eq!(decoded_value, value);
+    }
+
+    #[test]
+    fn test_resource_attribute_protobuf_round_trip_preserves_delimiters() {
+        let key = "custom.label";
+        let value = "value=with=delimiters and unicode marker";
+
+        let encoded = encode_resource_attribute(key, value);
+        let (decoded_key, decoded_value) = decode_resource_attribute(&encoded);
+
+        assert_eq!(decoded_key, key);
+        assert_eq!(decoded_value, value);
+    }
+
+    #[test]
+    fn test_resource_attribute_decode_rejects_malformed_payload() {
+        let (decoded_key, decoded_value) = decode_resource_attribute(b"service.name=test");
+
+        assert_eq!(decoded_key, "");
+        assert_eq!(decoded_value, "");
+    }
+
+    #[test]
+    fn test_otlp_vector_validation_rejects_structural_gaps() {
+        let mut invalid = otlp_test_vectors()
+            .into_iter()
+            .find(|vector| vector.name == "basic_counter")
+            .expect("basic counter vector must exist");
+
+        invalid.expected_metric.name.clear();
+        assert!(!validate_otlp_message(&invalid));
+
+        invalid.expected_metric.name = "requests_total".to_string();
+        invalid.expected_metric.data_points.clear();
+        assert!(!validate_otlp_message(&invalid));
+    }
+
+    #[test]
+    fn test_cardinality_and_compatibility_helpers_fail_closed() {
+        assert!(accept_metric_series("requests_total", "ok"));
+        assert!(!accept_metric_series("", "ok"));
+        assert!(!handle_cardinality_overflow("requests_total", ""));
+
+        assert!(validate_compatibility("opentelemetry_collector_v0.95.0"));
+        assert!(!validate_compatibility("unknown_collector"));
     }
 
     #[test]
