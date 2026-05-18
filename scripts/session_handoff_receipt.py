@@ -409,13 +409,15 @@ def normalize_dirty_entries(source: dict[str, Any]) -> list[dict[str, str]]:
             continue
         path = str(item.get("path", ""))
         status = str(item.get("status", ""))
+        cluster = str(item.get("cluster") or item.get("suspected_owner_or_bead") or "unknown")
+        action = str(item.get("action") or item.get("recommended_action") or "")
         for expanded_path in status_paths(status, path):
             entries.append(
                 {
                     "status": status,
                     "path": expanded_path,
-                    "cluster": str(item.get("cluster", "unknown")),
-                    "action": str(item.get("action", "")),
+                    "cluster": cluster,
+                    "action": action,
                 }
             )
     return entries

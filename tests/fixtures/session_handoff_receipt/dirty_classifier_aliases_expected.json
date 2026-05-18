@@ -1,0 +1,104 @@
+{
+  "active_bead_ids": {
+    "in_progress": [
+      "asupersync-c8thc8.11"
+    ],
+    "ready": [
+      "asupersync-c8thc8.1"
+    ],
+    "stale_in_progress": []
+  },
+  "agent": "CopperSpring",
+  "branch": {
+    "ahead": 0,
+    "behind": 0,
+    "current": "main",
+    "is_main": true,
+    "upstream": "origin/main"
+  },
+  "dirty_clusters": [
+    {
+      "actions": [
+        "stage only with the matching bead work; do not mix unrelated tracker updates"
+      ],
+      "cluster": "beads-tracker-state",
+      "paths": [
+        ".beads/issues.jsonl"
+      ]
+    },
+    {
+      "actions": [
+        "coordinate with RubyRobin before validation"
+      ],
+      "cluster": "peer-owned/swarm-capacity",
+      "paths": [
+        "src/runtime/scheduler/swarm_evidence.rs"
+      ]
+    }
+  ],
+  "generated_at": "2026-05-08T04:30:00Z",
+  "next_action": {
+    "category": "avoid-peer-owned-surface",
+    "path": "src/runtime/scheduler/swarm_evidence.rs",
+    "reason": "dirty paths need owner attribution before staging or validation"
+  },
+  "proof_suggestions": [
+    "rustfmt-check",
+    "all-targets-check"
+  ],
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  },
+  "repo_path": "/data/projects/asupersync",
+  "reservation_conflicts": [
+    {
+      "classification": "peer-active",
+      "exclusive": true,
+      "expires_ts": "2026-05-08T05:30:00Z",
+      "holder": "RubyRobin",
+      "path_pattern": "src/runtime/scheduler/swarm_evidence.rs"
+    }
+  ],
+  "reservation_snapshot": {
+    "available": true,
+    "classifications": [
+      {
+        "classification": "owned-active",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:30:00Z",
+        "holder": "CopperSpring",
+        "path_pattern": ".beads/issues.jsonl"
+      },
+      {
+        "classification": "peer-active",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:30:00Z",
+        "holder": "RubyRobin",
+        "path_pattern": "src/runtime/scheduler/swarm_evidence.rs"
+      }
+    ]
+  },
+  "schema_version": "session-handoff-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "dirty_tree": "ok",
+    "git": "ok",
+    "proof_runner": "ok",
+    "rch": "ok",
+    "tracker_sync": "ok"
+  },
+  "tracker_sync": {
+    "blocked": false,
+    "blocking_flags": [],
+    "db_newer": false,
+    "dirty_count": 0,
+    "jsonl_content_hash": "",
+    "jsonl_exists": true,
+    "jsonl_newer": false,
+    "last_export_time": "",
+    "last_import_time": "",
+    "status": "ok"
+  }
+}

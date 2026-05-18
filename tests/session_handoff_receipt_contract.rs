@@ -159,6 +159,56 @@ fn dirty_peer_owned_tree_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn dirty_classifier_aliases_preserve_owner_and_action_fields() {
+    let receipt = receipt_json("dirty_classifier_aliases.json");
+    assert_eq!(next_action_category(&receipt), "avoid-peer-owned-surface");
+    assert_eq!(
+        receipt["next_action"]["path"].as_str(),
+        Some("src/runtime/scheduler/swarm_evidence.rs")
+    );
+
+    let clusters = receipt["dirty_clusters"]
+        .as_array()
+        .expect("dirty_clusters must be array");
+    let tracker = clusters
+        .iter()
+        .find(|cluster| cluster["cluster"].as_str() == Some("beads-tracker-state"))
+        .expect("tracker cluster must be preserved from dirty-tree classifier aliases");
+    assert_eq!(
+        tracker["actions"][0].as_str(),
+        Some("stage only with the matching bead work; do not mix unrelated tracker updates")
+    );
+
+    let peer = clusters
+        .iter()
+        .find(|cluster| cluster["cluster"].as_str() == Some("peer-owned/swarm-capacity"))
+        .expect("peer source cluster must be preserved from dirty-tree classifier aliases");
+    assert_eq!(
+        peer["actions"][0].as_str(),
+        Some("coordinate with RubyRobin before validation")
+    );
+
+    assert_eq!(
+        receipt["reservation_snapshot"]["classifications"][0]["classification"].as_str(),
+        Some("owned-active"),
+        "current-agent tracker reservation must not be reported as a conflict"
+    );
+    assert_eq!(
+        receipt["reservation_conflicts"][0]["path_pattern"].as_str(),
+        Some("src/runtime/scheduler/swarm_evidence.rs")
+    );
+}
+
+#[test]
+fn dirty_classifier_aliases_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "dirty_classifier_aliases.json",
+        "dirty_classifier_aliases_expected.json",
+        "dirty classifier alias handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn dirty_rename_target_expands_source_and_target_paths() {
     let receipt = receipt_json("dirty_rename_target.json");
     assert_eq!(next_action_category(&receipt), "avoid-peer-owned-surface");
