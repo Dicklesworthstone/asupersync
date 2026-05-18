@@ -641,7 +641,7 @@ mod tests {
         use crate::types::RegionId;
         use crate::util::arena::ArenaIndex;
 
-        fn dummy_region_id() -> RegionId {
+        fn test_region_id() -> RegionId {
             RegionId::from_arena(ArenaIndex::new(0, 0))
         }
 
@@ -730,7 +730,7 @@ mod tests {
         #[test]
         fn from_app_stop_error() {
             init_test("from_app_stop_error");
-            let inner = AppStopError::RegionNotFound(dummy_region_id());
+            let inner = AppStopError::RegionNotFound(test_region_id());
             let e: SporkError = inner.into();
             assert!(matches!(e, SporkError::Stop(_)));
             crate::test_complete!("from_app_stop_error");
@@ -791,7 +791,7 @@ mod tests {
         #[test]
         fn severity_transient_spawn_parent_capacity() {
             init_test("severity_transient_spawn_parent_capacity");
-            let region = dummy_region_id();
+            let region = test_region_id();
             let e = SporkError::Spawn(AppSpawnError::RegionCreate(parent_capacity_error(region)));
             assert_eq!(e.severity(), SporkSeverity::Transient);
             assert!(e.is_transient());
@@ -801,7 +801,7 @@ mod tests {
         #[test]
         fn severity_transient_start_parent_capacity() {
             init_test("severity_transient_start_parent_capacity");
-            let region = dummy_region_id();
+            let region = test_region_id();
             let e = SporkError::Start(AppStartError::SpawnFailed(AppSpawnError::RegionCreate(
                 parent_capacity_error(region),
             )));
@@ -813,7 +813,7 @@ mod tests {
         #[test]
         fn severity_transient_spawn_child_start_region_capacity() {
             init_test("severity_transient_spawn_child_start_region_capacity");
-            let region = dummy_region_id();
+            let region = test_region_id();
             let e = SporkError::Spawn(AppSpawnError::SpawnFailed(
                 SupervisorSpawnError::ChildStartFailed {
                     child: "worker".into(),
@@ -829,7 +829,7 @@ mod tests {
         #[test]
         fn severity_transient_spawn_dependency_unavailable_preserves_root_cause() {
             init_test("severity_transient_spawn_dependency_unavailable_preserves_root_cause");
-            let region = dummy_region_id();
+            let region = test_region_id();
             let e = SporkError::Spawn(AppSpawnError::SpawnFailed(
                 SupervisorSpawnError::DependencyUnavailable {
                     child: "api".into(),
@@ -860,7 +860,7 @@ mod tests {
                 "start"
             );
             assert_eq!(
-                SporkError::Stop(AppStopError::RegionNotFound(dummy_region_id())).domain(),
+                SporkError::Stop(AppStopError::RegionNotFound(test_region_id())).domain(),
                 "stop"
             );
             assert_eq!(
