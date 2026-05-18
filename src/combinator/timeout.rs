@@ -353,9 +353,9 @@ impl TimeoutConfig {
 /// 2. `timeout!` returns immediately (sleep cleanup is fast)
 #[macro_export]
 macro_rules! timeout {
-    // Basic syntax: timeout!(duration, future) requires ambient context, but
-    // for now we require explicit cx in asupersync. We provide a dummy
-    // implementation that panics to enforce cx passing.
+    // Basic syntax: timeout!(duration, future) would require ambient context.
+    // Asupersync requires explicit Cx flow, so this arm is a compile-time
+    // guard that points callers at the supported form.
     ($duration:expr, $future:expr) => {{ compile_error!("timeout! requires a Cx context: timeout!(cx, duration, future)") }};
 
     // With explicit cx: timeout!(cx, duration, future)
