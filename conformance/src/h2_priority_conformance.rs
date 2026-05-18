@@ -232,7 +232,7 @@ impl PriorityConformanceTester {
 
         // Test h2 reference implementation. If the external reference is not
         // wired, keep this as a live conformance check against the RFC-backed
-        // expected state instead of reporting a fake comparison.
+        // expected state instead of reporting an invented comparison.
         let h2_result = self.test_h2_priorities(case).await;
 
         // Compare results

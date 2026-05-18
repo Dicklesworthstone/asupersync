@@ -227,7 +227,7 @@ impl PingConformanceTester {
 
         // Test h2 reference implementation. If the external reference is not wired,
         // keep this as a live conformance check against the RFC-backed expected
-        // state in the test case instead of reporting a fake comparison.
+        // state in the test case instead of reporting an invented comparison.
         let h2_result = self.test_h2_ping(case).await;
 
         // Compare results

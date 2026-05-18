@@ -1,7 +1,7 @@
 //! HTTP/2 SETTINGS_ENABLE_PUSH=0 enforcement conformance testing.
 //!
 //! This harness tests the production asupersync HTTP/2 SETTINGS_ENABLE_PUSH
-//! and PUSH_PROMISE seams. It intentionally does not fake h2 reference
+//! and PUSH_PROMISE seams. It intentionally does not synthesize h2 reference
 //! behavior when no live h2 peer is wired into this crate.
 
 use asupersync::bytes::{BufMut, BytesMut};
