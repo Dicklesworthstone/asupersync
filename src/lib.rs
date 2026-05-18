@@ -302,9 +302,9 @@ pub use types::{
 // this feature.
 //
 // Minimal builds that disable `proc-macros` do not get a functional macro DSL
-// fallback: `join!` and `race!` intentionally resolve to compile-error
-// placeholders, while `scope!`, `spawn!`, and `join_all!` are unavailable until
-// `proc-macros` is re-enabled.
+// fallback: `join!` and `race!` intentionally resolve to compile-error arms,
+// while `scope!`, `spawn!`, and `join_all!` are unavailable until `proc-macros`
+// is re-enabled.
 #[cfg(feature = "proc-macros")]
 pub use asupersync_macros::{join, join_all, race, scope, spawn};
 
