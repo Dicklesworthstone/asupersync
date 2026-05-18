@@ -63,6 +63,7 @@ fn create_operation(kind: u8, channel_id: u8, value: i32) -> SessionOperation {
 struct SessionState {
     mpsc_channels: HashMap<u8, (TrackedSender<i32>, mpsc::Receiver<i32>)>,
     oneshot_senders: HashMap<u8, TrackedOneshotSender<i32>>,
+    oneshot_receivers: HashMap<u8, oneshot::Receiver<i32>>,
     committed_proofs: Vec<CommittedProof<SendPermit>>,
     aborted_proofs: Vec<AbortedProof<SendPermit>>,
     operations_performed: Vec<SessionOperation>,
@@ -75,6 +76,7 @@ impl SessionState {
         Self {
             mpsc_channels: HashMap::new(),
             oneshot_senders: HashMap::new(),
+            oneshot_receivers: HashMap::new(),
             committed_proofs: Vec::new(),
             aborted_proofs: Vec::new(),
             operations_performed: Vec::new(),
@@ -89,9 +91,10 @@ impl SessionState {
     }
 
     fn add_oneshot_channel(&mut self, id: u8) {
-        let (sender, _receiver) = oneshot::channel();
+        let (sender, receiver) = oneshot::channel();
         self.oneshot_senders
             .insert(id, TrackedOneshotSender::new(sender));
+        self.oneshot_receivers.insert(id, receiver);
     }
 }
 
@@ -115,6 +118,8 @@ fn mr_obligation_conservation() {
             // Setup some channels
             state.add_mpsc_channel(0, 10);
             state.add_mpsc_channel(1, 5);
+            state.add_oneshot_channel(0);
+            state.add_oneshot_channel(1);
 
             let cx = Cx::for_testing();
             let mut permits_reserved = 0u32;
@@ -125,34 +130,71 @@ fn mr_obligation_conservation() {
                 match operation {
                     SessionOperation::ReserveMpsc { channel_id } => {
                         if let Some((sender, _)) = state.mpsc_channels.get(channel_id) {
-                            if let Ok(_permit) = sender.try_reserve() {
+                            if let Ok(permit) = sender.try_reserve() {
                                 permits_reserved += 1;
-                                // Note: In real implementation, permit would be stored
-                                // For testing, we'll track the count
+                                let _proof = permit.abort();
+                                proofs_generated += 1;
                             }
                         }
                     },
-                    SessionOperation::DirectSendMpsc { channel_id, value } => {
-                        if let Some((sender, _)) = state.mpsc_channels.get(channel_id) {
-                            match sender.send(&cx, *value).await {
-                                Ok(_proof) => {
-                                    proofs_generated += 1;
-                                },
-                                Err(_) => {
-                                    // Channel error - no proof generated
-                                },
+                    SessionOperation::SendMpsc { permit_id, value }
+                    | SessionOperation::DirectSendMpsc {
+                        channel_id: permit_id,
+                        value,
+                    } => {
+                        if let Some((sender, _)) = state.mpsc_channels.get(permit_id) {
+                            if let Ok(permit) = sender.try_reserve() {
+                                permits_reserved += 1;
+                                prop_assert!(
+                                    permit.send(*value).is_ok(),
+                                    "reserved live MPSC permit should commit successfully"
+                                );
+                                proofs_generated += 1;
                             }
                         }
                     },
-                    _ => {
-                        // Other operations would be handled similarly
-                    }
+                    SessionOperation::AbortMpsc { permit_id } => {
+                        if let Some((sender, _)) = state.mpsc_channels.get(permit_id) {
+                            if let Ok(permit) = sender.try_reserve() {
+                                permits_reserved += 1;
+                                let _proof = permit.abort();
+                                proofs_generated += 1;
+                            }
+                        }
+                    },
+                    SessionOperation::ReserveOneshot { channel_id }
+                    | SessionOperation::AbortOneshot {
+                        permit_id: channel_id,
+                    } => {
+                        if let Some(sender) = state.oneshot_senders.remove(channel_id) {
+                            let permit = sender.reserve(&cx).expect("test cx is not cancelled");
+                            permits_reserved += 1;
+                            let _proof = permit.abort();
+                            proofs_generated += 1;
+                        }
+                    },
+                    SessionOperation::SendOneshot { permit_id, value }
+                    | SessionOperation::DirectSendOneshot {
+                        channel_id: permit_id,
+                        value,
+                    } => {
+                        if let Some(sender) = state.oneshot_senders.remove(permit_id) {
+                            permits_reserved += 1;
+                            prop_assert!(
+                                sender.send(&cx, *value).is_ok(),
+                                "tracked oneshot with live receiver should commit successfully"
+                            );
+                            proofs_generated += 1;
+                        }
+                    },
                 }
             }
 
-            // For direct sends, each successful send creates one proof
-            // In practice, this would need to track actual permit reservations
-            prop_assert_eq!(permits_reserved, 0); // Simplified for this test
+            prop_assert_eq!(
+                permits_reserved,
+                proofs_generated,
+                "every successful tracked reservation must be consumed into exactly one commit or abort proof"
+            );
             Ok::<(), TestCaseError>(())
         })?;
     });
