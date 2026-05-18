@@ -441,7 +441,8 @@
   "documentation_contract": {
     "docs_must_reference_manifest": [
       "README.md",
-      "AGENTS.md"
+      "AGENTS.md",
+      "docs/proof_runner_usage.md"
     ],
     "required_marker": "artifacts/proof_lane_manifest_v1.json",
     "verifier_marker": "tests/proof_lane_manifest_contract.rs"

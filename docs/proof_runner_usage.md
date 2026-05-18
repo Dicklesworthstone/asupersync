@@ -200,6 +200,53 @@ Clippy passed after timeout.
 This is only accurate when a pass footer or remote exit status was visible before
 the timeout; otherwise the verdict is unknown.
 
+## Swarm Resource-Control Runbook
+
+This runbook is part of the proof-lane documentation contract. It must keep
+pointing at the canonical manifest, `artifacts/proof_lane_manifest_v1.json`, and
+its verifier, `tests/proof_lane_manifest_contract.rs`. It also must keep pointing
+at the current proof-claim dashboard, `artifacts/proof_status_snapshot_v1.json`,
+and its verifier, `tests/proof_status_snapshot_contract.rs`. Do not add a proof
+claim here unless the lane exists in the manifest or the status snapshot names
+the exact blocked frontier row.
+
+Use these colors for operator and agent decisions:
+
+| State | Meaning | Allowed agent action |
+|-------|---------|----------------------|
+| Green | No active disk, memory, reservation, or dirty-path blocker is visible for the chosen lane. | Run the exact manifest lane through `rch exec -- ...` with an isolated `CARGO_TARGET_DIR`, then cite the visible remote verdict. |
+| Yellow | The lane is intentionally scoped, fixture-only, or broad frontier evidence rather than a production guarantee. | Use it as scoped evidence only. Do not broaden the claim beyond the manifest `covers` and `explicit_not_covered` fields. |
+| Orange | Work can continue, but a safer lane exists because disk, memory, rch capacity, peer reservations, or dirty paths make broad proof risky. | Prefer source-only docs, fixtures, rustfmt, exact golden diffs, or tracker-only closeout. Announce the narrowed validation class in Agent Mail. |
+| Red | The intended lane is blocked by critical disk pressure, no remote worker, peer-owned dirty paths, active reservations, or a compile/test error outside the touched slice. | Stop the broad lane, record the first blocker exactly, and use only a narrower supplemental proof. Never force release or delete files without explicit user authorization. |
+
+Resource-control artifacts are evidence, not daemons:
+
+- `scripts/reservation_aware_work_finder.py --output json` is the stable machine
+  receipt for ready work, active reservations, dirty paths, disk pressure, stale
+  in-progress rows, and cleanup authorization.
+- `scripts/reservation_aware_work_finder.py --output markdown` is the compact
+  human dashboard for the same receipt. It must stay non-mutating: no Beads
+  mutation, no Agent Mail mutation, no Cargo execution, no branch/worktree
+  operations, and no cleanup commands.
+- `scripts/rch_retrieval_receipt.py --proof-lifecycle-contract` is the closeout
+  shape for remote proof result, local artifact retrieval result, local pressure,
+  and cleanup authorization.
+
+Keep proof verdicts separate from artifact movement:
+
+- A remote `exit 0` or visible pass footer proves only the command that ran on the
+  worker. It does not prove local artifact retrieval succeeded.
+- A retrieval failure after a remote pass is not a proof failure. It is an
+  artifact-status blocker that must name the path or filesystem that filled.
+- A timeout before a visible verdict is unknown. Do not summarize it as passed.
+- A local fallback is supplemental/local evidence, not the original `rch` proof
+  lane. If `RCH_REQUIRE_REMOTE=1` refuses local fallback, record that refusal.
+
+Cleanup remains report-only. Do not delete `/tmp`, target directories, caches,
+logs, proof artifacts, or ballast unless the user gives explicit written
+authorization for the exact cleanup target. Dashboard and receipt outputs must
+keep cleanup candidates as recommendations, not executable deletion commands.
+
 ## Error Handling
 
 Exit codes:
