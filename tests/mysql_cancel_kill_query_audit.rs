@@ -187,7 +187,7 @@ async fn mysql_cancel_sends_kill_query_audit() {
 fn create_handshake_v10_packet(connection_id: u32) -> Vec<u8> {
     let mut packet = Vec::new();
 
-    // Packet length (placeholder)
+    // Packet length for the fixed HandshakeV10 fixture
     packet.extend_from_slice(&[0x4a, 0x00, 0x00, 0x00]);
 
     // Protocol version
