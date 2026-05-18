@@ -65,10 +65,14 @@ pub use priority_inversion_oracle::{
 };
 pub use swarm_evidence::{
     CoordinationPressureFamily, SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION,
-    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SchedulerCoordinationEvidenceInput,
-    SchedulerCoordinationEvidenceInputs, SchedulerEvidenceArtifact, SchedulerEvidenceError,
-    SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
-    SchedulerTopologyDescriptor, SchedulerTuneReport, SchedulerWorkloadClass,
+    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION,
+    SchedulerCoordinationEvidenceInput, SchedulerCoordinationEvidenceInputs,
+    SchedulerEvidenceArtifact, SchedulerEvidenceError, SchedulerEvidenceMetrics,
+    SchedulerKnobProfile, SchedulerRecommendationReason, SchedulerTopologyDescriptor,
+    SchedulerTuneReport, SchedulerWorkloadClass, SwarmCapacitySnapshot,
+    SwarmCoordinationBacklogSignals, SwarmCpuTopologyHints, SwarmDiskCapacity,
+    SwarmDiskPressureLevel, SwarmMemoryCapacity, SwarmMemoryPressureTier, SwarmRchAdmissibility,
+    SwarmRchCapacity,
 };
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use work_stealing_checker::{

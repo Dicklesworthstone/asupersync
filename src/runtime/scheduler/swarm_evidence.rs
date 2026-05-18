@@ -154,7 +154,9 @@ impl SchedulerEvidenceArtifact {
         };
 
         let confidence_percent = 55u8
-            .saturating_add((u8::try_from(reason_codes.len()).unwrap_or(u8::MAX)).saturating_mul(10))
+            .saturating_add(
+                (u8::try_from(reason_codes.len()).unwrap_or(u8::MAX)).saturating_mul(10),
+            )
             .min(90);
 
         Ok(SchedulerTuneReport {
@@ -444,6 +446,221 @@ pub enum CoordinationPressureFamily {
     CoordinationLatencyBurst,
 }
 
+/// Stable schema for explicit host/resource snapshots used by swarm-scale policy.
+pub const SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION: &str = "asupersync.swarm-capacity-snapshot.v1";
+
+/// Deterministic, capability-supplied host capacity snapshot.
+///
+/// This type is intentionally inert: it records capacity and coordination
+/// signals supplied by an adapter or fixture, but it never reads ambient OS
+/// state and never authorizes cleanup by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmCapacitySnapshot {
+    /// Version tag for this schema.
+    pub schema_version: String,
+    /// Stable snapshot/run identifier.
+    pub snapshot_id: String,
+    /// CPU topology hints supplied by the caller.
+    pub cpu: SwarmCpuTopologyHints,
+    /// Memory availability and pressure tier.
+    pub memory: SwarmMemoryCapacity,
+    /// Disk availability and pressure tier.
+    pub disk: SwarmDiskCapacity,
+    /// Remote build/admission state for rch-backed proof work.
+    pub rch: SwarmRchCapacity,
+    /// Agent Mail and Beads coordination backlog signals.
+    pub coordination: SwarmCoordinationBacklogSignals,
+}
+
+impl SwarmCapacitySnapshot {
+    /// Validate that the snapshot is complete enough to feed deterministic
+    /// admission or replay tests without implying ambient authority.
+    pub fn validate(&self) -> Result<(), SchedulerEvidenceError> {
+        if self.schema_version != SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION {
+            return Err(SchedulerEvidenceError::UnsupportedSchemaVersion {
+                expected: SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION.to_string(),
+                found: self.schema_version.clone(),
+            });
+        }
+        if self.snapshot_id.trim().is_empty() {
+            return Err(SchedulerEvidenceError::EmptyCapacitySnapshotId);
+        }
+        self.cpu.validate()?;
+        self.memory.validate()?;
+        self.disk.validate()?;
+        Ok(())
+    }
+}
+
+/// Explicit CPU topology hints for swarm-scale admission decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmCpuTopologyHints {
+    /// Logical CPU count visible to the admission adapter.
+    pub logical_cpus: usize,
+    /// Physical core count, if the adapter can report it deterministically.
+    pub physical_cores: Option<usize>,
+    /// NUMA or locality group count, if known.
+    pub numa_nodes: Option<usize>,
+    /// Worker target that policy should consider for this host.
+    pub scheduler_worker_target: Option<usize>,
+}
+
+impl SwarmCpuTopologyHints {
+    fn validate(&self) -> Result<(), SchedulerEvidenceError> {
+        if self.logical_cpus == 0 {
+            return Err(SchedulerEvidenceError::InvalidCapacityDimension {
+                field: "cpu.logical_cpus",
+            });
+        }
+        if self.physical_cores == Some(0) {
+            return Err(SchedulerEvidenceError::InvalidCapacityDimension {
+                field: "cpu.physical_cores",
+            });
+        }
+        if self.numa_nodes == Some(0) {
+            return Err(SchedulerEvidenceError::InvalidCapacityDimension {
+                field: "cpu.numa_nodes",
+            });
+        }
+        if self.scheduler_worker_target == Some(0) {
+            return Err(SchedulerEvidenceError::InvalidCapacityDimension {
+                field: "cpu.scheduler_worker_target",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Coarse memory-pressure tier for deterministic policy fixtures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmMemoryPressureTier {
+    /// Adapter did not provide a memory-pressure classification.
+    #[default]
+    Unknown,
+    /// Plenty of memory is available.
+    Healthy,
+    /// Memory is reduced but not yet blocking ordinary work.
+    Low,
+    /// Memory pressure should throttle cache/artifact growth.
+    Saturated,
+    /// Memory pressure should fail closed for memory-heavy lanes.
+    Critical,
+}
+
+/// Explicit memory capacity inputs for swarm-scale policy.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SwarmMemoryCapacity {
+    /// Available memory in bytes, if reported.
+    pub available_bytes: Option<u64>,
+    /// Total memory in bytes, if reported.
+    pub total_bytes: Option<u64>,
+    /// Coarse pressure tier supplied by the adapter or fixture.
+    #[serde(default)]
+    pub pressure_tier: SwarmMemoryPressureTier,
+}
+
+impl SwarmMemoryCapacity {
+    fn validate(&self) -> Result<(), SchedulerEvidenceError> {
+        validate_optional_capacity_pair(
+            self.available_bytes,
+            self.total_bytes,
+            "memory.available_bytes",
+            "memory.total_bytes",
+        )
+    }
+}
+
+/// Coarse disk-pressure level for proof/artifact admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmDiskPressureLevel {
+    /// Adapter did not provide a disk-pressure classification.
+    #[default]
+    Unknown,
+    /// Disk has enough space for normal proof/artifact work.
+    Healthy,
+    /// Disk is low; source-only and remote-only lanes should be preferred.
+    Low,
+    /// Disk is red; local artifact retrieval and cleanup need explicit handling.
+    Critical,
+}
+
+/// Explicit disk capacity inputs for swarm-scale policy.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SwarmDiskCapacity {
+    /// Free bytes on the relevant project/artifact filesystem, if reported.
+    pub free_bytes: Option<u64>,
+    /// Total bytes on the relevant filesystem, if reported.
+    pub total_bytes: Option<u64>,
+    /// Coarse pressure level supplied by the adapter or fixture.
+    #[serde(default)]
+    pub pressure_level: SwarmDiskPressureLevel,
+}
+
+impl SwarmDiskCapacity {
+    fn validate(&self) -> Result<(), SchedulerEvidenceError> {
+        validate_optional_capacity_pair(
+            self.free_bytes,
+            self.total_bytes,
+            "disk.free_bytes",
+            "disk.total_bytes",
+        )
+    }
+}
+
+/// rch-backed proof-work availability from the coordinator's point of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmRchAdmissibility {
+    /// Adapter did not provide an rch availability classification.
+    #[default]
+    Unknown,
+    /// Remote proof work can be admitted.
+    Available,
+    /// Remote proof work is available but degraded.
+    Degraded,
+    /// Remote proof work should not be admitted now.
+    Unavailable,
+    /// A higher-level policy intentionally deferred remote proof work.
+    DeferredByPolicy,
+}
+
+/// Explicit remote proof-worker state for swarm-scale policy.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SwarmRchCapacity {
+    /// rch admission classification.
+    #[serde(default)]
+    pub admissibility: SwarmRchAdmissibility,
+    /// Number of healthy remote workers, if known.
+    pub healthy_worker_count: Option<usize>,
+    /// Number of currently available remote build slots, if known.
+    pub available_slots: Option<usize>,
+    /// Stable reason labels explaining degraded/unavailable states.
+    #[serde(default)]
+    pub blocked_reason_codes: Vec<String>,
+}
+
+/// Coordination-control backlog signals that affect work-conserving decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SwarmCoordinationBacklogSignals {
+    /// Ready Beads count.
+    pub ready_beads: usize,
+    /// Open Beads count.
+    pub open_beads: usize,
+    /// In-progress Beads count.
+    pub in_progress_beads: usize,
+    /// Active Agent Mail reservations relevant to this project.
+    pub active_reservations: usize,
+    /// Dirty paths currently visible in the shared worktree.
+    pub active_dirty_paths: usize,
+    /// Agents with recent activity in the coordination view.
+    pub active_agents: usize,
+    /// In-progress Beads that look stale to the coordinator.
+    pub stale_in_progress_beads: usize,
+}
+
 /// Validation and recommendation failures for scheduler evidence artifacts.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SchedulerEvidenceError {
@@ -512,6 +729,23 @@ pub enum SchedulerEvidenceError {
         /// Hash value that failed validation.
         found: String,
     },
+    /// The capacity snapshot id was empty.
+    #[error("swarm capacity snapshot id must not be empty")]
+    EmptyCapacitySnapshotId,
+    /// A required capacity dimension was zero or otherwise invalid.
+    #[error("swarm capacity dimension is invalid: {field}")]
+    InvalidCapacityDimension {
+        /// Stable field path for the invalid dimension.
+        field: &'static str,
+    },
+    /// A free/available capacity value exceeded the corresponding total.
+    #[error("swarm capacity available field {available_field} exceeds total field {total_field}")]
+    CapacityAvailableExceedsTotal {
+        /// Field that reported the available/free value.
+        available_field: &'static str,
+        /// Field that reported the total value.
+        total_field: &'static str,
+    },
 }
 
 fn validate_percentiles<T: Ord>(
@@ -533,6 +767,23 @@ fn validate_hash(hash: &str) -> Result<(), SchedulerEvidenceError> {
     if !hash.starts_with("sha256:") {
         return Err(SchedulerEvidenceError::InvalidSourceHash {
             found: hash.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_optional_capacity_pair(
+    available: Option<u64>,
+    total: Option<u64>,
+    available_field: &'static str,
+    total_field: &'static str,
+) -> Result<(), SchedulerEvidenceError> {
+    if let (Some(available), Some(total)) = (available, total)
+        && available > total
+    {
+        return Err(SchedulerEvidenceError::CapacityAvailableExceedsTotal {
+            available_field,
+            total_field,
         });
     }
     Ok(())

@@ -2,9 +2,12 @@
 
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{
-    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SchedulerEvidenceArtifact, SchedulerEvidenceError,
-    SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
-    SchedulerTopologyDescriptor, SchedulerWorkloadClass, ThreeLaneScheduler,
+    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION,
+    SchedulerEvidenceArtifact, SchedulerEvidenceError, SchedulerEvidenceMetrics,
+    SchedulerKnobProfile, SchedulerRecommendationReason, SchedulerTopologyDescriptor,
+    SchedulerWorkloadClass, SwarmCapacitySnapshot, SwarmCoordinationBacklogSignals,
+    SwarmCpuTopologyHints, SwarmDiskCapacity, SwarmDiskPressureLevel, SwarmMemoryCapacity,
+    SwarmMemoryPressureTier, SwarmRchAdmissibility, SwarmRchCapacity, ThreeLaneScheduler,
 };
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
@@ -47,6 +50,46 @@ fn sample_artifact() -> SchedulerEvidenceArtifact {
             cross_cohort_wake_p99_ns: Some(180_000),
         },
         notes: vec!["deterministic_lab".to_string()],
+    }
+}
+
+fn sample_capacity_snapshot(snapshot_id: &str) -> SwarmCapacitySnapshot {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    SwarmCapacitySnapshot {
+        schema_version: SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION.to_string(),
+        snapshot_id: snapshot_id.to_string(),
+        cpu: SwarmCpuTopologyHints {
+            logical_cpus: 64,
+            physical_cores: Some(32),
+            numa_nodes: Some(2),
+            scheduler_worker_target: Some(64),
+        },
+        memory: SwarmMemoryCapacity {
+            available_bytes: Some(192 * GIB),
+            total_bytes: Some(256 * GIB),
+            pressure_tier: SwarmMemoryPressureTier::Healthy,
+        },
+        disk: SwarmDiskCapacity {
+            free_bytes: Some(768 * GIB),
+            total_bytes: Some(2 * 1_024 * GIB),
+            pressure_level: SwarmDiskPressureLevel::Healthy,
+        },
+        rch: SwarmRchCapacity {
+            admissibility: SwarmRchAdmissibility::Available,
+            healthy_worker_count: Some(6),
+            available_slots: Some(12),
+            blocked_reason_codes: Vec::new(),
+        },
+        coordination: SwarmCoordinationBacklogSignals {
+            ready_beads: 3,
+            open_beads: 7,
+            in_progress_beads: 1,
+            active_reservations: 5,
+            active_dirty_paths: 2,
+            active_agents: 4,
+            stale_in_progress_beads: 0,
+        },
     }
 }
 
@@ -139,6 +182,218 @@ fn scheduler_evidence_artifact_rejects_invalid_inputs() {
         artifact.validate(),
         Err(SchedulerEvidenceError::RemoteStealRatioOutOfRange(101))
     );
+}
+
+#[test]
+fn swarm_capacity_snapshot_round_trips_resource_pressure_fixtures() {
+    let healthy = sample_capacity_snapshot("healthy-64c");
+
+    let mut disk_red = sample_capacity_snapshot("disk-red");
+    disk_red.disk.free_bytes = Some(8 * 1_024 * 1_024 * 1_024);
+    disk_red.disk.pressure_level = SwarmDiskPressureLevel::Critical;
+    disk_red.rch.admissibility = SwarmRchAdmissibility::DeferredByPolicy;
+    disk_red
+        .rch
+        .blocked_reason_codes
+        .push("disk-critical".to_string());
+
+    let mut memory_saturated = sample_capacity_snapshot("memory-saturated");
+    memory_saturated.memory.available_bytes = Some(4 * 1_024 * 1_024 * 1_024);
+    memory_saturated.memory.pressure_tier = SwarmMemoryPressureTier::Saturated;
+    memory_saturated.rch.admissibility = SwarmRchAdmissibility::Degraded;
+
+    let mut rch_unavailable = sample_capacity_snapshot("rch-unavailable");
+    rch_unavailable.rch.admissibility = SwarmRchAdmissibility::Unavailable;
+    rch_unavailable.rch.healthy_worker_count = Some(0);
+    rch_unavailable.rch.available_slots = Some(0);
+    rch_unavailable
+        .rch
+        .blocked_reason_codes
+        .push("no-admissible-workers".to_string());
+
+    let mut backlog_heavy = sample_capacity_snapshot("coordination-backlog-heavy");
+    backlog_heavy.coordination.ready_beads = 42;
+    backlog_heavy.coordination.open_beads = 96;
+    backlog_heavy.coordination.in_progress_beads = 18;
+    backlog_heavy.coordination.active_reservations = 27;
+    backlog_heavy.coordination.active_dirty_paths = 9;
+    backlog_heavy.coordination.active_agents = 14;
+    backlog_heavy.coordination.stale_in_progress_beads = 3;
+
+    let fixtures = [
+        healthy,
+        disk_red,
+        memory_saturated,
+        rch_unavailable,
+        backlog_heavy,
+    ];
+    let mut observed_labels = BTreeSet::new();
+
+    for snapshot in fixtures {
+        snapshot
+            .validate()
+            .expect("fixture snapshot should validate");
+
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(
+            value["schema_version"].as_str(),
+            Some(SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION)
+        );
+        observed_labels.insert((
+            snapshot.snapshot_id.clone(),
+            value["memory"]["pressure_tier"]
+                .as_str()
+                .expect("memory tier label")
+                .to_string(),
+            value["disk"]["pressure_level"]
+                .as_str()
+                .expect("disk pressure label")
+                .to_string(),
+            value["rch"]["admissibility"]
+                .as_str()
+                .expect("rch admissibility label")
+                .to_string(),
+        ));
+
+        let reparsed: SwarmCapacitySnapshot =
+            serde_json::from_value(value).expect("deserialize snapshot");
+        assert_eq!(reparsed, snapshot);
+    }
+
+    assert!(observed_labels.contains(&(
+        "healthy-64c".to_string(),
+        "healthy".to_string(),
+        "healthy".to_string(),
+        "available".to_string(),
+    )));
+    assert!(observed_labels.contains(&(
+        "disk-red".to_string(),
+        "healthy".to_string(),
+        "critical".to_string(),
+        "deferred_by_policy".to_string(),
+    )));
+    assert!(observed_labels.contains(&(
+        "memory-saturated".to_string(),
+        "saturated".to_string(),
+        "healthy".to_string(),
+        "degraded".to_string(),
+    )));
+    assert!(observed_labels.contains(&(
+        "rch-unavailable".to_string(),
+        "healthy".to_string(),
+        "healthy".to_string(),
+        "unavailable".to_string(),
+    )));
+}
+
+#[test]
+fn swarm_capacity_snapshot_rejects_invalid_dimensions() {
+    let mut snapshot = sample_capacity_snapshot("invalid-schema");
+    snapshot.schema_version = "asupersync.swarm-capacity-snapshot.v0".to_string();
+    assert_eq!(
+        snapshot.validate(),
+        Err(SchedulerEvidenceError::UnsupportedSchemaVersion {
+            expected: SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION.to_string(),
+            found: "asupersync.swarm-capacity-snapshot.v0".to_string(),
+        })
+    );
+
+    let mut snapshot = sample_capacity_snapshot("   ");
+    assert_eq!(
+        snapshot.validate(),
+        Err(SchedulerEvidenceError::EmptyCapacitySnapshotId)
+    );
+
+    let mut snapshot = sample_capacity_snapshot("zero-logical-cpus");
+    snapshot.cpu.logical_cpus = 0;
+    assert_eq!(
+        snapshot.validate(),
+        Err(SchedulerEvidenceError::InvalidCapacityDimension {
+            field: "cpu.logical_cpus",
+        })
+    );
+
+    let mut snapshot = sample_capacity_snapshot("zero-physical-cores");
+    snapshot.cpu.physical_cores = Some(0);
+    assert_eq!(
+        snapshot.validate(),
+        Err(SchedulerEvidenceError::InvalidCapacityDimension {
+            field: "cpu.physical_cores",
+        })
+    );
+
+    let mut snapshot = sample_capacity_snapshot("memory-available-too-large");
+    snapshot.memory.available_bytes = Some(256);
+    snapshot.memory.total_bytes = Some(128);
+    assert_eq!(
+        snapshot.validate(),
+        Err(SchedulerEvidenceError::CapacityAvailableExceedsTotal {
+            available_field: "memory.available_bytes",
+            total_field: "memory.total_bytes",
+        })
+    );
+
+    let mut snapshot = sample_capacity_snapshot("disk-free-too-large");
+    snapshot.disk.free_bytes = Some(256);
+    snapshot.disk.total_bytes = Some(128);
+    assert_eq!(
+        snapshot.validate(),
+        Err(SchedulerEvidenceError::CapacityAvailableExceedsTotal {
+            available_field: "disk.free_bytes",
+            total_field: "disk.total_bytes",
+        })
+    );
+}
+
+#[test]
+fn swarm_capacity_snapshot_defaults_and_unknown_fields_are_stable() {
+    let raw = serde_json::json!({
+        "schema_version": SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION,
+        "snapshot_id": "sparse-adapter-v1",
+        "ignored_top_level": "kept out of the contract",
+        "cpu": {
+            "logical_cpus": 64,
+            "ignored_cpu_hint": 2,
+        },
+        "memory": {
+            "available_bytes": null,
+            "total_bytes": null,
+            "ignored_memory_hint": true,
+        },
+        "disk": {
+            "ignored_disk_hint": "remote-only",
+        },
+        "rch": {
+            "available_slots": 0,
+            "ignored_rch_hint": "preflight-red",
+        },
+        "coordination": {
+            "ready_beads": 1,
+            "active_agents": 4,
+            "ignored_coordination_hint": "mail-lag",
+        },
+    });
+
+    let snapshot: SwarmCapacitySnapshot =
+        serde_json::from_value(raw).expect("deserialize sparse snapshot");
+
+    assert_eq!(snapshot.validate(), Ok(()));
+    assert_eq!(snapshot.cpu.logical_cpus, 64);
+    assert_eq!(snapshot.cpu.physical_cores, None);
+    assert_eq!(
+        snapshot.memory.pressure_tier,
+        SwarmMemoryPressureTier::Unknown
+    );
+    assert_eq!(
+        snapshot.disk.pressure_level,
+        SwarmDiskPressureLevel::Unknown
+    );
+    assert_eq!(snapshot.rch.admissibility, SwarmRchAdmissibility::Unknown);
+    assert_eq!(snapshot.rch.blocked_reason_codes, Vec::<String>::new());
+    assert_eq!(snapshot.coordination.ready_beads, 1);
+    assert_eq!(snapshot.coordination.open_beads, 0);
+    assert_eq!(snapshot.coordination.active_agents, 4);
+    assert_eq!(snapshot.coordination.active_dirty_paths, 0);
 }
 
 #[test]
