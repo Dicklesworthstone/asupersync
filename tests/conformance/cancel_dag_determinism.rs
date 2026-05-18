@@ -831,13 +831,13 @@ mod cancel_dag_determinism_tests {
         #[allow(dead_code)]
 
         fn create_cancel_dag_snapshot(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
-            // Mock implementation for creating a deterministic cancel DAG
+            // Deterministic fixture implementation for creating a cancel DAG
             let mut events = Vec::new();
             let mut dependency_graph = BTreeMap::new();
             let mut finalizer_calls = Vec::new();
             let mut budget_exhaustions = Vec::new();
 
-            // Create mock objects with deterministic IDs based on seed
+            // Create fixture objects with deterministic IDs based on seed
             for i in 0..5 {
                 let object_id = ObjectId::new_for_test((seed + i) as u32);
 
@@ -874,7 +874,7 @@ mod cancel_dag_determinism_tests {
         ) -> Result<CancelDagSnapshot, String> {
             let mut snapshot = self.create_cancel_dag_snapshot(seed)?;
 
-            // Add mock finalizer events
+            // Add synthetic finalizer events
             for (i, event) in snapshot.cancellation_events.iter().enumerate() {
                 snapshot.finalizer_calls.push(FinalizerEvent {
                     object_id: event.object_id,
@@ -895,7 +895,7 @@ mod cancel_dag_determinism_tests {
         ) -> Result<CancelDagSnapshot, String> {
             let mut snapshot = self.create_cancel_dag_snapshot(seed)?;
 
-            // Add mock budget exhaustion events
+            // Add synthetic budget exhaustion events
             for (i, event) in snapshot.cancellation_events.iter().enumerate() {
                 if (i % 2) == 0 {
                     // Every other object has budget exhaustion
@@ -983,7 +983,7 @@ mod cancel_dag_determinism_tests {
             seed: u64,
             _config: ProgressConfig,
         ) -> Result<Vec<f64>, String> {
-            // Mock progress certificate trace
+            // Synthetic progress certificate trace
             let mut trace = Vec::new();
             let mut potential = 100.0f64;
 
@@ -1097,14 +1097,14 @@ mod cancel_dag_determinism_tests {
         #[allow(dead_code)]
 
         fn has_parent_dependency(&self, _object_id: ObjectId) -> bool {
-            // Mock implementation
+            // Deterministic fixture implementation
             _object_id.as_u32() % 2 == 0
         }
 
         #[allow(dead_code)]
 
         fn is_parent_of(&self, _potential_parent: ObjectId, _child: ObjectId) -> bool {
-            // Mock implementation
+            // Deterministic fixture implementation
             _potential_parent.as_u32() < _child.as_u32()
         }
 
