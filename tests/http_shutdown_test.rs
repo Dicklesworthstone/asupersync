@@ -10,13 +10,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-// Mock IO that allows controlling read/write behavior
-struct MockIo {
+// Fixture IO that allows controlling read/write behavior
+struct FixtureIo {
     read_data: Vec<u8>,
     write_data: Vec<u8>,
 }
 
-impl MockIo {
+impl FixtureIo {
     fn new(data: Vec<u8>) -> Self {
         Self {
             read_data: data,
@@ -25,7 +25,7 @@ impl MockIo {
     }
 }
 
-impl AsyncRead for MockIo {
+impl AsyncRead for FixtureIo {
     fn poll_read(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -41,7 +41,7 @@ impl AsyncRead for MockIo {
     }
 }
 
-impl AsyncWrite for MockIo {
+impl AsyncWrite for FixtureIo {
     fn poll_write(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -67,9 +67,9 @@ fn test_shutdown_signal() {
     let server = Http1Server::new(|_req| async move { Response::new(200, "OK", vec![]) })
         .with_shutdown_signal(signal.clone());
 
-    // Create a mock IO with a simple GET request
+    // Create fixture IO with a simple GET request
     let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    let io = MockIo::new(request.to_vec());
+    let io = FixtureIo::new(request.to_vec());
 
     // Trigger shutdown immediately (begin drain phase).
     let began = signal.begin_drain(Duration::from_millis(0));
