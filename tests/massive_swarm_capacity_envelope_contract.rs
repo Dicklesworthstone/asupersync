@@ -181,7 +181,7 @@ fn artifact_declares_truthful_schema_sources_and_required_logs() {
             .and_then(JsonValue::as_str)
             .unwrap_or("missing large_host_truthfulness")
             .contains("never emit verdict=pass"),
-        "metric policy must prevent fake large-host proof"
+        "metric policy must prevent synthetic large-host proof"
     );
 
     log_contract_event(
