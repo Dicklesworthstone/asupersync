@@ -930,7 +930,7 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
-    struct FakeRetryError(&'static str);
+    struct RetryProbeError(&'static str);
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -1093,7 +1093,7 @@ mod tests {
             &policy,
             || {
                 attempts += 1;
-                std::future::ready(Outcome::<(), FakeRetryError>::Err(FakeRetryError(
+                std::future::ready(Outcome::<(), RetryProbeError>::Err(RetryProbeError(
                     "retryable",
                 )))
             },
@@ -1101,7 +1101,7 @@ mod tests {
         ));
 
         match outcome {
-            Outcome::Err(err) => assert_eq!(err, FakeRetryError("retryable")),
+            Outcome::Err(err) => assert_eq!(err, RetryProbeError("retryable")),
             other => panic!("expected persistent retryable error, got {other:?}"),
         }
         assert_eq!(
@@ -1130,7 +1130,7 @@ mod tests {
             || {
                 body_started.set(false);
                 attempts += 1;
-                std::future::ready(Outcome::<(), FakeRetryError>::Err(FakeRetryError(
+                std::future::ready(Outcome::<(), RetryProbeError>::Err(RetryProbeError(
                     "retryable",
                 )))
             },
@@ -1138,7 +1138,7 @@ mod tests {
         ));
 
         match outcome {
-            Outcome::Err(err) => assert_eq!(err, FakeRetryError("retryable")),
+            Outcome::Err(err) => assert_eq!(err, RetryProbeError("retryable")),
             other => panic!("expected persistent retryable error, got {other:?}"),
         }
         assert_eq!(attempts, 4, "begin-time retryables should remain retryable");
@@ -1165,7 +1165,7 @@ mod tests {
                 body_started.set(false);
                 attempts += 1;
                 body_started.set(true);
-                std::future::ready(Outcome::<(), FakeRetryError>::Err(FakeRetryError(
+                std::future::ready(Outcome::<(), RetryProbeError>::Err(RetryProbeError(
                     "retryable",
                 )))
             },
@@ -1173,7 +1173,7 @@ mod tests {
         ));
 
         match outcome {
-            Outcome::Err(err) => assert_eq!(err, FakeRetryError("retryable")),
+            Outcome::Err(err) => assert_eq!(err, RetryProbeError("retryable")),
             other => panic!("expected persistent retryable error, got {other:?}"),
         }
         assert_eq!(attempts, 1, "replay-unsafe closures must not be rerun");
@@ -1196,13 +1196,15 @@ mod tests {
             &policy,
             || {
                 attempts += 1;
-                std::future::ready(Outcome::<(), FakeRetryError>::Err(FakeRetryError("fatal")))
+                std::future::ready(Outcome::<(), RetryProbeError>::Err(RetryProbeError(
+                    "fatal",
+                )))
             },
             |_| false,
         ));
 
         match outcome {
-            Outcome::Err(err) => assert_eq!(err, FakeRetryError("fatal")),
+            Outcome::Err(err) => assert_eq!(err, RetryProbeError("fatal")),
             other => panic!("expected non-retryable error, got {other:?}"),
         }
         assert_eq!(attempts, 1, "non-retryable errors must not loop");
