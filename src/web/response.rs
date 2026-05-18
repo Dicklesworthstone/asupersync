@@ -774,7 +774,7 @@ impl IntoResponse for Redirect {
 /// through unfiltered. Embedded NUL is the highest-impact case: a
 /// downstream proxy / WAF / log collector that scans the wire format
 /// with C string semantics treats NUL as end-of-line and may parse a
-/// fake additional header from whatever follows. VT/FF likewise smuggle
+/// forged additional header from whatever follows. VT/FF likewise smuggle
 /// past tools that only look for CRLF.
 ///
 /// Allowlist semantics: the function preserves HTAB / SP / printable
@@ -1332,10 +1332,10 @@ mod tests {
 
     #[test]
     fn _5jtjo0_strips_nul_byte_from_header_value() {
-        let raw = String::from("alice\u{0000}fake-header: value");
+        let raw = String::from("alice\u{0000}forged-header: value");
         let cleaned = sanitize_header_value(raw);
         assert!(!cleaned.contains('\u{0000}'));
-        assert_eq!(cleaned, "alicefake-header: value");
+        assert_eq!(cleaned, "aliceforged-header: value");
     }
 
     #[test]
@@ -1369,9 +1369,9 @@ mod tests {
 
     #[test]
     fn _5jtjo0_strips_crlf_legacy_behavior_preserved() {
-        let raw = String::from("first\r\nfake-header: bad");
+        let raw = String::from("first\r\nforged-header: bad");
         let cleaned = sanitize_header_value(raw);
-        assert_eq!(cleaned, "firstfake-header: bad");
+        assert_eq!(cleaned, "firstforged-header: bad");
     }
 
     #[test]

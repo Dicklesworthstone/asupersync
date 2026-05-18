@@ -2424,7 +2424,7 @@ mod tests {
     fn aog3fz_metric_name_injection_via_newlines_sanitized() {
         // A caller (or untrusted upstream that names metrics from user
         // input) attempts to forge an extra metric line by smuggling
-        // \n + a complete fake exposition record into the metric name.
+        // \n + a complete forged exposition record into the metric name.
         let mut metrics = Metrics::new();
         let crafted = "real_metric\n# TYPE forged_metric counter\nforged_metric 999";
         metrics.counter(crafted).add(1);
@@ -2452,7 +2452,7 @@ mod tests {
 
     #[test]
     fn aog3fz_metric_name_with_curly_brace_injection_sanitized() {
-        // Smuggle fake labels by closing the metric name with `{` and
+        // Smuggle forged labels by closing the metric name with `{` and
         // injecting a label clause before the value.
         let mut metrics = Metrics::new();
         metrics.counter("evil{job=\"hacker\"}").add(1);

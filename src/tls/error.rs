@@ -17,7 +17,7 @@ const MAX_SANITIZED_LEN: usize = 256;
 /// br-asupersync-kxw8nx: rustls error strings, peer-supplied SNI values,
 /// peer certificate subjects, etc. all flow through Display and end up
 /// in structured logs. An attacker who controls these strings can inject
-/// embedded `\n` to splice fake log lines (log injection / forgery).
+/// embedded `\n` to splice forged log lines (log injection / forgery).
 ///
 /// Sanitization rules:
 ///   * `\r`, `\n`, `\t` → ASCII space (preserves field separation,
@@ -525,11 +525,11 @@ mod tests {
 
     #[test]
     fn display_handshake_with_log_injection_attempt_sanitized() {
-        // Peer-controlled handshake error containing a fake log line
+        // Peer-controlled handshake error containing a forged log line
         // splice attempt. Post-fix Display must NOT contain the
         // injected newline.
         let err = TlsError::Handshake(
-            "alert: bad_certificate\n[ERROR] FAKE LOG ENTRY: privilege escalation".to_string(),
+            "alert: bad_certificate\n[ERROR] FORGED LOG ENTRY: privilege escalation".to_string(),
         );
         let display = err.to_string();
         assert!(
@@ -539,7 +539,7 @@ mod tests {
         // The injected text becomes part of the same log line, prefixed
         // by the spaces that replaced \n — visible to operators but
         // unable to forge a separate log entry.
-        assert!(display.contains("FAKE LOG ENTRY"));
+        assert!(display.contains("FORGED LOG ENTRY"));
         assert!(display.starts_with("TLS handshake failed: "));
     }
 
