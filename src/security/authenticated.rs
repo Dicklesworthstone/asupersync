@@ -26,7 +26,7 @@ impl AuthenticatedSymbol {
     /// only when the supplied tag is NOT the all-zero sentinel
     /// produced by [`AuthenticationTag::zero`]. The pre-fix shape
     /// unconditionally set `verified = true` even when callers passed
-    /// `AuthenticationTag::zero()` as a placeholder (the three encode
+    /// `AuthenticationTag::zero()` as an unauthenticated sentinel (the three encode
     /// paths in `types/typed_symbol.rs` at lines 630/925/1204 still
     /// do this). Downstream consumers that trust `is_verified()`
     /// without re-running [`verify`](AuthenticationTag::verify)
@@ -41,7 +41,7 @@ impl AuthenticatedSymbol {
     /// every consumer to either run a real verification step or
     /// reject the symbol explicitly. This is a runtime invariant
     /// (the type signature itself is unchanged), so the existing
-    /// placeholder callsites in `typed_symbol.rs` still compile —
+    /// zero-sentinel callsites in `typed_symbol.rs` still compile —
     /// they just stop producing falsely-verified symbols.
     #[must_use]
     pub(crate) fn new_verified(symbol: Symbol, tag: AuthenticationTag) -> Self {
@@ -141,14 +141,14 @@ mod tests {
     fn test_new_verified_zero_tag_forces_unverified() {
         // br-asupersync-srqosl: the all-zero sentinel tag must NEVER
         // produce `verified = true`. This pins the runtime invariant
-        // that protects the typed_symbol.rs zero-tag placeholder
+        // that protects the typed_symbol.rs zero-tag sentinel
         // callsites from forging trust.
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![], SymbolKind::Source);
         let auth = AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero());
         assert!(
             !auth.is_verified(),
-            "br-asupersync-srqosl: zero-tag placeholder must not pose as verified"
+            "br-asupersync-srqosl: zero-tag sentinel must not pose as verified"
         );
     }
 

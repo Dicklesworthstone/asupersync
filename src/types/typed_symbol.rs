@@ -627,7 +627,7 @@ impl<T: Serialize + 'static> TypedEncoder<T> {
         let mut count = 0;
         for symbol in symbols {
             // br-asupersync-usr4ax: the AuthenticationTag::zero
-            // placeholder is the documented sentinel that
+            // value is the documented unauthenticated sentinel that
             // AuthenticationTag::compute() never produces. The
             // verify() path now fail-closes on it (see
             // src/security/tag.rs), so any consumer that calls
@@ -935,7 +935,7 @@ fn feed_typed_symbol<T>(
         });
     }
     let inner_symbol = Symbol::new(raw.id(), payload, raw.kind());
-    // br-asupersync-usr4ax: zero-tag placeholder; downstream verify()
+    // br-asupersync-usr4ax: zero-tag sentinel; downstream verify()
     // fail-closes on it (src/security/tag.rs). Same caveat as the
     // TypedEncoder::encode_to_sink callsite above — a full fix routes
     // a real Cx-anchored AuthKey through the pipeline.

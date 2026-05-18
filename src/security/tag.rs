@@ -58,7 +58,7 @@ impl AuthenticationTag {
     /// This uses a constant-time comparison to prevent timing attacks.
     ///
     /// br-asupersync-usr4ax: a tag equal to [`Self::zero`] is the
-    /// sentinel placeholder used by upstream encoders that have not
+    /// unauthenticated sentinel used by upstream encoders that have not
     /// yet been wired through to a real key (see types/typed_symbol.rs
     /// callsites at lines 630 / 925). The sentinel is documented as
     /// "never produced by [`Self::compute`]" — accepting it here
@@ -81,7 +81,7 @@ impl AuthenticationTag {
     /// br-asupersync-usr4ax: returns `true` when the tag is the
     /// all-zero sentinel that [`Self::zero`] produces. Consumer code
     /// that needs to fail-closed against unauthenticated symbols
-    /// (or call out the placeholder shape in diagnostics) checks
+    /// (or call out the zero-sentinel shape in diagnostics) checks
     /// this before treating an [`AuthenticatedSymbol`] as actually
     /// authenticated.
     #[inline]
