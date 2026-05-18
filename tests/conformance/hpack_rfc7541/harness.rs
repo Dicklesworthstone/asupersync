@@ -655,7 +655,7 @@ impl ConformanceTest for LiteralHeaderFieldTest {
 }
 
 // ============================================================================
-// Context and Error Tests (Stubs)
+// Implemented Context and Error Tests
 // ============================================================================
 
 #[allow(dead_code)]
