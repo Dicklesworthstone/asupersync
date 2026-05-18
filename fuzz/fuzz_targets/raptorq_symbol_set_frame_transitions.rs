@@ -28,7 +28,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use asupersync::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
@@ -315,14 +315,14 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
             }
 
             SymbolSetOperation::SerializeToFrame => {
-                // Test frame serialization (simplified implementation)
                 let frame_data = serialize_symbol_set_to_frame(&symbol_set, &scenario.frame_format);
 
                 if scenario.test_roundtrip && !frame_data.is_empty() {
-                    // Test round-trip: frame → symbols → frame
+                    // Test round-trip: frame -> symbols preserves the live set.
                     match deserialize_frame_to_symbols(&frame_data, &scenario.frame_format) {
                         Ok(deserialized) => {
                             assert!(deserialized.len() <= MAX_SYMBOLS_PER_SET);
+                            assert_symbol_roundtrip(&symbol_set, &deserialized);
                         }
                         Err(_)
                             if matches!(&scenario.frame_format, FrameFormat::Malformed { .. }) =>
@@ -371,22 +371,60 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Serialize symbol set to frame format (simplified implementation for testing)
-fn serialize_symbol_set_to_frame(_symbol_set: &SymbolSet, format: &FrameFormat) -> Vec<u8> {
+const SIMPLE_MAGIC: &[u8; 4] = b"RQSB";
+const LENGTH_PREFIXED_MAGIC: &[u8; 4] = b"RQSL";
+const COMPRESSED_MAGIC: &[u8; 4] = b"RQSC";
+const COMPRESSED_PER_SYMBOL_OBJECTS: u8 = 0;
+const COMPRESSED_COMMON_OBJECT: u8 = 1;
+
+/// Serialize symbol set to a deterministic fuzzer-only frame format.
+fn serialize_symbol_set_to_frame(symbol_set: &SymbolSet, format: &FrameFormat) -> Vec<u8> {
+    let symbols = sorted_symbols(symbol_set);
+
     match format {
         FrameFormat::SimpleBinary => {
-            // Simplified: just return a valid-looking frame header
-            vec![0x01, 0x02, 0x03, 0x04]
+            let mut frame = Vec::new();
+            frame.extend_from_slice(SIMPLE_MAGIC);
+            push_full_symbol_records(&mut frame, &symbols);
+            frame
         }
         FrameFormat::LengthPrefixed => {
-            let mut frame = Vec::new();
-            frame.extend_from_slice(&4u32.to_le_bytes()); // Total length
-            frame.extend_from_slice(&0u16.to_le_bytes()); // Symbol count
+            let mut payload = Vec::new();
+            payload.extend_from_slice(LENGTH_PREFIXED_MAGIC);
+            push_full_symbol_records(&mut payload, &symbols);
+
+            let mut frame = Vec::with_capacity(4 + payload.len());
+            let payload_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+            frame.extend_from_slice(&payload_len.to_le_bytes());
+            frame.extend_from_slice(&payload);
             frame
         }
         FrameFormat::Compressed => {
-            // Minimal compressed format
-            vec![0xFF, 0x00]
+            let mut frame = Vec::new();
+            frame.extend_from_slice(COMPRESSED_MAGIC);
+            push_u16(&mut frame, symbols.len());
+
+            if symbols.is_empty() {
+                frame.push(COMPRESSED_COMMON_OBJECT);
+            } else {
+                let first_object = symbols[0].object_id();
+                let has_common_object = symbols
+                    .iter()
+                    .all(|symbol| symbol.object_id() == first_object);
+
+                if has_common_object {
+                    frame.push(COMPRESSED_COMMON_OBJECT);
+                    push_object_id(&mut frame, first_object);
+                    for symbol in symbols {
+                        push_local_symbol_record(&mut frame, symbol);
+                    }
+                } else {
+                    frame.push(COMPRESSED_PER_SYMBOL_OBJECTS);
+                    push_full_symbol_payloads(&mut frame, &symbols);
+                }
+            }
+
+            frame
         }
         FrameFormat::Malformed { corruption_type } => match corruption_type {
             CorruptionType::TruncatedHeader => vec![0x01],
@@ -411,29 +449,255 @@ fn deserialize_frame_to_symbols(
 ) -> Result<Vec<Symbol>, Box<dyn std::error::Error>> {
     match format {
         FrameFormat::SimpleBinary => {
-            if data.len() < 4 {
-                return Err("Frame too short".into());
-            }
-            Ok(Vec::new()) // Simplified: return empty
+            let mut offset = 0;
+            read_magic(data, &mut offset, SIMPLE_MAGIC)?;
+            let symbols = read_full_symbol_records(data, &mut offset)?;
+            reject_trailing_bytes(data, offset)?;
+            Ok(symbols)
         }
         FrameFormat::LengthPrefixed => {
-            if data.len() < 6 {
-                return Err("Frame too short for length prefix".into());
+            let mut offset = 0;
+            let payload_len = usize::try_from(read_u32(data, &mut offset)?)
+                .map_err(|_| "Length-prefixed frame length does not fit usize")?;
+            if payload_len != data.len().saturating_sub(offset) {
+                return Err("Length-prefixed frame length mismatch".into());
             }
-            let _total_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            let _count = u16::from_le_bytes([data[4], data[5]]);
-            Ok(Vec::new()) // Simplified: return empty
+
+            read_magic(data, &mut offset, LENGTH_PREFIXED_MAGIC)?;
+            let symbols = read_full_symbol_records(data, &mut offset)?;
+            reject_trailing_bytes(data, offset)?;
+            Ok(symbols)
         }
         FrameFormat::Compressed => {
-            if data.len() < 2 {
-                return Err("Compressed frame too short".into());
-            }
-            Ok(Vec::new()) // Simplified: return empty
+            let mut offset = 0;
+            read_magic(data, &mut offset, COMPRESSED_MAGIC)?;
+            let count = read_symbol_count(data, &mut offset)?;
+            let mode = read_u8(data, &mut offset)?;
+
+            let symbols = match mode {
+                COMPRESSED_COMMON_OBJECT if count == 0 => Vec::new(),
+                COMPRESSED_COMMON_OBJECT => {
+                    let object_id = read_object_id(data, &mut offset)?;
+                    read_local_symbol_records(data, &mut offset, count, object_id)?
+                }
+                COMPRESSED_PER_SYMBOL_OBJECTS => {
+                    read_full_symbol_payloads(data, &mut offset, count)?
+                }
+                _ => return Err("Unknown compressed frame object mode".into()),
+            };
+
+            reject_trailing_bytes(data, offset)?;
+            Ok(symbols)
         }
         FrameFormat::Malformed { .. } => {
             // Malformed frames should cause controlled errors
             Err("Malformed frame".into())
         }
+    }
+}
+
+fn sorted_symbols(symbol_set: &SymbolSet) -> Vec<&Symbol> {
+    let mut symbols: Vec<&Symbol> = symbol_set.iter().map(|(_, symbol)| symbol).collect();
+    symbols.sort_by_key(|symbol| {
+        (
+            symbol.object_id().as_u128(),
+            symbol.sbn(),
+            symbol.esi(),
+            symbol_kind_tag(symbol.kind()),
+            symbol.data().len(),
+        )
+    });
+    symbols
+}
+
+fn assert_symbol_roundtrip(symbol_set: &SymbolSet, deserialized: &[Symbol]) {
+    assert_eq!(deserialized.len(), symbol_set.len());
+
+    let mut seen = HashSet::new();
+    for symbol in deserialized {
+        assert!(
+            seen.insert(symbol.id()),
+            "decoder emitted duplicate symbol id"
+        );
+
+        let expected = symbol_set
+            .get(&symbol.id())
+            .expect("decoded symbol id must exist in serialized set");
+        assert_eq!(symbol.kind(), expected.kind());
+        assert_eq!(symbol.data(), expected.data());
+    }
+}
+
+fn push_full_symbol_records(frame: &mut Vec<u8>, symbols: &[&Symbol]) {
+    push_u16(frame, symbols.len());
+    push_full_symbol_payloads(frame, symbols);
+}
+
+fn push_full_symbol_payloads(frame: &mut Vec<u8>, symbols: &[&Symbol]) {
+    for symbol in symbols {
+        push_object_id(frame, symbol.object_id());
+        push_local_symbol_record(frame, symbol);
+    }
+}
+
+fn push_local_symbol_record(frame: &mut Vec<u8>, symbol: &Symbol) {
+    frame.push(symbol.sbn());
+    frame.extend_from_slice(&symbol.esi().to_le_bytes());
+    frame.push(symbol_kind_tag(symbol.kind()));
+    push_u16(frame, symbol.data().len());
+    frame.extend_from_slice(symbol.data());
+}
+
+fn push_object_id(frame: &mut Vec<u8>, object_id: ObjectId) {
+    frame.extend_from_slice(&object_id.high().to_le_bytes());
+    frame.extend_from_slice(&object_id.low().to_le_bytes());
+}
+
+fn push_u16(frame: &mut Vec<u8>, value: usize) {
+    debug_assert!(value <= usize::from(u16::MAX));
+    let value = u16::try_from(value).unwrap_or(u16::MAX);
+    frame.extend_from_slice(&value.to_le_bytes());
+}
+
+fn read_full_symbol_records(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<Vec<Symbol>, Box<dyn std::error::Error>> {
+    let count = read_symbol_count(data, offset)?;
+    read_full_symbol_payloads(data, offset, count)
+}
+
+fn read_full_symbol_payloads(
+    data: &[u8],
+    offset: &mut usize,
+    count: usize,
+) -> Result<Vec<Symbol>, Box<dyn std::error::Error>> {
+    let mut symbols = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let object_id = read_object_id(data, offset)?;
+        symbols.push(read_local_symbol_record(data, offset, object_id)?);
+    }
+
+    Ok(symbols)
+}
+
+fn read_local_symbol_records(
+    data: &[u8],
+    offset: &mut usize,
+    count: usize,
+    object_id: ObjectId,
+) -> Result<Vec<Symbol>, Box<dyn std::error::Error>> {
+    let mut symbols = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        symbols.push(read_local_symbol_record(data, offset, object_id)?);
+    }
+
+    Ok(symbols)
+}
+
+fn read_local_symbol_record(
+    data: &[u8],
+    offset: &mut usize,
+    object_id: ObjectId,
+) -> Result<Symbol, Box<dyn std::error::Error>> {
+    let sbn = read_u8(data, offset)?;
+    let esi = read_u32(data, offset)?;
+    let kind = symbol_kind_from_tag(read_u8(data, offset)?)?;
+    let data_len = usize::from(read_u16(data, offset)?);
+    if data_len > MAX_SYMBOL_SIZE {
+        return Err("Decoded symbol exceeds fuzz symbol size limit".into());
+    }
+
+    let payload = read_exact(data, offset, data_len)?.to_vec();
+    let id = SymbolId::new(object_id, sbn, esi);
+    Ok(Symbol::new(id, payload, kind))
+}
+
+fn read_symbol_count(data: &[u8], offset: &mut usize) -> Result<usize, Box<dyn std::error::Error>> {
+    let count = usize::from(read_u16(data, offset)?);
+    if count > MAX_SYMBOLS_PER_SET {
+        return Err("Decoded symbol count exceeds fuzz set limit".into());
+    }
+    Ok(count)
+}
+
+fn read_object_id(data: &[u8], offset: &mut usize) -> Result<ObjectId, Box<dyn std::error::Error>> {
+    let high = read_u64(data, offset)?;
+    let low = read_u64(data, offset)?;
+    Ok(ObjectId::new(high, low))
+}
+
+fn read_magic(
+    data: &[u8],
+    offset: &mut usize,
+    expected: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let actual = read_exact(data, offset, expected.len())?;
+    if actual != expected {
+        return Err("Frame magic mismatch".into());
+    }
+    Ok(())
+}
+
+fn read_exact<'a>(
+    data: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+) -> Result<&'a [u8], Box<dyn std::error::Error>> {
+    let end = offset
+        .checked_add(len)
+        .ok_or("Frame offset overflow while decoding")?;
+    if end > data.len() {
+        return Err("Frame ended before expected field".into());
+    }
+
+    let bytes = &data[*offset..end];
+    *offset = end;
+    Ok(bytes)
+}
+
+fn read_u8(data: &[u8], offset: &mut usize) -> Result<u8, Box<dyn std::error::Error>> {
+    Ok(read_exact(data, offset, 1)?[0])
+}
+
+fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16, Box<dyn std::error::Error>> {
+    let bytes = read_exact(data, offset, 2)?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32, Box<dyn std::error::Error>> {
+    let bytes = read_exact(data, offset, 4)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64, Box<dyn std::error::Error>> {
+    let bytes = read_exact(data, offset, 8)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn reject_trailing_bytes(data: &[u8], offset: usize) -> Result<(), Box<dyn std::error::Error>> {
+    if offset != data.len() {
+        return Err("Frame has trailing bytes".into());
+    }
+    Ok(())
+}
+
+fn symbol_kind_tag(kind: SymbolKind) -> u8 {
+    match kind {
+        SymbolKind::Source => 0,
+        SymbolKind::Repair => 1,
+    }
+}
+
+fn symbol_kind_from_tag(tag: u8) -> Result<SymbolKind, Box<dyn std::error::Error>> {
+    match tag {
+        0 => Ok(SymbolKind::Source),
+        1 => Ok(SymbolKind::Repair),
+        _ => Err("Unknown symbol kind tag".into()),
     }
 }
 
