@@ -2444,7 +2444,7 @@ impl PgStream {
         matches!(self, Self::Tls(_))
     }
 
-    /// Stub for builds without the `tls` feature — there is no TLS path,
+    /// Fallback for builds without the `tls` feature — there is no TLS path,
     /// so SCRAM channel binding is always disabled.
     #[cfg(not(feature = "tls"))]
     #[allow(dead_code)]

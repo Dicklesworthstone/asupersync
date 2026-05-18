@@ -53,7 +53,7 @@ const MAX_SANITIZED_CANCEL_MESSAGE_LEN: usize = 256;
 ///
 /// Sanitization rules:
 ///   * `\r`, `\n`, `\t` → ASCII space (preserves field separation)
-///   * Any other ASCII control char (0x00..=0x1F, 0x7F) → `?` placeholder
+///   * Any other ASCII control char (0x00..=0x1F, 0x7F) → `?` replacement marker
 ///   * UTF-8 truncation at MAX_SANITIZED_CANCEL_MESSAGE_LEN bytes, cut on
 ///     a char boundary, with `…` suffix on truncation
 fn sanitize_cancel_message(input: &str) -> String {
@@ -1396,9 +1396,9 @@ fn tail_compact_event_overhead_estimate_bytes(
 /// Emit one compact tail-causal attribution event.
 ///
 /// The emitter is disabled by default. When enabled, every required compact
-/// field is present in the output. Missing producers are represented by a zero
-/// placeholder plus a `missing_producers` entry and a nonzero unknown residual
-/// whenever measured direct terms do not cover the observed total.
+/// field is present in the output. Missing producers are represented by a
+/// zero-valued stand-in plus a `missing_producers` entry and a nonzero unknown
+/// residual whenever measured direct terms do not cover the observed total.
 pub fn emit_tail_latency_compact_event(
     config: TailLatencyEmitterConfig,
     scenario_id: &str,
