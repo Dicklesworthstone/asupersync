@@ -6959,6 +6959,27 @@ fn g1_performance_gates_script_validation() {
         RAPTORQ_PERF_GATES_SCRIPT.contains("raptorq_perf_gate_events.ndjson"),
         "script must generate NDJSON event log for structured logging"
     );
+    assert!(
+        !RAPTORQ_PERF_GATES_SCRIPT.contains("simplified_implementation"),
+        "budget gate must not silently pass workloads through the old placeholder path"
+    );
+    assert!(
+        !RAPTORQ_PERF_GATES_SCRIPT.contains("assume pass unless benchmark results"),
+        "budget gate must fail closed instead of assuming pass for missing evidence"
+    );
+    for required in [
+        "measurement_values_for_workload",
+        "missing_measurement",
+        "hard_violation",
+        "operational_budget_exceeded",
+        "operational_budget_missed",
+        "jq -Rr",
+    ] {
+        assert!(
+            RAPTORQ_PERF_GATES_SCRIPT.contains(required),
+            "performance gates script must retain real budget-check token: {required}"
+        );
+    }
 
     // Validate integration with governance framework
     assert!(

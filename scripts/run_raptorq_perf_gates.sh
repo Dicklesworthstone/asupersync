@@ -148,14 +148,18 @@ check_all_budgets() {
     local violations=0
     local warnings=0
 
-    # Parse budget file and check against current results
-    # Note: This is a simplified implementation - in practice would use jq/python
     while IFS= read -r workload; do
         if check_workload_budget "$workload"; then
             echo "✅ $workload: PASS"
         else
-            echo "❌ $workload: BUDGET VIOLATION"
-            violations=$((violations + 1))
+            local result=$?
+            if [[ $result -eq 2 ]]; then
+                echo "⚠️  $workload: OPERATIONAL WARNING"
+                warnings=$((warnings + 1))
+            else
+                echo "❌ $workload: BUDGET VIOLATION"
+                violations=$((violations + 1))
+            fi
         fi
     done < <(jq -r '.workload_budgets | keys[]' "$BUDGET_FILE")
 
@@ -178,15 +182,26 @@ check_critical_budgets() {
     # For smoke testing, only check the most critical workloads
     local critical_workloads=("RQ-G1-ENC-SMALL" "RQ-G1-DEC-SOURCE" "RQ-G1-GF256-ADDMUL")
     local violations=0
+    local warnings=0
 
     for workload in "${critical_workloads[@]}"; do
         if check_workload_budget "$workload"; then
             echo "✅ $workload: PASS"
         else
-            echo "❌ $workload: CRITICAL BUDGET VIOLATION"
-            violations=$((violations + 1))
+            local result=$?
+            if [[ $result -eq 2 ]]; then
+                echo "⚠️  $workload: CRITICAL OPERATIONAL WARNING"
+                warnings=$((warnings + 1))
+            else
+                echo "❌ $workload: CRITICAL BUDGET VIOLATION"
+                violations=$((violations + 1))
+            fi
         fi
     done
+
+    cat >> "$NDJSON_LOG" <<EOF
+{"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","event":"critical_budget_check_complete","violations":$violations,"warnings":$warnings}
+EOF
 
     if [[ $violations -gt 0 ]]; then
         echo "❌ $violations critical budget violations"
@@ -197,15 +212,216 @@ check_critical_budgets() {
     return 0
 }
 
-check_workload_budget() {
+hard_budget_key_for_metric() {
+    local metric="$1"
+
+    case "$metric" in
+        median_ns|p95_ns|p99_ns|duration_ns)
+            printf '%s\n' "hard_budget_ns"
+            ;;
+        throughput_mbps)
+            printf '%s\n' "hard_budget_mbps"
+            ;;
+        decode_success_rate)
+            printf '%s\n' "hard_budget_rate"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+operational_budget_key_for_metric() {
+    local metric="$1"
+
+    case "$metric" in
+        median_ns|p95_ns|p99_ns|duration_ns)
+            printf '%s\n' "operational_budget_ns"
+            ;;
+        throughput_mbps)
+            printf '%s\n' "operational_budget_mbps"
+            ;;
+        decode_success_rate)
+            printf '%s\n' "operational_budget_rate"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+metric_direction() {
+    local metric="$1"
+
+    case "$metric" in
+        median_ns|p95_ns|p99_ns|duration_ns)
+            printf '%s\n' "max"
+            ;;
+        throughput_mbps|decode_success_rate)
+            printf '%s\n' "min"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+budget_value() {
+    local workload="$1"
+    local key="$2"
+
+    jq -r --arg workload "$workload" --arg key "$key" \
+        '.workload_budgets[$workload][$key] // empty' "$BUDGET_FILE"
+}
+
+metric_for_workload() {
     local workload="$1"
 
-    # Simplified budget check - would use proper JSON parsing in practice
-    # For now, assume pass unless benchmark results show obvious regression
+    jq -r --arg workload "$workload" \
+        '.workload_budgets[$workload].primary_metric // empty' "$BUDGET_FILE"
+}
 
-    cat >> "$NDJSON_LOG" <<EOF
-{"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","event":"workload_check","workload":"$workload","status":"pass","note":"simplified_implementation"}
-EOF
+measurement_values_for_workload() {
+    local workload="$1"
+    local metric="$2"
+
+    jq -Rr --arg workload "$workload" --arg metric "$metric" '
+        def numeric:
+            if type == "number" then tostring
+            elif type == "string" and test("^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$") then .
+            else empty
+            end;
+        def workload_id:
+            .workload_id // .workload // .id // .name // "";
+        def metric_value($metric):
+            .measurement[$metric]? //
+            (if $metric == "median_ns" then .measurement.duration_ns? else null end) //
+            (if ($metric | endswith("_ns")) then .result.measurement_ns? else null end) //
+            (if $metric == "throughput_mbps" then .result.measurement_mbps? else null end) //
+            (if $metric == "decode_success_rate" then .result.measurement_rate? else null end) //
+            .metrics[$metric]? //
+            .result[$metric]? //
+            .[$metric]?;
+        fromjson? | objects
+        | select(workload_id == $workload)
+        | metric_value($metric)
+        | numeric
+    ' "$CURRENT_RESULTS"
+}
+
+selected_measurement_value() {
+    local workload="$1"
+    local metric="$2"
+    local direction="$3"
+
+    local values
+    values="$(measurement_values_for_workload "$workload" "$metric")"
+    if [[ -z "$values" ]]; then
+        return 1
+    fi
+
+    if [[ "$direction" == "max" ]]; then
+        printf '%s\n' "$values" | jq -s 'max'
+    else
+        printf '%s\n' "$values" | jq -s 'min'
+    fi
+}
+
+number_le() {
+    jq -en --argjson left "$1" --argjson right "$2" '$left <= $right' > /dev/null
+}
+
+number_ge() {
+    jq -en --argjson left "$1" --argjson right "$2" '$left >= $right' > /dev/null
+}
+
+emit_workload_check_event() {
+    local workload="$1"
+    local metric="$2"
+    local status="$3"
+    local note="$4"
+    local observed="${5:-null}"
+    local hard="${6:-null}"
+    local operational="${7:-null}"
+
+    jq -cn \
+        --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg workload "$workload" \
+        --arg metric "$metric" \
+        --arg status "$status" \
+        --arg note "$note" \
+        --argjson observed "$observed" \
+        --argjson hard_budget "$hard" \
+        --argjson operational_budget "$operational" \
+        '{
+            timestamp: $timestamp,
+            event: "workload_check",
+            workload: $workload,
+            metric: $metric,
+            status: $status,
+            note: $note,
+            observed: $observed,
+            hard_budget: $hard_budget,
+            operational_budget: $operational_budget
+        }' >> "$NDJSON_LOG"
+}
+
+check_workload_budget() {
+    local workload="$1"
+    local metric
+    local direction
+    local hard_key
+    local operational_key
+    local hard_budget
+    local operational_budget
+    local observed
+
+    metric="$(metric_for_workload "$workload")"
+    if [[ -z "$metric" ]]; then
+        emit_workload_check_event "$workload" "" "fail" "missing_budget_entry"
+        return 1
+    fi
+
+    if ! direction="$(metric_direction "$metric")"; then
+        emit_workload_check_event "$workload" "$metric" "fail" "unsupported_primary_metric"
+        return 1
+    fi
+    hard_key="$(hard_budget_key_for_metric "$metric")"
+    operational_key="$(operational_budget_key_for_metric "$metric")"
+    hard_budget="$(budget_value "$workload" "$hard_key")"
+    operational_budget="$(budget_value "$workload" "$operational_key")"
+
+    if [[ -z "$hard_budget" ]]; then
+        emit_workload_check_event "$workload" "$metric" "fail" "missing_hard_budget"
+        return 1
+    fi
+
+    if ! observed="$(selected_measurement_value "$workload" "$metric" "$direction")"; then
+        emit_workload_check_event "$workload" "$metric" "fail" "missing_measurement" "null" "$hard_budget" "${operational_budget:-null}"
+        return 1
+    fi
+
+    if [[ "$direction" == "max" ]]; then
+        if ! number_le "$observed" "$hard_budget"; then
+            emit_workload_check_event "$workload" "$metric" "fail" "hard_violation" "$observed" "$hard_budget" "${operational_budget:-null}"
+            return 1
+        fi
+        if [[ -n "$operational_budget" ]] && ! number_le "$observed" "$operational_budget"; then
+            emit_workload_check_event "$workload" "$metric" "warning" "operational_budget_exceeded" "$observed" "$hard_budget" "$operational_budget"
+            return 2
+        fi
+    else
+        if ! number_ge "$observed" "$hard_budget"; then
+            emit_workload_check_event "$workload" "$metric" "fail" "hard_violation" "$observed" "$hard_budget" "${operational_budget:-null}"
+            return 1
+        fi
+        if [[ -n "$operational_budget" ]] && ! number_ge "$observed" "$operational_budget"; then
+            emit_workload_check_event "$workload" "$metric" "warning" "operational_budget_missed" "$observed" "$hard_budget" "$operational_budget"
+            return 2
+        fi
+    fi
+
+    emit_workload_check_event "$workload" "$metric" "pass" "within_budget" "$observed" "$hard_budget" "${operational_budget:-null}"
 
     return 0
 }
