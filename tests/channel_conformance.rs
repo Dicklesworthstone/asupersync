@@ -228,9 +228,9 @@ impl<T: Send + Clone + 'static> BroadcastSender<T> for BroadcastSenderWrapper<T>
         self.0.send(&cx, value).map_err(|e| match e {
             broadcast::SendError::Closed(v) => v,
             broadcast::SendError::Cancelled => {
-                // If cancelled, we don't have the value to return in the error
-                // so we just panic or return a placeholder if T allows.
-                // Given the trait definition, we must return T.
+                // Cancelled sends cannot reconstruct the moved value required
+                // by this trait's `Result<usize, T>` error shape, so the
+                // conformance adapter fails loudly instead of inventing one.
                 panic!("Send cancelled: value lost");
             }
         })
