@@ -976,10 +976,68 @@ impl PgLogicalReplicationHarness {
     fn test_concurrent_transaction_isolation(&mut self) { /* Implementation */
     }
     #[allow(dead_code)]
-    fn test_unknown_message_type_handling(&mut self) { /* Implementation */
+    fn test_unknown_message_type_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let unknown_messages = [vec![b'X'], vec![0xFF, 0x00], vec![b'S', 0x00, 0x00]];
+
+        let result = if unknown_messages.iter().all(|message| {
+            matches!(
+                self.parse_logical_message(message),
+                Err(error) if error == "Unknown message type"
+            )
+        }) {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_023".to_string(),
+            description: "Unknown logical replication message rejection".to_string(),
+            category: TestCategory::ErrorHandling,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests non-empty messages with unsupported type bytes are rejected".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_truncated_message_handling(&mut self) { /* Implementation */
+    fn test_truncated_message_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let truncated_messages = [
+            vec![b'B', 0x00],
+            vec![b'C', 0x00],
+            vec![b'R', 0x00, 0x00, 0x00, 0x01, b'p'],
+            vec![b'Y', 0x00, 0x00, 0x00, 23, b'n'],
+            vec![b'I', 0x00, 0x00, 0x00, 0x01, b'N', 0x00],
+            vec![b'U', 0x00, 0x00, 0x00, 0x01, b'N', 0x00],
+            vec![b'D', 0x00, 0x00, 0x00, 0x01, b'O', 0x00],
+            vec![b'T', 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01],
+        ];
+
+        let result = if truncated_messages
+            .iter()
+            .all(|message| self.parse_logical_message(message).is_err())
+        {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_024".to_string(),
+            description: "Truncated logical replication message rejection".to_string(),
+            category: TestCategory::ErrorHandling,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests truncated known pgoutput messages are rejected by parser dispatch"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
     fn test_large_tuple_performance(&mut self) { /* Implementation */
