@@ -1,6 +1,9 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::bytes::BytesMut;
+use asupersync::codec::Decoder;
+use asupersync::http::h1::codec::{Http1Codec, HttpError};
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/1.1 Content-Length vs body-bytes mismatch fuzzing.
@@ -316,9 +319,9 @@ impl TestScenario {
     }
 }
 
-/// Mock HTTP/1.1 Content-Length validator for fuzzing
+/// Fuzz-local HTTP/1.1 Content-Length oracle.
 #[derive(Debug)]
-pub struct MockContentLengthValidator {
+pub struct ContentLengthOracle {
     max_body_size: usize,
     strict_parsing: bool,
     allow_head_mismatch: bool,
@@ -347,13 +350,13 @@ pub enum ValidationResult {
     MalformedMessage(String),
 }
 
-impl Default for MockContentLengthValidator {
+impl Default for ContentLengthOracle {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MockContentLengthValidator {
+impl ContentLengthOracle {
     pub fn new() -> Self {
         Self {
             max_body_size: 16 * 1024 * 1024, // 16MB default
@@ -697,11 +700,12 @@ fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
 
     if let Ok(test_case) = ContentLengthTestCase::arbitrary(&mut u) {
-        let validator = MockContentLengthValidator::new();
+        let validator = ContentLengthOracle::new();
         std::hint::black_box(test_case.semantic_shape());
 
         // Test main validation path
         let result = validator.validate_message(&test_case);
+        assert_production_request_framing_agrees(&validator, &test_case, &result);
 
         match result {
             Ok(validated) => {
@@ -791,10 +795,180 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-fn test_boundary_conditions(
-    validator: &MockContentLengthValidator,
+fn assert_production_request_framing_agrees(
+    oracle: &ContentLengthOracle,
     test_case: &ContentLengthTestCase,
+    oracle_result: &Result<ValidatedMessage, String>,
 ) {
+    if !matches!(test_case.message_type, MessageType::Request(_)) {
+        return;
+    }
+
+    let Ok((headers, body)) = oracle.build_message(test_case) else {
+        return;
+    };
+    let framing_headers = request_framing_headers(&headers);
+    let has_content_length = framing_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+    let has_transfer_encoding = framing_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"));
+    if has_transfer_encoding && !has_content_length {
+        return;
+    }
+    if framing_headers
+        .iter()
+        .any(|(_, value)| value.contains('\r') || value.contains('\n'))
+    {
+        return;
+    }
+    if framing_headers.is_empty() && !body.is_empty() {
+        return;
+    }
+
+    let production_result = decode_with_production_h1_codec(&framing_headers, &body);
+
+    match oracle_result {
+        Ok(validated) => match &validated.validation_result {
+            ValidationResult::Valid => {
+                if let Some(declared) = validated.declared_length {
+                    assert_production_accepts_complete_body(
+                        production_result,
+                        declared,
+                        validated.actual_length,
+                    );
+                } else if validated.actual_length == 0 {
+                    assert!(
+                        matches!(production_result, Ok(Some((0, 0)))),
+                        "production H1 codec should accept an empty no-body request"
+                    );
+                }
+            }
+            ValidationResult::LengthMismatch { declared, actual } => {
+                if *actual < *declared {
+                    assert!(
+                        matches!(production_result, Ok(None)),
+                        "production H1 codec should wait for short Content-Length bodies"
+                    );
+                } else {
+                    assert_production_accepts_pipelined_surplus(
+                        production_result,
+                        *declared,
+                        *actual,
+                    );
+                }
+            }
+            ValidationResult::BodyTooLarge => {
+                if validated
+                    .declared_length
+                    .is_some_and(|declared| declared > oracle.max_body_size)
+                {
+                    assert!(
+                        matches!(production_result, Err(HttpError::BodyTooLarge)),
+                        "production H1 codec should reject oversized Content-Length declarations"
+                    );
+                }
+            }
+            ValidationResult::InvalidHeader(_)
+            | ValidationResult::DuplicateHeader
+            | ValidationResult::ConflictingHeaders
+            | ValidationResult::MalformedMessage(_) => {}
+        },
+        Err(_) => {
+            if !framing_headers.is_empty() {
+                assert!(
+                    production_result.is_err(),
+                    "production H1 codec should reject invalid Content-Length/Transfer-Encoding framing"
+                );
+            }
+        }
+    }
+}
+
+fn request_framing_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            name.eq_ignore_ascii_case("content-length")
+                || name.eq_ignore_ascii_case("transfer-encoding")
+        })
+        .cloned()
+        .collect()
+}
+
+fn decode_with_production_h1_codec(
+    framing_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<Option<(usize, usize)>, HttpError> {
+    let mut wire = Vec::new();
+    wire.extend_from_slice(b"POST / HTTP/1.1\r\nHost: example.com\r\n");
+    for (name, value) in framing_headers {
+        wire.extend_from_slice(name.as_bytes());
+        wire.extend_from_slice(b": ");
+        wire.extend_from_slice(value.as_bytes());
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend_from_slice(b"\r\n");
+    wire.extend_from_slice(body);
+
+    let mut buf = BytesMut::from(wire.as_slice());
+    let mut codec = Http1Codec::new();
+    codec
+        .decode(&mut buf)
+        .map(|decoded| decoded.map(|request| (request.body.len(), buf.len())))
+}
+
+fn assert_production_accepts_complete_body(
+    production_result: Result<Option<(usize, usize)>, HttpError>,
+    declared: usize,
+    actual: usize,
+) {
+    assert_eq!(
+        declared, actual,
+        "oracle marked Content-Length valid without matching the generated body"
+    );
+    match production_result {
+        Ok(Some((body_len, remaining))) => {
+            assert_eq!(
+                body_len, declared,
+                "production H1 codec should consume exactly the declared complete body"
+            );
+            assert_eq!(
+                remaining, 0,
+                "production H1 codec should leave no buffered bytes for a complete body"
+            );
+        }
+        Ok(None) => panic!("production H1 codec waited on a complete Content-Length body"),
+        Err(error) => panic!("production H1 codec rejected a valid Content-Length body: {error:?}"),
+    }
+}
+
+fn assert_production_accepts_pipelined_surplus(
+    production_result: Result<Option<(usize, usize)>, HttpError>,
+    declared: usize,
+    actual: usize,
+) {
+    match production_result {
+        Ok(Some((body_len, remaining))) => {
+            assert_eq!(
+                body_len, declared,
+                "production H1 codec should consume only the declared body length"
+            );
+            assert_eq!(
+                remaining,
+                actual - declared,
+                "production H1 codec should leave surplus bytes buffered as pipelined input"
+            );
+        }
+        Ok(None) => panic!("production H1 codec waited despite surplus body bytes"),
+        Err(error) => {
+            panic!("production H1 codec rejected a surplus-body Content-Length frame: {error:?}")
+        }
+    }
+}
+
+fn test_boundary_conditions(validator: &ContentLengthOracle, test_case: &ContentLengthTestCase) {
     // Test zero-length scenarios
     let mut zero_case = test_case.clone();
     zero_case.content_length = ContentLengthConfig::Valid(0);
@@ -815,10 +989,7 @@ fn test_boundary_conditions(
     );
 }
 
-fn test_header_conflicts(
-    validator: &MockContentLengthValidator,
-    test_case: &ContentLengthTestCase,
-) {
+fn test_header_conflicts(validator: &ContentLengthOracle, test_case: &ContentLengthTestCase) {
     // Test Content-Length + Transfer-Encoding conflict
     let mut conflict_case = test_case.clone();
     conflict_case.content_length = ContentLengthConfig::Conflicting(
@@ -844,7 +1015,7 @@ fn test_header_conflicts(
     }
 }
 
-fn test_size_limits(validator: &MockContentLengthValidator, test_case: &ContentLengthTestCase) {
+fn test_size_limits(validator: &ContentLengthOracle, test_case: &ContentLengthTestCase) {
     // Test oversized declaration
     let mut oversized_case = test_case.clone();
     oversized_case.content_length = ContentLengthConfig::Valid(validator.max_body_size * 2);
@@ -861,8 +1032,8 @@ fn test_size_limits(validator: &MockContentLengthValidator, test_case: &ContentL
 
 fn test_parsing_strictness(test_case: &ContentLengthTestCase) {
     // Test strict vs lenient parsing
-    let strict_validator = MockContentLengthValidator::new().with_strict_parsing(true);
-    let lenient_validator = MockContentLengthValidator::new().with_strict_parsing(false);
+    let strict_validator = ContentLengthOracle::new().with_strict_parsing(true);
+    let lenient_validator = ContentLengthOracle::new().with_strict_parsing(false);
 
     let strict_result = strict_validator.validate_message(test_case);
     let lenient_result = lenient_validator.validate_message(test_case);
