@@ -4,7 +4,7 @@
 The helper ranks ready beads and approved fallback-lane candidates while
 respecting active file reservations and dirty shared-main paths. It never
 claims beads, reserves files, edits code, sends Agent Mail, runs Cargo, or
-mutates git state.
+mutates git state. Output is available as stable JSON or compact Markdown.
 """
 
 import argparse
@@ -1149,6 +1149,294 @@ def build_receipt(
     }
 
 
+def markdown_value(value: Any) -> str:
+    text = str(value) if value is not None else ""
+    text = " ".join(text.split())
+    return text.replace("|", "\\|") or "-"
+
+
+def markdown_code(value: Any) -> str:
+    text = markdown_value(value)
+    return f"`{text}`" if text != "-" else "-"
+
+
+def markdown_bool(value: Any) -> str:
+    return "yes" if bool(value) else "no"
+
+
+def markdown_bytes(value: Any) -> str:
+    parsed = _int_or_none(value)
+    if parsed is None:
+        return "unknown"
+    if parsed < 0:
+        return f"{parsed} B"
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    amount = float(parsed)
+    unit = units[0]
+    for unit in units:
+        if amount < 1024.0 or unit == units[-1]:
+            break
+        amount /= 1024.0
+    if unit == "B":
+        return f"{parsed} B"
+    return f"{amount:.2f} {unit}"
+
+
+def markdown_table(headers: list[str], rows: list[list[Any]]) -> list[str]:
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(markdown_value(value) for value in row) + " |")
+    return lines
+
+
+def append_markdown_table(
+    lines: list[str],
+    title: str,
+    headers: list[str],
+    rows: list[list[Any]],
+    empty_text: str,
+) -> None:
+    lines.extend(["", f"## {title}"])
+    if rows:
+        lines.extend(markdown_table(headers, rows))
+    else:
+        lines.append(empty_text)
+
+
+def limited_rows(rows: list[Any], limit: int = 6) -> tuple[list[Any], int]:
+    visible = rows[:limit]
+    return visible, max(0, len(rows) - len(visible))
+
+
+def render_candidate_rows(candidates: list[dict[str, Any]], status: str) -> list[list[Any]]:
+    rows = []
+    for row in candidates:
+        if row.get("status") != status:
+            continue
+        rows.append(
+            [
+                markdown_code(row.get("candidate_id")),
+                markdown_code(row.get("lane")),
+                markdown_code(row.get("validation_class")),
+                row.get("safety_reason") or "",
+            ]
+        )
+    return rows
+
+
+def render_blocker_rows(candidates: list[dict[str, Any]]) -> list[list[Any]]:
+    rows = []
+    for candidate in candidates:
+        for blocker in candidate.get("blockers", []):
+            rows.append(
+                [
+                    markdown_code(candidate.get("candidate_id")),
+                    markdown_code(blocker.get("kind")),
+                    blocker.get("holder") or blocker.get("lane") or "-",
+                    blocker.get("path") or blocker.get("path_pattern") or "-",
+                    blocker.get("reason") or blocker.get("source") or "-",
+                ]
+            )
+    return rows
+
+
+def render_markdown_dashboard(receipt: dict[str, Any]) -> str:
+    summary = receipt.get("summary", {})
+    recommendation_row = receipt.get("recommendation", {})
+    disk_pressure = receipt.get("disk_pressure", {})
+    handoff = receipt.get("closeout_handoff", {})
+    proof_result = handoff.get("remote_proof_result", {}) if isinstance(handoff, dict) else {}
+    retrieval_blocker = handoff.get("artifact_retrieval_blocker", {}) if isinstance(handoff, dict) else {}
+    safety = receipt.get("safety", {})
+    candidates = [row for row in receipt.get("candidates", []) if isinstance(row, dict)]
+
+    lines = [
+        "# Swarm Evidence Dashboard",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Schema | {markdown_code(receipt.get('schema_version'))} |",
+        f"| Generated | {markdown_code(receipt.get('generated_at'))} |",
+        f"| Current date | {markdown_code(receipt.get('current_date'))} |",
+        f"| Agent | {markdown_code(receipt.get('agent'))} |",
+        f"| Repo | {markdown_code(receipt.get('repo_path'))} |",
+        "",
+        "## Summary",
+    ]
+    lines.extend(
+        markdown_table(
+            ["Metric", "Value"],
+            [
+                ["candidates", summary.get("candidate_count", 0)],
+                ["ready", summary.get("ready_count", 0)],
+                ["blocked", summary.get("blocked_count", 0)],
+                ["ready beads", summary.get("ready_bead_count", 0)],
+                ["fallback lanes", summary.get("fallback_count", 0)],
+                ["stale in-progress", summary.get("stale_in_progress_count", 0)],
+            ],
+        )
+    )
+
+    lines.extend(["", "## Recommendation"])
+    lines.extend(
+        markdown_table(
+            ["Field", "Value"],
+            [
+                ["category", markdown_code(recommendation_row.get("category"))],
+                ["candidate", markdown_code(recommendation_row.get("candidate_id"))],
+                ["lane", markdown_code(recommendation_row.get("lane"))],
+                ["validation", markdown_code(recommendation_row.get("validation_class"))],
+                ["reason", recommendation_row.get("reason") or ""],
+                ["safety", recommendation_row.get("safety_reason") or ""],
+            ],
+        )
+    )
+    files_to_reserve = recommendation_row.get("files_to_reserve", [])
+    lines.append("")
+    lines.append("Files to reserve:")
+    if files_to_reserve:
+        lines.extend(f"- {markdown_code(path)}" for path in files_to_reserve)
+    else:
+        lines.append("- none")
+
+    ready_rows = render_candidate_rows(candidates, "ready-to-claim")
+    ready_rows.extend(render_candidate_rows(candidates, "ready-fallback"))
+    append_markdown_table(
+        lines,
+        "Safe Work",
+        ["Candidate", "Lane", "Validation", "Safety"],
+        ready_rows,
+        "No unblocked work candidates.",
+    )
+
+    blocker_rows, extra_blockers = limited_rows(render_blocker_rows(candidates))
+    if extra_blockers:
+        blocker_rows.append(["+", "+", "+", f"{extra_blockers} more blockers", "+"])
+    append_markdown_table(
+        lines,
+        "Blockers",
+        ["Candidate", "Kind", "Owner", "Path", "Reason"],
+        blocker_rows,
+        "No candidate blockers.",
+    )
+
+    reservation_rows = [
+        [
+            markdown_code(row.get("path_pattern")),
+            row.get("holder") or "unknown",
+            markdown_bool(row.get("exclusive", True)),
+            markdown_code(row.get("expires_ts")),
+        ]
+        for row in receipt.get("active_reservations", [])
+        if isinstance(row, dict)
+    ]
+    append_markdown_table(
+        lines,
+        "Active Reservations",
+        ["Path", "Holder", "Exclusive", "Expires"],
+        reservation_rows,
+        "No active reservations in snapshot.",
+    )
+
+    dirty_rows = [
+        [
+            markdown_code(row.get("path")),
+            markdown_code(row.get("status")),
+            row.get("owner") or "unknown",
+        ]
+        for row in receipt.get("dirty_paths", [])
+        if isinstance(row, dict)
+    ]
+    append_markdown_table(
+        lines,
+        "Dirty Paths",
+        ["Path", "Status", "Owner"],
+        dirty_rows,
+        "No dirty paths in snapshot.",
+    )
+
+    lines.extend(["", "## Disk And Proof"])
+    lines.extend(
+        markdown_table(
+            ["Field", "Value"],
+            [
+                ["disk level", markdown_code(disk_pressure.get("level"))],
+                ["available", markdown_bytes(disk_pressure.get("available_bytes"))],
+                ["rch heavy work allowed", markdown_bool(disk_pressure.get("rch_heavy_work_allowed"))],
+                ["ballast releasable", markdown_bytes(disk_pressure.get("ballast_releasable_bytes"))],
+                ["proof status", markdown_code(proof_result.get("status"))],
+                ["proof decision", markdown_code(proof_result.get("decision"))],
+                ["proof target", markdown_code(proof_result.get("target_dir"))],
+                ["retrieval status", markdown_code(retrieval_blocker.get("status"))],
+                ["retrieval blocker", retrieval_blocker.get("text") or retrieval_blocker.get("kind") or "-"],
+            ],
+        )
+    )
+
+    cleanup_rows = [
+        [
+            markdown_code(row.get("candidate_id")),
+            markdown_code(row.get("path")),
+            markdown_bytes(row.get("reclaimable_bytes")),
+            markdown_bool(row.get("requires_authorization")),
+            "none" if row.get("delete_command") is None else "present",
+        ]
+        for row in disk_pressure.get("cleanup_candidates", [])
+        if isinstance(row, dict)
+    ]
+    append_markdown_table(
+        lines,
+        "Cleanup Authorization",
+        ["Candidate", "Path", "Reclaimable", "Requires Auth", "Delete Command"],
+        cleanup_rows,
+        "No cleanup candidates in snapshot.",
+    )
+
+    stale_rows = [
+        [
+            markdown_code(row.get("id")),
+            row.get("owner") or "unknown",
+            row.get("age_minutes", 0),
+            row.get("recommended_action") or "",
+            markdown_bool(row.get("force_release_performed")),
+            markdown_bool(row.get("reopen_performed")),
+        ]
+        for row in receipt.get("stale_in_progress", [])
+        if isinstance(row, dict)
+    ]
+    append_markdown_table(
+        lines,
+        "Stale In-Progress",
+        ["Issue", "Owner", "Age Minutes", "Action", "Force Released", "Reopened"],
+        stale_rows,
+        "No stale in-progress issues in snapshot.",
+    )
+
+    lines.extend(["", "## Safety"])
+    lines.extend(
+        markdown_table(
+            ["Invariant", "Value"],
+            [
+                ["mutating commands executed", markdown_bool(safety.get("mutating_commands_executed"))],
+                ["beads mutated", markdown_bool(safety.get("beads_mutated"))],
+                ["agent mail mutated", markdown_bool(safety.get("agent_mail_mutated"))],
+                ["cargo executed", markdown_bool(safety.get("cargo_executed"))],
+                ["branch/worktree operations", markdown_bool(safety.get("branch_or_worktree_operations"))],
+                [
+                    "forbidden command tokens",
+                    len(safety.get("forbidden_command_tokens", []))
+                    if isinstance(safety.get("forbidden_command_tokens", []), list)
+                    else "unknown",
+                ],
+            ],
+        )
+    )
+    return "\n".join(lines) + "\n"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Find safe ready or fallback work without mutation.")
     parser.add_argument("--fixture", type=Path, help="Read deterministic input from a JSON fixture")
@@ -1158,7 +1446,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=2.0, help="Per-probe timeout in seconds")
     parser.add_argument("--reservation-snapshot", type=Path, help="Optional Agent Mail reservation snapshot")
     parser.add_argument("--candidate-snapshot", type=Path, help="Optional fallback candidate snapshot")
-    parser.add_argument("--output", choices=["json"], default="json")
+    parser.add_argument("--output", choices=["json", "markdown"], default="json")
     return parser.parse_args()
 
 
@@ -1181,8 +1469,11 @@ def main() -> int:
         agent=args.agent,
         generated_at=generated_at,
     )
-    json.dump(receipt, sys.stdout, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
+    if args.output == "json":
+        json.dump(receipt, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(render_markdown_dashboard(receipt))
     return 0
 
 

@@ -15,7 +15,7 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn run_finder(fixture: &str) -> Output {
+fn run_finder_with_output(fixture: &str, output_format: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--fixture")
@@ -27,10 +27,14 @@ fn run_finder(fixture: &str) -> Output {
         .arg("--generated-at")
         .arg(GENERATED_AT)
         .arg("--output")
-        .arg("json")
+        .arg(output_format)
         .current_dir(repo_root())
         .output()
         .expect("run reservation-aware work finder")
+}
+
+fn run_finder(fixture: &str) -> Output {
+    run_finder_with_output(fixture, "json")
 }
 
 fn finder_json(fixture: &str) -> Value {
@@ -43,6 +47,18 @@ fn finder_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("finder output must be JSON")
+}
+
+fn finder_markdown(fixture: &str) -> String {
+    let output = run_finder_with_output(fixture, "markdown");
+    assert!(
+        output.status.success(),
+        "finder helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("finder markdown must be UTF-8")
 }
 
 fn candidate<'a>(receipt: &'a Value, candidate_id: &str) -> &'a Value {
@@ -58,6 +74,11 @@ fn fixture_json(fixture: &str) -> Value {
     let text = fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
         .expect("fixture JSON should be readable");
     serde_json::from_str(&text).expect("fixture must be valid JSON")
+}
+
+fn fixture_text(fixture: &str) -> String {
+    fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .expect("fixture text should be readable")
 }
 
 #[test]
@@ -282,6 +303,39 @@ fn disk_pressure_autopilot_e2e_fixture_matches_closeout_handoff_golden() {
             ["cleanup_requires_explicit_user_authorization"]
             .as_bool(),
         Some(true)
+    );
+}
+
+#[test]
+fn markdown_dashboard_disk_red_fixture_matches_golden() {
+    let markdown = finder_markdown("disk_pressure_autopilot_e2e.json");
+    let expected = fixture_text("swarm_dashboard_disk_red_expected.md");
+
+    assert_eq!(markdown, expected);
+    assert!(markdown.contains("| disk level | `critical` |"));
+    assert!(markdown.contains("testing-golden-artifacts:source-only-handoff"));
+    assert!(markdown.contains("No stale in-progress issues in snapshot."));
+    assert!(markdown.contains("| `rch_target_stale_large` |"));
+    assert!(
+        !markdown.contains("rm -rf"),
+        "dashboard must not emit cleanup commands"
+    );
+}
+
+#[test]
+fn markdown_dashboard_reports_stale_in_progress_without_actions() {
+    let markdown = finder_markdown("stale_in_progress_tracker_lock.json");
+    let expected = fixture_text("stale_in_progress_tracker_lock_expected.md");
+
+    assert_eq!(markdown, expected);
+    assert!(markdown.contains("asupersync-stale-agent"));
+    assert!(markdown.contains("coordinate-before-reopen-or-force-release"));
+    assert!(markdown.contains("| `asupersync-stale-agent` | DormantAgent | 140 |"));
+    assert!(markdown.contains("| mutating commands executed | no |"));
+    assert!(markdown.contains("| beads mutated | no |"));
+    assert!(
+        !markdown.contains("force_release_performed=true"),
+        "dashboard must report stale work without performing force-release"
     );
 }
 
