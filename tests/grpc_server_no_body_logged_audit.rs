@@ -30,13 +30,11 @@
 //!       (covered by tick #153 audit). It stamps `x-logged=true`
 //!       metadata only. No body access.
 //!
-//!   (d) **⚠️ P3 finding (filed separately):** `src/grpc/health.rs:234`
-//!       logs `token_prefix = first-20-chars-of-authorization-header`
-//!       at INFO level. This is a TODO-stub auth path (the doc
-//!       comment says "TODO: Add actual token validation against
-//!       your auth system"). For short bearer tokens the prefix
-//!       leak can identify the secret. Documented as a separate
-//!       audit follow-up; orthogonal to body-content logging.
+//!   (d) **Resolved follow-up:** the older gRPC health audit finding
+//!       that logged an authorization-header prefix has been retired.
+//!       `HealthService` now validates `HealthAuthMode` before `Check`
+//!       and `Watch`, and logs only auth mode plus metadata count; no
+//!       token bytes or body content are emitted.
 //!
 //! Regression tests below pin (a) — any future commit that adds a
 //! `tracing::info!("body = {body:?}", ...)`-style call to the
