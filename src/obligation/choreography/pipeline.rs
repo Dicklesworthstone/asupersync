@@ -1337,7 +1337,7 @@ mod tests {
             .generate_with_locals(&protocol)
             .expect("pipeline failed");
 
-        // Pairwise directional placeholders must exist.
+        // Pairwise directional lab channel stand-ins must exist.
         assert!(
             output
                 .lab_test_code
