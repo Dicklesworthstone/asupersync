@@ -566,6 +566,14 @@ impl<T> RwLock<T> {
                     let waker = Self::pop_writer_waiter(&mut state);
                     if waker.is_some() {
                         state.writer_active = true;
+                        // br-asupersync-4j40bb: track writer hand-offs while
+                        // readers are queued so the streak count is accurate.
+                        if !state.reader_waiters.is_empty() {
+                            state.consecutive_writers_served =
+                                state.consecutive_writers_served.saturating_add(1);
+                        } else {
+                            state.consecutive_writers_served = 0;
+                        }
                     }
                     waker
                 } else {
