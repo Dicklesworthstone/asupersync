@@ -692,15 +692,21 @@ impl SwarmPressureGovernor {
                 AdmissionDecision::AdmitWithBackpressure
             }
 
-            // Apply backpressure for moderate system stress
+            // Emergency system pressure has no normal-work headroom left.
+            (_, DegradationLevel::Emergency, RegionPriority::Normal) => AdmissionDecision::Reject,
+
+            // Apply backpressure for moderate and heavy system stress.
             (_, DegradationLevel::Moderate | DegradationLevel::Heavy, RegionPriority::Normal) => {
                 AdmissionDecision::AdmitWithBackpressure
             }
 
-            // Reject low-priority regions under any stress
+            // Reject low-priority regions under any system or peer-reported stress.
             (
                 _,
-                DegradationLevel::Moderate | DegradationLevel::Heavy | DegradationLevel::Emergency,
+                DegradationLevel::Light
+                | DegradationLevel::Moderate
+                | DegradationLevel::Heavy
+                | DegradationLevel::Emergency,
                 RegionPriority::Low | RegionPriority::BestEffort,
             ) => AdmissionDecision::Reject,
 
@@ -951,6 +957,14 @@ mod tests {
         .expect("Failed to create pressure governor");
 
         SwarmPressureGovernor::new(config, resource_monitor, pressure_governor)
+    }
+
+    fn admission_rank(decision: AdmissionDecision) -> u8 {
+        match decision {
+            AdmissionDecision::Admit => 0,
+            AdmissionDecision::AdmitWithBackpressure => 1,
+            AdmissionDecision::Reject => 2,
+        }
     }
 
     #[test]
@@ -1510,6 +1524,166 @@ mod tests {
         assert!(decision.envelope.is_none());
         assert!(decision.reason.contains("Rejected due to pressure"));
         assert_eq!(governor.metrics().regions_rejected, 1);
+    }
+
+    #[test]
+    fn test_emergency_system_degradation_rejects_normal_admission() {
+        let governor = create_test_swarm_governor();
+        governor
+            .resource_monitor
+            .pressure()
+            .update_degradation_level(
+                crate::runtime::resource_monitor::ResourceType::Memory,
+                DegradationLevel::Emergency,
+            );
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let decision = governor
+            .check_region_admission(&cx, RegionPriority::Normal, None)
+            .expect("Emergency degradation should still return a decision");
+
+        assert!(matches!(decision.decision, AdmissionDecision::Reject));
+        assert!(decision.envelope.is_none());
+        assert!(decision.reason.contains("Emergency"));
+        assert_eq!(governor.metrics().regions_rejected, 1);
+    }
+
+    #[test]
+    fn metamorphic_degradation_never_makes_noncritical_admission_safer() {
+        let governor = create_test_swarm_governor();
+        let levels = [
+            DegradationLevel::None,
+            DegradationLevel::Light,
+            DegradationLevel::Moderate,
+            DegradationLevel::Heavy,
+            DegradationLevel::Emergency,
+        ];
+
+        for priority in [
+            RegionPriority::Normal,
+            RegionPriority::Low,
+            RegionPriority::BestEffort,
+        ] {
+            let mut previous_rank = 0;
+            for level in levels {
+                let decision = governor
+                    .evaluate_swarm_admission(
+                        priority,
+                        &AdmissionDecision::Admit,
+                        level,
+                        None,
+                        SwarmPeerPressureSummary::EMPTY,
+                    )
+                    .expect("metamorphic degradation admission should classify");
+                let rank = admission_rank(decision.decision);
+                assert!(
+                    rank >= previous_rank,
+                    "worse degradation made {priority:?} admission safer: {level:?} -> {:?}",
+                    decision.decision
+                );
+                previous_rank = rank;
+            }
+        }
+
+        let critical = governor
+            .evaluate_swarm_admission(
+                RegionPriority::Critical,
+                &AdmissionDecision::Admit,
+                DegradationLevel::Emergency,
+                None,
+                SwarmPeerPressureSummary::EMPTY,
+            )
+            .expect("critical admission should classify");
+        assert!(matches!(critical.decision, AdmissionDecision::Admit));
+    }
+
+    #[test]
+    fn metamorphic_requested_memory_never_makes_normal_admission_safer() {
+        let mut config = SwarmPressureGovernorConfig::default();
+        config.default_memory_budget_bytes = 1024;
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let pressure_governor = PressureGovernor::new(
+            config.pressure_config.clone(),
+            std::sync::Arc::clone(&runtime),
+            Metrics::new(),
+        )
+        .expect("Failed to create pressure governor");
+        let governor =
+            SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let requests = [0, 512, 1024, 1025, 2048, u64::MAX];
+
+        let mut previous_rank = 0;
+        for requested_memory in requests {
+            let decision = governor
+                .check_region_admission(&cx, RegionPriority::Normal, Some(requested_memory))
+                .expect("memory-pressure admission should classify");
+            let rank = admission_rank(decision.decision);
+            assert!(
+                rank >= previous_rank,
+                "larger requested memory made normal admission safer: {requested_memory} -> {:?}",
+                decision.decision
+            );
+            if requested_memory <= 1024 {
+                assert!(
+                    decision.envelope.is_some(),
+                    "in-budget request should preserve admitted envelope"
+                );
+            } else {
+                assert!(
+                    decision.envelope.is_none(),
+                    "over-budget request must not allocate an envelope"
+                );
+            }
+            previous_rank = rank;
+        }
+    }
+
+    #[test]
+    fn metamorphic_peer_pressure_transition_storm_never_improves_background_admission() {
+        let governor = create_test_swarm_governor();
+        let peer_pressures = [0.0, 0.20, 0.79, 0.80, 0.95, 1.25];
+
+        for priority in [
+            RegionPriority::Normal,
+            RegionPriority::Low,
+            RegionPriority::BestEffort,
+        ] {
+            let mut previous_rank = 0;
+            for peer_pressure in peer_pressures {
+                governor
+                    .record_peer_pressure("peer-storm", peer_pressure, DegradationLevel::Light)
+                    .expect("peer pressure report should be accepted");
+                let decision = governor
+                    .evaluate_swarm_admission(
+                        priority,
+                        &AdmissionDecision::Admit,
+                        DegradationLevel::None,
+                        None,
+                        governor.peer_pressure_summary(Instant::now()),
+                    )
+                    .expect("peer-pressure admission should classify");
+                let rank = admission_rank(decision.decision);
+                assert!(
+                    rank >= previous_rank,
+                    "higher peer pressure made {priority:?} admission safer: {peer_pressure} -> {:?}",
+                    decision.decision
+                );
+                previous_rank = rank;
+            }
+            assert!(governor.clear_peer_pressure("peer-storm").is_some());
+        }
     }
 
     #[test]
