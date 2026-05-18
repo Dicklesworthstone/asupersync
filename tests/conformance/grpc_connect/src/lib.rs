@@ -444,27 +444,38 @@ impl ConformanceTestSuite {
         Ok(test_result)
     }
 
+    fn record_skipped_category_result(
+        &mut self,
+        test_name: &str,
+        category: TestCategory,
+        coverage_status: &str,
+        error_message: &str,
+    ) {
+        let start_time = Instant::now();
+        let mut metadata = TestMetadata::default();
+        metadata
+            .headers
+            .insert("coverage_status".to_string(), coverage_status.to_string());
+
+        self.results.push(ConformanceResult {
+            test_name: test_name.to_string(),
+            category,
+            status: TestStatus::Skipped,
+            duration: start_time.elapsed(),
+            error_message: Some(error_message.to_string()),
+            metadata,
+        });
+    }
+
     async fn run_metadata_tests(&mut self, cx: &Cx) -> Result<()> {
         info!("Running metadata tests");
 
-        let start_time = Instant::now();
-        let mut metadata = TestMetadata::default();
-        metadata.headers.insert(
-            "coverage_status".to_string(),
-            "requires_connect_reference_client_metadata_fixture".to_string(),
+        self.record_skipped_category_result(
+            "metadata_custom_headers_contract",
+            TestCategory::Metadata,
+            "requires_connect_reference_client_metadata_fixture",
+            "metadata conformance execution requires a Connect reference-client header fixture",
         );
-
-        self.results.push(ConformanceResult {
-            test_name: "metadata_custom_headers_contract".to_string(),
-            category: TestCategory::Metadata,
-            status: TestStatus::Skipped,
-            duration: start_time.elapsed(),
-            error_message: Some(
-                "metadata conformance execution requires a Connect reference-client header fixture"
-                    .to_string(),
-            ),
-            metadata,
-        });
 
         Ok(())
     }
@@ -472,8 +483,12 @@ impl ConformanceTestSuite {
     async fn run_compression_tests(&mut self, cx: &Cx) -> Result<()> {
         info!("Running compression tests");
 
-        // Placeholder for compression tests
-        // Implementation would test gzip compression negotiation
+        self.record_skipped_category_result(
+            "compression_negotiation_contract",
+            TestCategory::Compression,
+            "requires_connect_reference_client_compression_fixture",
+            "compression conformance execution requires a Connect reference-client compression negotiation fixture",
+        );
 
         Ok(())
     }
@@ -630,6 +645,30 @@ mod tests {
                 .error_message
                 .as_deref()
                 .is_some_and(|message| message.contains("Connect reference-client header fixture"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compression_conformance_records_fixture_gap() {
+        let cx = Cx::root();
+        let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
+
+        suite.run_compression_tests(&cx).await.unwrap();
+
+        assert_eq!(suite.results.len(), 1);
+        let result = &suite.results[0];
+        assert_eq!(result.test_name, "compression_negotiation_contract");
+        assert_eq!(result.category, TestCategory::Compression);
+        assert_eq!(result.status, TestStatus::Skipped);
+        assert_eq!(
+            result.metadata.headers.get("coverage_status"),
+            Some(&"requires_connect_reference_client_compression_fixture".to_string())
+        );
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("compression negotiation fixture"))
         );
     }
 }
