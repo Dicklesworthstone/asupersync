@@ -370,7 +370,7 @@ fn setup_secure_test_environment() -> TempDir {
 
     let assets_dir = dir.path().join("assets");
     fs::create_dir(&assets_dir).unwrap();
-    fs::write(assets_dir.join("image.png"), "fake PNG data").unwrap();
+    fs::write(assets_dir.join("image.png"), "test PNG fixture data").unwrap();
 
     // Create version-like directory structure
     let version_dir = dir.path().join("version.1.2");
