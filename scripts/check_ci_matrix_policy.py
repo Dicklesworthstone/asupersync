@@ -56,6 +56,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workflow", type=Path, default=None)
     parser.add_argument("--summary-output", default="", type=Path)
     parser.add_argument("--events-output", default="", type=Path)
+    parser.add_argument("--script-scan-root", default=None, type=Path)
+    parser.add_argument("--script-scan-glob", default="*.sh")
+    parser.add_argument("--skip-script-scan", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
@@ -150,6 +153,20 @@ def cargo_routing_violations(text: str) -> list[str]:
     if has_local_cargo_command(text):
         violations.append("local_cargo")
     return sorted(set(violations))
+
+
+def collect_script_routing_violations(script_root: Path, script_glob: str) -> list[dict[str, Any]]:
+    if not script_root.exists():
+        return []
+
+    reports: list[dict[str, Any]] = []
+    for path in sorted(script_root.glob(script_glob)):
+        if not path.is_file():
+            continue
+        violations = cargo_routing_violations(path.read_text(encoding="utf-8", errors="replace"))
+        if violations:
+            reports.append({"path": str(path), "violations": violations})
+    return reports
 
 
 def rch_replay_compliant(command: str) -> bool:
@@ -538,6 +555,20 @@ jobs:
     if lane_cargo_bin["status"] != "pass":
         raise AssertionError("expected pass lane status for rch-routed CARGO_BIN replay")
 
+    script_selftest_dir = policy_path.parent / "ci_matrix_policy_script_selftest"
+    script_selftest_dir.mkdir(parents=True, exist_ok=True)
+    (script_selftest_dir / "route_good.sh").write_text(
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_ci_policy_selftest cargo test --lib\n",
+        encoding="utf-8",
+    )
+    (script_selftest_dir / "route_bad.sh").write_text("cargo test --lib\n", encoding="utf-8")
+    script_reports = collect_script_routing_violations(script_selftest_dir, "route_*.sh")
+    script_report_by_name = {Path(report["path"]).name: report for report in script_reports}
+    if "route_good.sh" in script_report_by_name:
+        raise AssertionError("expected rch-routed script scan fixture to pass")
+    if script_report_by_name.get("route_bad.sh", {}).get("violations") != ["local_cargo"]:
+        raise AssertionError("expected script scan fixture to report local_cargo")
+
     workflow_fail = """
 jobs:
   docs:
@@ -674,6 +705,12 @@ def main() -> int:
 
     policy_path = args.policy
     policy, lanes, default_summary_path, default_events_path = load_policy(policy_path)
+    script_scan_root = args.script_scan_root if args.script_scan_root is not None else policy_path.parent.parent / "scripts"
+    script_routing_violations = (
+        []
+        if args.skip_script_scan
+        else collect_script_routing_violations(script_scan_root, args.script_scan_glob)
+    )
 
     workflow_path = args.workflow or Path(require_str(policy.get("workflow_path"), "workflow_path"))
     workflow_text = workflow_path.read_text(encoding="utf-8")
@@ -684,7 +721,7 @@ def main() -> int:
         evaluate_lane(lane, workflow_text, job_ids, step_names, step_run_blocks) for lane in lanes
     ]
     failing_lane_ids = [lane["lane_id"] for lane in lane_reports if lane["status"] != "pass"]
-    overall_status = "pass" if not failing_lane_ids else "fail"
+    overall_status = "pass" if not failing_lane_ids and not script_routing_violations else "fail"
     rch_required_lane_count = sum(1 for lane in lane_reports if lane.get("require_rch") is True)
     rch_noncompliant_lane_ids = [
         lane["lane_id"]
@@ -725,6 +762,13 @@ def main() -> int:
         "rch_local_fallback_step_refs": rch_local_fallback_step_refs,
         "rch_missing_fallback_step_count": 0,
         "rch_missing_fallback_step_refs": [],
+        "script_scan": {
+            "enabled": not args.skip_script_scan,
+            "root": str(script_scan_root),
+            "glob": args.script_scan_glob,
+            "violating_path_count": len(script_routing_violations),
+            "violations": script_routing_violations,
+        },
         "lanes": lane_reports,
     }
 
@@ -745,6 +789,16 @@ def main() -> int:
                 "failure_taxonomy": lane["failure_taxonomy"],
             }
         )
+    for report in script_routing_violations:
+        events.append(
+            {
+                "schema_version": "ci-matrix-policy-script-event-v1",
+                "generated_at": summary["generated_at"],
+                "path": report["path"],
+                "status": "fail",
+                "routing_violations": report["violations"],
+            }
+        )
 
     write_json(summary_path, summary)
     write_ndjson(events_path, events)
@@ -756,6 +810,9 @@ def main() -> int:
             if lane["status"] != "pass":
                 missing = ", ".join(lane["missing_contracts"])
                 print(f"CI matrix lane failed: {lane['lane_id']} [{missing}]")
+        for report in script_routing_violations:
+            violations = ", ".join(report["violations"])
+            print(f"CI matrix script failed: {report['path']} [{violations}]")
         return 1
     return 0
 
