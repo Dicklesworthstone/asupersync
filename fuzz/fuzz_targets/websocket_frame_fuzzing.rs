@@ -1,6 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::codec::{Decoder, Encoder};
+use asupersync::net::websocket::{
+    Frame, FrameCodec, Opcode, Role as WebSocketRole, WsError, apply_mask,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive WebSocket frame fuzzing targeting RFC 6455 compliance
@@ -179,118 +184,23 @@ fn test_raw_frame_parsing(raw_bytes: &[u8]) {
     }
 }
 
-/// Parse WebSocket frame from raw bytes
-fn parse_websocket_frame(bytes: &[u8]) -> Result<ParsedFrame, ParseError> {
-    if bytes.len() < 2 {
-        return Err(ParseError::TooShort);
-    }
-
-    let first_byte = bytes[0];
-    let second_byte = bytes[1];
-
-    let fin = (first_byte & 0x80) != 0;
-    let rsv1 = (first_byte & 0x40) != 0;
-    let rsv2 = (first_byte & 0x20) != 0;
-    let rsv3 = (first_byte & 0x10) != 0;
-    let opcode = first_byte & 0x0F;
-
-    let masked = (second_byte & 0x80) != 0;
-    let payload_len = (second_byte & 0x7F) as u64;
-
-    let mut offset = 2;
-
-    // Extended payload length
-    let payload_len = match payload_len {
-        126 => {
-            if bytes.len() < offset + 2 {
-                return Err(ParseError::TooShort);
-            }
-            let len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as u64;
-            offset += 2;
-            len
-        }
-        127 => {
-            if bytes.len() < offset + 8 {
-                return Err(ParseError::TooShort);
-            }
-            let len = u64::from_be_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-                bytes[offset + 4],
-                bytes[offset + 5],
-                bytes[offset + 6],
-                bytes[offset + 7],
-            ]);
-            offset += 8;
-            len
-        }
-        len => len,
-    };
-
-    // Masking key
-    let mask = if masked {
-        if bytes.len() < offset + 4 {
-            return Err(ParseError::TooShort);
-        }
-        let mask = [
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ];
-        offset += 4;
-        Some(mask)
-    } else {
-        None
-    };
-
-    // Payload
-    if bytes.len() < offset + payload_len as usize {
-        return Err(ParseError::TooShort);
-    }
-
-    let mut payload = bytes[offset..offset + payload_len as usize].to_vec();
-    if let Some(mask) = mask {
-        asupersync::net::websocket::apply_mask(&mut payload, mask);
-    }
-
-    Ok(ParsedFrame {
-        fin,
-        rsv1,
-        rsv2,
-        rsv3,
-        opcode,
-        masked,
-        payload,
-    })
+/// Parse WebSocket frame bytes with the production RFC 6455 codec.
+fn parse_websocket_frame(bytes: &[u8]) -> Result<Frame, WsError> {
+    decode_with_role(bytes, WebSocketRole::Server)
+        .or_else(|_| decode_with_role(bytes, WebSocketRole::Client))
 }
 
-/// Basic frame structure for parsing
-#[derive(Debug)]
-struct ParsedFrame {
-    fin: bool,
-    rsv1: bool,
-    rsv2: bool,
-    rsv3: bool,
-    opcode: u8,
-    masked: bool,
-    payload: Vec<u8>,
-}
-
-/// Parse errors
-#[derive(Debug)]
-enum ParseError {
-    TooShort,
-    InvalidOpcode,
-    InvalidLength,
+fn decode_with_role(bytes: &[u8], role: WebSocketRole) -> Result<Frame, WsError> {
+    let mut codec = FrameCodec::new(role).max_payload_size(MAX_PAYLOAD_SIZE);
+    let mut src = BytesMut::from(bytes);
+    <FrameCodec as Decoder>::decode(&mut codec, &mut src)?
+        .ok_or(WsError::ProtocolViolation("incomplete frame"))
 }
 
 /// Verify basic frame invariants
-fn verify_frame_invariants(frame: &ParsedFrame) {
+fn verify_frame_invariants(frame: &Frame) {
     // Control frames must have fin=true
-    if is_control_opcode(frame.opcode) {
+    if frame.opcode.is_control() {
         assert_eq!(frame.fin, true, "Control frames must have FIN=1");
 
         // Control frames must have payload <= 125 bytes
@@ -301,21 +211,10 @@ fn verify_frame_invariants(frame: &ParsedFrame) {
         );
     }
 
-    // RSV bits must be 0 unless extensions are negotiated
-    // (relaxed for fuzzing - some implementations may vary)
-
-    // Opcode must be valid
-    assert!(frame.opcode <= 15, "Opcode out of range: {}", frame.opcode);
-
-    // Reserved opcodes 3-7 and 11-15 should be invalid
-    if (3..=7).contains(&frame.opcode) || (11..=15).contains(&frame.opcode) {
-        // Reserved opcodes - implementation may reject or handle differently
-    }
-}
-
-/// Check if opcode is a control frame
-fn is_control_opcode(opcode: u8) -> bool {
-    opcode >= 8 // Control frames are 8-15, data frames are 0-7
+    assert!(
+        !(frame.rsv1 || frame.rsv2 || frame.rsv3),
+        "reserved bits require negotiated extensions"
+    );
 }
 
 /// Test structured frame operations using WebSocket APIs
@@ -363,8 +262,7 @@ fn test_text_frame_creation(fin: bool, payload: &[u8]) {
     // Test UTF-8 validation by attempting to create text frame
     match std::str::from_utf8(payload) {
         Ok(text) => {
-            // Valid UTF-8 - create text frame using WebSocket API
-            let _frame = create_text_frame_internal(text, fin);
+            let _frame = frame_with(Opcode::Text, fin, text.as_bytes());
         }
         Err(_) => {
             // Invalid UTF-8 - text frame creation should be rejected
@@ -373,41 +271,20 @@ fn test_text_frame_creation(fin: bool, payload: &[u8]) {
     }
 }
 
-/// Create text frame (stub implementation)
-fn create_text_frame_internal(_text: &str, _fin: bool) -> TestFrame {
-    TestFrame {
-        opcode: 1, // Text
-        fin: _fin,
-        payload: _text.as_bytes().to_vec(),
-    }
-}
-
 /// Test binary frame creation
 fn test_binary_frame_creation(fin: bool, payload: &[u8]) {
     // Binary frames can contain any data
-    let _frame = TestFrame {
-        opcode: 2, // Binary
-        fin,
-        payload: payload.to_vec(),
-    };
+    let _frame = frame_with(Opcode::Binary, fin, payload);
 }
 
 /// Test control frame creation
 fn test_control_frame_creation(opcode: &ControlOpcode, payload: &[u8]) {
-    let opcode_num = match opcode {
-        ControlOpcode::Close => 8,
-        ControlOpcode::Ping => 9,
-        ControlOpcode::Pong => 10,
-    };
-
     // Control frames must have payload <= 125 bytes
     assert!(payload.len() <= 125, "Control frame payload too large");
 
-    let _frame = TestFrame {
-        opcode: opcode_num,
-        fin: true, // Control frames must have FIN=true
-        payload: payload.to_vec(),
-    };
+    let frame = frame_with(control_opcode(opcode), true, payload);
+    let mut encoded = BytesMut::new();
+    let _ = FrameCodec::server().encode(frame, &mut encoded);
 
     // Special validation for close frames
     if matches!(opcode, ControlOpcode::Close) {
@@ -417,9 +294,8 @@ fn test_control_frame_creation(opcode: &ControlOpcode, payload: &[u8]) {
 
 /// Validate close frame payload format
 fn test_close_frame_payload_validation(payload: &[u8]) {
-    if payload.len() >= 2 {
-        // Extract status code
-        let status_code = u16::from_be_bytes([payload[0], payload[1]]);
+    if let Some([high, low]) = payload.get(..2) {
+        let status_code = u16::from_be_bytes([*high, *low]);
 
         // Validate status code per RFC 6455
         match status_code {
@@ -436,8 +312,8 @@ fn test_close_frame_payload_validation(payload: &[u8]) {
         }
 
         // Validate reason text is UTF-8
-        if payload.len() > 2 {
-            let _reason_validation = std::str::from_utf8(&payload[2..]);
+        if let Some(reason) = payload.get(2..) {
+            let _reason_validation = std::str::from_utf8(reason);
             // UTF-8 validation result - implementation should check this
         }
     }
@@ -454,24 +330,28 @@ fn test_fragmented_frame_sequence(fragments: &[FragmentData]) {
     for fragment in fragments {
         // Validate fragment sequence rules
         if fragment.is_first {
-            assert!(!in_fragment, "Cannot start fragment while in progress");
+            if in_fragment {
+                return;
+            }
             in_fragment = true;
-        } else {
-            assert!(in_fragment, "Continuation without start fragment");
+        } else if !in_fragment {
+            return;
         }
 
         if fragment.is_last {
-            assert!(in_fragment, "Cannot end fragment when not started");
+            if !in_fragment {
+                return;
+            }
             in_fragment = false;
         }
 
         // Create frame for fragment
-        let opcode = if fragment.is_first { 1 } else { 0 }; // Text or Continuation
-        let _frame = TestFrame {
-            opcode,
-            fin: fragment.is_last,
-            payload: fragment.payload.clone(),
+        let opcode = if fragment.is_first {
+            Opcode::Text
+        } else {
+            Opcode::Continuation
         };
+        let _frame = frame_with(opcode, fragment.is_last, &fragment.payload);
     }
 }
 
@@ -495,11 +375,11 @@ fn test_masking_operation(test: &MaskingTest) {
     let mut masked = test.payload.clone();
 
     // Apply masking using WebSocket utility
-    asupersync::net::websocket::apply_mask(&mut masked, test.mask);
+    apply_mask(&mut masked, test.mask);
 
     // Apply masking again to unmask
     let mut unmasked = masked.clone();
-    asupersync::net::websocket::apply_mask(&mut unmasked, test.mask);
+    apply_mask(&mut unmasked, test.mask);
 
     // Verify round-trip
     assert_eq!(original, unmasked, "Masking round-trip failed");
@@ -550,36 +430,26 @@ fn test_control_frame_edge_cases(test: &ControlFrameTest) {
 
 /// Test valid control frame
 fn test_valid_control_frame(opcode: &ControlOpcode, payload: &[u8]) {
-    let opcode_num = match opcode {
-        ControlOpcode::Close => 8,
-        ControlOpcode::Ping => 9,
-        ControlOpcode::Pong => 10,
-    };
-
-    let _frame = TestFrame {
-        opcode: opcode_num,
-        fin: true,
-        payload: payload.to_vec(),
-    };
+    let frame = frame_with(control_opcode(opcode), true, payload);
+    let mut encoded = BytesMut::new();
+    let _ = FrameCodec::server().encode(frame, &mut encoded);
 }
 
 /// Test control frame with invalid RSV bits
 fn test_invalid_rsv_control_frame(opcode: &ControlOpcode, payload: &[u8]) {
-    let opcode_byte = match opcode {
-        ControlOpcode::Close => 8,
-        ControlOpcode::Ping => 9,
-        ControlOpcode::Pong => 10,
-    };
+    let opcode_byte = control_opcode_byte(opcode);
 
     // Create frame with RSV1=1 (invalid)
     let first_byte = 0x80 | 0x40 | opcode_byte; // FIN=1, RSV1=1
-    let second_byte = payload.len() as u8;
+    let Ok(second_byte) = u8::try_from(payload.len()) else {
+        return;
+    };
 
     let mut frame_bytes = vec![first_byte, second_byte];
     frame_bytes.extend_from_slice(payload);
 
-    // This should be rejected
-    let _parse_result = parse_websocket_frame(&frame_bytes);
+    // This should be rejected by the production codec.
+    assert!(parse_websocket_frame(&frame_bytes).is_err());
 }
 
 /// Test round-trip encode/decode consistency
@@ -588,24 +458,23 @@ fn test_roundtrip_consistency(test: &RoundTripTest) {
         return;
     }
 
-    // Create frame
-    let opcode = match test.frame_data.opcode {
-        DataOpcode::Continuation => 0,
-        DataOpcode::Text => 1,
-        DataOpcode::Binary => 2,
-    };
-
-    let original_frame = TestFrame {
-        opcode,
-        fin: test.frame_data.fin,
-        payload: test.frame_data.payload.clone(),
-    };
+    let original_frame = frame_with(
+        data_opcode(&test.frame_data.opcode),
+        test.frame_data.fin,
+        &test.frame_data.payload,
+    );
 
     // Encode to bytes
-    let encoded = encode_test_frame(&original_frame, &test.role);
+    let mut encoded = BytesMut::new();
+    if FrameCodec::new(sender_role(&test.role))
+        .encode(original_frame.clone(), &mut encoded)
+        .is_err()
+    {
+        return;
+    }
 
     // Decode back
-    match parse_websocket_frame(&encoded) {
+    match decode_with_role(&encoded, receiver_role(&test.role)) {
         Ok(decoded) => {
             // Verify consistency
             assert_eq!(original_frame.opcode, decoded.opcode);
@@ -618,47 +487,53 @@ fn test_roundtrip_consistency(test: &RoundTripTest) {
     }
 }
 
-/// Simplified frame structure for testing
-#[derive(Debug)]
-struct TestFrame {
-    opcode: u8,
-    fin: bool,
-    payload: Vec<u8>,
+fn frame_with(opcode: Opcode, fin: bool, payload: &[u8]) -> Frame {
+    Frame {
+        fin,
+        rsv1: false,
+        rsv2: false,
+        rsv3: false,
+        opcode,
+        masked: false,
+        mask_key: None,
+        payload: Bytes::copy_from_slice(payload),
+    }
 }
 
-/// Encode test frame to bytes
-fn encode_test_frame(frame: &TestFrame, role: &Role) -> Vec<u8> {
-    let mut bytes = Vec::new();
-
-    // First byte: FIN + opcode
-    let first_byte = if frame.fin { 0x80 } else { 0x00 } | frame.opcode;
-    bytes.push(first_byte);
-
-    // Second byte: MASK + payload length
-    let mask_bit = match role {
-        Role::Client => 0x80, // Clients mask
-        Role::Server => 0x00, // Servers don't mask
-    };
-
-    let payload_len = frame.payload.len();
-    if payload_len < 126 {
-        bytes.push(mask_bit | (payload_len as u8));
-    } else if payload_len < 65536 {
-        bytes.push(mask_bit | 126);
-        bytes.extend_from_slice(&(payload_len as u16).to_be_bytes());
-    } else {
-        bytes.push(mask_bit | 127);
-        bytes.extend_from_slice(&(payload_len as u64).to_be_bytes());
+fn data_opcode(opcode: &DataOpcode) -> Opcode {
+    match opcode {
+        DataOpcode::Continuation => Opcode::Continuation,
+        DataOpcode::Text => Opcode::Text,
+        DataOpcode::Binary => Opcode::Binary,
     }
+}
 
-    // Masking key + payload
-    let mut payload = frame.payload.clone();
-    if matches!(role, Role::Client) {
-        let mask = [0x12, 0x34, 0x56, 0x78];
-        bytes.extend_from_slice(&mask);
-        asupersync::net::websocket::apply_mask(&mut payload, mask);
+fn control_opcode(opcode: &ControlOpcode) -> Opcode {
+    match opcode {
+        ControlOpcode::Close => Opcode::Close,
+        ControlOpcode::Ping => Opcode::Ping,
+        ControlOpcode::Pong => Opcode::Pong,
     }
-    bytes.extend_from_slice(&payload);
+}
 
-    bytes
+fn control_opcode_byte(opcode: &ControlOpcode) -> u8 {
+    match opcode {
+        ControlOpcode::Close => 8,
+        ControlOpcode::Ping => 9,
+        ControlOpcode::Pong => 10,
+    }
+}
+
+fn sender_role(role: &Role) -> WebSocketRole {
+    match role {
+        Role::Client => WebSocketRole::Client,
+        Role::Server => WebSocketRole::Server,
+    }
+}
+
+fn receiver_role(role: &Role) -> WebSocketRole {
+    match role {
+        Role::Client => WebSocketRole::Server,
+        Role::Server => WebSocketRole::Client,
+    }
 }
