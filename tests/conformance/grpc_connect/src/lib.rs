@@ -509,8 +509,12 @@ impl ConformanceTestSuite {
     async fn run_cancellation_tests(&mut self, cx: &Cx) -> Result<()> {
         info!("Running cancellation tests");
 
-        // Placeholder for cancellation tests
-        // Implementation would test request cancellation and cleanup
+        self.record_skipped_category_result(
+            "cancellation_cleanup_contract",
+            TestCategory::Cancellation,
+            "requires_connect_reference_client_cancellation_fixture",
+            "cancellation conformance execution requires a Connect reference-client cancellation fixture",
+        );
 
         Ok(())
     }
@@ -697,6 +701,30 @@ mod tests {
                 .error_message
                 .as_deref()
                 .is_some_and(|message| message.contains("deadline propagation fixture"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_conformance_records_fixture_gap() {
+        let cx = Cx::root();
+        let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
+
+        suite.run_cancellation_tests(&cx).await.unwrap();
+
+        assert_eq!(suite.results.len(), 1);
+        let result = &suite.results[0];
+        assert_eq!(result.test_name, "cancellation_cleanup_contract");
+        assert_eq!(result.category, TestCategory::Cancellation);
+        assert_eq!(result.status, TestStatus::Skipped);
+        assert_eq!(
+            result.metadata.headers.get("coverage_status"),
+            Some(&"requires_connect_reference_client_cancellation_fixture".to_string())
+        );
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("cancellation fixture"))
         );
     }
 }
