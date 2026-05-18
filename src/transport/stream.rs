@@ -1983,13 +1983,13 @@ mod tests {
     #[test]
     fn test_timeout_stream_triggers_and_resets() {
         static NOW: AtomicU64 = AtomicU64::new(0);
-        fn fake_now() -> Time {
+        fn test_now() -> Time {
             Time::from_nanos(NOW.load(Ordering::SeqCst))
         }
 
         init_test("test_timeout_stream_triggers_and_resets");
         let inner = PendingStream;
-        let mut timed = TimeoutStream::with_time_getter(inner, Duration::from_nanos(10), fake_now);
+        let mut timed = TimeoutStream::with_time_getter(inner, Duration::from_nanos(10), test_now);
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
 
@@ -2026,7 +2026,7 @@ mod tests {
     #[test]
     fn test_timeout_stream_resets_on_item() {
         static NOW: AtomicU64 = AtomicU64::new(0);
-        fn fake_now() -> Time {
+        fn test_now() -> Time {
             Time::from_nanos(NOW.load(Ordering::SeqCst))
         }
 
@@ -2049,7 +2049,7 @@ mod tests {
         let inner = OneItemThenPending {
             item: Some(create_symbol(5)),
         };
-        let mut timed = TimeoutStream::with_time_getter(inner, Duration::from_nanos(10), fake_now);
+        let mut timed = TimeoutStream::with_time_getter(inner, Duration::from_nanos(10), test_now);
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
 
@@ -2077,7 +2077,7 @@ mod tests {
     #[test]
     fn test_timeout_stream_duration_max_saturates_deadline() {
         static NOW: AtomicU64 = AtomicU64::new(0);
-        fn fake_now() -> Time {
+        fn test_now() -> Time {
             Time::from_nanos(NOW.load(Ordering::SeqCst))
         }
 
@@ -2085,7 +2085,7 @@ mod tests {
         NOW.store(123, Ordering::SeqCst);
 
         let inner = PendingStream;
-        let mut timed = TimeoutStream::with_time_getter(inner, Duration::MAX, fake_now);
+        let mut timed = TimeoutStream::with_time_getter(inner, Duration::MAX, test_now);
         crate::assert_with_log!(
             timed.sleep.deadline() == Time::MAX,
             "deadline saturates to max",
