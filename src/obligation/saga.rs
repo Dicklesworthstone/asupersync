@@ -1284,7 +1284,7 @@ mod tests {
 
         assert!(
             report.pairwise_conflicts.is_empty(),
-            "mapping validation should fail before synthetic overlap introduces fake conflicts"
+            "mapping validation should fail before synthetic overlap introduces synthetic conflicts"
         );
         assert_eq!(report.constraint_violations.len(), 1);
         assert!(
