@@ -448,27 +448,10 @@ impl SchedulerFairnessHarness {
             order.clone()
         };
 
-        // Get metrics from current runtime (mock values for now)
-        let preemption_metrics = PreemptionMetrics {
-            cancel_dispatches: 100,
-            timed_dispatches: 200,
-            ready_dispatches: 1000,
-            fairness_yields: 5,
-            adaptive_epochs: if self.config.enable_adaptive { 10 } else { 0 },
-            adaptive_current_limit: self.config.cancel_streak_limit,
-            adaptive_reward_ema: 0.45,
-            adaptive_e_value: 2.1,
-            max_cancel_streak: self.config.cancel_streak_limit - 2,
-            ..Default::default()
-        };
-
-        let starvation_stats = StarvationStats {
-            currently_starved_tasks: 0,
-            max_task_wait_time_ns: total_runtime_ns / 10,
-            avg_task_wait_time_ns: total_runtime_ns / 50,
-            pattern_detected: false,
-            ..Default::default()
-        };
+        let preemption_metrics =
+            self.derive_preemption_metrics(&task_traces, completion_order.len());
+        let starvation_stats = Self::derive_starvation_stats(&task_traces);
+        let scheduler_ticks = Self::derive_scheduler_ticks(&task_traces, completion_order.len());
 
         SchedulerFairnessResults {
             config: self.config.clone(),
@@ -476,9 +459,105 @@ impl SchedulerFairnessHarness {
             preemption_metrics,
             starvation_stats,
             total_runtime_ns,
-            scheduler_ticks: 1000, // Mock scheduler tick count
+            scheduler_ticks,
             completion_order,
         }
+    }
+
+    fn derive_preemption_metrics(
+        &self,
+        task_traces: &[TaskTrace],
+        completion_count: usize,
+    ) -> PreemptionMetrics {
+        let total_polls: u64 = task_traces
+            .iter()
+            .map(|trace| u64::from(trace.poll_count))
+            .sum();
+        let total_yields: u64 = task_traces
+            .iter()
+            .map(|trace| u64::from(trace.yield_count))
+            .sum();
+        let cancelled_count = task_traces
+            .iter()
+            .filter(|trace| trace.was_cancelled)
+            .count() as u64;
+        let task_count = task_traces.len() as u64;
+        let completion_count = completion_count as u64;
+        let completion_ratio = if task_count == 0 {
+            0.0
+        } else {
+            completion_count as f64 / task_count as f64
+        };
+
+        let adaptive_epochs = if self.config.enable_adaptive {
+            let interval = u64::from(self.config.governor_interval.max(1));
+            total_polls.saturating_add(interval - 1) / interval
+        } else {
+            0
+        };
+
+        let adaptive_reward_ema = if self.config.enable_adaptive {
+            completion_ratio.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let adaptive_e_value = if self.config.enable_adaptive {
+            1.0 + (1.0 - completion_ratio.clamp(0.0, 1.0))
+        } else {
+            1.0
+        };
+
+        PreemptionMetrics {
+            cancel_dispatches: cancelled_count,
+            timed_dispatches: total_yields,
+            ready_dispatches: total_polls.max(completion_count),
+            fairness_yields: total_yields,
+            adaptive_epochs,
+            adaptive_current_limit: self.config.cancel_streak_limit,
+            adaptive_reward_ema,
+            adaptive_e_value,
+            max_cancel_streak: (cancelled_count as usize).min(self.config.cancel_streak_limit),
+            ..Default::default()
+        }
+    }
+
+    fn derive_starvation_stats(task_traces: &[TaskTrace]) -> StarvationStats {
+        let wait_times: Vec<u64> = task_traces
+            .iter()
+            .filter_map(|trace| {
+                trace
+                    .start_time
+                    .map(|start| start.duration_since_nanos(trace.spawn_time))
+            })
+            .collect();
+        let total_wait_time_ns = wait_times.iter().sum::<u64>();
+        let avg_task_wait_time_ns = if wait_times.is_empty() {
+            0
+        } else {
+            total_wait_time_ns / wait_times.len() as u64
+        };
+        let currently_starved_tasks = task_traces
+            .iter()
+            .filter(|trace| trace.start_time.is_some() && trace.completion_time.is_none())
+            .count() as u32;
+
+        StarvationStats {
+            currently_starved_tasks,
+            max_task_wait_time_ns: wait_times.into_iter().max().unwrap_or(0),
+            avg_task_wait_time_ns,
+            tracked_tasks_count: task_traces.len() as u32,
+            pattern_detected: currently_starved_tasks > 0,
+            total_tracked_wait_time_ns: total_wait_time_ns,
+            ..Default::default()
+        }
+    }
+
+    fn derive_scheduler_ticks(task_traces: &[TaskTrace], completion_count: usize) -> u64 {
+        let total_polls: u64 = task_traces
+            .iter()
+            .map(|trace| u64::from(trace.poll_count))
+            .sum();
+        total_polls.saturating_add(completion_count as u64)
     }
 
     fn calculate_task_priority(&self, task_index: usize) -> u8 {
