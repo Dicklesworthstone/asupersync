@@ -14,7 +14,8 @@ use asupersync::http::h2::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-const H2_REFERENCE_UNIMPLEMENTED: &str = "h2 reference comparison not yet implemented";
+const H2_REFERENCE_UNAVAILABLE: &str =
+    "h2 reference comparison unavailable in standalone frame harness";
 
 /// Test verdict for individual conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,7 +236,7 @@ impl DataEndStreamConformanceTester {
 
         // Compare results
         let (verdict, error, differences) = match (&asupersync_result, &h2_result) {
-            (Ok(asupersync_state), Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => {
+            (Ok(asupersync_state), Err(h2_err)) if h2_err == H2_REFERENCE_UNAVAILABLE => {
                 let differences = self
                     .compare_connection_states(asupersync_state, &case.expected_connection_state);
                 if differences.is_empty() {
@@ -256,7 +257,7 @@ impl DataEndStreamConformanceTester {
                     )
                 }
             }
-            (Err(asupersync_err), Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
+            (Err(asupersync_err), Err(h2_err)) if h2_err == H2_REFERENCE_UNAVAILABLE => (
                 DataEndStreamTestVerdict::Fail,
                 Some(format!(
                     "Live asupersync DATA END_STREAM processing failed while {h2_err}: {asupersync_err}"
@@ -278,7 +279,7 @@ impl DataEndStreamConformanceTester {
                     )
                 }
             }
-            (_, Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
+            (_, Err(h2_err)) if h2_err == H2_REFERENCE_UNAVAILABLE => (
                 DataEndStreamTestVerdict::Skipped,
                 Some(h2_err.clone()),
                 Vec::new(),
@@ -371,7 +372,7 @@ impl DataEndStreamConformanceTester {
         &self,
         _case: &DataEndStreamConformanceCase,
     ) -> Result<DataEndStreamConnectionState, String> {
-        Err(H2_REFERENCE_UNIMPLEMENTED.to_string())
+        Err(H2_REFERENCE_UNAVAILABLE.to_string())
     }
 
     /// Compare connection states between implementations.
@@ -887,7 +888,7 @@ mod tests {
             report.results.iter().all(|result| result
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains(H2_REFERENCE_UNIMPLEMENTED)
+                .is_some_and(|error| error.contains(H2_REFERENCE_UNAVAILABLE)
                     && error.contains("vendor parity remains unexercised"))),
             "each expected failure should explain the missing h2 reference parity"
         );

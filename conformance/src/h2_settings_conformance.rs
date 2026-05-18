@@ -11,7 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
-const H2_REFERENCE_UNIMPLEMENTED: &str = "h2 reference comparison not yet implemented";
+const H2_REFERENCE_UNAVAILABLE: &str =
+    "h2 reference comparison unavailable in standalone frame harness";
 
 /// Settings field values for comparison between implementations
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -379,7 +380,7 @@ impl SettingsConformanceTester {
             Ok(h2_state) => local_state
                 .map(|state| (state, h2_state))
                 .map_err(DifferentialError::Failure),
-            Err(error) if error == H2_REFERENCE_UNIMPLEMENTED => {
+            Err(error) if error == H2_REFERENCE_UNAVAILABLE => {
                 Err(DifferentialError::ReferenceUnavailable { local_state, error })
             }
             Err(error) => Err(DifferentialError::Failure(format!(
@@ -452,7 +453,7 @@ impl SettingsConformanceTester {
         &self,
         _settings_sequence: &[SettingsFrame],
     ) -> Result<SettingsSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-        Err(H2_REFERENCE_UNIMPLEMENTED.into())
+        Err(H2_REFERENCE_UNAVAILABLE.into())
     }
 
     fn evaluate_local_expected_result(
@@ -640,7 +641,7 @@ mod tests {
             report.results.iter().all(|result| result
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains(H2_REFERENCE_UNIMPLEMENTED))),
+                .is_some_and(|error| error.contains(H2_REFERENCE_UNAVAILABLE))),
             "each fail-closed result must name the missing h2 vendor reference"
         );
         assert!(
