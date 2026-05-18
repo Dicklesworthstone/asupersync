@@ -46,6 +46,10 @@ path = "src/bin/mysql_conformance_runner.rs"
 name = "h1_request_building_conformance"
 path = "src/bin/h1_request_building_conformance.rs"
 
+[[test]]
+name = "h1_request_building_conformance_exit_codes"
+path = "tests/h1_request_building_conformance_exit_codes.rs"
+
 [[bin]]
 name = "h1_response_building_conformance"
 path = "src/bin/h1_response_building_conformance.rs"

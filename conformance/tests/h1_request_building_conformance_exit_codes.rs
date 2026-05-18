@@ -3,15 +3,19 @@
 //! These tests verify that the binary correctly fails closed on partial coverage
 //! and produces appropriate exit codes.
 
-use std::process::Command;
+use std::process::{Command, Output};
+
+fn run_h1_request_building_conformance(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_h1_request_building_conformance"))
+        .args(args)
+        .output()
+        .expect("Failed to run h1_request_building_conformance binary")
+}
 
 /// Test that the binary runs without panicking and produces expected output format
 #[test]
 fn test_binary_runs_successfully() {
-    let output = Command::new("cargo")
-        .args(&["run", "--bin", "h1_request_building_conformance", "--", "--timeout", "10", "--format", "summary"])
-        .output()
-        .expect("Failed to run h1_request_building_conformance binary");
+    let output = run_h1_request_building_conformance(&["--timeout", "10", "--format", "summary"]);
 
     // The binary should run without being killed by signal
     assert!(
@@ -25,10 +29,11 @@ fn test_binary_runs_successfully() {
 
     // Should contain conformance results
     assert!(
-        stderr.contains("HTTP/1.1 REQUEST BUILDING CONFORMANCE RESULTS") ||
-        stdout.contains("HTTP/1.1 REQUEST BUILDING CONFORMANCE SUMMARY"),
+        stderr.contains("HTTP/1.1 REQUEST BUILDING CONFORMANCE RESULTS")
+            || stdout.contains("HTTP/1.1 REQUEST BUILDING CONFORMANCE SUMMARY"),
         "Output should contain conformance results. stdout: {}, stderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 }
 
@@ -36,10 +41,7 @@ fn test_binary_runs_successfully() {
 #[test]
 fn test_binary_fail_closed_behavior() {
     // Run the binary and capture exit code
-    let output = Command::new("cargo")
-        .args(&["run", "--bin", "h1_request_building_conformance", "--", "--timeout", "10"])
-        .output()
-        .expect("Failed to run h1_request_building_conformance binary");
+    let output = run_h1_request_building_conformance(&["--timeout", "10"]);
 
     let exit_code = output.status.code();
 
@@ -56,25 +58,26 @@ fn test_binary_fail_closed_behavior() {
     // If exit code is 1, there should be indication of why in the output
     if exit_code == Some(1) {
         assert!(
-            stderr.contains("FAILED") ||
-            stderr.contains("PARTIAL COVERAGE") ||
-            stderr.contains("Expected Failures") ||
-            stderr.contains("Skipped") ||
-            stdout.contains("Failed:") ||
-            stdout.contains("Expected Failures:") ||
-            stdout.contains("Skipped:"),
+            stderr.contains("FAILED")
+                || stderr.contains("PARTIAL COVERAGE")
+                || stderr.contains("Expected Failures")
+                || stderr.contains("Skipped")
+                || stdout.contains("Failed:")
+                || stdout.contains("Expected Failures:")
+                || stdout.contains("Skipped:"),
             "Exit code 1 should be accompanied by indication of failures or partial coverage. stdout: {}, stderr: {}",
-            stdout, stderr
+            stdout,
+            stderr
         );
     }
 
     // If exit code is 0, should indicate full success
     if exit_code == Some(0) {
         assert!(
-            stderr.contains("ALL TESTS PASSED") ||
-            stdout.contains("Compliance Score: 100.0%"),
+            stderr.contains("ALL TESTS PASSED") || stdout.contains("Compliance Score: 100.0%"),
             "Exit code 0 should indicate all tests passed with full coverage. stdout: {}, stderr: {}",
-            stdout, stderr
+            stdout,
+            stderr
         );
     }
 }
@@ -83,38 +86,37 @@ fn test_binary_fail_closed_behavior() {
 #[test]
 fn test_binary_output_formats() {
     // Test JSON format
-    let json_output = Command::new("cargo")
-        .args(&["run", "--bin", "h1_request_building_conformance", "--", "--format", "json", "--timeout", "5"])
-        .output()
-        .expect("Failed to run binary with JSON format");
+    let json_output = run_h1_request_building_conformance(&["--format", "json", "--timeout", "5"]);
 
-    assert!(json_output.status.code().is_some(), "JSON format should produce valid exit code");
+    assert!(
+        json_output.status.code().is_some(),
+        "JSON format should produce valid exit code"
+    );
 
     // Test Markdown format
-    let md_output = Command::new("cargo")
-        .args(&["run", "--bin", "h1_request_building_conformance", "--", "--format", "markdown", "--timeout", "5"])
-        .output()
-        .expect("Failed to run binary with Markdown format");
+    let md_output =
+        run_h1_request_building_conformance(&["--format", "markdown", "--timeout", "5"]);
 
-    assert!(md_output.status.code().is_some(), "Markdown format should produce valid exit code");
+    assert!(
+        md_output.status.code().is_some(),
+        "Markdown format should produce valid exit code"
+    );
 
     // Test Summary format
-    let summary_output = Command::new("cargo")
-        .args(&["run", "--bin", "h1_request_building_conformance", "--", "--format", "summary", "--timeout", "5"])
-        .output()
-        .expect("Failed to run binary with Summary format");
+    let summary_output =
+        run_h1_request_building_conformance(&["--format", "summary", "--timeout", "5"]);
 
-    assert!(summary_output.status.code().is_some(), "Summary format should produce valid exit code");
+    assert!(
+        summary_output.status.code().is_some(),
+        "Summary format should produce valid exit code"
+    );
 }
 
 /// Test that the binary handles timeout correctly
 #[test]
 fn test_binary_timeout_handling() {
     // Test with a very short timeout to ensure timeout handling works
-    let output = Command::new("cargo")
-        .args(&["run", "--bin", "h1_request_building_conformance", "--", "--timeout", "1"])
-        .output()
-        .expect("Failed to run binary with short timeout");
+    let output = run_h1_request_building_conformance(&["--timeout", "1"]);
 
     let exit_code = output.status.code();
 
@@ -136,10 +138,7 @@ fn test_binary_timeout_handling() {
 /// Test that verbose flag provides additional output without breaking exit code logic
 #[test]
 fn test_binary_verbose_flag() {
-    let output = Command::new("cargo")
-        .args(&["run", "--bin", "h1_request_building_conformance", "--", "--verbose", "--timeout", "10"])
-        .output()
-        .expect("Failed to run binary with verbose flag");
+    let output = run_h1_request_building_conformance(&["--verbose", "--timeout", "10"]);
 
     // Verbose flag should not break exit code logic
     let exit_code = output.status.code();
@@ -164,7 +163,7 @@ mod unit_tests {
 
     use asupersync_conformance::{
         RequestBuildingComplianceReport, RequestBuildingComplianceSummary,
-        RequestBuildingTestResult, RequestBuildingTestVerdict
+        RequestBuildingTestResult, RequestBuildingTestVerdict,
     };
 
     /// Test the fail-closed exit code logic
@@ -172,41 +171,82 @@ mod unit_tests {
     fn test_exit_code_logic() {
         // Test case 1: All tests pass, no partial coverage -> exit 0
         let report1 = create_test_report(5, 0, 0, 0);
-        assert_eq!(calculate_exit_code(&report1), 0, "All pass with full coverage should exit 0");
+        assert_eq!(
+            calculate_exit_code(&report1),
+            0,
+            "All pass with full coverage should exit 0"
+        );
 
         // Test case 2: Some tests fail -> exit 1
         let report2 = create_test_report(3, 2, 0, 0);
-        assert_eq!(calculate_exit_code(&report2), 1, "Test failures should exit 1");
+        assert_eq!(
+            calculate_exit_code(&report2),
+            1,
+            "Test failures should exit 1"
+        );
 
         // Test case 3: Expected failures (partial coverage) -> exit 1
         let report3 = create_test_report(3, 0, 2, 0);
-        assert_eq!(calculate_exit_code(&report3), 1, "Expected failures should exit 1");
+        assert_eq!(
+            calculate_exit_code(&report3),
+            1,
+            "Expected failures should exit 1"
+        );
 
         // Test case 4: Skipped tests (partial coverage) -> exit 1
         let report4 = create_test_report(3, 0, 0, 2);
-        assert_eq!(calculate_exit_code(&report4), 1, "Skipped tests should exit 1");
+        assert_eq!(
+            calculate_exit_code(&report4),
+            1,
+            "Skipped tests should exit 1"
+        );
 
         // Test case 5: Mixed failures and partial coverage -> exit 1
         let report5 = create_test_report(2, 1, 1, 1);
-        assert_eq!(calculate_exit_code(&report5), 1, "Mixed failures and partial coverage should exit 1");
+        assert_eq!(
+            calculate_exit_code(&report5),
+            1,
+            "Mixed failures and partial coverage should exit 1"
+        );
     }
 
-    fn create_test_report(passed: usize, failed: usize, expected_failures: usize, skipped: usize) -> RequestBuildingComplianceReport {
+    fn create_test_report(
+        passed: usize,
+        failed: usize,
+        expected_failures: usize,
+        skipped: usize,
+    ) -> RequestBuildingComplianceReport {
         let total = passed + failed + expected_failures + skipped;
         let mut results = Vec::new();
 
         // Add results based on counts
         for i in 0..passed {
-            results.push(create_test_result(format!("PASS-{}", i), RequestBuildingTestVerdict::Pass, true));
+            results.push(create_test_result(
+                format!("PASS-{}", i),
+                RequestBuildingTestVerdict::Pass,
+                true,
+            ));
         }
         for i in 0..failed {
-            results.push(create_test_result(format!("FAIL-{}", i), RequestBuildingTestVerdict::Fail, false));
+            results.push(create_test_result(
+                format!("FAIL-{}", i),
+                RequestBuildingTestVerdict::Fail,
+                false,
+            ));
         }
         for i in 0..expected_failures {
-            results.push(create_test_result(format!("XFAIL-{}", i), RequestBuildingTestVerdict::ExpectedFailure, false));
+            results.push(create_test_result(
+                format!("XFAIL-{}", i),
+                RequestBuildingTestVerdict::ExpectedFailure,
+                false,
+            ));
         }
         for i in 0..skipped {
-            results.push(create_test_result(format!("SKIP-{}", i), RequestBuildingTestVerdict::Skipped, false));
+            results.push(create_test_result(
+                format!("SKIP-{}", i),
+                RequestBuildingTestVerdict::Skipped,
+                false,
+            ));
         }
 
         let compliance_score = if passed + failed > 0 {
@@ -231,7 +271,11 @@ mod unit_tests {
         }
     }
 
-    fn create_test_result(case_id: String, verdict: RequestBuildingTestVerdict, bytes_match: bool) -> RequestBuildingTestResult {
+    fn create_test_result(
+        case_id: String,
+        verdict: RequestBuildingTestVerdict,
+        bytes_match: bool,
+    ) -> RequestBuildingTestResult {
         let error = if verdict == RequestBuildingTestVerdict::Pass {
             None
         } else {
@@ -243,7 +287,11 @@ mod unit_tests {
             verdict,
             error,
             asupersync_wire: vec![1, 2, 3],
-            reqwest_wire: if bytes_match { vec![1, 2, 3] } else { vec![1, 2] },
+            reqwest_wire: if bytes_match {
+                vec![1, 2, 3]
+            } else {
+                vec![1, 2]
+            },
             bytes_match,
             asupersync_size: 3,
             reqwest_size: if bytes_match { 3 } else { 2 },
@@ -253,7 +301,12 @@ mod unit_tests {
     /// Calculate exit code using the same logic as the binary
     fn calculate_exit_code(report: &RequestBuildingComplianceReport) -> i32 {
         let has_failures = report.summary.failed > 0;
-        let has_partial_coverage = report.summary.expected_failures > 0 || report.summary.skipped > 0;
-        if has_failures || has_partial_coverage { 1 } else { 0 }
+        let has_partial_coverage =
+            report.summary.expected_failures > 0 || report.summary.skipped > 0;
+        if has_failures || has_partial_coverage {
+            1
+        } else {
+            0
+        }
     }
 }
