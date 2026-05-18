@@ -379,12 +379,14 @@ fn test_basic_frame_sequence_golden() {
     if tester.update_golden {
         println!("SEQUENCE GOLDEN UPDATE: {}", actual_hex);
     } else {
-        // This is a simplified test - in practice, exact hex would be verified
-        assert!(
-            !actual_hex.is_empty(),
-            "Frame sequence should produce output"
+        assert_eq!(
+            actual_hex,
+            concat!(
+                "000000040000000000",         // SETTINGS: length=0, type=4, flags=0, stream=0
+                "00000400000000000174657374"  // DATA: length=4, type=0, flags=0, stream=1, "test"
+            ),
+            "Frame sequence golden should preserve exact SETTINGS+DATA wire bytes",
         );
-        assert!(actual_hex.len() >= 18); // At least 2 frame headers (9 bytes each)
     }
 }
 
@@ -402,18 +404,8 @@ fn test_unknown_frame_golden() {
         payload: Bytes::from_static(b"ext"),
     };
 
-    // Golden: Unknown frame preserves payload exactly
-    if tester.update_golden {
-        let mut buf = BytesMut::new();
-        frame.encode(&mut buf).expect("test frame fits");
-        let actual_hex = FrameGoldenTester::to_hex(&buf);
-        println!("UNKNOWN FRAME GOLDEN UPDATE: {actual_hex}");
-    } else {
-        // Simplified test - just verify it encodes without error
-        let mut buf = BytesMut::new();
-        frame.encode(&mut buf).expect("test frame fits");
-        assert!(buf.len() > 9); // Header + payload
-    }
+    // Golden: Unknown frame preserves type, stream id, zero flags, and payload exactly.
+    tester.assert_frame_golden(&frame, "unknown_frame", "000003ff0012345678657874");
 }
 
 #[cfg(test)]
