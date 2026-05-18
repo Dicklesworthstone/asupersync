@@ -752,6 +752,173 @@ fn artifact_free_proof_receipt_records_selected_worker_when_reported() {
 }
 
 #[test]
+fn proof_lifecycle_contract_splits_remote_enospc_and_cleanup_authorization() {
+    let receipt = receipt_json_with_args(
+        "passed_after_retrieval_enospc.log",
+        None,
+        &[
+            "--proof-lifecycle-contract",
+            "--proof-lane",
+            "rch-retrieval-lifecycle",
+            "--guarantee",
+            "remote fuzz smoke result is separated from local artifact retrieval",
+            "--stale-target-candidate",
+            "/tmp/rch_target_maroontrout_semaphore_fuzz",
+        ],
+    );
+    let lifecycle = &receipt["proof_lifecycle_contract"];
+
+    assert_eq!(
+        lifecycle["schema_version"].as_str(),
+        Some("proof-artifact-lifecycle-contract-v1")
+    );
+    assert_eq!(lifecycle["remote_result"]["status"].as_str(), Some("pass"));
+    assert_eq!(lifecycle["remote_result"]["exit_code"].as_i64(), Some(0));
+    assert_eq!(
+        lifecycle["retrieval_result"]["status"].as_str(),
+        Some("blocked")
+    );
+    assert_eq!(
+        lifecycle["retrieval_result"]["blocker_kind"].as_str(),
+        Some("local-disk-full")
+    );
+    assert_eq!(
+        lifecycle["local_pressure"]["status"].as_str(),
+        Some("critical")
+    );
+    assert_eq!(
+        lifecycle["local_pressure"]["signal"].as_str(),
+        Some("enospc")
+    );
+    assert_eq!(
+        lifecycle["cleanup_authorization"]["status"].as_str(),
+        Some("required")
+    );
+    assert_eq!(
+        lifecycle["cleanup_authorization"]["authorized"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        lifecycle["cleanup_authorization"]["executable_cleanup_commands"]
+            .as_array()
+            .expect("cleanup commands must be array")
+            .len(),
+        0,
+        "receipt must not emit executable deletion commands"
+    );
+    assert!(
+        lifecycle["cleanup_authorization"]["stale_target_candidates"]
+            .as_array()
+            .expect("stale target candidates")
+            .iter()
+            .any(|candidate| candidate.as_str()
+                == Some("/tmp/rch_target_maroontrout_semaphore_fuzz"))
+    );
+    assert!(
+        lifecycle["closeout_template"]
+            .as_str()
+            .expect("closeout template")
+            .contains("cleanup_authorization.authorized=false")
+    );
+}
+
+#[test]
+fn proof_lifecycle_contract_covers_remote_failure_without_retrieval() {
+    let receipt = receipt_json_with_args(
+        "remote_failure.log",
+        Some(101),
+        &["--proof-lifecycle-contract"],
+    );
+    let lifecycle = &receipt["proof_lifecycle_contract"];
+
+    assert_eq!(lifecycle["remote_result"]["status"].as_str(), Some("fail"));
+    assert_eq!(lifecycle["remote_result"]["exit_code"].as_i64(), Some(101));
+    assert_eq!(
+        lifecycle["retrieval_result"]["status"].as_str(),
+        Some("not_requested")
+    );
+    assert_eq!(
+        lifecycle["local_pressure"]["status"].as_str(),
+        Some("unknown")
+    );
+    assert_eq!(
+        lifecycle["cleanup_authorization"]["status"].as_str(),
+        Some("not_required")
+    );
+    assert_eq!(
+        lifecycle["cleanup_authorization"]["executable_cleanup_commands"]
+            .as_array()
+            .expect("cleanup commands must be array")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn proof_lifecycle_contract_covers_local_fallback_under_red_disk() {
+    let receipt = receipt_json_with_args(
+        "local_fallback_red_disk.log",
+        None,
+        &["--proof-lifecycle-contract"],
+    );
+    let lifecycle = &receipt["proof_lifecycle_contract"];
+
+    assert_eq!(lifecycle["classification"].as_str(), Some("local_fallback"));
+    assert_eq!(
+        lifecycle["remote_result"]["status"].as_str(),
+        Some("invalid")
+    );
+    assert_eq!(
+        lifecycle["retrieval_result"]["status"].as_str(),
+        Some("not_available")
+    );
+    assert_eq!(
+        lifecycle["local_pressure"]["status"].as_str(),
+        Some("critical")
+    );
+    assert_eq!(
+        lifecycle["local_pressure"]["signal"].as_str(),
+        Some("critical_pressure")
+    );
+    assert_eq!(
+        lifecycle["cleanup_authorization"]["status"].as_str(),
+        Some("required")
+    );
+    assert_eq!(
+        lifecycle["cleanup_authorization"]["authorized"].as_bool(),
+        Some(false)
+    );
+    assert!(
+        lifecycle["closeout_template"]
+            .as_str()
+            .expect("closeout template")
+            .contains("remote_result.status=invalid")
+    );
+}
+
+#[test]
+fn proof_lifecycle_contract_enospc_matches_full_output_golden() {
+    let output = run_receipt_with_args(
+        "passed_after_retrieval_enospc.log",
+        None,
+        &[
+            "--proof-lifecycle-contract",
+            "--proof-lane",
+            "rch-retrieval-lifecycle",
+            "--guarantee",
+            "remote fuzz smoke result is separated from local artifact retrieval",
+            "--stale-target-candidate",
+            "/tmp/rch_target_maroontrout_semaphore_fuzz",
+        ],
+    );
+    assert_output_matches_golden(
+        output,
+        "passed_after_retrieval_enospc_expected.json",
+        "rch retrieval ENOSPC lifecycle receipt changed; update the golden only after reviewing cleanup authorization semantics",
+    );
+}
+
+#[test]
 fn helper_declares_it_does_not_run_mutating_commands() {
     let receipt = receipt_json("passed_after_retrieval_timeout.log", Some(124));
 

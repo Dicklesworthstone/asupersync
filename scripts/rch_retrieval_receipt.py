@@ -36,6 +36,7 @@ TIMEOUT_RE = re.compile(r"(?i)(timed out|timeout|terminated|signal TERM|exit cod
 DISK_FULL_RE = re.compile(
     r"(?i)(ENOSPC|No space left on device|os error 28|error 28)"
 )
+CRITICAL_PRESSURE_RE = re.compile(r"critical_pressure=(?P<level>\d+)")
 
 
 def utc_now() -> str:
@@ -556,7 +557,7 @@ def artifact_retrieval_result(
 
 
 def local_disk_pressure_result(
-    retrieval_blocker: dict[str, Any] | None
+    retrieval_blocker: dict[str, Any] | None, text: str = ""
 ) -> dict[str, Any]:
     if retrieval_blocker is not None and retrieval_blocker["kind"] == "local-disk-full":
         return {
@@ -565,11 +566,102 @@ def local_disk_pressure_result(
             "evidence_line": retrieval_blocker["line"],
             "evidence_text": retrieval_blocker["text"],
         }
+    critical_pressure = first_matching_line(text, CRITICAL_PRESSURE_RE)
+    if critical_pressure is not None:
+        return {
+            "status": "critical",
+            "signal": "critical_pressure",
+            "evidence_line": critical_pressure["line"],
+            "evidence_text": critical_pressure["text"],
+        }
     return {
         "status": "unknown",
         "signal": "",
         "evidence_line": 0,
         "evidence_text": "",
+    }
+
+
+def cleanup_authorization_result(
+    args: argparse.Namespace, local_pressure: dict[str, Any]
+) -> dict[str, Any]:
+    stale_target_candidates = args.stale_target_candidate or []
+    local_cleanup_blocker = local_pressure["status"] == "critical"
+    requires_authorization = local_cleanup_blocker or bool(stale_target_candidates)
+
+    if requires_authorization:
+        status = "required"
+        reason = (
+            "local disk pressure or stale target candidates require explicit cleanup authorization"
+        )
+        next_steps = [
+            "record remote proof and artifact retrieval as separate closeout fields",
+            "ask the user for explicit written authorization before deleting any candidate",
+            "rerun the same focused proof lane after authorized cleanup or pressure relief",
+        ]
+    else:
+        status = "not_required"
+        reason = "no cleanup candidate or disk-pressure blocker was detected"
+        next_steps = ["no cleanup action is needed for this receipt"]
+
+    return {
+        "status": status,
+        "authorized": False,
+        "report_only": True,
+        "reason": reason,
+        "required_authorization": (
+            "explicit written user authorization is required before deleting files or directories"
+        ),
+        "stale_target_candidates": stale_target_candidates,
+        "executable_cleanup_commands": [],
+        "forbidden_without_authorization": [
+            "delete target directories",
+            "remove rch scratch artifacts",
+            "clean build caches",
+            "truncate logs or session history",
+        ],
+        "next_steps": next_steps,
+    }
+
+
+def proof_lifecycle_contract(
+    args: argparse.Namespace, text: str, analysis: dict[str, Any], target_dir: str | None
+) -> dict[str, Any]:
+    markers = analysis["markers"]
+    retrieval_blocker = analysis.get("retrieval_blocker")
+    remote_result = remote_command_result(markers)
+    retrieval_result = artifact_retrieval_result(markers, retrieval_blocker)
+    local_pressure = local_disk_pressure_result(retrieval_blocker, text)
+    cleanup_authorization = cleanup_authorization_result(args, local_pressure)
+
+    return {
+        "schema_version": "proof-artifact-lifecycle-contract-v1",
+        "command": args.command,
+        "log_remote_command": remote_command_from_log(text),
+        "proof_lane": args.proof_lane or "unspecified",
+        "guarantee": args.guarantee or "unspecified",
+        "target_dir": target_dir,
+        "selected_worker": selected_worker_from_log(text),
+        "wrapper_exit_code": args.wrapper_exit_code,
+        "classification": analysis["classification"],
+        "decision": analysis["decision"],
+        "remote_result": remote_result,
+        "retrieval_result": retrieval_result,
+        "local_pressure": local_pressure,
+        "cleanup_authorization": cleanup_authorization,
+        "closeout_template": (
+            "remote_result.status={remote_status}; "
+            "retrieval_result.status={retrieval_status}; "
+            "local_pressure.status={pressure_status}; "
+            "cleanup_authorization.status={cleanup_status}; "
+            "cleanup_authorization.authorized=false"
+        ).format(
+            remote_status=remote_result["status"],
+            retrieval_status=retrieval_result["status"],
+            pressure_status=local_pressure["status"],
+            cleanup_status=cleanup_authorization["status"],
+        ),
+        "non_mutating": True,
     }
 
 
@@ -661,6 +753,10 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         receipt["artifact_free_proof_receipt"] = artifact_free_proof_receipt(
             args, text, analysis, target_dir
         )
+    if args.proof_lifecycle_contract:
+        receipt["proof_lifecycle_contract"] = proof_lifecycle_contract(
+            args, text, analysis, target_dir
+        )
     return receipt
 
 
@@ -704,6 +800,17 @@ def main() -> int:
         "--artifact-free-proof-receipt",
         action="store_true",
         help="Emit compact remote proof and artifact-retrieval fields for closeouts",
+    )
+    parser.add_argument(
+        "--proof-lifecycle-contract",
+        action="store_true",
+        help="Emit remote/retrieval/local-pressure/cleanup-authorization lifecycle fields",
+    )
+    parser.add_argument(
+        "--stale-target-candidate",
+        action="append",
+        default=[],
+        help="Report-only stale target candidate; never deleted by this helper",
     )
     parser.add_argument("--generated-at", default="", help="UTC timestamp for deterministic receipts")
     parser.add_argument("--wrapper-exit-code", type=int, help="Local wrapper exit code, if known")

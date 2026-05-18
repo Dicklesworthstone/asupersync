@@ -1,0 +1,3 @@
+[RCH] local (no admissible workers: critical_pressure=5,hard_preflight=4): env CARGO_TARGET_DIR=/tmp/rch_target_boldtower_c8thc8_5 cargo test -p asupersync --test rch_retrieval_receipt_contract proof_lifecycle_contract -- --nocapture
+running 2 tests
+test result: ok. 2 passed; 0 failed

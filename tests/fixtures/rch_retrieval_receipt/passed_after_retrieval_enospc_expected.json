@@ -1,0 +1,135 @@
+{
+  "artifact_budget": {
+    "configured": false,
+    "limits": {
+      "max_artifact_bytes": null,
+      "max_artifact_files": null,
+      "max_retrieval_ms": null
+    },
+    "observed": {
+      "artifact_bytes": null,
+      "artifact_file_count": null,
+      "retrieval_elapsed_ms": null
+    },
+    "proof_lane": "rch-retrieval-lifecycle",
+    "rchignore_remediation": {
+      "next_steps": [
+        "use a lane-specific CARGO_TARGET_DIR under ${TMPDIR:-/tmp}/rch_target_<lane>",
+        "exclude transient rch scratch directories from artifact retrieval",
+        "rerun the same focused proof lane after trimming artifact fanout"
+      ],
+      "operator_note": "Keep per-lane CARGO_TARGET_DIR values under transient rch scratch paths or add equivalent bulky artifact directories to .rchignore before rerunning.",
+      "recommended_patterns": [
+        ".rch-*/",
+        ".rch_target*/"
+      ]
+    },
+    "status": "not-configured",
+    "violations": [],
+    "within_budget": null
+  },
+  "classification": "passed_after_retrieval_enospc",
+  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs cargo test --test proof_runner_contract -- --nocapture",
+  "current_date": "2026-05-08",
+  "decision": "pass-with-retrieval-blocker",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:10:00Z",
+  "guarantee": "remote fuzz smoke result is separated from local artifact retrieval",
+  "log_path": "tests/fixtures/rch_retrieval_receipt/passed_after_retrieval_enospc.log",
+  "markers": {
+    "artifact_bytes": null,
+    "artifact_file_count": null,
+    "local_fallback": false,
+    "remote_exit_code": 0,
+    "remote_failure": false,
+    "remote_success": true,
+    "remote_success_line": 4,
+    "retrieval_completed": false,
+    "retrieval_completed_count": 0,
+    "retrieval_elapsed_ms": null,
+    "retrieval_partial": true,
+    "retrieval_stage_count": 1,
+    "retrieval_started": true,
+    "retrieval_started_line": 5,
+    "timeout_observed": false
+  },
+  "non_mutating": true,
+  "proof_lane": "rch-retrieval-lifecycle",
+  "proof_lifecycle_contract": {
+    "classification": "passed_after_retrieval_enospc",
+    "cleanup_authorization": {
+      "authorized": false,
+      "executable_cleanup_commands": [],
+      "forbidden_without_authorization": [
+        "delete target directories",
+        "remove rch scratch artifacts",
+        "clean build caches",
+        "truncate logs or session history"
+      ],
+      "next_steps": [
+        "record remote proof and artifact retrieval as separate closeout fields",
+        "ask the user for explicit written authorization before deleting any candidate",
+        "rerun the same focused proof lane after authorized cleanup or pressure relief"
+      ],
+      "reason": "local disk pressure or stale target candidates require explicit cleanup authorization",
+      "report_only": true,
+      "required_authorization": "explicit written user authorization is required before deleting files or directories",
+      "stale_target_candidates": [
+        "/tmp/rch_target_maroontrout_semaphore_fuzz"
+      ],
+      "status": "required"
+    },
+    "closeout_template": "remote_result.status=pass; retrieval_result.status=blocked; local_pressure.status=critical; cleanup_authorization.status=required; cleanup_authorization.authorized=false",
+    "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs cargo test --test proof_runner_contract -- --nocapture",
+    "decision": "pass-with-retrieval-blocker",
+    "guarantee": "remote fuzz smoke result is separated from local artifact retrieval",
+    "local_pressure": {
+      "evidence_line": 7,
+      "evidence_text": "rsync: [receiver] write failed on \"/tmp/rch_target_maroontrout_semaphore_fuzz/debug/deps/libasupersync.rmeta\": No space left on device (28)",
+      "signal": "enospc",
+      "status": "critical"
+    },
+    "log_remote_command": "env CARGO_TARGET_DIR=/tmp/rch_target_maroontrout_semaphore_fuzz cargo check --manifest-path fuzz/Cargo.toml --bin semaphore_acquire_cancel",
+    "non_mutating": true,
+    "proof_lane": "rch-retrieval-lifecycle",
+    "remote_result": {
+      "exit_code": 0,
+      "line": 4,
+      "reason": "remote command finished with exit 0",
+      "status": "pass"
+    },
+    "retrieval_result": {
+      "blocker_kind": "local-disk-full",
+      "blocker_line": 7,
+      "blocker_text": "rsync: [receiver] write failed on \"/tmp/rch_target_maroontrout_semaphore_fuzz/debug/deps/libasupersync.rmeta\": No space left on device (28)",
+      "completed": false,
+      "detail": "retrieval_incomplete",
+      "partial": true,
+      "reason": "artifact retrieval started but no completion marker was observed",
+      "started": true,
+      "started_line": 5,
+      "status": "blocked"
+    },
+    "schema_version": "proof-artifact-lifecycle-contract-v1",
+    "selected_worker": "ts2",
+    "target_dir": "${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs",
+    "wrapper_exit_code": null
+  },
+  "remediation": {
+    "next_steps": [
+      "capture the remote success line and test summary in the closeout",
+      "record the exact ENOSPC retrieval blocker line",
+      "recover local disk space before rerunning or retrieving artifacts"
+    ],
+    "operator_note": "Record the remote command as passed only when the remote success marker is present; record local ENOSPC during artifact retrieval as a separate disk-pressure blocker.",
+    "summary": "remote proof passed, but local artifact retrieval hit disk pressure"
+  },
+  "schema_version": "rch-retrieval-receipt-v1",
+  "target_dir": "${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs",
+  "wrapper_exit_code": null
+}

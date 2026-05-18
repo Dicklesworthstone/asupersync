@@ -146,6 +146,19 @@ claims proof coverage:
   `not_requested`, or `not_available`.
 - `process_status`: whether any `rch`, Cargo, or helper process remains running.
 
+For reusable closeout receipts, run `scripts/rch_retrieval_receipt.py` with
+`--proof-lifecycle-contract`. The emitted `proof_lifecycle_contract` object is
+the stable disk-pressure lifecycle shape:
+
+- `remote_result`: remote exit status and pass/fail/unknown reason.
+- `retrieval_result`: local artifact retrieval status, blocker kind, and
+  blocker line.
+- `local_pressure`: explicit disk-pressure signal such as `critical`/`enospc`
+  when observed.
+- `cleanup_authorization`: report-only cleanup posture. It must keep
+  `authorized=false` and `executable_cleanup_commands=[]` until the user gives
+  explicit written permission to delete files or directories.
+
 Use this interpretation table:
 
 | Situation | Closeout rule |
