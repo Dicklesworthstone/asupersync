@@ -530,7 +530,7 @@ fn render_handler(
     // Message structs
     writeln!(code, "// --- Message types ---").ok();
     writeln!(code).ok();
-    render_message_stubs(local, &mut code, &mut BTreeSet::new());
+    render_message_skeletons(local, &mut code, &mut BTreeSet::new());
     writeln!(code).ok();
 
     // Session type alias
@@ -557,7 +557,7 @@ fn render_handler(
     code
 }
 
-fn render_message_stubs(local: &LocalType, code: &mut String, seen: &mut BTreeSet<String>) {
+fn render_message_skeletons(local: &LocalType, code: &mut String, seen: &mut BTreeSet<String>) {
     match local {
         LocalType::Send { msg_type, then, .. } | LocalType::Recv { msg_type, then, .. } => {
             if seen.insert(msg_type.name.clone()) {
@@ -565,7 +565,7 @@ fn render_message_stubs(local: &LocalType, code: &mut String, seen: &mut BTreeSe
                 writeln!(code, "pub struct {};", msg_type.name).ok();
                 writeln!(code).ok();
             }
-            render_message_stubs(then, code, seen);
+            render_message_skeletons(then, code, seen);
         }
         LocalType::InternalChoice {
             then_branch,
@@ -577,18 +577,18 @@ fn render_message_stubs(local: &LocalType, code: &mut String, seen: &mut BTreeSe
             else_branch,
             ..
         } => {
-            render_message_stubs(then_branch, code, seen);
-            render_message_stubs(else_branch, code, seen);
+            render_message_skeletons(then_branch, code, seen);
+            render_message_skeletons(else_branch, code, seen);
         }
         LocalType::Rec { body, .. } => {
-            render_message_stubs(body, code, seen);
+            render_message_skeletons(body, code, seen);
         }
         LocalType::Compensate {
             forward,
             compensate,
         } => {
-            render_message_stubs(forward, code, seen);
-            render_message_stubs(compensate, code, seen);
+            render_message_skeletons(forward, code, seen);
+            render_message_skeletons(compensate, code, seen);
         }
         LocalType::RecVar { .. } | LocalType::End => {}
     }
@@ -673,9 +673,9 @@ fn render_handler_body(local: &LocalType, code: &mut String, indent: usize) {
             render_handler_body(forward, code, indent);
             writeln!(code, "{pad}// Compensation (on failure):").ok();
             writeln!(code, "{pad}// {{").ok();
-            let mut compensation_stub = String::new();
-            render_handler_body(compensate, &mut compensation_stub, 0);
-            for line in compensation_stub.lines() {
+            let mut compensation_skeleton = String::new();
+            render_handler_body(compensate, &mut compensation_skeleton, 0);
+            for line in compensation_skeleton.lines() {
                 if line.is_empty() {
                     writeln!(code, "{pad}//").ok();
                 } else {
@@ -932,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_code_compensation_actions_are_stubbed() {
+    fn generated_code_compensation_actions_are_commented_skeletons() {
         let protocol = example_saga_compensation();
         let output = compiler()
             .compile(&protocol, "coordinator")
@@ -951,7 +951,7 @@ mod tests {
         }
         assert!(
             found_compensate_send,
-            "Expected generated compensation skeleton to include CompensateMsg send stubs"
+            "Expected generated compensation skeleton to include CompensateMsg send skeleton"
         );
     }
 
