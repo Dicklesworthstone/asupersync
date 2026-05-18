@@ -970,10 +970,112 @@ impl PgLogicalReplicationHarness {
         });
     }
     #[allow(dead_code)]
-    fn test_transaction_ordering(&mut self) { /* Implementation */
+    fn test_transaction_ordering(&mut self) {
+        let start = std::time::Instant::now();
+        let first = self.create_transaction_sequence(
+            2_001,
+            &[("INSERT", 16_384, vec![TupleData::Text("first".to_string())])],
+        );
+        let second = self.create_transaction_sequence(
+            2_002,
+            &[(
+                "UPDATE",
+                16_384,
+                vec![TupleData::Text("second".to_string())],
+            )],
+        );
+        let third = self.create_transaction_sequence(
+            2_003,
+            &[("INSERT", 16_384, vec![TupleData::Text("third".to_string())])],
+        );
+
+        let ordered = vec![first.clone(), second.clone(), third.clone()];
+        let reversed = vec![second, first, third];
+        let result = if self.validate_transaction_consistency(&ordered)
+            && !self.validate_transaction_consistency(&reversed)
+        {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_027".to_string(),
+            description: "Transaction LSN ordering validation".to_string(),
+            category: TestCategory::LogicalSnapshots,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests transaction byte streams must be in increasing BEGIN/COMMIT LSN order"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_concurrent_transaction_isolation(&mut self) { /* Implementation */
+    fn test_concurrent_transaction_isolation(&mut self) {
+        let start = std::time::Instant::now();
+        let first = self.create_transaction_sequence(
+            3_001,
+            &[
+                (
+                    "INSERT",
+                    16_384,
+                    vec![TupleData::Text("shared-key".to_string())],
+                ),
+                (
+                    "UPDATE",
+                    16_384,
+                    vec![TupleData::Text("first-value".to_string())],
+                ),
+            ],
+        );
+        let second = self.create_transaction_sequence(
+            3_002,
+            &[
+                (
+                    "INSERT",
+                    16_384,
+                    vec![TupleData::Text("shared-key".to_string())],
+                ),
+                (
+                    "UPDATE",
+                    16_384,
+                    vec![TupleData::Text("second-value".to_string())],
+                ),
+            ],
+        );
+        let duplicate_xid = self.create_transaction_sequence(
+            3_001,
+            &[(
+                "INSERT",
+                16_385,
+                vec![TupleData::Text("duplicate".to_string())],
+            )],
+        );
+
+        let isolated = vec![first.clone(), second];
+        let duplicated = vec![first, duplicate_xid];
+        let result = if self.validate_transaction_consistency(&isolated)
+            && !self.validate_transaction_consistency(&duplicated)
+        {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_028".to_string(),
+            description: "Concurrent transaction XID isolation validation".to_string(),
+            category: TestCategory::LogicalSnapshots,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests transactions touching the same relation remain isolated by unique XIDs"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
     fn test_unknown_message_type_handling(&mut self) {
@@ -1268,13 +1370,13 @@ impl PgLogicalReplicationHarness {
         operations: &[(&str, u32, Vec<TupleData>)],
     ) -> Vec<u8> {
         let mut result = vec![];
+        let begin_lsn = 0x1000_0000_0000_0000 + u64::from(xid) * 0x1000;
+        let commit_lsn = begin_lsn + 0x100;
+        let end_lsn = begin_lsn + 0x200;
+        let timestamp = 1_640_995_200_000_000 + u64::from(xid);
 
         // BEGIN
-        result.extend_from_slice(&self.create_begin_message(
-            0x1000_0000_0000_0000,
-            1640995200000000,
-            xid,
-        ));
+        result.extend_from_slice(&self.create_begin_message(begin_lsn, timestamp, xid));
 
         // Operations
         for (op_type, relation_oid, tuple) in operations {
@@ -1294,14 +1396,14 @@ impl PgLogicalReplicationHarness {
         // COMMIT
         result.extend_from_slice(&self.create_commit_message(
             0x01,
-            0x1000_0000_0000_0100,
-            0x1000_0000_0000_0200,
-            1640995260000000,
+            commit_lsn,
+            end_lsn,
+            timestamp + 1,
         ));
         result
     }
 
-    // Parser methods (these would interface with actual parsing logic)
+    // Parser methods for the local conformance harness message bytes.
 
     /// Parse a BEGIN message and return (LSN, timestamp, XID).
     #[allow(dead_code)]
@@ -1443,6 +1545,19 @@ impl PgLogicalReplicationHarness {
     /// Parse an INSERT message and return (relation_oid, tuple).
     #[allow(dead_code)]
     fn parse_insert_message(&self, data: &[u8]) -> Result<(u32, Vec<TupleData>), String> {
+        let (relation_oid, tuple, consumed) = self.parse_insert_message_prefix(data)?;
+        if consumed != data.len() {
+            return Err("INSERT message has trailing bytes".to_string());
+        }
+        Ok((relation_oid, tuple))
+    }
+
+    /// Parse an INSERT message at the start of a larger transaction sequence.
+    #[allow(dead_code)]
+    fn parse_insert_message_prefix(
+        &self,
+        data: &[u8],
+    ) -> Result<(u32, Vec<TupleData>, usize), String> {
         if data.len() < 6 || data[0] != b'I' {
             return Err("Invalid INSERT message format".to_string());
         }
@@ -1451,9 +1566,9 @@ impl PgLogicalReplicationHarness {
         if data[5] != b'N' {
             return Err("INSERT message missing new tuple marker".to_string());
         }
-        let tuple = self.parse_tuple_data(&data[6..])?;
+        let (tuple, tuple_bytes) = self.parse_tuple_data_prefix(&data[6..])?;
 
-        Ok((relation_oid, tuple))
+        Ok((relation_oid, tuple, 6 + tuple_bytes))
     }
 
     /// Parse an UPDATE message and return (relation_oid, old_tuple, new_tuple).
@@ -1462,6 +1577,20 @@ impl PgLogicalReplicationHarness {
         &self,
         data: &[u8],
     ) -> Result<(u32, Option<Vec<TupleData>>, Vec<TupleData>), String> {
+        let (relation_oid, old_tuple, new_tuple, consumed) =
+            self.parse_update_message_prefix(data)?;
+        if consumed != data.len() {
+            return Err("UPDATE message has trailing bytes".to_string());
+        }
+        Ok((relation_oid, old_tuple, new_tuple))
+    }
+
+    /// Parse an UPDATE message at the start of a larger transaction sequence.
+    #[allow(dead_code)]
+    fn parse_update_message_prefix(
+        &self,
+        data: &[u8],
+    ) -> Result<(u32, Option<Vec<TupleData>>, Vec<TupleData>, usize), String> {
         if data.len() < 6 || data[0] != b'U' {
             return Err("Invalid UPDATE message format".to_string());
         }
@@ -1487,9 +1616,10 @@ impl PgLogicalReplicationHarness {
             return Err("UPDATE message missing new tuple marker".to_string());
         };
         pos += 1;
-        let new_tuple = self.parse_tuple_data(&data[pos..])?;
+        let (new_tuple, consumed) = self.parse_tuple_data_prefix(&data[pos..])?;
+        pos += consumed;
 
-        Ok((relation_oid, old_tuple, new_tuple))
+        Ok((relation_oid, old_tuple, new_tuple, pos))
     }
 
     /// Parse a DELETE message and return (relation_oid, old_tuple).
@@ -1634,7 +1764,7 @@ impl PgLogicalReplicationHarness {
             return Err("Empty message".to_string());
         }
 
-        // Simplified validation
+        // Dispatch to the message-specific parser.
         match data[0] {
             b'B' => self.parse_begin_message(data).map(|_| ()),
             b'C' => self.parse_commit_message(data).map(|_| ()),
@@ -1650,12 +1780,78 @@ impl PgLogicalReplicationHarness {
 
     /// Validate transaction consistency across multiple transactions.
     #[allow(dead_code)]
-    fn validate_transaction_consistency(&self, _transactions: &[Vec<u8>]) -> bool {
-        // Simplified validation - in real implementation would check:
-        // - LSN ordering
-        // - Transaction isolation
-        // - Snapshot consistency
-        true
+    fn validate_transaction_consistency(&self, transactions: &[Vec<u8>]) -> bool {
+        let mut seen_xids = std::collections::HashSet::new();
+        let mut last_end_lsn = None;
+
+        for transaction in transactions {
+            let Ok((xid, begin_lsn, commit_lsn, end_lsn, operation_count)) =
+                self.parse_transaction_sequence(transaction)
+            else {
+                return false;
+            };
+
+            if operation_count == 0
+                || !seen_xids.insert(xid)
+                || begin_lsn > commit_lsn
+                || commit_lsn > end_lsn
+            {
+                return false;
+            }
+
+            if let Some(previous_end_lsn) = last_end_lsn
+                && begin_lsn <= previous_end_lsn
+            {
+                return false;
+            }
+            last_end_lsn = Some(end_lsn);
+        }
+
+        !transactions.is_empty()
+    }
+
+    /// Parse a transaction sequence and return (xid, begin_lsn, commit_lsn, end_lsn, op_count).
+    #[allow(dead_code)]
+    fn parse_transaction_sequence(
+        &self,
+        data: &[u8],
+    ) -> Result<(u32, u64, u64, u64, usize), String> {
+        if data.len() < 47 {
+            return Err("Transaction sequence is too short".to_string());
+        }
+
+        let (begin_lsn, _, xid) = self.parse_begin_message(&data[..21])?;
+        let mut pos = 21;
+        let mut operation_count = 0;
+
+        while pos < data.len() {
+            match data[pos] {
+                b'I' => {
+                    let (_, _, consumed) = self.parse_insert_message_prefix(&data[pos..])?;
+                    pos += consumed;
+                    operation_count += 1;
+                }
+                b'U' => {
+                    let (_, _, _, consumed) = self.parse_update_message_prefix(&data[pos..])?;
+                    pos += consumed;
+                    operation_count += 1;
+                }
+                b'C' => {
+                    if data.len() - pos != 26 {
+                        return Err("COMMIT must terminate the transaction sequence".to_string());
+                    }
+                    let (_, commit_lsn, end_lsn, _) = self.parse_commit_message(&data[pos..])?;
+                    return Ok((xid, begin_lsn, commit_lsn, end_lsn, operation_count));
+                }
+                other => {
+                    return Err(format!(
+                        "Transaction sequence has unsupported operation 0x{other:02X}"
+                    ));
+                }
+            }
+        }
+
+        Err("Transaction sequence missing COMMIT message".to_string())
     }
 }
 
