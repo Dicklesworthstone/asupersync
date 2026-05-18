@@ -180,7 +180,7 @@ impl WsConformanceHarness {
             requirement_level: requirement,
             verdict,
             notes,
-            elapsed_ms: 0, // TODO: Add timing if needed
+            elapsed_ms: 0, // deterministic harness does not capture wall-clock timing
         });
     }
 
