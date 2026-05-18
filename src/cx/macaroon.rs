@@ -602,7 +602,7 @@ impl MacaroonKeyRing {
     /// `PartialEq` impl, which XORs the full 32 bytes regardless of the
     /// position of the first differing byte. (br-asupersync-y4fpfl) The
     /// retired slot is also compared against in EVERY call (using a
-    /// zero-filled placeholder when `retired` is `None`) so wall-clock
+    /// zero-filled sentinel when `retired` is `None`) so wall-clock
     /// timing does not depend on rotation state — an attacker who can
     /// time-stamp many `verify` calls cannot distinguish between
     /// "rotation window open" and "rotation window closed" by the
@@ -612,12 +612,12 @@ impl MacaroonKeyRing {
         let active_match = self.active == *candidate;
         // br-asupersync-y4fpfl: ALWAYS compare against the retired
         // slot, even when it's None, to keep verify wall-clock time
-        // independent of rotation state. The placeholder zero-sig
+        // independent of rotation state. The zero-signature sentinel
         // comparison cannot match a legitimate HMAC output (which
         // would require the attacker to find an HMAC-SHA256 preimage
         // for the all-zeros output — infeasible).
-        let placeholder = MacaroonSignature::from_bytes([0u8; AUTH_KEY_SIZE]);
-        let retired_ref = self.retired.as_ref().unwrap_or(&placeholder);
+        let zero_signature_sentinel = MacaroonSignature::from_bytes([0u8; AUTH_KEY_SIZE]);
+        let retired_ref = self.retired.as_ref().unwrap_or(&zero_signature_sentinel);
         let retired_match = retired_ref.constant_time_eq(candidate);
         // OR-fold without short-circuit so the boolean combine itself
         // is also constant-time.
