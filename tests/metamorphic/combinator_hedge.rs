@@ -13,19 +13,19 @@
 //! for systematic input space exploration with comprehensive scenario coverage.
 
 use asupersync::combinator::hedge::{
-    hedge, AdaptiveHedgePolicy, HedgeConfig, HedgeResult, HedgeWinner,
+    AdaptiveHedgePolicy, HedgeConfig, HedgeResult, HedgeWinner, hedge,
 };
 use asupersync::cx::Cx;
 use asupersync::lab::{LabRuntime, RuntimeConfig};
 use asupersync::time::Sleep;
-use asupersync::types::cancel::{CancelReason, CancelKind};
+use asupersync::types::cancel::{CancelKind, CancelReason};
 use asupersync::types::{Outcome, Time};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -71,7 +71,7 @@ impl HedgeExecutionTrace {
             backup_spawn_time: None,
             primary_completion_time: None,
             backup_completion_time: None,
-            result: HedgeResult::primary_fast(Outcome::Ok(0)), // placeholder
+            result: HedgeResult::primary_fast(Outcome::Ok(0)), // initial value overwritten by execution
             external_cancel_requested: false,
             external_cancel_time: None,
             total_values_produced: 0,
@@ -115,7 +115,9 @@ impl HedgeExecutionTrace {
     fn actual_hedge_delay(&self) -> Option<Duration> {
         self.backup_spawn_time.map(|spawn_time| {
             Duration::from_nanos(
-                spawn_time.as_nanos().saturating_sub(self.start_time.as_nanos())
+                spawn_time
+                    .as_nanos()
+                    .saturating_sub(self.start_time.as_nanos()),
             )
         })
     }
@@ -262,9 +264,15 @@ impl Drop for MockTask {
 
             if let Ok(mut trace) = self.trace.lock() {
                 if self.id.starts_with("primary") {
-                    trace.record_primary_completion(now, Outcome::Cancelled(CancelReason::race_loser()));
+                    trace.record_primary_completion(
+                        now,
+                        Outcome::Cancelled(CancelReason::race_loser()),
+                    );
                 } else if self.id.starts_with("backup") {
-                    trace.record_backup_completion(now, Outcome::Cancelled(CancelReason::race_loser()));
+                    trace.record_backup_completion(
+                        now,
+                        Outcome::Cancelled(CancelReason::race_loser()),
+                    );
                 }
             }
         }
@@ -310,16 +318,25 @@ fn hedge_scenario_strategy() -> impl Strategy<Value = HedgeScenario> {
         task_outcome_strategy(),
         prop::option::of(task_duration_strategy()),
     )
-        .prop_map(|(config, primary_duration, primary_outcome, backup_duration, backup_outcome, external_cancel_after)| {
-            HedgeScenario {
+        .prop_map(
+            |(
                 config,
                 primary_duration,
                 primary_outcome,
                 backup_duration,
                 backup_outcome,
                 external_cancel_after,
-            }
-        })
+            )| {
+                HedgeScenario {
+                    config,
+                    primary_duration,
+                    primary_outcome,
+                    backup_duration,
+                    backup_outcome,
+                    external_cancel_after,
+                }
+            },
+        )
 }
 
 /// Execute a hedge scenario and return execution trace
@@ -421,7 +438,11 @@ fn mr_first_success_wins_and_cancels_others(trace: &HedgeExecutionTrace) -> bool
             // Primary completed before backup was spawned - no cancellation needed
             trace.backup_spawn_time.is_none()
         }
-        HedgeResult::Raced { winner, loser_outcome, .. } => {
+        HedgeResult::Raced {
+            winner,
+            loser_outcome,
+            ..
+        } => {
             // A race occurred - verify loser was cancelled correctly
             if let Outcome::Cancelled(reason) = loser_outcome {
                 matches!(reason.kind(), CancelKind::RaceLost)
@@ -443,8 +464,8 @@ fn mr_hedge_delay_respects_configured_interval(trace: &HedgeExecutionTrace) -> b
         // Allow small tolerance for virtual time precision
         let tolerance = Duration::from_micros(100);
 
-        actual_delay >= configured_delay.saturating_sub(tolerance) &&
-        actual_delay <= configured_delay + tolerance
+        actual_delay >= configured_delay.saturating_sub(tolerance)
+            && actual_delay <= configured_delay + tolerance
     } else {
         // Backup was never spawned - hedge delay is respected trivially
         // (primary completed before delay expired)
@@ -507,9 +528,16 @@ fn mr_cancel_propagates_to_all_attempts(trace: &HedgeExecutionTrace) -> bool {
 fn mr_no_value_duplication_across_attempts(trace: &HedgeExecutionTrace) -> bool {
     // Count successful outcomes in the final result
     let winner_success_count = match &trace.result {
-        HedgeResult::PrimaryFast(outcome) |
-        HedgeResult::Raced { winner_outcome: outcome, .. } => {
-            if outcome.is_ok() { 1 } else { 0 }
+        HedgeResult::PrimaryFast(outcome)
+        | HedgeResult::Raced {
+            winner_outcome: outcome,
+            ..
+        } => {
+            if outcome.is_ok() {
+                1
+            } else {
+                0
+            }
         }
     };
 
@@ -682,17 +710,17 @@ fn test_hedge_primary_fast_scenario() {
     let rt = LabRuntime::new(RuntimeConfig::default()).expect("lab runtime");
 
     let scenario = HedgeScenario {
-        config: HedgeConfig::from_millis(500),  // Long delay
-        primary_duration: Duration::from_millis(100),  // Quick primary
+        config: HedgeConfig::from_millis(500),        // Long delay
+        primary_duration: Duration::from_millis(100), // Quick primary
         primary_outcome: Outcome::Ok(42),
         backup_duration: Duration::from_millis(200),
         backup_outcome: Outcome::Ok(99),
         external_cancel_after: None,
     };
 
-    let trace = rt.block_on(async {
-        execute_hedge_scenario(&scenario).await
-    }).expect("hedge execution");
+    let trace = rt
+        .block_on(async { execute_hedge_scenario(&scenario).await })
+        .expect("hedge execution");
 
     // Verify hedge properties
     assert!(mr_first_success_wins_and_cancels_others(&trace));
@@ -711,17 +739,17 @@ fn test_hedge_backup_wins_race_scenario() {
     let rt = LabRuntime::new(RuntimeConfig::default()).expect("lab runtime");
 
     let scenario = HedgeScenario {
-        config: HedgeConfig::from_millis(100),  // Short delay
-        primary_duration: Duration::from_millis(1000),  // Slow primary
+        config: HedgeConfig::from_millis(100),         // Short delay
+        primary_duration: Duration::from_millis(1000), // Slow primary
         primary_outcome: Outcome::Ok(42),
-        backup_duration: Duration::from_millis(50),   // Fast backup
+        backup_duration: Duration::from_millis(50), // Fast backup
         backup_outcome: Outcome::Ok(99),
         external_cancel_after: None,
     };
 
-    let trace = rt.block_on(async {
-        execute_hedge_scenario(&scenario).await
-    }).expect("hedge execution");
+    let trace = rt
+        .block_on(async { execute_hedge_scenario(&scenario).await })
+        .expect("hedge execution");
 
     // Verify hedge properties
     assert!(mr_first_success_wins_and_cancels_others(&trace));
@@ -741,16 +769,16 @@ fn test_hedge_external_cancellation_scenario() {
 
     let scenario = HedgeScenario {
         config: HedgeConfig::from_millis(200),
-        primary_duration: Duration::from_millis(1000),  // Slow primary
+        primary_duration: Duration::from_millis(1000), // Slow primary
         primary_outcome: Outcome::Ok(42),
-        backup_duration: Duration::from_millis(800),   // Slow backup
+        backup_duration: Duration::from_millis(800), // Slow backup
         backup_outcome: Outcome::Ok(99),
-        external_cancel_after: Some(Duration::from_millis(300)),  // Cancel during race
+        external_cancel_after: Some(Duration::from_millis(300)), // Cancel during race
     };
 
-    let trace = rt.block_on(async {
-        execute_hedge_scenario(&scenario).await
-    }).expect("hedge execution");
+    let trace = rt
+        .block_on(async { execute_hedge_scenario(&scenario).await })
+        .expect("hedge execution");
 
     // Verify hedge properties
     assert!(mr_cancel_propagates_to_all_attempts(&trace));
@@ -776,7 +804,12 @@ fn test_adaptive_hedge_policy_edge_cases() {
     assert_eq!(policy.next_hedge_delay(), max_delay);
 
     // Test clamping behavior
-    let mut policy = AdaptiveHedgePolicy::new(20, 0.1, Duration::from_millis(100), Duration::from_millis(200));
+    let mut policy = AdaptiveHedgePolicy::new(
+        20,
+        0.1,
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+    );
 
     // Record very small latencies - should clamp to min
     for _ in 0..20 {
