@@ -22,7 +22,7 @@ pub struct SourceLocation {
 }
 
 impl SourceLocation {
-    /// Returns an unknown source location placeholder.
+    /// Returns the sentinel value for an unknown source location.
     #[must_use]
     pub const fn unknown() -> Self {
         Self {

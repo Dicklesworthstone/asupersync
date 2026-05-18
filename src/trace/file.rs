@@ -648,7 +648,7 @@ impl TraceWriter {
         self.write_bytes(&meta_len.to_le_bytes())?;
         self.write_bytes(&meta_bytes)?;
 
-        // Write placeholder for event count (we'll update this in finish())
+        // Reserve the event-count header slot; finish() backpatches it.
         self.event_count_pos = HEADER_SIZE as u64 + u64::from(meta_len);
         self.write_bytes(&0u64.to_le_bytes())?;
         self.metadata_state = TraceWriterMetadataState::Written;

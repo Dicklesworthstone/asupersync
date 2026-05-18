@@ -188,7 +188,7 @@ impl<T> Arena<T> {
     /// Inserts a value produced by `f` into the arena and returns its index.
     ///
     /// The closure receives the assigned `ArenaIndex`, allowing callers to
-    /// construct records that embed their final ID without placeholder updates.
+    /// construct records that embed their final ID without later backpatching.
     #[inline]
     pub fn insert_with<F>(&mut self, f: F) -> ArenaIndex
     where

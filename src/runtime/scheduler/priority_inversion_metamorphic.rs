@@ -234,7 +234,7 @@ pub fn run_inversion_detection(
     };
 
     // Step 1: spawn every task. DispatchLane::Ready and worker_id=None
-    // are placeholders — the oracle uses them only for reporting;
+    // are diagnostic defaults; the oracle uses them only for reporting;
     // inversion detection only inspects `priority`.
     for task in tasks {
         oracle.track_task_spawned(task.task_id, priority_of(task), DispatchLane::Ready, None);
