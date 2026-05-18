@@ -676,7 +676,7 @@ mod kqueue_impl {
 ))]
 pub use kqueue_impl::KqueueReactor;
 
-// Stub for unsupported platforms (for documentation purposes)
+// Fallback for unsupported platforms (for documentation purposes)
 #[cfg(not(any(
     target_os = "macos",
     target_os = "freebsd",
@@ -684,7 +684,7 @@ pub use kqueue_impl::KqueueReactor;
     target_os = "netbsd",
     target_os = "dragonfly"
 )))]
-mod stub {
+mod unsupported_platform {
     use super::super::{Events, Interest, Reactor, Source, Token};
     use std::io;
     use std::time::Duration;
@@ -761,7 +761,7 @@ mod stub {
     target_os = "netbsd",
     target_os = "dragonfly"
 )))]
-pub use stub::KqueueReactor;
+pub use unsupported_platform::KqueueReactor;
 
 #[cfg(all(
     test,

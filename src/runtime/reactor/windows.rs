@@ -357,9 +357,9 @@ mod iocp_impl {
     }
 }
 
-// Stub for non-Windows platforms (keeps docs/builds consistent).
+// Fallback for non-Windows platforms (keeps docs/builds consistent).
 #[cfg(not(target_os = "windows"))]
-mod stub {
+mod unsupported_platform {
     use super::{Events, Interest, Reactor, Source, Token};
     use std::io;
     use std::time::Duration;
@@ -488,4 +488,4 @@ mod stub {
 pub use iocp_impl::IocpReactor;
 
 #[cfg(not(target_os = "windows"))]
-pub use stub::IocpReactor;
+pub use unsupported_platform::IocpReactor;
