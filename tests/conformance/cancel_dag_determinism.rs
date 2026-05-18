@@ -945,8 +945,37 @@ mod cancel_dag_determinism_tests {
         #[allow(dead_code)]
 
         fn create_hierarchical_cancel_dag(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
-            let snapshot = self.create_cancel_dag_snapshot(seed)?;
-            // For now, return basic snapshot as hierarchical structure requires more complex setup
+            let mut snapshot = self.create_cancel_dag_snapshot(seed)?;
+            let object_ids: Vec<_> = snapshot
+                .cancellation_events
+                .iter()
+                .map(|event| event.object_id)
+                .collect();
+
+            if object_ids.len() < 5 {
+                return Ok(snapshot);
+            }
+
+            let root = object_ids[0];
+            let first_child = object_ids[1];
+            let second_child = object_ids[2];
+            let first_grandchild = object_ids[3];
+            let second_grandchild = object_ids[4];
+
+            snapshot.dependency_graph.insert(first_child, vec![root]);
+            snapshot.dependency_graph.insert(second_child, vec![root]);
+            snapshot
+                .dependency_graph
+                .insert(first_grandchild, vec![first_child]);
+            snapshot
+                .dependency_graph
+                .insert(second_grandchild, vec![first_child, second_child]);
+
+            for dependencies in snapshot.dependency_graph.values_mut() {
+                dependencies.sort();
+                dependencies.dedup();
+            }
+
             Ok(snapshot)
         }
 
@@ -1212,7 +1241,7 @@ mod cancel_dag_determinism_tests {
 
         #[test]
         #[allow(dead_code)]
-        fn test_cancel_dag_mock_snapshot_consistency() {
+        fn test_cancel_dag_fixture_snapshot_consistency() {
             let harness = CancelDagDeterminismHarness::new();
             let seed = 42u64;
 
@@ -1226,6 +1255,41 @@ mod cancel_dag_determinism_tests {
             assert_eq!(
                 snapshot1, snapshot2,
                 "Snapshots with same seed should be identical"
+            );
+        }
+
+        #[test]
+        #[allow(dead_code)]
+        fn test_hierarchical_cancel_dag_fixture_has_parent_child_levels() {
+            let harness = CancelDagDeterminismHarness::new();
+            let snapshot = harness
+                .create_hierarchical_cancel_dag(1337)
+                .expect("Should create snapshot");
+            let object_ids: Vec<_> = snapshot
+                .cancellation_events
+                .iter()
+                .map(|event| event.object_id)
+                .collect();
+
+            assert_eq!(
+                snapshot.dependency_graph.get(&object_ids[1]).unwrap(),
+                &vec![object_ids[0]]
+            );
+            assert_eq!(
+                snapshot.dependency_graph.get(&object_ids[2]).unwrap(),
+                &vec![object_ids[0]]
+            );
+            assert_eq!(
+                snapshot.dependency_graph.get(&object_ids[3]).unwrap(),
+                &vec![object_ids[1]]
+            );
+            assert_eq!(
+                snapshot.dependency_graph.get(&object_ids[4]).unwrap(),
+                &vec![object_ids[1], object_ids[2]]
+            );
+            assert!(
+                !harness.has_cycles(&snapshot.dependency_graph),
+                "Hierarchical dependency graph should be acyclic"
             );
         }
 
