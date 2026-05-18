@@ -318,9 +318,6 @@ pub enum ProtocolEvolutionCompatibilityError {
     },
 }
 
-/// Backward-compatible alias while the session module re-export catches up.
-pub type SynthesizedHandlerPlaceholder = SynthesizedProtocolScaffold;
-
 /// Synthesize deterministic role-local scaffolding from one validated contract.
 pub fn synthesize_protocol_scaffold(
     contract: &ProtocolContract,

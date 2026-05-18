@@ -21,4 +21,4 @@ pub use projection::{
     LocalSessionBranch, LocalSessionType, ProjectionError, is_dual, project, project_contract,
     project_pair,
 };
-pub use synthesis::SynthesizedHandlerPlaceholder;
+pub use synthesis::SynthesizedProtocolScaffold;
