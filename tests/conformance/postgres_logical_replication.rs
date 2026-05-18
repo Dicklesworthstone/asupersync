@@ -859,10 +859,64 @@ impl PgLogicalReplicationHarness {
         });
     }
     #[allow(dead_code)]
-    fn test_type_message_format(&mut self) { /* Implementation */
+    fn test_type_message_format(&mut self) {
+        let start = std::time::Instant::now();
+        let type_message = self.create_type_message(3_802, "pg_catalog", "jsonb");
+
+        let result = match self.parse_type_message(&type_message) {
+            Ok((type_oid, namespace, name))
+                if type_oid == 3_802 && namespace == "pg_catalog" && name == "jsonb" =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_021".to_string(),
+            description: "TYPE message format parsing".to_string(),
+            category: TestCategory::TypeMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests TYPE OID, namespace, and data type name decoding".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
-    fn test_type_namespace_handling(&mut self) { /* Implementation */
+    fn test_type_namespace_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let catalog_type = self.create_type_message(23, "", "int4");
+        let custom_type = self.create_type_message(42_000, "tenant_42_types", "sku_code");
+
+        let result = match (
+            self.parse_type_message(&catalog_type),
+            self.parse_type_message(&custom_type),
+        ) {
+            (
+                Ok((23, catalog_namespace, catalog_name)),
+                Ok((42_000, custom_namespace, custom_name)),
+            ) if catalog_namespace.is_empty()
+                && catalog_name == "int4"
+                && custom_namespace == "tenant_42_types"
+                && custom_name == "sku_code" =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_022".to_string(),
+            description: "TYPE namespace preservation".to_string(),
+            category: TestCategory::TypeMessages,
+            requirement_level: RequirementLevel::Should,
+            verdict: result,
+            notes: Some(
+                "Tests TYPE namespace C strings, including empty namespace for pg_catalog"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
     }
     #[allow(dead_code)]
     fn test_delete_message_format(&mut self) {
@@ -983,6 +1037,18 @@ impl PgLogicalReplicationHarness {
             msg.extend_from_slice(&type_oid.to_be_bytes());
             msg.extend_from_slice(&attr_num.to_be_bytes());
         }
+        msg
+    }
+
+    /// Create a TYPE message with type metadata.
+    #[allow(dead_code)]
+    fn create_type_message(&self, type_oid: u32, namespace: &str, name: &str) -> Vec<u8> {
+        let mut msg = vec![b'Y'];
+        msg.extend_from_slice(&type_oid.to_be_bytes());
+        msg.extend_from_slice(namespace.as_bytes());
+        msg.push(0); // null terminator
+        msg.extend_from_slice(name.as_bytes());
+        msg.push(0); // null terminator
         msg
     }
 
@@ -1164,25 +1230,12 @@ impl PgLogicalReplicationHarness {
             return Err("Invalid RELATION message format".to_string());
         }
 
-        fn read_cstring(data: &[u8], pos: &mut usize, field: &str) -> Result<String, String> {
-            let start = *pos;
-            let Some(relative_end) = data[start..].iter().position(|byte| *byte == 0) else {
-                return Err(format!("RELATION {field} missing null terminator"));
-            };
-            let end = start + relative_end;
-            let value = std::str::from_utf8(&data[start..end])
-                .map_err(|err| format!("RELATION {field} is not UTF-8: {err}"))?
-                .to_string();
-            *pos = end + 1;
-            Ok(value)
-        }
-
         let mut pos = 1;
         let oid = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
-        let namespace = read_cstring(data, &mut pos, "namespace")?;
-        let name = read_cstring(data, &mut pos, "relation name")?;
+        let namespace = Self::read_cstring(data, &mut pos, "RELATION namespace")?;
+        let name = Self::read_cstring(data, &mut pos, "RELATION relation name")?;
 
         let Some(identity_byte) = data.get(pos).copied() else {
             return Err("RELATION missing replica identity".to_string());
@@ -1213,7 +1266,7 @@ impl PgLogicalReplicationHarness {
             };
             pos += 1;
 
-            let column_name = read_cstring(data, &mut pos, "column name")?;
+            let column_name = Self::read_cstring(data, &mut pos, "RELATION column name")?;
 
             if data.len().saturating_sub(pos) < 8 {
                 return Err(format!(
@@ -1234,6 +1287,26 @@ impl PgLogicalReplicationHarness {
         }
 
         Ok((oid, namespace, name, replica_identity, columns))
+    }
+
+    /// Parse a TYPE message and return (type_oid, namespace, type_name).
+    #[allow(dead_code)]
+    fn parse_type_message(&self, data: &[u8]) -> Result<(u32, String, String), String> {
+        if data.len() < 7 || data[0] != b'Y' {
+            return Err("Invalid TYPE message format".to_string());
+        }
+
+        let mut pos = 1;
+        let type_oid = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+
+        let namespace = Self::read_cstring(data, &mut pos, "TYPE namespace")?;
+        let name = Self::read_cstring(data, &mut pos, "TYPE name")?;
+        if pos != data.len() {
+            return Err("TYPE message has trailing bytes".to_string());
+        }
+
+        Ok((type_oid, namespace, name))
     }
 
     /// Parse an INSERT message and return (relation_oid, tuple).
@@ -1404,6 +1477,25 @@ impl PgLogicalReplicationHarness {
         Ok((tuple, pos))
     }
 
+    /// Read one null-terminated UTF-8 string from a logical replication message.
+    #[allow(dead_code)]
+    fn read_cstring(data: &[u8], pos: &mut usize, field: &str) -> Result<String, String> {
+        let start = *pos;
+        if start > data.len() {
+            return Err(format!("{field} starts past end of message"));
+        }
+
+        let Some(relative_end) = data[start..].iter().position(|byte| *byte == 0) else {
+            return Err(format!("{field} missing null terminator"));
+        };
+        let end = start + relative_end;
+        let value = std::str::from_utf8(&data[start..end])
+            .map_err(|err| format!("{field} is not UTF-8: {err}"))?
+            .to_string();
+        *pos = end + 1;
+        Ok(value)
+    }
+
     /// Parse any logical replication message.
     #[allow(dead_code)]
     fn parse_logical_message(&self, data: &[u8]) -> Result<(), String> {
@@ -1416,6 +1508,7 @@ impl PgLogicalReplicationHarness {
             b'B' => self.parse_begin_message(data).map(|_| ()),
             b'C' => self.parse_commit_message(data).map(|_| ()),
             b'R' => self.parse_relation_message(data).map(|_| ()),
+            b'Y' => self.parse_type_message(data).map(|_| ()),
             b'I' => self.parse_insert_message(data).map(|_| ()),
             b'U' => self.parse_update_message(data).map(|_| ()),
             b'D' => self.parse_delete_message(data).map(|_| ()),
