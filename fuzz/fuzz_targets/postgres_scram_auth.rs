@@ -6,6 +6,7 @@ use libfuzzer_sys::fuzz_target;
 // Note: ScramAuth is internal, so we'll test through the exposed parser functions
 
 const MAX_SAFE_ITERATIONS: u32 = 600_000;
+const MAX_FUZZ_PBKDF2_ITERATIONS: u32 = 32_768;
 const MAX_SCRAM_DIAGNOSTIC_SIZE: usize = 2048;
 const MAX_CLIENT_FIRST_SIZE: usize = 256;
 const MAX_NONCE_COMBINED_SIZE: usize = 256;
@@ -60,8 +61,8 @@ fn arbitrary_iteration_count(u: &mut Unstructured<'_>) -> arbitrary::Result<u32>
     Ok(match selector % 4 {
         0 => 1,
         1 => 4096,
-        2 => MAX_SAFE_ITERATIONS,
-        _ => u.int_in_range(1..=MAX_SAFE_ITERATIONS)?,
+        2 => MAX_FUZZ_PBKDF2_ITERATIONS,
+        _ => u.int_in_range(1..=MAX_FUZZ_PBKDF2_ITERATIONS)?,
     })
 }
 
@@ -499,7 +500,7 @@ fn verify_client_final_proof_oracle(case: &ClientFinalProofCase) {
     let expected_proof: Vec<u8> = client_key
         .iter()
         .zip(client_signature.iter())
-        .map(|(key, sig)| key ^ sig)
+        .map(|(key, sig)| *key ^ *sig)
         .collect();
     let expected_proof_b64 = base64::engine::general_purpose::STANDARD.encode(&expected_proof);
     let client_final = format!("{client_final_without_proof},p={expected_proof_b64}");
@@ -521,9 +522,13 @@ fn verify_client_final_proof_oracle(case: &ClientFinalProofCase) {
     );
 }
 
-/// Real PBKDF2-SHA256 implementation for boundary testing
+/// Budgeted PBKDF2-SHA256 implementation for boundary testing.
 fn pbkdf2_sha256_test(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
-    if iterations == 0 || iterations > 600_000 || salt.is_empty() || salt.len() > 64 {
+    if iterations == 0
+        || iterations > MAX_FUZZ_PBKDF2_ITERATIONS
+        || salt.is_empty()
+        || salt.len() > 64
+    {
         return vec![0u8; 32]; // Return zero bytes for invalid inputs
     }
 
@@ -566,13 +571,13 @@ fn hmac_sha256_test(key: &[u8], data: &[u8]) -> Vec<u8> {
     // Inner padding
     let mut inner = [0x36u8; BLOCK_SIZE];
     for (i, k) in key_block.iter().enumerate() {
-        inner[i] ^= k;
+        inner[i] ^= *k;
     }
 
     // Outer padding
     let mut outer = [0x5cu8; BLOCK_SIZE];
     for (i, k) in key_block.iter().enumerate() {
-        outer[i] ^= k;
+        outer[i] ^= *k;
     }
 
     // HMAC = H(outer || H(inner || data))
@@ -594,15 +599,16 @@ fn sha256_test(data: &[u8]) -> Vec<u8> {
 }
 
 /// Constant-time comparison testing
-fn constant_time_compare_test(a: &[u8], b: &[u8]) -> bool {
-    // Test constant-time comparison logic like the real SCRAM implementation
-    let len_ok = a.len() == b.len();
-    let content_ok = a
-        .iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0;
-    len_ok & content_ok
+fn constant_time_compare_test(expected: &[u8], actual: &[u8]) -> bool {
+    use std::hint::black_box;
+
+    let mut diff = u8::from(expected.len() != actual.len());
+    for (index, expected_byte) in expected.iter().enumerate() {
+        let actual_byte = actual.get(index).copied().unwrap_or(0);
+        diff |= *expected_byte ^ actual_byte;
+    }
+
+    black_box(diff) == 0
 }
 
 /// Test nonce concatenation boundary conditions
@@ -719,13 +725,15 @@ fn test_pbkdf2_boundaries(data: &[u8]) {
     // Test various boundary conditions
     let test_cases = [
         (password_data, salt_data, iterations),
-        (password_data, salt_data, 1),       // Minimum iterations
-        (password_data, salt_data, 4096),    // PostgreSQL default
-        (password_data, salt_data, 600_000), // Maximum safe iterations
-        (password_data, salt_data, 600_001), // Just over maximum (should fail gracefully)
-        (b"", salt_data, iterations),        // Empty password
-        (password_data, b"", iterations),    // Empty salt
-        (b"a", b"s", 4096),                  // Minimal valid case
+        (password_data, salt_data, 1),    // Minimum iterations
+        (password_data, salt_data, 4096), // PostgreSQL default
+        (password_data, salt_data, MAX_FUZZ_PBKDF2_ITERATIONS),
+        (password_data, salt_data, MAX_FUZZ_PBKDF2_ITERATIONS + 1),
+        (password_data, salt_data, MAX_SAFE_ITERATIONS),
+        (password_data, salt_data, MAX_SAFE_ITERATIONS + 1),
+        (b"", salt_data, iterations),     // Empty password
+        (password_data, b"", iterations), // Empty salt
+        (b"a", b"s", 4096),               // Minimal valid case
     ];
 
     for (pwd, salt, iter) in test_cases {
