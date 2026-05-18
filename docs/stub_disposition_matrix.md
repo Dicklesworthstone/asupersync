@@ -110,9 +110,16 @@ from detached source files.
 
 ### Surface 13: Conformance panic-based dummies
 - **File**: `conformance/src/runner.rs:950-1220`
-- **State**: 29 instances of `panic!("dummy ...")` across DummyMpscSender, DummyFile, DummyTcpListener, DummyTcpStream, DummyUdpSocket, etc.
-- **Disposition**: **QUARANTINE** → Track I (I2/v2ofj7.9.2)
-- **Target**: Replace panic!() with `Err(Unsupported)` or wire real Asupersync backends.
+- **State**: **RESOLVED** — the dummy conformance runtime no longer uses
+  `panic!("dummy ...")` placeholders. Channel surfaces execute in memory, and
+  unsupported I/O surfaces fail closed with `io::ErrorKind::Unsupported` via
+  `dummy_unsupported(...)`.
+- **Disposition**: **RESOLVED** (Track I / I2 / v2ofj7.9.2)
+- **Evidence**: `dummy_runtime_channels_are_non_panicking`,
+  `dummy_runtime_io_surfaces_fail_closed_with_unsupported_errors`, and
+  `dummy_runtime_contains_no_panic_based_placeholders` cover the previous
+  panic-based dummy surface; `scripts/scan_stubs.sh` reports
+  `ZR-SCAN-CONFORMANCE-DUMMY-PANIC` as passed.
 
 ## Hygiene Surfaces (not from original audit, added during planning)
 
@@ -162,11 +169,11 @@ from detached source files.
 
 | Disposition | Count | Surfaces |
 |-------------|-------|----------|
-| RESOLVED | 11 | #2, #3, #4, #6, #7, #11, #12, #14, #16, #17, #18 |
+| RESOLVED | 12 | #2, #3, #4, #6, #7, #11, #12, #13, #14, #16, #17, #18 |
 | IMPLEMENT | 0 | — |
 | DOCUMENT | 4 | #5, #9, #10, #19 |
 | CONVERGE | 1 | #1 |
-| QUARANTINE | 1 | #13 |
+| QUARANTINE | 0 | — |
 | RETIRE | 2 | #8, #15 |
 | **Total** | **19** | |
 
@@ -182,6 +189,6 @@ from detached source files.
 | F | #6 | RESOLVED |
 | G | #7 | RESOLVED |
 | H | #8, #9, #10 | RETIRE, DOCUMENT, DOCUMENT |
-| I | #13, #17, #18 | QUARANTINE, RESOLVED, RESOLVED |
+| I | #13, #17, #18 | RESOLVED, RESOLVED, RESOLVED |
 | Z | All, #19 | Verification of above plus live marker classification ratchet |
 | Hygiene | #14, #15, #16 | #14 RESOLVED, #15 RETIRE, #16 RESOLVED |
