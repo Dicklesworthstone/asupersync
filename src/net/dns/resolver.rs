@@ -1745,7 +1745,7 @@ mod tests {
     }
 
     #[derive(Clone)]
-    enum FakeDnsRecord {
+    enum TestDnsRecord {
         A {
             ttl: u32,
             addr: Ipv4Addr,
@@ -1772,7 +1772,7 @@ mod tests {
         },
     }
 
-    impl FakeDnsRecord {
+    impl TestDnsRecord {
         fn qtype(&self) -> u16 {
             match self {
                 Self::A { .. } => 1,
@@ -1831,25 +1831,25 @@ mod tests {
         }
     }
 
-    struct FakeDnsServer {
+    struct TestDnsServer {
         addr: SocketAddr,
         stop: Arc<AtomicBool>,
         udp_handle: Option<JoinHandle<()>>,
         tcp_handle: Option<JoinHandle<()>>,
     }
 
-    impl FakeDnsServer {
-        fn start(zone: BTreeMap<(String, u16), Vec<FakeDnsRecord>>, truncate_udp: bool) -> Self {
+    impl TestDnsServer {
+        fn start(zone: BTreeMap<(String, u16), Vec<TestDnsRecord>>, truncate_udp: bool) -> Self {
             let udp_socket = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .expect("bind fake UDP DNS server");
+                .expect("bind test UDP DNS server");
             udp_socket
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("set UDP timeout");
-            let addr = udp_socket.local_addr().expect("fake UDP local addr");
-            let tcp_listener = TcpListener::bind(addr).expect("bind fake TCP DNS server");
+            let addr = udp_socket.local_addr().expect("test UDP local addr");
+            let tcp_listener = TcpListener::bind(addr).expect("bind test TCP DNS server");
             tcp_listener
                 .set_nonblocking(true)
-                .expect("set fake TCP nonblocking");
+                .expect("set test TCP nonblocking");
 
             let stop = Arc::new(AtomicBool::new(false));
             let udp_stop = Arc::clone(&stop);
@@ -1863,7 +1863,7 @@ mod tests {
                     match udp_socket.recv_from(&mut buf) {
                         Ok((n, peer)) => {
                             let response =
-                                build_fake_dns_response(&buf[..n], &udp_zone, truncate_udp);
+                                build_test_dns_response(&buf[..n], &udp_zone, truncate_udp);
                             let _ = udp_socket.send_to(&response, peer);
                         }
                         Err(err)
@@ -1895,9 +1895,9 @@ mod tests {
                             stream
                                 .read_exact(&mut request)
                                 .expect("read DNS TCP payload");
-                            let response = build_fake_dns_response(&request, &tcp_zone, false);
+                            let response = build_test_dns_response(&request, &tcp_zone, false);
                             let frame_len =
-                                u16::try_from(response.len()).expect("fake response fits in TCP");
+                                u16::try_from(response.len()).expect("test response fits in TCP");
                             stream
                                 .write_all(&frame_len.to_be_bytes())
                                 .expect("write DNS TCP response length");
@@ -1922,7 +1922,7 @@ mod tests {
         }
     }
 
-    impl Drop for FakeDnsServer {
+    impl Drop for TestDnsServer {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
             if let Some(handle) = self.udp_handle.take() {
@@ -1934,12 +1934,12 @@ mod tests {
         }
     }
 
-    fn build_fake_dns_response(
+    fn build_test_dns_response(
         request: &[u8],
-        zone: &BTreeMap<(String, u16), Vec<FakeDnsRecord>>,
+        zone: &BTreeMap<(String, u16), Vec<TestDnsRecord>>,
         truncate: bool,
     ) -> Vec<u8> {
-        let (query_name, question_end, qtype) = parse_fake_dns_question(request);
+        let (query_name, question_end, qtype) = parse_test_dns_question(request);
         let question = &request[12..question_end];
         let records = zone.get(&(query_name, qtype)).cloned().unwrap_or_default();
         let mut response = Vec::new();
@@ -1982,7 +1982,7 @@ mod tests {
         response
     }
 
-    fn parse_fake_dns_question(request: &[u8]) -> (String, usize, u16) {
+    fn parse_test_dns_question(request: &[u8]) -> (String, usize, u16) {
         let mut offset = 12usize;
         let query_name = decode_dns_name(request, &mut offset).expect("decode question name");
         let qtype = u16::from_be_bytes([request[offset], request[offset + 1]]);
@@ -2706,19 +2706,19 @@ mod tests {
         let mut zone = BTreeMap::new();
         zone.insert(
             ("example.test".to_string(), 1),
-            vec![FakeDnsRecord::A {
+            vec![TestDnsRecord::A {
                 ttl: 30,
                 addr: Ipv4Addr::new(192, 0, 2, 10),
             }],
         );
         zone.insert(
             ("example.test".to_string(), 28),
-            vec![FakeDnsRecord::Aaaa {
+            vec![TestDnsRecord::Aaaa {
                 ttl: 20,
                 addr: "2001:db8::10".parse().expect("valid v6"),
             }],
         );
-        let server = FakeDnsServer::start(zone, true);
+        let server = TestDnsServer::start(zone, true);
 
         let resolver = Resolver::with_config(ResolverConfig {
             nameservers: vec![server.addr],
@@ -2793,12 +2793,12 @@ mod tests {
         zone.insert(
             ("example.test".to_string(), 15),
             vec![
-                FakeDnsRecord::Mx {
+                TestDnsRecord::Mx {
                     ttl: 60,
                     preference: 20,
                     exchange: "mx2.example.test".to_string(),
                 },
-                FakeDnsRecord::Mx {
+                TestDnsRecord::Mx {
                     ttl: 60,
                     preference: 10,
                     exchange: "mx1.example.test".to_string(),
@@ -2807,7 +2807,7 @@ mod tests {
         );
         zone.insert(
             ("_sip._tcp.example.test".to_string(), 33),
-            vec![FakeDnsRecord::Srv {
+            vec![TestDnsRecord::Srv {
                 ttl: 60,
                 priority: 5,
                 weight: 7,
@@ -2817,12 +2817,12 @@ mod tests {
         );
         zone.insert(
             ("_acme-challenge.example.test".to_string(), 16),
-            vec![FakeDnsRecord::Txt {
+            vec![TestDnsRecord::Txt {
                 ttl: 60,
                 text: "proof-token".to_string(),
             }],
         );
-        let server = FakeDnsServer::start(zone, false);
+        let server = TestDnsServer::start(zone, false);
 
         let resolver = Resolver::with_config(ResolverConfig {
             nameservers: vec![server.addr],
@@ -2886,17 +2886,17 @@ mod tests {
     fn resolver_tries_later_nameserver_after_early_nxdomain() {
         init_test("resolver_tries_later_nameserver_after_early_nxdomain");
 
-        let stale_server = FakeDnsServer::start(BTreeMap::new(), false);
+        let stale_server = TestDnsServer::start(BTreeMap::new(), false);
 
         let mut live_zone = BTreeMap::new();
         live_zone.insert(
             ("example.test".to_string(), 1),
-            vec![FakeDnsRecord::A {
+            vec![TestDnsRecord::A {
                 ttl: 30,
                 addr: Ipv4Addr::new(192, 0, 2, 77),
             }],
         );
-        let live_server = FakeDnsServer::start(live_zone, false);
+        let live_server = TestDnsServer::start(live_zone, false);
 
         let resolver = Resolver::with_config(ResolverConfig {
             nameservers: vec![stale_server.addr, live_server.addr],
