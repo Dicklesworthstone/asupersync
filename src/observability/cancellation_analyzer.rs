@@ -1370,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trend_analysis_non_placeholder() {
+    fn test_trend_analysis_uses_sufficient_history() {
         use std::time::{Duration, SystemTime};
 
         let analyzer = CancellationAnalyzer::default();
@@ -1424,12 +1424,12 @@ mod tests {
         );
         assert!(
             !matches!(trends.latency_trend, TrendDirection::Insufficient),
-            "Should not return placeholder Insufficient result"
+            "Should not fall back to Insufficient with sufficient history"
         );
     }
 
     #[test]
-    fn test_regression_detection_non_placeholder() {
+    fn test_regression_detection_uses_sufficient_history() {
         use std::time::{Duration, SystemTime};
 
         let analyzer = CancellationAnalyzer::default();
@@ -1524,7 +1524,7 @@ mod tests {
 
         let trends = analyzer.analyze_trends(&traces);
 
-        // Should detect stable trends, not placeholder insufficient
+        // Should detect stable trends rather than report insufficient data.
         assert!(
             matches!(trends.latency_trend, TrendDirection::Stable),
             "Expected stable latency trend, got {:?}",
@@ -1532,7 +1532,7 @@ mod tests {
         );
         assert!(
             !matches!(trends.latency_trend, TrendDirection::Insufficient),
-            "Should not return placeholder result for sufficient data"
+            "Should not return Insufficient for sufficient data"
         );
     }
 
