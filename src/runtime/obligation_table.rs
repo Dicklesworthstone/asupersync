@@ -876,15 +876,27 @@ mod tests {
     #[test]
     fn nonexistent_obligation_fails() {
         let mut table = ObligationTable::new();
-        let fake = ObligationId::from_arena(ArenaIndex::new(99, 0));
+        let unknown_obligation = ObligationId::from_arena(ArenaIndex::new(99, 0));
 
-        assert!(table.commit(fake, Time::from_nanos(100)).is_err());
         assert!(
             table
-                .abort(fake, Time::from_nanos(100), ObligationAbortReason::Cancel)
+                .commit(unknown_obligation, Time::from_nanos(100))
                 .is_err()
         );
-        assert!(table.mark_leaked(fake, Time::from_nanos(100)).is_err());
+        assert!(
+            table
+                .abort(
+                    unknown_obligation,
+                    Time::from_nanos(100),
+                    ObligationAbortReason::Cancel
+                )
+                .is_err()
+        );
+        assert!(
+            table
+                .mark_leaked(unknown_obligation, Time::from_nanos(100))
+                .is_err()
+        );
     }
 
     #[test]
