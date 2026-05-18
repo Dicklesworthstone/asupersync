@@ -36,6 +36,10 @@ const MAX_SALT_SIZE: usize = 256;
 /// Maximum nonce size for practical testing
 const MAX_NONCE_SIZE: usize = 512;
 
+/// Maximum PBKDF2 rounds the fuzz target will execute while still covering the
+/// real SCRAM derivation path.
+const MAX_FUZZ_PBKDF2_ITERATIONS: u32 = 32_768;
+
 /// Channel binding types for testing
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum ChannelBindingType {
@@ -289,8 +293,9 @@ struct FuzzInput {
     operation: FuzzOperation,
 }
 
-// Mock SCRAM auth implementation for testing (since we can't access the internal struct)
-struct MockScramAuth {
+// Harness-local SCRAM auth implementation for testing the private production state machine.
+struct HarnessScramAuth {
+    password: String,
     client_nonce: String,
     client_first_bare: String,
     salt: Option<Vec<u8>>,
@@ -298,7 +303,7 @@ struct MockScramAuth {
     auth_message: Option<String>,
 }
 
-impl MockScramAuth {
+impl HarnessScramAuth {
     fn new(_cx: &Cx, username: &str, password: &str) -> Self {
         use sha2::{Digest, Sha256};
 
@@ -310,9 +315,11 @@ impl MockScramAuth {
         let client_nonce =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &hash[..12]);
 
-        let client_first_bare = format!("n={},r={}", username, client_nonce);
+        let escaped_username = username.replace('=', "=3D").replace(',', "=2C");
+        let client_first_bare = format!("n={},r={}", escaped_username, client_nonce);
 
         Self {
+            password: password.to_string(),
             client_nonce,
             client_first_bare,
             salt: None,
@@ -372,12 +379,20 @@ impl MockScramAuth {
                 "SCRAM iteration count {iterations} outside safe range {MIN_PBKDF2_ITERATIONS}..={MAX_PBKDF2_ITERATIONS}"
             )));
         }
+        if iterations > MAX_FUZZ_PBKDF2_ITERATIONS {
+            return Err(PgError::AuthenticationFailed(format!(
+                "SCRAM iteration count {iterations} exceeds fuzz PBKDF2 budget {MAX_FUZZ_PBKDF2_ITERATIONS}"
+            )));
+        }
 
         // Store for later verification
         self.salt = Some(salt.clone());
         self.iterations = Some(iterations);
 
-        // Generate client-final message (simplified for fuzzing)
+        let salted_password = Self::pbkdf2_sha256(&self.password, &salt, iterations);
+        let client_key = Self::hmac_sha256(&salted_password, b"Client Key");
+        let stored_key = Self::sha256(&client_key);
+
         let channel_binding =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"n,,");
         let client_final_without_proof = format!("c={channel_binding},r={full_nonce}");
@@ -389,8 +404,19 @@ impl MockScramAuth {
         );
         self.auth_message = Some(auth_message);
 
-        // Generate mock client proof
-        let client_final = format!("{}p=dGVzdA==", client_final_without_proof);
+        let auth_message = self.auth_message.as_ref().ok_or_else(|| {
+            PgError::AuthenticationFailed("SCRAM state error: missing auth_message".to_string())
+        })?;
+        let client_signature = Self::hmac_sha256(&stored_key, auth_message.as_bytes());
+        let client_proof: Vec<u8> = client_key
+            .iter()
+            .zip(client_signature.iter())
+            .map(|(key, sig)| *key ^ *sig)
+            .collect();
+        let client_proof_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &client_proof);
+
+        let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
         Ok(client_final.into_bytes())
     }
 
@@ -410,24 +436,100 @@ impl MockScramAuth {
                     PgError::AuthenticationFailed(format!("invalid server signature: {e}"))
                 })?;
 
-        // Compute expected server signature (mock implementation)
-        let expected_sig = [0x12, 0x34, 0x56, 0x78]; // Mock signature for testing
+        let salt = self.salt.as_ref().ok_or_else(|| {
+            PgError::AuthenticationFailed("SCRAM state error: missing salt".to_string())
+        })?;
+        let iterations = self.iterations.ok_or_else(|| {
+            PgError::AuthenticationFailed("SCRAM state error: missing iterations".to_string())
+        })?;
+        let salted_password = Self::pbkdf2_sha256(&self.password, salt, iterations);
+        let server_key = Self::hmac_sha256(&salted_password, b"Server Key");
+        let auth_message = self.auth_message.as_ref().ok_or_else(|| {
+            PgError::AuthenticationFailed("SCRAM state error: missing auth_message".to_string())
+        })?;
+        let expected_sig = Self::hmac_sha256(&server_key, auth_message.as_bytes());
 
         // **ASSERTION 2: Server signature verification uses constant-time comparison**
-        let len_ok = server_sig.len() == expected_sig.len();
-        let content_ok = server_sig
-            .iter()
-            .zip(expected_sig.iter())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0;
-
-        if !(len_ok && content_ok) {
+        if !Self::constant_time_eq_expected_len(&expected_sig, &server_sig) {
             return Err(PgError::AuthenticationFailed(
                 "server signature verification failed".to_string(),
             ));
         }
 
         Ok(())
+    }
+
+    /// PBKDF2-SHA256 key derivation.
+    fn pbkdf2_sha256(password: &str, salt: &[u8], iterations: u32) -> Vec<u8> {
+        let mut result = vec![0u8; 32];
+        let mut salt_with_block = salt.to_vec();
+        salt_with_block.extend_from_slice(&1u32.to_be_bytes());
+
+        let mut u = Self::hmac_sha256(password.as_bytes(), &salt_with_block);
+        result.copy_from_slice(&u);
+
+        for _ in 1..iterations {
+            u = Self::hmac_sha256(password.as_bytes(), &u);
+            for (result_byte, u_byte) in result.iter_mut().zip(u.iter()) {
+                *result_byte ^= u_byte;
+            }
+        }
+
+        result
+    }
+
+    /// HMAC-SHA256.
+    fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+
+        const BLOCK_SIZE: usize = 64;
+
+        let mut key_block = [0u8; BLOCK_SIZE];
+        if key.len() > BLOCK_SIZE {
+            let hash = Sha256::digest(key);
+            key_block[..32].copy_from_slice(&hash);
+        } else {
+            key_block[..key.len()].copy_from_slice(key);
+        }
+
+        let mut inner = [0x36u8; BLOCK_SIZE];
+        for (index, key_byte) in key_block.iter().enumerate() {
+            inner[index] ^= *key_byte;
+        }
+
+        let mut outer = [0x5cu8; BLOCK_SIZE];
+        for (index, key_byte) in key_block.iter().enumerate() {
+            outer[index] ^= *key_byte;
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(inner);
+        hasher.update(data);
+        let inner_hash = hasher.finalize();
+
+        let mut hasher = Sha256::new();
+        hasher.update(outer);
+        hasher.update(inner_hash);
+        hasher.finalize().to_vec()
+    }
+
+    /// SHA-256 hash.
+    fn sha256(data: &[u8]) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(data).to_vec()
+    }
+
+    /// Constant-time equality over the expected SCRAM-SHA-256 signature length.
+    fn constant_time_eq_expected_len(expected: &[u8], actual: &[u8]) -> bool {
+        use std::hint::black_box;
+
+        let mut diff = u8::from(expected.len() != actual.len());
+        for (index, expected_byte) in expected.iter().enumerate() {
+            let actual_byte = actual.get(index).copied().unwrap_or(0);
+            diff |= *expected_byte ^ actual_byte;
+        }
+
+        black_box(diff) == 0
     }
 }
 
@@ -441,7 +543,7 @@ fuzz_target!(|input: FuzzInput| {
     let cx = Cx::for_testing();
 
     // Create SCRAM auth instance
-    let mut scram = MockScramAuth::new(&cx, &input.config.username, &input.config.password);
+    let mut scram = HarnessScramAuth::new(&cx, &input.config.username, &input.config.password);
 
     match &input.operation {
         FuzzOperation::ServerFirstMessage { malformed_first } => {
