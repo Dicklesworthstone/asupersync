@@ -23,32 +23,32 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Mock system time for testing clock skew scenarios.
+/// Fixture system time for testing clock skew scenarios.
 #[derive(Debug, Clone)]
-pub struct MockSystemTime {
+pub struct ClockSkewFixtureTime {
     current_time: SystemTime,
 }
 
-impl MockSystemTime {
+impl ClockSkewFixtureTime {
     fn new(time: SystemTime) -> Self {
         Self { current_time: time }
     }
 
-    /// Create mock time that's significantly ahead of actual time.
+    /// Create fixture time that's significantly ahead of actual time.
     fn ahead_by_minutes(minutes: u64) -> Self {
         let ahead_time = SystemTime::now() + Duration::from_secs(minutes * 60);
         Self::new(ahead_time)
     }
 
-    /// Create mock time that's significantly behind actual time.
+    /// Create fixture time that's significantly behind actual time.
     fn behind_by_minutes(minutes: u64) -> Self {
         let behind_time = SystemTime::now()
             .checked_sub(Duration::from_secs(minutes * 60))
-            .expect("mock clock skew should remain representable");
+            .expect("fixture clock skew should remain representable");
         Self::new(behind_time)
     }
 
-    /// Create mock time before Unix epoch (edge case).
+    /// Create fixture time before Unix epoch (edge case).
     fn before_epoch() -> Self {
         let before_epoch = UNIX_EPOCH
             .checked_sub(Duration::from_secs(3600))
@@ -68,16 +68,16 @@ fn unix_nanos(time: SystemTime) -> u64 {
         .as_nanos() as u64
 }
 
-/// Mock span with configurable timestamp for testing clock scenarios.
+/// Fixture span with configurable timestamp for testing clock scenarios.
 #[derive(Debug, Clone)]
-pub struct MockClockSkewSpan {
+pub struct ClockSkewFixtureSpan {
     name: String,
     start_time: SystemTime,
     end_time: Option<SystemTime>,
     local_clock_offset_minutes: i64, // For test documentation
 }
 
-impl MockClockSkewSpan {
+impl ClockSkewFixtureSpan {
     fn new(name: &str, start_time: SystemTime, clock_offset_minutes: i64) -> Self {
         Self {
             name: name.to_string(),
@@ -128,7 +128,7 @@ fn audit_local_clock_ahead_of_collector() {
     println!("   • No errors on significant clock differences");
 
     // **SCENARIO**: Local clock 10 minutes ahead of "collector" clock
-    let local_time_ahead = MockSystemTime::ahead_by_minutes(10);
+    let local_time_ahead = ClockSkewFixtureTime::ahead_by_minutes(10);
     let collector_time_behind = SystemTime::now(); // "Current" collector time
 
     println!("📊 Clock skew scenario: Local ahead by 10 minutes");
@@ -145,7 +145,7 @@ fn audit_local_clock_ahead_of_collector() {
     println!("   Clock skew: {} minutes", skew_duration.as_secs() / 60);
 
     // Create span using local (ahead) clock
-    let mut span = MockClockSkewSpan::new(
+    let mut span = ClockSkewFixtureSpan::new(
         "database_query",
         local_time_ahead.as_system_time(),
         10, // 10 minutes ahead
@@ -208,7 +208,7 @@ fn audit_local_clock_behind_collector() {
     println!("🔍 AUDIT: Local clock behind collector by >5 minutes");
 
     // **SCENARIO**: Local clock 15 minutes behind "collector" clock
-    let local_time_behind = MockSystemTime::behind_by_minutes(15);
+    let local_time_behind = ClockSkewFixtureTime::behind_by_minutes(15);
     let collector_time_ahead = SystemTime::now(); // "Current" collector time
 
     println!("📊 Clock skew scenario: Local behind by 15 minutes");
@@ -222,7 +222,7 @@ fn audit_local_clock_behind_collector() {
     );
 
     // Create span using local (behind) clock
-    let mut span = MockClockSkewSpan::new(
+    let mut span = ClockSkewFixtureSpan::new(
         "api_request",
         local_time_behind.as_system_time(),
         -15, // 15 minutes behind
@@ -289,7 +289,7 @@ fn audit_extreme_clock_edge_case_before_epoch() {
     println!("📊 Edge case scenario: SystemTime before UNIX_EPOCH");
 
     // **SCENARIO**: Time before Unix epoch (should never happen in practice)
-    let before_epoch_time = MockSystemTime::before_epoch();
+    let before_epoch_time = ClockSkewFixtureTime::before_epoch();
 
     println!("   Test time: {:?}", before_epoch_time.as_system_time());
     println!("   Unix epoch: {:?}", UNIX_EPOCH);
@@ -307,7 +307,7 @@ fn audit_extreme_clock_edge_case_before_epoch() {
     );
 
     // Create span with before-epoch time to test span handling
-    let mut span = MockClockSkewSpan::new(
+    let mut span = ClockSkewFixtureSpan::new(
         "edge_case_span",
         before_epoch_time.as_system_time(),
         i64::MIN, // Extreme negative offset
@@ -420,7 +420,7 @@ fn audit_otlp_spec_compliance_local_clock_authority() {
     // Create trace with multiple spans using consistent local clock
     for i in 0..3 {
         let start_time = base_time + Duration::from_millis(i * 100);
-        let mut span = MockClockSkewSpan::new(
+        let mut span = ClockSkewFixtureSpan::new(
             &format!("operation_{}", i),
             start_time,
             0, // No artificial offset
