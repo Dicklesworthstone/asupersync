@@ -172,14 +172,14 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn capture_sqlx_execute_packet() -> (Vec<u8>, Vec<u8>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake mysql server");
-    let addr = listener.local_addr().expect("fake mysql address");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted mysql server");
+    let addr = listener.local_addr().expect("scripted mysql address");
 
     let server = thread::spawn(move || -> (Vec<u8>, Vec<u8>) {
         let (mut stream, _) = listener.accept().expect("accept sqlx client");
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set fake mysql read timeout");
+            .expect("set scripted mysql read timeout");
 
         write_packet(&mut stream, &handshake_payload(), 0).expect("write handshake");
 
@@ -241,7 +241,7 @@ fn capture_sqlx_execute_packet() -> (Vec<u8>, Vec<u8>) {
                 {
                     break;
                 }
-                Err(err) => panic!("unexpected fake mysql read error: {err}"),
+                Err(err) => panic!("unexpected scripted mysql read error: {err}"),
             }
         }
 
@@ -277,7 +277,7 @@ fn capture_sqlx_execute_packet() -> (Vec<u8>, Vec<u8>) {
             .expect("execute sqlx prepared statement");
     });
 
-    server.join().expect("join fake mysql server")
+    server.join().expect("join scripted mysql server")
 }
 
 #[test]
