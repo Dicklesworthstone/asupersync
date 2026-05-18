@@ -17,7 +17,7 @@
 //!       Err IS the call's outcome. A regression that ran the
 //!       response-side chain on Err would either (i) crash on
 //!       the missing response, or (ii) attempt to construct a
-//!       fake response — both bad.
+//!       fabricated response — both bad.
 //!
 //!   (c) **Error-side interceptors run in REVERSE order**
 //!       (server.rs:862). Same shape as the response-side
