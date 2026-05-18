@@ -477,13 +477,13 @@ fn handle_generation_bumps_on_reuse() {
 #[test]
 fn handle_out_of_bounds_is_rejected() {
     let table = WasmHandleTable::new();
-    let fake = WasmHandleRef {
+    let out_of_range = WasmHandleRef {
         kind: WasmHandleKind::Runtime,
         slot: 999,
         generation: 0,
         owner_token: 0,
     };
-    let err = table.get(&fake).unwrap_err();
+    let err = table.get(&out_of_range).unwrap_err();
     assert!(matches!(err, WasmHandleError::SlotOutOfRange { .. }));
 }
 
