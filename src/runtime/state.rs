@@ -2902,7 +2902,7 @@ impl RuntimeState {
                 // bookkeeping bug AND poisoned the cause chain by
                 // stamping the root reason as if it were the immediate
                 // parent's. Now we log the violation as `error!` and
-                // synthesize a self-rooted ParentCancelled placeholder
+                // synthesize a self-rooted ParentCancelled diagnostic sentinel
                 // (no `with_cause_limited` chain) so cause-chain
                 // consumers see "depth>0 region with empty parent cause"
                 // — a clear signal that something is wrong, instead of
@@ -2919,7 +2919,7 @@ impl RuntimeState {
                              this indicates either an out-of-order traversal or a parent \
                              that was skipped (br-tnk8ny)"
                         );
-                        // Self-rooted placeholder: ParentCancelled stamped
+                        // Self-rooted sentinel: ParentCancelled stamped
                         // at the missing parent's region so post-mortem
                         // inspection can find the chain break. Do NOT
                         // chain the root target reason here — that would
@@ -6568,7 +6568,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let task_id = insert_task(&mut state, region);
 
-        // Add a fake waiter so the first call has something to return.
+        // Add a registered waiter so the first call has something to return.
         let waiter_id = insert_task(&mut state, region);
         state
             .task_mut(task_id)
@@ -7544,10 +7544,10 @@ mod tests {
     fn register_finalizer_fails_for_nonexistent_region() {
         init_test("register_finalizer_fails_for_nonexistent_region");
         let mut state = RuntimeState::new();
-        let fake_region = RegionId::from_arena(ArenaIndex::new(999, 0));
+        let unknown_region = RegionId::from_arena(ArenaIndex::new(999, 0));
 
-        let sync_ok = state.register_sync_finalizer(fake_region, || {});
-        let async_ok = state.register_async_finalizer(fake_region, async {});
+        let sync_ok = state.register_sync_finalizer(unknown_region, || {});
+        let async_ok = state.register_async_finalizer(unknown_region, async {});
         crate::assert_with_log!(!sync_ok, "sync finalizer rejected", false, sync_ok);
         crate::assert_with_log!(!async_ok, "async finalizer rejected", false, async_ok);
         crate::test_complete!("register_finalizer_fails_for_nonexistent_region");
