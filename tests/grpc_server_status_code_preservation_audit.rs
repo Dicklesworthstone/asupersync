@@ -233,7 +233,7 @@ fn status_message_preserved_through_trailer_encoding() {
 fn status_message_crlf_percent_encoded_in_trailer() {
     // Pin (a) extension: a Status message containing CRLF
     // (potentially attacker-influenced) is percent-encoded so
-    // it cannot inject additional headers / fake grpc-status.
+    // it cannot inject additional headers / forged grpc-status.
     let mut buf = BytesMut::new();
     asupersync::grpc::web::encode_trailers(
         &Status::internal("line1\r\ngrpc-status: 0"),

@@ -160,7 +160,7 @@ fn metadata_insert_bin_keeps_existing_bin_suffix() {
 fn metadata_insert_value_strips_crlf_and_non_visible_ascii() {
     // Pin (f): ASCII control chars + non-ASCII bytes stripped
     // from VALUE at insert. A peer cannot inject CRLF into a
-    // header value to smuggle additional headers (or fake
+    // header value to smuggle additional headers (or forged
     // grpc-status). Originally audited in tick #152; re-pinned
     // at the request-line metadata-key boundary.
     let mut metadata = Metadata::new();
