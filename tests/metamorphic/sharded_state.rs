@@ -27,35 +27,37 @@
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 use asupersync::cx::{Cx, Scope};
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::runtime::sharded_state::{ShardedConfig, ShardedObservability, ShardedState, ShardGuard};
+use asupersync::observability::metrics::MetricsProvider;
+use asupersync::observability::{LogCollector, ObservabilityConfig};
+use asupersync::runtime::BlockingPoolHandle;
+use asupersync::runtime::config::{LeakEscalation, ObligationLeakResponse};
+use asupersync::runtime::io_driver::IoDriverHandle;
+use asupersync::runtime::sharded_state::{
+    ShardGuard, ShardedConfig, ShardedObservability, ShardedState,
+};
 use asupersync::runtime::{ObligationTable, RegionTable, TaskTable};
 use asupersync::sync::ContendedMutex;
+use asupersync::time::TimerDriverHandle;
+use asupersync::trace::distributed::LogicalClockMode;
+use asupersync::trace::{TraceBufferHandle, TraceConfig};
+use asupersync::types::CancelAttributionConfig;
 use asupersync::types::{ArenaIndex, Budget, RegionId, TaskId, Time};
 use asupersync::util::EntropySource;
-use asupersync::observability::{LogCollector, ObservabilityConfig};
-use asupersync::trace::{TraceBufferHandle, TraceConfig};
-use asupersync::observability::metrics::MetricsProvider;
-use asupersync::time::TimerDriverHandle;
-use asupersync::runtime::io_driver::IoDriverHandle;
-use asupersync::runtime::config::{LeakEscalation, ObligationLeakResponse};
-use asupersync::trace::distributed::LogicalClockMode;
-use asupersync::types::CancelAttributionConfig;
-use asupersync::runtime::BlockingPoolHandle;
 
 // =============================================================================
 // Test Utilities
 // =============================================================================
 
-/// Mock entropy source for deterministic testing
+/// Deterministic entropy source for repeatable tests
 #[derive(Debug, Clone)]
-struct MockEntropySource;
+struct DeterministicEntropySource;
 
-impl EntropySource for MockEntropySource {
+impl EntropySource for DeterministicEntropySource {
     fn generate(&self) -> u64 {
         42 // Deterministic value for testing
     }
@@ -65,11 +67,11 @@ impl EntropySource for MockEntropySource {
     }
 }
 
-/// Mock metrics provider for testing
+/// No-op metrics provider for tests
 #[derive(Debug)]
-struct MockMetricsProvider;
+struct NoopMetricsProvider;
 
-impl MetricsProvider for MockMetricsProvider {
+impl MetricsProvider for NoopMetricsProvider {
     fn increment_counter(&self, _name: &str, _labels: &[(&str, &str)]) {}
     fn observe_histogram(&self, _name: &str, _value: f64, _labels: &[(&str, &str)]) {}
     fn set_gauge(&self, _name: &str, _value: f64, _labels: &[(&str, &str)]) {}
@@ -80,14 +82,14 @@ impl MetricsProvider for MockMetricsProvider {
 fn create_test_sharded_state() -> Arc<ShardedState> {
     let trace_config = TraceConfig::default();
     let trace_handle = TraceBufferHandle::new(trace_config);
-    let metrics: Arc<dyn MetricsProvider> = Arc::new(MockMetricsProvider);
+    let metrics: Arc<dyn MetricsProvider> = Arc::new(NoopMetricsProvider);
 
     let config = Arc::new(ShardedConfig {
         io_driver: None,
         timer_driver: None,
         logical_clock_mode: LogicalClockMode::DetLogical,
         cancel_attribution: CancelAttributionConfig::default(),
-        entropy_source: Arc::new(MockEntropySource),
+        entropy_source: Arc::new(DeterministicEntropySource),
         blocking_pool: None,
         obligation_leak_response: ObligationLeakResponse::Warn,
         leak_escalation: None,
@@ -169,7 +171,10 @@ fn mr1_shard_selection_deterministic() {
             "tasks"
         };
 
-        assert_eq!(task_shard_a, task_shard_b, "Same task ID must map to same shard");
+        assert_eq!(
+            task_shard_a, task_shard_b,
+            "Same task ID must map to same shard"
+        );
 
         // Verify independence: different IDs can map to different shards
         // (This is probabilistic but we test the determinism property)
@@ -185,7 +190,11 @@ fn mr1_shard_selection_deterministic() {
                 format!("regions_{}", i)
             };
 
-            assert_eq!(shard_first, shard_second, "Shard selection must be deterministic for region {}", i);
+            assert_eq!(
+                shard_first, shard_second,
+                "Shard selection must be deterministic for region {}",
+                i
+            );
         }
     });
 }
@@ -255,19 +264,36 @@ fn mr2_shards_lock_independently() {
         let progress = progress_tracker.lock().unwrap();
 
         // Assert: All different shards should have been acquired
-        assert!(progress.contains(&"regions_acquired"), "Regions shard should be acquired");
-        assert!(progress.contains(&"tasks_acquired"), "Tasks shard should be acquired");
-        assert!(progress.contains(&"obligations_acquired"), "Obligations shard should be acquired");
+        assert!(
+            progress.contains(&"regions_acquired"),
+            "Regions shard should be acquired"
+        );
+        assert!(
+            progress.contains(&"tasks_acquired"),
+            "Tasks shard should be acquired"
+        );
+        assert!(
+            progress.contains(&"obligations_acquired"),
+            "Obligations shard should be acquired"
+        );
 
         // Assert: Independent shards should make concurrent progress
         // Tasks and obligations should be acquired while regions is still held
-        let regions_work_idx = progress.iter().position(|x| x == "regions_work_done").unwrap();
+        let regions_work_idx = progress
+            .iter()
+            .position(|x| x == "regions_work_done")
+            .unwrap();
         let tasks_acquired_idx = progress.iter().position(|x| x == "tasks_acquired").unwrap();
-        let obligations_acquired_idx = progress.iter().position(|x| x == "obligations_acquired").unwrap();
+        let obligations_acquired_idx = progress
+            .iter()
+            .position(|x| x == "obligations_acquired")
+            .unwrap();
 
         // Independent shards should not be blocked by each other
-        assert!(tasks_acquired_idx < regions_work_idx || obligations_acquired_idx < regions_work_idx,
-               "Independent shards should not be blocked by each other");
+        assert!(
+            tasks_acquired_idx < regions_work_idx || obligations_acquired_idx < regions_work_idx,
+            "Independent shards should not be blocked by each other"
+        );
     });
 }
 
@@ -288,37 +314,39 @@ fn mr3_cross_shard_operations_deadlock_free() {
         let cx = test_cx();
 
         // Test: Multiple tasks doing cross-shard operations in proper order
-        let tasks: Vec<_> = (0..5).map(|i| {
-            let state_clone = state.clone();
-            let counter_clone = completion_counter.clone();
+        let tasks: Vec<_> = (0..5)
+            .map(|i| {
+                let state_clone = state.clone();
+                let counter_clone = completion_counter.clone();
 
-            cx.spawn(async move {
-                // Each task performs a cross-shard operation
-                // Using the predefined guard methods that enforce lock ordering
-                match i % 3 {
-                    0 => {
-                        // Use for_spawn (regions -> tasks)
-                        let _guard = ShardGuard::for_spawn(&state_clone);
-                        asupersync::time::sleep(Duration::from_millis(5)).await;
+                cx.spawn(async move {
+                    // Each task performs a cross-shard operation
+                    // Using the predefined guard methods that enforce lock ordering
+                    match i % 3 {
+                        0 => {
+                            // Use for_spawn (regions -> tasks)
+                            let _guard = ShardGuard::for_spawn(&state_clone);
+                            asupersync::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        1 => {
+                            // Use for_obligation (regions -> obligations)
+                            let _guard = ShardGuard::for_obligation(&state_clone);
+                            asupersync::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        2 => {
+                            // Use for_task_completed (regions -> tasks -> obligations)
+                            let _guard = ShardGuard::for_task_completed(&state_clone);
+                            asupersync::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        _ => unreachable!(),
                     }
-                    1 => {
-                        // Use for_obligation (regions -> obligations)
-                        let _guard = ShardGuard::for_obligation(&state_clone);
-                        asupersync::time::sleep(Duration::from_millis(5)).await;
-                    }
-                    2 => {
-                        // Use for_task_completed (regions -> tasks -> obligations)
-                        let _guard = ShardGuard::for_task_completed(&state_clone);
-                        asupersync::time::sleep(Duration::from_millis(5)).await;
-                    }
-                    _ => unreachable!(),
-                }
 
-                // Mark completion
-                let mut counter = counter_clone.lock().unwrap();
-                *counter += 1;
+                    // Mark completion
+                    let mut counter = counter_clone.lock().unwrap();
+                    *counter += 1;
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all tasks with timeout to detect deadlocks
         let timeout_duration = Duration::from_millis(1000);
@@ -326,26 +354,37 @@ fn mr3_cross_shard_operations_deadlock_free() {
 
         for task in tasks {
             let _ = task.await;
-            assert!(start_time.elapsed() < timeout_duration, "Deadlock detected - operation took too long");
+            assert!(
+                start_time.elapsed() < timeout_duration,
+                "Deadlock detected - operation took too long"
+            );
         }
 
         // Assert: All operations completed without deadlock
         let final_count = *completion_counter.lock().unwrap();
-        assert_eq!(final_count, 5, "All cross-shard operations should complete without deadlock");
+        assert_eq!(
+            final_count, 5,
+            "All cross-shard operations should complete without deadlock"
+        );
 
         // Test concurrent cross-shard operations don't deadlock
-        let concurrent_tasks: Vec<_> = (0..3).map(|_| {
-            let state_clone = state.clone();
-            cx.spawn(async move {
-                // All use the same cross-shard pattern (should not deadlock)
-                let _guard = ShardGuard::for_task_completed(&state_clone);
-                asupersync::time::sleep(Duration::from_millis(10)).await;
+        let concurrent_tasks: Vec<_> = (0..3)
+            .map(|_| {
+                let state_clone = state.clone();
+                cx.spawn(async move {
+                    // All use the same cross-shard pattern (should not deadlock)
+                    let _guard = ShardGuard::for_task_completed(&state_clone);
+                    asupersync::time::sleep(Duration::from_millis(10)).await;
+                })
             })
-        }).collect();
+            .collect();
 
         for task in concurrent_tasks {
             let _ = task.await;
-            assert!(start_time.elapsed() < timeout_duration, "Concurrent cross-shard operations caused deadlock");
+            assert!(
+                start_time.elapsed() < timeout_duration,
+                "Concurrent cross-shard operations caused deadlock"
+            );
         }
     });
 }
@@ -374,11 +413,11 @@ fn mr4_shard_rebalancing_preserves_count() {
 
         // Simulate operations that modify counts in different shards
         let operations = vec![
-            ("regions", 5),    // Add 5 items to regions
-            ("tasks", 8),      // Add 8 items to tasks
+            ("regions", 5),     // Add 5 items to regions
+            ("tasks", 8),       // Add 8 items to tasks
             ("obligations", 3), // Add 3 items to obligations
-            ("regions", -2),   // Remove 2 items from regions
-            ("tasks", -1),     // Remove 1 item from tasks
+            ("regions", -2),    // Remove 2 items from regions
+            ("tasks", -1),      // Remove 1 item from tasks
         ];
 
         // Apply operations while maintaining count invariant
@@ -401,9 +440,11 @@ fn mr4_shard_rebalancing_preserves_count() {
 
             // Assert: Total count is preserved
             let computed_total: usize = shard_counts.values().sum();
-            assert_eq!(computed_total, running_total,
-                      "Count invariant violated: computed {} != tracked {}",
-                      computed_total, running_total);
+            assert_eq!(
+                computed_total, running_total,
+                "Count invariant violated: computed {} != tracked {}",
+                computed_total, running_total
+            );
         }
 
         // Test: Cross-shard move operations preserve total count
@@ -425,7 +466,10 @@ fn mr4_shard_rebalancing_preserves_count() {
 
             // Assert: Total count unchanged after move
             let final_total: usize = shard_counts.values().sum();
-            assert_eq!(final_total, running_total, "Move operation must preserve total count");
+            assert_eq!(
+                final_total, running_total,
+                "Move operation must preserve total count"
+            );
         }
     });
 }
@@ -449,7 +493,9 @@ fn mr5_concurrent_operations_independent_progress() {
         // Track progress with timestamps
         let log_progress = |log: &Arc<StdMutex<VecDeque<(String, u64)>>>, event: &str| {
             let timestamp = asupersync::time::Instant::now().elapsed().as_millis() as u64;
-            log.lock().unwrap().push_back((event.to_string(), timestamp));
+            log.lock()
+                .unwrap()
+                .push_back((event.to_string(), timestamp));
         };
 
         // Test: Operations on different shards should progress in parallel
@@ -515,25 +561,59 @@ fn mr5_concurrent_operations_independent_progress() {
         let events: Vec<_> = log.iter().collect();
 
         // Assert: All shards should have made progress
-        let regions_events: Vec<_> = events.iter().filter(|(event, _)| event.starts_with("regions")).count();
-        let tasks_events: Vec<_> = events.iter().filter(|(event, _)| event.starts_with("tasks")).count();
-        let obligations_events: Vec<_> = events.iter().filter(|(event, _)| event.starts_with("obligations")).count();
+        let regions_events: Vec<_> = events
+            .iter()
+            .filter(|(event, _)| event.starts_with("regions"))
+            .count();
+        let tasks_events: Vec<_> = events
+            .iter()
+            .filter(|(event, _)| event.starts_with("tasks"))
+            .count();
+        let obligations_events: Vec<_> = events
+            .iter()
+            .filter(|(event, _)| event.starts_with("obligations"))
+            .count();
 
-        assert!(regions_events >= 5, "Regions shard should have multiple events");
+        assert!(
+            regions_events >= 5,
+            "Regions shard should have multiple events"
+        );
         assert!(tasks_events >= 5, "Tasks shard should have multiple events");
-        assert!(obligations_events >= 5, "Obligations shard should have multiple events");
+        assert!(
+            obligations_events >= 5,
+            "Obligations shard should have multiple events"
+        );
 
         // Assert: Operations should overlap in time (concurrent progress)
-        let regions_start = events.iter().find(|(event, _)| event == "regions_start").unwrap().1;
-        let regions_end = events.iter().find(|(event, _)| event == "regions_end").unwrap().1;
-        let tasks_start = events.iter().find(|(event, _)| event == "tasks_start").unwrap().1;
-        let tasks_end = events.iter().find(|(event, _)| event == "tasks_end").unwrap().1;
+        let regions_start = events
+            .iter()
+            .find(|(event, _)| event == "regions_start")
+            .unwrap()
+            .1;
+        let regions_end = events
+            .iter()
+            .find(|(event, _)| event == "regions_end")
+            .unwrap()
+            .1;
+        let tasks_start = events
+            .iter()
+            .find(|(event, _)| event == "tasks_start")
+            .unwrap()
+            .1;
+        let tasks_end = events
+            .iter()
+            .find(|(event, _)| event == "tasks_end")
+            .unwrap()
+            .1;
 
         // Check for overlap: one operation should start before the other ends
-        let has_overlap = (tasks_start < regions_end && tasks_end > regions_start) ||
-                         (regions_start < tasks_end && regions_end > tasks_start);
+        let has_overlap = (tasks_start < regions_end && tasks_end > regions_start)
+            || (regions_start < tasks_end && regions_end > tasks_start);
 
-        assert!(has_overlap, "Independent shard operations should overlap in time, indicating concurrent progress");
+        assert!(
+            has_overlap,
+            "Independent shard operations should overlap in time, indicating concurrent progress"
+        );
     });
 }
 
@@ -631,50 +711,82 @@ fn integration_test_sharded_state_metamorphic_properties() {
         let region1 = RegionId::from_arena(ArenaIndex::new(0, 42));
         let region2 = RegionId::from_arena(ArenaIndex::new(0, 42));
 
-        let shard1 = { let _g = ShardGuard::regions_only(&state); "regions" };
-        let shard2 = { let _g = ShardGuard::regions_only(&state); "regions" };
+        let shard1 = {
+            let _g = ShardGuard::regions_only(&state);
+            "regions"
+        };
+        let shard2 = {
+            let _g = ShardGuard::regions_only(&state);
+            "regions"
+        };
         assert_eq!(shard1, shard2, "MR1: Deterministic shard selection failed");
 
         // MR2 & MR5: Independent locking and concurrent progress
         let progress_tracker = Arc::new(StdMutex::new(Vec::new()));
 
-        let concurrent_ops: Vec<_> = (0..3).map(|i| {
-            let state_clone = state.clone();
-            let tracker_clone = progress_tracker.clone();
+        let concurrent_ops: Vec<_> = (0..3)
+            .map(|i| {
+                let state_clone = state.clone();
+                let tracker_clone = progress_tracker.clone();
 
-            cx.spawn(async move {
-                let shard_name = match i {
-                    0 => { let _g = ShardGuard::regions_only(&state_clone); "regions" }
-                    1 => { let _g = ShardGuard::tasks_only(&state_clone); "tasks" }
-                    2 => { let _g = ShardGuard::obligations_only(&state_clone); "obligations" }
-                    _ => unreachable!(),
-                };
+                cx.spawn(async move {
+                    let shard_name = match i {
+                        0 => {
+                            let _g = ShardGuard::regions_only(&state_clone);
+                            "regions"
+                        }
+                        1 => {
+                            let _g = ShardGuard::tasks_only(&state_clone);
+                            "tasks"
+                        }
+                        2 => {
+                            let _g = ShardGuard::obligations_only(&state_clone);
+                            "obligations"
+                        }
+                        _ => unreachable!(),
+                    };
 
-                tracker_clone.lock().unwrap().push(format!("{}_completed", shard_name));
-                asupersync::time::sleep(Duration::from_millis(1)).await;
+                    tracker_clone
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}_completed", shard_name));
+                    asupersync::time::sleep(Duration::from_millis(1)).await;
+                })
             })
-        }).collect();
+            .collect();
 
         for task in concurrent_ops {
             let _ = task.await;
         }
 
         let progress = progress_tracker.lock().unwrap();
-        assert_eq!(progress.len(), 3, "MR2&5: All independent operations should complete");
+        assert_eq!(
+            progress.len(),
+            3,
+            "MR2&5: All independent operations should complete"
+        );
 
         // MR3: Deadlock-free cross-shard operations
-        let cross_shard_ops: Vec<_> = (0..3).map(|i| {
-            let state_clone = state.clone();
+        let cross_shard_ops: Vec<_> = (0..3)
+            .map(|i| {
+                let state_clone = state.clone();
 
-            cx.spawn(async move {
-                match i {
-                    0 => { let _g = ShardGuard::for_spawn(&state_clone); }
-                    1 => { let _g = ShardGuard::for_task_completed(&state_clone); }
-                    2 => { let _g = ShardGuard::for_obligation_resolve(&state_clone); }
-                    _ => unreachable!(),
-                }
+                cx.spawn(async move {
+                    match i {
+                        0 => {
+                            let _g = ShardGuard::for_spawn(&state_clone);
+                        }
+                        1 => {
+                            let _g = ShardGuard::for_task_completed(&state_clone);
+                        }
+                        2 => {
+                            let _g = ShardGuard::for_obligation_resolve(&state_clone);
+                        }
+                        _ => unreachable!(),
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         for task in cross_shard_ops {
             let _ = task.await;
@@ -685,12 +797,24 @@ fn integration_test_sharded_state_metamorphic_properties() {
         let mut total_items = 0;
 
         // Simulate adding items to different shards
-        { let _g = ShardGuard::regions_only(&state); total_items += 5; }
-        { let _g = ShardGuard::tasks_only(&state); total_items += 3; }
-        { let _g = ShardGuard::obligations_only(&state); total_items += 2; }
+        {
+            let _g = ShardGuard::regions_only(&state);
+            total_items += 5;
+        }
+        {
+            let _g = ShardGuard::tasks_only(&state);
+            total_items += 3;
+        }
+        {
+            let _g = ShardGuard::obligations_only(&state);
+            total_items += 2;
+        }
 
         let expected_total = 10;
-        assert_eq!(total_items, expected_total, "MR4: Count preservation failed");
+        assert_eq!(
+            total_items, expected_total,
+            "MR4: Count preservation failed"
+        );
 
         println!("✓ All metamorphic relations (MR1-MR5) validated successfully");
     });
