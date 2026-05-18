@@ -33,7 +33,7 @@ mod tests {
         let id = SymbolId::new_for_test(1, 0, i);
         let data = vec![i as u8];
         let symbol = Symbol::new(id, data, SymbolKind::Source);
-        // Fake tag for testing transport (we don't check validity here, just transport)
+        // Deterministic test tag for transport paths; validity is outside this test scope.
         let tag = AuthenticationTag::zero();
         AuthenticatedSymbol::new_verified(symbol, tag)
     }

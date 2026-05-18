@@ -228,7 +228,7 @@ mod tests {
         init_test("test_add_fds");
         let mut ancillary = SocketAncillary::new(128);
 
-        // Add some fake fds (we're not actually sending them)
+        // Add deterministic test fds; this unit test does not send them.
         let fds = [3, 4, 5];
         let added = ancillary.add_fds(&fds);
 
