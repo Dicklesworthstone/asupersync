@@ -2,7 +2,9 @@
 #![allow(clippy::all)]
 //! Conformance test case definitions
 
-use crate::{TestRequest, StreamingTestRequest, ConformanceResult, TestCategory, TestStatus, TestMetadata};
+use crate::{
+    ConformanceResult, StreamingTestRequest, TestCategory, TestMetadata, TestRequest, TestStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -36,9 +38,16 @@ pub enum TestCaseRequest {
 #[serde(tag = "type")]
 #[allow(dead_code)]
 pub enum TestCaseResponse {
-    Unary { response_pattern: String },
-    Streaming { response_count: u32 },
-    Error { status_code: i32, message_pattern: Option<String> },
+    Unary {
+        response_pattern: String,
+    },
+    Streaming {
+        response_count: u32,
+    },
+    Error {
+        status_code: i32,
+        message_pattern: Option<String>,
+    },
 }
 
 /// Generate standard conformance test cases
@@ -182,7 +191,7 @@ pub fn generate_standard_test_cases() -> Vec<TestCase> {
             skip_reason: None,
         },
 
-        // Streaming tests (placeholder)
+        // Streaming tests gated on reference-client fixtures
         TestCase {
             name: "server_streaming_basic".to_string(),
             category: TestCategory::ServerStreaming,
@@ -199,7 +208,10 @@ pub fn generate_standard_test_cases() -> Vec<TestCase> {
             }),
             expected_status: Some(0),
             timeout: Some(Duration::from_secs(15)),
-            skip_reason: Some("Server streaming not yet implemented".to_string()),
+            skip_reason: Some(
+                "Server streaming execution requires a Connect reference-client fixture"
+                    .to_string(),
+            ),
         },
 
         TestCase {
@@ -230,7 +242,10 @@ pub fn generate_standard_test_cases() -> Vec<TestCase> {
             }),
             expected_status: Some(0),
             timeout: Some(Duration::from_secs(15)),
-            skip_reason: Some("Client streaming not yet implemented".to_string()),
+            skip_reason: Some(
+                "Client streaming execution requires a Connect reference-client fixture"
+                    .to_string(),
+            ),
         },
 
         TestCase {
@@ -256,7 +271,10 @@ pub fn generate_standard_test_cases() -> Vec<TestCase> {
             }),
             expected_status: Some(0),
             timeout: Some(Duration::from_secs(15)),
-            skip_reason: Some("Bidirectional streaming not yet implemented".to_string()),
+            skip_reason: Some(
+                "Bidirectional streaming execution requires a Connect reference-client fixture"
+                    .to_string(),
+            ),
         },
 
         // Timeout and cancellation tests
@@ -287,8 +305,12 @@ pub fn generate_standard_test_cases() -> Vec<TestCase> {
 
 /// Filter test cases by category
 #[allow(dead_code)]
-pub fn filter_test_cases_by_category(test_cases: Vec<TestCase>, category: TestCategory) -> Vec<TestCase> {
-    test_cases.into_iter()
+pub fn filter_test_cases_by_category(
+    test_cases: Vec<TestCase>,
+    category: TestCategory,
+) -> Vec<TestCase> {
+    test_cases
+        .into_iter()
         .filter(|tc| tc.category == category)
         .collect()
 }
@@ -296,7 +318,8 @@ pub fn filter_test_cases_by_category(test_cases: Vec<TestCase>, category: TestCa
 /// Filter test cases by pattern matching name
 #[allow(dead_code)]
 pub fn filter_test_cases_by_pattern(test_cases: Vec<TestCase>, pattern: &str) -> Vec<TestCase> {
-    test_cases.into_iter()
+    test_cases
+        .into_iter()
         .filter(|tc| tc.name.contains(pattern))
         .collect()
 }
@@ -304,7 +327,8 @@ pub fn filter_test_cases_by_pattern(test_cases: Vec<TestCase>, pattern: &str) ->
 /// Remove skipped test cases
 #[allow(dead_code)]
 pub fn remove_skipped_test_cases(test_cases: Vec<TestCase>) -> Vec<TestCase> {
-    test_cases.into_iter()
+    test_cases
+        .into_iter()
         .filter(|tc| tc.skip_reason.is_none())
         .collect()
 }
@@ -320,9 +344,8 @@ mod tests {
         assert!(!test_cases.is_empty());
 
         // Verify we have different categories
-        let categories: std::collections::HashSet<_> = test_cases.iter()
-            .map(|tc| tc.category)
-            .collect();
+        let categories: std::collections::HashSet<_> =
+            test_cases.iter().map(|tc| tc.category).collect();
 
         assert!(categories.contains(&TestCategory::UnaryRpc));
         assert!(categories.contains(&TestCategory::ErrorHandling));
@@ -336,7 +359,9 @@ mod tests {
         let unary_cases = filter_test_cases_by_category(test_cases.clone(), TestCategory::UnaryRpc);
 
         assert!(!unary_cases.is_empty());
-        assert!(unary_cases.iter().all(|tc| tc.category == TestCategory::UnaryRpc));
+        assert!(unary_cases
+            .iter()
+            .all(|tc| tc.category == TestCategory::UnaryRpc));
     }
 
     #[test]

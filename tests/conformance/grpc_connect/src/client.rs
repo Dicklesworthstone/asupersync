@@ -11,7 +11,7 @@ use std::time::Duration;
 use tracing::debug;
 
 /// Connect-compatible client for conformance testing
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct ConformanceClient {
     inner: GrpcClient,

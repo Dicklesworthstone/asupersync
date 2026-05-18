@@ -9,22 +9,64 @@
 use anyhow::Result;
 use asupersync::cx::Cx;
 use asupersync::grpc::{
+    service::{MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler},
     Code, Request, Response, Status,
-    service::{
-        BidiStreamingMethod, ClientStreamingMethod, NamedService, ServerStreamingMethod,
-        ServiceDescriptor, UnaryMethod,
-    },
-    streaming::{RequestStream, ResponseSink},
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{AuthContext, StreamingTestRequest, StreamingTestResponse, TestRequest, TestResponse};
+
+/// In-process request stream used by this standalone conformance harness.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct RequestStream<T> {
+    messages: VecDeque<T>,
+}
+
+#[allow(dead_code)]
+impl<T> RequestStream<T> {
+    pub fn new(messages: impl IntoIterator<Item = T>) -> Self {
+        Self {
+            messages: messages.into_iter().collect(),
+        }
+    }
+
+    pub async fn next(&mut self) -> Option<T> {
+        self.messages.pop_front()
+    }
+}
+
+/// In-process response sink used by this standalone conformance harness.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ResponseSink<T> {
+    messages: Vec<T>,
+}
+
+#[allow(dead_code)]
+impl<T> ResponseSink<T> {
+    pub fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+        }
+    }
+
+    pub async fn send(&mut self, item: T) -> Result<(), String> {
+        self.messages.push(item);
+        Ok(())
+    }
+
+    pub fn messages(&self) -> &[T] {
+        &self.messages
+    }
+}
 
 /// Conformance test service implementation
 #[derive(Debug, Clone)]
@@ -133,18 +175,25 @@ impl ConformanceTestService {
 
         // Echo metadata if requested
         if test_request.echo_metadata {
-            for (key, value) in request.metadata() {
-                if key.as_str().starts_with("test-") {
-                    grpc_response
-                        .metadata_mut()
-                        .insert(key.clone(), value.clone());
+            for (key, value) in request.metadata().iter() {
+                if key.starts_with("test-") {
+                    match value {
+                        asupersync::grpc::MetadataValue::Ascii(value) => {
+                            grpc_response.metadata_mut().insert(key, value.clone());
+                        }
+                        asupersync::grpc::MetadataValue::Binary(value) => {
+                            grpc_response.metadata_mut().insert_bin(key, value.clone());
+                        }
+                    }
                 }
             }
         }
 
         // Echo deadline if requested
         if test_request.echo_deadline {
-            if let Some(deadline) = request.metadata().get("grpc-timeout") {
+            if let Some(asupersync::grpc::MetadataValue::Ascii(deadline)) =
+                request.metadata().get("grpc-timeout")
+            {
                 grpc_response
                     .metadata_mut()
                     .insert("echo-deadline", deadline.clone());
@@ -175,7 +224,7 @@ impl ConformanceTestService {
 
         // Send multiple responses
         for i in 0..5 {
-            if cx.is_cancelled() {
+            if cx.is_cancel_requested() {
                 debug!("Server streaming call #{} cancelled", request_id);
                 return Err(Status::new(Code::Cancelled, "Request cancelled"));
             }
@@ -222,7 +271,7 @@ impl ConformanceTestService {
         let mut last_sequence = 0;
 
         while let Some(request_bytes) = request_stream.next().await {
-            if cx.is_cancelled() {
+            if cx.is_cancel_requested() {
                 debug!("Client streaming call #{} cancelled", request_id);
                 return Err(Status::new(Code::Cancelled, "Request cancelled"));
             }
@@ -283,7 +332,7 @@ impl ConformanceTestService {
 
         // Echo each request as a response with server timestamp
         while let Some(request_bytes) = request_stream.next().await {
-            if cx.is_cancelled() {
+            if cx.is_cancel_requested() {
                 debug!("Bidirectional streaming call #{} cancelled", request_id);
                 return Err(Status::new(Code::Cancelled, "Request cancelled"));
             }
@@ -391,7 +440,7 @@ impl Default for ConformanceTestService {
 
 /// Create and configure the conformance test service with all required methods
 #[allow(dead_code)]
-pub fn create_conformance_test_service() -> impl NamedService {
+pub fn create_conformance_test_service() -> impl NamedService + ServiceHandler {
     ConformanceTestServiceWrapper::new()
 }
 
@@ -415,16 +464,38 @@ impl ConformanceTestServiceWrapper {
 
 impl NamedService for ConformanceTestServiceWrapper {
     const NAME: &'static str = "conformance.TestService";
+}
 
-    #[allow(dead_code)]
+impl ServiceHandler for ConformanceTestServiceWrapper {
+    fn descriptor(&self) -> &ServiceDescriptor {
+        static METHODS: &[MethodDescriptor] = &[
+            MethodDescriptor::unary("UnaryCall", "/conformance.TestService/UnaryCall"),
+            MethodDescriptor::server_streaming(
+                "ServerStreamingCall",
+                "/conformance.TestService/ServerStreamingCall",
+            ),
+            MethodDescriptor::client_streaming(
+                "ClientStreamingCall",
+                "/conformance.TestService/ClientStreamingCall",
+            ),
+            MethodDescriptor::bidi_streaming(
+                "BidirectionalStreamingCall",
+                "/conformance.TestService/BidirectionalStreamingCall",
+            ),
+            MethodDescriptor::unary("ErrorTestCall", "/conformance.TestService/ErrorTestCall"),
+        ];
+        static DESCRIPTOR: ServiceDescriptor =
+            ServiceDescriptor::new("TestService", "conformance", METHODS);
 
-    fn descriptor() -> ServiceDescriptor {
-        ServiceDescriptor::new(Self::NAME)
-            .with_method(UnaryMethod::new("UnaryCall"))
-            .with_method(ServerStreamingMethod::new("ServerStreamingCall"))
-            .with_method(ClientStreamingMethod::new("ClientStreamingCall"))
-            .with_method(BidiStreamingMethod::new("BidirectionalStreamingCall"))
-            .with_method(UnaryMethod::new("ErrorTestCall"))
+        &DESCRIPTOR
+    }
+
+    fn method_names(&self) -> Vec<&str> {
+        self.descriptor()
+            .methods
+            .iter()
+            .map(|method| method.name)
+            .collect()
     }
 }
 
@@ -453,7 +524,7 @@ mod tests {
     #[tokio::test]
     async fn test_unary_call_basic() {
         let service = ConformanceTestService::new();
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
 
         let test_request = TestRequest {
             message: "Hello, world!".to_string(),
@@ -478,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_handling() {
         let service = ConformanceTestService::new();
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
 
         let test_request = TestRequest {
             message: "UNIMPLEMENTED".to_string(),

@@ -7,7 +7,6 @@
 //! or target for external conformance test suites.
 
 use anyhow::{Context, Result};
-use asupersync::cx::Cx;
 use asupersync::grpc::{Server, ServerBuilder};
 use clap::{Arg, Command};
 use grpc_conformance_suite::service::create_conformance_test_service;
@@ -121,8 +120,8 @@ async fn main() -> Result<()> {
 
     // Build the server
     let mut server_builder = ServerBuilder::new()
-        .max_message_size(max_message_size)
-        .compression_enabled(enable_compression)
+        .max_recv_message_size(max_message_size)
+        .max_send_message_size(max_message_size)
         .add_service(test_service);
 
     // Add optional services
@@ -178,7 +177,6 @@ async fn main() -> Result<()> {
     let server = server_builder.build();
 
     // Set up graceful shutdown
-    let cx = Cx::root();
     let shutdown_signal = async {
         tokio::signal::ctrl_c()
             .await
@@ -196,11 +194,12 @@ async fn main() -> Result<()> {
         info!("  - grpc.health.v1.Health (Check, Watch)");
     }
 
+    let bind_addr_string = bind_addr.to_string();
     info!("Press Ctrl+C to shutdown");
 
     // Start the server
     tokio::select! {
-        result = server.serve(&cx, bind_addr) => {
+        result = server.serve(&bind_addr_string) => {
             match result {
                 Ok(_) => info!("Server shutdown cleanly"),
                 Err(e) => {

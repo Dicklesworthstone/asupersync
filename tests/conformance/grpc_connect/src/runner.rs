@@ -2,12 +2,12 @@
 #![allow(clippy::all)]
 //! Test runner implementation for parallel execution and test management
 
-use crate::{ConformanceResult, ConformanceConfig, TestCategory, TestStatus};
+use crate::{ConformanceConfig, ConformanceResult, TestCategory, TestStatus};
 use anyhow::Result;
 use asupersync::cx::Cx;
 use std::collections::HashMap;
 use std::time::Instant;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 /// Parallel test runner for conformance tests
 #[allow(dead_code)]
@@ -24,7 +24,11 @@ impl ParallelTestRunner {
     }
 
     /// Run tests in parallel with concurrency control
-    pub async fn run_tests<F, Fut>(&self, cx: &Cx, test_cases: Vec<(&str, F)>) -> Result<Vec<ConformanceResult>>
+    pub async fn run_tests<F, Fut>(
+        &self,
+        cx: &Cx,
+        test_cases: Vec<(&str, F)>,
+    ) -> Result<Vec<ConformanceResult>>
     where
         F: Fn() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<ConformanceResult>> + Send,
@@ -97,7 +101,8 @@ impl ParallelTestRunner {
             }
 
             summary.total_duration += result.duration;
-            summary.by_category
+            summary
+                .by_category
                 .entry(result.category)
                 .or_default()
                 .push(result.clone());
@@ -136,16 +141,26 @@ impl TestSummary {
     pub fn print_summary(&self) {
         info!("=== Test Execution Summary ===");
         info!("Total tests: {}", self.total_tests);
-        info!("Passed: {} ({:.1}%)", self.passed_tests, self.success_rate());
+        info!(
+            "Passed: {} ({:.1}%)",
+            self.passed_tests,
+            self.success_rate()
+        );
         info!("Failed: {}", self.failed_tests);
         info!("Skipped: {}", self.skipped_tests);
         info!("Errors: {}", self.error_tests);
         info!("Total duration: {:?}", self.total_duration);
 
         for (category, results) in &self.by_category {
-            let category_passed = results.iter().filter(|r| r.status == TestStatus::Passed).count();
+            let category_passed = results
+                .iter()
+                .filter(|r| r.status == TestStatus::Passed)
+                .count();
             let category_total = results.len();
-            info!("{:?}: {}/{} passed", category, category_passed, category_total);
+            info!(
+                "{:?}: {}/{} passed",
+                category, category_passed, category_total
+            );
         }
     }
 }

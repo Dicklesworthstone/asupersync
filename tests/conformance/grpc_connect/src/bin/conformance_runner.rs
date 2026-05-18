@@ -99,12 +99,14 @@ async fn main() -> Result<()> {
     let config = ConformanceConfig {
         server_address: matches.get_one::<String>("server").unwrap().clone(),
         timeout: std::time::Duration::from_secs(
-            matches.get_one::<String>("timeout")
+            matches
+                .get_one::<String>("timeout")
                 .unwrap()
                 .parse()
-                .context("Invalid timeout value")?
+                .context("Invalid timeout value")?,
         ),
-        max_message_size: matches.get_one::<String>("max-message-size")
+        max_message_size: matches
+            .get_one::<String>("max-message-size")
             .unwrap()
             .parse()
             .context("Invalid max message size")?,
@@ -124,7 +126,7 @@ async fn main() -> Result<()> {
     info!("Compression: {}", config.enable_compression);
     info!("TLS: {}", config.enable_tls);
 
-    let cx = Cx::root();
+    let cx = Cx::for_testing();
     let mut suite = ConformanceTestSuite::new(config);
 
     // Run all tests
@@ -140,8 +142,7 @@ async fn main() -> Result<()> {
             // Write detailed results to output file
             let results_json = serde_json::to_string_pretty(suite.get_results())
                 .context("Failed to serialize results")?;
-            std::fs::write(&output_file, results_json)
-                .context("Failed to write output file")?;
+            std::fs::write(&output_file, results_json).context("Failed to write output file")?;
 
             info!("Detailed results written to {}", output_file.display());
 
@@ -171,14 +172,16 @@ mod tests {
     #[test]
     #[allow(dead_code)]
     fn test_cli_parsing() {
-        let app = Command::new("test")
-            .arg(
-                Arg::new("server")
-                    .long("server")
-                    .default_value("http://127.0.0.1:8080"),
-            );
+        let app = Command::new("test").arg(
+            Arg::new("server")
+                .long("server")
+                .default_value("http://127.0.0.1:8080"),
+        );
 
         let matches = app.try_get_matches_from(&["test"]).unwrap();
-        assert_eq!(matches.get_one::<String>("server").unwrap(), "http://127.0.0.1:8080");
+        assert_eq!(
+            matches.get_one::<String>("server").unwrap(),
+            "http://127.0.0.1:8080"
+        );
     }
 }

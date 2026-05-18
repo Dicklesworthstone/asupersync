@@ -10,6 +10,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 /// Connect protocol constants
 pub mod constants {
@@ -108,7 +109,7 @@ impl ConnectRequestBuilder {
     #[allow(dead_code)]
 
     pub fn with_config(mut self, config: ConnectTestConfig) -> Self {
-        self.config = config;
+        self.config = config.clone();
 
         // Set content type based on encoding preference
         let content_type = if config.use_json_encoding {
@@ -655,11 +656,9 @@ mod tests {
         assert_eq!(request.method, Method::POST);
         assert_eq!(request.uri.path(), "/test.Service/TestMethod");
         assert!(request.headers.contains_key("user-agent"));
-        assert!(
-            request
-                .headers
-                .contains_key(constants::CONNECT_PROTOCOL_HEADER)
-        );
+        assert!(request
+            .headers
+            .contains_key(constants::CONNECT_PROTOCOL_HEADER));
     }
 
     #[test]
