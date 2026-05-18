@@ -3,13 +3,13 @@
 use arbitrary::Arbitrary;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::runtime::yield_now;
+use asupersync::runtime::{TaskHandle, yield_now};
 use asupersync::sync::Semaphore;
-use asupersync::types::Budget;
+use asupersync::types::{Budget, CancelReason};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 // Comprehensive fuzz target for Semaphore acquire-with-cancel race conditions.
 //
@@ -175,8 +175,9 @@ fn execute_acquire_cancel_scenario(
     let semaphore = Arc::new(Semaphore::new(initial_permits));
     let tracker = Arc::new(PermitTracker::default());
 
-    // Maps task index to task handle for cancellation
-    let mut task_handles: HashMap<usize, _> = HashMap::new();
+    // Maps task index to a shared handle so cancel tasks can exercise the
+    // real runtime abort path while the verifier can still join afterward.
+    let mut task_handles: HashMap<usize, Arc<Mutex<TaskHandle<usize>>>> = HashMap::new();
     let mut acquire_handles = Vec::new();
     let mut cancel_handles = Vec::new();
 
@@ -208,21 +209,23 @@ fn execute_acquire_cancel_scenario(
             .expect("acquire task should spawn");
 
         runtime.scheduler.lock().schedule(task_id, priority);
-        task_handles.insert(task_idx, task_id);
-        acquire_handles.push(handle);
+        let shared_handle = Arc::new(Mutex::new(handle));
+        task_handles.insert(task_idx, Arc::clone(&shared_handle));
+        acquire_handles.push(shared_handle);
     }
 
     // Spawn cancel tasks
     for cancel_plan in cancel_tasks {
         let target_idx = cancel_plan.target_task_id as usize;
-        if let Some(&target_task_id) = task_handles.get(&target_idx) {
+        if let Some(target_handle) = task_handles.get(&target_idx) {
             let priority = cancel_plan.priority;
             let cancel_plan_clone = cancel_plan.clone();
+            let target_handle = Arc::clone(target_handle);
 
             let (cancel_task_id, cancel_handle) = runtime
                 .state
                 .create_task(region, Budget::INFINITE, async move {
-                    run_cancel_task(cancel_plan_clone, target_task_id).await
+                    run_cancel_task(cancel_plan_clone, target_handle).await
                 })
                 .expect("cancel task should spawn");
 
@@ -257,7 +260,10 @@ fn execute_acquire_cancel_scenario(
     }
 
     // Join acquire tasks and verify no panics
-    for mut handle in acquire_handles {
+    for handle in acquire_handles {
+        let mut handle = handle
+            .lock()
+            .expect("acquire task handle mutex should not be poisoned");
         match handle.try_join() {
             Ok(Some(_)) => {} // Task completed normally
             Ok(None) => {}    // Task was cancelled
@@ -350,14 +356,24 @@ async fn run_acquire_task(
     permit_count
 }
 
-async fn run_cancel_task(cancel_plan: CancelTaskPlan, _target_task_id: asupersync::types::TaskId) {
+async fn run_cancel_task(
+    cancel_plan: CancelTaskPlan,
+    target_handle: Arc<Mutex<TaskHandle<usize>>>,
+) {
     // Delay before cancellation attempt
     for _ in 0..cancel_plan.delay_yields.min(MAX_YIELDS) {
         yield_now().await;
     }
 
-    // TODO: Implement task cancellation when API is available
-    // For now this just yields to create scheduling interference
+    {
+        let handle = target_handle
+            .lock()
+            .expect("target task handle mutex should not be poisoned");
+        handle.abort_with_reason(CancelReason::user("semaphore acquire-cancel fuzz task"));
+    }
+
+    // Give the target task a chance to observe the abort waker and reach a
+    // cancellation checkpoint under varied interleavings.
     for _ in 0..5 {
         yield_now().await;
     }
