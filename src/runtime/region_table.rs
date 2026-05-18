@@ -497,8 +497,8 @@ mod tests {
     #[test]
     fn create_child_nonexistent_parent_fails() {
         let mut table = RegionTable::new();
-        let fake_parent = RegionId::from_arena(ArenaIndex::new(99, 0));
-        let result = table.create_child(fake_parent, Budget::default(), Time::ZERO);
+        let unknown_parent = RegionId::from_arena(ArenaIndex::new(99, 0));
+        let result = table.create_child(unknown_parent, Budget::default(), Time::ZERO);
         assert!(matches!(result, Err(RegionCreateError::ParentNotFound(_))));
         assert_eq!(table.len(), 0);
     }
@@ -682,8 +682,8 @@ mod tests {
     #[test]
     fn set_limits_nonexistent_returns_false() {
         let table = RegionTable::new();
-        let fake = RegionId::from_arena(ArenaIndex::new(99, 0));
-        assert!(!table.set_limits(fake, RegionLimits::UNLIMITED));
+        let unknown_region = RegionId::from_arena(ArenaIndex::new(99, 0));
+        assert!(!table.set_limits(unknown_region, RegionLimits::UNLIMITED));
     }
 
     #[test]
