@@ -3,12 +3,13 @@
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{
     SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION,
-    SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION, SchedulerEvidenceArtifact, SchedulerEvidenceError,
-    SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
-    SchedulerTopologyDescriptor, SchedulerWorkloadClass, SwarmAdmissionDecision,
-    SwarmAdmissionLane, SwarmAdmissionReasonCode, SwarmAdmissionReport, SwarmCapacitySnapshot,
-    SwarmCoordinationBacklogSignals, SwarmCpuTopologyHints, SwarmDiskCapacity,
-    SwarmDiskPressureLevel, SwarmMemoryCapacity, SwarmMemoryPressureTier, SwarmRchAdmissibility,
+    SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION, SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION,
+    SchedulerEvidenceArtifact, SchedulerEvidenceError, SchedulerEvidenceMetrics,
+    SchedulerKnobProfile, SchedulerRecommendationReason, SchedulerTopologyDescriptor,
+    SchedulerWorkloadClass, SwarmAdmissionDecision, SwarmAdmissionLane, SwarmAdmissionReasonCode,
+    SwarmAdmissionReport, SwarmCapacitySnapshot, SwarmCoordinationBacklogSignals,
+    SwarmCpuTopologyHints, SwarmDiskCapacity, SwarmDiskPressureLevel, SwarmMemoryBudgetPlan,
+    SwarmMemoryCapacity, SwarmMemoryHostTier, SwarmMemoryPressureTier, SwarmRchAdmissibility,
     SwarmRchCapacity, SwarmValidationClass, ThreeLaneScheduler,
 };
 use asupersync::sync::ContendedMutex;
@@ -104,6 +105,23 @@ fn admission_for(
         .iter()
         .find(|admission| admission.lane == lane)
         .unwrap_or_else(|| panic!("missing lane admission for {lane:?}"))
+}
+
+fn assert_memory_plan_invariants(plan: &SwarmMemoryBudgetPlan) {
+    assert_eq!(
+        plan.total_planned_bytes,
+        plan.interactive_runtime_bytes
+            + plan.trace_replay_bytes
+            + plan.proof_artifact_staging_bytes
+            + plan.compiler_cache_bytes
+    );
+    let allocatable_bytes = plan
+        .available_bytes
+        .saturating_sub(plan.emergency_reserve_bytes);
+    assert!(
+        plan.total_planned_bytes <= allocatable_bytes,
+        "planned bytes must fit inside memory left after emergency reserve"
+    );
 }
 
 #[test]
@@ -562,6 +580,181 @@ fn swarm_admission_policy_keeps_work_conserving_fallback_on_sparse_queue() {
         tracker
             .reason_codes
             .contains(&SwarmAdmissionReasonCode::SparseReadyQueueUseFallback)
+    );
+}
+
+#[test]
+fn swarm_memory_budget_planner_handles_32gb_hosts() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let mut snapshot = sample_capacity_snapshot("memory-budget-32gb");
+    snapshot.memory.total_bytes = Some(32 * GIB);
+    snapshot.memory.available_bytes = Some(24 * GIB);
+
+    let plan = snapshot
+        .memory_budget_plan()
+        .expect("32GB snapshot should produce memory budget plan");
+
+    assert_eq!(plan.schema_version, SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION);
+    assert_eq!(plan.source_snapshot_id, "memory-budget-32gb");
+    assert_eq!(plan.host_tier, SwarmMemoryHostTier::Small);
+    assert_eq!(plan.pressure_tier, SwarmMemoryPressureTier::Healthy);
+    assert_eq!(plan.emergency_reserve_bytes, 4 * GIB);
+    assert_memory_plan_invariants(&plan);
+    assert!(plan.interactive_runtime_bytes > plan.proof_artifact_staging_bytes);
+}
+
+#[test]
+fn swarm_memory_budget_planner_scales_trace_and_proof_windows_on_128gb_hosts() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let mut small = sample_capacity_snapshot("memory-budget-small-baseline");
+    small.memory.total_bytes = Some(32 * GIB);
+    small.memory.available_bytes = Some(24 * GIB);
+    let small_plan = small
+        .memory_budget_plan()
+        .expect("small host should produce memory budget plan");
+
+    let mut standard = sample_capacity_snapshot("memory-budget-128gb");
+    standard.memory.total_bytes = Some(128 * GIB);
+    standard.memory.available_bytes = Some(96 * GIB);
+    let standard_plan = standard
+        .memory_budget_plan()
+        .expect("128GB snapshot should produce memory budget plan");
+
+    assert_eq!(standard_plan.host_tier, SwarmMemoryHostTier::Standard);
+    assert_memory_plan_invariants(&standard_plan);
+    assert!(standard_plan.trace_replay_bytes > small_plan.trace_replay_bytes);
+    assert!(standard_plan.proof_artifact_staging_bytes > small_plan.proof_artifact_staging_bytes);
+    assert!(standard_plan.compiler_cache_bytes > small_plan.compiler_cache_bytes);
+}
+
+#[test]
+fn swarm_memory_budget_planner_expands_256gb_trace_and_proof_budgets() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let mut standard = sample_capacity_snapshot("memory-budget-128gb-baseline");
+    standard.memory.total_bytes = Some(128 * GIB);
+    standard.memory.available_bytes = Some(96 * GIB);
+    let standard_plan = standard
+        .memory_budget_plan()
+        .expect("128GB snapshot should produce memory budget plan");
+
+    let snapshot = sample_capacity_snapshot("memory-budget-256gb");
+    let plan = snapshot
+        .memory_budget_plan()
+        .expect("256GB snapshot should produce memory budget plan");
+
+    assert_eq!(plan.host_tier, SwarmMemoryHostTier::HighMemory);
+    assert_eq!(plan.emergency_reserve_bytes, 32 * GIB);
+    assert_memory_plan_invariants(&plan);
+    assert!(plan.trace_replay_bytes > standard_plan.trace_replay_bytes);
+    assert!(plan.proof_artifact_staging_bytes > standard_plan.proof_artifact_staging_bytes);
+    assert!(plan.interactive_runtime_bytes > 0);
+}
+
+#[test]
+fn swarm_memory_budget_planner_degrades_artifacts_before_interactive_under_pressure() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let mut snapshot = sample_capacity_snapshot("memory-budget-saturated");
+    snapshot.memory.available_bytes = Some(64 * GIB);
+    snapshot.memory.pressure_tier = SwarmMemoryPressureTier::Saturated;
+
+    let saturated = snapshot
+        .memory_budget_plan()
+        .expect("saturated snapshot should produce memory budget plan");
+
+    assert_eq!(saturated.host_tier, SwarmMemoryHostTier::HighMemory);
+    assert_eq!(saturated.pressure_tier, SwarmMemoryPressureTier::Saturated);
+    assert_memory_plan_invariants(&saturated);
+    assert!(saturated.interactive_runtime_bytes > saturated.proof_artifact_staging_bytes);
+    assert!(saturated.interactive_runtime_bytes > saturated.compiler_cache_bytes);
+    assert!(saturated.emergency_reserve_bytes >= saturated.available_bytes / 3);
+
+    snapshot.memory.pressure_tier = SwarmMemoryPressureTier::Critical;
+    let critical = snapshot
+        .memory_budget_plan()
+        .expect("critical snapshot should produce memory budget plan");
+
+    assert_eq!(critical.proof_artifact_staging_bytes, 0);
+    assert_eq!(critical.compiler_cache_bytes, 0);
+    assert!(critical.interactive_runtime_bytes > 0);
+    assert_memory_plan_invariants(&critical);
+}
+
+#[test]
+fn swarm_memory_budget_planner_emits_stable_golden_shapes() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let mut small = sample_capacity_snapshot("memory-budget-golden-32gb");
+    small.memory.total_bytes = Some(32 * GIB);
+    small.memory.available_bytes = Some(24 * GIB);
+    let small_plan = small
+        .memory_budget_plan()
+        .expect("32GB snapshot should produce memory budget plan");
+    assert_eq!(
+        serde_json::to_value(&small_plan).expect("serialize small memory budget plan"),
+        serde_json::json!({
+            "schema_version": SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION,
+            "source_snapshot_id": "memory-budget-golden-32gb",
+            "host_tier": "small",
+            "pressure_tier": "healthy",
+            "available_bytes": 24 * GIB,
+            "total_bytes": 32 * GIB,
+            "emergency_reserve_bytes": 4 * GIB,
+            "interactive_runtime_bytes": 9 * GIB,
+            "trace_replay_bytes": 5 * GIB,
+            "proof_artifact_staging_bytes": 3 * GIB,
+            "compiler_cache_bytes": 3 * GIB,
+            "total_planned_bytes": 20 * GIB,
+        })
+    );
+
+    let high_memory = sample_capacity_snapshot("memory-budget-golden-256gb");
+    let high_memory_plan = high_memory
+        .memory_budget_plan()
+        .expect("256GB snapshot should produce memory budget plan");
+    assert_eq!(
+        serde_json::to_value(&high_memory_plan).expect("serialize high-memory budget plan"),
+        serde_json::json!({
+            "schema_version": SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION,
+            "source_snapshot_id": "memory-budget-golden-256gb",
+            "host_tier": "high_memory",
+            "pressure_tier": "healthy",
+            "available_bytes": 192 * GIB,
+            "total_bytes": 256 * GIB,
+            "emergency_reserve_bytes": 32 * GIB,
+            "interactive_runtime_bytes": 40 * GIB,
+            "trace_replay_bytes": 56 * GIB,
+            "proof_artifact_staging_bytes": 40 * GIB,
+            "compiler_cache_bytes": 24 * GIB,
+            "total_planned_bytes": 160 * GIB,
+        })
+    );
+
+    let mut critical = sample_capacity_snapshot("memory-budget-golden-critical");
+    critical.memory.available_bytes = Some(64 * GIB);
+    critical.memory.pressure_tier = SwarmMemoryPressureTier::Critical;
+    let critical_plan = critical
+        .memory_budget_plan()
+        .expect("critical snapshot should produce memory budget plan");
+    assert_eq!(
+        serde_json::to_value(&critical_plan).expect("serialize critical budget plan"),
+        serde_json::json!({
+            "schema_version": SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION,
+            "source_snapshot_id": "memory-budget-golden-critical",
+            "host_tier": "high_memory",
+            "pressure_tier": "critical",
+            "available_bytes": 64 * GIB,
+            "total_bytes": 256 * GIB,
+            "emergency_reserve_bytes": 32 * GIB,
+            "interactive_runtime_bytes": 30_923_764_531_u64,
+            "trace_replay_bytes": 3_435_973_836_u64,
+            "proof_artifact_staging_bytes": 0_u64,
+            "compiler_cache_bytes": 0_u64,
+            "total_planned_bytes": 34_359_738_367_u64,
+        })
     );
 }
 

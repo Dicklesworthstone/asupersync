@@ -453,6 +453,9 @@ pub const SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION: &str = "asupersync.swarm-capac
 pub const SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION: &str =
     "asupersync.swarm-admission-policy-report.v1";
 
+/// Stable schema for memory budget plans derived from swarm capacity snapshots.
+pub const SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION: &str = "asupersync.swarm-memory-budget-plan.v1";
+
 /// Deterministic, capability-supplied host capacity snapshot.
 ///
 /// This type is intentionally inert: it records capacity and coordination
@@ -518,6 +521,60 @@ impl SwarmCapacitySnapshot {
             source_snapshot_id: self.snapshot_id.clone(),
             recommended_lane,
             lanes,
+        })
+    }
+
+    /// Derive explicit per-lane memory budgets from this snapshot.
+    ///
+    /// The planner is deterministic and capability-fed: it only consumes this
+    /// snapshot, preserves an emergency reserve first, and reduces proof/cache
+    /// growth before interactive runtime state when pressure rises.
+    pub fn memory_budget_plan(&self) -> Result<SwarmMemoryBudgetPlan, SchedulerEvidenceError> {
+        self.validate()?;
+
+        let host_tier = SwarmMemoryHostTier::classify(self.memory.total_bytes);
+        let available_bytes = self.memory.available_bytes.unwrap_or(0);
+        let total_bytes = self.memory.total_bytes.unwrap_or(available_bytes);
+        let emergency_reserve_bytes = host_tier.emergency_reserve_bytes(
+            total_bytes,
+            available_bytes,
+            self.memory.pressure_tier,
+        );
+        let allocatable_bytes = available_bytes.saturating_sub(emergency_reserve_bytes);
+        let (interactive_weight, trace_weight, proof_weight, cache_weight) =
+            host_tier.budget_weights(self.memory.pressure_tier);
+        let total_weight = interactive_weight + trace_weight + proof_weight + cache_weight;
+
+        let lane_budget = |weight| {
+            if total_weight == 0 {
+                0
+            } else {
+                allocatable_bytes.saturating_mul(weight) / total_weight
+            }
+        };
+
+        let interactive_runtime_bytes = lane_budget(interactive_weight);
+        let trace_replay_bytes = lane_budget(trace_weight);
+        let proof_artifact_staging_bytes = lane_budget(proof_weight);
+        let compiler_cache_bytes = lane_budget(cache_weight);
+        let total_planned_bytes = interactive_runtime_bytes
+            .saturating_add(trace_replay_bytes)
+            .saturating_add(proof_artifact_staging_bytes)
+            .saturating_add(compiler_cache_bytes);
+
+        Ok(SwarmMemoryBudgetPlan {
+            schema_version: SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION.to_string(),
+            source_snapshot_id: self.snapshot_id.clone(),
+            host_tier,
+            pressure_tier: self.memory.pressure_tier,
+            available_bytes,
+            total_bytes,
+            emergency_reserve_bytes,
+            interactive_runtime_bytes,
+            trace_replay_bytes,
+            proof_artifact_staging_bytes,
+            compiler_cache_bytes,
+            total_planned_bytes,
         })
     }
 
@@ -669,6 +726,108 @@ impl SwarmCapacitySnapshot {
             reason_codes,
         }
     }
+}
+
+/// Memory host tier used by the deterministic budget planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmMemoryHostTier {
+    /// Total memory was not reported.
+    Unknown,
+    /// Small or laptop-class host, up to roughly 64 GiB.
+    Small,
+    /// Workstation/server host below the high-memory threshold.
+    Standard,
+    /// High-memory swarm host, 256 GiB or more.
+    HighMemory,
+}
+
+impl SwarmMemoryHostTier {
+    fn classify(total_bytes: Option<u64>) -> Self {
+        const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+        match total_bytes {
+            None => Self::Unknown,
+            Some(bytes) if bytes >= 256 * GIB => Self::HighMemory,
+            Some(bytes) if bytes > 64 * GIB => Self::Standard,
+            Some(_) => Self::Small,
+        }
+    }
+
+    fn emergency_reserve_bytes(
+        self,
+        total_bytes: u64,
+        available_bytes: u64,
+        pressure_tier: SwarmMemoryPressureTier,
+    ) -> u64 {
+        const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+        let tier_floor = match self {
+            Self::Unknown => 0,
+            Self::Small => 4 * GIB,
+            Self::Standard => 12 * GIB,
+            Self::HighMemory => 32 * GIB,
+        };
+        let ratio_floor = total_bytes / 10;
+        let healthy_reserve = tier_floor.max(ratio_floor);
+
+        let pressure_reserve = match pressure_tier {
+            SwarmMemoryPressureTier::Unknown => healthy_reserve.max(available_bytes / 4),
+            SwarmMemoryPressureTier::Healthy => healthy_reserve,
+            SwarmMemoryPressureTier::Low => healthy_reserve.max(available_bytes / 5),
+            SwarmMemoryPressureTier::Saturated => healthy_reserve.max(available_bytes / 3),
+            SwarmMemoryPressureTier::Critical => healthy_reserve.max(available_bytes / 2),
+        };
+        if available_bytes == 0 {
+            0
+        } else {
+            pressure_reserve.min(available_bytes.saturating_sub(1))
+        }
+    }
+
+    fn budget_weights(self, pressure_tier: SwarmMemoryPressureTier) -> (u64, u64, u64, u64) {
+        match pressure_tier {
+            SwarmMemoryPressureTier::Critical => (90, 10, 0, 0),
+            SwarmMemoryPressureTier::Saturated => (70, 20, 5, 5),
+            SwarmMemoryPressureTier::Low => (45, 30, 15, 10),
+            SwarmMemoryPressureTier::Unknown => (80, 20, 0, 0),
+            SwarmMemoryPressureTier::Healthy => match self {
+                Self::Unknown => (80, 20, 0, 0),
+                Self::Small => (45, 25, 15, 15),
+                Self::Standard => (35, 30, 20, 15),
+                Self::HighMemory => (25, 35, 25, 15),
+            },
+        }
+    }
+}
+
+/// Deterministic per-lane memory budget plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmMemoryBudgetPlan {
+    /// Version tag for this schema.
+    pub schema_version: String,
+    /// Snapshot identifier copied from the source snapshot.
+    pub source_snapshot_id: String,
+    /// Host tier selected from explicit total memory.
+    pub host_tier: SwarmMemoryHostTier,
+    /// Pressure tier copied from the source snapshot.
+    pub pressure_tier: SwarmMemoryPressureTier,
+    /// Available memory supplied by the adapter.
+    pub available_bytes: u64,
+    /// Total memory supplied by the adapter, or available bytes if total is absent.
+    pub total_bytes: u64,
+    /// Reserve preserved before assigning any lane budget.
+    pub emergency_reserve_bytes: u64,
+    /// Interactive runtime state and source-only coordination budget.
+    pub interactive_runtime_bytes: u64,
+    /// Trace and replay buffer budget.
+    pub trace_replay_bytes: u64,
+    /// Proof artifact staging budget.
+    pub proof_artifact_staging_bytes: u64,
+    /// Reusable compiler/build cache budget.
+    pub compiler_cache_bytes: u64,
+    /// Sum of lane budgets, excluding emergency reserve.
+    pub total_planned_bytes: u64,
 }
 
 /// Work lanes that swarm-scale admission policy classifies.
