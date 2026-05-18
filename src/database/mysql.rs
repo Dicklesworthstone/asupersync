@@ -403,25 +403,6 @@ pub struct MySqlColumn {
     pub decimals: u8,
 }
 
-impl MySqlColumn {
-    /// Create a simple string column for prepared statement metadata.
-    pub fn new_simple_string(name: &str) -> Self {
-        Self {
-            catalog: "def".to_string(),
-            schema: String::new(),
-            table: String::new(),
-            org_table: String::new(),
-            name: name.to_string(),
-            org_name: name.to_string(),
-            charset: 0,
-            length: 0,
-            column_type: 0,
-            flags: 0,
-            decimals: 0,
-        }
-    }
-}
-
 /// A value from a MySQL row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MySqlValue {
@@ -3662,14 +3643,17 @@ impl MySqlConnection {
         let mut params = Vec::new();
         if param_count > 0 {
             for _ in 0..param_count {
-                let (_param_data, seq) = match self.read_packet().await {
+                let (param_data, seq) = match self.read_packet().await {
                     Ok((data, seq)) => (data, seq),
                     Err(e) => return outcome_from_error(e),
                 };
                 self.inner.sequence = seq.wrapping_add(1);
 
-                // Parse column definition packet - simplified for now
-                params.push(MySqlColumn::new_simple_string("param"));
+                let param = match Self::parse_column_definition(&param_data) {
+                    Ok(column) => column,
+                    Err(e) => return outcome_from_error(e),
+                };
+                params.push(param);
             }
 
             if expects_metadata_eof {
@@ -3683,14 +3667,17 @@ impl MySqlConnection {
         let mut columns = Vec::new();
         if column_count > 0 {
             for _ in 0..column_count {
-                let (_col_data, seq) = match self.read_packet().await {
+                let (col_data, seq) = match self.read_packet().await {
                     Ok((data, seq)) => (data, seq),
                     Err(e) => return outcome_from_error(e),
                 };
                 self.inner.sequence = seq.wrapping_add(1);
 
-                // Parse column definition packet - simplified for now
-                columns.push(MySqlColumn::new_simple_string("column"));
+                let column = match Self::parse_column_definition(&col_data) {
+                    Ok(column) => column,
+                    Err(e) => return outcome_from_error(e),
+                };
+                columns.push(column);
             }
 
             if expects_metadata_eof {
@@ -7417,6 +7404,16 @@ mod tests {
         assert_eq!(stmt.owner_connection_id(), 7);
         assert_eq!(stmt.param_count(), 1);
         assert_eq!(stmt.column_count(), 1);
+        assert_eq!(stmt.params()[0].name, "param");
+        assert_eq!(
+            stmt.params()[0].column_type,
+            column_type::MYSQL_TYPE_VAR_STRING
+        );
+        assert_eq!(stmt.columns()[0].name, "result");
+        assert_eq!(
+            stmt.columns()[0].column_type,
+            column_type::MYSQL_TYPE_VAR_STRING
+        );
         assert_eq!(conn.inner.sequence, 4);
         assert!(!conn.inner.closed);
     }
