@@ -42,13 +42,13 @@ enum BodyKind<B> {
     Stream(B),
 }
 
-/// A dummy stream type used for full bodies.
+/// Type marker for full or empty bodies that do not poll an inner stream.
 pub struct EmptyStream;
 
 impl asupersync::stream::Stream for EmptyStream {
     type Item = Result<bytes::Bytes, std::convert::Infallible>;
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        unreachable!("EmptyStream should never be polled")
+        unreachable!("EmptyStream is only a type marker for full bodies")
     }
 }
 

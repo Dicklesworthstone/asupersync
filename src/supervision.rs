@@ -9482,13 +9482,13 @@ mod tests {
         }
     }
 
-    /// Mock start function for metamorphic testing
+    /// No-op start function for metamorphic testing
     fn noop_start_metamorphic(
         _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
         _state: &mut crate::runtime::RuntimeState,
         _cx: &crate::cx::Cx,
     ) -> Result<TaskId, SpawnError> {
-        // Return a dummy TaskId for testing
+        // Return a deterministic TaskId for the test harness.
         use crate::util::ArenaIndex;
         let arena_idx = ArenaIndex::new(42, 0);
         Ok(TaskId::from_arena(arena_idx))

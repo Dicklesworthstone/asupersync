@@ -704,7 +704,9 @@ impl WakerDedupOracle {
             // Spurious wakeup - no registered waker
             let violation = WakerDedupViolation::SpuriousWakeup {
                 waker_id,
-                channel_id: ChannelId(0), // We don't know the channel, use dummy
+                // Unknown-channel sentinel: this wakeup has no registered
+                // channel state to report.
+                channel_id: ChannelId(0),
                 woken_at: now,
                 reason: "unknown waker".to_string(),
                 trace_id,
