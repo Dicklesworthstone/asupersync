@@ -195,7 +195,7 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
         // Open a fresh connection to the same file. SqliteConnection on
         // the same path opens its own rusqlite handle, which sees the
         // server-side committed state — what asupersync's internal Mutex
-        // cannot fake.
+        // cannot synthesize.
         let cx_recover = Cx::for_testing();
         let recover = match SqliteConnection::open(&cx_recover, &db_path_str).await {
             Outcome::Ok(c) => c,

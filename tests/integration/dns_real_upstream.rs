@@ -1,4 +1,4 @@
-//! Real public-resolver DNS integration test — no fake nameserver.
+//! Real public-resolver DNS integration test — no in-process nameserver.
 //!
 //! Bead: br-asupersync-3t9amh
 //!

@@ -624,7 +624,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
 
         // Server-side proof: MySQL itself must agree the connection is
         // out of the transaction. @@in_transaction is server-side state,
-        // not anything our wire codec can fake.
+        // not anything our wire codec can synthesize.
         log.phase("server_side_in_transaction_off");
         let post_drain = unwrap_mysql(
             conn.query_unchecked(&cx, "SELECT @@in_transaction AS in_txn")
