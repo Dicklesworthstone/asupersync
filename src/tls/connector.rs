@@ -807,7 +807,7 @@ impl TlsConnectorBuilder {
         false
     }
 
-    /// Stub for the `tls`-disabled build — strict-CA gate is a no-op
+    /// Fallback for the `tls`-disabled build — strict-CA gate is a no-op
     /// because there is no x509 parser available.
     #[cfg(not(feature = "tls"))]
     fn admit_root_certificate(&self, _cert: &Certificate) -> bool {

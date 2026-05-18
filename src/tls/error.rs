@@ -23,7 +23,7 @@ const MAX_SANITIZED_LEN: usize = 256;
 ///   * `\r`, `\n`, `\t` → ASCII space (preserves field separation,
 ///     prevents line splitting)
 ///   * Any other ASCII control char (0x00..=0x1F, 0x7F) → replaced with
-///     `?` (visible-but-not-special placeholder)
+///     `?` (visible-but-not-special replacement marker)
 ///   * UTF-8 truncation at MAX_SANITIZED_LEN bytes, cut on a char
 ///     boundary to avoid invalid UTF-8 in the output, with `…` suffix
 ///     on truncation
