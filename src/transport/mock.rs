@@ -290,7 +290,7 @@ impl SimNetwork {
 // NOTE: This simulator is deterministic with respect to loss/duplication/corruption and
 // (when `preserve_order` is enabled) delivery order. Non-zero latency can also be driven
 // deterministically by overriding `SimTransportConfig::with_time_getter(...)` so tests can
-// advance a fake clock instead of sleeping on wall time.
+// advance a test clock instead of sleeping on wall time.
 
 #[derive(Debug)]
 struct Delay {
