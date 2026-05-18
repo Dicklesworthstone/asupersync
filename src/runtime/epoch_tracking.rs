@@ -836,7 +836,7 @@ mod tests {
         assert_eq!(stats.pin_start.load(Ordering::Relaxed), 0);
         assert!(
             stats.max_pin_duration.load(Ordering::Relaxed) > 0,
-            "pin duration should be measured instead of left at the placeholder value",
+            "pin duration should be measured instead of left at the initial zero value",
         );
     }
 
