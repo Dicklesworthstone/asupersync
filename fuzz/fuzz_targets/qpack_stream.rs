@@ -79,6 +79,67 @@ impl QpackTableEntry {
     }
 }
 
+fn qpack_static_name(index: u64) -> Option<&'static str> {
+    // RFC 9204 Appendix A, matching the production static table in h3_native.
+    match index {
+        0 => Some(":authority"),
+        1 => Some(":path"),
+        2 => Some("age"),
+        3 => Some("content-disposition"),
+        4 => Some("content-length"),
+        5 => Some("cookie"),
+        6 => Some("date"),
+        7 => Some("etag"),
+        8 => Some("if-modified-since"),
+        9 => Some("if-none-match"),
+        10 => Some("last-modified"),
+        11 => Some("link"),
+        12 => Some("location"),
+        13 => Some("referer"),
+        14 => Some("set-cookie"),
+        15..=21 => Some(":method"),
+        22..=23 => Some(":scheme"),
+        24..=28 => Some(":status"),
+        29..=30 => Some("accept"),
+        31 => Some("accept-encoding"),
+        32 => Some("accept-ranges"),
+        33..=34 => Some("access-control-allow-headers"),
+        35 => Some("access-control-allow-origin"),
+        36..=41 => Some("cache-control"),
+        42..=43 => Some("content-encoding"),
+        44..=54 => Some("content-type"),
+        55 => Some("range"),
+        56..=58 => Some("strict-transport-security"),
+        59..=60 => Some("vary"),
+        61 => Some("x-content-type-options"),
+        62 => Some("x-xss-protection"),
+        63..=71 => Some(":status"),
+        72 => Some("accept-language"),
+        73..=74 => Some("access-control-allow-credentials"),
+        75 => Some("access-control-allow-headers"),
+        76..=78 => Some("access-control-allow-methods"),
+        79 => Some("access-control-expose-headers"),
+        80 => Some("access-control-request-headers"),
+        81..=82 => Some("access-control-request-method"),
+        83 => Some("alt-svc"),
+        84 => Some("authorization"),
+        85 => Some("content-security-policy"),
+        86 => Some("early-data"),
+        87 => Some("expect-ct"),
+        88 => Some("forwarded"),
+        89 => Some("if-range"),
+        90 => Some("origin"),
+        91 => Some("purpose"),
+        92 => Some("server"),
+        93 => Some("timing-allow-origin"),
+        94 => Some("upgrade-insecure-requests"),
+        95 => Some("user-agent"),
+        96 => Some("x-forwarded-for"),
+        97..=98 => Some("x-frame-options"),
+        _ => None,
+    }
+}
+
 /// QPACK dynamic table state tracker
 #[derive(Debug, Clone)]
 struct QpackDynamicTable {
@@ -123,8 +184,9 @@ impl QpackDynamicTable {
     fn insert_with_name_reference(&mut self, name_index: u64, value: String) -> Result<(), String> {
         // Validate name_index bounds (static table 0-98 + dynamic table)
         let name = if name_index <= 98 {
-            // Static table reference - use placeholder name
-            format!("static-{}", name_index)
+            qpack_static_name(name_index)
+                .ok_or_else(|| format!("Static name index {} not found", name_index))?
+                .to_string()
         } else {
             // Dynamic table reference: absolute_index = insert_count + name_index - 99
             let dynamic_index = name_index.saturating_sub(99);
