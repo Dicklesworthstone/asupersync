@@ -1,0 +1,82 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": [
+      {
+        "path_pattern": "fuzz/fuzz_targets/websocket_frame_fuzzing.rs",
+        "holder": "RubyRobin",
+        "exclusive": true,
+        "expires_ts": "2026-05-18T23:00:00Z"
+      }
+    ]
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": [
+      {
+        "id": "asupersync-lhx6m4",
+        "title": "[idea-wizard] Swarm responsiveness and proof-lane autopilot",
+        "issue_type": "epic",
+        "priority": 1
+      },
+      {
+        "id": "asupersync-lhx6m4.375",
+        "title": "[proof-lane] Add end-to-end disk-pressure autopilot fixture",
+        "issue_type": "task",
+        "priority": 2,
+        "paths": [
+          "tests/proof_lane_disk_pressure_autopilot_contract.py",
+          "tests/fixtures/proof_lane_disk_pressure_autopilot"
+        ],
+        "source_only_validation": true,
+        "proof_commands": [
+          "python3 tests/proof_lane_disk_pressure_autopilot_contract.py"
+        ]
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": [
+      {
+        "status": " M",
+        "path": "fuzz/fuzz_targets/websocket_frame_fuzzing.rs",
+        "owner": "RubyRobin"
+      }
+    ]
+  },
+  "disk_pressure": {
+    "status": "fixture",
+    "level": "critical",
+    "available_bytes": 268435456,
+    "ballast_releasable_bytes": 0,
+    "cleanup_candidates": [
+      {
+        "candidate_id": "tmp-rch-target-beigesnow-autopilot",
+        "path": "/tmp/rch_target_beigesnow_autopilot",
+        "reclaimable_bytes": 3221225472,
+        "source": "rch-target-inventory"
+      },
+      {
+        "candidate_id": "repo-rch-target-ts2-job-375",
+        "path": "/data/projects/asupersync/.rch-target-ts2-job-375",
+        "reclaimable_bytes": 5368709120,
+        "source": "rch-target-inventory"
+      }
+    ]
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "testing-fuzzing:websocket-frame-codec",
+      "lane": "testing-fuzzing",
+      "title": "Exercise WebSocket frame codec with real parser",
+      "priority": 1,
+      "paths": [
+        "fuzz/fuzz_targets/websocket_frame_fuzzing.rs"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_websocket cargo check --manifest-path fuzz/Cargo.toml --bin websocket_frame_fuzzing"
+      ]
+    }
+  ]
+}

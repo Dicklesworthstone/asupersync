@@ -1,0 +1,35 @@
+{
+  "roots": [
+    "/tmp/rch_target*",
+    "/data/projects/asupersync/.rch-target-*"
+  ],
+  "candidates": [
+    {
+      "path": "/tmp/rch_target_active_rubyrobin",
+      "source_pattern": "/tmp/rch_target*",
+      "exists": true,
+      "size_bytes": 1048576,
+      "mtime": "2026-05-18T21:20:00Z",
+      "open_file_count": 2,
+      "open_file_probe": "provided"
+    },
+    {
+      "path": "/tmp/rch_target_beigesnow_autopilot",
+      "source_pattern": "/tmp/rch_target*",
+      "exists": true,
+      "size_bytes": 3221225472,
+      "mtime": "2026-05-18T19:00:00Z",
+      "open_file_count": 0,
+      "open_file_probe": "provided"
+    },
+    {
+      "path": "/data/projects/asupersync/.rch-target-ts2-job-375",
+      "source_pattern": "/data/projects/asupersync/.rch-target-*",
+      "exists": true,
+      "size_bytes": 5368709120,
+      "mtime": "2026-05-18T18:30:00Z",
+      "open_file_count": 0,
+      "open_file_probe": "provided"
+    }
+  ]
+}

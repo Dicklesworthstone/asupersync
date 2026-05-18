@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -51,6 +52,12 @@ fn candidate<'a>(receipt: &'a Value, candidate_id: &str) -> &'a Value {
         .iter()
         .find(|row| row["candidate_id"].as_str() == Some(candidate_id))
         .expect("candidate id should exist")
+}
+
+fn fixture_json(fixture: &str) -> Value {
+    let text = fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .expect("fixture JSON should be readable");
+    serde_json::from_str(&text).expect("fixture must be valid JSON")
 }
 
 #[test]
@@ -236,6 +243,45 @@ fn critical_disk_without_safe_work_recommends_cleanup_authorization() {
     assert!(
         receipt["disk_pressure"]["cleanup_candidates"][0]["delete_command"].is_null(),
         "cleanup candidates must not include deletion commands"
+    );
+}
+
+#[test]
+fn disk_pressure_autopilot_e2e_fixture_matches_closeout_handoff_golden() {
+    let receipt = finder_json("disk_pressure_autopilot_e2e.json");
+    let expected = fixture_json("disk_pressure_autopilot_e2e_expected_handoff.json");
+    let rch_candidate = candidate(&receipt, "testing-fuzzing:critical-rch-only");
+
+    assert_eq!(receipt["closeout_handoff"], expected);
+    assert_eq!(receipt["disk_pressure"]["level"].as_str(), Some("critical"));
+    assert_eq!(
+        receipt["recommendation"]["category"].as_str(),
+        Some("run-fallback-lane")
+    );
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("testing-golden-artifacts:source-only-handoff")
+    );
+    assert!(
+        rch_candidate["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|blocker| blocker["kind"].as_str() == Some("critical-disk-pressure-rch-heavy"))
+    );
+    assert_eq!(
+        receipt["closeout_handoff"]["active_dirty_paths"][0]["path"].as_str(),
+        Some("fuzz/fuzz_targets/websocket_frame_fuzzing.rs")
+    );
+    assert!(
+        receipt["closeout_handoff"]["cleanup_candidates"][0]["delete_command"].is_null(),
+        "handoff cleanup candidates must not include deletion commands"
+    );
+    assert_eq!(
+        receipt["closeout_handoff"]["authorization"]
+            ["cleanup_requires_explicit_user_authorization"]
+            .as_bool(),
+        Some(true)
     );
 }
 

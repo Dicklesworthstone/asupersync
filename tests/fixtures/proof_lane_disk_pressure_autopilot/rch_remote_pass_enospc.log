@@ -1,0 +1,10 @@
+  2026-05-18T21:14:12.000000Z  INFO rch::hook: Selected worker: ts2 at ubuntu@198.51.100.2 (0 slots, speed 50.0)
+  2026-05-18T21:14:42.000000Z  INFO rch::hook: Executing command remotely: env CARGO_TARGET_DIR=/tmp/rch_target_beigesnow_autopilot cargo test -p asupersync --test reservation_aware_work_finder_contract
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.40s
+     Running tests/reservation_aware_work_finder_contract.rs (/tmp/rch_target_beigesnow_autopilot/debug/deps/reservation_aware_work_finder_contract-1234)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+  2026-05-18T21:15:14.000000Z  INFO rch::hook: Remote command finished: exit=0 in 32000ms
+  2026-05-18T21:15:14.000100Z  INFO rch::hook: Retrieving build artifacts...
+  2026-05-18T21:15:14.000200Z  INFO rch::transfer: Retrieving artifacts from /data/projects/asupersync/.rch-target-ts2-job-375 on ts2
+rsync: [receiver] write failed on "/tmp/rch_target_beigesnow_autopilot/debug/deps/libasupersync.rmeta": No space left on device (28)
+error: failed to retrieve artifacts: ENOSPC: No space left on device

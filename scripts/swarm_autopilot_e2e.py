@@ -152,6 +152,8 @@ def stage_command(stage: dict[str, Any], repo_path: Path, generated_at: str) -> 
             args.append("--audit-target-dir")
         for target_dir in stage.get("active_target_dirs", []):
             args.extend(["--active-target-dir", str(target_dir)])
+        if stage.get("artifact_free_proof_receipt", False):
+            args.append("--artifact-free-proof-receipt")
     elif kind == "reservation-aware-work-finder":
         args.extend(["--fixture", rel(stage["fixture"])])
         args.extend(["--repo-path", rel(repo_path)])
@@ -176,15 +178,52 @@ def stage_command(stage: dict[str, Any], repo_path: Path, generated_at: str) -> 
 def observed_values(kind: str, report: dict[str, Any]) -> dict[str, Any]:
     if kind == "rch-retrieval-receipt":
         audit = report.get("target_dir_audit") if isinstance(report, dict) else {}
+        artifact_free = report.get("artifact_free_proof_receipt") if isinstance(report, dict) else {}
+        if not isinstance(artifact_free, dict):
+            artifact_free = {}
+        retrieval = artifact_free.get("artifact_retrieval_result")
+        if not isinstance(retrieval, dict):
+            retrieval = {}
+        remote = artifact_free.get("remote_command_result")
+        if not isinstance(remote, dict):
+            remote = {}
+        local_disk = artifact_free.get("local_disk_pressure")
+        if not isinstance(local_disk, dict):
+            local_disk = {}
         return {
             "schema_version": report.get("schema_version"),
             "classification": report.get("classification"),
             "decision": report.get("decision"),
             "target_dir": report.get("target_dir"),
             "target_dir_audit_status": audit.get("status") if isinstance(audit, dict) else None,
+            "remote_command_status": remote.get("status"),
+            "artifact_retrieval_status": retrieval.get("status"),
+            "artifact_retrieval_blocker_kind": retrieval.get("blocker_kind"),
+            "local_disk_pressure_status": local_disk.get("status"),
         }
     if kind == "reservation-aware-work-finder":
         recommendation = report.get("recommendation") if isinstance(report, dict) else {}
+        disk_pressure = report.get("disk_pressure") if isinstance(report, dict) else {}
+        if not isinstance(disk_pressure, dict):
+            disk_pressure = {}
+        dirty_paths = report.get("dirty_paths") if isinstance(report, dict) else []
+        if not isinstance(dirty_paths, list):
+            dirty_paths = []
+        cleanup_candidates = disk_pressure.get("cleanup_candidates")
+        if not isinstance(cleanup_candidates, list):
+            cleanup_candidates = []
+        handoff = report.get("closeout_handoff") if isinstance(report, dict) else {}
+        if not isinstance(handoff, dict):
+            handoff = {}
+        handoff_remote = handoff.get("remote_proof_result")
+        if not isinstance(handoff_remote, dict):
+            handoff_remote = {}
+        handoff_blocker = handoff.get("artifact_retrieval_blocker")
+        if not isinstance(handoff_blocker, dict):
+            handoff_blocker = {}
+        handoff_auth = handoff.get("authorization")
+        if not isinstance(handoff_auth, dict):
+            handoff_auth = {}
         return {
             "schema_version": report.get("schema_version"),
             "recommendation_category": recommendation.get("category")
@@ -199,6 +238,24 @@ def observed_values(kind: str, report: dict[str, Any]) -> dict[str, Any]:
             "blocked_count": report.get("summary", {}).get("blocked_count")
             if isinstance(report.get("summary"), dict)
             else None,
+            "disk_pressure_level": disk_pressure.get("level"),
+            "rch_heavy_work_allowed": disk_pressure.get("rch_heavy_work_allowed"),
+            "cleanup_candidate_ids": [
+                str(row.get("candidate_id") or "")
+                for row in cleanup_candidates
+                if isinstance(row, dict)
+            ],
+            "dirty_path_count": len(dirty_paths),
+            "handoff_schema_version": handoff.get("schema_version"),
+            "handoff_remote_status": handoff_remote.get("status"),
+            "handoff_remote_classification": handoff_remote.get("classification"),
+            "handoff_remote_decision": handoff_remote.get("decision"),
+            "handoff_retrieval_blocker_status": handoff_blocker.get("status"),
+            "handoff_retrieval_blocker_kind": handoff_blocker.get("kind"),
+            "handoff_cleanup_requires_authorization": handoff_auth.get(
+                "cleanup_requires_explicit_user_authorization"
+            ),
+            "handoff_delete_command_available": handoff_auth.get("delete_command_available"),
         }
     if kind == "fuzz-oracle-bead-template":
         return {
@@ -379,6 +436,7 @@ def run_stage(
         "observed": observed,
         "stderr": stderr.strip(),
         "safety_findings": findings,
+        "handoff_record": report.get("closeout_handoff") if isinstance(report, dict) else None,
         "stdout_bytes": len(stdout.encode("utf-8")),
     }
 
@@ -406,6 +464,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     }
     if safety["stage_safety_findings"]:
         expectation_status = "fail"
+    handoff_records = [
+        stage.get("handoff_record")
+        for stage in stages
+        if isinstance(stage.get("handoff_record"), dict)
+    ]
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -420,6 +483,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "failed_stages": sum(1 for stage in stages if stage["status"] == "fail"),
         },
         "stage_logs": stages,
+        "handoff_record": handoff_records[0] if handoff_records else {},
         "safety": safety,
     }
 

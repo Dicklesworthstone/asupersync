@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -41,6 +42,11 @@ fn e2e_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("e2e output must be JSON")
+}
+
+fn fixture_json(path: &str) -> Value {
+    let text = fs::read_to_string(repo_root().join(path)).expect("read fixture JSON");
+    serde_json::from_str(&text).expect("fixture must be JSON")
 }
 
 fn stage<'a>(receipt: &'a Value, stage_id: &str) -> &'a Value {
@@ -183,6 +189,51 @@ fn blocked_path_is_successful_when_blockers_are_observed() {
         Some("probably-stale")
     );
     assert_eq!(stale["observed"]["probably_stale"].as_u64(), Some(1));
+}
+
+#[test]
+fn disk_pressure_autopilot_emits_cleanup_authorization_handoff_golden() {
+    let receipt = e2e_json("disk_pressure_autopilot.json");
+
+    assert_eq!(
+        receipt["scenario_id"].as_str(),
+        Some("disk_pressure_autopilot")
+    );
+    assert_eq!(
+        receipt["scenario_outcome"].as_str(),
+        Some("cleanup-authorization-handoff")
+    );
+    assert_eq!(receipt["overall_status"].as_str(), Some("pass"));
+    assert_eq!(receipt["summary"]["stage_count"].as_u64(), Some(2));
+
+    let proof = stage(&receipt, "proof_receipt");
+    assert_eq!(
+        proof["observed"]["classification"].as_str(),
+        Some("passed_after_retrieval_enospc")
+    );
+    assert_eq!(
+        proof["observed"]["remote_command_status"].as_str(),
+        Some("pass")
+    );
+    assert_eq!(
+        proof["observed"]["artifact_retrieval_status"].as_str(),
+        Some("blocked")
+    );
+
+    let finder = stage(&receipt, "work_finder");
+    assert_eq!(
+        finder["observed"]["recommendation_category"].as_str(),
+        Some("request-cleanup-authorization")
+    );
+    assert_eq!(
+        finder["observed"]["handoff_retrieval_blocker_kind"].as_str(),
+        Some("local-disk-full")
+    );
+
+    let expected = fixture_json(
+        "tests/fixtures/swarm_autopilot_e2e/disk_pressure_autopilot_handoff_expected.json",
+    );
+    assert_eq!(receipt["handoff_record"], expected);
 }
 
 #[test]

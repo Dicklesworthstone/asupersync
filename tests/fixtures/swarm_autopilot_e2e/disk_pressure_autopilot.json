@@ -1,0 +1,57 @@
+{
+  "expected_scenario_outcome": "cleanup-authorization-handoff",
+  "scenario_id": "disk_pressure_autopilot",
+  "stages": [
+    {
+      "active_target_dirs": [
+        "/tmp/rch_target_other_agent"
+      ],
+      "artifact_free_proof_receipt": true,
+      "audit_target_dir": true,
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_autopilot_e2e cargo test --test swarm_autopilot_e2e_contract",
+      "expect": {
+        "artifact_retrieval_blocker_kind": "local-disk-full",
+        "artifact_retrieval_status": "blocked",
+        "classification": "passed_after_retrieval_enospc",
+        "decision": "pass-with-retrieval-blocker",
+        "local_disk_pressure_status": "critical",
+        "remote_command_status": "pass",
+        "schema_version": "rch-retrieval-receipt-v1",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_autopilot_e2e",
+        "target_dir_audit_status": "pass"
+      },
+      "kind": "rch-retrieval-receipt",
+      "log": "tests/fixtures/rch_retrieval_receipt/passed_after_retrieval_enospc.log",
+      "proof_lane": "swarm-autopilot-e2e",
+      "stage_id": "proof_receipt"
+    },
+    {
+      "agent": "CrimsonHawk",
+      "expect": {
+        "blocked_count": 1,
+        "cleanup_candidate_ids": [
+          "stale-rch-target-large",
+          "stale-rch-target-medium"
+        ],
+        "dirty_path_count": 1,
+        "disk_pressure_level": "critical",
+        "handoff_cleanup_requires_authorization": true,
+        "handoff_delete_command_available": false,
+        "handoff_remote_classification": "passed_after_retrieval_enospc",
+        "handoff_remote_decision": "pass-with-retrieval-blocker",
+        "handoff_remote_status": "pass",
+        "handoff_retrieval_blocker_kind": "local-disk-full",
+        "handoff_retrieval_blocker_status": "blocked",
+        "handoff_schema_version": "disk-pressure-autopilot-handoff-v1",
+        "rch_heavy_work_allowed": false,
+        "ready_count": 0,
+        "recommendation_candidate_id": "stale-rch-target-large",
+        "recommendation_category": "request-cleanup-authorization",
+        "schema_version": "reservation-aware-work-finder-v1"
+      },
+      "fixture": "tests/fixtures/swarm_autopilot_e2e/disk_pressure_autopilot_work_finder.json",
+      "kind": "reservation-aware-work-finder",
+      "stage_id": "work_finder"
+    }
+  ]
+}

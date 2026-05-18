@@ -1,0 +1,101 @@
+{
+  "agent_mail": {
+    "reservations": [
+      {
+        "exclusive": true,
+        "expires_ts": "2026-05-18T22:00:00Z",
+        "holder": "RubyRobin",
+        "path_pattern": "fuzz/fuzz_targets/websocket_frame_fuzzing.rs"
+      }
+    ],
+    "status": "fixture"
+  },
+  "beads": {
+    "ready": [],
+    "status": "fixture"
+  },
+  "dirty_tree": {
+    "entries": [
+      {
+        "owner": "RubyRobin",
+        "path": "fuzz/fuzz_targets/websocket_frame_fuzzing.rs",
+        "status": " M"
+      }
+    ],
+    "status": "fixture"
+  },
+  "disk_pressure": {
+    "available_bytes": 268435456,
+    "ballast_releasable_bytes": 0,
+    "level": "critical",
+    "source": "sbh-fixture"
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "testing-fuzzing:critical-rch-only",
+      "lane": "testing-fuzzing",
+      "paths": [
+        "fuzz/fuzz_targets/websocket_frame_fuzzing.rs"
+      ],
+      "priority": 1,
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_websocket cargo check --manifest-path fuzz/Cargo.toml --bin websocket_frame_fuzzing"
+      ],
+      "title": "Critical disk websocket fuzz proof"
+    },
+    {
+      "candidate_id": "testing-golden-artifacts:source-only-handoff",
+      "lane": "testing-golden-artifacts",
+      "no_build_validation": true,
+      "paths": [
+        "scripts/reservation_aware_work_finder.py",
+        "tests/fixtures/reservation_aware_work_finder/disk_pressure_autopilot_e2e.json"
+      ],
+      "priority": 2,
+      "proof_commands": [
+        "python3 tests/rch_target_inventory_contract.py",
+        "python3 tests/rch_retrieval_receipt_enospc_contract.py"
+      ],
+      "title": "Materialize disk-pressure autopilot handoff golden"
+    }
+  ],
+  "proof_receipt": {
+    "artifact_free_proof_receipt": {
+      "artifact_retrieval_result": {
+        "blocker_kind": "local-disk-full",
+        "blocker_line": 8,
+        "blocker_text": "rsync: [receiver] write failed on \"/tmp/.rch-target/websocket_frame_fuzzing\": No space left on device (28)",
+        "status": "blocked"
+      },
+      "classification": "passed_after_retrieval_enospc",
+      "decision": "pass-with-retrieval-blocker",
+      "remote_command_result": {
+        "exit_code": 0,
+        "line": 4,
+        "reason": "remote command finished with exit 0",
+        "status": "pass"
+      },
+      "selected_worker": "rch-worker-17",
+      "target_dir": "/tmp/rch_target_rubyrobin_websocket"
+    }
+  },
+  "target_inventory": {
+    "candidates": [
+      {
+        "authorization_candidate": true,
+        "mtime": "2026-05-18T17:00:00Z",
+        "path": "/tmp/rch_target_stale_large",
+        "size_bytes": 2147483648,
+        "target_name": "rch_target_stale_large"
+      },
+      {
+        "authorization_candidate": false,
+        "mtime": "2026-05-18T20:59:00Z",
+        "path": "/tmp/rch_target_active_websocket",
+        "size_bytes": 1073741824,
+        "target_name": "rch_target_active_websocket"
+      }
+    ],
+    "schema_version": "rch-target-inventory-v1"
+  }
+}

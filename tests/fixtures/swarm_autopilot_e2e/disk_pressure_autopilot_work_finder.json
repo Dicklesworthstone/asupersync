@@ -1,0 +1,121 @@
+{
+  "agent_mail": {
+    "reservations": [
+      {
+        "exclusive": true,
+        "expires_ts": "2026-05-18T22:30:00Z",
+        "holder": "RubyRobin",
+        "path_pattern": "fuzz/fuzz_targets/websocket_frame_fuzzing.rs"
+      }
+    ],
+    "status": "fixture"
+  },
+  "artifact_free_proof_receipt": {
+    "artifact_retrieval": {
+      "byte_count": null,
+      "completed": false,
+      "elapsed_ms": null,
+      "file_count": null,
+      "partial": true,
+      "started": true
+    },
+    "artifact_retrieval_result": {
+      "blocker_kind": "local-disk-full",
+      "blocker_line": 7,
+      "blocker_text": "rsync: [receiver] write failed on \"/tmp/rch_target_maroontrout_semaphore_fuzz/debug/deps/libasupersync.rmeta\": No space left on device (28)",
+      "completed": false,
+      "detail": "retrieval_incomplete",
+      "partial": true,
+      "reason": "artifact retrieval started but no completion marker was observed",
+      "started": true,
+      "started_line": 5,
+      "status": "blocked"
+    },
+    "artifact_status": "retrieval_incomplete",
+    "artifact_status_reason": "artifact retrieval started but no completion marker was observed",
+    "classification": "passed_after_retrieval_enospc",
+    "closeout_fields": [
+      "command",
+      "log_remote_command",
+      "selected_worker",
+      "remote_exit_status",
+      "remote_elapsed_ms",
+      "artifact_status",
+      "wrapper_exit_code",
+      "classification",
+      "decision"
+    ],
+    "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_autopilot_e2e cargo test --test swarm_autopilot_e2e_contract",
+    "decision": "pass-with-retrieval-blocker",
+    "guarantee": "unspecified",
+    "local_disk_pressure": {
+      "evidence_line": 7,
+      "evidence_text": "rsync: [receiver] write failed on \"/tmp/rch_target_maroontrout_semaphore_fuzz/debug/deps/libasupersync.rmeta\": No space left on device (28)",
+      "signal": "enospc",
+      "status": "critical"
+    },
+    "log_remote_command": "env CARGO_TARGET_DIR=/tmp/rch_target_maroontrout_semaphore_fuzz cargo check --manifest-path fuzz/Cargo.toml --bin semaphore_acquire_cancel",
+    "non_mutating": true,
+    "proof_lane": "swarm-autopilot-e2e",
+    "remote_command_result": {
+      "exit_code": 0,
+      "line": 4,
+      "reason": "remote command finished with exit 0",
+      "status": "pass"
+    },
+    "remote_elapsed_ms": 32000,
+    "remote_exit_status": 0,
+    "schema_version": "artifact-free-rch-proof-receipt-v1",
+    "selected_worker": "ts2",
+    "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_autopilot_e2e",
+    "wrapper_exit_code": null
+  },
+  "beads": {
+    "ready": [],
+    "status": "fixture"
+  },
+  "dirty_tree": {
+    "entries": [
+      {
+        "owner": "RubyRobin",
+        "path": "fuzz/fuzz_targets/websocket_frame_fuzzing.rs",
+        "status": " M"
+      }
+    ],
+    "status": "fixture"
+  },
+  "disk_pressure": {
+    "available_bytes": 0,
+    "ballast_releasable_bytes": 0,
+    "cleanup_candidates": [
+      {
+        "candidate_id": "stale-rch-target-medium",
+        "path": "/tmp/rch_target_beigesnow_cancel_dag_hier",
+        "reclaimable_bytes": 2147483648,
+        "source": "fixture"
+      },
+      {
+        "candidate_id": "stale-rch-target-large",
+        "path": "/tmp/rch_target_maroontrout_semaphore_fuzz",
+        "reclaimable_bytes": 8589934592,
+        "source": "fixture"
+      }
+    ],
+    "level": "critical",
+    "status": "fixture"
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "testing-fuzzing:critical-disk-rch-proof",
+      "lane": "testing-fuzzing",
+      "paths": [
+        "fuzz/fuzz_targets/postgres_row_description.rs"
+      ],
+      "priority": 1,
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_critical_disk cargo check --manifest-path fuzz/Cargo.toml --bin postgres_row_description"
+      ],
+      "title": "Critical disk rch fuzz proof"
+    }
+  ]
+}

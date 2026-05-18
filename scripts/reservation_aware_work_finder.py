@@ -651,6 +651,18 @@ def normalize_cleanup_candidate(row: dict[str, Any], index: int) -> dict[str, An
 def cleanup_candidates_from(source: dict[str, Any]) -> list[dict[str, Any]]:
     disk = source.get("disk_pressure", {}) if isinstance(source, dict) else {}
     rows = rows_from(disk, ("cleanup_candidates", "candidates", "stale_target_candidates"))
+    inventory = source.get("target_inventory", {}) if isinstance(source, dict) else {}
+    inventory_rows = []
+    for row in rows_from(inventory, ("candidates",)):
+        if not row.get("authorization_candidate"):
+            continue
+        inventory_row = dict(row)
+        inventory_row.setdefault("candidate_id", inventory_row.get("target_name") or inventory_row.get("path"))
+        inventory_row.setdefault("source", "target_inventory")
+        inventory_row.setdefault("reclaimable_bytes", inventory_row.get("size_bytes"))
+        inventory_row.setdefault("title", "stale rch target candidate")
+        inventory_rows.append(inventory_row)
+    rows.extend(inventory_rows)
     candidates = [
         normalize_cleanup_candidate(row, index)
         for index, row in enumerate(rows)
@@ -719,6 +731,107 @@ def disk_pressure_non_build_candidates(candidates: list[dict[str, Any]]) -> list
         and not proof_commands_require_rch_heavy_work(row)
     ]
     return sorted(rows, key=lambda row: (row["lane"], row["candidate_id"]))
+
+
+def source_proof_receipt(source: dict[str, Any]) -> dict[str, Any]:
+    for key in ("proof_receipt", "rch_receipt", "artifact_free_proof_receipt"):
+        value = source.get(key)
+        if isinstance(value, dict):
+            receipt = value.get("artifact_free_proof_receipt")
+            if isinstance(receipt, dict):
+                return receipt
+            return value
+    return {}
+
+
+def proof_result_from(source: dict[str, Any]) -> dict[str, Any]:
+    receipt = source_proof_receipt(source)
+    remote = receipt.get("remote_command_result") if isinstance(receipt, dict) else {}
+    if not isinstance(remote, dict):
+        remote = {}
+    return {
+        "status": str(remote.get("status") or "unknown"),
+        "exit_code": remote.get("exit_code"),
+        "line": int(remote.get("line") or 0),
+        "reason": str(remote.get("reason") or ""),
+        "classification": str(receipt.get("classification") or "unknown"),
+        "decision": str(receipt.get("decision") or "unknown"),
+        "target_dir": str(receipt.get("target_dir") or ""),
+        "selected_worker": str(receipt.get("selected_worker") or ""),
+    }
+
+
+def retrieval_blocker_from(source: dict[str, Any]) -> dict[str, Any]:
+    receipt = source_proof_receipt(source)
+    retrieval = receipt.get("artifact_retrieval_result") if isinstance(receipt, dict) else {}
+    if not isinstance(retrieval, dict):
+        retrieval = {}
+    return {
+        "status": str(retrieval.get("status") or "unknown"),
+        "kind": str(retrieval.get("blocker_kind") or ""),
+        "line": int(retrieval.get("blocker_line") or 0),
+        "text": str(retrieval.get("blocker_text") or ""),
+    }
+
+
+def handoff_cleanup_candidates(disk_pressure: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "candidate_id": row["candidate_id"],
+            "path": row["path"],
+            "title": row["title"],
+            "reclaimable_bytes": row["reclaimable_bytes"],
+            "source": row["source"],
+            "requires_authorization": row["requires_authorization"],
+            "delete_command": row["delete_command"],
+        }
+        for row in disk_pressure.get("cleanup_candidates", [])
+    ]
+
+
+def build_closeout_handoff(
+    source: dict[str, Any],
+    agent: str,
+    generated_at: str,
+    recommendation_row: dict[str, Any],
+    disk_pressure: dict[str, Any],
+    dirty: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "disk-pressure-autopilot-handoff-v1",
+        "generated_at": generated_at,
+        "agent": agent,
+        "active_dirty_paths": dirty,
+        "chosen_next_lane": {
+            "category": recommendation_row["category"],
+            "candidate_id": recommendation_row["candidate_id"],
+            "lane": recommendation_row["lane"],
+            "title": recommendation_row["title"],
+            "paths": recommendation_row["paths"],
+            "reason": recommendation_row["reason"],
+        },
+        "remote_proof_result": proof_result_from(source),
+        "artifact_retrieval_blocker": retrieval_blocker_from(source),
+        "disk_pressure_status": {
+            "level": disk_pressure["level"],
+            "available_bytes": disk_pressure["available_bytes"],
+            "rch_heavy_work_allowed": disk_pressure["rch_heavy_work_allowed"],
+            "ballast_releasable_bytes": disk_pressure["ballast_releasable_bytes"],
+            "source": disk_pressure["source"],
+        },
+        "cleanup_candidates": handoff_cleanup_candidates(disk_pressure),
+        "authorization": {
+            "cleanup_requires_explicit_user_authorization": True,
+            "automatic_cleanup_performed": False,
+            "delete_command_available": False,
+            "instruction": (
+                "Do not delete cleanup candidates unless the user explicitly authorizes "
+                "the exact cleanup command or paths."
+            ),
+        },
+        "non_mutating": True,
+        "preserves_peer_dirty_paths": True,
+    }
 
 
 def run_text(repo_path: Path, command: list[str], timeout: float) -> tuple[str, str]:
@@ -817,6 +930,14 @@ def build_receipt(
     rec = recommendation(classified, disk_pressure)
     blocked = [row for row in classified if row["status"] == "blocked"]
     ready = [row for row in classified if row["status"] != "blocked"]
+    closeout_handoff = build_closeout_handoff(
+        source=source,
+        agent=agent,
+        generated_at=generated_at,
+        recommendation_row=rec,
+        disk_pressure=disk_pressure,
+        dirty=dirty,
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -832,6 +953,7 @@ def build_receipt(
             "fallback_count": sum(1 for row in classified if row["kind"] == "fallback-lane"),
         },
         "recommendation": rec,
+        "closeout_handoff": closeout_handoff,
         "disk_pressure": disk_pressure,
         "candidates": classified,
         "active_reservations": [row for row in reservations if row["active"]],
