@@ -297,6 +297,54 @@ fn tracker_write_lock_timeout_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn clean_tracker_sync_preserves_ready_claim() {
+    let receipt = receipt_json("tracker_sync_clean.json");
+    assert_eq!(next_action_category(&receipt), "claim-ready-bead");
+    assert_eq!(receipt["tracker_sync"]["blocked"].as_bool(), Some(false));
+    assert_eq!(receipt["subsystems"]["tracker_sync"].as_str(), Some("ok"));
+}
+
+#[test]
+fn clean_tracker_sync_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "tracker_sync_clean.json",
+        "tracker_sync_clean_expected.json",
+        "clean tracker-sync handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
+fn tracker_sync_drift_blocks_claiming_or_creating_beads() {
+    let receipt = receipt_json("tracker_sync_drift.json");
+    assert_eq!(next_action_category(&receipt), "blocked");
+    assert_eq!(
+        receipt["next_action"]["reason"].as_str(),
+        Some(
+            "beads sync status is dirty or stale; repair DB/JSONL freshness before claiming or creating beads"
+        )
+    );
+    assert_eq!(receipt["tracker_sync"]["blocked"].as_bool(), Some(true));
+    assert_eq!(
+        receipt["tracker_sync"]["blocking_flags"]
+            .as_array()
+            .expect("blocking flags must be array")
+            .iter()
+            .map(|value| value.as_str().expect("blocking flag must be string"))
+            .collect::<Vec<_>>(),
+        vec!["dirty_count", "jsonl_newer", "db_newer"]
+    );
+}
+
+#[test]
+fn tracker_sync_drift_output_matches_full_reviewed_golden() {
+    assert_receipt_output_matches_golden(
+        "tracker_sync_drift.json",
+        "tracker_sync_drift_expected.json",
+        "tracker-sync drift handoff receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn unavailable_agent_mail_is_explicitly_reported() {
     let receipt = receipt_json("no_agent_mail.json");
     assert_eq!(next_action_category(&receipt), "blocked");
@@ -491,6 +539,8 @@ def fake_run_json(repo_path, command, timeout):
         ]}
     if command == ["br", "list", "--status", "in_progress", "--json"]:
         return "ok", {"issues": []}
+    if command == ["br", "sync", "--status", "--json"]:
+        return "ok", {"dirty_count": 0, "jsonl_newer": False, "db_newer": False, "jsonl_exists": True}
     if command[:3] == ["python3", "scripts/proof_runner.py", "--suggest-lanes"]:
         return "ok", {"suggested_lanes": []}
     raise AssertionError(f"unexpected json command: {command!r}")

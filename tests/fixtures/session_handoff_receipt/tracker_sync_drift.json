@@ -1,0 +1,44 @@
+{
+  "agent_mail": {
+    "available": true,
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [],
+    "ready": [
+      {
+        "id": "asupersync-ready1",
+        "title": "Ready bounded bead"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": []
+  },
+  "git": {
+    "ahead": 0,
+    "behind": 0,
+    "branch": "main",
+    "upstream": "origin/main"
+  },
+  "proof_runner": {
+    "status": "ok",
+    "suggested_lanes": []
+  },
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  },
+  "tracker_sync": {
+    "db_newer": true,
+    "dirty_count": 2,
+    "jsonl_content_hash": "15ec29fb52a6e4f0b2110a7ec90cd923dc3b657f42d90ae2c532483547d2067a",
+    "jsonl_exists": true,
+    "jsonl_newer": true,
+    "last_export_time": "2026-05-15T13:51:57.155774565+00:00",
+    "last_import_time": "2026-05-12T01:37:01.321039088+00:00",
+    "status": "ok"
+  }
+}

@@ -210,6 +210,14 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
         ["br", "list", "--status", "in_progress", "--json"],
         timeout,
     )
+    tracker_sync_status, tracker_sync = run_json(
+        repo_path,
+        ["br", "sync", "--status", "--json"],
+        timeout,
+    )
+    tracker_sync_summary = {"status": tracker_sync_status}
+    if isinstance(tracker_sync, dict):
+        tracker_sync_summary.update(tracker_sync)
     rch_status, rch_queue = run_text(repo_path, ["rch", "queue"], timeout)
     agent_mail = live_agent_mail_snapshot(repo_path, timeout)
 
@@ -230,6 +238,7 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
             },
         },
         "tracker_write_lock": describe_tracker_write_lock(repo_path),
+        "tracker_sync": tracker_sync_summary,
         "agent_mail": agent_mail,
         "proof_runner": {
             "status": proof_runner_status,
@@ -341,6 +350,47 @@ def normalize_tracker_write_lock(source: Any) -> dict[str, Any]:
         lock["mtime_utc"] = str(source.get("mtime_utc") or "")
         lock["size_bytes"] = int(source.get("size_bytes") or 0)
     return lock
+
+
+def normalize_tracker_sync(source: Any) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return {
+            "present": False,
+            "status": "missing",
+            "blocked": False,
+            "blocking_flags": [],
+        }
+
+    status = str(source.get("status") or "ok")
+    dirty_count = int(source.get("dirty_count") or 0)
+    jsonl_newer = bool(source.get("jsonl_newer", False))
+    db_newer = bool(source.get("db_newer", False))
+    jsonl_exists = bool(source.get("jsonl_exists", True))
+    blocking_flags = []
+    if status != "ok":
+        blocking_flags.append(f"status:{status}")
+    if dirty_count > 0:
+        blocking_flags.append("dirty_count")
+    if jsonl_newer:
+        blocking_flags.append("jsonl_newer")
+    if db_newer:
+        blocking_flags.append("db_newer")
+    if not jsonl_exists:
+        blocking_flags.append("missing_jsonl")
+
+    return {
+        "present": True,
+        "status": status,
+        "dirty_count": dirty_count,
+        "jsonl_newer": jsonl_newer,
+        "db_newer": db_newer,
+        "jsonl_exists": jsonl_exists,
+        "last_import_time": str(source.get("last_import_time") or ""),
+        "last_export_time": str(source.get("last_export_time") or ""),
+        "jsonl_content_hash": str(source.get("jsonl_content_hash") or ""),
+        "blocked": bool(blocking_flags),
+        "blocking_flags": blocking_flags,
+    }
 
 
 def beads_status_blocked(status: Any) -> bool:
@@ -522,6 +572,7 @@ def choose_next_action(
     agent_mail_available: bool,
     branch: str,
     tracker_write_lock: dict[str, Any],
+    tracker_sync: dict[str, Any],
     beads_blocked: bool,
 ) -> dict[str, Any]:
     hard_conflicts = [
@@ -548,6 +599,16 @@ def choose_next_action(
             "path": tracker_write_lock.get("path", TRACKER_WRITE_LOCK_PATH),
             "mtime_utc": tracker_write_lock.get("mtime_utc", ""),
             "size_bytes": tracker_write_lock.get("size_bytes", 0),
+        }
+    if tracker_sync.get("blocked"):
+        return {
+            "category": "blocked",
+            "reason": "beads sync status is dirty or stale; repair DB/JSONL freshness before claiming or creating beads",
+            "status": tracker_sync.get("status", ""),
+            "dirty_count": tracker_sync.get("dirty_count", 0),
+            "jsonl_newer": tracker_sync.get("jsonl_newer", False),
+            "db_newer": tracker_sync.get("db_newer", False),
+            "blocking_flags": tracker_sync.get("blocking_flags", []),
         }
     if dirty:
         peer_dirty = [
@@ -629,6 +690,7 @@ def build_receipt(
     rch = source.get("rch", {})
     branch = str(git.get("branch", ""))
     tracker_write_lock = normalize_tracker_write_lock(source.get("tracker_write_lock"))
+    tracker_sync = normalize_tracker_sync(source.get("tracker_sync"))
     beads_status = source.get("beads", {}).get("status", "ok")
     next_action = choose_next_action(
         claimable_ready,
@@ -640,10 +702,22 @@ def build_receipt(
         agent_mail_available,
         branch,
         tracker_write_lock,
+        tracker_sync,
         beads_status_blocked(beads_status),
     )
     if next_action["category"] not in NEXT_ACTIONS:
         raise ValueError(f"invalid next action: {next_action['category']}")
+
+    subsystems = {
+        "git": "ok" if branch else "unavailable",
+        "dirty_tree": "ok",
+        "beads": str(beads_status),
+        "agent_mail": "ok" if agent_mail_available else str(agent_mail.get("status", "unavailable")),
+        "proof_runner": str(proof_runner.get("status", "ok")),
+        "rch": "ok" if rch.get("available", False) else "unavailable",
+    }
+    if tracker_sync.get("present"):
+        subsystems["tracker_sync"] = "blocked" if tracker_sync.get("blocked") else str(tracker_sync.get("status", "ok"))
 
     receipt = {
         "schema_version": SCHEMA_VERSION,
@@ -677,18 +751,17 @@ def build_receipt(
             "available": bool(rch.get("available", False)),
             "queue_summary": compact_summary(str(rch.get("queue_summary", ""))),
         },
-        "subsystems": {
-            "git": "ok" if branch else "unavailable",
-            "dirty_tree": "ok",
-            "beads": str(beads_status),
-            "agent_mail": "ok" if agent_mail_available else str(agent_mail.get("status", "unavailable")),
-            "proof_runner": str(proof_runner.get("status", "ok")),
-            "rch": "ok" if rch.get("available", False) else "unavailable",
-        },
+        "subsystems": subsystems,
         "next_action": next_action,
     }
     if tracker_write_lock.get("exists"):
         receipt["tracker_write_lock"] = tracker_write_lock
+    if tracker_sync.get("present"):
+        receipt["tracker_sync"] = {
+            key: value
+            for key, value in tracker_sync.items()
+            if key != "present"
+        }
     return receipt
 
 
