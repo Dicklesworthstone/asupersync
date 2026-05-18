@@ -861,7 +861,7 @@ mod token_validation {
         }
     }
 
-    // Token validation helper functions (mock implementation for testing)
+    // Token validation helpers for the protocol grammar cases above.
     fn validate_subject_token(subject: &str) -> bool {
         if subject.is_empty() {
             return false;
