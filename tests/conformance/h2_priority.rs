@@ -1121,7 +1121,7 @@ impl H2PriorityConformanceHarness {
         ));
 
         results.push(self.run_test(
-            "priority_live_idle_stream_is_ignored_without_fake_state",
+            "priority_live_idle_stream_is_ignored_without_fabricated_state",
             "PRIORITY on an idle unknown stream follows asupersync semantics without fabricating state",
             TestCategory::ClosedStreamPriority,
             RequirementLevel::Should,
