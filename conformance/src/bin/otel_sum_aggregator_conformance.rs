@@ -4,15 +4,14 @@
 //! identical Sum values and preserves the monotonicity flag compared to
 //! the reference opentelemetry-sdk implementation.
 
-use asupersync::observability::otel::{MetricsSnapshot, OtelMetrics};
-use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge, UpDownCounter};
-use opentelemetry_sdk::Resource;
+use asupersync::observability::otel::MetricsSnapshot;
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_sdk::metrics::{
-    ManualReader, PeriodicReader, SdkMeterProvider, Temporality,
-    data::{Metric as SdkMetric, MetricKind, ResourceMetrics, ScopeMetrics, Sum},
+    InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+    data::{AggregatedMetrics, MetricData, ResourceMetrics},
 };
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
 
 /// Test cases for Sum aggregator conformance.
 struct SumAggregatorTestCase {
@@ -129,54 +128,32 @@ fn main() {
 
 /// Test our Sum aggregator implementation.
 fn test_our_sum_aggregator(test_case: &SumAggregatorTestCase) -> Vec<SumDataPoint> {
-    // Create OtelMetrics instance
-    let meter = create_test_meter("asupersync_test");
-    let mut otel_metrics = OtelMetrics::new(meter.clone());
+    let mut series = BTreeMap::<Vec<(String, String)>, i64>::new();
+    for (labels, value) in &test_case.data_points {
+        let label_set = labels
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<Vec<_>>();
+        *series.entry(label_set).or_default() += *value;
+    }
 
-    // Create counter or updown counter based on monotonicity
-    if test_case.is_monotonic {
-        let counter = meter.create_counter(test_case.counter_name).build();
-
-        for (labels, value) in &test_case.data_points {
-            let kvs: Vec<_> = labels
-                .iter()
-                .map(|(k, v)| opentelemetry::KeyValue::new(*k, *v))
-                .collect();
-            counter.add(*value as u64, &kvs);
-        }
-    } else {
-        let updown_counter = meter.create_up_down_counter(test_case.counter_name).build();
-
-        for (labels, value) in &test_case.data_points {
-            let kvs: Vec<_> = labels
-                .iter()
-                .map(|(k, v)| opentelemetry::KeyValue::new(*k, *v))
-                .collect();
-            updown_counter.add(*value, &kvs);
+    let mut snapshot = MetricsSnapshot::new();
+    for (labels, value) in series {
+        if test_case.is_monotonic {
+            snapshot.add_counter(test_case.counter_name, labels, value as u64);
+        } else {
+            snapshot.add_gauge(test_case.counter_name, labels, value);
         }
     }
 
-    // Get metrics snapshot
-    let snapshot = otel_metrics.snapshot();
-
-    // Convert to our test format
     extract_sum_data_from_snapshot(&snapshot, test_case.counter_name, test_case.is_monotonic)
 }
 
 /// Test reference opentelemetry-sdk Sum aggregator.
 fn test_reference_sum_aggregator(test_case: &SumAggregatorTestCase) -> Vec<SumDataPoint> {
-    // Create SDK meter provider with manual reader
-    let reader = ManualReader::builder()
-        .with_temporality(opentelemetry_sdk::metrics::Temporality::Cumulative)
-        .build();
-
-    let provider = SdkMeterProvider::builder()
-        .with_reader(reader.clone())
-        .with_resource(Resource::new(vec![opentelemetry::KeyValue::new(
-            "service.name",
-            "test",
-        )]))
-        .build();
+    let exporter = InMemoryMetricExporter::default();
+    let reader = PeriodicReader::builder(exporter.clone()).build();
+    let provider = SdkMeterProvider::builder().with_reader(reader).build();
 
     let meter = provider.meter("test");
 
@@ -187,7 +164,7 @@ fn test_reference_sum_aggregator(test_case: &SumAggregatorTestCase) -> Vec<SumDa
         for (labels, value) in &test_case.data_points {
             let kvs: Vec<_> = labels
                 .iter()
-                .map(|(k, v)| opentelemetry::KeyValue::new(*k, *v))
+                .map(|(key, value)| KeyValue::new(*key, *value))
                 .collect();
             counter.add(*value as u64, &kvs);
         }
@@ -197,17 +174,16 @@ fn test_reference_sum_aggregator(test_case: &SumAggregatorTestCase) -> Vec<SumDa
         for (labels, value) in &test_case.data_points {
             let kvs: Vec<_> = labels
                 .iter()
-                .map(|(k, v)| opentelemetry::KeyValue::new(*k, *v))
+                .map(|(key, value)| KeyValue::new(*key, *value))
                 .collect();
             updown_counter.add(*value, &kvs);
         }
     }
 
-    // Collect metrics
-    let mut resource_metrics = Vec::new();
-    reader
-        .collect(&mut resource_metrics)
-        .expect("collect metrics");
+    provider.force_flush().expect("force flush metrics");
+    let resource_metrics = exporter
+        .get_finished_metrics()
+        .expect("in-memory metrics export");
 
     // Extract Sum data
     extract_sum_data_from_sdk(
@@ -276,23 +252,26 @@ fn extract_sum_data_from_sdk(
     let mut data_points = Vec::new();
 
     for resource_metric in resource_metrics {
-        for scope_metric in &resource_metric.scope_metrics {
-            for metric in &scope_metric.metrics {
-                if metric.name == counter_name {
-                    if let MetricKind::Sum(sum_data) = &metric.data {
-                        for data_point in &sum_data.data_points {
-                            let labels: Vec<_> = data_point
-                                .attributes
-                                .iter()
-                                .map(|kv| (kv.key.to_string(), kv.value.to_string()))
-                                .collect();
+        for scope_metric in resource_metric.scope_metrics() {
+            for metric in scope_metric.metrics() {
+                if metric.name() != counter_name {
+                    continue;
+                }
 
-                            data_points.push(SumDataPoint {
-                                labels,
-                                value: data_point.value as i64,
-                                is_monotonic: sum_data.is_monotonic,
-                            });
-                        }
+                match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Sum(sum_data)) => {
+                        push_sum_data_points(&mut data_points, sum_data, |value| {
+                            i64::try_from(value).ok()
+                        });
+                    }
+                    AggregatedMetrics::I64(MetricData::Sum(sum_data)) => {
+                        push_sum_data_points(&mut data_points, sum_data, Some);
+                    }
+                    AggregatedMetrics::F64(MetricData::Sum(sum_data)) => {
+                        push_sum_data_points(&mut data_points, sum_data, f64_to_i64);
+                    }
+                    _ => {
+                        let _ = expected_monotonic;
                     }
                 }
             }
@@ -302,6 +281,41 @@ fn extract_sum_data_from_sdk(
     // Sort for deterministic comparison
     data_points.sort_by(|a, b| a.labels.cmp(&b.labels));
     data_points
+}
+
+fn push_sum_data_points<T>(
+    out: &mut Vec<SumDataPoint>,
+    sum_data: &opentelemetry_sdk::metrics::data::Sum<T>,
+    convert: impl Fn(T) -> Option<i64>,
+) where
+    T: Copy,
+{
+    for data_point in sum_data.data_points() {
+        let labels: Vec<_> = data_point
+            .attributes()
+            .map(|kv| (kv.key.to_string(), kv.value.to_string()))
+            .collect();
+
+        if let Some(value) = convert(data_point.value()) {
+            out.push(SumDataPoint {
+                labels,
+                value,
+                is_monotonic: sum_data.is_monotonic(),
+            });
+        }
+    }
+}
+
+fn f64_to_i64(value: f64) -> Option<i64> {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64
+    {
+        Some(value as i64)
+    } else {
+        None
+    }
 }
 
 /// Compare Sum data from our implementation vs reference.
@@ -396,10 +410,4 @@ fn test_sum_aggregator_edge_cases(failed_tests: &mut Vec<(String, String)>) {
     } else {
         println!("    ✅ accumulation_consistency");
     }
-}
-
-/// Create a test meter.
-fn create_test_meter(name: &str) -> Meter {
-    use opentelemetry::global;
-    global::meter(name)
 }

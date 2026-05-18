@@ -186,7 +186,7 @@ hyper = { version = "0.14", features = ["client", "http1"] }
 urlencoding = "2.1"
 prometheus-client = "0.23"
 opentelemetry = { version = "0.31", features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "metrics", "testing"] }
 opentelemetry-proto = "0.31"
 prost = "0.14"
 
