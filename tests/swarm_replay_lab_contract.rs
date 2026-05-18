@@ -1,8 +1,11 @@
 //! Contract tests for deterministic swarm replay lab scenarios.
 
 use asupersync::lab::{
-    SWARM_REPLAY_SCHEMA_VERSION, SwarmReplayError, SwarmReplayEventKind, SwarmReplayScenario,
-    SwarmReplayTaskStatus, run_swarm_replay_scenario,
+    SWARM_PRESSURE_SCHEMA_VERSION, SWARM_REPLAY_SCHEMA_VERSION, SwarmDiskPressureLevel,
+    SwarmDiskPressureTransition, SwarmPressureEventKind, SwarmPressureLane, SwarmPressureScenario,
+    SwarmRchWorkerEvent, SwarmRchWorkerEventKind, SwarmReplayError, SwarmReplayEventKind,
+    SwarmReplayScenario, SwarmReplayTaskStatus, run_swarm_pressure_scenario,
+    run_swarm_replay_scenario,
 };
 
 fn cancellation_scenario(seed: u64) -> SwarmReplayScenario {
@@ -36,6 +39,46 @@ fn completion_scenario(seed: u64) -> SwarmReplayScenario {
         artifact_bytes_per_task: 64,
         cancel_after_steps: None,
         max_steps: 20_000,
+    }
+}
+
+fn pressure_scenario(seed: u64) -> SwarmPressureScenario {
+    SwarmPressureScenario {
+        scenario_id: "swarm-pressure-64-worker-red-disk".to_string(),
+        seed,
+        worker_count: 64,
+        interactive_tasks: 128,
+        proof_tasks: 96,
+        cleanup_requests: 4,
+        rch_workers_initial: 16,
+        disk_pressure_transitions: vec![
+            SwarmDiskPressureTransition {
+                at_step: 0,
+                level: SwarmDiskPressureLevel::Green,
+            },
+            SwarmDiskPressureTransition {
+                at_step: 3,
+                level: SwarmDiskPressureLevel::Red,
+            },
+            SwarmDiskPressureTransition {
+                at_step: 18,
+                level: SwarmDiskPressureLevel::Green,
+            },
+        ],
+        rch_worker_events: vec![
+            SwarmRchWorkerEvent {
+                at_step: 5,
+                kind: SwarmRchWorkerEventKind::Loss,
+                worker_delta: 16,
+            },
+            SwarmRchWorkerEvent {
+                at_step: 24,
+                kind: SwarmRchWorkerEventKind::Recovery,
+                worker_delta: 12,
+            },
+        ],
+        interactive_latency_bound_steps: 4,
+        max_steps: 50_000,
     }
 }
 
@@ -74,6 +117,86 @@ fn swarm_replay_summary_is_byte_stable_for_same_seed() {
     assert_eq!(
         first_json, second_json,
         "serialized replay summaries must be byte stable"
+    );
+}
+
+#[test]
+fn swarm_pressure_simulator_models_64_workers_red_disk_and_rch_recovery() {
+    let scenario = pressure_scenario(0x64C0_A11D_2026);
+    let first = run_swarm_pressure_scenario(&scenario).expect("first pressure run");
+    let second = run_swarm_pressure_scenario(&scenario).expect("second pressure run");
+
+    assert_eq!(first, second, "same seed and knobs must replay identically");
+    assert_eq!(first.schema_version, SWARM_PRESSURE_SCHEMA_VERSION);
+    assert_eq!(first.worker_count, 64);
+    assert_eq!(first.interactive_tasks, scenario.interactive_tasks);
+    assert_eq!(first.proof_tasks, scenario.proof_tasks);
+    assert_eq!(first.cleanup_requests, scenario.cleanup_requests);
+    assert!(
+        first.quiescent,
+        "pressure simulator must drain to quiescence"
+    );
+    assert_eq!(
+        first.task_leaks, 0,
+        "tracked LabRuntime tasks must not leak"
+    );
+    assert_eq!(first.non_terminal_task_count, 0);
+    assert_eq!(first.terminal_task_count, first.scheduled_task_count);
+    assert!(
+        first.max_interactive_admission_latency_steps <= first.interactive_latency_bound_steps,
+        "interactive lane latency must remain bounded under red disk/rch pressure"
+    );
+    assert!(
+        first.proof_throttled_count > 0,
+        "bursty proof work must be throttled while disk/rch pressure is unsafe"
+    );
+    assert_eq!(
+        first.cleanup_authorization_required_count, scenario.cleanup_requests,
+        "cleanup requests must remain explicit human-authorization handoffs"
+    );
+    assert_eq!(
+        first.auto_delete_command_count, 0,
+        "simulator must never emit cleanup auto-delete commands"
+    );
+    assert_eq!(first.disk_pressure_transition_count, 3);
+    assert_eq!(first.rch_worker_loss_events, 1);
+    assert_eq!(first.rch_worker_recovery_events, 1);
+    assert!(first.invariant_violations.is_empty());
+
+    for kind in [
+        SwarmPressureEventKind::DiskPressureChanged,
+        SwarmPressureEventKind::RchWorkersLost,
+        SwarmPressureEventKind::RchWorkersRecovered,
+        SwarmPressureEventKind::InteractiveAdmitted,
+        SwarmPressureEventKind::ProofThrottled,
+        SwarmPressureEventKind::CleanupRequested,
+    ] {
+        assert!(
+            first.event_log.iter().any(|event| event.kind == kind),
+            "pressure event log must include {kind:?}"
+        );
+    }
+    assert!(
+        first.event_log.iter().any(|event| {
+            event.kind == SwarmPressureEventKind::InteractiveAdmitted
+                && event.lane == Some(SwarmPressureLane::Interactive)
+                && event.disk_pressure == SwarmDiskPressureLevel::Red
+        }),
+        "sustained interactive work must remain admissible during red disk pressure"
+    );
+    assert!(
+        first.event_log.iter().all(|event| {
+            event.kind != SwarmPressureEventKind::CleanupRequested
+                || (!event.cleanup_authorized && event.auto_delete_command_count == 0)
+        }),
+        "cleanup events must be report-only until explicit authorization"
+    );
+
+    let first_json = serde_json::to_vec(&first).expect("serialize first pressure summary");
+    let second_json = serde_json::to_vec(&second).expect("serialize second pressure summary");
+    assert_eq!(
+        first_json, second_json,
+        "pressure summary JSON must be byte stable"
     );
 }
 
