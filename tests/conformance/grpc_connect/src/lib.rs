@@ -447,8 +447,24 @@ impl ConformanceTestSuite {
     async fn run_metadata_tests(&mut self, cx: &Cx) -> Result<()> {
         info!("Running metadata tests");
 
-        // Placeholder for metadata tests
-        // Implementation would test custom headers, auth tokens, etc.
+        let start_time = Instant::now();
+        let mut metadata = TestMetadata::default();
+        metadata.headers.insert(
+            "coverage_status".to_string(),
+            "requires_connect_reference_client_metadata_fixture".to_string(),
+        );
+
+        self.results.push(ConformanceResult {
+            test_name: "metadata_custom_headers_contract".to_string(),
+            category: TestCategory::Metadata,
+            status: TestStatus::Skipped,
+            duration: start_time.elapsed(),
+            error_message: Some(
+                "metadata conformance execution requires a Connect reference-client header fixture"
+                    .to_string(),
+            ),
+            metadata,
+        });
 
         Ok(())
     }
@@ -591,5 +607,29 @@ mod tests {
         // This would normally run against a real server
         // For testing, we'll just verify the structure
         assert!(suite.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_metadata_conformance_records_fixture_gap() {
+        let cx = Cx::root();
+        let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
+
+        suite.run_metadata_tests(&cx).await.unwrap();
+
+        assert_eq!(suite.results.len(), 1);
+        let result = &suite.results[0];
+        assert_eq!(result.test_name, "metadata_custom_headers_contract");
+        assert_eq!(result.category, TestCategory::Metadata);
+        assert_eq!(result.status, TestStatus::Skipped);
+        assert_eq!(
+            result.metadata.headers.get("coverage_status"),
+            Some(&"requires_connect_reference_client_metadata_fixture".to_string())
+        );
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Connect reference-client header fixture"))
+        );
     }
 }
