@@ -23,7 +23,7 @@ fn empty_scheduler_state_dump() -> Value {
     // Verify invariants before dumping state
     worker.verify_scheduler_invariants();
 
-    // Create mock state dump (simplified for golden test)
+    // Create synthetic state dump (simplified for golden test)
     json!({
         "scenario": "empty",
         "worker_id": 0,
@@ -60,14 +60,14 @@ fn loaded_scheduler_state_dump() -> Value {
     let mut workers = scheduler.take_workers();
     let worker = &mut workers[0];
 
-    // Schedule some mock tasks to create loaded state
+    // Schedule fixture tasks to create loaded state
     worker.schedule_local(TaskId::new_for_test(100, 0), 128);
     worker.schedule_local(TaskId::new_for_test(101, 0), 128);
     worker.schedule_local_timed(TaskId::new_for_test(102, 1), Time::from_nanos(5_000));
 
     worker.verify_scheduler_invariants();
 
-    // Create mock state dump with loaded tasks
+    // Create synthetic state dump with loaded tasks
     json!({
         "scenario": "loaded",
         "worker_id": 0,
@@ -130,7 +130,7 @@ fn cancel_streak_scheduler_state_dump() -> Value {
 
     worker.verify_scheduler_invariants();
 
-    // Create mock state dump with cancel streak scenario
+    // Create synthetic state dump with cancel streak scenario
     json!({
         "scenario": "cancel_streak",
         "worker_id": 0,
