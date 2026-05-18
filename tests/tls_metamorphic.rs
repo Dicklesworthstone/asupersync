@@ -756,7 +756,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
 #[cfg(not(feature = "tls"))]
 mod tls_disabled_tests {
-    // Placeholder tests for when TLS is disabled
+    // Feature marker test for when TLS is disabled
     #[test]
     fn mr_tests_require_tls_feature() {
         println!("TLS metamorphic tests require 'tls' feature to be enabled");
