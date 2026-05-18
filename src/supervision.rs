@@ -3776,7 +3776,7 @@ mod tests {
         RegionId::from_arena(ArenaIndex::new(0, 0))
     }
 
-    /// Helper: a `ChildStart`-compatible function that returns a dummy `TaskId`.
+    /// Helper: a `ChildStart`-compatible function that returns the canonical test `TaskId`.
     /// Named functions satisfy the HRTB required by `ChildStart` where closures
     /// with inferred lifetimes do not.
     #[allow(clippy::unnecessary_wraps)]
