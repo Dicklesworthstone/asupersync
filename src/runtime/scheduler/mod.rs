@@ -65,14 +65,15 @@ pub use priority_inversion_oracle::{
 };
 pub use swarm_evidence::{
     CoordinationPressureFamily, SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION,
-    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION,
-    SchedulerCoordinationEvidenceInput, SchedulerCoordinationEvidenceInputs,
-    SchedulerEvidenceArtifact, SchedulerEvidenceError, SchedulerEvidenceMetrics,
-    SchedulerKnobProfile, SchedulerRecommendationReason, SchedulerTopologyDescriptor,
-    SchedulerTuneReport, SchedulerWorkloadClass, SwarmCapacitySnapshot,
-    SwarmCoordinationBacklogSignals, SwarmCpuTopologyHints, SwarmDiskCapacity,
-    SwarmDiskPressureLevel, SwarmMemoryCapacity, SwarmMemoryPressureTier, SwarmRchAdmissibility,
-    SwarmRchCapacity,
+    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION,
+    SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION, SchedulerCoordinationEvidenceInput,
+    SchedulerCoordinationEvidenceInputs, SchedulerEvidenceArtifact, SchedulerEvidenceError,
+    SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
+    SchedulerTopologyDescriptor, SchedulerTuneReport, SchedulerWorkloadClass,
+    SwarmAdmissionDecision, SwarmAdmissionLane, SwarmAdmissionReasonCode, SwarmAdmissionReport,
+    SwarmCapacitySnapshot, SwarmCoordinationBacklogSignals, SwarmCpuTopologyHints,
+    SwarmDiskCapacity, SwarmDiskPressureLevel, SwarmLaneAdmission, SwarmMemoryCapacity,
+    SwarmMemoryPressureTier, SwarmRchAdmissibility, SwarmRchCapacity, SwarmValidationClass,
 };
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use work_stealing_checker::{

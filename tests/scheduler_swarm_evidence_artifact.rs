@@ -2,12 +2,14 @@
 
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{
-    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION,
-    SchedulerEvidenceArtifact, SchedulerEvidenceError, SchedulerEvidenceMetrics,
-    SchedulerKnobProfile, SchedulerRecommendationReason, SchedulerTopologyDescriptor,
-    SchedulerWorkloadClass, SwarmCapacitySnapshot, SwarmCoordinationBacklogSignals,
-    SwarmCpuTopologyHints, SwarmDiskCapacity, SwarmDiskPressureLevel, SwarmMemoryCapacity,
-    SwarmMemoryPressureTier, SwarmRchAdmissibility, SwarmRchCapacity, ThreeLaneScheduler,
+    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION,
+    SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION, SchedulerEvidenceArtifact, SchedulerEvidenceError,
+    SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
+    SchedulerTopologyDescriptor, SchedulerWorkloadClass, SwarmAdmissionDecision,
+    SwarmAdmissionLane, SwarmAdmissionReasonCode, SwarmAdmissionReport, SwarmCapacitySnapshot,
+    SwarmCoordinationBacklogSignals, SwarmCpuTopologyHints, SwarmDiskCapacity,
+    SwarmDiskPressureLevel, SwarmMemoryCapacity, SwarmMemoryPressureTier, SwarmRchAdmissibility,
+    SwarmRchCapacity, SwarmValidationClass, ThreeLaneScheduler,
 };
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
@@ -91,6 +93,17 @@ fn sample_capacity_snapshot(snapshot_id: &str) -> SwarmCapacitySnapshot {
             stale_in_progress_beads: 0,
         },
     }
+}
+
+fn admission_for(
+    report: &SwarmAdmissionReport,
+    lane: SwarmAdmissionLane,
+) -> &asupersync::runtime::scheduler::SwarmLaneAdmission {
+    report
+        .lanes
+        .iter()
+        .find(|admission| admission.lane == lane)
+        .unwrap_or_else(|| panic!("missing lane admission for {lane:?}"))
 }
 
 #[test]
@@ -298,7 +311,7 @@ fn swarm_capacity_snapshot_rejects_invalid_dimensions() {
         })
     );
 
-    let mut snapshot = sample_capacity_snapshot("   ");
+    let snapshot = sample_capacity_snapshot("   ");
     assert_eq!(
         snapshot.validate(),
         Err(SchedulerEvidenceError::EmptyCapacitySnapshotId)
@@ -394,6 +407,162 @@ fn swarm_capacity_snapshot_defaults_and_unknown_fields_are_stable() {
     assert_eq!(snapshot.coordination.open_beads, 0);
     assert_eq!(snapshot.coordination.active_agents, 4);
     assert_eq!(snapshot.coordination.active_dirty_paths, 0);
+}
+
+#[test]
+fn swarm_admission_policy_blocks_local_artifacts_under_red_disk() {
+    let mut snapshot = sample_capacity_snapshot("red-disk-admission");
+    snapshot.disk.free_bytes = Some(8 * 1_024 * 1_024 * 1_024);
+    snapshot.disk.pressure_level = SwarmDiskPressureLevel::Critical;
+    snapshot.coordination.active_dirty_paths = 4;
+
+    let report = snapshot
+        .admission_report()
+        .expect("red disk snapshot should produce report");
+
+    assert_eq!(
+        report.schema_version,
+        SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION
+    );
+    assert_eq!(report.source_snapshot_id, "red-disk-admission");
+    assert_eq!(
+        report.recommended_lane,
+        SwarmAdmissionLane::InteractiveSourceOnly
+    );
+
+    let source = admission_for(&report, SwarmAdmissionLane::InteractiveSourceOnly);
+    assert_eq!(source.decision, SwarmAdmissionDecision::Admit);
+    assert_eq!(source.validation_class, SwarmValidationClass::SourceOnly);
+    assert!(
+        source
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::DiskCriticalPreferSourceOnly)
+    );
+    assert!(
+        source
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::PeerDirtyPathsRequireNarrowReservations)
+    );
+
+    let tracker = admission_for(&report, SwarmAdmissionLane::TrackerOnlyPlanning);
+    assert_eq!(tracker.decision, SwarmAdmissionDecision::Admit);
+    assert_eq!(tracker.validation_class, SwarmValidationClass::SourceOnly);
+
+    let remote = admission_for(&report, SwarmAdmissionLane::RemoteProof);
+    assert_eq!(remote.decision, SwarmAdmissionDecision::Admit);
+    assert!(
+        remote
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::DiskCriticalRemoteOnly)
+    );
+
+    let local_artifacts = admission_for(&report, SwarmAdmissionLane::LocalArtifactRetrieval);
+    assert_eq!(local_artifacts.decision, SwarmAdmissionDecision::Defer);
+    assert_eq!(
+        local_artifacts.validation_class,
+        SwarmValidationClass::LocalArtifact
+    );
+    assert!(
+        local_artifacts
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::DiskCriticalBlocksLocalArtifacts)
+    );
+
+    let cleanup = admission_for(&report, SwarmAdmissionLane::CleanupAuthorization);
+    assert_eq!(
+        cleanup.decision,
+        SwarmAdmissionDecision::RequireAuthorization
+    );
+    assert!(
+        cleanup
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::CleanupRequiresAuthorization)
+    );
+}
+
+#[test]
+fn swarm_admission_policy_defers_remote_proof_when_rch_unavailable() {
+    let mut snapshot = sample_capacity_snapshot("rch-unavailable-admission");
+    snapshot.rch.admissibility = SwarmRchAdmissibility::Unavailable;
+    snapshot.rch.healthy_worker_count = Some(0);
+    snapshot.rch.available_slots = Some(0);
+
+    let report = snapshot
+        .admission_report()
+        .expect("rch-unavailable snapshot should produce report");
+
+    let remote = admission_for(&report, SwarmAdmissionLane::RemoteProof);
+    assert_eq!(remote.decision, SwarmAdmissionDecision::Defer);
+    assert_eq!(remote.validation_class, SwarmValidationClass::RemoteRch);
+    assert!(
+        remote
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::RchUnavailable)
+    );
+
+    let source = admission_for(&report, SwarmAdmissionLane::InteractiveSourceOnly);
+    assert_eq!(source.decision, SwarmAdmissionDecision::Admit);
+    assert_eq!(
+        report.recommended_lane,
+        SwarmAdmissionLane::InteractiveSourceOnly
+    );
+}
+
+#[test]
+fn swarm_admission_policy_admits_green_state_heavy_lanes() {
+    let snapshot = sample_capacity_snapshot("green-admission");
+    let report = snapshot
+        .admission_report()
+        .expect("green snapshot should produce report");
+
+    assert_eq!(report.recommended_lane, SwarmAdmissionLane::RemoteProof);
+
+    let remote = admission_for(&report, SwarmAdmissionLane::RemoteProof);
+    assert_eq!(remote.decision, SwarmAdmissionDecision::Admit);
+    assert!(
+        remote
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::RchAvailable)
+    );
+
+    let local_artifacts = admission_for(&report, SwarmAdmissionLane::LocalArtifactRetrieval);
+    assert_eq!(local_artifacts.decision, SwarmAdmissionDecision::Admit);
+    assert!(
+        local_artifacts
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::DiskHealthy)
+    );
+}
+
+#[test]
+fn swarm_admission_policy_keeps_work_conserving_fallback_on_sparse_queue() {
+    let mut snapshot = sample_capacity_snapshot("sparse-queue-admission");
+    snapshot.coordination.ready_beads = 0;
+    snapshot.disk.pressure_level = SwarmDiskPressureLevel::Critical;
+    snapshot.rch.admissibility = SwarmRchAdmissibility::DeferredByPolicy;
+
+    let report = snapshot
+        .admission_report()
+        .expect("sparse queue snapshot should produce report");
+
+    assert_eq!(
+        report.recommended_lane,
+        SwarmAdmissionLane::InteractiveSourceOnly
+    );
+    let source = admission_for(&report, SwarmAdmissionLane::InteractiveSourceOnly);
+    let tracker = admission_for(&report, SwarmAdmissionLane::TrackerOnlyPlanning);
+    assert_eq!(source.decision, SwarmAdmissionDecision::Admit);
+    assert_eq!(tracker.decision, SwarmAdmissionDecision::Admit);
+    assert!(
+        source
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::SparseReadyQueueUseFallback)
+    );
+    assert!(
+        tracker
+            .reason_codes
+            .contains(&SwarmAdmissionReasonCode::SparseReadyQueueUseFallback)
+    );
 }
 
 #[test]

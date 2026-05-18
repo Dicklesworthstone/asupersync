@@ -449,6 +449,10 @@ pub enum CoordinationPressureFamily {
 /// Stable schema for explicit host/resource snapshots used by swarm-scale policy.
 pub const SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION: &str = "asupersync.swarm-capacity-snapshot.v1";
 
+/// Stable schema for admission reports derived from swarm capacity snapshots.
+pub const SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION: &str =
+    "asupersync.swarm-admission-policy-report.v1";
+
 /// Deterministic, capability-supplied host capacity snapshot.
 ///
 /// This type is intentionally inert: it records capacity and coordination
@@ -490,6 +494,291 @@ impl SwarmCapacitySnapshot {
         self.disk.validate()?;
         Ok(())
     }
+
+    /// Classify work lanes from this explicit snapshot.
+    ///
+    /// The policy is work-conserving but fail-closed for local artifact and
+    /// cleanup surfaces: disk pressure never blocks source-only planning, but
+    /// it does defer artifact-heavy local work and requires explicit cleanup
+    /// authorization.
+    pub fn admission_report(&self) -> Result<SwarmAdmissionReport, SchedulerEvidenceError> {
+        self.validate()?;
+
+        let lanes = vec![
+            self.classify_source_only_lane(),
+            self.classify_tracker_planning_lane(),
+            self.classify_remote_proof_lane(),
+            self.classify_local_artifact_lane(),
+            self.classify_cleanup_authorization_lane(),
+        ];
+        let recommended_lane = self.recommend_admission_lane(&lanes);
+
+        Ok(SwarmAdmissionReport {
+            schema_version: SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION.to_string(),
+            source_snapshot_id: self.snapshot_id.clone(),
+            recommended_lane,
+            lanes,
+        })
+    }
+
+    fn classify_source_only_lane(&self) -> SwarmLaneAdmission {
+        let mut reason_codes = vec![SwarmAdmissionReasonCode::SourceOnlyAlwaysAvailable];
+        if self.disk.pressure_level == SwarmDiskPressureLevel::Critical {
+            reason_codes.push(SwarmAdmissionReasonCode::DiskCriticalPreferSourceOnly);
+        }
+        if self.coordination.active_dirty_paths > 0 {
+            reason_codes.push(SwarmAdmissionReasonCode::PeerDirtyPathsRequireNarrowReservations);
+        }
+        if self.coordination.ready_beads == 0 {
+            reason_codes.push(SwarmAdmissionReasonCode::SparseReadyQueueUseFallback);
+        }
+        SwarmLaneAdmission {
+            lane: SwarmAdmissionLane::InteractiveSourceOnly,
+            decision: SwarmAdmissionDecision::Admit,
+            validation_class: SwarmValidationClass::SourceOnly,
+            reason_codes,
+        }
+    }
+
+    fn recommend_admission_lane(&self, lanes: &[SwarmLaneAdmission]) -> SwarmAdmissionLane {
+        let is_admitted = |candidate| {
+            lanes.iter().any(|lane| {
+                lane.lane == candidate && lane.decision == SwarmAdmissionDecision::Admit
+            })
+        };
+
+        if self.coordination.ready_beads == 0
+            || self.disk.pressure_level == SwarmDiskPressureLevel::Critical
+            || matches!(
+                self.memory.pressure_tier,
+                SwarmMemoryPressureTier::Saturated | SwarmMemoryPressureTier::Critical
+            )
+        {
+            if is_admitted(SwarmAdmissionLane::InteractiveSourceOnly) {
+                return SwarmAdmissionLane::InteractiveSourceOnly;
+            }
+        }
+
+        if is_admitted(SwarmAdmissionLane::RemoteProof) {
+            return SwarmAdmissionLane::RemoteProof;
+        }
+        if is_admitted(SwarmAdmissionLane::InteractiveSourceOnly) {
+            return SwarmAdmissionLane::InteractiveSourceOnly;
+        }
+        if is_admitted(SwarmAdmissionLane::TrackerOnlyPlanning) {
+            return SwarmAdmissionLane::TrackerOnlyPlanning;
+        }
+
+        SwarmAdmissionLane::TrackerOnlyPlanning
+    }
+
+    fn classify_tracker_planning_lane(&self) -> SwarmLaneAdmission {
+        let mut reason_codes = vec![SwarmAdmissionReasonCode::TrackerPlanningAlwaysAvailable];
+        if self.coordination.ready_beads == 0 {
+            reason_codes.push(SwarmAdmissionReasonCode::SparseReadyQueueUseFallback);
+        }
+        SwarmLaneAdmission {
+            lane: SwarmAdmissionLane::TrackerOnlyPlanning,
+            decision: SwarmAdmissionDecision::Admit,
+            validation_class: SwarmValidationClass::SourceOnly,
+            reason_codes,
+        }
+    }
+
+    fn classify_remote_proof_lane(&self) -> SwarmLaneAdmission {
+        let mut reason_codes = Vec::new();
+        let decision = match self.rch.admissibility {
+            SwarmRchAdmissibility::Available => {
+                reason_codes.push(SwarmAdmissionReasonCode::RchAvailable);
+                SwarmAdmissionDecision::Admit
+            }
+            SwarmRchAdmissibility::Degraded => {
+                reason_codes.push(SwarmAdmissionReasonCode::RchDegraded);
+                SwarmAdmissionDecision::Admit
+            }
+            SwarmRchAdmissibility::Unavailable => {
+                reason_codes.push(SwarmAdmissionReasonCode::RchUnavailable);
+                SwarmAdmissionDecision::Defer
+            }
+            SwarmRchAdmissibility::DeferredByPolicy => {
+                reason_codes.push(SwarmAdmissionReasonCode::RchDeferredByPolicy);
+                SwarmAdmissionDecision::Defer
+            }
+            SwarmRchAdmissibility::Unknown => {
+                reason_codes.push(SwarmAdmissionReasonCode::RchUnknown);
+                SwarmAdmissionDecision::Defer
+            }
+        };
+        if self.disk.pressure_level == SwarmDiskPressureLevel::Critical {
+            reason_codes.push(SwarmAdmissionReasonCode::DiskCriticalRemoteOnly);
+        }
+        SwarmLaneAdmission {
+            lane: SwarmAdmissionLane::RemoteProof,
+            decision,
+            validation_class: SwarmValidationClass::RemoteRch,
+            reason_codes,
+        }
+    }
+
+    fn classify_local_artifact_lane(&self) -> SwarmLaneAdmission {
+        let mut reason_codes = Vec::new();
+        let mut decision = SwarmAdmissionDecision::Admit;
+
+        match self.disk.pressure_level {
+            SwarmDiskPressureLevel::Healthy => {
+                reason_codes.push(SwarmAdmissionReasonCode::DiskHealthy);
+            }
+            SwarmDiskPressureLevel::Low => {
+                decision = SwarmAdmissionDecision::Defer;
+                reason_codes.push(SwarmAdmissionReasonCode::DiskLowPreferRemoteOrSourceOnly);
+            }
+            SwarmDiskPressureLevel::Critical => {
+                decision = SwarmAdmissionDecision::Defer;
+                reason_codes.push(SwarmAdmissionReasonCode::DiskCriticalBlocksLocalArtifacts);
+            }
+            SwarmDiskPressureLevel::Unknown => {
+                decision = SwarmAdmissionDecision::Defer;
+                reason_codes.push(SwarmAdmissionReasonCode::DiskUnknownBlocksLocalArtifacts);
+            }
+        }
+        if matches!(
+            self.memory.pressure_tier,
+            SwarmMemoryPressureTier::Saturated | SwarmMemoryPressureTier::Critical
+        ) {
+            decision = SwarmAdmissionDecision::Defer;
+            reason_codes.push(SwarmAdmissionReasonCode::MemoryPressureBlocksArtifactGrowth);
+        }
+
+        SwarmLaneAdmission {
+            lane: SwarmAdmissionLane::LocalArtifactRetrieval,
+            decision,
+            validation_class: SwarmValidationClass::LocalArtifact,
+            reason_codes,
+        }
+    }
+
+    fn classify_cleanup_authorization_lane(&self) -> SwarmLaneAdmission {
+        let mut reason_codes = vec![SwarmAdmissionReasonCode::CleanupRequiresAuthorization];
+        if self.disk.pressure_level == SwarmDiskPressureLevel::Critical {
+            reason_codes.push(SwarmAdmissionReasonCode::DiskCriticalNeedsCleanupReview);
+        }
+        SwarmLaneAdmission {
+            lane: SwarmAdmissionLane::CleanupAuthorization,
+            decision: SwarmAdmissionDecision::RequireAuthorization,
+            validation_class: SwarmValidationClass::HumanAuthorizedCleanup,
+            reason_codes,
+        }
+    }
+}
+
+/// Work lanes that swarm-scale admission policy classifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdmissionLane {
+    /// Latency-sensitive source edits, code review, and lightweight checks.
+    InteractiveSourceOnly,
+    /// Tracker/mail/planning work that does not need build artifacts.
+    TrackerOnlyPlanning,
+    /// Remote `rch` proof work without local artifact-heavy retrieval.
+    RemoteProof,
+    /// Local proof-output retrieval or artifact-heavy analysis.
+    LocalArtifactRetrieval,
+    /// Cleanup work that may delete or truncate data and needs human approval.
+    CleanupAuthorization,
+}
+
+/// Deterministic admission decision for one work lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdmissionDecision {
+    /// Work may proceed under the attached validation class.
+    Admit,
+    /// Work should wait for pressure or capacity to recover.
+    Defer,
+    /// Work needs explicit human approval before it can proceed.
+    RequireAuthorization,
+}
+
+/// Validation class an admitted lane should use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmValidationClass {
+    /// Source-only checks such as rustfmt, JSON parsing, or diff checks.
+    SourceOnly,
+    /// Remote `rch` build/test proof.
+    RemoteRch,
+    /// Local artifact retrieval or artifact inspection.
+    LocalArtifact,
+    /// Human-authorized cleanup/truncation path.
+    HumanAuthorizedCleanup,
+}
+
+/// Stable reason codes for lane admission decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdmissionReasonCode {
+    /// Source-only work remains available even under disk pressure.
+    SourceOnlyAlwaysAvailable,
+    /// Tracker/planning work remains available even when heavy work is unsafe.
+    TrackerPlanningAlwaysAvailable,
+    /// Red disk should bias agents toward source-only work.
+    DiskCriticalPreferSourceOnly,
+    /// Red disk does not block remote-only proof submission by itself.
+    DiskCriticalRemoteOnly,
+    /// Local artifact retrieval is allowed by disk state.
+    DiskHealthy,
+    /// Low disk should prefer remote or source-only work.
+    DiskLowPreferRemoteOrSourceOnly,
+    /// Red disk blocks local artifact-heavy work.
+    DiskCriticalBlocksLocalArtifacts,
+    /// Missing disk pressure data blocks local artifact-heavy work.
+    DiskUnknownBlocksLocalArtifacts,
+    /// Red disk means cleanup should be reviewed explicitly.
+    DiskCriticalNeedsCleanupReview,
+    /// rch workers are available.
+    RchAvailable,
+    /// rch workers are degraded but usable.
+    RchDegraded,
+    /// rch workers are unavailable.
+    RchUnavailable,
+    /// rch work was deferred by a higher-level policy.
+    RchDeferredByPolicy,
+    /// rch capacity is unknown, so remote proof work is deferred.
+    RchUnknown,
+    /// Memory pressure blocks cache/artifact growth.
+    MemoryPressureBlocksArtifactGrowth,
+    /// Shared dirty paths require narrow reservations before source work.
+    PeerDirtyPathsRequireNarrowReservations,
+    /// No ready work is visible; use a safe fallback lane.
+    SparseReadyQueueUseFallback,
+    /// Cleanup needs explicit authorization and cannot be auto-admitted.
+    CleanupRequiresAuthorization,
+}
+
+/// Admission decision for one lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmLaneAdmission {
+    /// Lane being classified.
+    pub lane: SwarmAdmissionLane,
+    /// Deterministic decision for this lane.
+    pub decision: SwarmAdmissionDecision,
+    /// Validation/proof class that applies if this lane is taken.
+    pub validation_class: SwarmValidationClass,
+    /// Stable reason codes explaining the decision.
+    pub reason_codes: Vec<SwarmAdmissionReasonCode>,
+}
+
+/// Full deterministic report derived from one capacity snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdmissionReport {
+    /// Version tag for this schema.
+    pub schema_version: String,
+    /// Snapshot identifier copied from the source snapshot.
+    pub source_snapshot_id: String,
+    /// Best work-conserving lane to take under current pressure.
+    pub recommended_lane: SwarmAdmissionLane,
+    /// Per-lane decisions in stable priority order.
+    pub lanes: Vec<SwarmLaneAdmission>,
 }
 
 /// Explicit CPU topology hints for swarm-scale admission decisions.
