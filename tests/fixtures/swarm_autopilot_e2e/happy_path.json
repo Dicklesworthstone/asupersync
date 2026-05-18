@@ -51,6 +51,20 @@
       "fixture": "tests/fixtures/closeout_verifier/clean_closeout.json",
       "kind": "closeout-verifier",
       "stage_id": "closeout_verifier"
+    },
+    {
+      "agent": "CopperSpring",
+      "expect": {
+        "closed_by_recent_commit": 1,
+        "first_classification": "closed-by-recent-commit",
+        "first_proposed_action_kind": "br-update-command",
+        "probably_stale": 0,
+        "schema_version": "stale-in-progress-receipt-v1",
+        "total_in_progress": 1
+      },
+      "fixture": "tests/fixtures/stale_in_progress_receipt/recent_commit_reference.json",
+      "kind": "stale-in-progress-receipt",
+      "stage_id": "stale_reclaim"
     }
   ]
 }

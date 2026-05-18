@@ -91,13 +91,14 @@ fn happy_path_composes_autopilot_helpers() {
         Some("ready-to-closeout")
     );
     assert_eq!(receipt["overall_status"].as_str(), Some("pass"));
-    assert_eq!(receipt["summary"]["stage_count"].as_u64(), Some(4));
+    assert_eq!(receipt["summary"]["stage_count"].as_u64(), Some(5));
     assert_eq!(
         stage_ids(&receipt),
         BTreeSet::from([
             "closeout_verifier".to_owned(),
             "proof_receipt".to_owned(),
             "scanner_templates".to_owned(),
+            "stale_reclaim".to_owned(),
             "work_finder".to_owned(),
         ])
     );
@@ -112,12 +113,10 @@ fn happy_path_composes_autopilot_helpers() {
         proof["observed"]["target_dir_audit_status"].as_str(),
         Some("pass")
     );
-    assert!(
-        proof["command"]
-            .as_str()
-            .expect("command")
-            .contains("scripts/rch_retrieval_receipt.py")
-    );
+    assert!(proof["command"]
+        .as_str()
+        .expect("command")
+        .contains("scripts/rch_retrieval_receipt.py"));
 
     let finder = stage(&receipt, "work_finder");
     assert_eq!(
@@ -130,6 +129,15 @@ fn happy_path_composes_autopilot_helpers() {
     assert_eq!(
         closeout["observed"]["overall_status"].as_str(),
         Some("pass")
+    );
+    let stale = stage(&receipt, "stale_reclaim");
+    assert_eq!(
+        stale["observed"]["first_classification"].as_str(),
+        Some("closed-by-recent-commit")
+    );
+    assert_eq!(
+        stale["observed"]["closed_by_recent_commit"].as_u64(),
+        Some(1)
     );
 }
 
@@ -167,6 +175,12 @@ fn blocked_path_is_successful_when_blockers_are_observed() {
         closeout["observed"]["overall_status"].as_str(),
         Some("fail")
     );
+    let stale = stage(&receipt, "stale_reclaim");
+    assert_eq!(
+        stale["observed"]["first_classification"].as_str(),
+        Some("probably-stale")
+    );
+    assert_eq!(stale["observed"]["probably_stale"].as_u64(), Some(1));
 }
 
 #[test]

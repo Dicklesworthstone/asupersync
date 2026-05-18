@@ -59,6 +59,19 @@
       "fixture": "tests/fixtures/closeout_verifier/missing_reservation_release.json",
       "kind": "closeout-verifier",
       "stage_id": "closeout_verifier"
+    },
+    {
+      "agent": "CopperSpring",
+      "expect": {
+        "first_classification": "probably-stale",
+        "first_proposed_action_kind": "br-update-command",
+        "probably_stale": 1,
+        "schema_version": "stale-in-progress-receipt-v1",
+        "total_in_progress": 1
+      },
+      "fixture": "tests/fixtures/stale_in_progress_receipt/expired_reservation_inactive_agent.json",
+      "kind": "stale-in-progress-receipt",
+      "stage_id": "stale_reclaim"
     }
   ]
 }

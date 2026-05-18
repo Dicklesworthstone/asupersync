@@ -22,6 +22,7 @@ HELPERS = {
     "reservation-aware-work-finder": "scripts/reservation_aware_work_finder.py",
     "fuzz-oracle-bead-template": "scripts/fuzz_oracle_debt_scanner.py",
     "closeout-verifier": "scripts/closeout_verifier.py",
+    "stale-in-progress-receipt": "scripts/stale_in_progress_receipt.py",
 }
 FORBIDDEN_ACTIONS = {
     "runs_live_agent_mail_mutation": False,
@@ -162,6 +163,10 @@ def stage_command(stage: dict[str, Any], repo_path: Path, generated_at: str) -> 
     elif kind == "closeout-verifier":
         args.extend(["--fixture", rel(stage["fixture"])])
         args.extend(["--repo-path", rel(repo_path)])
+    elif kind == "stale-in-progress-receipt":
+        args.extend(["--fixture", rel(stage["fixture"])])
+        args.extend(["--repo-path", rel(repo_path)])
+        args.extend(["--agent", str(stage.get("agent") or "CopperSpring")])
     args.extend(["--generated-at", generated_at])
     if "--output" not in args:
         args.extend(["--output", "json"])
@@ -215,6 +220,22 @@ def observed_values(kind: str, report: dict[str, Any]) -> dict[str, Any]:
             else None,
             "warn_count": report.get("summary", {}).get("warn")
             if isinstance(report.get("summary"), dict)
+            else None,
+        }
+    if kind == "stale-in-progress-receipt":
+        classifications = rows_from(report, "classifications")
+        first = classifications[0] if classifications else {}
+        proposed_action = first.get("proposed_action") if isinstance(first, dict) else {}
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        return {
+            "schema_version": report.get("schema_version"),
+            "total_in_progress": summary.get("total_in_progress"),
+            "probably_stale": summary.get("probably_stale"),
+            "closed_by_recent_commit": summary.get("closed_by_recent_commit"),
+            "blocked_by_active_reservation": summary.get("blocked_by_active_reservation"),
+            "first_classification": first.get("classification") if isinstance(first, dict) else None,
+            "first_proposed_action_kind": proposed_action.get("kind")
+            if isinstance(proposed_action, dict)
             else None,
         }
     return {}
