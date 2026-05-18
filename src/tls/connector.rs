@@ -1685,7 +1685,7 @@ mod tests {
         let redacted_path = "<redacted>";
         let mut builder = TlsConnectorBuilder::new()
             .enable_env_cert_loading()
-            .add_root_certificate(&Certificate::from_der(b"fake-root".to_vec()))
+            .add_root_certificate(&Certificate::from_der(b"test-root".to_vec()))
             .alpn_h2();
 
         let load_error = builder
