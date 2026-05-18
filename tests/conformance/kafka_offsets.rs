@@ -586,7 +586,7 @@ fn integration_all_metamorphic_relations() -> Result<(), Box<dyn std::error::Err
             auto_commit_interval: Duration::from_secs(10),
         };
 
-        // Test against stub implementation
+        // Test against the in-process test-mode broker backend.
         let consumer = create_test_consumer(&cx, config, true).await?;
         let topic = "integration-test";
 
