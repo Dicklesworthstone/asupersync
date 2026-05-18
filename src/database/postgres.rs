@@ -8809,12 +8809,12 @@ mod tests {
                 "SCRAM-SHA-256".to_string(),
                 "SCRAM-SHA-256-PLUS".to_string(),
             ];
-            let dummy_cert = vec![0x30, 0x82]; // Valid DER prefix
+            let der_prefix_cert = vec![0x30, 0x82]; // Valid DER prefix
 
             let result = PgConnection::pick_scram_channel_binding(
                 &mechanisms_with_plus,
                 true, // TLS active
-                Some(dummy_cert.clone()),
+                Some(der_prefix_cert.clone()),
             )
             .expect("should choose channel binding");
 
@@ -8829,12 +8829,12 @@ mod tests {
         #[cfg(feature = "tls")]
         {
             let mechanisms_no_plus = vec!["SCRAM-SHA-256".to_string()];
-            let dummy_cert = vec![0x30, 0x82]; // Valid DER prefix
+            let der_prefix_cert = vec![0x30, 0x82]; // Valid DER prefix
 
             let result = PgConnection::pick_scram_channel_binding(
                 &mechanisms_no_plus,
                 true, // TLS active
-                Some(dummy_cert),
+                Some(der_prefix_cert),
             )
             .expect("should use downgrade protection");
 
@@ -8874,7 +8874,7 @@ mod tests {
         }
     }
 
-    /// Create a PgConnection backed by a dummy socket pair for unit-testing
+    /// Create a PgConnection backed by a loopback socket pair for unit-testing
     /// parse methods that only inspect a byte slice.
     fn make_test_connection() -> PgConnection {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -14022,7 +14022,7 @@ mod tests {
 
     // ─── br-asupersync-cvkoe9: PreparedStatementCache regression tests ──
 
-    fn fake_pg_statement(name: &str) -> PgStatement {
+    fn fixture_pg_statement(name: &str) -> PgStatement {
         PgStatement {
             name: name.to_string(),
             param_oids: Vec::new(),
@@ -14038,22 +14038,22 @@ mod tests {
         let mut cache = PreparedStatementCache::new(3);
         // Fill to cap.
         assert_eq!(
-            cache.insert_returning_evicted_name("sql_a".into(), fake_pg_statement("__s0")),
+            cache.insert_returning_evicted_name("sql_a".into(), fixture_pg_statement("__s0")),
             None
         );
         assert_eq!(
-            cache.insert_returning_evicted_name("sql_b".into(), fake_pg_statement("__s1")),
+            cache.insert_returning_evicted_name("sql_b".into(), fixture_pg_statement("__s1")),
             None
         );
         assert_eq!(
-            cache.insert_returning_evicted_name("sql_c".into(), fake_pg_statement("__s2")),
+            cache.insert_returning_evicted_name("sql_c".into(), fixture_pg_statement("__s2")),
             None
         );
         assert_eq!(cache.len(), 3);
 
         // Insert at cap → evicts LRU (sql_a).
         let evicted =
-            cache.insert_returning_evicted_name("sql_d".into(), fake_pg_statement("__s3"));
+            cache.insert_returning_evicted_name("sql_d".into(), fixture_pg_statement("__s3"));
         assert_eq!(
             evicted,
             Some("__s0".to_string()),
@@ -14068,7 +14068,7 @@ mod tests {
 
     /// Mock-free version of prepared_cache_returns_evicted_name_at_cap.
     ///
-    /// This test replaces the fake_pg_statement mock with real prepared statements
+    /// This test replaces the fixture statement helper with real prepared statements
     /// created through the actual prepare() method, testing cache eviction behavior
     /// with realistic PostgreSQL protocol responses.
     #[test]
@@ -14911,9 +14911,9 @@ mod tests {
         // eviction round. Otherwise frequently-reused statements get
         // evicted alongside one-shot statements.
         let mut cache = PreparedStatementCache::new(3);
-        cache.insert_returning_evicted_name("sql_a".into(), fake_pg_statement("__s0"));
-        cache.insert_returning_evicted_name("sql_b".into(), fake_pg_statement("__s1"));
-        cache.insert_returning_evicted_name("sql_c".into(), fake_pg_statement("__s2"));
+        cache.insert_returning_evicted_name("sql_a".into(), fixture_pg_statement("__s0"));
+        cache.insert_returning_evicted_name("sql_b".into(), fixture_pg_statement("__s1"));
+        cache.insert_returning_evicted_name("sql_c".into(), fixture_pg_statement("__s2"));
 
         // Touch sql_a → moves it to back of LRU. Now sql_b is LRU.
         let hit = cache.get_and_touch("sql_a");
@@ -14922,7 +14922,7 @@ mod tests {
 
         // Insert sql_d at cap. sql_b (now LRU) MUST be evicted.
         let evicted =
-            cache.insert_returning_evicted_name("sql_d".into(), fake_pg_statement("__s3"));
+            cache.insert_returning_evicted_name("sql_d".into(), fixture_pg_statement("__s3"));
         assert_eq!(
             evicted,
             Some("__s1".to_string()),
@@ -14933,7 +14933,7 @@ mod tests {
     #[test]
     fn prepared_cache_get_and_touch_miss_returns_none() {
         let mut cache = PreparedStatementCache::new(3);
-        cache.insert_returning_evicted_name("sql_a".into(), fake_pg_statement("__s0"));
+        cache.insert_returning_evicted_name("sql_a".into(), fixture_pg_statement("__s0"));
         assert!(cache.get_and_touch("sql_b").is_none());
     }
 
@@ -14944,7 +14944,7 @@ mod tests {
         // server-side state ever lingers beyond the prepare() call.
         let mut cache = PreparedStatementCache::new(0);
         let evicted =
-            cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__only"));
+            cache.insert_returning_evicted_name("sql".into(), fixture_pg_statement("__only"));
         assert_eq!(evicted, Some("__only".to_string()));
     }
 
@@ -14954,8 +14954,9 @@ mod tests {
         // insert with SQL already present. The OLD server-side name MUST
         // be returned for DEALLOCATE so the duplicate doesn't leak.
         let mut cache = PreparedStatementCache::new(3);
-        cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__s0"));
-        let evicted = cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__s1"));
+        cache.insert_returning_evicted_name("sql".into(), fixture_pg_statement("__s0"));
+        let evicted =
+            cache.insert_returning_evicted_name("sql".into(), fixture_pg_statement("__s1"));
         assert_eq!(evicted, Some("__s0".to_string()));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.entries.get("sql").unwrap().name, "__s1");
@@ -15202,7 +15203,7 @@ mod tests {
         let cx = crate::cx::Cx::for_testing();
         let cancel_cx = cx.clone();
         let sql = "SELECT 1";
-        let cached = fake_pg_statement("__cached_stmt");
+        let cached = fixture_pg_statement("__cached_stmt");
         conn.inner
             .prepared_cache
             .insert_returning_evicted_name(sql.to_string(), cached.clone());
@@ -15292,7 +15293,7 @@ mod tests {
         let (mut conn, mut peer) = make_test_connection_with_peer();
         let cx = crate::cx::Cx::for_testing();
         let sql = "SELECT 1";
-        let cached = fake_pg_statement("__cached_stmt");
+        let cached = fixture_pg_statement("__cached_stmt");
         conn.inner
             .prepared_cache
             .insert_returning_evicted_name(sql.to_string(), cached.clone());
@@ -15347,7 +15348,7 @@ mod tests {
         let (mut conn, mut peer) = make_test_connection_with_peer();
         let cx = crate::cx::Cx::for_testing();
         let cached_sql = "SELECT * FROM widgets";
-        let cached_stmt = fake_pg_statement("__cached_stmt");
+        let cached_stmt = fixture_pg_statement("__cached_stmt");
         conn.inner
             .prepared_cache
             .insert_returning_evicted_name(cached_sql.to_string(), cached_stmt.clone());
