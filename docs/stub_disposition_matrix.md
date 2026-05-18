@@ -133,8 +133,10 @@ from detached source files.
 
 ### Surface 17: unimplemented!() in test harnesses
 - **Files**: `examples/test_manual.rs:18`, `tests/split_utf8_read_line.rs:18`
-- **Disposition**: **IMPLEMENT** → Track I (I1/v2ofj7.9.1)
-- **Target**: Replace `unimplemented!()` with `Poll::Ready(Ok(()))` or proper delegation.
+- **Disposition**: **RESOLVED** (Track I / I1 / v2ofj7.9.1)
+- **Evidence**: `ast-grep run -l Rust -p 'unimplemented!()' examples tests`
+  returns no matches, and `scripts/scan_stubs.sh` reports
+  `ZR-SCAN-NO-HARNESS-UNIMPLEMENTED` as passed.
 
 ### Surface 18: API skeleton in project root
 - **File**: `asupersync_v4_api_skeleton.rs`
@@ -153,8 +155,8 @@ from detached source files.
 
 | Disposition | Count | Surfaces |
 |-------------|-------|----------|
-| RESOLVED | 7 | #2, #3, #4, #11, #12, #14, #16 |
-| IMPLEMENT | 3 | #6, #7, #17 |
+| RESOLVED | 8 | #2, #3, #4, #11, #12, #14, #16, #17 |
+| IMPLEMENT | 2 | #6, #7 |
 | DOCUMENT | 4 | #5, #9, #10, #19 |
 | CONVERGE | 1 | #1 |
 | QUARANTINE | 1 | #13 |
@@ -173,6 +175,6 @@ from detached source files.
 | F | #6 | IMPLEMENT |
 | G | #7 | IMPLEMENT |
 | H | #8, #9, #10 | RETIRE, DOCUMENT, DOCUMENT |
-| I | #13, #17, #18 | QUARANTINE, IMPLEMENT, RETIRE |
+| I | #13, #17, #18 | QUARANTINE, RESOLVED, RETIRE |
 | Z | All, #19 | Verification of above plus live marker classification ratchet |
 | Hygiene | #14, #15, #16 | #14 RESOLVED, #15 RETIRE, #16 RESOLVED |
