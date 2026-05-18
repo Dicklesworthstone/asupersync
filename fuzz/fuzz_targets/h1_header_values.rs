@@ -1,7 +1,7 @@
 //! HTTP/1.1 header value percent-encoding and obs-text fuzz target.
 //!
 //! Fuzzes malformed HTTP header values to test critical parsing invariants:
-//! 1. obs-fold tolerated per RFC 9112 (obsolete line folding with space/tab)
+//! 1. obs-fold handled by normalization or fail-closed rejection per RFC 9112
 //! 2. LF without CR rejected (bare LF detection)
 //! 3. VCHAR allowed + obs-text (0x80-0xFF) tolerated
 //! 4. space-prefixed continuation trimmed (leading/trailing whitespace)
@@ -11,7 +11,7 @@
 //! - Non-ASCII characters and invalid encoded-word sequences
 //! - CRLF injection attempts (bare LF, bare CR, embedded nulls)
 //! - obs-text characters (0x80-0xFF) for Latin-1 compatibility
-//! - Header value continuation lines (obs-fold patterns)
+//! - Header value continuation lines (obs-fold normalization or rejection)
 //! - Oversized header values exceeding configured limits
 //! - Control character injection (except allowed HTAB)
 //! - Unicode normalization attacks
@@ -26,11 +26,10 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::io::Cursor;
 
-use asupersync::http::h1::codec::{Http1Codec, HttpError};
-use asupersync::codec::Decoder;
 use asupersync::bytes::BytesMut;
+use asupersync::codec::Decoder;
+use asupersync::http::h1::codec::{Http1Codec, HttpError};
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_FUZZ_SIZE: usize = 64_000;
@@ -181,7 +180,11 @@ enum CharacterRange {
 impl CharacterRange {
     fn generate_bytes(self, count: usize) -> Vec<u8> {
         match self {
-            Self::ControlChars => (0x00..=0x1F).filter(|&b| b != 0x09).cycle().take(count).collect(),
+            Self::ControlChars => (0x00..=0x1F)
+                .filter(|&b| b != 0x09)
+                .cycle()
+                .take(count)
+                .collect(),
             Self::VChar => (0x21..=0x7E).cycle().take(count).collect(),
             Self::ObsText => (0x80..=0xFF).cycle().take(count).collect(),
             Self::ExtendedUnicode => {
@@ -252,7 +255,7 @@ impl OversizedContentType {
             Self::AsciiRepeat => b"X".to_vec(),
             Self::UnicodeRepeat => "🦀".bytes().collect(),
             Self::BinaryRepeat => vec![0xFF],
-            Self::MixedRepeat => b"X\xFF🦀".to_vec(),
+            Self::MixedRepeat => b"X\xFF\xF0\x9F\xA6\x80".to_vec(),
         }
     }
 }
@@ -264,7 +267,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Try to parse as structured scenario
-    if let Ok(scenario) = arbitrary::Unstructured::new(data).arbitrary::<HeaderValueFuzzScenario>() {
+    if let Ok(scenario) = arbitrary::Unstructured::new(data).arbitrary::<HeaderValueFuzzScenario>()
+    {
         test_header_value_scenario(scenario);
     }
 
@@ -275,26 +279,83 @@ fuzz_target!(|data: &[u8]| {
 /// Test a specific header value fuzzing scenario
 fn test_header_value_scenario(scenario: HeaderValueFuzzScenario) {
     match scenario {
-        HeaderValueFuzzScenario::ObsFoldTest { header_name, base_value, fold_type, continuation_lines, post_fold_content } => {
-            test_obs_fold_handling(header_name, base_value, fold_type, continuation_lines, post_fold_content);
+        HeaderValueFuzzScenario::ObsFoldTest {
+            header_name,
+            base_value,
+            fold_type,
+            continuation_lines,
+            post_fold_content,
+        } => {
+            test_obs_fold_handling(
+                header_name,
+                base_value,
+                fold_type,
+                continuation_lines,
+                post_fold_content,
+            );
         }
-        HeaderValueFuzzScenario::CrlfInjectionTest { header_name, base_value, injection_type, injection_position, payload_after } => {
-            test_crlf_injection_detection(header_name, base_value, injection_type, injection_position, payload_after);
+        HeaderValueFuzzScenario::CrlfInjectionTest {
+            header_name,
+            base_value,
+            injection_type,
+            injection_position,
+            payload_after,
+        } => {
+            test_crlf_injection_detection(
+                header_name,
+                base_value,
+                injection_type,
+                injection_position,
+                payload_after,
+            );
         }
-        HeaderValueFuzzScenario::CharacterValidationTest { header_name, character_ranges, mix_with_valid, valid_wrapper } => {
+        HeaderValueFuzzScenario::CharacterValidationTest {
+            header_name,
+            character_ranges,
+            mix_with_valid,
+            valid_wrapper,
+        } => {
             test_character_validation(header_name, character_ranges, mix_with_valid, valid_wrapper);
         }
-        HeaderValueFuzzScenario::WhitespaceTrimmingTest { header_name, core_value, leading_whitespace, trailing_whitespace, internal_whitespace } => {
-            test_whitespace_trimming(header_name, core_value, leading_whitespace, trailing_whitespace, internal_whitespace);
+        HeaderValueFuzzScenario::WhitespaceTrimmingTest {
+            header_name,
+            core_value,
+            leading_whitespace,
+            trailing_whitespace,
+            internal_whitespace,
+        } => {
+            test_whitespace_trimming(
+                header_name,
+                core_value,
+                leading_whitespace,
+                trailing_whitespace,
+                internal_whitespace,
+            );
         }
-        HeaderValueFuzzScenario::OversizedHeaderTest { header_name, repeat_pattern, repetition_count, content_type } => {
-            test_oversized_header_rejection(header_name, repeat_pattern, repetition_count, content_type);
+        HeaderValueFuzzScenario::OversizedHeaderTest {
+            header_name,
+            repeat_pattern,
+            repetition_count,
+            content_type,
+        } => {
+            test_oversized_header_rejection(
+                header_name,
+                repeat_pattern,
+                repetition_count,
+                content_type,
+            );
         }
     }
 }
 
 /// Test obs-fold (obsolete line folding) handling (Assertion 1)
-fn test_obs_fold_handling(header_name: String, base_value: String, fold_type: ObsFoldType, continuation_lines: u8, post_fold_content: Vec<u8>) {
+fn test_obs_fold_handling(
+    header_name: String,
+    base_value: String,
+    fold_type: ObsFoldType,
+    continuation_lines: u8,
+    post_fold_content: Vec<u8>,
+) {
     if header_name.is_empty() || header_name.len() > 100 {
         return; // Skip invalid header names
     }
@@ -334,33 +395,45 @@ fn test_obs_fold_handling(header_name: String, base_value: String, fold_type: Ob
         Ok(None) => {
             // Incomplete request - acceptable
         }
-        Err(_) => {
-            // Parse error may be acceptable for malformed obs-fold
-            // But well-formed obs-fold should not cause errors
+        Err(error) => {
+            // RFC 9112 permits recipients to reject obsolete folded lines or
+            // normalize each fold to one SP. If this implementation rejects
+            // a well-formed fold, the failure must stay in header parsing.
             if continuation_lines <= 2 && post_fold_content.is_empty() {
-                validate_obs_fold_error_acceptable(&header_name, &base_value, fold_type);
+                validate_obs_fold_error_acceptable(&header_name, &base_value, fold_type, &error);
             }
         }
     }
 }
 
 /// Test CRLF injection detection (Assertion 2)
-fn test_crlf_injection_detection(header_name: String, base_value: String, injection_type: CrlfInjectionType, injection_position: f32, payload_after: Vec<u8>) {
+fn test_crlf_injection_detection(
+    header_name: String,
+    base_value: String,
+    injection_type: CrlfInjectionType,
+    injection_position: f32,
+    payload_after: Vec<u8>,
+) {
     if header_name.is_empty() || header_name.len() > 100 || base_value.len() > 1000 {
         return;
     }
 
     // Insert injection at specified position
-    let position = ((injection_position.clamp(0.0, 1.0) * base_value.len() as f32) as usize).min(base_value.len());
+    let position = ((injection_position.clamp(0.0, 1.0) * base_value.len() as f32) as usize)
+        .min(base_value.len());
     let mut injected_value = base_value[..position].to_owned();
-    injected_value.extend_from_slice(&String::from_utf8_lossy(injection_type.to_bytes()).into_owned());
+    let injection = String::from_utf8_lossy(injection_type.to_bytes());
+    injected_value.push_str(&injection);
     injected_value.push_str(&base_value[position..]);
 
     if !payload_after.is_empty() && payload_after.len() < 1000 {
         injected_value.push_str(&String::from_utf8_lossy(&payload_after));
     }
 
-    let request = format!("GET / HTTP/1.1\r\nHost: example.com\r\n{}: {}\r\n\r\n", header_name, injected_value);
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: example.com\r\n{}: {}\r\n\r\n",
+        header_name, injected_value
+    );
 
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(request.as_bytes());
@@ -381,7 +454,12 @@ fn test_crlf_injection_detection(header_name: String, base_value: String, inject
 }
 
 /// Test character validation (Assertion 3)
-fn test_character_validation(header_name: String, character_ranges: Vec<CharacterRange>, mix_with_valid: bool, valid_wrapper: Option<String>) {
+fn test_character_validation(
+    header_name: String,
+    character_ranges: Vec<CharacterRange>,
+    mix_with_valid: bool,
+    valid_wrapper: Option<String>,
+) {
     if header_name.is_empty() || header_name.len() > 100 {
         return;
     }
@@ -406,7 +484,10 @@ fn test_character_validation(header_name: String, character_ranges: Vec<Characte
         test_value.push_str(&wrapper[..wrapper.len().min(100)]);
     }
 
-    let request = format!("GET / HTTP/1.1\r\nHost: example.com\r\n{}: {}\r\n\r\n", header_name, test_value);
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: example.com\r\n{}: {}\r\n\r\n",
+        header_name, test_value
+    );
 
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(request.as_bytes());
@@ -431,7 +512,13 @@ fn test_character_validation(header_name: String, character_ranges: Vec<Characte
 }
 
 /// Test whitespace trimming and continuation (Assertion 4)
-fn test_whitespace_trimming(header_name: String, core_value: String, leading_whitespace: WhitespacePattern, trailing_whitespace: WhitespacePattern, internal_whitespace: Vec<WhitespaceInsertion>) {
+fn test_whitespace_trimming(
+    header_name: String,
+    core_value: String,
+    leading_whitespace: WhitespacePattern,
+    trailing_whitespace: WhitespacePattern,
+    internal_whitespace: Vec<WhitespaceInsertion>,
+) {
     if header_name.is_empty() || header_name.len() > 100 || core_value.len() > 1000 {
         return;
     }
@@ -444,8 +531,10 @@ fn test_whitespace_trimming(header_name: String, core_value: String, leading_whi
     // Add core value with internal whitespace insertions
     let mut core_chars: Vec<char> = core_value.chars().collect();
     for insertion in internal_whitespace.iter().take(3) {
-        let pos = ((insertion.position.clamp(0.0, 1.0) * core_chars.len() as f32) as usize).min(core_chars.len());
-        let whitespace_str = String::from_utf8_lossy(&insertion.pattern.to_bytes());
+        let pos = ((insertion.position.clamp(0.0, 1.0) * core_chars.len() as f32) as usize)
+            .min(core_chars.len());
+        let whitespace_bytes = insertion.pattern.to_bytes();
+        let whitespace_str = String::from_utf8_lossy(&whitespace_bytes);
         let whitespace_chars: Vec<char> = whitespace_str.chars().collect();
 
         for (i, ch) in whitespace_chars.into_iter().enumerate() {
@@ -460,7 +549,10 @@ fn test_whitespace_trimming(header_name: String, core_value: String, leading_whi
     // Add trailing whitespace
     test_value.push_str(&String::from_utf8_lossy(&trailing_whitespace.to_bytes()));
 
-    let request = format!("GET / HTTP/1.1\r\nHost: example.com\r\n{}: {}\r\n\r\n", header_name, test_value);
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: example.com\r\n{}: {}\r\n\r\n",
+        header_name, test_value
+    );
 
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(request.as_bytes());
@@ -470,7 +562,12 @@ fn test_whitespace_trimming(header_name: String, core_value: String, leading_whi
             // Assertion 4: Space-prefixed continuation should be trimmed
             for (name, value) in &parsed_request.headers {
                 if name.eq_ignore_ascii_case(&header_name) {
-                    validate_whitespace_trimming(value, &core_value, leading_whitespace, trailing_whitespace);
+                    validate_whitespace_trimming(
+                        value,
+                        &core_value,
+                        leading_whitespace,
+                        trailing_whitespace,
+                    );
                 }
             }
         }
@@ -484,7 +581,12 @@ fn test_whitespace_trimming(header_name: String, core_value: String, leading_whi
 }
 
 /// Test oversized header rejection (Assertion 5)
-fn test_oversized_header_rejection(header_name: String, repeat_pattern: String, repetition_count: u16, content_type: OversizedContentType) {
+fn test_oversized_header_rejection(
+    header_name: String,
+    repeat_pattern: String,
+    repetition_count: u16,
+    content_type: OversizedContentType,
+) {
     if header_name.is_empty() || header_name.len() > 100 || repeat_pattern.len() > 100 {
         return;
     }
@@ -516,7 +618,11 @@ fn test_oversized_header_rejection(header_name: String, repeat_pattern: String, 
     match codec.decode(&mut buf) {
         Ok(Some(_)) => {
             // Should not succeed for truly oversized headers
-            assert_oversized_header_handling(&header_name, oversized_value.len(), DEFAULT_TEST_MAX_HEADER_SIZE);
+            assert_oversized_header_handling(
+                &header_name,
+                oversized_value.len(),
+                DEFAULT_TEST_MAX_HEADER_SIZE,
+            );
         }
         Ok(None) => {
             // Incomplete request - may need more data
@@ -533,19 +639,82 @@ fn test_oversized_header_rejection(header_name: String, repeat_pattern: String, 
 fn validate_obs_fold_processing(value: &str) {
     // RFC 9112 allows obs-fold to be treated as single space
     // Just ensure the value doesn't contain raw CRLF
-    assert!(!value.contains('\r') && !value.contains('\n'), "obs-fold processed value contains CRLF");
+    assert!(
+        !value.contains('\r') && !value.contains('\n'),
+        "obs-fold processed value contains CRLF"
+    );
 }
 
-fn validate_obs_fold_error_acceptable(_header_name: &str, _base_value: &str, _fold_type: ObsFoldType) {
-    // For well-formed obs-fold, errors should be limited
-    // This is a placeholder for more sophisticated validation
+fn validate_obs_fold_error_acceptable(
+    header_name: &str,
+    base_value: &str,
+    fold_type: ObsFoldType,
+    error: &HttpError,
+) {
+    let header_name_valid = header_name.bytes().all(is_fuzz_header_name_tchar);
+    let base_value_valid = base_value.bytes().all(is_fuzz_header_value_byte);
+    let fold_is_obs_fold = fold_type
+        .to_continuation_string()
+        .bytes()
+        .all(|byte| byte == b' ' || byte == b'\t');
+
+    if header_name_valid && base_value_valid && fold_is_obs_fold {
+        assert!(
+            matches!(error, HttpError::BadHeader | HttpError::InvalidHeaderValue),
+            "well-formed obs-fold rejection must stay confined to header parsing: {:?}",
+            error
+        );
+        return;
+    }
+
+    assert!(
+        matches!(
+            error,
+            HttpError::InvalidHeaderName
+                | HttpError::InvalidHeaderValue
+                | HttpError::BadHeader
+                | HttpError::BadRequestLine
+        ),
+        "malformed obs-fold inputs should fail with a header/request parse error: {:?}",
+        error
+    );
+}
+
+fn is_fuzz_header_name_tchar(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'!' | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+            | b'0'..=b'9'
+            | b'A'..=b'Z'
+            | b'a'..=b'z'
+    )
+}
+
+fn is_fuzz_header_value_byte(byte: u8) -> bool {
+    byte == b'\t' || byte == b' ' || (0x21..=0x7e).contains(&byte) || byte >= 0x80
 }
 
 fn assert_crlf_injection_properly_handled(injection_type: CrlfInjectionType, value: &str) {
     match injection_type {
         CrlfInjectionType::BareLF | CrlfInjectionType::BareCR | CrlfInjectionType::CRLF => {
             // These should be rejected, not accepted
-            panic!("CRLF injection was not properly rejected: {:?}", injection_type);
+            panic!(
+                "CRLF injection was not properly rejected: {:?} in {:?}",
+                injection_type, value
+            );
         }
         _ => {
             // Other injection types may have different handling
@@ -557,12 +726,18 @@ fn verify_crlf_error_appropriate(injection_type: CrlfInjectionType, error: &Http
     match injection_type {
         CrlfInjectionType::BareLF | CrlfInjectionType::BareCR | CrlfInjectionType::CRLF => {
             // Should result in header validation error
-            assert!(matches!(error, HttpError::InvalidHeaderValue | HttpError::BadHeader),
-                "Unexpected error for CRLF injection: {:?}", error);
+            assert!(
+                matches!(error, HttpError::InvalidHeaderValue | HttpError::BadHeader),
+                "Unexpected error for CRLF injection: {:?}",
+                error
+            );
         }
         CrlfInjectionType::NullByte | CrlfInjectionType::ControlChar => {
-            assert!(matches!(error, HttpError::InvalidHeaderValue),
-                "Control character should trigger InvalidHeaderValue: {:?}", error);
+            assert!(
+                matches!(error, HttpError::InvalidHeaderValue),
+                "Control character should trigger InvalidHeaderValue: {:?}",
+                error
+            );
         }
         _ => {
             // Other errors may be acceptable
@@ -570,7 +745,7 @@ fn verify_crlf_error_appropriate(injection_type: CrlfInjectionType, error: &Http
     }
 }
 
-fn validate_character_acceptance(value: &str, character_ranges: &[CharacterRange]) {
+fn validate_character_acceptance(_value: &str, character_ranges: &[CharacterRange]) {
     for range in character_ranges {
         match range {
             CharacterRange::VChar => {
@@ -595,44 +770,67 @@ fn validate_character_acceptance(value: &str, character_ranges: &[CharacterRange
 
 fn verify_character_error_justified(character_ranges: &[CharacterRange], error: &HttpError) {
     let has_invalid_chars = character_ranges.iter().any(|range| {
-        matches!(range, CharacterRange::ControlChars | CharacterRange::DelChar)
+        matches!(
+            range,
+            CharacterRange::ControlChars | CharacterRange::DelChar
+        )
     });
 
     if has_invalid_chars {
-        assert!(matches!(error, HttpError::InvalidHeaderValue),
-            "Should be InvalidHeaderValue for control characters: {:?}", error);
+        assert!(
+            matches!(error, HttpError::InvalidHeaderValue),
+            "Should be InvalidHeaderValue for control characters: {:?}",
+            error
+        );
     }
 }
 
-fn validate_whitespace_trimming(parsed_value: &str, original_core: &str, leading: WhitespacePattern, trailing: WhitespacePattern) {
+fn validate_whitespace_trimming(
+    parsed_value: &str,
+    original_core: &str,
+    leading: WhitespacePattern,
+    trailing: WhitespacePattern,
+) {
     // Verify leading/trailing whitespace was trimmed
     if !matches!(leading, WhitespacePattern::None) {
-        assert!(!parsed_value.starts_with(' ') && !parsed_value.starts_with('\t'),
-            "Leading whitespace was not trimmed");
+        assert!(
+            !parsed_value.starts_with(' ') && !parsed_value.starts_with('\t'),
+            "Leading whitespace was not trimmed"
+        );
     }
 
     if !matches!(trailing, WhitespacePattern::None) {
-        assert!(!parsed_value.ends_with(' ') && !parsed_value.ends_with('\t'),
-            "Trailing whitespace was not trimmed");
+        assert!(
+            !parsed_value.ends_with(' ') && !parsed_value.ends_with('\t'),
+            "Trailing whitespace was not trimmed"
+        );
     }
 
     // Core content should still be present (allowing for transformations)
     if !original_core.is_empty() {
-        assert!(parsed_value.contains(&original_core.trim()) || parsed_value.len() > 0,
-            "Core header value content was lost during processing");
+        assert!(
+            parsed_value.contains(&original_core.trim()) || parsed_value.len() > 0,
+            "Core header value content was lost during processing"
+        );
     }
 }
 
 fn assert_oversized_header_handling(_header_name: &str, actual_size: usize, limit: usize) {
     if actual_size > limit * 2 {
-        panic!("Oversized header ({}B) was not rejected (limit: {}B)", actual_size, limit);
+        panic!(
+            "Oversized header ({}B) was not rejected (limit: {}B)",
+            actual_size, limit
+        );
     }
 }
 
 fn verify_oversized_header_error(error: &HttpError, size: usize) {
     if size > DEFAULT_TEST_MAX_HEADER_SIZE {
-        assert!(matches!(error, HttpError::HeadersTooLarge),
-            "Should be HeadersTooLarge for oversized header: {:?}", error);
+        assert!(
+            matches!(error, HttpError::HeadersTooLarge),
+            "Should be HeadersTooLarge for oversized header: {:?}",
+            error
+        );
     }
 }
 
@@ -645,8 +843,10 @@ fn test_raw_header_value_parsing(input: &[u8]) {
     let header_name = "Test-Header";
     let header_value = String::from_utf8_lossy(input);
 
-    let request = format!("GET / HTTP/1.1\r\nHost: example.com\r\n{}: {}\r\n\r\n",
-        header_name, header_value);
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: example.com\r\n{}: {}\r\n\r\n",
+        header_name, header_value
+    );
 
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(request.as_bytes());
