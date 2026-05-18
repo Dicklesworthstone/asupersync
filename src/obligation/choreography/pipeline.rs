@@ -531,7 +531,7 @@ fn compile_and_render(
     Ok((projection, saga_plan, execution_plan, source_code))
 }
 
-/// Render the saga module using the actual LocalType (not the placeholder).
+/// Render the saga module using the actual LocalType, not an earlier stand-in.
 #[allow(clippy::too_many_lines)]
 fn render_saga_module_with_local(
     protocol: &str,
@@ -1349,13 +1349,13 @@ mod tests {
                 .contains("let (chan_proxy_a_to_worker_a, chan_worker_a_to_proxy_a) = (")
         );
 
-        // Each participant should have exactly one entry-channel placeholder.
+        // Each participant should have exactly one entry-channel unit stand-in.
         for name in ["proxy_a", "proxy_b", "worker_a", "worker_b"] {
             let decl = format!("let chan_{name} = ();");
             assert_eq!(
                 output.lab_test_code.matches(&decl).count(),
                 1,
-                "{name} should have exactly one channel entry placeholder"
+                "{name} should have exactly one channel entry unit stand-in"
             );
         }
     }
