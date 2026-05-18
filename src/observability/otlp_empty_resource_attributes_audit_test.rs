@@ -7,7 +7,7 @@
 //! - Empty string values MUST be dropped (invalid empty value)
 //! - Resource attributes with empty values MUST NOT be exported
 //! - NOT: preserve empty string as {"string_value": ""} (spec violation)
-//! - NOT: substitute "unknown" placeholder (changes user intent)
+//! - NOT: substitute an "unknown" stand-in (changes user intent)
 //!
 //! **CRITICAL DEFECT IDENTIFIED**:
 //! - key_value() function preserves empty strings without validation

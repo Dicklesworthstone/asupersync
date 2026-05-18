@@ -1,6 +1,6 @@
 //! OTLP-Trace span `add_attributes(Vec<KeyValue>)` production-seam tests.
 //!
-//! br-asupersync-803qzz converts the stale audit placeholder into executable
+//! br-asupersync-803qzz converts the stale audit note into executable
 //! coverage for `TestSpan::add_attributes`. The API accepts OTLP protobuf
 //! `KeyValue` records, deduplicates duplicate keys with last-write-wins
 //! semantics, applies the existing per-span attribute cap, filters invalid empty

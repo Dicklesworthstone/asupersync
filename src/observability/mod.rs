@@ -68,9 +68,10 @@ pub mod otel_sampling_strategy_audit_test;
 pub mod otel_structured_concurrency;
 #[cfg(test)]
 pub mod otlp_attribute_size_cap_audit_test;
-// br-asupersync-lf1a77: stale OTLP audit files that depended on removed fake
-// HTTP/span APIs remain tracked in-place, but their invariants are normalized into
-// compiled production-seam tests and the OTLP inventory artifact before re-entry.
+// br-asupersync-lf1a77: stale OTLP audit files that depended on removed
+// synthetic HTTP/span APIs remain tracked in-place, but their invariants are
+// normalized into compiled production-seam tests and the OTLP inventory artifact
+// before re-entry.
 #[cfg(test)]
 pub mod otlp_add_attributes_missing_api_audit_test;
 #[cfg(test)]
