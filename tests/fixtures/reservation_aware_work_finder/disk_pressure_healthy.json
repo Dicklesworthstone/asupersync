@@ -1,0 +1,33 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": []
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": []
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  },
+  "disk_pressure": {
+    "status": "fixture",
+    "level": "green",
+    "available_bytes": 21474836480
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "testing-fuzzing:healthy-rch-proof",
+      "lane": "testing-fuzzing",
+      "title": "Healthy disk rch fuzz proof",
+      "priority": 1,
+      "paths": [
+        "fuzz/fuzz_targets/postgres_row_description.rs"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_healthy_disk cargo check --manifest-path fuzz/Cargo.toml --bin postgres_row_description"
+      ]
+    }
+  ]
+}

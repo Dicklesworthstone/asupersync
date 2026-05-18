@@ -90,6 +90,8 @@ RCH_LOCAL_FALLBACK_RE = re.compile(
     r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
 )
+DISK_CRITICAL_BYTES = 1 * 1024 * 1024 * 1024
+DISK_LOW_BYTES = 5 * 1024 * 1024 * 1024
 
 
 def utc_now() -> str:
@@ -290,6 +292,9 @@ def fallback_candidates(source: dict[str, Any]) -> list[dict[str, Any]]:
                 "title": str(row.get("title") or candidate_id),
                 "priority": int(row.get("priority", 2) or 2),
                 "paths": candidate_paths(row),
+                "no_build_validation": bool(
+                    row.get("no_build_validation") or row.get("source_only_validation")
+                ),
                 "proof_commands": [
                     str(command)
                     for command in row.get("proof_commands", [])
@@ -316,6 +321,9 @@ def ready_candidates(source: dict[str, Any]) -> list[dict[str, Any]]:
                 "issue_type": str(issue.get("issue_type") or ""),
                 "priority": int(issue.get("priority", 2) or 2),
                 "paths": candidate_paths(issue),
+                "no_build_validation": bool(
+                    issue.get("no_build_validation") or issue.get("source_only_validation")
+                ),
                 "proof_commands": [
                     str(command)
                     for command in issue.get("proof_commands", [])
@@ -461,6 +469,36 @@ def proof_command_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     return blockers
 
 
+def proof_commands_require_rch_heavy_work(candidate: dict[str, Any]) -> bool:
+    return any(command_mentions_cargo(str(command)) for command in candidate.get("proof_commands", []))
+
+
+def candidate_has_no_build_validation(candidate: dict[str, Any]) -> bool:
+    if not candidate.get("no_build_validation"):
+        return False
+    return not proof_commands_require_rch_heavy_work(candidate)
+
+
+def disk_pressure_blockers(
+    candidate: dict[str, Any],
+    disk_pressure: dict[str, Any],
+) -> list[dict[str, str]]:
+    if disk_pressure["level"] != "critical":
+        return []
+    if not proof_commands_require_rch_heavy_work(candidate):
+        return []
+    if candidate_has_no_build_validation(candidate):
+        return []
+    return [
+        {
+            "kind": "critical-disk-pressure-rch-heavy",
+            "level": disk_pressure["level"],
+            "available_bytes": str(disk_pressure["available_bytes"]),
+            "reason": "critical disk pressure blocks rch/Cargo-heavy recommendations",
+        }
+    ]
+
+
 def bead_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
     if candidate["kind"] != "ready-bead":
         return []
@@ -481,11 +519,13 @@ def classify_candidate(
     reservations: list[dict[str, Any]],
     dirty: list[dict[str, Any]],
     agent: str,
+    disk_pressure: dict[str, Any],
 ) -> dict[str, Any]:
     paths = candidate["paths"]
     blockers = []
     blockers.extend(lane_blockers(candidate))
     blockers.extend(proof_command_blockers(candidate))
+    blockers.extend(disk_pressure_blockers(candidate, disk_pressure))
     blockers.extend(bead_blockers(candidate))
     blockers.extend(reservation_blockers(paths, reservations, agent))
     blockers.extend(dirty_blockers(paths, dirty, reservations, agent))
@@ -512,7 +552,7 @@ def candidate_sort_key(row: dict[str, Any]) -> tuple[int, int, str]:
     return (kind_rank, int(row["priority"]), row["candidate_id"])
 
 
-def recommendation(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+def recommendation(candidates: list[dict[str, Any]], disk_pressure: dict[str, Any]) -> dict[str, Any]:
     ready = [row for row in candidates if row["status"] in {"ready-to-claim", "ready-fallback"}]
     if ready:
         chosen = sorted(ready, key=candidate_sort_key)[0]
@@ -527,6 +567,17 @@ def recommendation(candidates: list[dict[str, Any]]) -> dict[str, Any]:
             "title": chosen["title"],
             "paths": chosen["paths"],
             "reason": "first unblocked candidate by kind and priority",
+        }
+    cleanup_candidates = disk_pressure.get("cleanup_candidates", [])
+    if disk_pressure["level"] == "critical" and cleanup_candidates:
+        chosen = cleanup_candidates[0]
+        return {
+            "category": "request-cleanup-authorization",
+            "candidate_id": str(chosen.get("candidate_id") or chosen.get("path") or "disk-cleanup"),
+            "lane": "disk-pressure-cleanup-authorization",
+            "title": str(chosen.get("title") or "Request authorization for stale artifact cleanup"),
+            "paths": [str(chosen["path"])] if chosen.get("path") else [],
+            "reason": "critical disk pressure leaves no safe work candidate; ask for explicit cleanup authorization",
         }
     if candidates:
         first = sorted(candidates, key=candidate_sort_key)[0]
@@ -546,6 +597,128 @@ def recommendation(candidates: list[dict[str, Any]]) -> dict[str, Any]:
         "paths": [],
         "reason": "no ready beads or fallback candidates were provided",
     }
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        parsed = _int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def infer_disk_level(available_bytes: int | None, explicit_level: str = "") -> str:
+    if explicit_level in {"green", "healthy", "normal"}:
+        return "green"
+    if explicit_level in {"yellow", "low", "warning"}:
+        return "low"
+    if explicit_level in {"red", "critical", "fatal"}:
+        return "critical"
+    if available_bytes is None:
+        return "unknown"
+    if available_bytes < DISK_CRITICAL_BYTES:
+        return "critical"
+    if available_bytes < DISK_LOW_BYTES:
+        return "low"
+    return "green"
+
+
+def normalize_cleanup_candidate(row: dict[str, Any], index: int) -> dict[str, Any]:
+    reclaimable = _first_int(
+        row.get("reclaimable_bytes"),
+        row.get("size_bytes"),
+        row.get("bytes"),
+        row.get("estimated_reclaimable_bytes"),
+    )
+    return {
+        "candidate_id": str(row.get("candidate_id") or row.get("id") or f"cleanup:{index + 1}"),
+        "path": normalize_path(str(row.get("path") or "")),
+        "title": str(row.get("title") or row.get("category") or "stale artifact candidate"),
+        "reclaimable_bytes": reclaimable,
+        "source": str(row.get("source") or row.get("pattern_name") or "fixture"),
+        "requires_authorization": True,
+        "delete_command": None,
+    }
+
+
+def cleanup_candidates_from(source: dict[str, Any]) -> list[dict[str, Any]]:
+    disk = source.get("disk_pressure", {}) if isinstance(source, dict) else {}
+    rows = rows_from(disk, ("cleanup_candidates", "candidates", "stale_target_candidates"))
+    candidates = [
+        normalize_cleanup_candidate(row, index)
+        for index, row in enumerate(rows)
+        if isinstance(row, dict)
+    ]
+    return sorted(
+        candidates,
+        key=lambda row: (-(row["reclaimable_bytes"] or 0), row["candidate_id"]),
+    )
+
+
+def disk_pressure_from_source(source: dict[str, Any]) -> dict[str, Any]:
+    disk = source.get("disk_pressure", {}) if isinstance(source, dict) else {}
+    available_bytes = _first_int(
+        disk.get("available_bytes"),
+        disk.get("free_bytes"),
+        disk.get("free"),
+        disk.get("volume_available"),
+    )
+    level = infer_disk_level(available_bytes, str(disk.get("level") or disk.get("pressure") or ""))
+    ballast_releasable = _first_int(
+        disk.get("ballast_releasable_bytes"),
+        disk.get("releasable_bytes"),
+    )
+    cleanup_candidates = cleanup_candidates_from(source)
+    return {
+        "level": level,
+        "available_bytes": available_bytes,
+        "rch_heavy_work_allowed": level != "critical",
+        "ballast_releasable_bytes": ballast_releasable,
+        "cleanup_candidates": cleanup_candidates,
+        "source": str(disk.get("status") or disk.get("source") or "fixture"),
+    }
+
+
+def parse_df_bytes(raw: str) -> dict[str, Any]:
+    available: list[int] = []
+    for line in raw.splitlines()[1:]:
+        columns = line.split()
+        if len(columns) < 4:
+            continue
+        value = _int_or_none(columns[3])
+        if value is not None:
+            available.append(value)
+    available_bytes = min(available) if available else None
+    return {
+        "status": "df",
+        "available_bytes": available_bytes,
+        "level": infer_disk_level(available_bytes),
+        "cleanup_candidates": [],
+    }
+
+
+def disk_pressure_non_build_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "candidate_id": row["candidate_id"],
+            "lane": row["lane"],
+            "title": row["title"],
+            "paths": row["paths"],
+            "status": row["status"],
+        }
+        for row in candidates
+        if row["kind"] == "fallback-lane"
+        and row["status"] == "ready-fallback"
+        and not proof_commands_require_rch_heavy_work(row)
+    ]
+    return sorted(rows, key=lambda row: (row["lane"], row["candidate_id"]))
 
 
 def run_text(repo_path: Path, command: list[str], timeout: float) -> tuple[str, str]:
@@ -604,6 +777,7 @@ def live_probe(
 ) -> dict[str, Any]:
     status, raw_status = run_text(repo_path, ["git", "status", "--porcelain=v1"], timeout)
     ready_status, ready = run_json(repo_path, ["br", "ready", "--json"], timeout)
+    df_status, raw_df = run_text(repo_path, ["df", "-B1", "/", "/tmp"], timeout)
     return {
         "beads": {
             "ready": ready if ready_status == "ok" and isinstance(ready, list) else [],
@@ -620,6 +794,7 @@ def live_probe(
             "status": status,
             "entries": parse_status_lines(raw_status if status == "ok" else ""),
         },
+        "disk_pressure": parse_df_bytes(raw_df) if df_status == "ok" else {"status": df_status},
         "fallback_lanes": rows_from(candidates, ("fallback_lanes", "candidates", "fallback_candidates")),
     }
 
@@ -632,12 +807,14 @@ def build_receipt(
 ) -> dict[str, Any]:
     reservations = reservation_rows(source, generated_at)
     dirty = dirty_entries(source)
+    disk_pressure = disk_pressure_from_source(source)
     candidates = ready_candidates(source) + fallback_candidates(source)
     classified = [
-        classify_candidate(candidate, reservations, dirty, agent)
+        classify_candidate(candidate, reservations, dirty, agent, disk_pressure)
         for candidate in sorted(candidates, key=candidate_sort_key)
     ]
-    rec = recommendation(classified)
+    disk_pressure["non_build_fallback_candidates"] = disk_pressure_non_build_candidates(classified)
+    rec = recommendation(classified, disk_pressure)
     blocked = [row for row in classified if row["status"] == "blocked"]
     ready = [row for row in classified if row["status"] != "blocked"]
 
@@ -655,6 +832,7 @@ def build_receipt(
             "fallback_count": sum(1 for row in classified if row["kind"] == "fallback-lane"),
         },
         "recommendation": rec,
+        "disk_pressure": disk_pressure,
         "candidates": classified,
         "active_reservations": [row for row in reservations if row["active"]],
         "dirty_paths": dirty,

@@ -148,6 +148,98 @@ fn clean_workspace_selects_highest_priority_fallback_candidate() {
 }
 
 #[test]
+fn healthy_disk_keeps_rch_heavy_fallback_work_allowed() {
+    let receipt = finder_json("disk_pressure_healthy.json");
+    let rch_candidate = candidate(&receipt, "testing-fuzzing:healthy-rch-proof");
+
+    assert_eq!(receipt["disk_pressure"]["level"].as_str(), Some("green"));
+    assert_eq!(
+        receipt["disk_pressure"]["rch_heavy_work_allowed"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(rch_candidate["status"].as_str(), Some("ready-fallback"));
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("testing-fuzzing:healthy-rch-proof")
+    );
+}
+
+#[test]
+fn low_disk_surfaces_pressure_but_does_not_block_rch_work() {
+    let receipt = finder_json("disk_pressure_low.json");
+    let rch_candidate = candidate(&receipt, "testing-fuzzing:low-disk-rch-proof");
+
+    assert_eq!(receipt["disk_pressure"]["level"].as_str(), Some("low"));
+    assert_eq!(
+        receipt["disk_pressure"]["available_bytes"].as_u64(),
+        Some(2_147_483_648)
+    );
+    assert_eq!(
+        receipt["disk_pressure"]["rch_heavy_work_allowed"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(rch_candidate["status"].as_str(), Some("ready-fallback"));
+}
+
+#[test]
+fn critical_disk_blocks_rch_heavy_and_prefers_no_build_fallback() {
+    let receipt = finder_json("disk_pressure_critical_no_ballast.json");
+    let rch_candidate = candidate(&receipt, "testing-fuzzing:critical-rch-proof");
+    let source_only = candidate(&receipt, "mock-code-finder:source-only-scan");
+
+    assert_eq!(receipt["disk_pressure"]["level"].as_str(), Some("critical"));
+    assert_eq!(
+        receipt["disk_pressure"]["rch_heavy_work_allowed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(rch_candidate["status"].as_str(), Some("blocked"));
+    assert!(
+        rch_candidate["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|blocker| blocker["kind"].as_str() == Some("critical-disk-pressure-rch-heavy"))
+    );
+    assert_eq!(source_only["status"].as_str(), Some("ready-fallback"));
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("mock-code-finder:source-only-scan")
+    );
+    assert_eq!(
+        receipt["disk_pressure"]["non_build_fallback_candidates"][0]["candidate_id"].as_str(),
+        Some("mock-code-finder:source-only-scan")
+    );
+}
+
+#[test]
+fn critical_disk_without_safe_work_recommends_cleanup_authorization() {
+    let receipt = finder_json("disk_pressure_critical_stale_targets.json");
+    let rch_candidate = candidate(&receipt, "testing-fuzzing:critical-rch-only");
+
+    assert_eq!(rch_candidate["status"].as_str(), Some("blocked"));
+    assert_eq!(
+        receipt["recommendation"]["category"].as_str(),
+        Some("request-cleanup-authorization")
+    );
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("stale-rch-target-large")
+    );
+    assert_eq!(
+        receipt["disk_pressure"]["cleanup_candidates"][0]["path"].as_str(),
+        Some("/tmp/rch_target_stale_large")
+    );
+    assert_eq!(
+        receipt["disk_pressure"]["cleanup_candidates"][0]["requires_authorization"].as_bool(),
+        Some(true)
+    );
+    assert!(
+        receipt["disk_pressure"]["cleanup_candidates"][0]["delete_command"].is_null(),
+        "cleanup candidates must not include deletion commands"
+    );
+}
+
+#[test]
 fn pathless_epic_ready_queue_falls_through_to_fallback_candidate() {
     let receipt = finder_json("epic_queue_fallback.json");
     let epic = candidate(&receipt, "asupersync-lhx6m4");
