@@ -238,8 +238,8 @@ fn calculate_percentile(values: &[f64], percentile: f64) -> f64 {
 ///    passed the deadline before `next_task()` will surface the task,
 ///    and this harness does not advance virtual time. Filed as
 ///    br-asupersync-k18nlg; until the time-source-aware harness
-///    lands, treat the timed-lane portion of the certificate as a
-///    placeholder rather than a real measurement.
+///    lands, the timed-lane portion of the certificate remains deferred
+///    coverage rather than a measured scheduler outcome.
 pub fn run_pressure_scaling_scenario(
     config: &LanePressureConfig,
     scaling_factor: usize,
