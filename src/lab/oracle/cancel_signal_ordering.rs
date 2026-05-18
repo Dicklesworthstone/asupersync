@@ -882,7 +882,7 @@ mod tests {
         // cancellation is detected.
         oracle.check_ordering_violations(Time::from_nanos(2_000_000_000));
 
-        // Should detect a violation with the correct child region (not testing_default placeholder)
+        // Should detect a violation with the correct child region, not the default sentinel.
         let violations = oracle.get_recent_violations(10);
         assert_eq!(violations.len(), 1);
 
@@ -893,7 +893,7 @@ mod tests {
             } => {
                 assert_eq!(
                     *detected_child_region, child_region,
-                    "Should use actual child region, not placeholder"
+                    "Should use actual child region, not testing_default sentinel"
                 );
             }
             other => panic!("Expected MissingChildCancellation, got: {:?}", other),
