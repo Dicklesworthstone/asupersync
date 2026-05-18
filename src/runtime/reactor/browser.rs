@@ -771,7 +771,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
 
-    /// Fake source for testing (browser reactor ignores the source entirely).
+    /// Test source used when the browser reactor ignores the source entirely.
     struct TestFdSource;
     impl std::os::fd::AsRawFd for TestFdSource {
         fn as_raw_fd(&self) -> std::os::fd::RawFd {
