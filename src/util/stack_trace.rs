@@ -10,7 +10,7 @@ use std::fmt;
 ///
 /// When the `lab-stack-traces` feature is enabled, this will capture a real
 /// stack trace using the backtrace crate. When disabled, returns a
-/// placeholder message to avoid overhead.
+/// disabled-feature diagnostic string to avoid overhead.
 ///
 /// The captured stack trace includes file names and line numbers when
 /// debug information is available.
@@ -48,7 +48,7 @@ pub fn capture_stack_trace() -> String {
     output
 }
 
-/// Returns a placeholder message when stack traces are disabled.
+/// Returns the disabled-feature diagnostic when stack traces are disabled.
 #[cfg(not(feature = "lab-stack-traces"))]
 pub fn capture_stack_trace() -> String {
     "Stack trace capture disabled (enable 'lab-stack-traces' feature)".to_string()
@@ -245,7 +245,7 @@ mod tests {
 
         #[cfg(not(feature = "lab-stack-traces"))]
         {
-            // With feature disabled, should get placeholder message
+            // With feature disabled, should get the diagnostic string.
             assert_eq!(
                 trace,
                 "Stack trace capture disabled (enable 'lab-stack-traces' feature)"
