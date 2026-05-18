@@ -842,13 +842,13 @@ pub fn make_race_all_result<T, E>(
     race_all_to_result(result)
 }
 
-/// Contract-enforcement placeholder for builds without the `proc-macros` feature.
+/// Contract-enforcement fallback for builds without the `proc-macros` feature.
 ///
 /// In `proc-macros` builds, the supported root macro DSL re-exports the real
 /// `race!` proc macro from the crate root (`use asupersync::race;`).
 ///
 /// When `proc-macros` is disabled, the macro DSL is intentionally unavailable.
-/// This placeholder exists only to fail fast with a truthful error message
+/// This fallback exists only to fail fast with a truthful error message
 /// instead of pretending a fallback macro exists.
 ///
 /// Without that feature, use the `Scope` APIs (`Scope::race`,

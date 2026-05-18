@@ -555,13 +555,13 @@ pub fn join2_to_result<T1, T2, E>(
     }
 }
 
-/// Contract-enforcement placeholder for builds without the `proc-macros` feature.
+/// Contract-enforcement fallback for builds without the `proc-macros` feature.
 ///
 /// In `proc-macros` builds, the supported root macro DSL re-exports the real
 /// `join!` proc macro from the crate root (`use asupersync::join;`).
 ///
 /// When `proc-macros` is disabled, the macro DSL is intentionally unavailable.
-/// This placeholder exists only to fail fast with a truthful error message
+/// This fallback exists only to fail fast with a truthful error message
 /// instead of pretending a fallback macro exists.
 ///
 /// Without that feature, use the functional API instead:
@@ -580,7 +580,7 @@ pub fn join2_to_result<T1, T2, E>(
 ///
 /// # Why `compile_error!`
 ///
-/// The previous placeholder silently discarded all futures without executing
+/// The previous disabled-feature fallback silently discarded all futures without executing
 /// them — a correctness hazard. This `compile_error!` ensures callers migrate
 /// to the functional API, which properly spawns into a child region, waits for
 /// all branches to complete, and aggregates outcomes via the severity lattice.
