@@ -3,10 +3,10 @@
 //! This module provides common parsing utilities, error handling helpers,
 //! and shared code generation patterns used across all macros.
 //!
-//! Note: These utilities are provided for the full macro implementations in
-//! dependent tasks (asupersync-86gw, asupersync-5tic, asupersync-mwff, asupersync-hcpl).
-//! They are currently unused but will be utilized when the placeholder
-//! implementations are replaced with full versions.
+//! Note: The macro crate already uses this module for shared diagnostics such
+//! as [`compile_error`]. The remaining helpers stay centralized here so parser
+//! and code-generation extensions can reuse one implementation instead of
+//! growing per-macro copies.
 
 // Allow dead code for utility functions that are provided for future macro implementations
 #![allow(dead_code)]
