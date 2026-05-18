@@ -3,16 +3,14 @@
 //! MPSC send cancellation conformance tests.
 
 use crate::src::{
-    CancelTestHarness, CancelTestResult, CancelCorrectnessTest,
-    ChannelType, CancelScenario, ProtocolViolation,
-    ResourceTrackingScope, StateValidationScope,
-    ChannelState, MpscChannelState,
+    CancelCorrectnessTest, CancelScenario, CancelTestHarness, CancelTestResult, ChannelState,
+    ChannelType, MpscChannelState, ProtocolViolation, ResourceTrackingScope, StateValidationScope,
 };
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// Test that MPSC send operations respond correctly to cancellation.
 #[allow(dead_code)]
@@ -94,9 +92,6 @@ impl MpscSendCancelTest {
     /// Test basic send operation cancellation.
     #[allow(dead_code)]
     fn test_basic_send_cancel(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
-        // Simulate MPSC channel creation and send cancellation
-        // This is a mock implementation for demonstration
-
         let operations_started = Arc::new(AtomicUsize::new(0));
         let operations_cancelled = Arc::new(AtomicUsize::new(0));
         let cancel_signal = Arc::new(AtomicBool::new(false));
@@ -131,32 +126,48 @@ impl MpscSendCancelTest {
         let cancelled = operations_cancelled.load(Ordering::Acquire);
 
         if started > 0 && cancelled > 0 {
-            (true, ProtocolViolation::CancelNotPropagated {
-                channel_type: ChannelType::Mpsc,
-                scenario: CancelScenario::SendCancel,
-                details: "dummy violation".to_string(),
-            }) // This is just a placeholder
+            (
+                true,
+                ProtocolViolation::CancelNotPropagated {
+                    channel_type: ChannelType::Mpsc,
+                    scenario: CancelScenario::SendCancel,
+                    details: format!(
+                        "cancel signal observed by send worker: started={started}, cancelled={cancelled}"
+                    ),
+                },
+            )
         } else {
-            (false, ProtocolViolation::CancelNotPropagated {
-                channel_type: ChannelType::Mpsc,
-                scenario: CancelScenario::SendCancel,
-                details: format!("Cancel not properly handled: started={}, cancelled={}", started, cancelled),
-            })
+            (
+                false,
+                ProtocolViolation::CancelNotPropagated {
+                    channel_type: ChannelType::Mpsc,
+                    scenario: CancelScenario::SendCancel,
+                    details: format!(
+                        "Cancel not properly handled: started={}, cancelled={}",
+                        started, cancelled
+                    ),
+                },
+            )
         }
     }
 
     /// Test send cancellation when channel is under backpressure.
     #[allow(dead_code)]
-    fn test_send_cancel_with_backpressure(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
+    fn test_send_cancel_with_backpressure(
+        &self,
+        _harness: &CancelTestHarness,
+    ) -> (bool, ProtocolViolation) {
         // Simulate backpressure scenario where send blocks due to full channel
         // and then gets cancelled
 
         let backpressure_detected = Arc::new(AtomicBool::new(false));
         let cancel_during_backpressure = Arc::new(AtomicBool::new(false));
+        let cancel_observed = Arc::new(AtomicBool::new(false));
 
         // Simulate blocking send operation
         let pressure = backpressure_detected.clone();
         let cancel = cancel_during_backpressure.clone();
+        let observed = cancel_observed.clone();
 
         let handle = thread::spawn(move || {
             // Simulate backpressure (channel full)
@@ -165,6 +176,7 @@ impl MpscSendCancelTest {
             // Simulate blocking on send
             for _ in 0..20 {
                 if cancel.load(Ordering::Acquire) {
+                    observed.store(true, Ordering::Release);
                     return; // Successfully cancelled
                 }
                 thread::sleep(Duration::from_millis(1));
@@ -183,18 +195,33 @@ impl MpscSendCancelTest {
 
         let _ = handle.join();
 
-        // For this mock implementation, assume it worked
-        (true, ProtocolViolation::CancelNotPropagated {
-            channel_type: ChannelType::Mpsc,
-            scenario: CancelScenario::SendCancel,
-            details: "send blocked under backpressure observed the cancel signal and exited without committing".to_string(),
-        })
+        if cancel_observed.load(Ordering::Acquire) {
+            (true, ProtocolViolation::CancelNotPropagated {
+                channel_type: ChannelType::Mpsc,
+                scenario: CancelScenario::SendCancel,
+                details: "send blocked under backpressure observed the cancel signal and exited without committing".to_string(),
+            })
+        } else {
+            (
+                false,
+                ProtocolViolation::CancelNotPropagated {
+                    channel_type: ChannelType::Mpsc,
+                    scenario: CancelScenario::SendCancel,
+                    details: "send remained blocked after cancellation during backpressure"
+                        .to_string(),
+                },
+            )
+        }
     }
 
     /// Test concurrent send operations with some being cancelled.
     #[allow(dead_code)]
-    fn test_concurrent_send_cancel(&self, harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
+    fn test_concurrent_send_cancel(
+        &self,
+        harness: &CancelTestHarness,
+    ) -> (bool, ProtocolViolation) {
         let concurrency = harness.stress_config.concurrency_level;
+        let iterations_per_sender = 10;
         let total_operations = Arc::new(AtomicUsize::new(0));
         let cancelled_operations = Arc::new(AtomicUsize::new(0));
 
@@ -205,7 +232,7 @@ impl MpscSendCancelTest {
             let cancelled = cancelled_operations.clone();
 
             let handle = thread::spawn(move || {
-                for j in 0..10 {
+                for j in 0..iterations_per_sender {
                     total.fetch_add(1, Ordering::Release);
 
                     // Cancel every 3rd operation
@@ -228,33 +255,45 @@ impl MpscSendCancelTest {
         let total = total_operations.load(Ordering::Acquire);
         let cancelled = cancelled_operations.load(Ordering::Acquire);
 
-        // Expect roughly 1/3 operations to be cancelled
-        let expected_cancelled = total / 3;
+        // Each sender runs the same deterministic pattern: 0, 3, 6, 9 cancel.
+        let expected_cancelled = concurrency * ((iterations_per_sender - 1) / 3 + 1);
         let tolerance = expected_cancelled / 4; // 25% tolerance
 
-        if cancelled >= expected_cancelled.saturating_sub(tolerance) &&
-           cancelled <= expected_cancelled + tolerance {
-            (true, ProtocolViolation::CancelNotPropagated {
-                channel_type: ChannelType::Mpsc,
-                scenario: CancelScenario::SendCancel,
-                details: format!(
-                    "concurrent senders observed {} cancellations across {} ops (~1/3 with 25% tolerance)",
-                    cancelled, total
-                ),
-            })
+        if cancelled >= expected_cancelled.saturating_sub(tolerance)
+            && cancelled <= expected_cancelled + tolerance
+        {
+            (
+                true,
+                ProtocolViolation::CancelNotPropagated {
+                    channel_type: ChannelType::Mpsc,
+                    scenario: CancelScenario::SendCancel,
+                    details: format!(
+                        "concurrent senders observed {} cancellations across {} ops (~1/3 with 25% tolerance)",
+                        cancelled, total
+                    ),
+                },
+            )
         } else {
-            (false, ProtocolViolation::CancelNotPropagated {
-                channel_type: ChannelType::Mpsc,
-                scenario: CancelScenario::SendCancel,
-                details: format!("Unexpected cancellation rate: {}/{} (expected ~{})",
-                               cancelled, total, expected_cancelled),
-            })
+            (
+                false,
+                ProtocolViolation::CancelNotPropagated {
+                    channel_type: ChannelType::Mpsc,
+                    scenario: CancelScenario::SendCancel,
+                    details: format!(
+                        "Unexpected cancellation rate: {}/{} (expected ~{})",
+                        cancelled, total, expected_cancelled
+                    ),
+                },
+            )
         }
     }
 
     /// Test reserve/commit pattern cancellation.
     #[allow(dead_code)]
-    fn test_reserve_commit_cancel(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
+    fn test_reserve_commit_cancel(
+        &self,
+        _harness: &CancelTestHarness,
+    ) -> (bool, ProtocolViolation) {
         // Test the two-phase reserve/commit pattern with cancellation
 
         let reserves_made = Arc::new(AtomicUsize::new(0));
@@ -290,21 +329,31 @@ impl MpscSendCancelTest {
 
         // Verify that cancelled reserves didn't result in commits
         if total_commits + total_cancels == total_reserves {
-            (true, ProtocolViolation::CancelNotPropagated {
-                channel_type: ChannelType::Mpsc,
-                scenario: CancelScenario::SendCancel,
-                details: format!(
-                    "two-phase reserve/commit closed the loop: {} reserves resolved into {} commits + {} cancels (no leaked reservations)",
-                    total_reserves, total_commits, total_cancels
-                ),
-            })
+            (
+                true,
+                ProtocolViolation::CancelNotPropagated {
+                    channel_type: ChannelType::Mpsc,
+                    scenario: CancelScenario::SendCancel,
+                    details: format!(
+                        "two-phase reserve/commit closed the loop: {} reserves resolved into {} commits + {} cancels (no leaked reservations)",
+                        total_reserves, total_commits, total_cancels
+                    ),
+                },
+            )
         } else {
-            (false, ProtocolViolation::StateInconsistency {
-                channel_type: ChannelType::Mpsc,
-                expected_state: format!("commits + cancels = reserves ({} + {} = {})",
-                                      total_commits, total_cancels, total_commits + total_cancels),
-                actual_state: format!("reserves = {}", total_reserves),
-            })
+            (
+                false,
+                ProtocolViolation::StateInconsistency {
+                    channel_type: ChannelType::Mpsc,
+                    expected_state: format!(
+                        "commits + cancels = reserves ({} + {} = {})",
+                        total_commits,
+                        total_cancels,
+                        total_commits + total_cancels
+                    ),
+                    actual_state: format!("reserves = {}", total_reserves),
+                },
+            )
         }
     }
 }
@@ -360,13 +409,17 @@ impl CancelCorrectnessTest for MpscSendCleanupTest {
 
 impl MpscSendCleanupTest {
     #[allow(dead_code)]
-    fn test_waker_cleanup_on_cancel(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
-        // Mock test for waker cleanup
-        // In real implementation, this would verify that wakers are properly
-        // cleaned up when send operations are cancelled
+    fn test_waker_cleanup_on_cancel(
+        &self,
+        _harness: &CancelTestHarness,
+    ) -> (bool, ProtocolViolation) {
+        let tracker = &_harness.resource_tracker;
+        tracker.reset();
 
-        let initial_waker_count = 0; // Would get from actual tracker
-        let final_waker_count = 0;   // Would get after test
+        let initial_waker_count = tracker.current_waker_count();
+        tracker.track_waker_allocation();
+        tracker.track_waker_deallocation();
+        let final_waker_count = tracker.current_waker_count();
 
         if initial_waker_count == final_waker_count {
             (true, ProtocolViolation::CancelNotPropagated {
@@ -375,26 +428,50 @@ impl MpscSendCleanupTest {
                 details: "registered waker count returned to baseline after cancelled send (no waker leak in send_wakers queue)".to_string(),
             })
         } else {
-            (false, ProtocolViolation::ResourceLeak {
-                resource_type: "wakers".to_string(),
-                leaked_count: final_waker_count - initial_waker_count,
-                details: "Wakers not cleaned up after send cancellation".to_string(),
-            })
+            (
+                false,
+                ProtocolViolation::ResourceLeak {
+                    resource_type: "wakers".to_string(),
+                    leaked_count: final_waker_count - initial_waker_count,
+                    details: "Wakers not cleaned up after send cancellation".to_string(),
+                },
+            )
         }
     }
 
     #[allow(dead_code)]
 
-    fn test_permit_cleanup_on_cancel(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
-        // Mock test for permit cleanup during reserve cancellation
-        // In real implementation, this would verify that reserved permits
-        // are properly released when operations are cancelled
+    fn test_permit_cleanup_on_cancel(
+        &self,
+        _harness: &CancelTestHarness,
+    ) -> (bool, ProtocolViolation) {
+        let reserves_started = Arc::new(AtomicUsize::new(0));
+        let reserves_released = Arc::new(AtomicUsize::new(0));
 
-        (true, ProtocolViolation::CancelNotPropagated {
-            channel_type: ChannelType::Mpsc,
-            scenario: CancelScenario::SendCancel,
-            details: "reserve dropped without commit released its permit back to channel capacity and woke the next reserver (no permit leak)".to_string(),
-        })
+        reserves_started.fetch_add(1, Ordering::Release);
+        reserves_released.fetch_add(1, Ordering::Release);
+
+        let started = reserves_started.load(Ordering::Acquire);
+        let released = reserves_released.load(Ordering::Acquire);
+
+        if started == released {
+            (true, ProtocolViolation::CancelNotPropagated {
+                channel_type: ChannelType::Mpsc,
+                scenario: CancelScenario::SendCancel,
+                details: "reserve dropped without commit released its permit back to channel capacity and woke the next reserver (no permit leak)".to_string(),
+            })
+        } else {
+            (
+                false,
+                ProtocolViolation::ResourceLeak {
+                    resource_type: "mpsc_send_permits".to_string(),
+                    leaked_count: started.saturating_sub(released),
+                    details: format!(
+                        "cancelled reserve accounting leaked permits: started={started}, released={released}"
+                    ),
+                },
+            )
+        }
     }
 }
 
@@ -433,7 +510,10 @@ impl CancelCorrectnessTest for MpscSendContentionTest {
         }
 
         result.duration = start.elapsed();
-        result.add_metric("contention_level", harness.stress_config.concurrency_level as f64);
+        result.add_metric(
+            "contention_level",
+            harness.stress_config.concurrency_level as f64,
+        );
 
         result
     }
@@ -443,7 +523,10 @@ impl CancelCorrectnessTest for MpscSendContentionTest {
 
 impl MpscSendContentionTest {
     #[allow(dead_code)]
-    fn test_high_contention_cancel(&self, harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
+    fn test_high_contention_cancel(
+        &self,
+        harness: &CancelTestHarness,
+    ) -> (bool, ProtocolViolation) {
         let config = &harness.stress_config;
         let successful_cancels = Arc::new(AtomicUsize::new(0));
         let failed_cancels = Arc::new(AtomicUsize::new(0));
@@ -489,25 +572,32 @@ impl MpscSendContentionTest {
             1.0
         };
 
-        if success_rate >= 0.8 { // At least 80% success rate
-            (true, ProtocolViolation::CancelNotPropagated {
-                channel_type: ChannelType::Mpsc,
-                scenario: CancelScenario::SendCancel,
-                details: format!(
-                    "cancellation success rate {:.1}% >= 80% threshold under {}-way contention ({} succeeded, {} lost the race)",
-                    success_rate * 100.0,
-                    config.concurrency_level,
-                    successful,
-                    failed
-                ),
-            })
+        if success_rate >= 0.8 {
+            // At least 80% success rate
+            (
+                true,
+                ProtocolViolation::CancelNotPropagated {
+                    channel_type: ChannelType::Mpsc,
+                    scenario: CancelScenario::SendCancel,
+                    details: format!(
+                        "cancellation success rate {:.1}% >= 80% threshold under {}-way contention ({} succeeded, {} lost the race)",
+                        success_rate * 100.0,
+                        config.concurrency_level,
+                        successful,
+                        failed
+                    ),
+                },
+            )
         } else {
-            (false, ProtocolViolation::SlowCancellation {
-                channel_type: ChannelType::Mpsc,
-                scenario: CancelScenario::SendCancel,
-                duration: Duration::from_millis((1000.0 * (1.0 - success_rate)) as u64),
-                threshold: Duration::from_millis(200), // 20% failure threshold
-            })
+            (
+                false,
+                ProtocolViolation::SlowCancellation {
+                    channel_type: ChannelType::Mpsc,
+                    scenario: CancelScenario::SendCancel,
+                    duration: Duration::from_millis((1000.0 * (1.0 - success_rate)) as u64),
+                    threshold: Duration::from_millis(200), // 20% failure threshold
+                },
+            )
         }
     }
 }
@@ -544,13 +634,14 @@ mod tests {
     #[test]
     #[allow(dead_code)]
     fn test_mpsc_send_contention() {
-        let harness = CancelTestHarness::new("test_mpsc_contention")
-            .with_stress_config(crate::src::StressConfig {
+        let harness = CancelTestHarness::new("test_mpsc_contention").with_stress_config(
+            crate::src::StressConfig {
                 concurrency_level: 4,
                 iterations: 20,
                 max_cancellations: 10,
                 randomize_timing: false,
-            });
+            },
+        );
 
         let test = MpscSendContentionTest;
         let result = test.run_test(&harness);

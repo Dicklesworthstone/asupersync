@@ -2,9 +2,9 @@
 #![allow(clippy::all)]
 //! Resource leak detection infrastructure for cancellation testing.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 use std::time::Instant;
 
 /// Tracks resource usage to detect leaks during cancellation testing.
@@ -50,8 +50,10 @@ impl ResourceTracker {
         let current_wakers = self.waker_count.load(Ordering::Acquire);
         let current_memory = self.memory_usage.load(Ordering::Acquire);
 
-        self.baseline_waker_count.store(current_wakers, Ordering::Release);
-        self.baseline_memory_usage.store(current_memory, Ordering::Release);
+        self.baseline_waker_count
+            .store(current_wakers, Ordering::Release);
+        self.baseline_memory_usage
+            .store(current_memory, Ordering::Release);
 
         if let Ok(mut tracking) = self.detailed_tracking.lock() {
             tracking.clear();
@@ -61,7 +63,8 @@ impl ResourceTracker {
     /// Enable or disable tracking.
     #[allow(dead_code)]
     pub fn set_tracking_enabled(&self, enabled: bool) {
-        self.tracking_enabled.store(enabled as usize, Ordering::Release);
+        self.tracking_enabled
+            .store(enabled as usize, Ordering::Release);
     }
 
     /// Check if tracking is enabled.
@@ -182,7 +185,9 @@ impl ResourceTracker {
     #[allow(dead_code)]
     fn track_resource(&self, resource_type: &str, amount: usize, operation: ResourceOperation) {
         if let Ok(mut tracking) = self.detailed_tracking.lock() {
-            let metrics = tracking.entry(resource_type.to_string()).or_insert_with(ResourceMetrics::new);
+            let metrics = tracking
+                .entry(resource_type.to_string())
+                .or_insert_with(ResourceMetrics::new);
 
             match operation {
                 ResourceOperation::Allocate => {
@@ -292,8 +297,11 @@ pub struct ResourceLeak {
 impl std::fmt::Display for ResourceLeak {
     #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} leak: {} units (baseline: {}, current: {})",
-               self.resource_type, self.leaked_count, self.baseline_count, self.current_count)
+        write!(
+            f,
+            "{} leak: {} units (baseline: {}, current: {})",
+            self.resource_type, self.leaked_count, self.baseline_count, self.current_count
+        )
     }
 }
 
@@ -370,7 +378,8 @@ impl<'a> ResourceTrackingScope<'a> {
             });
         }
 
-        if memory_delta > 1024 { // 1KB tolerance
+        if memory_delta > 1024 {
+            // 1KB tolerance
             leaks.push(ResourceLeak {
                 resource_type: "memory".to_string(),
                 leaked_count: memory_delta as usize,

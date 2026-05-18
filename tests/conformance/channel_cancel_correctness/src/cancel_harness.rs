@@ -2,12 +2,12 @@
 #![allow(clippy::all)]
 //! Cancellation test infrastructure for systematic channel conformance testing.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use crate::resource_tracking::{ResourceTracker, ResourceLeakError};
+use crate::resource_tracking::{ResourceLeakError, ResourceTracker};
 
 /// Configuration for cancellation test scenarios.
 #[derive(Debug, Clone)]
@@ -222,8 +222,8 @@ impl CancelTestResult {
     /// Check if any resource leaks were detected.
     #[allow(dead_code)]
     pub fn has_resource_leaks(&self) -> bool {
-        self.final_resources.waker_count > self.initial_resources.waker_count ||
-        self.final_resources.memory_usage > self.initial_resources.memory_usage + 1024 // 1KB tolerance
+        self.final_resources.waker_count > self.initial_resources.waker_count
+            || self.final_resources.memory_usage > self.initial_resources.memory_usage + 1024 // 1KB tolerance
     }
 }
 
@@ -279,21 +279,55 @@ impl std::fmt::Display for ProtocolViolation {
     #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProtocolViolation::CancelNotPropagated { channel_type, scenario, details } => {
-                write!(f, "Cancel not propagated in {} {}: {}", channel_type, scenario, details)
+            ProtocolViolation::CancelNotPropagated {
+                channel_type,
+                scenario,
+                details,
+            } => {
+                write!(
+                    f,
+                    "Cancel not propagated in {} {}: {}",
+                    channel_type, scenario, details
+                )
             }
-            ProtocolViolation::ResourceLeak { resource_type, leaked_count, details } => {
-                write!(f, "Resource leak: {} {} leaked - {}", leaked_count, resource_type, details)
+            ProtocolViolation::ResourceLeak {
+                resource_type,
+                leaked_count,
+                details,
+            } => {
+                write!(
+                    f,
+                    "Resource leak: {} {} leaked - {}",
+                    leaked_count, resource_type, details
+                )
             }
-            ProtocolViolation::StateInconsistency { channel_type, expected_state, actual_state } => {
-                write!(f, "State inconsistency in {}: expected '{}', got '{}'",
-                       channel_type, expected_state, actual_state)
+            ProtocolViolation::StateInconsistency {
+                channel_type,
+                expected_state,
+                actual_state,
+            } => {
+                write!(
+                    f,
+                    "State inconsistency in {}: expected '{}', got '{}'",
+                    channel_type, expected_state, actual_state
+                )
             }
-            ProtocolViolation::SlowCancellation { channel_type, scenario, duration, threshold } => {
-                write!(f, "Slow cancellation in {} {}: took {:?}, threshold {:?}",
-                       channel_type, scenario, duration, threshold)
+            ProtocolViolation::SlowCancellation {
+                channel_type,
+                scenario,
+                duration,
+                threshold,
+            } => {
+                write!(
+                    f,
+                    "Slow cancellation in {} {}: took {:?}, threshold {:?}",
+                    channel_type, scenario, duration, threshold
+                )
             }
-            ProtocolViolation::DropCorruption { channel_type, details } => {
+            ProtocolViolation::DropCorruption {
+                channel_type,
+                details,
+            } => {
                 write!(f, "Drop corruption in {}: {}", channel_type, details)
             }
         }
@@ -384,10 +418,12 @@ impl CancelTestEngine {
         let mut failed_tests = 0;
 
         for test in &self.tests {
-            let test_id = format!("{}:{}:{}",
-                                  test.channel_type(),
-                                  test.cancel_scenario(),
-                                  test.test_name());
+            let test_id = format!(
+                "{}:{}:{}",
+                test.channel_type(),
+                test.cancel_scenario(),
+                test.test_name()
+            );
 
             // Setup test
             if let Err(e) = test.setup() {

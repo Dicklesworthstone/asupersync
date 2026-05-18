@@ -12,26 +12,22 @@ pub mod state_validation;
 pub mod stress_scenarios;
 
 pub use cancel_harness::{
-    CancelTestHarness, CancelTestEngine, CancelTestResult, CancelCorrectnessTest,
-    ConformanceTestReport, ChannelType, CancelScenario, ProtocolViolation,
-    StressConfig,
+    CancelCorrectnessTest, CancelScenario, CancelTestEngine, CancelTestHarness, CancelTestResult,
+    ChannelType, ConformanceTestReport, ProtocolViolation, StressConfig,
 };
 
 pub use resource_tracking::{
-    ResourceTracker, ResourceLeakError, ResourceLeak, ResourceTrackingScope,
-    global_tracker, track_waker_allocation, track_waker_deallocation,
-    track_memory_allocation, track_memory_deallocation,
+    ResourceLeak, ResourceLeakError, ResourceTracker, ResourceTrackingScope, global_tracker,
+    track_memory_allocation, track_memory_deallocation, track_waker_allocation,
+    track_waker_deallocation,
 };
 
 pub use state_validation::{
-    StateValidator, StateValidationConfig, StateValidationScope,
-    ChannelState, MpscChannelState, BroadcastChannelState,
-    WatchChannelState, OneshotChannelState, OperationType,
+    BroadcastChannelState, ChannelState, MpscChannelState, OneshotChannelState, OperationType,
+    StateValidationConfig, StateValidationScope, StateValidator, WatchChannelState,
 };
 
-pub use stress_scenarios::{
-    StressTestScenarios, StressTestConfig, StressTestUtils,
-};
+pub use stress_scenarios::{StressTestConfig, StressTestScenarios, StressTestUtils};
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -117,47 +113,46 @@ impl ChannelCancelCorrectnessRunner {
     /// Register smoke tests only.
     #[allow(dead_code)]
     fn register_smoke_tests(engine: &mut CancelTestEngine) {
-        // Just the basic cancellation tests for each channel type
-        // Implementation would go here
+        // Smoke coverage starts with the wired MPSC send-cancellation suite.
+        Self::register_mpsc_tests(engine);
     }
 
     /// Register MPSC channel tests.
     #[allow(dead_code)]
     fn register_mpsc_tests(engine: &mut CancelTestEngine) {
-        // Implementation would go here
-        // This would add specific test implementations for MPSC channels
+        engine.add_test(Box::new(crate::mpsc::MpscSendCancelTest));
+        engine.add_test(Box::new(crate::mpsc::MpscSendCleanupTest));
+        engine.add_test(Box::new(crate::mpsc::MpscSendContentionTest));
     }
 
     /// Register broadcast channel tests.
     #[allow(dead_code)]
-    fn register_broadcast_tests(engine: &mut CancelTestEngine) {
-        // Implementation would go here
+    fn register_broadcast_tests(_engine: &mut CancelTestEngine) {
+        // Broadcast cancellation scenarios are not wired in this standalone harness yet.
     }
 
     /// Register watch channel tests.
     #[allow(dead_code)]
-    fn register_watch_tests(engine: &mut CancelTestEngine) {
-        // Implementation would go here
+    fn register_watch_tests(_engine: &mut CancelTestEngine) {
+        // Watch cancellation scenarios are not wired in this standalone harness yet.
     }
 
     /// Register oneshot channel tests.
     #[allow(dead_code)]
-    fn register_oneshot_tests(engine: &mut CancelTestEngine) {
-        // Implementation would go here
+    fn register_oneshot_tests(_engine: &mut CancelTestEngine) {
+        // Oneshot cancellation scenarios are not wired in this standalone harness yet.
     }
 
     /// Register cross-channel interaction tests.
     #[allow(dead_code)]
-    fn register_cross_channel_tests(engine: &mut CancelTestEngine) {
-        // Tests for interactions between different channel types
-        // Implementation would go here
+    fn register_cross_channel_tests(_engine: &mut CancelTestEngine) {
+        // Cross-channel scenarios wait on channel-specific harness coverage.
     }
 
     /// Register stress tests.
     #[allow(dead_code)]
-    fn register_stress_tests(engine: &mut CancelTestEngine) {
-        // High-concurrency stress testing scenarios
-        // Implementation would go here
+    fn register_stress_tests(_engine: &mut CancelTestEngine) {
+        // High-concurrency coverage is currently provided by the MPSC contention test.
     }
 }
 
@@ -231,7 +226,10 @@ pub mod utils {
         output.push_str(&format!("Failed: {}\n", report.failed_tests));
         output.push_str(&format!("Pass Rate: {:.1}%\n", report.pass_rate()));
         output.push_str(&format!("Total Duration: {:?}\n", report.duration));
-        output.push_str(&format!("Total Violations: {}\n\n", report.total_violations));
+        output.push_str(&format!(
+            "Total Violations: {}\n\n",
+            report.total_violations
+        ));
 
         // Results by channel type
         let mut by_channel: HashMap<ChannelType, (usize, usize)> = HashMap::new();
@@ -249,9 +247,15 @@ pub mod utils {
         output.push_str("=== RESULTS BY CHANNEL TYPE ===\n");
         for (channel_type, (passed, failed)) in &by_channel {
             let total = passed + failed;
-            let pass_rate = if total > 0 { *passed as f64 / total as f64 * 100.0 } else { 0.0 };
-            output.push_str(&format!("{}: {}/{} ({:.1}% pass rate)\n",
-                                   channel_type, passed, total, pass_rate));
+            let pass_rate = if total > 0 {
+                *passed as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            output.push_str(&format!(
+                "{}: {}/{} ({:.1}% pass rate)\n",
+                channel_type, passed, total, pass_rate
+            ));
         }
         output.push_str("\n");
 
@@ -262,8 +266,10 @@ pub mod utils {
                 if !result.passed {
                     output.push_str(&format!("\nTest: {}\n", test_id));
                     output.push_str(&format!("  Duration: {:?}\n", result.duration));
-                    output.push_str(&format!("  Operations: {} completed, {} cancelled\n",
-                                           result.operations_completed, result.operations_cancelled));
+                    output.push_str(&format!(
+                        "  Operations: {} completed, {} cancelled\n",
+                        result.operations_completed, result.operations_cancelled
+                    ));
 
                     if !result.violations.is_empty() {
                         output.push_str("  Violations:\n");
@@ -311,9 +317,8 @@ mod tests {
     fn test_smoke_test_suite() {
         let report = ChannelCancelCorrectnessRunner::run_smoke_tests();
 
-        // Basic validation
-        assert!(report.total_tests >= 0);
-        assert!(report.pass_rate() >= 0.0 && report.pass_rate() <= 100.0);
+        assert!(report.total_tests > 0);
+        assert!(report.all_passed());
         assert!(report.duration > Duration::ZERO);
     }
 

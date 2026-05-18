@@ -35,20 +35,17 @@
 //! - Watch: State observation channels
 //! - Oneshot: Single-value transfer channels
 
-pub mod src;
 pub mod mpsc;
+pub mod src;
 
 pub use src::*;
 
 // Re-export key types for convenience
 pub use src::{
-    ChannelCancelCorrectnessRunner,
-    CancelTestHarness, CancelTestEngine, CancelTestResult,
-    CancelCorrectnessTest, ConformanceTestReport,
-    ChannelType, CancelScenario, ProtocolViolation,
-    ResourceTracker, ResourceLeakError,
-    StateValidator, StateValidationConfig,
-    StressTestScenarios, StressConfig,
+    CancelCorrectnessTest, CancelScenario, CancelTestEngine, CancelTestHarness, CancelTestResult,
+    ChannelCancelCorrectnessRunner, ChannelType, ConformanceTestReport, ProtocolViolation,
+    ResourceLeakError, ResourceTracker, StateValidationConfig, StateValidator, StressConfig,
+    StressTestScenarios,
 };
 
 /// Version information for the conformance test suite.
@@ -76,8 +73,14 @@ pub fn run_smoke_tests() -> ConformanceTestReport {
 pub fn validate_channel_type(channel_type: ChannelType) -> ConformanceTestReport {
     let mut engine = CancelTestEngine::new();
 
-    // Add tests specific to the requested channel type
-    // Implementation would filter tests by channel type
+    match channel_type {
+        ChannelType::Mpsc => {
+            engine.add_test(Box::new(mpsc::MpscSendCancelTest));
+            engine.add_test(Box::new(mpsc::MpscSendCleanupTest));
+            engine.add_test(Box::new(mpsc::MpscSendContentionTest));
+        }
+        ChannelType::Broadcast | ChannelType::Watch | ChannelType::Oneshot => {}
+    }
 
     engine.run_all_tests()
 }
@@ -91,8 +94,8 @@ mod integration_tests {
     fn test_smoke_suite_runs() {
         let report = run_smoke_tests();
 
-        // Basic smoke test validation
-        assert!(report.total_tests >= 0);
+        assert!(report.total_tests > 0);
+        assert!(report.all_passed());
         assert!(report.duration.as_secs() < 30); // Should complete quickly
     }
 
@@ -101,8 +104,8 @@ mod integration_tests {
     fn test_individual_channel_validation() {
         let report = validate_channel_type(ChannelType::Mpsc);
 
-        // Should have run at least some MPSC-specific tests
-        assert!(report.total_tests >= 0);
+        assert!(report.total_tests > 0);
+        assert!(report.all_passed());
     }
 
     #[test]

@@ -57,7 +57,7 @@ impl StateValidator {
 
     /// Take a snapshot of channel state.
     #[allow(dead_code)]
-    pub fn snapshot_state<T: Debug + Clone + Send + 'static>(
+    pub fn snapshot_state<T: Debug + Clone + Send + Sync + 'static>(
         &self,
         channel_id: &str,
         channel_type: ChannelType,
@@ -88,13 +88,14 @@ impl StateValidator {
     /// Validate state consistency for a channel.
     #[allow(dead_code)]
     pub fn validate_consistency(&self, channel_id: &str) -> Vec<ProtocolViolation> {
-        let snapshots = if let Ok(state_map) = self.state_snapshots.lock() {
-            state_map.get(channel_id).cloned().unwrap_or_default()
-        } else {
-            return vec![];
-        };
-
         let mut violations = Vec::new();
+        let state_map = match self.state_snapshots.lock() {
+            Ok(state_map) => state_map,
+            Err(_) => return violations,
+        };
+        let Some(snapshots) = state_map.get(channel_id) else {
+            return violations;
+        };
 
         // Check for state transition violations
         for window in snapshots.windows(2) {
@@ -106,7 +107,7 @@ impl StateValidator {
         }
 
         // Check for state invariant violations
-        for snapshot in &snapshots {
+        for snapshot in snapshots {
             if let Some(violation) = self.check_state_invariants(snapshot) {
                 violations.push(violation);
             }
@@ -277,7 +278,7 @@ impl StateValidator {
 }
 
 /// A snapshot of channel state at a specific point in time.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct StateSnapshot {
     /// When the snapshot was taken.
@@ -334,6 +335,10 @@ impl std::fmt::Display for OperationType {
 
 /// Trait for types that can be stored in state snapshots.
 pub trait StateContainer: Debug + Send + Sync {
+    /// Clone this state into a boxed trait object.
+    #[allow(dead_code)]
+    fn clone_box(&self) -> Box<dyn StateContainer>;
+
     /// Get a description of the state.
     #[allow(dead_code)]
     fn describe(&self) -> String;
@@ -370,6 +375,11 @@ pub struct ChannelState<T: Debug + Clone> {
 }
 
 impl<T: Debug + Clone + Send + Sync + 'static> StateContainer for ChannelState<T> {
+    #[allow(dead_code)]
+    fn clone_box(&self) -> Box<dyn StateContainer> {
+        Box::new(self.clone())
+    }
+
     #[allow(dead_code)]
     fn describe(&self) -> String {
         format!(
@@ -430,6 +440,12 @@ impl<T: Debug + Clone + Send + Sync + 'static> StateContainer for ChannelState<T
             );
         }
         metrics
+    }
+}
+
+impl Clone for Box<dyn StateContainer> {
+    fn clone(&self) -> Self {
+        self.clone_box()
     }
 }
 

@@ -3,16 +3,16 @@
 //! High-concurrency stress testing scenarios for channel cancellation.
 
 use crate::cancel_harness::{
-    CancelTestHarness, ChannelType, CancelScenario, CancelTestResult, ProtocolViolation,
+    CancelScenario, CancelTestHarness, CancelTestResult, ChannelType, ProtocolViolation,
     StressConfig,
 };
 use crate::resource_tracking::ResourceTrackingScope;
 use crate::state_validation::StateValidationScope;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// High-concurrency stress test scenarios for channel cancellation.
 #[allow(dead_code)]
@@ -26,13 +26,25 @@ impl StressTestScenarios {
     pub fn run_all_stress_tests(harness: &CancelTestHarness) -> HashMap<String, CancelTestResult> {
         let mut results = HashMap::new();
 
-        let scenarios = vec![
-            ("concurrent_send_cancel", Self::concurrent_send_cancel_stress),
-            ("concurrent_receive_cancel", Self::concurrent_receive_cancel_stress),
-            ("mixed_operations_cancel", Self::mixed_operations_cancel_stress),
+        let scenarios: Vec<(&str, fn(&CancelTestHarness) -> CancelTestResult)> = vec![
+            (
+                "concurrent_send_cancel",
+                Self::concurrent_send_cancel_stress,
+            ),
+            (
+                "concurrent_receive_cancel",
+                Self::concurrent_receive_cancel_stress,
+            ),
+            (
+                "mixed_operations_cancel",
+                Self::mixed_operations_cancel_stress,
+            ),
             ("rapid_create_destroy", Self::rapid_create_destroy_stress),
             ("cascade_cancellation", Self::cascade_cancellation_stress),
-            ("memory_pressure_cancel", Self::memory_pressure_cancel_stress),
+            (
+                "memory_pressure_cancel",
+                Self::memory_pressure_cancel_stress,
+            ),
         ];
 
         for (name, test_fn) in scenarios {
@@ -116,11 +128,15 @@ impl StressTestScenarios {
 
         // Add stress test metrics
         result.add_metric("threads_used", config.concurrency_level as f64);
-        result.add_metric("total_operations",
-                          (result.operations_completed + result.operations_cancelled) as f64);
-        result.add_metric("cancellation_rate",
-                          result.operations_cancelled as f64 /
-                          (result.operations_completed + result.operations_cancelled).max(1) as f64);
+        result.add_metric(
+            "total_operations",
+            (result.operations_completed + result.operations_cancelled) as f64,
+        );
+        result.add_metric(
+            "cancellation_rate",
+            result.operations_cancelled as f64
+                / (result.operations_completed + result.operations_cancelled).max(1) as f64,
+        );
 
         result
     }
@@ -171,9 +187,11 @@ impl StressTestScenarios {
         result.operations_cancelled = operations_cancelled.load(Ordering::Relaxed);
 
         result.add_metric("concurrent_receivers", config.concurrency_level as f64);
-        result.add_metric("avg_receive_latency",
-                          result.duration.as_micros() as f64 /
-                          (result.operations_completed + result.operations_cancelled).max(1) as f64);
+        result.add_metric(
+            "avg_receive_latency",
+            result.duration.as_micros() as f64
+                / (result.operations_completed + result.operations_cancelled).max(1) as f64,
+        );
 
         result
     }
@@ -248,9 +266,11 @@ impl StressTestScenarios {
         result.operations_cancelled = operations_cancelled.load(Ordering::Relaxed);
 
         result.add_metric("mixed_operation_types", 3.0);
-        result.add_metric("total_throughput",
-                          (result.operations_completed + result.operations_cancelled) as f64 /
-                          result.duration.as_secs_f64());
+        result.add_metric(
+            "total_throughput",
+            (result.operations_completed + result.operations_cancelled) as f64
+                / result.duration.as_secs_f64(),
+        );
 
         result
     }
@@ -309,8 +329,14 @@ impl StressTestScenarios {
 
         let total_channels = channels_created.load(Ordering::Relaxed);
         result.add_metric("channels_created", total_channels as f64);
-        result.add_metric("channels_destroyed", channels_destroyed.load(Ordering::Relaxed) as f64);
-        result.add_metric("creation_rate", total_channels as f64 / result.duration.as_secs_f64());
+        result.add_metric(
+            "channels_destroyed",
+            channels_destroyed.load(Ordering::Relaxed) as f64,
+        );
+        result.add_metric(
+            "creation_rate",
+            total_channels as f64 / result.duration.as_secs_f64(),
+        );
 
         // Check for resource leaks (important for create/destroy tests)
         if let Err(_) = harness.assert_no_resource_leaks() {
@@ -344,7 +370,7 @@ impl StressTestScenarios {
             let test_config = config.clone();
 
             let handle = std::thread::spawn(move || {
-                for j in 0..test_config.iterations / config.concurrency_level {
+                for j in 0..test_config.iterations / test_config.concurrency_level {
                     // Simulate dependency chain
                     let chain_length = (level + 1) * 2;
                     depth.store(chain_length, Ordering::Relaxed);
@@ -375,10 +401,15 @@ impl StressTestScenarios {
         result.operations_completed = operations_completed.load(Ordering::Relaxed);
         result.operations_cancelled = operations_cancelled.load(Ordering::Relaxed);
 
-        result.add_metric("max_cascade_depth", cascade_depth.load(Ordering::Relaxed) as f64);
-        result.add_metric("cascade_efficiency",
-                          result.operations_completed as f64 /
-                          (result.operations_completed + result.operations_cancelled).max(1) as f64);
+        result.add_metric(
+            "max_cascade_depth",
+            cascade_depth.load(Ordering::Relaxed) as f64,
+        );
+        result.add_metric(
+            "cascade_efficiency",
+            result.operations_completed as f64
+                / (result.operations_completed + result.operations_cancelled).max(1) as f64,
+        );
 
         result
     }
@@ -445,10 +476,15 @@ impl StressTestScenarios {
         result.operations_completed = operations_completed.load(Ordering::Relaxed);
         result.operations_cancelled = operations_cancelled.load(Ordering::Relaxed);
 
-        result.add_metric("peak_memory_allocated", memory_allocations.load(Ordering::Relaxed) as f64);
-        result.add_metric("memory_pressure_ratio",
-                          memory_allocations.load(Ordering::Relaxed) as f64 /
-                          (config.concurrency_level * 1024) as f64);
+        result.add_metric(
+            "peak_memory_allocated",
+            memory_allocations.load(Ordering::Relaxed) as f64,
+        );
+        result.add_metric(
+            "memory_pressure_ratio",
+            memory_allocations.load(Ordering::Relaxed) as f64
+                / (config.concurrency_level * 1024) as f64,
+        );
 
         result
     }
@@ -568,8 +604,8 @@ mod tests {
     #[test]
     #[allow(dead_code)]
     fn test_concurrent_send_cancel_stress() {
-        let harness = CancelTestHarness::new("test_concurrent_send")
-            .with_stress_config(StressConfig {
+        let harness =
+            CancelTestHarness::new("test_concurrent_send").with_stress_config(StressConfig {
                 concurrency_level: 2,
                 iterations: 10,
                 max_cancellations: 5,
@@ -586,13 +622,12 @@ mod tests {
     #[test]
     #[allow(dead_code)]
     fn test_mixed_operations_stress() {
-        let harness = CancelTestHarness::new("test_mixed_ops")
-            .with_stress_config(StressConfig {
-                concurrency_level: 3,
-                iterations: 15,
-                max_cancellations: 7,
-                randomize_timing: false,
-            });
+        let harness = CancelTestHarness::new("test_mixed_ops").with_stress_config(StressConfig {
+            concurrency_level: 3,
+            iterations: 15,
+            max_cancellations: 7,
+            randomize_timing: false,
+        });
 
         let result = StressTestScenarios::mixed_operations_cancel_stress(&harness);
 
@@ -615,7 +650,11 @@ mod tests {
         assert_eq!(throughput, 100.0);
 
         // Test performance threshold
-        assert!(StressTestUtils::meets_performance_threshold(95.0, 100.0, 0.1));
-        assert!(!StressTestUtils::meets_performance_threshold(85.0, 100.0, 0.1));
+        assert!(StressTestUtils::meets_performance_threshold(
+            95.0, 100.0, 0.1
+        ));
+        assert!(!StressTestUtils::meets_performance_threshold(
+            85.0, 100.0, 0.1
+        ));
     }
 }
