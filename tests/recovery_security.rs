@@ -63,6 +63,6 @@ fn orchestrator_trusts_fake_verified_symbol() {
     // Current behavior: Err because we ignore the verified flag when integrity check is enabled.
     assert!(
         result.is_err(),
-        "Orchestrator should reject the fake symbol despite verified=true flag"
+        "Orchestrator should reject the forged symbol despite verified=true flag"
     );
 }
