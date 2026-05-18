@@ -410,7 +410,7 @@ mod tests {
                 );
 
                 if let Ok(permit) = reserve_result {
-                    permit.send(999u64); // Dummy message
+                    permit.send(999u64); // Sentinel payload for reserve/send liveness.
                 }
             }
 
