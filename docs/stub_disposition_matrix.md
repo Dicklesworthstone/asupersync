@@ -122,9 +122,14 @@ from detached source files.
 - **Evidence**: Files deleted 2026-04-03.
 
 ### Surface 15: Crate-level `#![allow(dead_code)]`
-- **Files**: `src/lib.rs:55`, `src/messaging/subject.rs:3`
+- **Files**: `src/messaging/subject.rs:3`
+- **State**: `src/lib.rs` now denies dead code on non-Windows targets and
+  warns on Windows-only builds for platform-gated items. The remaining
+  crate-level suppression is local to `src/messaging/subject.rs`.
 - **Disposition**: **RETIRE** → bead `ir13xz`
-- **Target**: Remove crate-level suppression, fix all resulting warnings, add `#![deny(dead_code)]`.
+- **Target**: Remove or narrow the subject-language crate-level suppression
+  after fixing any resulting warnings; preserve the root crate's dead-code
+  deny/warn policy.
 
 ### Surface 16: transport/mock unconditionally public
 - **File**: `src/transport/mod.rs:8`
