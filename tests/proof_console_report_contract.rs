@@ -10,8 +10,8 @@ const FRONTIER_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 const SCRIPT_PATH: &str = "scripts/proof_runner.py";
-const NO_TOKIO_TREE_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_report_docs cargo tree -e normal -p asupersync -i tokio";
-const LIB_TEST_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_report_docs cargo test -p asupersync --lib";
+const NO_TOKIO_TREE_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_report_docs cargo tree -e normal -p asupersync -i tokio";
+const LIB_TEST_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_report_docs cargo test -p asupersync --lib";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -92,6 +92,9 @@ fn report_contains_raw_coordination_data(report: &Value) -> bool {
 fn validate_rch_cargo_command_shape(label: &str, command: &str, failures: &mut Vec<String>) {
     if command.contains("rch exec -- cargo") {
         failures.push(format!("bare-rch-cargo:{label}:{command}"));
+    }
+    if command.contains("rch exec --") && !command.starts_with("RCH_REQUIRE_REMOTE=1 ") {
+        failures.push(format!("missing-remote-required:{label}:{command}"));
     }
     if command.contains("rch exec --")
         && command.contains(" cargo ")
@@ -582,6 +585,23 @@ fn bare_rch_cargo_commands_are_rejected() {
 }
 
 #[test]
+fn missing_remote_required_rch_commands_are_rejected() {
+    let contract = contract();
+    let mut report = valid_report();
+    report["lane_rows"][0]["command"] =
+        json!("rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_docs cargo test -p asupersync");
+    report["verdict"] = json!("fail_closed");
+
+    let failures = validate_report(&contract, &report);
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.starts_with("missing-remote-required:")),
+        "rch commands without RCH_REQUIRE_REMOTE must fail closed: {failures:?}"
+    );
+}
+
+#[test]
 fn raw_coordination_data_is_rejected() {
     let contract = contract();
     let mut report = valid_report();
@@ -640,8 +660,8 @@ fn proof_commands_are_rch_routed_and_include_existing_manifest_snapshot_gates() 
 
     for command in &commands {
         assert!(
-            command.starts_with("rch exec -- "),
-            "proof command must be rch-routed: {command}"
+            command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+            "proof command must be remote-required and rch-routed: {command}"
         );
         if command.contains(" cargo ") {
             assert!(

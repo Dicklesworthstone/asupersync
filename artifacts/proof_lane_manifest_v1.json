@@ -11,8 +11,9 @@
     "readme": "README.md"
   },
   "command_policy": {
-    "all_commands_must_start_with": "rch exec -- ",
+    "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
     "cpu_intensive_validation_must_use_rch": true,
+    "rch_must_fail_closed_to_remote": true,
     "formal_lean_build_must_not_shell_wrap": true,
     "broad_validation_is_frontier_evidence_not_local_change_proof": true
   },
@@ -35,7 +36,7 @@
     {
       "lane_id": "default-production-tokio-tree",
       "kind": "dependency_graph",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
       "package": "asupersync",
       "feature_flags": [],
       "guarantee_ids": [
@@ -58,7 +59,7 @@
     {
       "lane_id": "metrics-production-tokio-tree",
       "kind": "dependency_graph",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
       "package": "asupersync",
       "feature_flags": [
         "metrics"
@@ -84,7 +85,7 @@
     {
       "lane_id": "fuzz-tokio-quarantine-tree",
       "kind": "dependency_graph",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
       "package": "asupersync",
       "feature_flags": [
         "fuzz"
@@ -108,7 +109,7 @@
     {
       "lane_id": "workspace-normal-tokio-audit",
       "kind": "dependency_graph",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
       "package": "workspace",
       "feature_flags": [],
       "guarantee_ids": [
@@ -130,7 +131,7 @@
     {
       "lane_id": "native-feature-smoke",
       "kind": "compile_frontier",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
       "package": "asupersync",
       "feature_flags": [
         "tls",
@@ -161,7 +162,7 @@
     {
       "lane_id": "fuzz-manifest-smoke",
       "kind": "compile_frontier",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
       "package": "fuzz",
       "feature_flags": [],
       "guarantee_ids": [
@@ -183,7 +184,7 @@
     {
       "lane_id": "lib-tests",
       "kind": "test_frontier",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
       "package": "asupersync",
       "feature_flags": [
         "test-internals"
@@ -208,7 +209,7 @@
     {
       "lane_id": "all-targets-check",
       "kind": "compile_frontier",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
       "package": "asupersync",
       "feature_flags": [],
       "guarantee_ids": [
@@ -232,7 +233,7 @@
     {
       "lane_id": "clippy-all-targets",
       "kind": "lint_frontier",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
       "package": "asupersync",
       "feature_flags": [],
       "guarantee_ids": [
@@ -255,7 +256,7 @@
     {
       "lane_id": "rustfmt-check",
       "kind": "format_frontier",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
       "package": "workspace",
       "feature_flags": [],
       "guarantee_ids": [
@@ -275,7 +276,7 @@
     {
       "lane_id": "rustdoc-api",
       "kind": "documentation_frontier",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
       "package": "asupersync",
       "feature_flags": [
         "test-internals"
@@ -299,7 +300,7 @@
     {
       "lane_id": "formal-lean-build",
       "kind": "formal_frontier",
-      "command": "rch exec -- lake --dir formal/lean build",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build",
       "package": "formal/lean",
       "feature_flags": [],
       "guarantee_ids": [
@@ -322,7 +323,7 @@
     {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
       "guarantee_ids": [

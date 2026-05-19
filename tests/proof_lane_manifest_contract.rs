@@ -85,6 +85,7 @@ struct ManifestProjectionText {
 struct CommandPolicyProjectionText {
     all_commands_must_start_with: Value,
     cpu_intensive_validation_must_use_rch: Value,
+    rch_must_fail_closed_to_remote: Value,
     formal_lean_build_must_not_shell_wrap: Value,
     broad_validation_is_frontier_evidence_not_local_change_proof: Value,
 }
@@ -135,6 +136,8 @@ fn manifest_projection_text(manifest: &Value) -> ManifestProjectionText {
             all_commands_must_start_with: command_policy["all_commands_must_start_with"].clone(),
             cpu_intensive_validation_must_use_rch:
                 command_policy["cpu_intensive_validation_must_use_rch"].clone(),
+            rch_must_fail_closed_to_remote: command_policy["rch_must_fail_closed_to_remote"]
+                .clone(),
             formal_lean_build_must_not_shell_wrap:
                 command_policy["formal_lean_build_must_not_shell_wrap"].clone(),
             broad_validation_is_frontier_evidence_not_local_change_proof:
@@ -328,6 +331,10 @@ fn every_lane_has_rch_command_scope_limits_and_live_paths() {
         assert!(
             command.starts_with(required_prefix),
             "{lane_id}: command must start with {required_prefix:?}: {command}"
+        );
+        assert!(
+            command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+            "{lane_id}: proof lane must fail closed instead of falling back to local execution: {command}"
         );
         if command.contains(" cargo ") {
             assert!(

@@ -223,6 +223,10 @@ fn every_claim_maps_to_manifest_lanes_guarantees_and_commands() {
             "{claim_id}: proof commands must match the manifest lane commands"
         );
         for command in &snapshot_commands {
+            assert!(
+                command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+                "{claim_id}: proof command must require remote rch execution: {command}"
+            );
             if command.contains(" cargo ") {
                 assert!(
                     command.contains("CARGO_TARGET_DIR="),

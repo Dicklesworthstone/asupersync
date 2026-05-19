@@ -65,8 +65,8 @@
         "metrics-production-tokio-tree"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio"
       ],
       "blocked_frontier": null,
       "notes": "Green here is a mapped proof lane, not a fresh execution result."
@@ -92,7 +92,7 @@
         "formal-lean-build"
       ],
       "proof_commands": [
-        "rch exec -- lake --dir formal/lean build"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build"
       ],
       "blocked_frontier": null,
       "notes": "This maps only the formal core invariants covered by the Lean project."
@@ -120,8 +120,8 @@
         "formal-lean-build"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
-        "rch exec -- lake --dir formal/lean build"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build"
       ],
       "blocked_frontier": null,
       "notes": "The lib-test lane is broad frontier evidence; exact blocker rows are required if it stops outside the touched slice."
@@ -149,8 +149,8 @@
         "all-targets-check"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets"
       ],
       "blocked_frontier": null,
       "notes": "Fairness behavior needs lane-specific tests or benchmarks for behavioral proof; these are compile/test frontier commands."
@@ -178,8 +178,8 @@
         "fuzz-tokio-quarantine-tree"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio"
       ],
       "blocked_frontier": null,
       "notes": "The tokio edge is expected only in the fuzz quarantine lane and must not weaken production no-Tokio claims."
@@ -207,8 +207,8 @@
         "clippy-all-targets"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings"
       ],
       "blocked_frontier": null,
       "notes": "This row demonstrates the required exact red/blocker shape for conformance-adjacent proof stops."
@@ -220,7 +220,7 @@
       "doc_claim_markers": {
         "README.md": [
           "The proof posture is exact",
-          "canonical proof command is `rch exec -- lake --dir formal/lean build`"
+          "canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`"
         ],
         "AGENTS.md": [
           "formal Lean proof evidence",
@@ -234,7 +234,7 @@
         "formal-lean-build"
       ],
       "proof_commands": [
-        "rch exec -- lake --dir formal/lean build"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build"
       ],
       "blocked_frontier": null,
       "notes": "Green is limited to the Lean core-invariant project and does not cover every adapter or protocol implementation."
@@ -260,7 +260,7 @@
         "rustdoc-api"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals"
       ],
       "blocked_frontier": null,
       "notes": "This is API-doc frontier evidence, not a substitute for integration, conformance, or fuzz lanes."
