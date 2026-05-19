@@ -305,11 +305,11 @@ fn unsafe_validation_command_matches_full_output_golden() {
 
 #[test]
 fn rch_validation_without_target_dir_is_actionable() {
-    let receipt = receipt_json("current_inventory.json");
+    let receipt = receipt_json("duplicate_current.json");
 
     assert_eq!(
         receipt["capabilities"][0]["capability_id"].as_str(),
-        Some("cross-agent-timeline")
+        Some("artifact-freshness")
     );
     assert_eq!(
         receipt["capabilities"][0]["needs_review"].as_bool(),
@@ -319,12 +319,37 @@ fn rch_validation_without_target_dir_is_actionable() {
     let cues = receipt["review_cues"].as_array().expect("review cues");
     assert!(cues.iter().any(|cue| {
         cue["kind"].as_str() == Some("missing-cargo-target-dir-validation")
-            && cue["capability_id"].as_str() == Some("cross-agent-timeline")
-            && cue["helper_id"].as_str() == Some("swarm-timeline-receipt")
+            && cue["capability_id"].as_str() == Some("artifact-freshness")
+            && cue["helper_id"].as_str() == Some("proof-artifact-freshness-receipt")
             && cue["command"].as_str()
                 == Some(
-                    "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract",
+                    "rch exec -- cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
                 )
+    }));
+}
+
+#[test]
+fn current_inventory_remote_required_validation_is_not_actionable() {
+    let receipt = receipt_json("current_inventory.json");
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    let command = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_swarm_timeline_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test swarm_timeline_receipt_contract -- --nocapture";
+
+    assert_eq!(
+        receipt["capabilities"][0]["capability_id"].as_str(),
+        Some("cross-agent-timeline")
+    );
+    assert_eq!(
+        receipt["capabilities"][0]["needs_review"].as_bool(),
+        Some(false)
+    );
+    assert!(!cues.iter().any(|cue| {
+        cue["helper_id"].as_str() == Some("swarm-timeline-receipt")
+            && cue["command"].as_str() == Some(command)
+            && matches!(
+                cue["kind"].as_str(),
+                Some("missing-cargo-target-dir-validation")
+                    | Some("missing-remote-required-validation")
+            )
     }));
 }
 

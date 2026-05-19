@@ -8,7 +8,7 @@
       "draft_helper_count": 0,
       "duplicate_active_count": 0,
       "helper_count": 1,
-      "needs_review": true,
+      "needs_review": false,
       "superseded_helper_count": 0
     },
     {
@@ -43,7 +43,7 @@
       "superseded_by": "",
       "test_path": "tests/swarm_timeline_receipt_contract.rs",
       "validation": [
-        "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_swarm_timeline_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test swarm_timeline_receipt_contract -- --nocapture"
       ]
     },
     {
@@ -89,22 +89,6 @@
   "repo_path": "/repo",
   "review_cues": [
     {
-      "capability_id": "cross-agent-timeline",
-      "command": "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract",
-      "helper_id": "swarm-timeline-receipt",
-      "kind": "missing-cargo-target-dir-validation",
-      "recommendation": "include explicit CARGO_TARGET_DIR in the rch exec env before citing this helper",
-      "severity": "high"
-    },
-    {
-      "capability_id": "cross-agent-timeline",
-      "command": "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract",
-      "helper_id": "swarm-timeline-receipt",
-      "kind": "missing-remote-required-validation",
-      "recommendation": "prefix rch Cargo validation with RCH_REQUIRE_REMOTE=1 before citing this helper",
-      "severity": "high"
-    },
-    {
       "capability_id": "rch-worker-health",
       "helper_id": "rch-worker-quarantine-receipt",
       "kind": "superseded-helper",
@@ -134,7 +118,7 @@
     "capabilities": 2,
     "duplicate_capabilities": 0,
     "helpers": 3,
-    "review_cues": 3,
+    "review_cues": 1,
     "superseded_helpers": 1
   }
 }
