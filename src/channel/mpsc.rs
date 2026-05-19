@@ -529,15 +529,9 @@ impl<T> Sender<T> {
         }
 
         let has_physical_capacity = inner.has_capacity(self.shared.capacity);
-        let has_logical_capacity = has_physical_capacity && inner.send_wakers.is_empty();
 
-        let evicted = if has_logical_capacity {
+        let evicted = if has_physical_capacity {
             None
-        } else if has_physical_capacity {
-            // A queued waiter already owns the next free slot. Preserve FIFO
-            // ordering by treating the channel as logically full, but do not
-            // evict a committed message when there is still real capacity.
-            return Err(SendError::Full(value));
         } else if let Some(index) = inner.queue.iter().position(&mut predicate) {
             // Evict the oldest committed message (not a reserved slot) that the
             // caller explicitly allows us to drop.
