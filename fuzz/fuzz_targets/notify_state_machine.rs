@@ -81,6 +81,7 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
     let mut next_waiter_id = 0u64;
     let mut notify_one_count = 0u64;
     let mut cancelled_waiters = std::collections::HashSet::new();
+    let mut active_threads = Vec::new();
 
     // Execute operations
     for (op_index, operation) in operations.iter().enumerate() {
@@ -98,12 +99,13 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                     active_waiters.insert(bounded_id, waiter_sequence_id);
 
                     // Start waiter in background
-                    start_waiter_background(
+                    let handle = start_waiter_background(
                         bounded_id,
                         waiter_sequence_id,
                         notification_counter.clone(),
                         wake_order.clone(),
                     );
+                    active_threads.push(handle);
                 }
 
                 verify_notify_invariants(
@@ -227,6 +229,10 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
 
     // Final verification
     verify_final_state(&notify, notify_one_count, &wake_order);
+
+    for handle in active_threads {
+        let _ = handle.join();
+    }
 });
 
 /// Start a waiter in the background
@@ -235,7 +241,7 @@ fn start_waiter_background(
     waiter_sequence_id: u64,
     notification_counter: Arc<AtomicU64>,
     wake_order: WakeOrder,
-) {
+) -> std::thread::JoinHandle<()> {
     // Spawn waiter task (simulated with thread for simplicity)
     std::thread::spawn(move || {
         // Brief sleep to model asynchronous waiter progress without busy waiting.
@@ -247,7 +253,7 @@ fn start_waiter_background(
             .lock()
             .unwrap()
             .push((waiter_id, waiter_sequence_id, notification_order));
-    });
+    })
 }
 
 /// Verify notify invariants hold
