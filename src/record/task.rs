@@ -1094,8 +1094,12 @@ impl crate::util::Recyclable for TaskRecord {
         self.sched_priority = 0;
         self.sched_generation = 0;
 
-        // Create new wake_state (Arc allocation, but necessary for dedup)
-        self.wake_state = std::sync::Arc::new(TaskWakeState::new());
+        // Create new wake_state (or reuse existing allocation if uniquely owned)
+        if let Some(state) = std::sync::Arc::get_mut(&mut self.wake_state) {
+            *state = TaskWakeState::new();
+        } else {
+            self.wake_state = std::sync::Arc::new(TaskWakeState::new());
+        }
     }
 }
 
