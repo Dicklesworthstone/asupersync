@@ -150,7 +150,7 @@ mod kafka_mod {
             .expect("optional no-feature producer may be constructed for diagnostics");
         let result = futures_lite::future::block_on(async {
             producer
-                .send(&asupersync::cx::Cx::new(), "orders", None, b"payload", None)
+                .send(&asupersync::cx::Cx::for_testing(), "orders", None, b"payload", None)
                 .await
         });
 
