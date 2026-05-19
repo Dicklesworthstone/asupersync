@@ -617,25 +617,38 @@ impl<T> RwLock<T> {
                     state.writer_waiters = state.writer_waiters.saturating_sub(1);
                     state.writer_active = false;
 
-                    // Record lock release for ordering tracking - this write lock was
-                    // granted (record_acquire was called) but cancelled before guard creation
-                    if let Some(rank) = self.rank {
-                        lock_ordering::record_release(rank);
-                    }
-
                     if poisoned {
-                        (None, SmallVec::<[Waker; 4]>::new())
+                        let wakers = Self::queued_waiter_wakers(&state);
+                        (None, wakers)
                     } else {
-                        let wake_writer = Self::should_wake_writer(&state);
+                        let force_reader_batch = state.consecutive_writers_served
+                            >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH
+                            && !state.reader_waiters.is_empty();
+
+                        let wake_writer = !force_reader_batch && Self::should_wake_writer(&state);
                         if wake_writer {
                             let waker = Self::pop_writer_waiter(&mut state);
                             if waker.is_some() {
                                 state.writer_active = true;
+                                if !state.reader_waiters.is_empty() {
+                                    state.consecutive_writers_served =
+                                        state.consecutive_writers_served.saturating_add(1);
+                                } else {
+                                    state.consecutive_writers_served = 0;
+                                }
                             }
                             (waker, SmallVec::<[Waker; 4]>::new())
+                        } else if force_reader_batch {
+                            let wakers = Self::take_forced_reader_turn(&mut state);
+                            state.readers += wakers.len();
+                            state.consecutive_writers_served = 0;
+                            (None, wakers)
                         } else {
                             let wakers = Self::take_eligible_reader_waiters(&mut state);
                             state.readers += wakers.len();
+                            if !wakers.is_empty() {
+                                state.consecutive_writers_served = 0;
+                            }
                             (None, wakers)
                         }
                     }
@@ -983,11 +996,12 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
     /// assert_eq!(*read_guard, 42);
     /// ```
     pub fn downgrade(self) -> RwLockReadGuard<'a, T> {
-        let read_guard = RwLockReadGuard { lock: self.lock };
+        let md = std::mem::ManuallyDrop::new(self);
+        let read_guard = RwLockReadGuard { lock: md.lock };
 
         // Atomically transition from writer to reader
         let reader_wakers = {
-            let mut state = self.lock.state.lock();
+            let mut state = md.lock.state.lock();
 
             // Atomic transition: writer_active -> reader
             debug_assert!(state.writer_active, "downgrade called but no active writer");
@@ -1010,9 +1024,6 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
         for waker in reader_wakers {
             waker.wake();
         }
-
-        // Prevent the Drop impl from running since we've manually handled the transition
-        std::mem::forget(self);
 
         read_guard
     }
@@ -1166,13 +1177,14 @@ impl<T> OwnedRwLockWriteGuard<T> {
     /// read_guard.with_read(|data| assert_eq!(*data, 42));
     /// ```
     pub fn downgrade(self) -> OwnedRwLockReadGuard<T> {
-        let read_guard = OwnedRwLockReadGuard {
-            lock: Arc::clone(&self.lock),
-        };
+        let md = std::mem::ManuallyDrop::new(self);
+        let lock = unsafe { std::ptr::read(&md.lock) };
+
+        let read_guard = OwnedRwLockReadGuard { lock };
 
         // Atomically transition from writer to reader
         let reader_wakers = {
-            let mut state = self.lock.state.lock();
+            let mut state = read_guard.lock.state.lock();
 
             // Atomic transition: writer_active -> reader
             debug_assert!(state.writer_active, "downgrade called but no active writer");
@@ -1195,9 +1207,6 @@ impl<T> OwnedRwLockWriteGuard<T> {
         for waker in reader_wakers {
             waker.wake();
         }
-
-        // Prevent the Drop impl from running since we've manually handled the transition
-        std::mem::forget(self);
 
         read_guard
     }
