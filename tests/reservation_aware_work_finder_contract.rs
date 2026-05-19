@@ -388,6 +388,49 @@ fn pathless_epic_without_snapshot_uses_default_fallback_catalog() {
 }
 
 #[test]
+fn completed_default_fallback_is_skipped_for_next_safe_candidate() {
+    let receipt = finder_json("epic_queue_completed_overlap.json");
+    let epic = candidate(&receipt, "asupersync-vjc3pv");
+    let completed = candidate(
+        &receipt,
+        "testing-conformance-harnesses:session-handoff-receipt",
+    );
+    let blockers = completed["blockers"].as_array().expect("blockers");
+    let completion_blocker = blockers
+        .iter()
+        .find(|row| row["kind"].as_str() == Some("fallback-already-completed"))
+        .expect("completed-work blocker");
+
+    assert_eq!(epic["status"].as_str(), Some("blocked"));
+    assert_eq!(
+        epic["blockers"][0]["kind"].as_str(),
+        Some("non-shippable-epic")
+    );
+    assert_eq!(completed["status"].as_str(), Some("blocked"));
+    assert_eq!(
+        completion_blocker["closed_issue_id"].as_str(),
+        Some("asupersync-c8thc8.11")
+    );
+    assert_eq!(
+        completion_blocker["reason"].as_str(),
+        Some("fallback candidate overlaps previously closed Beads work")
+    );
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("testing-golden-artifacts:proof-receipt-inventory")
+    );
+    assert_eq!(
+        receipt["recommendation"]["category"].as_str(),
+        Some("run-fallback-lane")
+    );
+    assert_eq!(
+        receipt["safety"]["beads_mutated"].as_bool(),
+        Some(false),
+        "overlap detection must remain report-only"
+    );
+}
+
+#[test]
 fn unapproved_fallback_lane_is_blocked_by_policy() {
     let receipt = finder_json("unapproved_lane.json");
     let custom_scan = candidate(&receipt, "custom-scan:src");

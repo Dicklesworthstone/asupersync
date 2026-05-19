@@ -22,13 +22,19 @@
   "chosen_next_lane": {
     "candidate_id": "testing-golden-artifacts:source-only-handoff",
     "category": "run-fallback-lane",
+    "files_to_reserve": [
+      "scripts/reservation_aware_work_finder.py",
+      "tests/fixtures/reservation_aware_work_finder/disk_pressure_autopilot_e2e.json"
+    ],
     "lane": "testing-golden-artifacts",
     "paths": [
       "scripts/reservation_aware_work_finder.py",
       "tests/fixtures/reservation_aware_work_finder/disk_pressure_autopilot_e2e.json"
     ],
     "reason": "first unblocked candidate by kind and priority",
-    "title": "Materialize disk-pressure autopilot handoff golden"
+    "safety_reason": "no active peer reservation or dirty path blocks the candidate; no tracker mutation required",
+    "title": "Materialize disk-pressure autopilot handoff golden",
+    "validation_class": "source-only"
   },
   "cleanup_candidates": [
     {

@@ -42,6 +42,11 @@ DEFAULT_FALLBACK_CANDIDATES = [
             "python3 -m py_compile scripts/session_handoff_receipt.py",
             "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_session_handoff cargo test -p asupersync --test session_handoff_receipt_contract",
         ],
+        "completion_aliases": [
+            "asupersync-c8thc8.11",
+            "harden session handoff receipt contracts",
+            "session handoff receipt contracts",
+        ],
     },
     {
         "candidate_id": "testing-golden-artifacts:proof-receipt-inventory",
@@ -303,6 +308,9 @@ def fallback_candidates(source: dict[str, Any]) -> list[dict[str, Any]]:
         if not lane:
             continue
         candidate_id = str(row.get("candidate_id") or row.get("id") or f"{lane}:{index + 1}")
+        raw_aliases = row.get("completion_aliases", [])
+        if not isinstance(raw_aliases, list):
+            raw_aliases = []
         candidates.append(
             {
                 "kind": "fallback-lane",
@@ -320,6 +328,11 @@ def fallback_candidates(source: dict[str, Any]) -> list[dict[str, Any]]:
                     str(command)
                     for command in row.get("proof_commands", [])
                     if isinstance(command, str) and command
+                ],
+                "completion_aliases": [
+                    str(alias)
+                    for alias in raw_aliases
+                    if isinstance(alias, str) and alias.strip()
                 ],
             }
         )
@@ -544,6 +557,75 @@ def proof_commands_require_rch_heavy_work(candidate: dict[str, Any]) -> bool:
     return any(command_mentions_cargo(str(command)) for command in candidate.get("proof_commands", []))
 
 
+def completed_issues(source: dict[str, Any]) -> list[dict[str, Any]]:
+    beads = source.get("beads", {}) if isinstance(source, dict) else {}
+    rows = []
+    rows.extend(issue_rows(beads.get("closed", [])))
+    rows.extend(issue_rows(beads.get("completed", [])))
+    rows.extend(rows_from(beads, ("closed_issues", "completed_issues")))
+    for row in rows_from(beads, ("issues",)):
+        if str(row.get("status") or "") == "closed":
+            rows.append(row)
+
+    seen: set[str] = set()
+    unique = []
+    for row in rows:
+        issue_id = str(row.get("id") or "")
+        if issue_id and issue_id not in seen:
+            seen.add(issue_id)
+            unique.append(row)
+    return unique
+
+
+def normalized_search_text(*values: Any) -> str:
+    text = " ".join(str(value or "") for value in values)
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+
+
+def issue_search_text(issue: dict[str, Any]) -> str:
+    return normalized_search_text(
+        issue.get("id"),
+        issue.get("title"),
+        issue.get("description"),
+        issue.get("close_reason"),
+        " ".join(str(label) for label in issue.get("labels", []) if isinstance(label, str)),
+    )
+
+
+def completed_work_blockers(
+    candidate: dict[str, Any],
+    completed: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    if candidate["kind"] != "fallback-lane":
+        return []
+    aliases = [
+        normalized_search_text(alias)
+        for alias in candidate.get("completion_aliases", [])
+        if normalized_search_text(alias)
+    ]
+    if not aliases:
+        return []
+
+    blockers = []
+    for issue in completed:
+        issue_id = str(issue.get("id") or "")
+        haystack = issue_search_text(issue)
+        matched_alias = next((alias for alias in aliases if alias and alias in haystack), "")
+        if not matched_alias:
+            continue
+        blockers.append(
+            {
+                "kind": "fallback-already-completed",
+                "closed_issue_id": issue_id,
+                "closed_issue_title": str(issue.get("title") or issue_id),
+                "matched_alias": matched_alias,
+                "reason": "fallback candidate overlaps previously closed Beads work",
+            }
+        )
+        break
+    return blockers
+
+
 def candidate_has_no_build_validation(candidate: dict[str, Any]) -> bool:
     if not candidate.get("no_build_validation"):
         return False
@@ -614,6 +696,7 @@ def classify_candidate(
     candidate: dict[str, Any],
     reservations: list[dict[str, Any]],
     dirty: list[dict[str, Any]],
+    completed: list[dict[str, Any]],
     agent: str,
     disk_pressure: dict[str, Any],
     tracker_lock: dict[str, Any],
@@ -621,6 +704,7 @@ def classify_candidate(
     paths = candidate["paths"]
     blockers = []
     blockers.extend(lane_blockers(candidate))
+    blockers.extend(completed_work_blockers(candidate, completed))
     blockers.extend(proof_command_blockers(candidate))
     blockers.extend(disk_pressure_blockers(candidate, disk_pressure))
     blockers.extend(bead_blockers(candidate))
@@ -1051,6 +1135,25 @@ def status_paths(status: str, path: str) -> list[str]:
     return [normalize_path(path)]
 
 
+def closed_issues_from_jsonl(repo_path: Path) -> list[dict[str, Any]]:
+    path = repo_path / ".beads" / "issues.jsonl"
+    if not path.exists():
+        return []
+    rows = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict) and str(row.get("status") or "") == "closed":
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
 def live_probe(
     repo_path: Path,
     timeout: float,
@@ -1063,6 +1166,7 @@ def live_probe(
     return {
         "beads": {
             "ready": ready if ready_status == "ok" and isinstance(ready, list) else [],
+            "closed": closed_issues_from_jsonl(repo_path),
             "status": ready_status,
         },
         "agent_mail": {
@@ -1089,12 +1193,13 @@ def build_receipt(
 ) -> dict[str, Any]:
     reservations = reservation_rows(source, generated_at)
     dirty = dirty_entries(source)
+    completed = completed_issues(source)
     disk_pressure = disk_pressure_from_source(source)
     tracker_lock = tracker_lock_from(reservations, agent)
     stale_in_progress = stale_in_progress_reports(source, generated_at)
     candidates = ready_candidates(source) + fallback_candidates(source)
     classified = [
-        classify_candidate(candidate, reservations, dirty, agent, disk_pressure, tracker_lock)
+        classify_candidate(candidate, reservations, dirty, completed, agent, disk_pressure, tracker_lock)
         for candidate in sorted(candidates, key=candidate_sort_key)
     ]
     disk_pressure["non_build_fallback_candidates"] = disk_pressure_non_build_candidates(classified)

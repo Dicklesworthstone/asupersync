@@ -1,0 +1,32 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": []
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": [
+      {
+        "id": "asupersync-vjc3pv",
+        "title": "[idea-wizard] Swarm control plane v3 closed-loop resource autopilot",
+        "issue_type": "epic",
+        "priority": 1
+      }
+    ],
+    "closed": [
+      {
+        "id": "asupersync-c8thc8.11",
+        "title": "[testing-conformance] Harden session handoff receipt contracts",
+        "description": "The prior swarm-control wave already hardened session handoff receipt contracts.",
+        "status": "closed",
+        "priority": 2,
+        "issue_type": "task",
+        "close_reason": "Completed session handoff receipt contract hardening with deterministic fixtures."
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  }
+}
