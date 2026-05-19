@@ -240,28 +240,32 @@ impl SchedulerAutotuner {
 
         // High ready dispatch suggests reducing handoff frequency for better batching
         if obs.ready_dispatch_ratio_bps > 7000 {
-            let new_limit = current.saturating_mul(2).min(64);
-            return Some((
-                new_limit,
-                format!(
-                    "Increase limit for ready batching: {}bps",
-                    obs.ready_dispatch_ratio_bps
-                ),
-                65,
-            ));
+            let new_limit = current.saturating_mul(2).max(1).min(64);
+            if new_limit != current {
+                return Some((
+                    new_limit,
+                    format!(
+                        "Increase limit for ready batching: {}bps",
+                        obs.ready_dispatch_ratio_bps
+                    ),
+                    65,
+                ));
+            }
         }
 
         // High cancel ratio suggests more frequent handoffs for responsiveness
         if obs.cancel_dispatch_ratio_bps > 2000 && current > 2 {
             let new_limit = (current / 2).max(1);
-            return Some((
-                new_limit,
-                format!(
-                    "Decrease limit for cancel responsiveness: {}bps",
-                    obs.cancel_dispatch_ratio_bps
-                ),
-                75,
-            ));
+            if new_limit != current {
+                return Some((
+                    new_limit,
+                    format!(
+                        "Decrease limit for cancel responsiveness: {}bps",
+                        obs.cancel_dispatch_ratio_bps
+                    ),
+                    75,
+                ));
+            }
         }
 
         None
@@ -384,10 +388,10 @@ fn ratio_bps(numerator: u64, denominator: u64) -> u16 {
     if denominator == 0 {
         return 0;
     }
-    let raw = numerator
+    let raw = (u128::from(numerator)
         .saturating_mul(10_000)
-        .saturating_div(denominator)
-        .min(10_000);
+        .saturating_div(u128::from(denominator)))
+    .min(10_000);
     raw as u16
 }
 
