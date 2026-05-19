@@ -7,7 +7,7 @@
 //! on metamorphic relations that must hold regardless of specific inputs
 //! or operation ordering.
 
-use asupersync::channel::session::{TrackedOneshotSender, TrackedSender, tracked_channel};
+use asupersync::channel::session::{TrackedOneshotPermit, TrackedOneshotSender, TrackedSender, tracked_channel};
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
 use asupersync::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
@@ -64,6 +64,7 @@ struct SessionState {
     mpsc_channels: HashMap<u8, (TrackedSender<i32>, mpsc::Receiver<i32>)>,
     oneshot_senders: HashMap<u8, TrackedOneshotSender<i32>>,
     oneshot_receivers: HashMap<u8, oneshot::Receiver<i32>>,
+    oneshot_permits: HashMap<u8, TrackedOneshotPermit<i32>>,
     committed_proofs: Vec<CommittedProof<SendPermit>>,
     aborted_proofs: Vec<AbortedProof<SendPermit>>,
     operations_performed: Vec<SessionOperation>,
@@ -77,6 +78,7 @@ impl SessionState {
             mpsc_channels: HashMap::new(),
             oneshot_senders: HashMap::new(),
             oneshot_receivers: HashMap::new(),
+            oneshot_permits: HashMap::new(),
             committed_proofs: Vec::new(),
             aborted_proofs: Vec::new(),
             operations_performed: Vec::new(),
@@ -162,23 +164,30 @@ fn mr_obligation_conservation() {
                             }
                         }
                     },
-                    SessionOperation::ReserveOneshot { channel_id }
-                    | SessionOperation::AbortOneshot {
-                        permit_id: channel_id,
-                    } => {
+                    SessionOperation::ReserveOneshot { channel_id } => {
                         if let Some(sender) = state.oneshot_senders.remove(channel_id) {
                             let permit = sender.reserve(&cx).expect("test cx is not cancelled");
+                            state.oneshot_permits.insert(*channel_id, permit);
                             permits_reserved += 1;
+                        }
+                    },
+                    SessionOperation::AbortOneshot { permit_id } => {
+                        if let Some(permit) = state.oneshot_permits.remove(permit_id) {
                             let _proof = permit.abort();
                             proofs_generated += 1;
                         }
                     },
-                    SessionOperation::SendOneshot { permit_id, value }
-                    | SessionOperation::DirectSendOneshot {
-                        channel_id: permit_id,
-                        value,
-                    } => {
-                        if let Some(sender) = state.oneshot_senders.remove(permit_id) {
+                    SessionOperation::SendOneshot { permit_id, value } => {
+                        if let Some(permit) = state.oneshot_permits.remove(permit_id) {
+                            prop_assert!(
+                                permit.send(*value).is_ok(),
+                                "tracked oneshot with live receiver should commit successfully"
+                            );
+                            proofs_generated += 1;
+                        }
+                    },
+                    SessionOperation::DirectSendOneshot { channel_id, value } => {
+                        if let Some(sender) = state.oneshot_senders.remove(channel_id) {
                             permits_reserved += 1;
                             prop_assert!(
                                 sender.send(&cx, *value).is_ok(),
@@ -188,6 +197,11 @@ fn mr_obligation_conservation() {
                         }
                     },
                 }
+            }
+
+            for (_, permit) in state.oneshot_permits.drain() {
+                let _proof = permit.abort();
+                proofs_generated += 1;
             }
 
             prop_assert_eq!(
