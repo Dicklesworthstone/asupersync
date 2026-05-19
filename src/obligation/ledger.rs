@@ -669,8 +669,8 @@ impl ObligationLedger {
     /// so the drain loop can continue without unwinding the worker.
     ///
     /// Contract:
-    ///   * Returns `Ok(0)` if the owning region is finalized (same
-    ///     fail-closed behavior as `abort_by_id`).
+    ///   * Returns `Err(LedgerError::RegionFinalized)` if the owning region
+    ///     is finalized (matching `try_abort`).
     ///   * Returns `Err(LedgerError::NotFound)` if the obligation was
     ///     never in the ledger.
     ///   * Returns `Err(LedgerError::AlreadyResolved)` if the obligation
@@ -681,9 +681,8 @@ impl ObligationLedger {
     ///
     /// Stats accounting matches `abort_by_id` exactly:
     /// `total_aborted += 1` and `pending -= 1` only on the successful
-    /// transition path. The two error paths and the finalized-region
-    /// fast-return touch neither counter, so the ledger's
-    /// `LedgerStats::is_clean()` invariant is preserved across racy
+    /// transition path. The three error paths touch neither counter, so the
+    /// ledger's `LedgerStats::is_clean()` invariant is preserved across racy
     /// callers.
     pub fn try_abort_by_id(
         &mut self,
@@ -697,7 +696,10 @@ impl ObligationLedger {
         };
         let (state, region) = record_state_and_region;
         if self.finalized_regions.contains(&region) {
-            return Ok(0);
+            return Err(LedgerError::RegionFinalized {
+                region,
+                obligation: id,
+            });
         }
         if state != ObligationState::Reserved {
             return Err(LedgerError::AlreadyResolved {
