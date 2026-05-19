@@ -1056,9 +1056,11 @@ def issue_owner(issue: dict[str, Any]) -> str:
 def stale_in_progress_reports(
     source: dict[str, Any],
     generated_at: str,
+    active_agent_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     now = parse_timestamp(generated_at) or dt.datetime.now(dt.timezone.utc)
     threshold = stale_after_minutes_from(source)
+    active_agent_names = active_agent_names or set()
     reports = []
     for issue in in_progress_issues(source):
         updated_at = parse_timestamp(
@@ -1070,16 +1072,23 @@ def stale_in_progress_reports(
         if age_minutes < threshold:
             continue
         issue_id = str(issue.get("id") or "")
+        owner = issue_owner(issue)
+        owner_active = owner in active_agent_names
         reports.append(
             {
                 "id": issue_id,
                 "title": str(issue.get("title") or issue_id),
-                "owner": issue_owner(issue),
+                "owner": owner,
+                "owner_active": owner_active,
                 "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
                 "age_minutes": age_minutes,
                 "threshold_minutes": threshold,
                 "status": "stale-report-only",
-                "recommended_action": "coordinate-before-reopen-or-force-release",
+                "recommended_action": (
+                    "message-active-owner-before-reopen"
+                    if owner_active
+                    else "coordinate-before-reopen-or-force-release"
+                ),
                 "requires_explicit_action": True,
                 "force_release_performed": False,
                 "reopen_performed": False,
@@ -1363,7 +1372,8 @@ def build_receipt(
     completed = completed_issues(source)
     disk_pressure = disk_pressure_from_source(source)
     tracker_lock = tracker_lock_from(reservations, agent)
-    stale_in_progress = stale_in_progress_reports(source, generated_at)
+    active_agent_names = {row["name"] for row in active_agent_reports(source, generated_at)}
+    stale_in_progress = stale_in_progress_reports(source, generated_at, active_agent_names)
     candidates = ready_candidates(source) + fallback_candidates(source)
     classified = [
         classify_candidate(candidate, reservations, dirty, completed, agent, disk_pressure, tracker_lock)
