@@ -312,35 +312,18 @@ impl VirtualTimerWheel {
     /// are preserved as a special case (when stale entries dominate, the
     /// rebuild is the same operation).
     fn cleanup_cancelled(&mut self) {
-        self.cleanup_cancelled_incremental(512);
-    }
-
-    /// Incremental cleanup of cancelled timers with O(k) complexity.
-    ///
-    /// Instead of creating O(n log n) BTreeSet from entire heap, this uses
-    /// heap.retain() to remove cancelled timers in O(k) time where k is
-    /// the cleanup batch size.
-    fn cleanup_cancelled_incremental(&mut self, max_cleanup: usize) {
         if self.cancelled.is_empty() {
             return;
         }
 
-        let mut cleaned_ids = Vec::with_capacity(max_cleanup.min(self.cancelled.len()));
-
-        // Use heap.retain() for O(k) cleanup instead of O(n log n) BTreeSet
-        self.heap.retain(|timer| {
-            if cleaned_ids.len() < max_cleanup && self.cancelled.contains(&timer.timer_id) {
-                cleaned_ids.push(timer.timer_id);
-                false // Remove this cancelled timer from heap
-            } else {
-                true // Keep this timer
-            }
-        });
-
-        // Remove cleaned timer IDs from cancelled set
-        for timer_id in cleaned_ids {
-            self.cancelled.remove(&timer_id);
-        }
+        // heap.retain() does a full O(N) scan of the underlying vector and rebuilds the heap.
+        // There is no benefit to doing this "incrementally", so we remove all cancelled
+        // timers in one pass. By doing so, we guarantee there are no cancelled timers
+        // left in the heap, which means we can safely clear the entire `cancelled` set
+        // (including any stale IDs from timers that were already popped).
+        self.heap
+            .retain(|timer| !self.cancelled.contains(&timer.timer_id));
+        self.cancelled.clear();
     }
 
     /// Returns wakers for all expired timers without removing them from tracking.
@@ -1056,10 +1039,10 @@ mod tests {
 
             // Measure cleanup performance
             let start = Instant::now();
-            wheel.cleanup_cancelled_incremental(512); // Direct call with batch size
+            wheel.cleanup_cancelled(); // Direct call
             let duration = start.elapsed();
 
-            eprintln!("O(k) Incremental Cleanup:");
+            eprintln!("O(n) retain Cleanup:");
             eprintln!("  Duration: {:?}", duration);
             eprintln!("  Cancelled before: {}", original_len);
             eprintln!("  Cancelled after: {}", wheel.cancelled.len());
