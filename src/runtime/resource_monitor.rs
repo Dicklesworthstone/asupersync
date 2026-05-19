@@ -2752,13 +2752,14 @@ mod platform {
     ))]
     #[allow(unsafe_code)]
     pub fn process_rss_bytes() -> std::io::Result<u64> {
-        // SAFETY: `getrusage(RUSAGE_SELF, &mut usage)` writes into a
-        // zeroed `rusage` we own; the libc call is well-defined.
-        let mut usage: libc::rusage = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        // SAFETY: `getrusage(RUSAGE_SELF, ...)` writes into the provided pointer.
+        // We use MaybeUninit and as_mut_ptr() to safely pass uninitialized memory.
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
         if rc == -1 {
             return Err(std::io::Error::last_os_error());
         }
+        let usage = unsafe { usage.assume_init() };
         // ru_maxrss: bytes on macOS, kilobytes on BSDs (per their man pages).
         let raw = usage.ru_maxrss as u64;
         #[cfg(target_os = "macos")]
@@ -2919,29 +2920,30 @@ mod platform {
     // ----- Cross-platform helpers (Unix / fallback) -------------------------
 
     #[cfg(unix)]
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code, clippy::unnecessary_cast)]
     pub fn fd_rlimit() -> std::io::Result<(u64, u64)> {
-        // SAFETY: `getrlimit(RLIMIT_NOFILE, &mut rlim)` writes into a
-        // zeroed `rlimit` we own.
-        let mut rlim: libc::rlimit = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+        // SAFETY: `getrlimit(RLIMIT_NOFILE, ...)` writes into the provided pointer.
+        let mut rlim = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) };
         if rc == -1 {
             return Err(std::io::Error::last_os_error());
         }
+        let rlim = unsafe { rlim.assume_init() };
         let cur = rlim.rlim_cur as u64;
         let max = rlim.rlim_max as u64;
         Ok((cur, max))
     }
 
     #[cfg(unix)]
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code, clippy::unnecessary_cast)]
     pub fn address_space_rlimit() -> std::io::Result<(u64, u64)> {
         // SAFETY: same shape as `fd_rlimit`.
-        let mut rlim: libc::rlimit = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-        let rc = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut rlim) };
+        let mut rlim = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_AS, rlim.as_mut_ptr()) };
         if rc == -1 {
             return Err(std::io::Error::last_os_error());
         }
+        let rlim = unsafe { rlim.assume_init() };
         // Treat RLIM_INFINITY as `u64::MAX` so the caller can detect
         // "no ceiling" without depending on platform-specific
         // sentinel values.
