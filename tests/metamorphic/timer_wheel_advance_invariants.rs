@@ -38,18 +38,6 @@ fn test_waker(_id: usize) -> (Waker, Arc<AtomicUsize>) {
     (waker, counter)
 }
 
-#[derive(Debug, Clone)]
-struct TimerOp {
-    op_type: OpType,
-    deadline: u64,
-    waker_id: usize,
-}
-
-#[derive(Debug, Clone)]
-enum OpType {
-    Insert,
-    Cancel(u64), // timer_id to cancel
-}
 
 /// Extract comparable state from expired timers for assertions.
 fn expired_signatures(expired: &[ExpiredTimer]) -> Vec<(u64, u64)> {
@@ -132,8 +120,8 @@ fn mr2_advancement_decomposition() {
         // Sort both for comparison (order within same operation may vary)
         let mut sig1 = expired_signatures(&expired_combined);
         let mut sig2 = expired_signatures(&expired_decomposed);
-        sig1.sort();
-        sig2.sort();
+        sig1.sort_unstable();
+        sig2.sort_unstable();
 
         prop_assert_eq!(sig1, sig2,
             "Advancement decomposition violated: advance_by({}) != advance_by({}) + advance_by({})",
@@ -305,7 +293,7 @@ fn mr6_idempotent_advance() {
 fn mr7_cancelled_timer_invisibility() {
     proptest!(|(
         timers in prop::collection::vec((100u64..300, 0usize..5), 2..10),
-        cancel_indices in prop::collection::btree_set(any::<prop::sample::Index>(), 1..3),
+        cancel_indices in prop::collection::vec(any::<prop::sample::Index>(), 1..3),
         advance_tick in 400u64..500
     )| {
         let mut wheel = VirtualTimerWheel::new();
@@ -320,8 +308,11 @@ fn mr7_cancelled_timer_invisibility() {
 
         // Cancel some timers
         let mut cancelled_ids = BTreeSet::new();
+        let mut cancelled_indices = BTreeSet::new();
         for idx in cancel_indices {
-            let handle_idx = idx.index(handles.len());
+            cancelled_indices.insert(idx.index(handles.len()));
+        }
+        for handle_idx in cancelled_indices {
             let handle = handles[handle_idx];
             cancelled_ids.insert(handle.timer_id());
             wheel.cancel(handle);
@@ -373,14 +364,14 @@ fn mr8_composite_path_ordering() {
         // Both should have same signatures when sorted
         let mut sig1 = expired_signatures(&expired1);
         let mut sig2 = expired_signatures(&expired2);
-        sig1.sort();
-        sig2.sort();
+        sig1.sort_unstable();
+        sig2.sort_unstable();
 
-        prop_assert_eq!(sig1, sig2,
+        prop_assert_eq!(&sig1, &sig2,
             "Composite path+ordering violated: direct advance != incremental advance");
 
         // Within each deadline group, timer IDs should be ascending in both
-        for sig in [&sig1, &sig2] {
+        for sig in [&sig1.clone(), &sig2.clone()] {
             let mut deadline_groups: HashMap<u64, Vec<u64>> = HashMap::new();
             for (deadline, timer_id) in sig {
                 deadline_groups.entry(*deadline).or_default().push(*timer_id);
