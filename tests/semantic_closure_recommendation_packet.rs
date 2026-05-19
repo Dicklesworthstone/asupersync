@@ -115,14 +115,25 @@ fn packet_includes_reproducible_commands_with_rch_for_cargo() {
         "packet must include lean rerun command"
     );
     let rch_cargo_commands = [
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test algebraic_laws",
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus",
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_log_schema_validation",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test algebraic_laws",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_log_schema_validation",
     ];
     for command in rch_cargo_commands {
         assert!(
             packet.contains(command),
-            "packet must include target-dir-qualified rch cargo command: {command}"
+            "packet must include remote-required target-dir-qualified rch cargo command: {command}"
+        );
+    }
+    let local_fallback_rch_commands = [
+        "\nrch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test algebraic_laws",
+        "\nrch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus",
+        "\nrch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_log_schema_validation",
+    ];
+    for command in local_fallback_rch_commands {
+        assert!(
+            !packet.contains(command),
+            "packet must not publish rch cargo commands without RCH_REQUIRE_REMOTE=1: {command}"
         );
     }
     let stale_cargo_command = concat!("rch exec -- ", "cargo test");
