@@ -343,7 +343,10 @@ impl<T> Arena<T> {
                         continue;
                     }
 
-                    if let Slot::Vacant { next_free, .. } = &mut self.arena.slots[i] {
+                    if let Slot::Vacant { next_free, generation } = &mut self.arena.slots[i] {
+                        if *generation == 0 {
+                            continue;
+                        }
                         *next_free = None;
                     }
 
@@ -385,14 +388,36 @@ impl<T> Arena<T> {
                 continue;
             }
 
+            let mut skip_link = false;
             if let Slot::Occupied { generation, .. } = &guard.arena.slots[i] {
-                let generation_value = *generation;
+                let cur_gen = *generation;
+                let retire_slot = cur_gen == u32::MAX;
+                if retire_slot {
+                    debug_assert!(
+                        false,
+                        "ArenaIndex generation wrap detected at slot {} \
+                         (br-asupersync-rvz1tq)",
+                        i
+                    );
+                }
                 guard.arena.slots[i] = Slot::Vacant {
                     next_free: None,
-                    generation: generation_value.wrapping_add(1),
+                    generation: cur_gen.wrapping_add(1),
                 };
-            } else if let Slot::Vacant { next_free, .. } = &mut guard.arena.slots[i] {
-                *next_free = None;
+                if retire_slot {
+                    skip_link = true;
+                }
+            } else if let Slot::Vacant { next_free, generation } = &mut guard.arena.slots[i] {
+                if *generation == 0 {
+                    skip_link = true;
+                } else {
+                    *next_free = None;
+                }
+            }
+
+            if skip_link {
+                guard.current_index += 1;
+                continue;
             }
 
             if let Some(prev) = guard.prev_free {
@@ -497,15 +522,27 @@ impl<T> Iterator for DrainValues<'_, T> {
             self.pos += 1;
 
             if let Slot::Occupied { generation, .. } = &self.arena.slots[i] {
-                let generation_value = *generation;
+                let cur_gen = *generation;
+                let retire_slot = cur_gen == u32::MAX;
+                if retire_slot {
+                    debug_assert!(
+                        false,
+                        "ArenaIndex generation wrap detected at slot {} \
+                         (br-asupersync-rvz1tq)",
+                        i
+                    );
+                }
+                let new_gen = cur_gen.wrapping_add(1);
                 let old = core::mem::replace(
                     &mut self.arena.slots[i],
                     Slot::Vacant {
-                        next_free: self.arena.free_head,
-                        generation: generation_value.wrapping_add(1),
+                        next_free: if retire_slot { None } else { self.arena.free_head },
+                        generation: new_gen,
                     },
                 );
-                self.arena.free_head = Some(i as u32);
+                if !retire_slot {
+                    self.arena.free_head = Some(i as u32);
+                }
                 self.arena.len -= 1;
                 if let Slot::Occupied { value, .. } = old {
                     return Some(value);
