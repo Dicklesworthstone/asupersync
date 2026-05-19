@@ -1,0 +1,42 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Closed and pushed `asupersync-missing-remote-required` at `feedface0`. Validation: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_missing_remote cargo test passed. Released reservations.",
+        "from": "GentleCitadel",
+        "id": 1008,
+        "subject": "Closed asupersync-missing-remote-required",
+        "thread_id": "asupersync-missing-remote-required"
+      }
+    ],
+    "reservations": [
+      {
+        "agent": "GentleCitadel",
+        "id": 48,
+        "path": "tests/closeout_verifier_contract.rs",
+        "released_ts": "2026-05-10T08:00:00Z"
+      }
+    ]
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-missing-remote-required",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-missing-remote-required",
+    "commit": "feedface0",
+    "mode": "bead-backed",
+    "slice_id": "asupersync-missing-remote-required",
+    "thread_id": "asupersync-missing-remote-required"
+  },
+  "git": {
+    "main_head": "feedface0",
+    "origin_main": "feedface0",
+    "origin_master": "feedface0"
+  }
+}

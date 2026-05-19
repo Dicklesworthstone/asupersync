@@ -2,7 +2,7 @@
   "agent_mail": {
     "messages": [
       {
-        "body_md": "Closed and pushed `asupersync-open-reservation` at `def4567abc`. Validation: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_reservation cargo test passed.",
+        "body_md": "Closed and pushed `asupersync-open-reservation` at `def4567abc`. Validation: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_reservation cargo test passed.",
         "from": "GentleCitadel",
         "id": 1002,
         "subject": "Closed asupersync-open-reservation",

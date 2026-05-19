@@ -245,6 +245,41 @@ fn bare_cargo_validation_matches_full_output_golden() {
 }
 
 #[test]
+fn missing_remote_required_validation_fails_validation_row() {
+    let report = report("missing_remote_required_validation.json");
+    let validation = row(&report, "validation_reported");
+
+    assert_eq!(report["overall_status"].as_str(), Some("fail"));
+    assert_eq!(validation["status"].as_str(), Some("fail"));
+    assert!(
+        validation["summary"]
+            .as_str()
+            .expect("validation summary")
+            .contains("RCH_REQUIRE_REMOTE=1")
+    );
+    assert_eq!(
+        validation["evidence"]["missing_remote_required_cargo_segments"][0].as_str(),
+        Some(
+            "Validation: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_missing_remote cargo test passed. Released reservations."
+        )
+    );
+    assert!(
+        validation["remediation"]
+            .as_str()
+            .expect("validation remediation")
+            .contains("RCH_REQUIRE_REMOTE=1 rch exec")
+    );
+}
+
+#[test]
+fn missing_remote_required_validation_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "missing_remote_required_validation.json",
+        "missing_remote_required_validation_expected.json",
+    );
+}
+
+#[test]
 fn rch_local_fallback_segments_match_full_marker_set() {
     let probe = r#"
 import json

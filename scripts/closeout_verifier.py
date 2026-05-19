@@ -155,6 +155,19 @@ def rch_local_fallback_segments(text: str) -> list[str]:
     return fallback_segments
 
 
+def missing_remote_required_cargo_segments(text: str) -> list[str]:
+    missing_segments: list[str] = []
+    for segment in command_segments(text):
+        lowered = segment.lower()
+        for match in CARGO_PROOF_COMMAND.finditer(segment):
+            if "rch exec" in lowered[: match.start()] and "rch_require_remote=1" not in lowered:
+                validation_start = lowered.rfind("validation", 0, match.start())
+                reported = segment[validation_start:] if validation_start >= 0 else segment
+                missing_segments.append(reported.strip(" `\t\r"))
+                break
+    return missing_segments
+
+
 def closeout_mode(closeout: dict[str, Any]) -> str:
     mode = text_field(closeout, "mode", "slice_mode")
     return mode or "bead-backed"
@@ -377,10 +390,18 @@ def verify_validation_reported(closeout: dict[str, Any], agent_mail: dict[str, A
         for body in matched_bodies
         for segment in rch_local_fallback_segments(body)
     ]
+    missing_remote_required_segments = [
+        segment
+        for body in matched_bodies
+        for segment in missing_remote_required_cargo_segments(body)
+    ]
     validation_present = explicit is True or mail_mentions_validation
     status = (
         "pass"
-        if validation_present and not bare_cargo_segments and not rch_local_segments
+        if validation_present
+        and not bare_cargo_segments
+        and not rch_local_segments
+        and not missing_remote_required_segments
         else "fail"
     )
     evidence = {
@@ -391,9 +412,17 @@ def verify_validation_reported(closeout: dict[str, Any], agent_mail: dict[str, A
         evidence["bare_cargo_validation_segments"] = bare_cargo_segments
     if rch_local_segments:
         evidence["rch_local_fallback_segments"] = rch_local_segments
+    if missing_remote_required_segments:
+        evidence["missing_remote_required_cargo_segments"] = missing_remote_required_segments
     if rch_local_segments:
         summary = "validation evidence reports rch local fallback"
         remediation = "rerun and report remote rch validation; local fallback is not acceptable proof"
+    elif missing_remote_required_segments:
+        summary = "validation evidence omits RCH_REQUIRE_REMOTE=1 for rch Cargo proof"
+        remediation = (
+            "rerun and report Cargo validation as RCH_REQUIRE_REMOTE=1 rch exec -- "
+            "env CARGO_TARGET_DIR=... cargo ..."
+        )
     elif bare_cargo_segments:
         summary = "validation evidence reports bare Cargo instead of rch exec"
         remediation = "rerun and report Cargo validation through rch exec -- env CARGO_TARGET_DIR=... cargo ..."
