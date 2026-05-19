@@ -231,7 +231,9 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
     verify_final_state(&notify, notify_one_count, &wake_order);
 
     for handle in active_threads {
-        let _ = handle.join();
+        if let Err(panic_payload) = handle.join() {
+            std::panic::resume_unwind(panic_payload);
+        }
     }
 });
 
