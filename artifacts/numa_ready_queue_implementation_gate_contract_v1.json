@@ -1,0 +1,491 @@
+{
+  "schema_version": "numa-ready-queue-implementation-gate-contract-v1",
+  "bead_id": "asupersync-vjc3pv.5",
+  "capability_id": "numa_ready_queue_implementation_gate",
+  "artifact_path": "artifacts/numa_ready_queue_implementation_gate_contract_v1.json",
+  "contract_test": "tests/numa_ready_queue_implementation_gate_contract.rs",
+  "generated_at_utc": "2026-05-19T00:24:00Z",
+  "support_class": "artifact-contract-backed",
+  "gate_scope": {
+    "mode": "fail_closed_before_scheduler_semantics_change",
+    "scheduler_sharding_implementation_allowed": false,
+    "tracker_mutation_allowed": false,
+    "cleanup_allowed": false,
+    "notes": "This artifact is the implementation gate for future NUMA ready-queue sharding. It does not ship a scheduler rewrite and it never authorizes cleanup, local fallback, branches, worktrees, or tracker mutation by itself."
+  },
+  "source_evidence_paths": [
+    "docs/runtime_state_contention_inventory.md",
+    "docs/perf/perf_scenario_definition.md",
+    "benches/scheduler_benchmark.rs",
+    "artifacts/scheduler_global_ready_contention_smoke_contract_v1.json",
+    "tests/numa_arena_locality_contract.rs"
+  ],
+  "required_benchmark_lanes": [
+    "scheduler/global_ready_contention/inject_ready_then_drain/64",
+    "scheduler/three_lane_decision/global_ready_burst/64",
+    "scheduler/three_lane_decision/global_ready_burst/512",
+    "scheduler/three_lane_decision/fast_ready_uncontended",
+    "scheduler/three_lane_decision/fast_ready_local_peek_contended",
+    "scheduler/adaptive_cancel_streak/cancel_ready_mixed/16",
+    "scheduler/adaptive_cancel_streak/ready_stall_depth/8"
+  ],
+  "required_receipt_fields": [
+    "receipt_id",
+    "git_sha",
+    "rch_worker_id",
+    "remote_required",
+    "local_fallback_marker_detected",
+    "host_signature",
+    "logical_cpu_count",
+    "memory_gib",
+    "kernel",
+    "rustc",
+    "cargo",
+    "command_line",
+    "criterion_sample_count",
+    "lanes",
+    "fairness_counters",
+    "cancel_drain_evidence",
+    "evidence_capture_overhead",
+    "first_blocker"
+  ],
+  "required_gate_outputs": [
+    "pass",
+    "reject_missing_baseline",
+    "reject_mixed_host_comparison",
+    "reject_missing_remote_rch_evidence",
+    "reject_local_rch_fallback",
+    "reject_missing_lock_order_proof",
+    "reject_missing_fairness_evidence",
+    "reject_missing_cancel_drain_evidence",
+    "reject_missing_rollback_criteria",
+    "reject_scheduler_semantics_change_without_gate"
+  ],
+  "non_regression_thresholds": {
+    "max_p95_regression_bps": 500,
+    "max_p99_regression_bps": 500,
+    "max_p999_regression_bps": 750,
+    "max_cancel_drain_regression_bps": 500,
+    "max_evidence_capture_overhead_bps": 250,
+    "required_throughput_improvement_bps": 300
+  },
+  "lock_order_proof": {
+    "required_sequence": [
+      "B",
+      "A",
+      "C"
+    ],
+    "required_note_fragments": [
+      "B -> A -> C",
+      "no A -> B acquisition",
+      "no C -> A acquisition",
+      "no C -> B acquisition",
+      "ready queue sharding does not introduce reverse shard edges"
+    ],
+    "source_of_truth": "docs/runtime_state_contention_inventory.md"
+  },
+  "rollback_policy": {
+    "required_fields": [
+      "rollback_trigger",
+      "feature_flag",
+      "disable_command",
+      "owner",
+      "post_rollback_validation"
+    ],
+    "minimum_triggers": [
+      "p99_or_p999_latency_regression",
+      "cancel_ready_fairness_regression",
+      "cancel_drain_regression",
+      "evidence_capture_overhead_regression",
+      "remote_rch_evidence_missing"
+    ]
+  },
+  "validation": {
+    "json_probe": "jq empty artifacts/numa_ready_queue_implementation_gate_contract_v1.json",
+    "format_check": "rustfmt --edition 2024 --check tests/numa_ready_queue_implementation_gate_contract.rs",
+    "remote_required_contract_test": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_boldtower_numa_ready_queue_gate CARGO_INCREMENTAL=0 cargo test -p asupersync --test numa_ready_queue_implementation_gate_contract -- --nocapture",
+    "benchmark_smoke": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_boldtower_numa_gate_bench CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+    "local_fallback_policy": "A local rch fallback marker is a fail-closed gate rejection and cannot count as benchmark or contract evidence."
+  },
+  "forbidden_command_fragments": [
+    "git reset --hard",
+    "git clean -fd",
+    "rm -rf",
+    "git worktree add",
+    "git checkout -b",
+    "git switch -c",
+    "cargo bench -p asupersync --bench scheduler_benchmark",
+    "cargo test -p asupersync --test numa_ready_queue_implementation_gate_contract"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-PASS-SAME-HOST",
+      "description": "A future NUMA ready-queue implementation may proceed only when same-host receipts show real ready-queue improvement without tail, fairness, cancel/drain, or evidence-capture regressions.",
+      "implementation_candidate": {
+        "changes_scheduler_semantics": true,
+        "feature_flag": "numa-ready-queue-shards",
+        "requested_default": "disabled_until_gate_passes"
+      },
+      "before_benchmark_receipt": {
+        "receipt_id": "before-ts2-001",
+        "git_sha": "1111111111111111111111111111111111111111",
+        "rch_worker_id": "ts2",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "host_signature": "ts2-linux-24cpu-96g-6.8",
+        "logical_cpu_count": 24,
+        "memory_gib": 96,
+        "kernel": "6.8.0",
+        "rustc": "rustc 1.91.0-nightly",
+        "cargo": "cargo 1.91.0-nightly",
+        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_gate_before cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+        "criterion_sample_count": 10,
+        "lanes": [
+          {
+            "lane_id": "scheduler/global_ready_contention/inject_ready_then_drain/64",
+            "throughput_ops_per_sec": 1780000,
+            "p95_ns": 35500,
+            "p99_ns": 40100,
+            "p999_ns": 48000
+          },
+          {
+            "lane_id": "scheduler/three_lane_decision/global_ready_burst/64",
+            "throughput_ops_per_sec": 1800000,
+            "p95_ns": 35600,
+            "p99_ns": 40500,
+            "p999_ns": 48600
+          },
+          {
+            "lane_id": "scheduler/three_lane_decision/global_ready_burst/512",
+            "throughput_ops_per_sec": 1620000,
+            "p95_ns": 41100,
+            "p99_ns": 49800,
+            "p999_ns": 62100
+          },
+          {
+            "lane_id": "scheduler/three_lane_decision/fast_ready_uncontended",
+            "throughput_ops_per_sec": 5100000,
+            "p95_ns": 9400,
+            "p99_ns": 11800,
+            "p999_ns": 15100
+          },
+          {
+            "lane_id": "scheduler/three_lane_decision/fast_ready_local_peek_contended",
+            "throughput_ops_per_sec": 2700000,
+            "p95_ns": 21400,
+            "p99_ns": 25100,
+            "p999_ns": 31900
+          },
+          {
+            "lane_id": "scheduler/adaptive_cancel_streak/cancel_ready_mixed/16",
+            "throughput_ops_per_sec": 1400000,
+            "p95_ns": 47200,
+            "p99_ns": 59000,
+            "p999_ns": 77000
+          },
+          {
+            "lane_id": "scheduler/adaptive_cancel_streak/ready_stall_depth/8",
+            "throughput_ops_per_sec": 1300000,
+            "p95_ns": 49200,
+            "p99_ns": 61100,
+            "p999_ns": 79500
+          }
+        ],
+        "fairness_counters": {
+          "fairness_yields": 24,
+          "max_cancel_streak": 16,
+          "ready_stall_depth": 8
+        },
+        "cancel_drain_evidence": {
+          "p99_drain_ns": 61000,
+          "drain_regression_bps": 0
+        },
+        "evidence_capture_overhead": {
+          "overhead_bps": 120,
+          "evidence_enabled": true
+        },
+        "first_blocker": ""
+      },
+      "after_benchmark_receipt": {
+        "receipt_id": "after-ts2-001",
+        "git_sha": "2222222222222222222222222222222222222222",
+        "rch_worker_id": "ts2",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "host_signature": "ts2-linux-24cpu-96g-6.8",
+        "logical_cpu_count": 24,
+        "memory_gib": 96,
+        "kernel": "6.8.0",
+        "rustc": "rustc 1.91.0-nightly",
+        "cargo": "cargo 1.91.0-nightly",
+        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_gate_after cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+        "criterion_sample_count": 10,
+        "lanes": [
+          {
+            "lane_id": "scheduler/global_ready_contention/inject_ready_then_drain/64",
+            "throughput_ops_per_sec": 1860000,
+            "p95_ns": 34900,
+            "p99_ns": 39800,
+            "p999_ns": 47500
+          },
+          {
+            "lane_id": "scheduler/three_lane_decision/global_ready_burst/64",
+            "throughput_ops_per_sec": 1880000,
+            "p95_ns": 35000,
+            "p99_ns": 40100,
+            "p999_ns": 48100
+          },
+          {
+            "lane_id": "scheduler/three_lane_decision/global_ready_burst/512",
+            "throughput_ops_per_sec": 1700000,
+            "p95_ns": 40500,
+            "p99_ns": 49200,
+            "p999_ns": 61500
+          },
+          {
+            "lane_id": "scheduler/three_lane_decision/fast_ready_uncontended",
+            "throughput_ops_per_sec": 5100000,
+            "p95_ns": 9400,
+            "p99_ns": 11800,
+            "p999_ns": 15100
+          },
+          {
+            "lane_id": "scheduler/three_lane_decision/fast_ready_local_peek_contended",
+            "throughput_ops_per_sec": 2760000,
+            "p95_ns": 21100,
+            "p99_ns": 24900,
+            "p999_ns": 31500
+          },
+          {
+            "lane_id": "scheduler/adaptive_cancel_streak/cancel_ready_mixed/16",
+            "throughput_ops_per_sec": 1410000,
+            "p95_ns": 47200,
+            "p99_ns": 59000,
+            "p999_ns": 77000
+          },
+          {
+            "lane_id": "scheduler/adaptive_cancel_streak/ready_stall_depth/8",
+            "throughput_ops_per_sec": 1310000,
+            "p95_ns": 49200,
+            "p99_ns": 61100,
+            "p999_ns": 79500
+          }
+        ],
+        "fairness_counters": {
+          "fairness_yields": 24,
+          "max_cancel_streak": 16,
+          "ready_stall_depth": 8
+        },
+        "cancel_drain_evidence": {
+          "p99_drain_ns": 61000,
+          "drain_regression_bps": 0
+        },
+        "evidence_capture_overhead": {
+          "overhead_bps": 120,
+          "evidence_enabled": true
+        },
+        "first_blocker": ""
+      },
+      "lock_order_proof_notes": [
+        "B -> A -> C shard-lock order remains canonical",
+        "no A -> B acquisition",
+        "no C -> A acquisition",
+        "no C -> B acquisition",
+        "ready queue sharding does not introduce reverse shard edges"
+      ],
+      "rollback_criteria": {
+        "rollback_trigger": "any threshold breach or missing remote proof receipt",
+        "feature_flag": "numa-ready-queue-shards",
+        "disable_command": "set RuntimeBuilder NUMA ready queue policy to disabled",
+        "owner": "scheduler-runtime",
+        "post_rollback_validation": "rerun same-host remote rch scheduler_benchmark smoke and contract test",
+        "triggers": [
+          "p99_or_p999_latency_regression",
+          "cancel_ready_fairness_regression",
+          "cancel_drain_regression",
+          "evidence_capture_overhead_regression",
+          "remote_rch_evidence_missing"
+        ]
+      },
+      "expected_gate_decision": {
+        "decision": "pass",
+        "issue_kind": "",
+        "operator_action": "permit_feature_flagged_implementation_after_gate"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-MISSING-BASELINE",
+      "description": "A scheduler sharding claim without a before receipt is rejected.",
+      "implementation_candidate": {
+        "changes_scheduler_semantics": true,
+        "feature_flag": "numa-ready-queue-shards",
+        "requested_default": "disabled_until_gate_passes"
+      },
+      "after_benchmark_receipt": {
+        "receipt_id": "after-only",
+        "git_sha": "3333333333333333333333333333333333333333",
+        "rch_worker_id": "ts2",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "host_signature": "ts2-linux-24cpu-96g-6.8",
+        "logical_cpu_count": 24,
+        "memory_gib": 96,
+        "kernel": "6.8.0",
+        "rustc": "rustc 1.91.0-nightly",
+        "cargo": "cargo 1.91.0-nightly",
+        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_after_only cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+        "criterion_sample_count": 10,
+        "lanes": [],
+        "fairness_counters": {
+          "fairness_yields": 0,
+          "max_cancel_streak": 0,
+          "ready_stall_depth": 0
+        },
+        "cancel_drain_evidence": {
+          "p99_drain_ns": 0,
+          "drain_regression_bps": 0
+        },
+        "evidence_capture_overhead": {
+          "overhead_bps": 0,
+          "evidence_enabled": true
+        },
+        "first_blocker": ""
+      },
+      "lock_order_proof_notes": [
+        "B -> A -> C",
+        "no A -> B acquisition",
+        "no C -> A acquisition",
+        "no C -> B acquisition",
+        "ready queue sharding does not introduce reverse shard edges"
+      ],
+      "rollback_criteria": {
+        "rollback_trigger": "missing baseline",
+        "feature_flag": "numa-ready-queue-shards",
+        "disable_command": "disable feature flag",
+        "owner": "scheduler-runtime",
+        "post_rollback_validation": "rerun contract",
+        "triggers": [
+          "remote_rch_evidence_missing"
+        ]
+      },
+      "expected_gate_decision": {
+        "decision": "reject_missing_baseline",
+        "issue_kind": "missing_before_receipt",
+        "operator_action": "capture_same_host_before_receipt"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-MIXED-HOST",
+      "description": "Cross-host before/after benchmark comparisons are not release evidence.",
+      "mutate_from_scenario": "ASWARM-NUMA-GATE-PASS-SAME-HOST",
+      "mutations": {
+        "after_benchmark_receipt.host_signature": "ts7-linux-32cpu-128g-6.8",
+        "after_benchmark_receipt.rch_worker_id": "ts7"
+      },
+      "expected_gate_decision": {
+        "decision": "reject_mixed_host_comparison",
+        "issue_kind": "mixed_host_receipts",
+        "operator_action": "rerun_before_after_on_same_worker"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-MISSING-REMOTE-RCH",
+      "description": "Benchmark receipts must prove remote-required rch execution.",
+      "mutate_from_scenario": "ASWARM-NUMA-GATE-PASS-SAME-HOST",
+      "mutations": {
+        "after_benchmark_receipt.remote_required": false
+      },
+      "expected_gate_decision": {
+        "decision": "reject_missing_remote_rch_evidence",
+        "issue_kind": "remote_rch_evidence_missing",
+        "operator_action": "rerun_with_RCH_REQUIRE_REMOTE"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-LOCAL-RCH-FALLBACK",
+      "description": "Local fallback markers are fail-closed even if the benchmark output exists.",
+      "mutate_from_scenario": "ASWARM-NUMA-GATE-PASS-SAME-HOST",
+      "mutations": {
+        "after_benchmark_receipt.local_fallback_marker_detected": true,
+        "after_benchmark_receipt.first_blocker": "[RCH] local (no admissible workers)"
+      },
+      "expected_gate_decision": {
+        "decision": "reject_local_rch_fallback",
+        "issue_kind": "local_rch_fallback",
+        "operator_action": "discard_local_receipt"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-MISSING-LOCK-ORDER",
+      "description": "Scheduler semantics changes must preserve and document B -> A -> C shard order.",
+      "mutate_from_scenario": "ASWARM-NUMA-GATE-PASS-SAME-HOST",
+      "mutations": {
+        "lock_order_proof_notes": [
+          "ready queue sharding reviewed"
+        ]
+      },
+      "expected_gate_decision": {
+        "decision": "reject_missing_lock_order_proof",
+        "issue_kind": "lock_order_proof_missing",
+        "operator_action": "add_B_A_C_lock_order_proof_notes"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-MISSING-FAIRNESS",
+      "description": "Ready-queue wins cannot regress cancel/ready fairness evidence.",
+      "mutate_from_scenario": "ASWARM-NUMA-GATE-PASS-SAME-HOST",
+      "mutations": {
+        "after_benchmark_receipt.fairness_counters.max_cancel_streak": 0,
+        "after_benchmark_receipt.fairness_counters.ready_stall_depth": 0
+      },
+      "expected_gate_decision": {
+        "decision": "reject_missing_fairness_evidence",
+        "issue_kind": "fairness_evidence_missing",
+        "operator_action": "capture_cancel_ready_fairness_receipt"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-MISSING-CANCEL-DRAIN",
+      "description": "Scheduler queue changes must include cancel/drain non-regression evidence.",
+      "mutate_from_scenario": "ASWARM-NUMA-GATE-PASS-SAME-HOST",
+      "mutations": {
+        "after_benchmark_receipt.cancel_drain_evidence.p99_drain_ns": 0
+      },
+      "expected_gate_decision": {
+        "decision": "reject_missing_cancel_drain_evidence",
+        "issue_kind": "cancel_drain_evidence_missing",
+        "operator_action": "capture_cancel_drain_non_regression_receipt"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-MISSING-ROLLBACK",
+      "description": "No scheduler semantics gate may pass without explicit rollback criteria.",
+      "mutate_from_scenario": "ASWARM-NUMA-GATE-PASS-SAME-HOST",
+      "mutations": {
+        "rollback_criteria": {
+          "feature_flag": "numa-ready-queue-shards"
+        }
+      },
+      "expected_gate_decision": {
+        "decision": "reject_missing_rollback_criteria",
+        "issue_kind": "rollback_criteria_missing",
+        "operator_action": "define_feature_flag_disable_and_post_rollback_validation"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-NUMA-GATE-REJECT-SEMANTICS-WITHOUT-GATE",
+      "description": "A candidate that changes scheduler semantics while bypassing this gate is rejected even before performance evidence is interpreted.",
+      "implementation_candidate": {
+        "changes_scheduler_semantics": true,
+        "feature_flag": "",
+        "requested_default": "enabled_without_gate"
+      },
+      "gate_bypassed": true,
+      "expected_gate_decision": {
+        "decision": "reject_scheduler_semantics_change_without_gate",
+        "issue_kind": "scheduler_semantics_gate_bypassed",
+        "operator_action": "route_through_numa_ready_queue_gate_first"
+      }
+    }
+  ]
+}
