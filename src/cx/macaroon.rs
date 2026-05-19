@@ -609,7 +609,7 @@ impl MacaroonKeyRing {
     /// bimodal cost of one-vs-two comparisons.
     #[must_use]
     pub fn verify(&self, candidate: &MacaroonSignature) -> bool {
-        let active_match = self.active == *candidate;
+        let active_match = self.active.constant_time_eq(candidate);
         // br-asupersync-y4fpfl: ALWAYS compare against the retired
         // slot, even when it's None, to keep verify wall-clock time
         // independent of rotation state. The zero-signature sentinel
@@ -3730,7 +3730,7 @@ mod tests {
                 assert_eq!(actual, MAX + 1);
                 assert_eq!(max, MAX);
             }
-            other => panic!("expected PatternTooLarge, got {other:?}"),
+            other => panic!("expected PatternTooLarge, got {other:?}"), // ubs:ignore - test helper
         }
     }
 
