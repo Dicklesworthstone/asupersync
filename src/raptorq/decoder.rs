@@ -2836,7 +2836,7 @@ fn blocked_elimination_sparse(
     gauss_ops: &mut usize,
 ) {
     // Process rows in blocks for better cache locality
-    let block_size = BLOCK_SIZE.min(n_rows);
+    let block_size = BLOCK_SIZE.min(n_rows).max(1);
 
     for row_start in (0..n_rows).step_by(block_size) {
         let row_end = (row_start + block_size).min(n_rows);
@@ -2882,8 +2882,8 @@ fn blocked_elimination_dense(
     gauss_ops: &mut usize,
 ) {
     // Use smaller block size for dense updates to fit pivot_buf in cache
-    let row_block_size = BLOCK_SIZE.min(n_rows);
-    let col_block_size = (BLOCK_SIZE / 4).min(n_cols); // Smaller for better pivot_buf reuse
+    let row_block_size = BLOCK_SIZE.min(n_rows).max(1);
+    let col_block_size = (BLOCK_SIZE / 4).min(n_cols).max(1); // Smaller for better pivot_buf reuse
 
     // Process in row blocks
     for row_start in (0..n_rows).step_by(row_block_size) {
