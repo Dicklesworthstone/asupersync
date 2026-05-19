@@ -28,7 +28,7 @@
         "tests/session_handoff_receipt_contract.rs"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_session_closeout cargo test -p asupersync --test session_handoff_receipt_contract"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_session_closeout cargo test -p asupersync --test session_handoff_receipt_contract"
       ]
     }
   ]

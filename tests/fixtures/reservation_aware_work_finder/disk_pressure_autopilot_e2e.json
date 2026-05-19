@@ -39,7 +39,7 @@
       ],
       "priority": 1,
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_websocket cargo check --manifest-path fuzz/Cargo.toml --bin websocket_frame_fuzzing"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_websocket cargo check --manifest-path fuzz/Cargo.toml --bin websocket_frame_fuzzing"
       ],
       "title": "Critical disk websocket fuzz proof"
     },

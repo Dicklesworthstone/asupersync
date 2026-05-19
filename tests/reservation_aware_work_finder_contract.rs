@@ -385,6 +385,16 @@ fn pathless_epic_without_snapshot_uses_default_fallback_catalog() {
             .is_empty(),
         "default fallback candidates should carry validation expectations"
     );
+    assert!(
+        fallback["proof_commands"]
+            .as_array()
+            .expect("proof commands")
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|command| command
+                .starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=")),
+        "default Cargo fallback proof commands must require remote rch"
+    );
 }
 
 #[test]
@@ -639,8 +649,10 @@ sys.path.insert(0, str(repo / "scripts"))
 import reservation_aware_work_finder as finder
 
 commands = {
-    "safe_direct": "rch exec -- cargo test -p asupersync --test reservation_aware_work_finder_contract",
-    "safe_env": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract",
+    "safe_remote_required": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract",
+    "safe_remote_with_allowlist": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract",
+    "missing_remote_required": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract",
+    "missing_target_dir": "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --test reservation_aware_work_finder_contract",
     "spoofed_prefix": "echo rch exec --; cargo test -p asupersync",
     "nested_shell": "rch exec -- sh -c 'cargo test -p asupersync'",
     "bare_cargo": "cargo test -p asupersync",
@@ -667,8 +679,10 @@ print(json.dumps({
     );
 
     let receipt: Value = serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
-    assert_eq!(receipt["safe_direct"].as_bool(), Some(true));
-    assert_eq!(receipt["safe_env"].as_bool(), Some(true));
+    assert_eq!(receipt["safe_remote_required"].as_bool(), Some(true));
+    assert_eq!(receipt["safe_remote_with_allowlist"].as_bool(), Some(true));
+    assert_eq!(receipt["missing_remote_required"].as_bool(), Some(false));
+    assert_eq!(receipt["missing_target_dir"].as_bool(), Some(false));
     assert_eq!(receipt["spoofed_prefix"].as_bool(), Some(false));
     assert_eq!(receipt["nested_shell"].as_bool(), Some(false));
     assert_eq!(receipt["bare_cargo"].as_bool(), Some(false));
@@ -688,11 +702,11 @@ import reservation_aware_work_finder as finder
 
 candidate = {
     "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract\n[RCH] local (daemon unavailable)",
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo check -p asupersync\nfalling back to local execution",
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo fmt --check\nlocal fallback selected",
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo clippy -p asupersync --test reservation_aware_work_finder_contract\nfallback to local execution",
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract\nexecuting locally after remote failure",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract\n[RCH] local (daemon unavailable)",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo check -p asupersync\nfalling back to local execution",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo fmt --check\nlocal fallback selected",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo clippy -p asupersync --test reservation_aware_work_finder_contract\nfallback to local execution",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_finder cargo test -p asupersync --test reservation_aware_work_finder_contract\nexecuting locally after remote failure",
     ],
 }
 print(json.dumps(finder.proof_command_blockers(candidate), sort_keys=True))

@@ -40,7 +40,7 @@ DEFAULT_FALLBACK_CANDIDATES = [
         ],
         "proof_commands": [
             "python3 -m py_compile scripts/session_handoff_receipt.py",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_session_handoff cargo test -p asupersync --test session_handoff_receipt_contract",
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_session_handoff cargo test -p asupersync --test session_handoff_receipt_contract",
         ],
         "completion_aliases": [
             "asupersync-c8thc8.11",
@@ -60,7 +60,7 @@ DEFAULT_FALLBACK_CANDIDATES = [
         ],
         "proof_commands": [
             "python3 -m py_compile scripts/proof_receipt_inventory.py",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract",
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract",
         ],
     },
     {
@@ -75,7 +75,7 @@ DEFAULT_FALLBACK_CANDIDATES = [
         ],
         "proof_commands": [
             "python3 -m py_compile scripts/proof_runner.py",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_proof_runner cargo test -p asupersync --test proof_runner_contract",
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_proof_runner cargo test -p asupersync --test proof_runner_contract",
         ],
     },
 ]
@@ -91,6 +91,7 @@ FORBIDDEN_COMMAND_TOKENS = [
 ]
 SAFE_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 CARGO_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_-])cargo(?![A-Za-z0-9_-])")
+REMOTE_REQUIRED_VALUES = {"1", "true", "yes", "on"}
 RCH_LOCAL_FALLBACK_RE = re.compile(
     r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
@@ -509,11 +510,27 @@ def command_routes_cargo_through_rch(command: str) -> bool:
         return False
     if lowered[program_index:program_index + 3] != ["rch", "exec", "--"]:
         return False
+    command_requires_remote = any(
+        assignment.startswith("RCH_REQUIRE_REMOTE=")
+        and assignment.split("=", 1)[1].lower() in REMOTE_REQUIRED_VALUES
+        for assignment in argv[:program_index]
+    )
 
     remote_index = program_index + 3
+    command_uses_target_dir = False
     if remote_index < len(argv) and lowered[remote_index] == "env":
-        remote_index = _first_non_assignment(argv, remote_index + 1)
-    return remote_index < len(argv) and lowered[remote_index] == "cargo"
+        env_start = remote_index + 1
+        remote_index = _first_non_assignment(argv, env_start)
+        command_uses_target_dir = any(
+            arg.startswith("CARGO_TARGET_DIR=")
+            for arg in argv[env_start:remote_index]
+        )
+    return (
+        remote_index < len(argv)
+        and lowered[remote_index] == "cargo"
+        and command_uses_target_dir
+        and command_requires_remote
+    )
 
 
 def proof_command_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
@@ -538,7 +555,10 @@ def proof_command_blockers(candidate: dict[str, Any]) -> list[dict[str, str]]:
                             "kind": "unsafe-proof-command",
                             "token": "bare-cargo",
                             "command": command_text,
-                            "reason": "Cargo proof commands must be routed through rch exec",
+                            "reason": (
+                                "Cargo proof commands must route through "
+                                "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo"
+                            ),
                         }
                     )
                 continue

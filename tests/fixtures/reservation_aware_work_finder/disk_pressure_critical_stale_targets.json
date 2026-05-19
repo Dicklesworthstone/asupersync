@@ -41,7 +41,7 @@
         "fuzz/fuzz_targets/postgres_row_description.rs"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_critical_only cargo check --manifest-path fuzz/Cargo.toml --bin postgres_row_description"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_critical_only cargo check --manifest-path fuzz/Cargo.toml --bin postgres_row_description"
       ]
     }
   ]
