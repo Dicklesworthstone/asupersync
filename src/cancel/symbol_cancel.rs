@@ -1565,12 +1565,23 @@ impl CleanupCoordinator {
         handler: Box<dyn CleanupHandler>,
         mut pending_set: PendingSymbolSet,
     ) {
-        self.handlers.write().insert(object_id, handler);
-
         // Keep `pending` held while draining the cleanup buffer and clearing
         // `completed` so reopening retry state is atomic with respect to
         // register_pending() and cannot drop symbols in the reopen window.
         let mut pending = self.pending.write();
+        let mut completed = self.completed.write();
+
+        // If clear_pending was called concurrently during a cleanup attempt,
+        // the object has been successfully decoded. We must not restore the
+        // retry state (which would un-complete the object and cause memory leaks).
+        if completed.contains(&object_id) {
+            // Also clean up any trailing buffered symbols that arrived late
+            self.cleanup_buffer.write().remove(&object_id);
+            return;
+        }
+
+        self.handlers.write().insert(object_id, handler);
+
         let mut cleanup_buffer = self.cleanup_buffer.write();
         if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
             for symbol in buffered_symbols {
@@ -1579,12 +1590,19 @@ impl CleanupCoordinator {
             }
         }
         pending.insert(object_id, pending_set);
-        self.completed.write().remove(&object_id);
+        completed.remove(&object_id);
     }
 
     #[allow(clippy::significant_drop_tightening)]
     fn restore_pending_only_state(&self, object_id: ObjectId, mut pending_set: PendingSymbolSet) {
         let mut pending = self.pending.write();
+        let mut completed = self.completed.write();
+
+        if completed.contains(&object_id) {
+            self.cleanup_buffer.write().remove(&object_id);
+            return;
+        }
+
         let mut cleanup_buffer = self.cleanup_buffer.write();
         if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
             for symbol in buffered_symbols {
@@ -1593,7 +1611,7 @@ impl CleanupCoordinator {
             }
         }
         pending.insert(object_id, pending_set);
-        self.completed.write().remove(&object_id);
+        completed.remove(&object_id);
     }
 
     /// Registers a cleanup handler for an object.

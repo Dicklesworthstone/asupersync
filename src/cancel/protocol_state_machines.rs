@@ -374,6 +374,18 @@ impl CancelStateMachine for RegionStateMachine {
                 // when transitioning to Finalizing.
                 state.clone()
             }
+            (
+                RegionState::Cancelling {
+                    draining_tasks,
+                    pending_finalizers,
+                    cancel_reason,
+                },
+                RegionEvent::FinalizerRegistered,
+            ) => RegionState::Cancelling {
+                draining_tasks: *draining_tasks,
+                pending_finalizers: pending_finalizers + 1,
+                cancel_reason: cancel_reason.clone(),
+            },
 
             // Finalizing state transitions
             (RegionState::Finalizing { running_finalizers }, RegionEvent::FinalizerCompleted) => {
@@ -471,6 +483,7 @@ impl CancelStateMachine for RegionStateMachine {
             RegionState::Cancelling { .. } => vec![
                 RegionEvent::TaskDrained,
                 RegionEvent::FinalizerStarted,
+                RegionEvent::FinalizerRegistered,
                 RegionEvent::Cancel {
                     reason: "example".to_string(),
                 },
