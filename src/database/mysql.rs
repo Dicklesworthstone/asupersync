@@ -3423,7 +3423,7 @@ impl MySqlConnection {
                     // roll back and surface as mismatch with empty
                     // observed value so the caller sees the silent
                     // failure mode.
-                    let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                    self.rollback_isolated_begin_or_mark(cx).await;
                     return Outcome::Err(MySqlError::IsolationLevelMismatch {
                         requested: level,
                         observed: String::new(),
@@ -3431,11 +3431,17 @@ impl MySqlConnection {
                 }
             },
             Outcome::Err(e) => {
-                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                self.rollback_isolated_begin_or_mark(cx).await;
                 return outcome_from_error(e);
             }
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
+            Outcome::Cancelled(r) => {
+                self.rollback_isolated_begin_or_mark(cx).await;
+                return Outcome::Cancelled(r);
+            }
+            Outcome::Panicked(p) => {
+                self.rollback_isolated_begin_or_mark(cx).await;
+                return Outcome::Panicked(p);
+            }
         };
 
         match IsolationLevel::from_server_string(&observed_level) {
@@ -3448,11 +3454,50 @@ impl MySqlConnection {
             _ => {
                 // Mismatch — roll back the in-flight transaction
                 // before returning so the connection is clean.
-                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                self.rollback_isolated_begin_or_mark(cx).await;
                 Outcome::Err(MySqlError::IsolationLevelMismatch {
                     requested: level,
                     observed: observed_level,
                 })
+            }
+        }
+    }
+
+    /// br-asupersync-9g47af — once `START TRANSACTION` succeeds, any verification
+    /// failure must either return the connection to idle or mark it for orphan
+    /// cleanup before the caller can reuse it.
+    async fn rollback_isolated_begin_or_mark(&mut self, cx: &Cx) {
+        const MASKED_ROLLBACK_POLLS: u32 = 32;
+
+        match crate::combinator::commit_section(
+            cx,
+            MASKED_ROLLBACK_POLLS,
+            self.execute_unchecked(cx, "ROLLBACK"),
+        )
+        .await
+        {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => {
+                self.inner.needs_rollback = true;
+                self.inner.needs_discard = true;
+                cx.trace(&format!(
+                    "begin_with_isolation cleanup rollback failed; marking connection for orphan cleanup: {:?}",
+                    err
+                ));
+            }
+            Outcome::Cancelled(reason) => {
+                self.inner.needs_rollback = true;
+                self.inner.needs_discard = true;
+                cx.trace(&format!(
+                    "begin_with_isolation cleanup rollback was cancelled; marking connection for orphan cleanup: {reason}"
+                ));
+            }
+            Outcome::Panicked(_) => {
+                self.inner.needs_rollback = true;
+                self.inner.needs_discard = true;
+                cx.trace(
+                    "begin_with_isolation cleanup rollback panicked; marking connection for orphan cleanup",
+                );
             }
         }
     }
@@ -6048,8 +6093,12 @@ mod tests {
                 .read_exact(&mut payload)
                 .expect("read handshake response payload");
 
-            let client_caps =
-                u32::from_le_bytes(payload[0..4].try_into().expect("client capability bytes"));
+            let client_caps = u32::from_le_bytes(
+                payload
+                    .get(0..4)
+                    .and_then(|s| s.try_into().ok())
+                    .expect("client capability bytes missing"),
+            );
             assert_eq!(
                 client_caps & capability::CLIENT_LOCAL_FILES,
                 0,
@@ -6128,8 +6177,12 @@ mod tests {
                 .read_exact(&mut payload)
                 .expect("read handshake response payload");
 
-            let client_caps =
-                u32::from_le_bytes(payload[0..4].try_into().expect("client capability bytes"));
+            let client_caps = u32::from_le_bytes(
+                payload
+                    .get(0..4)
+                    .and_then(|s| s.try_into().ok())
+                    .expect("client capability bytes missing"),
+            );
             assert_eq!(
                 client_caps & capability::CLIENT_SSL,
                 0,

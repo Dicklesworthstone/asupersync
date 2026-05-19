@@ -103,8 +103,12 @@ fn audit_handshake_does_not_advertise_local_infile_capability() {
             .expect("read response payload");
 
         // AUDIT: Verify client capabilities exclude LOCAL FILES
-        let client_caps =
-            u32::from_le_bytes(payload[0..4].try_into().expect("client capability bytes"));
+        let client_caps = u32::from_le_bytes(
+            payload
+                .get(0..4)
+                .and_then(|s| s.try_into().ok())
+                .expect("client capability bytes missing"),
+        );
 
         assert_eq!(
             client_caps & capability::CLIENT_LOCAL_FILES,
