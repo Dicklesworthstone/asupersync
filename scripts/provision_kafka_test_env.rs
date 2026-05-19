@@ -129,7 +129,10 @@ impl KafkaTestEnvironment {
 
         if let Ok(addr) = server.to_socket_addrs() {
             if let Some(addr) = addr.into_iter().next() {
-                return TcpStream::connect_timeout(&addr, Duration::from_millis(1000)).is_ok();
+                if let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(1000)) {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    return true;
+                }
             }
         }
         false
