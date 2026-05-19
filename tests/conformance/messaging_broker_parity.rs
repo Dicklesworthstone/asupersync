@@ -24,10 +24,11 @@
 //!   placeholder assertion claiming RESP2-only behaviour. The live
 //!   broker test below now verifies Redis 7 `HELLO 3` vendor reply
 //!   shape through the public client surface.
-//! * **Kafka stub-broker fallback** — covered by pre-existing
+//! * **Kafka disabled-feature fallback** — covered by pre-existing
 //!   `asupersync-w2p2a0` (CRITICAL): production builds without `--features
-//!   kafka` silently swallow `KafkaProducer::send` into an in-process
-//!   stub. Not re-filed here.
+//!   kafka` must return `FeatureDisabled` instead of routing producers or
+//!   consumers into an in-process stub. The producer operation and client
+//!   consumer source boundary are pinned below.
 //! * **Kafka at-most-once default** — covered by pre-existing
 //!   `asupersync-2i2e21` (HIGH): `enable_auto_commit=true` default plus
 //!   poll-time offset store delivers at-most-once when users expect
@@ -134,21 +135,51 @@ mod kafka_mod {
         }
     }
 
-    /// Smoke conformance: `KafkaProducer::send` is reachable on default
-    /// features but, per the prior audit `asupersync-w2p2a0`, silently
-    /// routes to an in-process `stub_broker` rather than the wire when
-    /// the `kafka` feature is OFF. Since this conformance suite runs
-    /// against default features by default, the test merely documents
-    /// the contract and marks the production-fallback bug as covered
-    /// by the pre-existing CRITICAL bead.
+    /// Smoke conformance: default features do not provide a real Kafka broker
+    /// path. Per the prior audit `asupersync-w2p2a0`, non-test production
+    /// operations must fail loudly with `FeatureDisabled` instead of routing
+    /// through the in-process harness broker.
     #[test]
     fn kafka_default_features_do_not_provide_real_broker_path() {
-        // No assertion here — this is a contract-documentation test. The
-        // CRITICAL severity is captured in br-asupersync-w2p2a0.
-        // Any agent attempting to load-test the producer must build with
-        // --features kafka AND verify that messages reach the broker
-        // (the producer compiles + returns Ok on default features but
-        // sends nowhere observable).
+        if cfg!(feature = "kafka") {
+            return;
+        }
+
+        let config = ProducerConfig::new(vec!["localhost:9092".to_string()]);
+        let producer = KafkaProducer::new(config)
+            .expect("optional no-feature producer may be constructed for diagnostics");
+        let result = futures_lite::future::block_on(async {
+            producer
+                .send(&asupersync::cx::Cx::new(), "orders", None, b"payload", None)
+                .await
+        });
+
+        assert!(
+            matches!(result, Err(KafkaError::FeatureDisabled)),
+            "default no-feature producer sends must fail loudly, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn kafka_disabled_client_consumer_stub_is_test_only() {
+        let source = include_str!("../../src/messaging/kafka.rs");
+
+        assert!(
+            source.contains("#[cfg(all(not(feature = \"kafka\"), test))]\npub struct StubConsumer"),
+            "no-feature StubConsumer must be crate-local-test-only"
+        );
+        assert!(
+            source.contains("#[cfg(test)]\n    consumer: Option<StubConsumer>"),
+            "KafkaClient must not store a StubConsumer field in non-test builds"
+        );
+        assert!(
+            source.contains("Err(KafkaError::FeatureDisabled)"),
+            "no-feature non-test KafkaClient::consumer must fail with FeatureDisabled"
+        );
+        assert!(
+            source.contains("non-test builds without the kafka feature must fail loudly below"),
+            "source must document why the stub consumer boundary is test-only"
+        );
     }
 
     #[test]

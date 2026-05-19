@@ -2272,14 +2272,14 @@ impl KafkaClient {
     }
 }
 
-/// Stub consumer for testing when kafka feature is disabled.
-#[cfg(not(feature = "kafka"))]
+/// Stub consumer for crate-local tests when the kafka feature is disabled.
+#[cfg(all(not(feature = "kafka"), test))]
 pub struct StubConsumer {
     topic: String,
 }
 
 /// Stub Kafka consumer backend.
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), test))]
 impl KafkaConsumerTrait for StubConsumer {
     fn topic(&self) -> &str {
         &self.topic
@@ -2298,6 +2298,7 @@ impl KafkaConsumerTrait for StubConsumer {
 #[cfg(not(feature = "kafka"))]
 pub struct KafkaClient {
     producer: KafkaProducer,
+    #[cfg(test)]
     consumer: Option<StubConsumer>,
     backend: Box<dyn BrokerBackend>,
 }
@@ -2309,6 +2310,7 @@ impl KafkaClient {
         let producer = KafkaProducer::new(config.clone())?;
         Ok(Self {
             producer,
+            #[cfg(test)]
             consumer: None,
             backend: Box::new(StubBrokerBackend),
         })
@@ -2324,25 +2326,36 @@ impl KafkaClient {
         self.backend.as_ref()
     }
 
-    /// Initialize consumer for the given topic (stub implementation).
+    /// Initialize consumer for the given topic.
     pub async fn consumer(&mut self, topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
-        if let Some(ref consumer) = self.consumer {
-            // Validate existing consumer is for the requested topic
-            if consumer.topic() != topic {
-                return Err(KafkaError::Config(format!(
-                    "Consumer already exists for topic '{}', cannot create consumer for different topic '{}'",
-                    consumer.topic(),
-                    topic
-                )));
+        validate_topic(topic)?;
+
+        #[cfg(test)]
+        {
+            if let Some(ref consumer) = self.consumer {
+                // Validate existing consumer is for the requested topic
+                if consumer.topic() != topic {
+                    return Err(KafkaError::Config(format!(
+                        "Consumer already exists for topic '{}', cannot create consumer for different topic '{}'",
+                        consumer.topic(),
+                        topic
+                    )));
+                }
+                return Ok(consumer);
             }
-            return Ok(consumer);
+
+            // Crate-local tests may use the deterministic harness consumer, but
+            // non-test builds without the kafka feature must fail loudly below.
+            self.consumer = Some(StubConsumer {
+                topic: topic.to_string(),
+            });
+            Ok(self.consumer.as_ref().unwrap())
         }
 
-        // Create new stub consumer for the topic
-        self.consumer = Some(StubConsumer {
-            topic: topic.to_string(),
-        });
-        Ok(self.consumer.as_ref().unwrap())
+        #[cfg(not(test))]
+        {
+            Err(KafkaError::FeatureDisabled)
+        }
     }
 }
 
