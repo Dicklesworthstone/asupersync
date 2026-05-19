@@ -411,12 +411,18 @@ mod inner {
                 Err(std::sync::TryLockError::WouldBlock) => {
                     Err(std::sync::TryLockError::WouldBlock)
                 }
-                Err(std::sync::TryLockError::Poisoned(poison)) => Err(
-                    std::sync::TryLockError::Poisoned(PoisonError::new(ContendedMutexGuard {
-                        guard: poison.into_inner(),
-                        rank: self.rank,
-                    })),
-                ),
+                Err(std::sync::TryLockError::Poisoned(poison)) => {
+                    if let Some(rank) = self.rank {
+                        lock_ordering::check_acquire(self.name, rank);
+                        lock_ordering::record_acquire(rank);
+                    }
+                    Err(std::sync::TryLockError::Poisoned(PoisonError::new(
+                        ContendedMutexGuard {
+                            guard: poison.into_inner(),
+                            rank: self.rank,
+                        },
+                    )))
+                }
             }
         }
 
