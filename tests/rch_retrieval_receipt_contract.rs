@@ -683,6 +683,26 @@ fn artifact_free_proof_receipt_covers_success_timeout_and_failure() {
         success_receipt["artifact_retrieval"]["file_count"].as_u64(),
         Some(1_271)
     );
+    assert_eq!(
+        success_receipt["operator_decision"].as_str(),
+        Some("cite-remote-proof")
+    );
+    assert_eq!(
+        success_receipt["command_class"]["class"].as_str(),
+        Some("rch-cargo-proof")
+    );
+    assert_eq!(
+        success_receipt["command_class"]["target_dir_present"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        success_receipt["remote_required_status"]["status"].as_str(),
+        Some("not-declared")
+    );
+    assert_eq!(
+        success_receipt["first_blocker"]["kind"].as_str(),
+        Some("none")
+    );
 
     let retrieval_timeout = receipt_json_with_args(
         "passed_after_retrieval_timeout.log",
@@ -704,6 +724,18 @@ fn artifact_free_proof_receipt_covers_success_timeout_and_failure() {
         timeout_receipt["artifact_retrieval"]["partial"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        timeout_receipt["operator_decision"].as_str(),
+        Some("cite-remote-result-and-surface-retrieval-blocker")
+    );
+    assert_eq!(
+        timeout_receipt["retrieval_blocker"]["kind"].as_str(),
+        Some("wrapper-timeout")
+    );
+    assert_eq!(
+        timeout_receipt["first_blocker"]["source"].as_str(),
+        Some("artifact-retrieval")
+    );
 
     let failure = receipt_json_with_args(
         "remote_failure.log",
@@ -722,6 +754,15 @@ fn artifact_free_proof_receipt_covers_success_timeout_and_failure() {
         failure_receipt["selected_worker"].as_str(),
         Some("vmi1152480")
     );
+    assert_eq!(
+        failure_receipt["operator_decision"].as_str(),
+        Some("surface-remote-failure")
+    );
+    assert_eq!(
+        failure_receipt["first_blocker"]["kind"].as_str(),
+        Some("remote-error")
+    );
+    assert_eq!(failure_receipt["first_blocker"]["line"].as_u64(), Some(2));
 }
 
 #[test]
@@ -748,6 +789,55 @@ fn artifact_free_proof_receipt_records_selected_worker_when_reported() {
             .expect("closeout fields")
             .iter()
             .any(|field| field.as_str() == Some("selected_worker"))
+    );
+}
+
+#[test]
+fn artifact_free_proof_receipt_rejects_remote_required_local_fallback() {
+    let remote_required_command = concat!(
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env ",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs ",
+        "cargo test --test proof_runner_contract -- --nocapture"
+    );
+    let receipt = receipt_json_with_command(
+        "local_fallback.log",
+        None,
+        remote_required_command,
+        &["--artifact-free-proof-receipt"],
+    );
+    let proof_receipt = &receipt["artifact_free_proof_receipt"];
+
+    assert_eq!(
+        proof_receipt["classification"].as_str(),
+        Some("local_fallback")
+    );
+    assert_eq!(
+        proof_receipt["remote_required_status"]["status"].as_str(),
+        Some("failed-local-fallback")
+    );
+    assert_eq!(
+        proof_receipt["remote_required_status"]["local_fallback_refused"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        proof_receipt["local_fallback_refusal"]["refused_as_remote_proof"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        proof_receipt["operator_decision"].as_str(),
+        Some("reject-local-fallback-rerun-remote")
+    );
+    assert_eq!(
+        proof_receipt["first_blocker"]["file"].as_str(),
+        Some("rch-local-fallback")
+    );
+    assert_eq!(
+        proof_receipt["command_class"]["remote_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        proof_receipt["command_class"]["class"].as_str(),
+        Some("rch-cargo-proof")
     );
 }
 

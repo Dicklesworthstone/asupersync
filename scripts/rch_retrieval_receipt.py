@@ -37,6 +37,7 @@ DISK_FULL_RE = re.compile(
     r"(?i)(ENOSPC|No space left on device|os error 28|error 28)"
 )
 CRITICAL_PRESSURE_RE = re.compile(r"critical_pressure=(?P<level>\d+)")
+REMOTE_REQUIRED_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def utc_now() -> str:
@@ -153,6 +154,68 @@ def command_tokens(command: str) -> list[str]:
         return shlex.split(command)
     except ValueError:
         return command.split()
+
+
+def first_non_env_assignment(tokens: list[str], start: int = 0) -> int:
+    index = start
+    while index < len(tokens) and "=" in tokens[index]:
+        name, _value = tokens[index].split("=", 1)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            break
+        index += 1
+    return index
+
+
+def env_assignment_value(tokens: list[str], name: str) -> str | None:
+    prefix = f"{name}="
+    for token in tokens:
+        if token.startswith(prefix):
+            return token.split("=", 1)[1]
+    return None
+
+
+def command_classification(command: str, target_dir: str | None) -> dict[str, Any]:
+    tokens = command_tokens(command)
+    lowered = [token.lower() for token in tokens]
+    program_index = first_non_env_assignment(tokens)
+    program = lowered[program_index] if program_index < len(tokens) else ""
+    runs_rch_exec = (
+        program_index + 2 < len(tokens)
+        and lowered[program_index : program_index + 3] == ["rch", "exec", "--"]
+    )
+    cargo_index = lowered.index("cargo") if "cargo" in lowered else -1
+    runs_cargo = cargo_index >= 0
+    cargo_subcommand = (
+        lowered[cargo_index + 1] if cargo_index >= 0 and cargo_index + 1 < len(lowered) else ""
+    )
+    remote_required_value = env_assignment_value(tokens, "RCH_REQUIRE_REMOTE")
+    remote_required = (
+        remote_required_value is not None
+        and remote_required_value.lower() in REMOTE_REQUIRED_TRUE_VALUES
+    )
+
+    if runs_rch_exec and runs_cargo:
+        command_class = "rch-cargo-proof"
+    elif runs_rch_exec:
+        command_class = "rch-non-cargo-proof"
+    elif runs_cargo:
+        command_class = "bare-cargo-proof"
+    elif command:
+        command_class = "non-cargo-command"
+    else:
+        command_class = "unknown"
+
+    return {
+        "class": command_class,
+        "program": program,
+        "runs_rch_exec": runs_rch_exec,
+        "runs_cargo": runs_cargo,
+        "cargo_subcommand": cargo_subcommand,
+        "remote_required": remote_required,
+        "remote_required_env": remote_required_value or "",
+        "target_dir": target_dir,
+        "target_dir_present": target_dir is not None,
+    }
 
 
 def audit_target_dir(
@@ -582,6 +645,99 @@ def local_disk_pressure_result(
     }
 
 
+def first_blocker_from_log(
+    text: str, analysis: dict[str, Any], retrieval_blocker: dict[str, Any] | None
+) -> dict[str, Any]:
+    if analysis["markers"]["local_fallback"]:
+        fallback = first_matching_line(text, LOCAL_FALLBACK_RE)
+        return {
+            "kind": "local-fallback",
+            "source": "rch-wrapper",
+            "line": fallback["line"] if fallback else 0,
+            "text": fallback["text"] if fallback else "rch local fallback observed",
+            "file": "rch-local-fallback",
+        }
+    if retrieval_blocker is not None:
+        return {
+            "kind": retrieval_blocker["kind"],
+            "source": "artifact-retrieval",
+            "line": retrieval_blocker["line"],
+            "text": retrieval_blocker["text"],
+            "file": "artifact-retrieval",
+        }
+    if analysis["markers"]["remote_failure"]:
+        error_line = first_matching_line(text, re.compile(r"^\s*error(?:\[[^\]]+\])?:\s*"))
+        if error_line is not None:
+            return {
+                "kind": "remote-error",
+                "source": "remote-command",
+                "line": error_line["line"],
+                "text": error_line["text"],
+                "file": "remote-stderr",
+            }
+        return {
+            "kind": "remote-failure",
+            "source": "remote-command",
+            "line": 0,
+            "text": "remote command finished with nonzero exit",
+            "file": "remote-command",
+        }
+    if analysis["classification"] == "wrapper_interrupted":
+        interrupted = first_matching_line(text, TIMEOUT_RE)
+        return {
+            "kind": "wrapper-interrupted",
+            "source": "rch-wrapper",
+            "line": interrupted["line"] if interrupted else 0,
+            "text": interrupted["text"] if interrupted else "wrapper interrupted before remote verdict",
+            "file": "rch-wrapper",
+        }
+    return {
+        "kind": "none",
+        "source": "",
+        "line": 0,
+        "text": "",
+        "file": "",
+    }
+
+
+def remote_required_status(
+    command_class: dict[str, Any], markers: dict[str, Any]
+) -> dict[str, Any]:
+    required = command_class["remote_required"]
+    if not required:
+        status = "not-declared"
+    elif markers["local_fallback"]:
+        status = "failed-local-fallback"
+    elif markers["remote_success"] or markers["remote_failure"]:
+        status = "satisfied"
+    else:
+        status = "unproven"
+    return {
+        "required": required,
+        "status": status,
+        "local_fallback_refused": markers["local_fallback"],
+        "remote_verdict_observed": markers["remote_success"] or markers["remote_failure"],
+    }
+
+
+def operator_decision_for(classification: str) -> str:
+    if classification == "remote_success":
+        return "cite-remote-proof"
+    if classification in {
+        "passed_after_retrieval_enospc",
+        "passed_after_retrieval_timeout",
+        "remote_success_retrieval_unknown",
+    }:
+        return "cite-remote-result-and-surface-retrieval-blocker"
+    if classification == "remote_failure":
+        return "surface-remote-failure"
+    if classification == "local_fallback":
+        return "reject-local-fallback-rerun-remote"
+    if classification == "wrapper_interrupted":
+        return "rerun-incomplete-proof"
+    return "escalate-incomplete-proof"
+
+
 def cleanup_authorization_result(
     args: argparse.Namespace, local_pressure: dict[str, Any]
 ) -> dict[str, Any]:
@@ -671,6 +827,18 @@ def artifact_free_proof_receipt(
     markers = analysis["markers"]
     retrieval_blocker = analysis.get("retrieval_blocker")
     status, status_reason = artifact_status(markers)
+    command_class = command_classification(args.command, target_dir)
+    first_blocker = first_blocker_from_log(text, analysis, retrieval_blocker)
+    local_fallback_refusal = {
+        "observed": markers["local_fallback"],
+        "refused_as_remote_proof": markers["local_fallback"],
+        "reason": (
+            "local fallback markers invalidate this receipt as remote proof"
+            if markers["local_fallback"]
+            else ""
+        ),
+    }
+    retrieval_result = artifact_retrieval_result(markers, retrieval_blocker)
     return {
         "schema_version": "artifact-free-rch-proof-receipt-v1",
         "command": args.command,
@@ -684,10 +852,14 @@ def artifact_free_proof_receipt(
         "wrapper_exit_code": args.wrapper_exit_code,
         "classification": analysis["classification"],
         "decision": analysis["decision"],
+        "operator_decision": operator_decision_for(analysis["classification"]),
+        "remote_required_status": remote_required_status(command_class, markers),
+        "command_class": command_class,
+        "first_blocker": first_blocker,
+        "retrieval_blocker": retrieval_blocker,
+        "local_fallback_refusal": local_fallback_refusal,
         "remote_command_result": remote_command_result(markers),
-        "artifact_retrieval_result": artifact_retrieval_result(
-            markers, retrieval_blocker
-        ),
+        "artifact_retrieval_result": retrieval_result,
         "local_disk_pressure": local_disk_pressure_result(retrieval_blocker),
         "artifact_status": status,
         "artifact_status_reason": status_reason,
@@ -705,6 +877,12 @@ def artifact_free_proof_receipt(
             "selected_worker",
             "remote_exit_status",
             "remote_elapsed_ms",
+            "remote_required_status",
+            "command_class",
+            "first_blocker",
+            "retrieval_blocker",
+            "local_fallback_refusal",
+            "operator_decision",
             "artifact_status",
             "wrapper_exit_code",
             "classification",
