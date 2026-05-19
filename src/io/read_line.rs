@@ -188,11 +188,13 @@ fn process_pending_chunk(
                 }
                 pending.drain(..valid_len);
                 if found_newline || e.error_len().is_some() {
+                    pending.clear();
                     ChunkAction::ConsumeAndFinish(invalid_data_result(e))
                 } else {
                     ChunkAction::Consume
                 }
             } else if e.error_len().is_some() || found_newline {
+                pending.clear();
                 ChunkAction::ConsumeAndFinish(invalid_data_result(e))
             } else {
                 ChunkAction::Consume
