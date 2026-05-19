@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 SAFE_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ALLOWED_REMOTE_PROGRAMS = {"cargo", "lake", "rustfmt"}
+REMOTE_REQUIRED_VALUES = {"1", "true", "yes", "on"}
 SHELL_CONTROL_TOKENS = (";", "&", "|", "<", ">", "`", "$(")
 RCH_OUTCOME_SCHEMA_VERSION = "proof-runner-rch-outcome-v1"
 PROOF_CONSOLE_REPORT_SCHEMA_VERSION = "proof-console-report-v1"
@@ -302,7 +303,7 @@ def proof_target_slug(raw: str) -> str:
 
 def rch_cargo_command(target_slug: str, cargo_args: str) -> str:
     return (
-        "rch exec -- env "
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env "
         f"CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_proof_runner_{proof_target_slug(target_slug)} "
         f"cargo {cargo_args}"
     )
@@ -322,6 +323,11 @@ def command_routes_cargo_through_rch(command: str) -> bool:
         return False
     if argv[program_index:program_index + 3] != ["rch", "exec", "--"]:
         return False
+    command_requires_remote = any(
+        assignment.startswith("RCH_REQUIRE_REMOTE=")
+        and assignment.split("=", 1)[1].lower() in REMOTE_REQUIRED_VALUES
+        for assignment in argv[:program_index]
+    )
 
     remote_index = program_index + 3
     command_uses_target_dir = False
@@ -336,6 +342,7 @@ def command_routes_cargo_through_rch(command: str) -> bool:
         remote_index < len(argv)
         and argv[remote_index] == "cargo"
         and command_uses_target_dir
+        and command_requires_remote
     )
 
 
@@ -427,7 +434,7 @@ def rank_fallback_beads_for_disk(
             "unsafe_validation_commands": unsafe_validation_commands,
             "validation_command_policy": (
                 "cargo validation must route through "
-                "rch exec -- env CARGO_TARGET_DIR=... cargo"
+                "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo"
             ),
             "reservation_warning": (
                 f"peer-active reservation overlaps {peer_overlaps[0]['path']} held by {peer_overlaps[0]['holder']}"
@@ -570,12 +577,18 @@ def safe_command_argv(command: str) -> List[str]:
     except ValueError as error:
         raise ValueError(f"invalid proof command syntax: {error}") from error
 
-    if len(argv) < 4 or argv[:3] != ["rch", "exec", "--"]:
-        raise ValueError("proof command must start with 'rch exec --'")
     if any(any(marker in token for marker in SHELL_CONTROL_TOKENS) for token in argv):
         raise ValueError("proof command contains shell control metacharacters")
 
-    remote_index = 3
+    program_index = _first_non_assignment(argv)
+    if len(argv) - program_index < 4 or argv[program_index:program_index + 3] != ["rch", "exec", "--"]:
+        raise ValueError("proof command must start with 'rch exec --'")
+    for assignment in argv[:program_index]:
+        name, _value = assignment.split("=", 1)
+        if not SAFE_ENV_NAME.fullmatch(name):
+            raise ValueError(f"invalid leading environment assignment in proof command: {name}")
+
+    remote_index = program_index + 3
     if argv[remote_index] == "env":
         remote_index += 1
         while remote_index < len(argv) and "=" in argv[remote_index]:
@@ -588,6 +601,8 @@ def safe_command_argv(command: str) -> List[str]:
         raise ValueError("proof command has no remote program after rch exec --")
     if argv[remote_index] not in ALLOWED_REMOTE_PROGRAMS:
         raise ValueError(f"remote proof program is not allowed: {argv[remote_index]}")
+    if program_index:
+        return ["env", *argv[:program_index], *argv[program_index:]]
     return argv
 
 

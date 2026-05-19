@@ -998,7 +998,7 @@ fn proof_runner_disk_preflight_classifies_low_dev_shm_space() {
 fn proof_runner_rank_fallback_beads_prefers_disk_safe_under_pressure() {
     let fallback = write_json_fixture(&json!({"beads": [
         {"id": "cargo-heavy", "title": "run clippy frontier", "priority": 1,
-         "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_clippy cargo clippy -p asupersync --all-targets -- -D warnings"},
+         "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_clippy cargo clippy -p asupersync --all-targets -- -D warnings"},
         {"id": "docs-safe", "title": "docs-only policy note", "priority": 2,
          "disk_safe": true, "validation_command": "python3 scripts/proof_runner.py --suggest-lanes --touched-files docs/proof_runner_usage.md --output json"},
         {"id": "receipt-safe", "title": "artifact-free receipt fixture", "priority": 1,
@@ -1243,8 +1243,10 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
          "validation_command": "cargo test -p asupersync --test proof_runner_contract"},
         {"id": "bare-rch-cargo", "title": "bare rch cargo validation", "priority": 1,
          "validation_command": "rch exec -- cargo test -p asupersync --test proof_runner_contract"},
+        {"id": "missing-remote-required", "title": "rch cargo validation without remote-required guard", "priority": 1,
+         "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"},
         {"id": "rch-cargo", "title": "rch cargo validation", "priority": 1,
-         "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"}
+         "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"}
     ]}));
     let fallback_path = fallback.path().to_str().expect("fallback path utf8");
 
@@ -1262,10 +1264,18 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
         .iter()
         .map(|row| row["id"].as_str().expect("bead id"))
         .collect();
-    assert_eq!(ids, ["rch-cargo", "bare-cargo", "bare-rch-cargo"]);
+    assert_eq!(
+        ids,
+        [
+            "rch-cargo",
+            "bare-cargo",
+            "bare-rch-cargo",
+            "missing-remote-required"
+        ]
+    );
     assert_eq!(
         result["summary"]["unsafe_validation_block_count"].as_i64(),
-        Some(2)
+        Some(3)
     );
 
     let safe = &result["ranked_fallback_beads"][0];
@@ -1283,7 +1293,9 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
     );
     assert_eq!(
         blocked["validation_command_policy"].as_str(),
-        Some("cargo validation must route through rch exec -- env CARGO_TARGET_DIR=... cargo")
+        Some(
+            "cargo validation must route through RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo"
+        )
     );
 
     let blocked = &result["ranked_fallback_beads"][2];
@@ -1293,6 +1305,17 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
     assert_eq!(
         blocked["unsafe_validation_commands"][0].as_str(),
         Some("rch exec -- cargo test -p asupersync --test proof_runner_contract")
+    );
+
+    let blocked = &result["ranked_fallback_beads"][3];
+    assert_eq!(blocked["id"].as_str(), Some("missing-remote-required"));
+    assert_eq!(blocked["eligible"].as_bool(), Some(false));
+    assert_eq!(blocked["unsafe_validation_blocked"].as_bool(), Some(true));
+    assert_eq!(
+        blocked["unsafe_validation_commands"][0].as_str(),
+        Some(
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"
+        )
     );
 
     let plan = proof_runner_json(&[
@@ -1318,7 +1341,7 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
 fn proof_runner_autopilot_plan_combines_lanes_disk_and_fallbacks() {
     let fallback = write_json_fixture(&json!({"beads": [
         {"id": "cargo-heavy", "title": "run clippy frontier", "priority": 1,
-         "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_clippy cargo clippy -p asupersync --all-targets -- -D warnings"},
+         "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_clippy cargo clippy -p asupersync --all-targets -- -D warnings"},
         {"id": "docs-safe", "title": "docs-only policy note", "priority": 2,
          "disk_safe": true, "validation_command": "python3 scripts/proof_runner.py --suggest-lanes --touched-files docs/proof_runner_usage.md --output json"},
         {"id": "receipt-safe", "title": "artifact-free receipt fixture", "priority": 1,
@@ -1644,9 +1667,13 @@ fn proof_runner_generates_appropriate_supplemental_proofs() {
     );
     if supplemental.contains("cargo ") {
         assert!(
-            supplemental.contains("rch exec -- env")
+            supplemental.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env ")
                 && supplemental.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
-            "supplemental Cargo proof must preserve a target dir: {supplemental}"
+            "supplemental Cargo proof must require remote rch and preserve a target dir: {supplemental}"
+        );
+        assert!(
+            !supplemental.contains("rch exec -- cargo"),
+            "supplemental Cargo proof must not use bare rch cargo routing: {supplemental}"
         );
     }
 
@@ -1663,9 +1690,9 @@ fn proof_runner_generates_appropriate_supplemental_proofs() {
         .expect("should have supplemental proof command");
     assert!(
         supplemental.contains("cargo test")
-            && supplemental.contains("rch exec -- env")
+            && supplemental.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env ")
             && supplemental.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
-        "test supplemental proof must route through rch target dir: {supplemental}"
+        "test supplemental proof must require remote rch and preserve a target dir: {supplemental}"
     );
     assert!(
         !supplemental.contains("rch exec -- cargo"),
@@ -1782,6 +1809,41 @@ print(json.dumps(argv))
     assert!(
         argv.iter().any(|token| token == "cargo"),
         "remote cargo program should be preserved: {argv:?}"
+    );
+}
+
+#[test]
+fn proof_runner_parses_remote_required_prefix_without_shell_expansion() {
+    let snippet = r#"
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("proof_runner", "scripts/proof_runner.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+argv = module.safe_command_argv("RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test cargo check -p asupersync")
+print(json.dumps(argv))
+"#;
+    let output = run_python_snippet(snippet);
+    assert!(
+        output.status.success(),
+        "remote-required command should parse\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let argv: Vec<String> =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("parse argv JSON: {error}"));
+    assert_eq!(argv[0], "env");
+    assert_eq!(argv[1], "RCH_REQUIRE_REMOTE=1");
+    let rch_index = argv
+        .iter()
+        .position(|token| token == "rch")
+        .expect("rch program should be preserved");
+    assert_eq!(&argv[rch_index..rch_index + 3], &["rch", "exec", "--"]);
+    assert!(
+        argv.iter()
+            .any(|token| token == "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test"),
+        "TMPDIR fallback should be preserved for rch worker-side handling: {argv:?}"
     );
 }
 
