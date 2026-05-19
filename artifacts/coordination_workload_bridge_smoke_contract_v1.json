@@ -257,7 +257,7 @@
       "bash scripts/run_coordination_workload_bridge_smoke.sh --execute --fixture --output-root target/coordination-workload-bridge-smoke --generated-at 2026-05-05T05:00:00Z"
     ],
     "rch_cargo": [
-      "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_smoke cargo test -p asupersync --test coordination_workload_bridge_smoke_contract --features test-internals -- --nocapture"
+      "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_smoke cargo test -p asupersync --test coordination_workload_bridge_smoke_contract --features test-internals -- --nocapture"
     ]
   }
 }

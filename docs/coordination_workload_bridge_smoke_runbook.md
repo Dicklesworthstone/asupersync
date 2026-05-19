@@ -112,7 +112,7 @@ bash scripts/run_coordination_workload_bridge_smoke.sh --execute --fixture --out
 Cargo validation must go through `rch`:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_smoke cargo test -p asupersync --test coordination_workload_bridge_smoke_contract --features test-internals -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_smoke cargo test -p asupersync --test coordination_workload_bridge_smoke_contract --features test-internals -- --nocapture
 ```
 
 The integration test checks the contract artifact, runbook references, list and

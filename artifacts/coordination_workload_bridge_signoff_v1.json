@@ -335,7 +335,7 @@
       "bash scripts/run_coordination_workload_bridge_signoff.sh --execute --fixture --output-root target/coordination-workload-bridge-signoff --generated-at 2026-05-05T05:00:00Z"
     ],
     "rch_cargo": [
-      "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_signoff cargo test -p asupersync --test coordination_workload_bridge_signoff --features test-internals -- --nocapture"
+      "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_signoff cargo test -p asupersync --test coordination_workload_bridge_signoff --features test-internals -- --nocapture"
     ],
     "graph_state": [
       "br show asupersync-qn8i0p --json",

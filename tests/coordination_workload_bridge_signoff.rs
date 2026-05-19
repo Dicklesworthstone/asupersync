@@ -120,6 +120,29 @@ fn string_set(value: &Value) -> BTreeSet<String> {
         .collect()
 }
 
+fn assert_remote_required_rch_cargo_commands(value: &Value, context: &str) {
+    let commands = value.as_array().expect("rch_cargo commands");
+    assert!(
+        !commands.is_empty(),
+        "{context} must publish at least one rch cargo command"
+    );
+    for command in commands {
+        let command = command.as_str().expect("rch_cargo command string");
+        assert!(
+            command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env "),
+            "{context} cargo command must require a remote rch worker: {command}"
+        );
+        assert!(
+            command.contains("CARGO_TARGET_DIR="),
+            "{context} cargo command must keep an explicit target dir: {command}"
+        );
+        assert!(
+            !command.contains("rch exec -- cargo"),
+            "{context} cargo command must not use bare rch cargo: {command}"
+        );
+    }
+}
+
 #[test]
 fn doc_and_artifact_reference_final_signoff_surfaces() {
     let doc = fs::read_to_string(repo_path(DOC_PATH)).expect("read signoff doc");
@@ -135,7 +158,7 @@ fn doc_and_artifact_reference_final_signoff_surfaces() {
         "dependency-boundary.json",
         "br show asupersync-qn8i0p --json",
         "bv --robot-alerts",
-        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_signoff cargo test -p asupersync --test coordination_workload_bridge_signoff --features test-internals -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_signoff cargo test -p asupersync --test coordination_workload_bridge_signoff --features test-internals -- --nocapture",
     ] {
         assert!(
             doc.contains(expected),
@@ -228,6 +251,7 @@ fn artifact_keeps_child_graph_fields_fail_closed_and_validation_contracts() {
     ] {
         assert!(graph.contains(expected), "missing graph command {expected}");
     }
+    assert_remote_required_rch_cargo_commands(&artifact["validation"]["rch_cargo"], "artifact");
 
     let forbidden =
         string_set(&artifact["core_runtime_dependency_boundary"]["forbidden_dependency_keys"]);
@@ -329,6 +353,10 @@ fn execute_fixture_emits_operator_grade_signoff_report() {
             "{row_id} should pass"
         );
     }
+    assert_remote_required_rch_cargo_commands(
+        &rows["graph_state_and_rch_validation_commands_documented"]["detail"]["rch_cargo"],
+        "report row",
+    );
 }
 
 #[test]

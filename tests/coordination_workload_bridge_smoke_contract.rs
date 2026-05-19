@@ -122,6 +122,29 @@ fn string_set(value: &Value) -> BTreeSet<String> {
         .collect()
 }
 
+fn assert_remote_required_rch_cargo_commands(value: &Value, context: &str) {
+    let commands = value.as_array().expect("rch_cargo commands");
+    assert!(
+        !commands.is_empty(),
+        "{context} must publish at least one rch cargo command"
+    );
+    for command in commands {
+        let command = command.as_str().expect("rch_cargo command string");
+        assert!(
+            command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env "),
+            "{context} cargo command must require a remote rch worker: {command}"
+        );
+        assert!(
+            command.contains("CARGO_TARGET_DIR="),
+            "{context} cargo command must keep an explicit target dir: {command}"
+        );
+        assert!(
+            !command.contains("rch exec -- cargo"),
+            "{context} cargo command must not use bare rch cargo: {command}"
+        );
+    }
+}
+
 #[test]
 fn doc_and_artifact_reference_bridge_surfaces() {
     let doc = load_doc();
@@ -137,7 +160,7 @@ fn doc_and_artifact_reference_bridge_surfaces() {
         "scripts/run_signed_profile_bundle_smoke.sh",
         "synthesize_coordination_pressure_replay",
         "minimize_coordination_pressure_replay",
-        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_smoke cargo test -p asupersync --test coordination_workload_bridge_smoke_contract --features test-internals -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_smoke cargo test -p asupersync --test coordination_workload_bridge_smoke_contract --features test-internals -- --nocapture",
     ] {
         assert!(doc.contains(expected), "runbook must mention {expected}");
     }
@@ -150,6 +173,7 @@ fn doc_and_artifact_reference_bridge_surfaces() {
     assert_eq!(artifact["bead_id"].as_str(), Some("asupersync-qn8i0p.7"));
     assert_eq!(artifact["runner_script"].as_str(), Some(SCRIPT_PATH));
     assert_eq!(artifact["runbook_doc"].as_str(), Some(DOC_PATH));
+    assert_remote_required_rch_cargo_commands(&artifact["validation"]["rch_cargo"], "artifact");
 }
 
 #[test]
@@ -267,6 +291,10 @@ fn execute_fixture_emits_all_expected_pass_and_fail_closed_rows() {
     assert_eq!(report["passed_row_count"].as_u64(), Some(5));
     assert_eq!(report["fail_closed_row_count"].as_u64(), Some(5));
     assert_eq!(report["unexpected_failure_count"].as_u64(), Some(0));
+    assert_remote_required_rch_cargo_commands(
+        &report["validation_commands"]["rch_cargo"],
+        "report",
+    );
 
     for artifact_key in ["manifest", "rows_jsonl", "report", "summary"] {
         let path = report["artifact_paths"][artifact_key]

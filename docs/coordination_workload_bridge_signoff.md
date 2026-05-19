@@ -40,7 +40,7 @@ The runner writes:
 4. Malformed, stale, unredacted, unsupported, missing-dimension, and schema-mismatch inputs fail closed with a diagnostic.
 5. The core runtime dependency boundary is preserved by checking Cargo dependency keys against the forbidden Agent Mail, Beads, br, bv, and rch keys.
 6. The capacity/profile handoff keeps used, refused, and absent coordination-pack states explicit and conservative.
-7. The signoff records the exact `br`, `bv`, local shell, and `rch exec -- cargo ...` commands required for closeout.
+7. The signoff records the exact `br`, `bv`, local shell, and `RCH_REQUIRE_REMOTE=1 rch exec -- env ... cargo ...` commands required for closeout.
 
 ## Required Validation
 
@@ -50,7 +50,7 @@ jq empty artifacts/coordination_workload_bridge_signoff_v1.json
 bash scripts/run_coordination_workload_bridge_signoff.sh --list
 bash scripts/run_coordination_workload_bridge_signoff.sh --dry-run --fixture --output-root target/coordination-workload-bridge-signoff-dry-run --generated-at 2026-05-05T05:00:00Z
 bash scripts/run_coordination_workload_bridge_signoff.sh --execute --fixture --output-root target/coordination-workload-bridge-signoff --generated-at 2026-05-05T05:00:00Z
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_signoff cargo test -p asupersync --test coordination_workload_bridge_signoff --features test-internals -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_signoff cargo test -p asupersync --test coordination_workload_bridge_signoff --features test-internals -- --nocapture
 ```
 
 Before closing the parent epic, run:
