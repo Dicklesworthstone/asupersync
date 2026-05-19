@@ -66,9 +66,23 @@ fn doc_references_artifact_test_and_source_workload_contract() {
 
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_redaction cargo test -p asupersync --test agent_swarm_coordination_redaction_contract -- --nocapture"
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_redaction cargo test -p asupersync --test agent_swarm_coordination_redaction_contract -- --nocapture"
         ),
-        "doc must publish the focused rch validation command"
+        "doc must publish the focused remote-required rch validation command"
+    );
+    assert!(
+        doc.contains("RCH_REQUIRE_REMOTE=1 rch exec -- env"),
+        "doc must require remote rch and preserve env routing"
+    );
+    assert!(
+        doc.contains(
+            "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_redaction"
+        ),
+        "doc must isolate Cargo target dir for the focused proof"
+    );
+    assert!(
+        !doc.contains("rch exec -- cargo"),
+        "doc must not publish bare rch Cargo routing"
     );
 }
 

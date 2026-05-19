@@ -113,7 +113,7 @@ The invariant suite for this contract lives in:
 Focused reproduction:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_redaction cargo test -p asupersync --test agent_swarm_coordination_redaction_contract -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_redaction cargo test -p asupersync --test agent_swarm_coordination_redaction_contract -- --nocapture
 ```
 
 The validation checks:
