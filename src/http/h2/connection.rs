@@ -1150,6 +1150,9 @@ impl Connection {
                     "server MUST NOT send SETTINGS_ENABLE_PUSH",
                 ));
             }
+            if let Setting::InitialWindowSize(size) = setting {
+                self.streams.check_initial_window_size(*size)?;
+            }
             staged.apply(*setting)?;
         }
 

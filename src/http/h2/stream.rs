@@ -1011,6 +1011,9 @@ impl StreamStore {
 
     /// Set the initial window size for new streams.
     pub fn set_initial_window_size(&mut self, size: u32) -> Result<(), H2Error> {
+        // First check if any stream would overflow to prevent partial mutations
+        self.check_initial_window_size(size)?;
+
         // Update existing streams.  Closed streams are excluded: their
         // windows are irrelevant and applying a large delta could trigger
         // a spurious overflow error that blocks the entire SETTINGS update.
@@ -1020,6 +1023,20 @@ impl StreamStore {
             }
         }
         self.initial_window_size = size;
+        Ok(())
+    }
+
+    /// Check if setting the initial window size would overflow any stream's window.
+    pub fn check_initial_window_size(&self, size: u32) -> Result<(), H2Error> {
+        let delta = i64::from(size) - i64::from(self.initial_window_size);
+        for stream in self.iter_streams() {
+            if !stream.state.is_closed() {
+                let new_window = i64::from(stream.send_window()) + delta;
+                if new_window > i64::from(i32::MAX) || new_window < i64::from(i32::MIN) {
+                    return Err(H2Error::flow_control("flow-control window overflow"));
+                }
+            }
+        }
         Ok(())
     }
 
