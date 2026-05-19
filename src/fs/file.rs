@@ -144,52 +144,28 @@ impl File {
     // so callers must synchronize if they need deterministic ordering.
 
     /// Moves the shared file cursor and returns the new position.
-    #[allow(unsafe_code)] // Arc<File> mutable-cursor access; see SAFETY comment below.
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.with_inner(move |inner| {
-            // File operations work on the file descriptor, which can be shared.
-            // We use Arc::try_unwrap when possible, otherwise unsafe for mutability.
-            match Arc::try_unwrap(inner) {
-                Ok(mut file) => Seek::seek(&mut file, pos),
-                Err(inner) => {
-                    // SAFETY: File seek operations are atomic at the OS level.
-                    // The Arc guarantees the file descriptor remains valid.
-                    let file_mut = unsafe { &mut *Arc::as_ptr(&inner).cast_mut() };
-                    Seek::seek(file_mut, pos)
-                }
-            }
+            let mut inner_ref: &std::fs::File = &inner;
+            Seek::seek(&mut inner_ref, pos)
         })
         .await
     }
 
     /// Gets the current stream position.
-    #[allow(unsafe_code)] // Arc<File> mutable-cursor access; see SAFETY comment below.
     pub async fn stream_position(&mut self) -> io::Result<u64> {
         self.with_inner(move |inner| {
-            match Arc::try_unwrap(inner) {
-                Ok(mut file) => Seek::stream_position(&mut file),
-                Err(inner) => {
-                    // SAFETY: File seek operations are atomic at the OS level.
-                    let file_mut = unsafe { &mut *Arc::as_ptr(&inner).cast_mut() };
-                    Seek::stream_position(file_mut)
-                }
-            }
+            let mut inner_ref: &std::fs::File = &inner;
+            Seek::stream_position(&mut inner_ref)
         })
         .await
     }
 
     /// Rewinds the stream to the beginning.
-    #[allow(unsafe_code)] // Arc<File> mutable-cursor access; see SAFETY comment below.
     pub async fn rewind(&mut self) -> io::Result<()> {
         self.with_inner(move |inner| {
-            match Arc::try_unwrap(inner) {
-                Ok(mut file) => Seek::rewind(&mut file),
-                Err(inner) => {
-                    // SAFETY: File seek operations are atomic at the OS level.
-                    let file_mut = unsafe { &mut *Arc::as_ptr(&inner).cast_mut() };
-                    Seek::rewind(file_mut)
-                }
-            }
+            let mut inner_ref: &std::fs::File = &inner;
+            Seek::rewind(&mut inner_ref)
         })
         .await
     }
@@ -199,39 +175,33 @@ impl File {
 // std::fs::File. Shared handles are permitted and therefore inherit the
 // platform's shared-cursor semantics.
 
-#[allow(unsafe_code)] // Arc<File> mutable-FD access; see SAFETY comments inside.
 impl AsyncRead for File {
     fn poll_read(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        // SAFETY: File read operations are atomic at the OS level.
-        // The Arc guarantees the file descriptor remains valid.
-        let file_mut = unsafe { &mut *Arc::as_ptr(&self.inner).cast_mut() };
-        let n = Read::read(file_mut, buf.unfilled())?;
+        let mut inner_ref: &std::fs::File = &self.inner;
+        let n = Read::read(&mut inner_ref, buf.unfilled())?;
         buf.advance(n);
         Poll::Ready(Ok(()))
     }
 }
 
-#[allow(unsafe_code)] // Arc<File> mutable-FD access; see SAFETY comments inside.
 impl AsyncWrite for File {
     fn poll_write(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // SAFETY: File write operations are atomic at the OS level.
-        let file_mut = unsafe { &mut *Arc::as_ptr(&self.inner).cast_mut() };
-        let n = Write::write(file_mut, buf)?;
+        let mut inner_ref: &std::fs::File = &self.inner;
+        let n = Write::write(&mut inner_ref, buf)?;
         Poll::Ready(Ok(n))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // SAFETY: File flush operations are atomic at the OS level.
-        let file_mut = unsafe { &mut *Arc::as_ptr(&self.inner).cast_mut() };
-        Write::flush(file_mut)?;
+        let mut inner_ref: &std::fs::File = &self.inner;
+        Write::flush(&mut inner_ref)?;
         Poll::Ready(Ok(()))
     }
 
@@ -240,16 +210,14 @@ impl AsyncWrite for File {
     }
 }
 
-#[allow(unsafe_code)] // Arc<File> mutable-FD access; see SAFETY comment inside.
 impl AsyncSeek for File {
     fn poll_seek(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        // SAFETY: File seek operations are atomic at the OS level.
-        let file_mut = unsafe { &mut *Arc::as_ptr(&self.inner).cast_mut() };
-        let n = Seek::seek(file_mut, pos)?;
+        let mut inner_ref: &std::fs::File = &self.inner;
+        let n = Seek::seek(&mut inner_ref, pos)?;
         Poll::Ready(Ok(n))
     }
 }
