@@ -132,7 +132,7 @@ run_scenario() {
         --
         --nocapture
     )
-    printf -v command '%q ' "${command_args[@]}"
+    printf -v command '%q ' "RCH_REQUIRE_REMOTE=1" "${command_args[@]}"
     command="${command% }"
 
     local scenario_dir="${RUN_DIR}/${scenario_id}"
@@ -154,7 +154,7 @@ run_scenario() {
     else
         set +e
         pushd "$PROJECT_ROOT" >/dev/null
-        "${command_args[@]}" 2>&1 | tee "$log_file"
+        RCH_REQUIRE_REMOTE=1 "${command_args[@]}" 2>&1 | tee "$log_file"
         rc=${PIPESTATUS[0]}
         popd >/dev/null
         set -e

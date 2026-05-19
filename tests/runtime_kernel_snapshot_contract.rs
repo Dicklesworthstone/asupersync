@@ -154,9 +154,9 @@ fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa021 cargo test --test runtime_kernel_snapshot_contract -- --nocapture"
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa021 cargo test --test runtime_kernel_snapshot_contract -- --nocapture"
         ),
-        "doc must route heavy validation through rch"
+        "doc must route heavy validation through remote-required rch"
     );
 }
 
@@ -394,6 +394,22 @@ fn smoke_scenarios_are_rch_routed() {
             command.contains("rch exec --"),
             "scenario {scenario_id} command must use rch: {command}"
         );
+        assert!(
+            command.contains("RCH_REQUIRE_REMOTE=1"),
+            "scenario {scenario_id} command must require remote rch: {command}"
+        );
+        assert!(
+            command.contains("rch exec -- env"),
+            "scenario {scenario_id} command must route Cargo through rch env: {command}"
+        );
+        assert!(
+            command.contains("CARGO_TARGET_DIR="),
+            "scenario {scenario_id} command must isolate Cargo target dir: {command}"
+        );
+        assert!(
+            !command.contains("rch exec -- cargo"),
+            "scenario {scenario_id} command must not use bare rch Cargo routing: {command}"
+        );
     }
 }
 
@@ -430,6 +446,7 @@ fn runner_script_exists_and_declares_contract_schemas() {
         "--execute",
         "runtime-kernel-snapshot-smoke-bundle-v1",
         "runtime-kernel-snapshot-smoke-run-report-v1",
+        "RCH_REQUIRE_REMOTE=1",
     ] {
         assert!(
             script.contains(token),

@@ -120,7 +120,7 @@ bash ./scripts/run_runtime_kernel_snapshot_smoke.sh --scenario AA02-SMOKE-REGIST
 Focused invariant test command (routed through `rch`):
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa021 cargo test --test runtime_kernel_snapshot_contract -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa021 cargo test --test runtime_kernel_snapshot_contract -- --nocapture
 ```
 
 Invariant coverage locks:

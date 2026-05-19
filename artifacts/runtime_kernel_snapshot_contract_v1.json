@@ -1,0 +1,290 @@
+{
+  "contract_version": "runtime-kernel-snapshot-contract-v1",
+  "runner_bundle_schema_version": "runtime-kernel-snapshot-smoke-bundle-v1",
+  "runner_report_schema_version": "runtime-kernel-snapshot-smoke-run-report-v1",
+  "runner_script": "scripts/run_runtime_kernel_snapshot_smoke.sh",
+  "snapshot_schema": {
+    "current_version": {
+      "major": 1,
+      "minor": 0
+    },
+    "fields": [
+      {
+        "name": "id",
+        "rust_type": "SnapshotId",
+        "units": "snapshot_id",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::id",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Monotonic snapshot identifier for replay and audit ordering."
+      },
+      {
+        "name": "version",
+        "rust_type": "SnapshotVersion",
+        "units": "schema_version",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::version",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Runtime snapshot schema version observed by controllers."
+      },
+      {
+        "name": "timestamp",
+        "rust_type": "Time",
+        "units": "logical_time",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::timestamp",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Deterministic logical runtime timestamp."
+      },
+      {
+        "name": "ready_queue_len",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::ready_queue_len",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Runnable backlog visible to scheduler controllers."
+      },
+      {
+        "name": "cancel_lane_len",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::cancel_lane_len",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Cancellation backlog visible to fairness and drain controllers."
+      },
+      {
+        "name": "finalize_lane_len",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::finalize_lane_len",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Finalizer backlog that can elongate shutdown and drain paths."
+      },
+      {
+        "name": "total_tasks",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::total_tasks",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Total tasks tracked by the runtime at snapshot time."
+      },
+      {
+        "name": "active_regions",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::active_regions",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Count of live regions participating in scheduling and teardown."
+      },
+      {
+        "name": "cancel_streak_current",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::cancel_streak_current",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Current cancellation streak length in the three-lane scheduler."
+      },
+      {
+        "name": "cancel_streak_limit",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::cancel_streak_limit",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Configured maximum cancellation streak before fairness yield."
+      },
+      {
+        "name": "outstanding_obligations",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::outstanding_obligations",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Current number of unsettled obligations in the runtime."
+      },
+      {
+        "name": "obligation_leak_count",
+        "rust_type": "u64",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::obligation_leak_count",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Observed leak count for conservative escalation and rollback."
+      },
+      {
+        "name": "pending_io_registrations",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::pending_io_registrations",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Outstanding I/O registrations not yet fully integrated."
+      },
+      {
+        "name": "active_timers",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::active_timers",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Current timer population visible to deadline and retry controllers."
+      },
+      {
+        "name": "worker_count",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::worker_count",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Total runtime worker count at snapshot time."
+      },
+      {
+        "name": "workers_parked",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::workers_parked",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Workers currently parked or idle under scheduler control."
+      },
+      {
+        "name": "blocking_threads_active",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::blocking_threads_active",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Blocking-pool concurrency currently active."
+      },
+      {
+        "name": "governor_enabled",
+        "rust_type": "bool",
+        "units": "bool",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::governor_enabled",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Whether the scheduler governor is enabled."
+      },
+      {
+        "name": "adaptive_cancel_enabled",
+        "rust_type": "bool",
+        "units": "bool",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::adaptive_cancel_enabled",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Whether adaptive cancellation heuristics are enabled."
+      },
+      {
+        "name": "adaptive_epoch",
+        "rust_type": "u64",
+        "units": "epoch",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::adaptive_epoch",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Current adaptive-control epoch index."
+      },
+      {
+        "name": "registered_controllers",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::registered_controllers",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Controllers accepted into the registry."
+      },
+      {
+        "name": "shadow_controllers",
+        "rust_type": "usize",
+        "units": "count",
+        "owner_symbol": "asupersync::runtime::kernel::RuntimeKernelSnapshot::shadow_controllers",
+        "owner_file": "src/runtime/kernel.rs",
+        "update_cadence": "per_snapshot",
+        "purpose": "Controllers currently running in shadow mode."
+      }
+    ]
+  },
+  "required_registration_fields": [
+    "name",
+    "min_version",
+    "max_version",
+    "required_fields",
+    "target_seams",
+    "initial_mode",
+    "proof_artifact_id",
+    "budget"
+  ],
+  "required_controller_observation_metadata": [
+    "decisions_this_epoch",
+    "fallback_active",
+    "calibration_score",
+    "last_action_label",
+    "proof_artifact_id",
+    "budget_max_decisions_per_epoch",
+    "budget_max_decision_latency_us"
+  ],
+  "registration_validation_rules": [
+    {
+      "code": "empty_name",
+      "description": "Reject empty controller registration names."
+    },
+    {
+      "code": "inverted_version_range",
+      "description": "Reject controller registrations whose min version exceeds max version."
+    },
+    {
+      "code": "incompatible_version",
+      "description": "Reject controllers that do not support the current snapshot major version."
+    },
+    {
+      "code": "unsupported_fields",
+      "description": "Reject required snapshot fields that are not in the stable catalog."
+    },
+    {
+      "code": "no_target_seams",
+      "description": "Reject controllers that do not target at least one runtime seam."
+    },
+    {
+      "code": "zero_budget",
+      "description": "Reject controllers with zero decision budget."
+    },
+    {
+      "code": "duplicate_name",
+      "description": "Reject duplicate controller names in the active registry."
+    }
+  ],
+  "structured_log_fields_required": [
+    "snapshot_id",
+    "snapshot_version",
+    "controller_id",
+    "controller_name",
+    "controller_mode",
+    "decision_label",
+    "fallback_active",
+    "calibration_score",
+    "proof_artifact_id",
+    "decisions_this_epoch",
+    "budget_max_decisions_per_epoch",
+    "budget_max_decision_latency_us",
+    "registration_status",
+    "rejection_code",
+    "rejection_reason",
+    "required_fields",
+    "target_seams"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA02-SMOKE-REGISTRATION-VALIDATION",
+      "description": "Validate runtime snapshot schema and registration rules",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa021 cargo test --test runtime_kernel_snapshot_contract registration -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.2.5"
+  ]
+}
