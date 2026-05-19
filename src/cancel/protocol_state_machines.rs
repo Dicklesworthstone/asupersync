@@ -368,32 +368,11 @@ impl CancelStateMachine for RegionStateMachine {
                     }
                 }
             }
-            (
-                RegionState::Cancelling {
-                    draining_tasks,
-                    pending_finalizers,
-                    cancel_reason,
-                },
-                RegionEvent::FinalizerStarted,
-            ) => {
-                if *pending_finalizers == 0 {
-                    return TransitionResult::Invalid {
-                        reason: "Cannot start finalizer with no pending finalizers".to_string(),
-                        current_state: format!("{:?}", self.state),
-                        attempted_transition: format!("{event:?}"),
-                    };
-                }
-                if *draining_tasks == 0 {
-                    RegionState::Finalizing {
-                        running_finalizers: *pending_finalizers,
-                    }
-                } else {
-                    RegionState::Cancelling {
-                        draining_tasks: *draining_tasks,
-                        pending_finalizers: pending_finalizers - 1,
-                        cancel_reason: cancel_reason.clone(),
-                    }
-                }
+            (state @ RegionState::Cancelling { .. }, RegionEvent::FinalizerStarted) => {
+                // FinalizerStarted does not change the count of pending_finalizers,
+                // because TaskDrained relies on pending_finalizers to initialize running_finalizers
+                // when transitioning to Finalizing.
+                state.clone()
             }
 
             // Finalizing state transitions
@@ -415,6 +394,7 @@ impl CancelStateMachine for RegionStateMachine {
                 }
             }
 
+            (state @ RegionState::Finalizing { .. }, RegionEvent::FinalizerStarted) => state.clone(),
             (state @ RegionState::Finalizing { .. }, RegionEvent::Cancel { .. }) => state.clone(),
             (state @ RegionState::Finalized, RegionEvent::Cancel { .. }) => state.clone(),
 
@@ -496,6 +476,7 @@ impl CancelStateMachine for RegionStateMachine {
                 },
             ],
             RegionState::Finalizing { .. } => vec![
+                RegionEvent::FinalizerStarted,
                 RegionEvent::FinalizerCompleted,
                 RegionEvent::Cancel {
                     reason: "example".to_string(),
@@ -1939,7 +1920,7 @@ mod tests {
                     .transition(RegionEvent::FinalizerCompleted, context)
                     .unwrap(),
                 state => {
-                    panic!("unexpected region state while driving cancel projection: {state:?}")
+                    panic!("unexpected region state while driving cancel projection: {state:?}") // ubs:ignore - test helper
                 }
             }
         }
