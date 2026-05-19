@@ -396,7 +396,7 @@ impl<T> Mutex<T> {
 
         // Record lock acquisition for ordering tracking
         if let Some(rank) = self.rank {
-            lock_ordering::record_acquire(rank);
+            lock_ordering::record_acquire(self.name, rank);
         }
 
         Ok(MutexGuard { mutex: self })
@@ -617,7 +617,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
                     // Record lock acquisition for ordering tracking
                     if let Some(rank) = self.mutex.rank {
-                        lock_ordering::record_acquire(rank);
+                        lock_ordering::record_acquire(self.mutex.name, rank);
                     }
 
                     return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
@@ -647,7 +647,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = self.mutex.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(self.mutex.name, rank);
             }
 
             return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
@@ -666,15 +666,11 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
                 // Was dequeued earlier but is no longer the granted waiter.
                 // Re-register at the FRONT to preserve FIFO fairness.
                 let new_id = state.waiters.push_front(context.waker().clone());
-                drop(state);
                 self.waiter_id = Some(new_id);
-                return Poll::Pending;
             }
         } else {
             let id = state.waiters.push_back(context.waker().clone());
-            drop(state);
             self.waiter_id = Some(id);
-            return Poll::Pending;
         }
         drop(state);
 
@@ -737,7 +733,7 @@ impl<T> Drop for MutexGuard<'_, T> {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.mutex.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.mutex.name, rank);
         }
     }
 }
@@ -826,7 +822,7 @@ impl<T, U: ?Sized> Drop for MappedMutexGuard<'_, T, U> {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.mutex.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.mutex.name, rank);
         }
     }
 }
@@ -909,7 +905,7 @@ impl<T> OwnedMutexGuard<T> {
 
         // Record lock acquisition for ordering tracking
         if let Some(rank) = mutex.rank {
-            lock_ordering::record_acquire(rank);
+            lock_ordering::record_acquire(mutex.name, rank);
         }
 
         Ok(Self { mutex })
@@ -977,7 +973,7 @@ impl<T> Drop for OwnedMutexGuard<T> {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.mutex.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.mutex.name, rank);
         }
     }
 }
@@ -1026,7 +1022,7 @@ impl<T, U: ?Sized> Drop for OwnedMappedMutexGuard<T, U> {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.mutex.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.mutex.name, rank);
         }
     }
 }

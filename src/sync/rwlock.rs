@@ -335,7 +335,7 @@ impl<T> RwLock<T> {
 
         // Record lock acquisition for ordering tracking
         if let Some(rank) = self.rank {
-            lock_ordering::record_acquire(rank);
+            lock_ordering::record_acquire(self.name, rank);
         }
 
         Ok(())
@@ -362,7 +362,7 @@ impl<T> RwLock<T> {
 
         // Record lock acquisition for ordering tracking
         if let Some(rank) = self.rank {
-            lock_ordering::record_acquire(rank);
+            lock_ordering::record_acquire(self.name, rank);
         }
 
         Ok(())
@@ -559,7 +559,7 @@ impl<T> RwLock<T> {
                 // Record lock release for ordering tracking - this read lock was
                 // granted (record_acquire was called) but cancelled before guard creation
                 if let Some(rank) = self.rank {
-                    lock_ordering::record_release(rank);
+                    lock_ordering::record_release(self.name, rank);
                 }
 
                 if state.readers == 0 && state.writer_waiters > 0 {
@@ -616,6 +616,12 @@ impl<T> RwLock<T> {
                     // We were granted the lock but never took the guard.
                     state.writer_waiters = state.writer_waiters.saturating_sub(1);
                     state.writer_active = false;
+
+                    // Record lock release for ordering tracking - this write lock was
+                    // granted (record_acquire was called) but cancelled before guard creation
+                    if let Some(rank) = self.rank {
+                        lock_ordering::record_release(self.name, rank);
+                    }
 
                     if poisoned {
                         let wakers = Self::queued_waiter_wakers(&state);
@@ -738,7 +744,7 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             // ordering as immediate acquisition.
             if let Some(rank) = this.lock.rank {
                 lock_ordering::check_acquire(this.lock.name, rank);
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.lock.name, rank);
             }
 
             this.waiter_id = None;
@@ -758,7 +764,7 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = this.lock.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.lock.name, rank);
             }
 
             this.completed = true;
@@ -838,7 +844,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             // ordering as immediate acquisition.
             if let Some(rank) = this.lock.rank {
                 lock_ordering::check_acquire(this.lock.name, rank);
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.lock.name, rank);
             }
 
             this.waiter_id = None;
@@ -869,7 +875,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = this.lock.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.lock.name, rank);
             }
 
             this.completed = true;
@@ -926,7 +932,7 @@ impl<T> Drop for RwLockReadGuard<'_, T> {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.lock.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.lock.name, rank);
         }
     }
 }
@@ -974,7 +980,7 @@ impl<T> Drop for RwLockWriteGuard<'_, T> {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.lock.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.lock.name, rank);
         }
     }
 }
@@ -1084,7 +1090,7 @@ impl<T> Drop for OwnedRwLockReadGuard<T> {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.lock.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.lock.name, rank);
         }
     }
 }
@@ -1155,7 +1161,7 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.lock.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.lock.name, rank);
         }
     }
 }
@@ -1260,7 +1266,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             // ordering as immediate acquisition.
             if let Some(rank) = this.lock.rank {
                 lock_ordering::check_acquire(this.lock.name, rank);
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.lock.name, rank);
             }
 
             this.waiter_id = None;
@@ -1282,7 +1288,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = this.lock.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.lock.name, rank);
             }
 
             this.completed = true;
@@ -1365,7 +1371,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             // ordering as immediate acquisition.
             if let Some(rank) = this.lock.rank {
                 lock_ordering::check_acquire(this.lock.name, rank);
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.lock.name, rank);
             }
 
             this.waiter_id = None;
@@ -1398,7 +1404,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = this.lock.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.lock.name, rank);
             }
 
             this.completed = true;

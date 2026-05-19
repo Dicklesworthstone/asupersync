@@ -208,7 +208,7 @@ mod inner {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = self.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(self.name, rank);
             }
 
             match result {
@@ -216,12 +216,14 @@ mod inner {
                     guard: Some(guard),
                     acquired_at: Instant::now(),
                     metrics: &self.metrics,
+                    name: self.name,
                     rank: self.rank,
                 }),
                 Err(poison) => Err(PoisonError::new(ContendedMutexGuard {
                     guard: Some(poison.into_inner()),
                     acquired_at: Instant::now(),
                     metrics: &self.metrics,
+                    name: self.name,
                     rank: self.rank,
                 })),
             }
@@ -237,7 +239,7 @@ mod inner {
                     // Check and record lock ordering for successful try_lock
                     if let Some(rank) = self.rank {
                         lock_ordering::check_acquire(self.name, rank);
-                        lock_ordering::record_acquire(rank);
+                        lock_ordering::record_acquire(self.name, rank);
                     }
 
                     self.metrics.record_acquire(0, false);
@@ -245,6 +247,7 @@ mod inner {
                         guard: Some(guard),
                         acquired_at: Instant::now(),
                         metrics: &self.metrics,
+                        name: self.name,
                         rank: self.rank,
                     })
                 }
@@ -254,7 +257,7 @@ mod inner {
                 Err(std::sync::TryLockError::Poisoned(poison)) => {
                     if let Some(rank) = self.rank {
                         lock_ordering::check_acquire(self.name, rank);
-                        lock_ordering::record_acquire(rank);
+                        lock_ordering::record_acquire(self.name, rank);
                     }
                     self.metrics.record_acquire(0, false);
                     Err(std::sync::TryLockError::Poisoned(PoisonError::new(
@@ -262,6 +265,7 @@ mod inner {
                             guard: Some(poison.into_inner()),
                             acquired_at: Instant::now(),
                             metrics: &self.metrics,
+                            name: self.name,
                             rank: self.rank,
                         },
                     )))
@@ -290,6 +294,7 @@ mod inner {
         guard: Option<MutexGuard<'a, T>>,
         acquired_at: Instant,
         metrics: &'a Metrics,
+        name: &'static str,
         rank: Option<LockRank>,
     }
 
@@ -315,7 +320,7 @@ mod inner {
 
             // Record lock release for ordering tracking
             if let Some(rank) = self.rank {
-                lock_ordering::record_release(rank);
+                lock_ordering::record_release(self.name, rank);
             }
 
             self.metrics.record_hold(hold_ns);
@@ -371,20 +376,22 @@ mod inner {
                 Ok(guard) => {
                     // Record lock acquisition for ordering tracking
                     if let Some(rank) = self.rank {
-                        lock_ordering::record_acquire(rank);
+                        lock_ordering::record_acquire(self.name, rank);
                     }
                     Ok(ContendedMutexGuard {
                         guard,
+                        name: self.name,
                         rank: self.rank,
                     })
                 }
                 Err(poison) => {
                     // Record lock acquisition even for poisoned mutex
                     if let Some(rank) = self.rank {
-                        lock_ordering::record_acquire(rank);
+                        lock_ordering::record_acquire(self.name, rank);
                     }
                     Err(PoisonError::new(ContendedMutexGuard {
                         guard: poison.into_inner(),
+                        name: self.name,
                         rank: self.rank,
                     }))
                 }
@@ -401,10 +408,11 @@ mod inner {
                     // Check and record lock ordering for successful try_lock
                     if let Some(rank) = self.rank {
                         lock_ordering::check_acquire(self.name, rank);
-                        lock_ordering::record_acquire(rank);
+                        lock_ordering::record_acquire(self.name, rank);
                     }
                     Ok(ContendedMutexGuard {
                         guard,
+                        name: self.name,
                         rank: self.rank,
                     })
                 }
@@ -414,11 +422,12 @@ mod inner {
                 Err(std::sync::TryLockError::Poisoned(poison)) => {
                     if let Some(rank) = self.rank {
                         lock_ordering::check_acquire(self.name, rank);
-                        lock_ordering::record_acquire(rank);
+                        lock_ordering::record_acquire(self.name, rank);
                     }
                     Err(std::sync::TryLockError::Poisoned(PoisonError::new(
                         ContendedMutexGuard {
                             guard: poison.into_inner(),
+                            name: self.name,
                             rank: self.rank,
                         },
                     )))
@@ -447,6 +456,7 @@ mod inner {
     /// Zero-cost guard wrapper (metrics disabled).
     pub struct ContendedMutexGuard<'a, T> {
         guard: MutexGuard<'a, T>,
+        name: &'static str,
         rank: Option<LockRank>,
     }
 
@@ -469,7 +479,7 @@ mod inner {
         fn drop(&mut self) {
             // Record lock release for ordering tracking
             if let Some(rank) = self.rank {
-                lock_ordering::record_release(rank);
+                lock_ordering::record_release(self.name, rank);
             }
         }
     }

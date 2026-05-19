@@ -376,15 +376,15 @@ fn validate_cross_module_pattern(
 /// Record that a lock of the given rank has been acquired.
 /// Only active in debug builds.
 #[inline]
-pub fn record_acquire(rank: LockRank) {
+pub fn record_acquire(lock_name: &str, rank: LockRank) {
     #[cfg(debug_assertions)]
     {
-        record_acquire_with_module("unknown", rank, LockModule::Other);
+        record_acquire_with_module(lock_name, rank, LockModule::from_name(lock_name));
     }
 
     #[cfg(not(debug_assertions))]
     {
-        let _ = rank; // Suppress unused variable warning
+        let _ = (lock_name, rank); // Suppress unused variable warning
     }
 }
 
@@ -422,15 +422,15 @@ pub fn record_acquire_with_module(lock_name: &str, rank: LockRank, module: LockM
 /// Record that a lock of the given rank has been released.
 /// Only active in debug builds.
 #[inline]
-pub fn record_release(rank: LockRank) {
+pub fn record_release(lock_name: &str, rank: LockRank) {
     #[cfg(debug_assertions)]
     {
-        record_release_with_module("unknown", rank, LockModule::Other);
+        record_release_with_module(lock_name, rank, LockModule::from_name(lock_name));
     }
 
     #[cfg(not(debug_assertions))]
     {
-        let _ = rank; // Suppress unused variable warning
+        let _ = (lock_name, rank); // Suppress unused variable warning
     }
 }
 
@@ -615,17 +615,17 @@ mod tests {
     fn test_correct_lock_ordering() {
         // This should not panic - correct ordering
         check_acquire("config_test", LockRank::Config);
-        record_acquire(LockRank::Config);
+        record_acquire("config_test", LockRank::Config);
 
         check_acquire("regions_test", LockRank::Regions);
-        record_acquire(LockRank::Regions);
+        record_acquire("regions_test", LockRank::Regions);
 
         check_acquire("tasks_test", LockRank::Tasks);
-        record_acquire(LockRank::Tasks);
+        record_acquire("tasks_test", LockRank::Tasks);
 
-        record_release(LockRank::Tasks);
-        record_release(LockRank::Regions);
-        record_release(LockRank::Config);
+        record_release("tasks_test", LockRank::Tasks);
+        record_release("regions_test", LockRank::Regions);
+        record_release("config_test", LockRank::Config);
     }
 
     #[test]
@@ -634,7 +634,7 @@ mod tests {
     fn test_incorrect_lock_ordering() {
         clear_held_locks(); // Start with clean state
         // This should panic - trying to acquire Config after Tasks
-        record_acquire(LockRank::Tasks);
+        record_acquire("tasks_test", LockRank::Tasks);
         check_acquire("config_test", LockRank::Config); // This should panic
     }
 

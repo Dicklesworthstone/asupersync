@@ -338,7 +338,7 @@ impl Semaphore {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = self.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(self.name, rank);
             }
 
             Ok(SemaphorePermit {
@@ -469,7 +469,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = self.semaphore.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(self.semaphore.name, rank);
             }
 
             // Optimization: Since we verified we are next in line, we are either
@@ -596,7 +596,7 @@ impl Drop for SemaphorePermit<'_> {
         // Record lock release for ordering tracking
         if self.release_lock_order_on_drop {
             if let Some(rank) = self.semaphore.rank {
-                lock_ordering::record_release(rank);
+                lock_ordering::record_release(self.semaphore.name, rank);
             }
         }
 
@@ -711,7 +711,7 @@ impl Drop for OwnedSemaphorePermit {
 
         // Record lock release for ordering tracking
         if let Some(rank) = self.semaphore.rank {
-            lock_ordering::record_release(rank);
+            lock_ordering::record_release(self.semaphore.name, rank);
         }
     }
 }
@@ -831,7 +831,7 @@ impl Future for OwnedAcquireFuture {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = this.semaphore.rank {
-                lock_ordering::record_acquire(rank);
+                lock_ordering::record_acquire(this.semaphore.name, rank);
             }
 
             // Optimization: O(1) removal instead of O(N) retain
