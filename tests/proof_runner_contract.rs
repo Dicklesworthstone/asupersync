@@ -1895,6 +1895,26 @@ fn proof_runner_rch_outcome_contract_names_required_fixtures() {
             "missing required outcome field {required}"
         );
     }
+
+    let proof_command = contract["proof_command"]
+        .as_str()
+        .expect("proof command string");
+    assert!(
+        proof_command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env "),
+        "proof command must force remote rch execution: {proof_command}"
+    );
+    assert!(
+        proof_command.contains("CARGO_TARGET_DIR="),
+        "proof command must use an explicit remote target directory: {proof_command}"
+    );
+    assert!(
+        proof_command.contains(" cargo test -p asupersync --test proof_runner_contract "),
+        "proof command must prove this contract test binary: {proof_command}"
+    );
+    assert!(
+        !proof_command.contains("rch exec -- cargo"),
+        "proof command must route Cargo through rch env setup: {proof_command}"
+    );
 }
 
 #[test]
