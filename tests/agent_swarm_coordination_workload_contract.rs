@@ -79,8 +79,12 @@ fn doc_references_bead_artifact_test_and_runtime_corpus() {
     }
 
     assert!(
-        doc.contains("rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_contract cargo test -p asupersync --test agent_swarm_coordination_workload_contract -- --nocapture"),
-        "doc must publish the focused rch validation command"
+        doc.contains("RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_contract cargo test -p asupersync --test agent_swarm_coordination_workload_contract -- --nocapture"),
+        "doc must publish the focused remote-required rch validation command"
+    );
+    assert!(
+        !doc.contains("rch exec -- cargo"),
+        "doc must not publish bare rch cargo validation commands"
     );
 }
 
