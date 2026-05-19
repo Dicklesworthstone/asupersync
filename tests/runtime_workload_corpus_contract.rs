@@ -171,7 +171,7 @@ fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-pearldog-aa012 cargo test --test runtime_workload_corpus_contract -- --nocapture"
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-pearldog-aa012 cargo test --test runtime_workload_corpus_contract -- --nocapture"
         ),
         "doc must route validation through rch"
     );
@@ -538,6 +538,10 @@ fn entry_commands_are_rch_routed_and_reference_existing_paths() {
             assert!(
                 entry_command.contains("rch exec -- env CARGO_TARGET_DIR="),
                 "direct cargo workload commands must set a remote CARGO_TARGET_DIR: {entry_command}"
+            );
+            assert!(
+                entry_command.contains("RCH_REQUIRE_REMOTE=1 rch exec -- env "),
+                "direct cargo workload commands must require a remote rch worker: {entry_command}"
             );
         }
     }

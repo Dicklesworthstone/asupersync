@@ -132,7 +132,7 @@ That manifest is the minimum required structured log. Underlying suite or benchm
 6. `artifact_path`
 7. `replay_command`
 
-All heavy underlying cargo operations must be routed through `rch`, either directly in `entry_command` or indirectly through an `RCH_BIN=rch` script runner.
+All heavy underlying cargo operations must be routed through `rch`, either directly in `entry_command` with `RCH_REQUIRE_REMOTE=1` or indirectly through an `RCH_BIN=rch` script runner.
 
 ## Validation
 
@@ -141,7 +141,7 @@ The invariant suite for this contract lives in `tests/runtime_workload_corpus_co
 Focused reproduction:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-pearldog-aa012 cargo test --test runtime_workload_corpus_contract -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-pearldog-aa012 cargo test --test runtime_workload_corpus_contract -- --nocapture
 ```
 
 The validation checks:

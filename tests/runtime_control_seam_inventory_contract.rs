@@ -140,7 +140,7 @@ fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa013 cargo test --test runtime_control_seam_inventory_contract -- --nocapture"
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa013 cargo test --test runtime_control_seam_inventory_contract -- --nocapture"
         ),
         "doc must route heavy validation through rch"
     );
@@ -300,7 +300,8 @@ fn smoke_commands_are_rch_routed() {
         );
         if command.contains(" cargo ") {
             assert!(
-                command.starts_with("rch exec -- env ") && command.contains("CARGO_TARGET_DIR="),
+                command.contains("RCH_REQUIRE_REMOTE=1 rch exec -- env ")
+                    && command.contains("CARGO_TARGET_DIR="),
                 "direct cargo smoke command for {seam_id} must use an explicit target dir: {command}"
             );
         }

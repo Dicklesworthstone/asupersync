@@ -114,7 +114,7 @@ Invariant suite:
 Focused reproduction:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa013 cargo test --test runtime_control_seam_inventory_contract -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa013 cargo test --test runtime_control_seam_inventory_contract -- --nocapture
 ```
 
 Optional smoke runner validation:

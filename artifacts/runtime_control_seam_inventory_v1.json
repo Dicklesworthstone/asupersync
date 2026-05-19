@@ -250,7 +250,7 @@
           "selector": "browser_ready_handoff_limit = 64"
         }
       ],
-      "comparator_smoke_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_control_seam_inventory_docs cargo test --test native_seam_parity browser_clock_through_trait_starts_at_zero -- --nocapture",
+      "comparator_smoke_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_control_seam_inventory_docs cargo test --test native_seam_parity browser_clock_through_trait_starts_at_zero -- --nocapture",
       "workload_ids": [
         "AA01-WL-BURST-001"
       ],
@@ -533,7 +533,7 @@
           "selector": "block-schur hard-regime path"
         }
       ],
-      "comparator_smoke_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_control_seam_inventory_docs cargo test --test raptorq_perf_invariants -- --nocapture",
+      "comparator_smoke_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_control_seam_inventory_docs cargo test --test raptorq_perf_invariants -- --nocapture",
       "workload_ids": [
         "AA01-WL-DIST-001"
       ],
