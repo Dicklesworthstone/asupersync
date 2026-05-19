@@ -237,6 +237,29 @@ def command_routes_cargo_with_target_dir(command: str) -> bool:
     return has_target_dir and remote_index < len(argv) and lowered[remote_index] == "cargo"
 
 
+def command_routes_cargo_with_remote_required(command: str) -> bool:
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return not command_mentions_cargo(command)
+
+    lowered = [arg.lower() for arg in argv]
+    if "cargo" not in lowered:
+        return not command_mentions_cargo(command)
+
+    program_index = first_non_assignment(argv)
+    if program_index >= len(argv):
+        return False
+    if lowered[program_index:program_index + 3] != ["rch", "exec", "--"]:
+        return False
+
+    for assignment in argv[:program_index]:
+        name, value = assignment.split("=", 1)
+        if name == "RCH_REQUIRE_REMOTE" and value.lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
 def unsafe_validation_commands(row: dict[str, Any]) -> list[str]:
     return [
         command
@@ -252,6 +275,16 @@ def missing_target_dir_validation_commands(row: dict[str, Any]) -> list[str]:
         if command_mentions_cargo(command)
         and command_routes_cargo_through_rch(command)
         and not command_routes_cargo_with_target_dir(command)
+    ]
+
+
+def missing_remote_required_validation_commands(row: dict[str, Any]) -> list[str]:
+    return [
+        command
+        for command in row["validation"]
+        if command_mentions_cargo(command)
+        and command_routes_cargo_through_rch(command)
+        and not command_routes_cargo_with_remote_required(command)
     ]
 
 
@@ -329,6 +362,7 @@ def capability_summaries(
                 or any(not is_covered(row) for row in rows)
                 or any(unsafe_validation_commands(row) for row in rows)
                 or any(missing_target_dir_validation_commands(row) for row in rows)
+                or any(missing_remote_required_validation_commands(row) for row in rows)
                 or any(local_fallback_validation_commands(row) for row in rows),
             }
         )
@@ -424,6 +458,17 @@ def review_cues(rows: list[dict[str, Any]], capabilities: list[dict[str, Any]]) 
                     "helper_id": row["helper_id"],
                     "command": command,
                     "recommendation": "include explicit CARGO_TARGET_DIR in the rch exec env before citing this helper",
+                }
+            )
+        for command in missing_remote_required_validation_commands(row):
+            cues.append(
+                {
+                    "kind": "missing-remote-required-validation",
+                    "severity": "high",
+                    "capability_id": row["capability_id"],
+                    "helper_id": row["helper_id"],
+                    "command": command,
+                    "recommendation": "prefix rch Cargo validation with RCH_REQUIRE_REMOTE=1 before citing this helper",
                 }
             )
         for command in local_fallback_validation_commands(row):

@@ -332,10 +332,35 @@ fn rch_validation_without_target_dir_is_actionable() {
 fn rch_validation_with_target_dir_is_not_flagged() {
     let receipt = receipt_json("unsafe_validation_command.json");
     let cues = receipt["review_cues"].as_array().expect("review cues");
-    let safe_command = "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract";
+    let safe_command = "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract";
 
     assert!(!cues.iter().any(|cue| {
         cue["kind"].as_str() == Some("missing-cargo-target-dir-validation")
+            && cue["command"].as_str() == Some(safe_command)
+    }));
+}
+
+#[test]
+fn rch_validation_without_remote_required_is_actionable() {
+    let receipt = receipt_json("unsafe_validation_command.json");
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    let command = "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_remote_required cargo test -p asupersync --test proof_receipt_inventory_contract";
+
+    assert!(cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("missing-remote-required-validation")
+            && cue["helper_id"].as_str() == Some("local-cargo-proof-receipt")
+            && cue["command"].as_str() == Some(command)
+    }));
+}
+
+#[test]
+fn rch_validation_with_remote_required_is_not_flagged() {
+    let receipt = receipt_json("unsafe_validation_command.json");
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+    let safe_command = "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract";
+
+    assert!(!cues.iter().any(|cue| {
+        cue["kind"].as_str() == Some("missing-remote-required-validation")
             && cue["command"].as_str() == Some(safe_command)
     }));
 }

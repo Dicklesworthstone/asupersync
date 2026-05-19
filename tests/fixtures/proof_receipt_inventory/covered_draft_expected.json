@@ -55,6 +55,14 @@
     },
     {
       "capability_id": "proof-runner-execute",
+      "command": "rch exec -- cargo test -p asupersync --test proof_runner_contract",
+      "helper_id": "proof-runner-execute-receipt-draft",
+      "kind": "missing-remote-required-validation",
+      "recommendation": "prefix rch Cargo validation with RCH_REQUIRE_REMOTE=1 before citing this helper",
+      "severity": "high"
+    },
+    {
+      "capability_id": "proof-runner-execute",
       "helper_id": "proof-runner-execute-receipt-draft",
       "kind": "draft-helper",
       "recommendation": "finish or retire this draft before citing it as canonical",
@@ -82,7 +90,7 @@
     "capabilities": 1,
     "duplicate_capabilities": 0,
     "helpers": 1,
-    "review_cues": 2,
+    "review_cues": 3,
     "superseded_helpers": 0
   }
 }

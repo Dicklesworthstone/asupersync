@@ -97,6 +97,14 @@
       "severity": "high"
     },
     {
+      "capability_id": "cross-agent-timeline",
+      "command": "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract",
+      "helper_id": "swarm-timeline-receipt",
+      "kind": "missing-remote-required-validation",
+      "recommendation": "prefix rch Cargo validation with RCH_REQUIRE_REMOTE=1 before citing this helper",
+      "severity": "high"
+    },
+    {
       "capability_id": "rch-worker-health",
       "helper_id": "rch-worker-quarantine-receipt",
       "kind": "superseded-helper",
@@ -126,7 +134,7 @@
     "capabilities": 2,
     "duplicate_capabilities": 0,
     "helpers": 3,
-    "review_cues": 2,
+    "review_cues": 3,
     "superseded_helpers": 1
   }
 }
