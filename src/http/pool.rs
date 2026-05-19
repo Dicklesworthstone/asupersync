@@ -394,24 +394,35 @@ impl Pool {
     /// This also evicts expired idle connections using the provided timestamp
     /// so stale entries do not block new connections.
     #[must_use]
-    pub fn can_create_connection(&mut self, key: &PoolKey, now: Time) -> bool {
-        // Capacity checks must ignore expired idle sockets immediately, not only
-        // on periodic cleanup ticks.
-        self.cleanup_expired(now);
-        self.last_cleanup = now;
-        // Check total connection limit
+    pub fn can_create_connection(&self, key: &PoolKey, now: Time) -> bool {
+        let idle_timeout = self.config.idle_timeout;
+
+        // Check total connection limit, ignoring expired idle connections
         let total = self
             .hosts
             .values()
-            .map(HostPool::connection_count)
+            .map(|host_pool| {
+                host_pool
+                    .connections
+                    .values()
+                    .filter(|conn| !conn.is_expired(now, idle_timeout))
+                    .count()
+            })
             .sum::<usize>();
+
         if total >= self.config.max_total_connections {
             return false;
         }
 
-        // Check per-host limit
+        // Check per-host limit, ignoring expired idle connections
         if let Some(host_pool) = self.hosts.get(key) {
-            if host_pool.connection_count() >= self.config.max_connections_per_host {
+            let host_total = host_pool
+                .connections
+                .values()
+                .filter(|conn| !conn.is_expired(now, idle_timeout))
+                .count();
+
+            if host_total >= self.config.max_connections_per_host {
                 return false;
             }
         }
