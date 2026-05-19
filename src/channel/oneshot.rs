@@ -551,16 +551,19 @@ impl<T> SendPermit<T> {
     /// will see a `Closed` error when attempting to receive.
     #[inline]
     pub fn abort(mut self) {
-        let waker = {
+        let (waker, receiver_closed_waker) = {
             let mut inner = self.inner.lock();
             inner.permit_outstanding = false;
             inner.record_cancellation();
             inner.closed_reason = Some("abort");
             // Take waker under lock, wake outside.
-            inner.take_waker()
+            (inner.take_waker(), inner.receiver_closed_waker.take())
         };
         self.sent = true; // Prevent drop from double-aborting
         if let Some(waker) = waker {
+            waker.wake();
+        }
+        if let Some(waker) = receiver_closed_waker {
             waker.wake();
         }
     }
@@ -584,14 +587,17 @@ impl<T> Drop for SendPermit<T> {
     fn drop(&mut self) {
         if !self.sent {
             // Permit dropped without sending - abort
-            let waker = {
+            let (waker, receiver_closed_waker) = {
                 let mut inner = self.inner.lock();
                 inner.permit_outstanding = false;
                 inner.record_cancellation();
                 inner.closed_reason = Some("permit_drop");
-                inner.take_waker()
+                (inner.take_waker(), inner.receiver_closed_waker.take())
             };
             if let Some(waker) = waker {
+                waker.wake();
+            }
+            if let Some(waker) = receiver_closed_waker {
                 waker.wake();
             }
         }
