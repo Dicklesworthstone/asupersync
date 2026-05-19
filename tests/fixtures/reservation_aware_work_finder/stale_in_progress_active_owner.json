@@ -1,0 +1,61 @@
+{
+  "agent_mail": {
+    "active_agent_window_minutes": 30,
+    "agents": [
+      {
+        "name": "ActiveAgent",
+        "program": "codex-cli",
+        "task_description": "still working the stale-looking bead",
+        "last_active_ts": "2026-05-10T09:00:00Z"
+      },
+      {
+        "name": "DormantAgent",
+        "program": "codex-cli",
+        "task_description": "no recent activity",
+        "last_active_ts": "2026-05-10T04:00:00Z"
+      }
+    ],
+    "reservations": [],
+    "status": "fixture"
+  },
+  "beads": {
+    "status": "fixture",
+    "stale_after_minutes": 90,
+    "ready": [],
+    "in_progress": [
+      {
+        "id": "asupersync-active-stale",
+        "title": "Stale by age but owned by active agent",
+        "status": "in_progress",
+        "owner": "ActiveAgent",
+        "updated_at": "2026-05-10T06:45:00Z"
+      },
+      {
+        "id": "asupersync-dormant-stale",
+        "title": "Stale and owned by inactive agent",
+        "status": "in_progress",
+        "owner": "DormantAgent",
+        "updated_at": "2026-05-10T06:30:00Z"
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "fixture",
+    "entries": []
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "mock-code-finder:source-only-finder",
+      "lane": "mock-code-finder",
+      "title": "Inspect reservation-aware finder without tracker mutation",
+      "priority": 2,
+      "no_build_validation": true,
+      "paths": [
+        "scripts/reservation_aware_work_finder.py"
+      ],
+      "proof_commands": [
+        "python3 -m py_compile scripts/reservation_aware_work_finder.py"
+      ]
+    }
+  ]
+}

@@ -581,6 +581,41 @@ fn coordination_churn_governor_rolls_up_mail_tracker_stale_and_dirty_state() {
 }
 
 #[test]
+fn stale_in_progress_owned_by_active_agent_recommends_owner_coordination_first() {
+    let receipt = finder_json("stale_in_progress_active_owner.json");
+    let stale = receipt["stale_in_progress"].as_array().expect("stale rows");
+    let active = stale
+        .iter()
+        .find(|row| row["id"].as_str() == Some("asupersync-active-stale"))
+        .expect("active-owner stale row");
+    let dormant = stale
+        .iter()
+        .find(|row| row["id"].as_str() == Some("asupersync-dormant-stale"))
+        .expect("dormant-owner stale row");
+
+    assert_eq!(stale.len(), 2);
+    assert_eq!(active["owner"].as_str(), Some("ActiveAgent"));
+    assert_eq!(active["owner_active"].as_bool(), Some(true));
+    assert_eq!(
+        active["recommended_action"].as_str(),
+        Some("message-active-owner-before-reopen")
+    );
+    assert_eq!(active["force_release_performed"].as_bool(), Some(false));
+    assert_eq!(active["reopen_performed"].as_bool(), Some(false));
+
+    assert_eq!(dormant["owner"].as_str(), Some("DormantAgent"));
+    assert_eq!(dormant["owner_active"].as_bool(), Some(false));
+    assert_eq!(
+        dormant["recommended_action"].as_str(),
+        Some("coordinate-before-reopen-or-force-release")
+    );
+    assert_eq!(
+        receipt["coordination_churn"]["active_agent_count"].as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
 fn markdown_dashboard_reports_coordination_churn_governor() {
     let markdown = finder_markdown("coordination_churn_governor.json");
     let expected = fixture_text("coordination_churn_governor_expected.md");
