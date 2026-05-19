@@ -482,11 +482,14 @@ def classify_reservations(agent: str, snapshot: dict[str, Any], now: str) -> lis
         released_ts = item.get("released_ts") or item.get("released_at")
         expires_at = parse_timestamp(expires_ts)
         expired = bool(released_ts) or bool(expires_at and expires_at <= now_ts)
+        exclusive = reservation_exclusive(item)
 
         if expired:
             classification = "expired"
         elif not holder:
             classification = "unknown-owner"
+        elif not exclusive:
+            classification = "shared-active"
         elif holder == agent:
             classification = "owned-active"
         elif tracker_reservation_path(pattern):
@@ -499,11 +502,29 @@ def classify_reservations(agent: str, snapshot: dict[str, Any], now: str) -> lis
                 "path_pattern": pattern,
                 "holder": holder or "unknown",
                 "expires_ts": expires_ts,
-                "exclusive": bool(item.get("exclusive", True)),
+                "exclusive": exclusive,
                 "classification": classification,
             }
         )
     return rows
+
+
+def reservation_exclusive(item: dict[str, Any]) -> bool:
+    value = item.get("exclusive", True)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "non-exclusive",
+            "nonexclusive",
+            "shared",
+        }
+    return bool(value)
 
 
 def stale_in_progress(

@@ -313,6 +313,88 @@ fn tracker_directory_reservation_conflict_output_matches_full_reviewed_golden() 
 }
 
 #[test]
+fn shared_tracker_reservation_does_not_block_ready_claim() {
+    let probe = r#"
+import json
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(repo / "scripts"))
+import session_handoff_receipt as receipt
+
+source = {
+    "agent_mail": {
+        "available": True,
+        "reservations": [
+            {
+                "agent_name": "BlackDove",
+                "exclusive": False,
+                "expires_ts": "2999-01-01T00:00:00Z",
+                "path_pattern": ".beads/issues.jsonl",
+            }
+        ],
+        "status": "ok",
+    },
+    "beads": {
+        "in_progress": [],
+        "ready": [{"id": "asupersync-ready3", "title": "Ready with shared tracker observer"}],
+        "status": "ok",
+    },
+    "dirty_tree": {"entries": []},
+    "git": {"ahead": 0, "behind": 0, "branch": "main", "upstream": "origin/main"},
+    "proof_runner": {"status": "ok", "suggested_lanes": []},
+    "rch": {"available": True, "queue_summary": "queued=0 running=0"},
+}
+
+handoff = receipt.build_receipt(
+    source=source,
+    repo_path=str(repo),
+    agent="CopperSpring",
+    generated_at="2026-05-08T04:30:00Z",
+    stale_after_hours=12,
+)
+print(json.dumps(handoff, sort_keys=True))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(probe)
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run shared tracker reservation probe");
+    assert!(
+        output.status.success(),
+        "python shared tracker reservation probe failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value = serde_json::from_slice(&output.stdout).expect("probe output must be JSON");
+    assert_eq!(next_action_category(&receipt), "claim-ready-bead");
+    assert_eq!(
+        receipt["next_action"]["bead_id"].as_str(),
+        Some("asupersync-ready3")
+    );
+    assert!(
+        receipt["reservation_conflicts"]
+            .as_array()
+            .expect("reservation_conflicts must be array")
+            .is_empty(),
+        "shared tracker reservations are observation-only and must not block claiming"
+    );
+    assert_eq!(
+        receipt["reservation_snapshot"]["classifications"][0]["classification"].as_str(),
+        Some("shared-active")
+    );
+    assert_eq!(
+        receipt["reservation_snapshot"]["classifications"][0]["exclusive"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
 fn tracker_write_lock_timeout_is_reported_without_mutation() {
     let receipt = receipt_json("write_lock_timeout.json");
     assert_eq!(next_action_category(&receipt), "blocked");
