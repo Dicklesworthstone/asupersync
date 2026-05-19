@@ -10,7 +10,7 @@
     {
       "artifact_path": "artifacts/proof/current-clean.json",
       "classification": "current-clean",
-      "command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_artifact_current_clean cargo test --test proof_runner_contract -- --nocapture",
       "decision": "cite-as-current",
       "evidence": {
         "artifact_git_branch": "main",

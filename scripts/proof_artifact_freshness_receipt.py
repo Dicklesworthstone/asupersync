@@ -348,12 +348,31 @@ def path_matches(pattern: str, path: str) -> bool:
     )
 
 
-def proof_command_uses_bare_cargo(command: str) -> bool:
+def cargo_proof_command_defects(command: str) -> list[str]:
     lowered = command.lower()
-    return any(
-        "rch exec" not in lowered[: match.start()]
-        for match in CARGO_PROOF_COMMAND.finditer(command)
-    )
+    defects: list[str] = []
+    for match in CARGO_PROOF_COMMAND.finditer(command):
+        prefix = lowered[: match.start()]
+        if "rch exec" not in prefix:
+            defects.append("bare-cargo")
+            continue
+        if "rch_require_remote=1" not in prefix:
+            defects.append("missing-rch-require-remote")
+        if "cargo_target_dir=" not in prefix:
+            defects.append("missing-cargo-target-dir")
+        if "rch exec -- env" not in prefix:
+            defects.append("missing-rch-env-wrapper")
+    return sorted(set(defects))
+
+
+def proof_command_uses_bare_cargo(command: str) -> bool:
+    return "bare-cargo" in cargo_proof_command_defects(command)
+
+
+def remote_required_rerun_command(command: str) -> str:
+    match = CARGO_PROOF_COMMAND.search(command)
+    cargo_command = command[match.start() :].strip() if match else command.strip()
+    return f"RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR {cargo_command}"
 
 
 def rch_local_fallback_segments(texts: list[str]) -> list[str]:
@@ -388,7 +407,8 @@ def classify_artifact(
     command = artifact["command"]
     touched_files = artifact["touched_files"]
     overlaps = dirty_overlaps(touched_files, dirty)
-    bare_cargo_command = proof_command_uses_bare_cargo(command)
+    unsafe_cargo_reasons = cargo_proof_command_defects(command)
+    bare_cargo_command = "bare-cargo" in unsafe_cargo_reasons
     local_fallback_segments = rch_local_fallback_segments(
         [command, *artifact.get("proof_text", [])]
     )
@@ -403,6 +423,8 @@ def classify_artifact(
     }
     if bare_cargo_command:
         evidence["bare_cargo_command"] = True
+    if unsafe_cargo_reasons:
+        evidence["unsafe_cargo_command_reasons"] = unsafe_cargo_reasons
     if local_fallback_segments:
         evidence["rch_local_fallback"] = True
         evidence["rch_local_fallback_segments"] = local_fallback_segments
@@ -427,10 +449,10 @@ def classify_artifact(
         classification = "unverifiable-surface"
         decision = "suppress-as-unverifiable"
         reason = "artifact does not declare touched files"
-    elif bare_cargo_command:
+    elif unsafe_cargo_reasons:
         classification = "unsafe-proof-command"
         decision = "rerun-required"
-        reason = "artifact proof command bypasses rch exec"
+        reason = "artifact proof command lacks remote-required rch Cargo routing"
     elif local_fallback_segments:
         classification = "rch-local-fallback-proof"
         decision = "rerun-required"
@@ -477,12 +499,12 @@ def remediation_for(classification: str, command: str) -> dict[str, Any]:
         }
     if classification == "unsafe-proof-command":
         return {
-            "operator_note": "Do not cite green output from a local bare Cargo proof.",
+            "operator_note": "Do not cite green output from a Cargo proof that can fall back locally.",
             "next_steps": [
-                "rerun the proof through rch exec with an explicit CARGO_TARGET_DIR",
+                "rerun the proof as RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo ...",
                 "replace the artifact command before citing it",
             ],
-            "rerun_command": f"rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR {command}",
+            "rerun_command": remote_required_rerun_command(command),
         }
     if classification == "rch-local-fallback-proof":
         return {

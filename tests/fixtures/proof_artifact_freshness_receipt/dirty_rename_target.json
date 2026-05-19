@@ -2,7 +2,7 @@
   "artifacts": [
     {
       "artifact_path": "target/proof-artifacts/dirty-rename-target.json",
-      "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
       "generated_at": "2026-05-08T05:00:00Z",
       "git_branch": "main",
       "git_sha": "2222222222222222222222222222222222222222",

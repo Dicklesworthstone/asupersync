@@ -10,7 +10,7 @@
     {
       "artifact_path": "artifacts/proof/missing-head.json",
       "classification": "unverifiable-head",
-      "command": "rch exec -- cargo check -p asupersync --lib",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_head cargo check -p asupersync --lib",
       "decision": "suppress-as-unverifiable",
       "evidence": {
         "artifact_git_branch": "main",
@@ -27,7 +27,7 @@
           "produce a new artifact with git_sha, git_branch, command, and touched_files"
         ],
         "operator_note": "Artifact lacks enough provenance to support a green claim.",
-        "rerun_command": "rch exec -- cargo check -p asupersync --lib"
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_head cargo check -p asupersync --lib"
       },
       "safe_to_cite": false,
       "status": "pass",

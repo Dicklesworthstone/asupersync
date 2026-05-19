@@ -5,10 +5,10 @@
   },
   "artifacts": [
     {
-      "artifact_path": "artifacts/proof/current-clean.json",
+      "artifact_path": "artifacts/proof/missing-target-dir-command.json",
       "git_sha": "2222222222222222222222222222222222222222",
       "git_branch": "main",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_artifact_current_clean cargo test --test proof_runner_contract -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test --test proof_runner_contract -- --nocapture",
       "touched_files": [
         "scripts/proof_runner.py",
         "tests/proof_runner_contract.rs"
@@ -18,13 +18,6 @@
     }
   ],
   "dirty_tree": {
-    "entries": [
-      {
-        "status": " M",
-        "path": "src/http/h1/client.rs",
-        "classification": "peer-owned",
-        "owner": "YellowDuck"
-      }
-    ]
+    "entries": []
   }
 }

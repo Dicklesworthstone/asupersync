@@ -256,9 +256,75 @@ fn bare_cargo_command_requires_rerun_even_at_current_head() {
         row["remediation"]["rerun_command"]
             .as_str()
             .expect("rerun command")
-            .starts_with("rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test")
+            .starts_with(
+                "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test"
+            )
     );
     assert_eq!(receipt["summary"]["rerun_required"].as_u64(), Some(1));
+}
+
+#[test]
+fn rch_cargo_without_remote_required_or_target_dir_requires_rerun() {
+    let receipt = receipt_json("missing_remote_required_command.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(row["classification"].as_str(), Some("unsafe-proof-command"));
+    assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+    assert_eq!(row["safe_to_cite"].as_bool(), Some(false));
+    let reasons = row["evidence"]["unsafe_cargo_command_reasons"]
+        .as_array()
+        .expect("unsafe reasons must be present");
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("missing-rch-require-remote"))
+    );
+    assert!(
+        row["remediation"]["rerun_command"]
+            .as_str()
+            .expect("rerun command")
+            .starts_with(
+                "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test"
+            )
+    );
+}
+
+#[test]
+fn missing_remote_required_command_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "missing_remote_required_command.json",
+        "missing_remote_required_command_expected.json",
+    );
+}
+
+#[test]
+fn rch_exec_cargo_without_env_target_dir_requires_rerun() {
+    let receipt = receipt_json("missing_target_dir_command.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(row["classification"].as_str(), Some("unsafe-proof-command"));
+    assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+    let reasons = row["evidence"]["unsafe_cargo_command_reasons"]
+        .as_array()
+        .expect("unsafe reasons must be present");
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("missing-cargo-target-dir"))
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("missing-rch-env-wrapper"))
+    );
+}
+
+#[test]
+fn missing_target_dir_command_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "missing_target_dir_command.json",
+        "missing_target_dir_command_expected.json",
+    );
 }
 
 #[test]
@@ -278,7 +344,7 @@ artifact = module.normalize_artifact({
     "artifact_path": "artifacts/proof/local-fallback.json",
     "git_sha": "2222222222222222222222222222222222222222",
     "git_branch": "main",
-    "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
     "stderr": "\n".join([
         "[RCH] local (daemon unavailable)",
         "falling back to local execution",
