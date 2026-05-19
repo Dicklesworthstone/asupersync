@@ -34,15 +34,15 @@ Files to reserve:
 ## Coordination Churn
 | Field | Value |
 | --- | --- |
-| active agents | 0 |
-| ack-required backlog | 0 |
+| active agents | 3 |
+| ack-required backlog | 2 |
 | tracker lock active | yes |
-| tracker holder | BoldTower |
+| tracker holder | RubyRobin |
 | stale in-progress | 1 |
-| max stale age minutes | 140 |
-| peer dirty paths | 0 |
+| max stale age minutes | 180 |
+| peer dirty paths | 2 |
 | source-only safe | yes |
-| next action | `coordinate-before-reopen-or-force-release` |
+| next action | `ack-required-mail-before-new-work` |
 | stale action | `coordinate-before-reopen-or-force-release` |
 
 ## Safe Work
@@ -53,15 +53,20 @@ Files to reserve:
 ## Blockers
 | Candidate | Kind | Owner | Path | Reason |
 | --- | --- | --- | --- | --- |
-| `asupersync-ready-needs-tracker` | `tracker-active-reservation` | BoldTower | .beads/issues.jsonl | candidate requires a Beads tracker mutation while the tracker ledger is reserved |
+| `asupersync-vjc3pv.4` | `tracker-active-reservation` | RubyRobin | .beads/issues.jsonl | candidate requires a Beads tracker mutation while the tracker ledger is reserved |
 
 ## Active Reservations
 | Path | Holder | Exclusive | Expires |
 | --- | --- | --- | --- |
-| `.beads/issues.jsonl` | BoldTower | yes | `2026-05-10T09:30:00Z` |
+| `.beads/issues.jsonl` | RubyRobin | yes | `2026-05-10T09:30:00Z` |
+| `src/http/h2/stream.rs` | BoldTower | yes | `2026-05-10T09:25:00Z` |
 
 ## Dirty Paths
-No dirty paths in snapshot.
+| Path | Status | Owner |
+| --- | --- | --- |
+| `scripts/local_scratch_note.txt` | `M` | CopperSpring |
+| `src/http/h2/stream.rs` | `M` | BoldTower |
+| `tests/swarm_evidence_pack_contract.rs` | `??` | RubyRobin |
 
 ## Disk And Proof
 | Field | Value |
@@ -82,7 +87,7 @@ No cleanup candidates in snapshot.
 ## Stale In-Progress
 | Issue | Owner | Age Minutes | Action | Force Released | Reopened |
 | --- | --- | --- | --- | --- | --- |
-| `asupersync-stale-agent` | DormantAgent | 140 | coordinate-before-reopen-or-force-release | no | no |
+| `asupersync-stale-owner` | DormantAgent | 180 | coordinate-before-reopen-or-force-release | no | no |
 
 ## Safety
 | Invariant | Value |

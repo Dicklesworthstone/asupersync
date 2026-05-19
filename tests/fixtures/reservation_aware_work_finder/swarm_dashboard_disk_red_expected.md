@@ -32,6 +32,20 @@ Files to reserve:
 - `scripts/reservation_aware_work_finder.py`
 - `tests/fixtures/reservation_aware_work_finder/disk_pressure_autopilot_e2e.json`
 
+## Coordination Churn
+| Field | Value |
+| --- | --- |
+| active agents | 0 |
+| ack-required backlog | 0 |
+| tracker lock active | no |
+| tracker holder | - |
+| stale in-progress | 0 |
+| max stale age minutes | 0 |
+| peer dirty paths | 1 |
+| source-only safe | yes |
+| next action | `avoid-peer-dirty-paths-and-use-safe-recommendation` |
+| stale action | `none` |
+
 ## Safe Work
 | Candidate | Lane | Validation | Safety |
 | --- | --- | --- | --- |

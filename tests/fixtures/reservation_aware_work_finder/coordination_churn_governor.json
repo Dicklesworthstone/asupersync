@@ -1,0 +1,132 @@
+{
+  "agent_mail": {
+    "active_agent_window_minutes": 30,
+    "agents": [
+      {
+        "name": "AmberRabbit",
+        "program": "codex-cli",
+        "task_description": "coordination churn source slice",
+        "last_active_ts": "2026-05-10T09:00:00Z"
+      },
+      {
+        "name": "RubyRobin",
+        "program": "codex-cli",
+        "task_description": "evidence pack schema",
+        "last_active_ts": "2026-05-10T08:57:00Z"
+      },
+      {
+        "name": "BoldTower",
+        "program": "codex-cli",
+        "task_description": "admission decision contract",
+        "last_active_ts": "2026-05-10T08:50:00Z"
+      },
+      {
+        "name": "DormantAgent",
+        "program": "codex-cli",
+        "task_description": "old stale work",
+        "last_active_ts": "2026-05-10T05:00:00Z"
+      }
+    ],
+    "inbox": [
+      {
+        "id": 9001,
+        "from": "RubyRobin",
+        "subject": "ack needed before force-release",
+        "created_ts": "2026-05-10T08:55:00Z",
+        "importance": "high",
+        "ack_required": true
+      },
+      {
+        "id": 9002,
+        "from": "BoldTower",
+        "subject": "claim collision check",
+        "created_ts": "2026-05-10T08:58:00Z",
+        "importance": "normal",
+        "ack_required": true
+      },
+      {
+        "id": 9003,
+        "from": "RubyRobin",
+        "subject": "already acknowledged",
+        "created_ts": "2026-05-10T08:59:00Z",
+        "importance": "normal",
+        "ack_required": true,
+        "acknowledged_at": "2026-05-10T09:00:00Z"
+      }
+    ],
+    "reservations": [
+      {
+        "agent_name": "RubyRobin",
+        "path_pattern": ".beads/issues.jsonl",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:30:00Z"
+      },
+      {
+        "agent_name": "BoldTower",
+        "path_pattern": "src/http/h2/stream.rs",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:25:00Z"
+      }
+    ],
+    "status": "fixture"
+  },
+  "beads": {
+    "status": "fixture",
+    "stale_after_minutes": 90,
+    "ready": [
+      {
+        "id": "asupersync-vjc3pv.4",
+        "title": "[swarm-scale] Coordination churn governor handoff receipt",
+        "priority": 2,
+        "paths": [
+          "scripts/reservation_aware_work_finder.py",
+          "tests/reservation_aware_work_finder_contract.rs"
+        ]
+      }
+    ],
+    "in_progress": [
+      {
+        "id": "asupersync-stale-owner",
+        "title": "Stale owner should require coordination",
+        "status": "in_progress",
+        "owner": "DormantAgent",
+        "updated_at": "2026-05-10T06:05:00Z"
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "fixture",
+    "entries": [
+      {
+        "owner": "BoldTower",
+        "path": "src/http/h2/stream.rs",
+        "status": " M"
+      },
+      {
+        "owner": "RubyRobin",
+        "path": "tests/swarm_evidence_pack_contract.rs",
+        "status": "??"
+      },
+      {
+        "owner": "CopperSpring",
+        "path": "scripts/local_scratch_note.txt",
+        "status": " M"
+      }
+    ]
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "mock-code-finder:source-only-finder",
+      "lane": "mock-code-finder",
+      "title": "Inspect reservation-aware finder without tracker mutation",
+      "priority": 2,
+      "no_build_validation": true,
+      "paths": [
+        "scripts/reservation_aware_work_finder.py"
+      ],
+      "proof_commands": [
+        "python3 -m py_compile scripts/reservation_aware_work_finder.py"
+      ]
+    }
+  ]
+}

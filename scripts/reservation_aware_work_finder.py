@@ -98,6 +98,7 @@ RCH_LOCAL_FALLBACK_RE = re.compile(
 DISK_CRITICAL_BYTES = 1 * 1024 * 1024 * 1024
 DISK_LOW_BYTES = 5 * 1024 * 1024 * 1024
 DEFAULT_STALE_IN_PROGRESS_MINUTES = 120
+DEFAULT_ACTIVE_AGENT_WINDOW_MINUTES = 30
 TRACKER_PATHS = (".beads/issues.jsonl", ".beads/beads.db")
 
 
@@ -1087,6 +1088,172 @@ def stale_in_progress_reports(
     return sorted(reports, key=lambda row: (-row["age_minutes"], row["id"]))
 
 
+def active_agent_window_minutes_from(source: dict[str, Any]) -> int:
+    agent_mail = source.get("agent_mail", {}) if isinstance(source, dict) else {}
+    parsed = _first_int(
+        agent_mail.get("active_agent_window_minutes") if isinstance(agent_mail, dict) else None,
+        source.get("active_agent_window_minutes") if isinstance(source, dict) else None,
+    )
+    return parsed if parsed is not None and parsed > 0 else DEFAULT_ACTIVE_AGENT_WINDOW_MINUTES
+
+
+def agent_rows(source: dict[str, Any]) -> list[dict[str, Any]]:
+    agent_mail = source.get("agent_mail", {}) if isinstance(source, dict) else {}
+    return rows_from(agent_mail, ("agents", "active_agents", "registered_agents"))
+
+
+def active_agent_reports(source: dict[str, Any], generated_at: str) -> list[dict[str, Any]]:
+    now = parse_timestamp(generated_at) or dt.datetime.now(dt.timezone.utc)
+    window = active_agent_window_minutes_from(source)
+    rows = []
+    for row in agent_rows(source):
+        name = holder_name(row)
+        if not name:
+            continue
+        last_active = parse_timestamp(
+            str(row.get("last_active_ts") or row.get("last_seen_ts") or row.get("updated_at") or "")
+        )
+        if last_active is None:
+            continue
+        age_minutes = int((now - last_active).total_seconds() // 60)
+        if age_minutes > window:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "program": str(row.get("program") or ""),
+                "task_description": str(row.get("task_description") or ""),
+                "last_active_ts": last_active.isoformat().replace("+00:00", "Z"),
+                "age_minutes": age_minutes,
+            }
+        )
+    return sorted(rows, key=lambda row: (row["age_minutes"], row["name"]))
+
+
+def ack_required_backlog(source: dict[str, Any]) -> list[dict[str, Any]]:
+    agent_mail = source.get("agent_mail", {}) if isinstance(source, dict) else {}
+    rows = []
+    for row in rows_from(
+        agent_mail,
+        ("ack_required", "ack_required_messages", "unacknowledged", "inbox"),
+    ):
+        ack_required = bool(row.get("ack_required", True))
+        acknowledged = bool(row.get("acknowledged") or row.get("acknowledged_at") or row.get("ack_ts"))
+        if not ack_required or acknowledged:
+            continue
+        message_id = str(row.get("id") or row.get("message_id") or "")
+        rows.append(
+            {
+                "id": message_id,
+                "from": str(row.get("from") or row.get("sender") or row.get("sender_name") or ""),
+                "subject": str(row.get("subject") or message_id),
+                "created_ts": str(row.get("created_ts") or row.get("created_at") or ""),
+                "importance": str(row.get("importance") or "normal"),
+            }
+        )
+    return sorted(rows, key=lambda row: (row["created_ts"], row["id"]))
+
+
+def peer_dirty_path_reports(
+    dirty: list[dict[str, Any]],
+    reservations: list[dict[str, Any]],
+    agent: str,
+) -> list[dict[str, str]]:
+    rows = []
+    for row in dirty:
+        owner, source = owner_for_dirty_path(row, reservations)
+        if owner == agent:
+            continue
+        rows.append(
+            {
+                "path": row["path"],
+                "status": row["status"],
+                "holder": owner or "unknown",
+                "source": source,
+            }
+        )
+    return sorted(rows, key=lambda row: row["path"])
+
+
+def coordination_next_action(
+    ack_backlog: list[dict[str, Any]],
+    tracker_lock: dict[str, Any],
+    stale_in_progress: list[dict[str, Any]],
+    peer_dirty_paths: list[dict[str, str]],
+    recommendation_row: dict[str, Any],
+) -> str:
+    if ack_backlog:
+        return "ack-required-mail-before-new-work"
+    if tracker_lock.get("active") and ".beads/issues.jsonl" in recommendation_row.get("files_to_reserve", []):
+        return "wait-for-tracker-or-run-source-only-fallback"
+    if stale_in_progress:
+        return "coordinate-before-reopen-or-force-release"
+    if peer_dirty_paths:
+        return "avoid-peer-dirty-paths-and-use-safe-recommendation"
+    category = str(recommendation_row.get("category") or "")
+    if category == "claim-ready-bead":
+        return "claim-ready-bead-and-reserve-paths"
+    if category == "run-fallback-lane":
+        return "run-fallback-lane"
+    return category or "blocked-no-safe-work"
+
+
+def coordination_churn_from(
+    source: dict[str, Any],
+    agent: str,
+    generated_at: str,
+    reservations: list[dict[str, Any]],
+    dirty: list[dict[str, Any]],
+    tracker_lock: dict[str, Any],
+    stale_in_progress: list[dict[str, Any]],
+    recommendation_row: dict[str, Any],
+) -> dict[str, Any]:
+    active_agents = active_agent_reports(source, generated_at)
+    ack_backlog = ack_required_backlog(source)
+    peer_dirty_paths = peer_dirty_path_reports(dirty, reservations, agent)
+    max_stale_age = max((row["age_minutes"] for row in stale_in_progress), default=0)
+    source_only_safe = (
+        recommendation_row.get("category") == "run-fallback-lane"
+        and ".beads/issues.jsonl" not in recommendation_row.get("files_to_reserve", [])
+    )
+    return {
+        "schema_version": "coordination-churn-governor-v1",
+        "active_agent_window_minutes": active_agent_window_minutes_from(source),
+        "active_agent_count": len(active_agents),
+        "active_agents": active_agents,
+        "ack_required_backlog_count": len(ack_backlog),
+        "ack_required_backlog": ack_backlog,
+        "tracker_lock_state": {
+            "active": bool(tracker_lock.get("active")),
+            "holder": str(tracker_lock.get("holder") or ""),
+            "path_pattern": str(tracker_lock.get("path_pattern") or ""),
+            "expires_ts": str(tracker_lock.get("expires_ts") or ""),
+        },
+        "stale_in_progress_count": len(stale_in_progress),
+        "max_stale_issue_age_minutes": max_stale_age,
+        "stale_work_action": (
+            "coordinate-before-reopen-or-force-release" if stale_in_progress else "none"
+        ),
+        "peer_dirty_path_count": len(peer_dirty_paths),
+        "peer_dirty_paths": peer_dirty_paths,
+        "source_only_safe_to_proceed": source_only_safe,
+        "recommended_next_action": coordination_next_action(
+            ack_backlog,
+            tracker_lock,
+            stale_in_progress,
+            peer_dirty_paths,
+            recommendation_row,
+        ),
+        "required_reservations": recommendation_row.get("files_to_reserve", []),
+        "mutations_performed": {
+            "beads": False,
+            "agent_mail": False,
+            "force_release": False,
+            "reopen": False,
+        },
+    }
+
+
 def run_text(repo_path: Path, command: list[str], timeout: float) -> tuple[str, str]:
     try:
         output = subprocess.run(
@@ -1206,6 +1373,16 @@ def build_receipt(
     rec = recommendation(classified, disk_pressure)
     blocked = [row for row in classified if row["status"] == "blocked"]
     ready = [row for row in classified if row["status"] != "blocked"]
+    coordination_churn = coordination_churn_from(
+        source=source,
+        agent=agent,
+        generated_at=generated_at,
+        reservations=reservations,
+        dirty=dirty,
+        tracker_lock=tracker_lock,
+        stale_in_progress=stale_in_progress,
+        recommendation_row=rec,
+    )
     closeout_handoff = build_closeout_handoff(
         source=source,
         agent=agent,
@@ -1230,6 +1407,7 @@ def build_receipt(
             "stale_in_progress_count": len(stale_in_progress),
         },
         "recommendation": rec,
+        "coordination_churn": coordination_churn,
         "closeout_handoff": closeout_handoff,
         "disk_pressure": disk_pressure,
         "candidates": classified,
@@ -1351,6 +1529,7 @@ def render_blocker_rows(candidates: list[dict[str, Any]]) -> list[list[Any]]:
 def render_markdown_dashboard(receipt: dict[str, Any]) -> str:
     summary = receipt.get("summary", {})
     recommendation_row = receipt.get("recommendation", {})
+    coordination = receipt.get("coordination_churn", {})
     disk_pressure = receipt.get("disk_pressure", {})
     handoff = receipt.get("closeout_handoff", {})
     proof_result = handoff.get("remote_proof_result", {}) if isinstance(handoff, dict) else {}
@@ -1406,6 +1585,26 @@ def render_markdown_dashboard(receipt: dict[str, Any]) -> str:
         lines.extend(f"- {markdown_code(path)}" for path in files_to_reserve)
     else:
         lines.append("- none")
+
+    lines.extend(["", "## Coordination Churn"])
+    tracker_state = coordination.get("tracker_lock_state", {}) if isinstance(coordination, dict) else {}
+    lines.extend(
+        markdown_table(
+            ["Field", "Value"],
+            [
+                ["active agents", coordination.get("active_agent_count", 0)],
+                ["ack-required backlog", coordination.get("ack_required_backlog_count", 0)],
+                ["tracker lock active", markdown_bool(tracker_state.get("active"))],
+                ["tracker holder", tracker_state.get("holder") or "-"],
+                ["stale in-progress", coordination.get("stale_in_progress_count", 0)],
+                ["max stale age minutes", coordination.get("max_stale_issue_age_minutes", 0)],
+                ["peer dirty paths", coordination.get("peer_dirty_path_count", 0)],
+                ["source-only safe", markdown_bool(coordination.get("source_only_safe_to_proceed"))],
+                ["next action", markdown_code(coordination.get("recommended_next_action"))],
+                ["stale action", markdown_code(coordination.get("stale_work_action"))],
+            ],
+        )
+    )
 
     ready_rows = render_candidate_rows(candidates, "ready-to-claim")
     ready_rows.extend(render_candidate_rows(candidates, "ready-fallback"))

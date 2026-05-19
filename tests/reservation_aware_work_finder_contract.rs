@@ -534,6 +534,65 @@ fn stale_in_progress_is_report_only_and_tracker_lock_blocks_claim() {
 }
 
 #[test]
+fn coordination_churn_governor_rolls_up_mail_tracker_stale_and_dirty_state() {
+    let receipt = finder_json("coordination_churn_governor.json");
+    let churn = &receipt["coordination_churn"];
+
+    assert_eq!(
+        churn["schema_version"].as_str(),
+        Some("coordination-churn-governor-v1")
+    );
+    assert_eq!(churn["active_agent_count"].as_u64(), Some(3));
+    assert_eq!(churn["ack_required_backlog_count"].as_u64(), Some(2));
+    assert_eq!(churn["tracker_lock_state"]["active"].as_bool(), Some(true));
+    assert_eq!(
+        churn["tracker_lock_state"]["holder"].as_str(),
+        Some("RubyRobin")
+    );
+    assert_eq!(churn["stale_in_progress_count"].as_u64(), Some(1));
+    assert_eq!(churn["max_stale_issue_age_minutes"].as_u64(), Some(180));
+    assert_eq!(churn["peer_dirty_path_count"].as_u64(), Some(2));
+    assert_eq!(churn["source_only_safe_to_proceed"].as_bool(), Some(true));
+    assert_eq!(
+        churn["recommended_next_action"].as_str(),
+        Some("ack-required-mail-before-new-work")
+    );
+    assert_eq!(
+        churn["stale_work_action"].as_str(),
+        Some("coordinate-before-reopen-or-force-release")
+    );
+    assert_eq!(
+        churn["required_reservations"][0].as_str(),
+        Some("scripts/reservation_aware_work_finder.py")
+    );
+    assert_eq!(churn["mutations_performed"]["beads"].as_bool(), Some(false));
+    assert_eq!(
+        churn["mutations_performed"]["agent_mail"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        churn["mutations_performed"]["force_release"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        churn["mutations_performed"]["reopen"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn markdown_dashboard_reports_coordination_churn_governor() {
+    let markdown = finder_markdown("coordination_churn_governor.json");
+    let expected = fixture_text("coordination_churn_governor_expected.md");
+
+    assert_eq!(markdown, expected);
+    assert!(markdown.contains("## Coordination Churn"));
+    assert!(markdown.contains("| ack-required backlog | 2 |"));
+    assert!(markdown.contains("| next action | `ack-required-mail-before-new-work` |"));
+    assert!(markdown.contains("| source-only safe | yes |"));
+}
+
+#[test]
 fn proof_command_rch_routing_rejects_shell_prefix_spoofing() {
     let probe = r#"
 import json
