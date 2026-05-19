@@ -216,7 +216,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                                 active_receiver_count
                             );
                         }
-                        Err(broadcast::SendError::Cancelled) => {
+                        Err(broadcast::SendError::Cancelled(_)) => {
                             panic!("broadcast send unexpectedly cancelled under test Cx");
                         }
                     }
@@ -344,7 +344,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                                 active_receiver_count
                             );
                         }
-                        Err(broadcast::SendError::Cancelled) => {
+                        Err(broadcast::SendError::Cancelled(_)) => {
                             panic!("broadcast burst send unexpectedly cancelled under test Cx");
                         }
                     }

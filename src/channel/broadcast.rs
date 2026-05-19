@@ -36,7 +36,7 @@ pub enum SendError<T> {
     /// The capability context was cancelled before the reservation
     /// could be granted. No slot was consumed; no receiver observed
     /// the message. (br-asupersync-bed5oh)
-    Cancelled,
+    Cancelled(T),
 }
 
 impl<T> std::fmt::Display for SendError<T> {
@@ -44,7 +44,7 @@ impl<T> std::fmt::Display for SendError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed(_) => write!(f, "sending on a closed broadcast channel"),
-            Self::Cancelled => write!(f, "broadcast send cancelled by Cx"),
+            Self::Cancelled(_) => write!(f, "broadcast send cancelled by Cx"),
         }
     }
 }
@@ -340,7 +340,7 @@ impl<T: Clone> Sender<T> {
         // Cx.
         if cx.checkpoint().is_err() {
             self.channel.record_cancellation();
-            return Err(SendError::Cancelled);
+            return Err(SendError::Cancelled(()));
         }
 
         if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
@@ -355,16 +355,16 @@ impl<T: Clone> Sender<T> {
     /// # Errors
     ///
     /// Returns `SendError::Closed(msg)` if there are no active receivers
-    /// when reservation is attempted. Returns `SendError::Cancelled` if
+    /// when reservation is attempted. Returns `SendError::Cancelled(msg)` if
     /// the capability context was cancelled before the permit was granted
-    /// (the message is dropped — caller retains nothing). Returns
+    /// (the message is returned). Returns
     /// `Ok(0)` if all receivers drop between reservation and commit.
     #[inline]
     pub fn send(&self, cx: &Cx, msg: T) -> Result<usize, SendError<T>> {
         let permit = match self.reserve(cx) {
             Ok(p) => p,
             Err(SendError::Closed(())) => return Err(SendError::Closed(msg)),
-            Err(SendError::Cancelled) => return Err(SendError::Cancelled),
+            Err(SendError::Cancelled(())) => return Err(SendError::Cancelled(msg)),
         };
         Ok(permit.send(msg))
     }
@@ -1215,7 +1215,7 @@ mod tests {
         cx.set_cancel_requested(true);
         let result = tx.reserve(&cx);
         crate::assert_with_log!(
-            matches!(result.as_ref(), Err(SendError::Cancelled)),
+            matches!(result.as_ref(), Err(SendError::Cancelled(_))),
             "reserve under cancel must return Cancelled",
             "Err(Cancelled)",
             format!("{:?}", result.as_ref().map(|_| "Ok(permit)"))
@@ -1242,7 +1242,7 @@ mod tests {
         cx.set_cancel_requested(true);
         let result = tx.send(&cx, 99);
         crate::assert_with_log!(
-            matches!(result, Err(SendError::Cancelled)),
+            matches!(result, Err(SendError::Cancelled(_))),
             "send under cancel must return Cancelled",
             "Err(Cancelled)",
             format!("{:?}", result)

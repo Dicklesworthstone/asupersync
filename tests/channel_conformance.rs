@@ -227,7 +227,7 @@ impl<T: Send + Clone + 'static> BroadcastSender<T> for BroadcastSenderWrapper<T>
         let cx = current_cx();
         self.0.send(&cx, value).map_err(|e| match e {
             broadcast::SendError::Closed(v) => v,
-            broadcast::SendError::Cancelled => {
+            broadcast::SendError::Cancelled(_) => {
                 // Cancelled sends cannot reconstruct the moved value required
                 // by this trait's `Result<usize, T>` error shape, so the
                 // conformance adapter fails loudly instead of inventing one.

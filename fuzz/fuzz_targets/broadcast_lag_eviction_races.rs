@@ -179,7 +179,7 @@ impl FuzzState {
                     Err(SendError::Closed(_)) => {
                         // Expected when no receivers
                     }
-                    Err(SendError::Cancelled) => {
+                    Err(SendError::Cancelled(_)) => {
                         // Expected when Cx is cancelled
                     }
                 }

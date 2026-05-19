@@ -73,7 +73,7 @@ impl<T: Clone> BroadcastTestHarness<T> {
         let permit = match self.sender.reserve(cx) {
             Ok(p) => p,
             Err(SendError::Closed(())) => return Err(SendError::Closed(message)),
-            Err(SendError::Cancelled) => return Err(SendError::Cancelled),
+            Err(SendError::Cancelled(_)) => return Err(SendError::Cancelled(message)),
         };
         permit.send(message);
         self.messages_sent += 1;

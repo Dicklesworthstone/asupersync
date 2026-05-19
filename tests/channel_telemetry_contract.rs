@@ -487,7 +487,7 @@ fn live_broadcast_snapshot_reports_receiver_lag_waiters_and_cancelled_pressure()
     cancelled_cx.cancel_with(CancelKind::User, Some("channel telemetry contract"));
     assert!(matches!(
         tx.reserve(&cancelled_cx),
-        Err(broadcast::SendError::Cancelled)
+        Err(broadcast::SendError::Cancelled(_))
     ));
     assert_eq!(tx.telemetry_snapshot(302).cancellation_count, 2);
 
