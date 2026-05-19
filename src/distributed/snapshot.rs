@@ -485,8 +485,8 @@ impl RegionSnapshot {
             (&other.cancel_reason, &self.cancel_reason)
         };
 
-        let (origin_id, epoch) = if (self.epoch, self.origin_id, self.sequence)
-            >= (other.epoch, other.origin_id, other.sequence)
+        let (origin_id, epoch) = if (self.epoch, self.sequence, self.origin_id)
+            >= (other.epoch, other.sequence, other.origin_id)
         {
             (self.origin_id, self.epoch)
         } else {
@@ -1029,7 +1029,7 @@ mod tests {
         }
 
         let child_count =
-            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize; // ubs:ignore - static length
         let child_count_bytes = &bytes[cursor..cursor + 4];
         cursor += 4;
         let _ = writeln!(out, "child_count: {}", format_hex(child_count_bytes));
