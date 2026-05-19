@@ -338,6 +338,7 @@ impl IoDriver {
     }
 
     /// Restores the events buffer and returns wakers for the events it contains.
+    #[allow(dead_code)]
     pub(crate) fn restore_and_extract_wakers<F>(
         &mut self,
         events: Events,
@@ -627,7 +628,7 @@ impl IoDriverHandle {
     pub fn try_turn_with<F>(
         &self,
         timeout: Option<Duration>,
-        on_event: F,
+        mut on_event: F,
     ) -> io::Result<Option<usize>>
     where
         F: FnMut(&Event, Option<Interest>),
@@ -646,23 +647,27 @@ impl IoDriverHandle {
 
             let poll_result = self.reactor.poll(guard.events_mut(), timeout);
 
-            let wakers = {
+            let (wakers, event_data) = {
                 let mut driver = self.inner.lock();
                 let events = guard.take_events();
                 if let Ok(n) = &poll_result {
                     driver.stats.polls += 1;
                     driver.stats.events_received += *n as u64;
-                    let wakers = driver.restore_and_extract_wakers(events, on_event);
+                    let res = driver.extract_wakers_and_event_data(events);
                     drop(driver);
-                    wakers
+                    res
                 } else {
                     driver.restore_events_only(events);
                     drop(driver);
-                    smallvec::SmallVec::new()
+                    (smallvec::SmallVec::new(), smallvec::SmallVec::new())
                 }
             };
 
             drop(guard);
+
+            for (event, interest) in event_data {
+                on_event(&event, interest);
+            }
 
             for waker in wakers {
                 waker.wake();
