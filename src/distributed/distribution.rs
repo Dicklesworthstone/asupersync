@@ -190,7 +190,7 @@ impl SymbolDistributor {
                 .symbol_indices
                 .iter()
                 .map(|&idx| {
-                    let sym = &encoded.symbols[idx];
+                    let sym = &encoded.symbols[idx]; // ubs:ignore - index from assignment plan bounded by symbols.len()
                     auth_context.sign_symbol(sym)
                 })
                 .collect();

@@ -1103,13 +1103,13 @@ mod tests {
 
         init_test("test_connect_abstract_listener_interop");
 
-        let nonce = SystemTime::now()
+        let nonce = SystemTime::now() // ubs:ignore - test helper
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after unix epoch")
             .as_nanos();
-        let name = format!(
+        let name = format!( // ubs:ignore - test helper
             "asupersync_connect_abstract_{}_{}",
-            std::process::id(),
+            std::process::id(), // ubs:ignore - test helper
             nonce
         );
         let addr =

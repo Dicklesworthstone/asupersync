@@ -852,7 +852,7 @@ impl<K: TokenKind> Drop for ObligationToken<K> {
             if std::thread::panicking() {
                 return;
             }
-            panic!(
+            panic!( // ubs:ignore - intentional panic on leak in debug build
                 "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
                  Call .commit() or .abort() before scope exit.",
                 K::obligation_kind(),

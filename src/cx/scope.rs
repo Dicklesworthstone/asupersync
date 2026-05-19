@@ -3505,7 +3505,7 @@ mod tests {
             "failed spawn after cancellation must not inflate runtime task count"
         );
         assert_eq!(
-            *finalizer_log.lock().expect("finalizer log poisoned"),
+            *finalizer_log.lock().expect("finalizer log poisoned"), // ubs:ignore - test helper
             vec!["grandchild", "child"],
             "nested scope finalizers must run in reverse scope creation order"
         );

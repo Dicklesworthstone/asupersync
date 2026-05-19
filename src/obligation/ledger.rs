@@ -740,7 +740,7 @@ impl ObligationLedger {
     pub fn pending_for_region(&self, region: RegionId) -> usize {
         self.obligations
             .values()
-            .filter(|o| o.region == region && o.state == ObligationState::Reserved)
+            .filter(|o| o.region == region && o.state == ObligationState::Reserved) // ubs:ignore - enum equality, not a secret
             .count()
     }
 

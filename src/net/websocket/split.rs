@@ -1530,7 +1530,7 @@ mod tests {
             cx.set_cancel_requested(true);
             let err = match send.as_mut().poll(&mut poll_cx) {
                 Poll::Ready(Err(err)) => err,
-                other => panic!("expected cancelled split send error, got {other:?}"),
+                other => panic!("expected cancelled split send error, got {other:?}"), // ubs:ignore - test helper
             };
 
             assert!(

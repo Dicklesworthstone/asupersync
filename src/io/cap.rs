@@ -2143,8 +2143,8 @@ impl TimeIoCap for BrowserTimeIoCap {
         {
             return Err(TimePolicyError::OperationDenied(request.operation));
         }
-        if self.require_monotonic && request.source != TimeSourceKind::DeterministicVirtual {
-            if request.source != TimeSourceKind::PerformanceNow {
+        if self.require_monotonic && request.source != TimeSourceKind::DeterministicVirtual { // ubs:ignore - enum equality, not a secret
+            if request.source != TimeSourceKind::PerformanceNow { // ubs:ignore - enum equality, not a secret
                 return Err(TimePolicyError::SourceDenied(request.source));
             }
         }

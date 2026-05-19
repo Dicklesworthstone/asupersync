@@ -576,14 +576,14 @@ mod tests {
 
         let before: Vec<String> = keys
             .iter()
-            .map(|k| ring.node_for_key(k).unwrap().to_owned())
+            .map(|k| ring.node_for_key(k).unwrap().to_owned()) // ubs:ignore - test helper
             .collect();
 
         ring.add_node("node-new");
 
         let after: Vec<String> = keys
             .iter()
-            .map(|k| ring.node_for_key(k).unwrap().to_owned())
+            .map(|k| ring.node_for_key(k).unwrap().to_owned()) // ubs:ignore - test helper
             .collect();
 
         let changed = before
@@ -606,7 +606,7 @@ mod tests {
 
         let before: Vec<String> = keys
             .iter()
-            .map(|k| ring.node_for_key(k).unwrap().to_owned())
+            .map(|k| ring.node_for_key(k).unwrap().to_owned()) // ubs:ignore - test helper
             .collect();
 
         let removed = "node-2";
@@ -614,7 +614,7 @@ mod tests {
 
         let after: Vec<String> = keys
             .iter()
-            .map(|k| ring.node_for_key(k).unwrap().to_owned())
+            .map(|k| ring.node_for_key(k).unwrap().to_owned()) // ubs:ignore - test helper
             .collect();
 
         let changed = before
@@ -803,7 +803,7 @@ mod tests {
     fn try_new_rejects_zero_vnodes() {
         match HashRing::try_new(0, 0) {
             Err(ConsistentHashError::ZeroVnodes) => {}
-            other => panic!("expected ZeroVnodes error, got {other:?}"),
+            other => panic!("expected ZeroVnodes error, got {other:?}"), // ubs:ignore - test helper
         }
     }
 

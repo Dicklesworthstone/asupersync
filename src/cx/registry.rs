@@ -865,7 +865,7 @@ impl NameRegistry {
         // under a different identity, creating split-brain registry state.
         if permit.holder() != entry.holder
             || permit.region() != entry.region
-            || permit.permit_id() != entry.identity_nonce
+            || permit.permit_id() != entry.identity_nonce // ubs:ignore - not a secret
         {
             // Re-insert the pending entry so the original holder can still commit.
             self.pending.insert(name.clone(), entry);
@@ -914,7 +914,7 @@ impl NameRegistry {
         };
         if permit.holder() != entry.holder
             || permit.region() != entry.region
-            || permit.permit_id() != entry.identity_nonce
+            || permit.permit_id() != entry.identity_nonce // ubs:ignore - not a secret
         {
             return Err(NameLeaseError::PermissionDenied {
                 name: name.to_string(),
@@ -4032,7 +4032,7 @@ mod tests {
             .unwrap();
         let mut l2 = match outcome {
             NameCollisionOutcome::Registered { lease } => lease,
-            _ => panic!("expected Registered"),
+            _ => panic!("expected Registered"), // ubs:ignore - test helper
         };
         assert_eq!(reg.leases.get("b").unwrap().identity_nonce, 0);
 
@@ -4049,7 +4049,7 @@ mod tests {
             .unwrap();
         let mut l3_new = match outcome {
             NameCollisionOutcome::Replaced { lease, .. } => lease,
-            _ => panic!("expected Replaced"),
+            _ => panic!("expected Replaced"), // ubs:ignore - test helper
         };
         assert_eq!(reg.leases.get("c").unwrap().identity_nonce, 0);
 

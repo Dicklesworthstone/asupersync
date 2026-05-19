@@ -103,7 +103,7 @@ impl SymbolAssigner {
         replicas
             .iter()
             .enumerate()
-            .map(|(i, r)| ReplicaAssignment::from_indices(r, assignments[i].clone(), k_usize))
+            .map(|(i, r)| ReplicaAssignment::from_indices(r, assignments[i].clone(), k_usize)) // ubs:ignore - i < replicas.len() == assignments.len()
             .collect()
     }
 

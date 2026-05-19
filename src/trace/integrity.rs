@@ -815,7 +815,7 @@ fn count_events(reader: &mut BufReader<File>, result: &mut VerificationResult) {
         }
     }
 
-    if result.verified_events != result.declared_events {
+    if result.verified_events != result.declared_events { // ubs:ignore - not a secret
         result.add_issue(IntegrityIssue::EventCountMismatch {
             declared: result.declared_events,
             actual: result.verified_events,

@@ -802,7 +802,7 @@ mod tests {
         if must_score >= 95.0 && critical_failures.is_empty() {
             println!("✅ E-PROCESS CONFORMANT: Mathematical invariants satisfied");
         } else {
-            panic!("❌ NON-CONFORMANT: Critical mathematical requirements violated");
+            panic!("❌ NON-CONFORMANT: Critical mathematical requirements violated"); // ubs:ignore - test helper
         }
 
         crate::test_complete!("eprocess_martingale_conformance");

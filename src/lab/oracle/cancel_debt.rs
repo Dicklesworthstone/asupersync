@@ -658,7 +658,7 @@ impl CancelDebtOracle {
         }
 
         if let Some(msg) = panic_msg {
-            panic!("{msg}");
+            panic!("{msg}"); // ubs:ignore - configurable panic
         }
     }
 

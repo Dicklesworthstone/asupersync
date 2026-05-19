@@ -3288,8 +3288,7 @@ mod tests {
             }
             (None, None) => { /* Both None is fine */ }
             (orig, recon) => {
-                panic!(
-                    // ubs:ignore
+                panic!( // ubs:ignore - test helper
                     "Empirical variance mismatch: orig={:?}, recon={:?}",
                     orig, recon
                 );
@@ -3311,7 +3310,7 @@ mod tests {
             }
             (None, None) => { /* Both None is fine */ }
             (orig, recon) => {
-                panic!(
+                panic!( // ubs:ignore - test helper
                     "Estimated remaining steps mismatch: orig={:?}, recon={:?}",
                     orig, recon
                 );

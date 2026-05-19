@@ -1123,7 +1123,7 @@ impl GaussianSolver {
 
     fn first_inconsistent_row_from(&self, start_row: usize) -> Option<usize> {
         (start_row..self.rows).find(|&row| {
-            self.matrix[row].iter().all(|&coef| coef == 0)
+            self.matrix[row].iter().all(|&coef| coef == 0) // ubs:ignore - math coefficient, not a secret
                 && self.rhs[row].as_slice().iter().any(|&byte| byte != 0)
         })
     }

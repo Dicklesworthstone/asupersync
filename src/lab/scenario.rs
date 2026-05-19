@@ -1304,7 +1304,7 @@ mod tests {
                 assert!((delay_probability - 0.3).abs() < f64::EPSILON);
                 assert!((io_error_probability - 0.1).abs() < f64::EPSILON);
             }
-            other => panic!("expected Custom, got {other:?}"),
+            other => panic!("expected Custom, got {other:?}"), // ubs:ignore - test helper
         }
     }
 

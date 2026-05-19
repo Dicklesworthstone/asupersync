@@ -119,7 +119,7 @@ impl SymbolSpan {
 
     /// Creates a new span for decoding.
     #[must_use]
-    pub fn new_decode(
+    pub fn new_decode( // ubs:ignore - false positive, not a JWT decode
         context: SymbolTraceContext,
         object_id: ObjectId,
         symbol_count: u32,

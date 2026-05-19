@@ -1049,7 +1049,7 @@ impl FileCrashPackWriter {
 impl CrashPackWriter for FileCrashPackWriter {
     fn write(&self, pack: &CrashPack) -> Result<ArtifactId, CrashPackWriteError> {
         let filename = artifact_filename(pack);
-        let path = self.base_dir.join(&filename);
+        let path = self.base_dir.join(&filename); // ubs:ignore - filename is deterministic hex string
 
         let json = serde_json::to_string_pretty(pack)
             .map_err(|e| CrashPackWriteError::Serialize(e.to_string()))?;

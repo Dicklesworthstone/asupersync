@@ -1881,7 +1881,7 @@ mod tests {
                 assert_eq!(remote_task_id, retry_task);
                 assert!(outcome.is_success());
             }
-            other => panic!("unexpected cached result: {other:?}"),
+            other => panic!("unexpected cached result: {other:?}"), // ubs:ignore - test helper
         }
     }
 

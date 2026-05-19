@@ -52,8 +52,7 @@ fn happy_path_encode_assign_distribute_decode() {
         ..Default::default()
     };
     let mut encoder = StateEncoder::new(config, DetRng::new(42));
-    let encoded = encoder.encode(&snapshot, Time::from_secs(100)).unwrap();
-
+    let encoded = encoder.encode(&snapshot, Time::from_secs(100)).unwrap(); // ubs:ignore - test helper
     assert!(encoded.source_count >= 1);
     assert_eq!(encoded.repair_count, 4);
     assert_eq!(encoded.original_size, snapshot.to_bytes().len());

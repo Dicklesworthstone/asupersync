@@ -927,7 +927,7 @@ mod tests {
         let listener = UnixListener::from_std(std_listener).expect("from_std failed");
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = listener.registration.lock();
-            panic!("panic while holding registration lock");
+            panic!("panic while holding registration lock"); // ubs:ignore - test helper
         }));
 
         let mut incoming = listener.incoming();
@@ -945,7 +945,7 @@ mod tests {
         match poll_result.expect("poll result available") {
             Poll::Pending => {}
             other @ Poll::Ready(_) => {
-                panic!("expected Poll::Pending after re-registration path, got {other:?}")
+                panic!("expected Poll::Pending after re-registration path, got {other:?}") // ubs:ignore - test helper
             }
         }
 

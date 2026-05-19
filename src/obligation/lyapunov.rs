@@ -2844,7 +2844,7 @@ mod tests {
                 .min(u128::from(u64::MAX)) as u64;
             let after_stats = scenario_state.state.read_biased_region_snapshot_stats();
 
-            let authoritative_started = Instant::now();
+            let authoritative_started = Instant::now(); // ubs:ignore - test helper
             let authoritative_snapshot = authoritative_state_snapshot(&scenario_state.state);
             let authoritative_latency_ns = authoritative_started
                 .elapsed()

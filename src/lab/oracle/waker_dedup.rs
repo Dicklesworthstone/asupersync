@@ -834,7 +834,7 @@ impl WakerDedupOracle {
         // Apply enforcement mode
         match self.config.enforcement {
             EnforcementMode::Panic => {
-                panic!("Waker deduplication violation detected: {violation}")
+                panic!("Waker deduplication violation detected: {violation}") // ubs:ignore - configurable panic
             }
             EnforcementMode::Warn => {
                 crate::tracing_compat::warn!(

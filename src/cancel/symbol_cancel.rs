@@ -1890,7 +1890,7 @@ mod tests {
         let token_id = token.token_id();
         let order = Arc::clone(order);
         token.add_listener(move |_: &CancelReason, _: Time| {
-            order.lock().unwrap().push(token_id);
+            order.lock().unwrap().push(token_id); // ubs:ignore - test helper
         });
     }
 
@@ -2047,7 +2047,7 @@ mod tests {
                 tracing::info!(event = %event, "symbol_cancel_lab_checkpoint");
                 {
                     checkpoints.lock().unwrap().push(event);
-                    messages.lock().unwrap().push(message);
+                    messages.lock().unwrap().push(message); // ubs:ignore - test helper
                 } // Drop mutex guards before yield
                 yield_now().await;
                 Ok(1)
@@ -4724,7 +4724,7 @@ mod tests {
         }
         impl Drop for DropPanickingListener {
             fn drop(&mut self) {
-                panic!("simulated late-add drop panic (mzamuo)");
+                panic!("simulated late-add drop panic (mzamuo)"); // ubs:ignore - test helper
             }
         }
 

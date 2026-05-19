@@ -980,7 +980,7 @@ mod tests {
         let campaign = super::FuzzHarness::new(cfg);
         let panic_message = "deliberate test failure";
         let result = campaign.run_single(0xDEADBEEF, &|_runtime: &mut LabRuntime| {
-            panic!("{}", panic_message);
+            panic!("{}", panic_message); // ubs:ignore - test helper
         });
         // The panic was caught and recorded; the campaign did NOT
         // abort.  `result.violations` contains the TestPanic with

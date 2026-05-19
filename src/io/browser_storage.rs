@@ -1067,7 +1067,7 @@ impl StorageHostBackend for LocalStorageHostBackend {
             encoded
                 .map(|payload| {
                     URL_SAFE_NO_PAD
-                        .decode(payload.as_bytes())
+                        .decode(payload.as_bytes()) // ubs:ignore - base64 decode, not JWT
                         .map_err(|error| format!("failed to decode localStorage payload: {error}"))
                 })
                 .transpose()

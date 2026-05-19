@@ -264,7 +264,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 
             if let Some(mut auth_symbol) = poll_next_blocking(&mut self.source)? {
                 // Skip symbols for other objects.
-                if auth_symbol.symbol().object_id() != params.object_id {
+                if auth_symbol.symbol().object_id() != params.object_id { // ubs:ignore - object_id is not a secret
                     continue;
                 }
 

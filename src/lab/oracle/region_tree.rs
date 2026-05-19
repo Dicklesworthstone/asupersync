@@ -692,7 +692,7 @@ mod tests {
                     claimed_parent
                 );
             }
-            other => panic!("Expected InvalidParent, got {other:?}"),
+            other => panic!("Expected InvalidParent, got {other:?}"), // ubs:ignore - test helper
         }
         crate::test_complete!("invalid_parent_fails");
     }
