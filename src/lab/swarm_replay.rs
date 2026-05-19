@@ -942,7 +942,7 @@ pub fn run_swarm_pressure_scenario(
             queue_depth,
             rch_workers_available,
             disk_pressure,
-            admission_latency_steps: if throttled { 1 } else { 0 },
+            admission_latency_steps: u64::from(throttled),
             cleanup_authorized: false,
             auto_delete_command_count: 0,
         });
@@ -1077,7 +1077,7 @@ fn build_summary(
             .iter()
             .position(|event| {
                 event.global_task_index == Some(task)
-                    && event.kind == SwarmReplayEventKind::CancelObserved
+                    && event.kind == SwarmReplayEventKind::CancelObserved // ubs:ignore - enum equality, not a secret
             })
             .map_or(event_log.len(), |index| index + 1)
     });
