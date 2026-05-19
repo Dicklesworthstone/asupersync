@@ -210,10 +210,14 @@ fn doc_and_artifact_reference_collector_surfaces() {
         "tests/agent_swarm_coordination_collector_contract.rs",
         WORKLOAD_ARTIFACT_PATH,
         REDACTION_ARTIFACT_PATH,
-        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_collector cargo test -p asupersync --test agent_swarm_coordination_collector_contract -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_collector cargo test -p asupersync --test agent_swarm_coordination_collector_contract -- --nocapture",
     ] {
         assert!(doc.contains(expected), "doc must mention {expected}");
     }
+    assert!(
+        !doc.contains("\nrch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_collector cargo test -p asupersync --test agent_swarm_coordination_collector_contract -- --nocapture"),
+        "collector doc must require remote rch for the focused Cargo proof"
+    );
 
     let artifact = load_json(ARTIFACT_PATH);
     assert_eq!(
@@ -235,6 +239,28 @@ fn doc_and_artifact_reference_collector_surfaces() {
             .pointer("/source_contracts/redaction")
             .and_then(Value::as_str),
         Some(REDACTION_ARTIFACT_PATH)
+    );
+    let validation_commands = artifact
+        .get("validation_commands")
+        .and_then(Value::as_array)
+        .expect("validation commands");
+    assert!(
+        validation_commands.iter().any(|command| {
+            command.as_str()
+                == Some(
+                    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_collector cargo test -p asupersync --test agent_swarm_coordination_collector_contract -- --nocapture",
+                )
+        }),
+        "artifact must pin the remote-required collector proof command"
+    );
+    let local_fallback_cargo_commands: Vec<_> = validation_commands
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|command| command.starts_with("rch exec --") && command.contains(" cargo "))
+        .collect();
+    assert!(
+        local_fallback_cargo_commands.is_empty(),
+        "validation commands must not allow local rch fallback for Cargo proofs: {local_fallback_cargo_commands:#?}"
     );
 }
 

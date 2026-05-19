@@ -233,6 +233,6 @@
     "bash scripts/run_agent_swarm_coordination_collector.sh --list",
     "bash scripts/run_agent_swarm_coordination_collector.sh --dry-run --source beads:missing.json",
     "bash scripts/run_agent_swarm_coordination_collector.sh --fixture --output-root target/agent-swarm-coordination-collector",
-    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_collector cargo test -p asupersync --test agent_swarm_coordination_collector_contract -- --nocapture"
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_collector cargo test -p asupersync --test agent_swarm_coordination_collector_contract -- --nocapture"
   ]
 }
