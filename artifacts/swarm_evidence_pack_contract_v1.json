@@ -1,0 +1,563 @@
+{
+  "schema_version": "swarm-evidence-pack-contract-v1",
+  "pack_schema_version": "swarm-evidence-pack-v1",
+  "bead_id": "asupersync-vjc3pv.6",
+  "capability_id": "replayable_swarm_evidence_pack",
+  "artifact_path": "artifacts/swarm_evidence_pack_contract_v1.json",
+  "contract_test": "tests/swarm_evidence_pack_contract.rs",
+  "generated_at_utc": "2026-05-19T00:18:00Z",
+  "support_class": "artifact-contract-backed",
+  "side_effect_policy": {
+    "mode": "report_only",
+    "beads_mutation_allowed": false,
+    "agent_mail_mutation_allowed": false,
+    "filesystem_cleanup_allowed": false,
+    "cargo_execution_allowed": false,
+    "local_cargo_fallback_allowed": false,
+    "notes": "Evidence packs are replay input for agents and operators. They recommend reservations and proof lanes, but never mutate Beads, Agent Mail, git, filesystems, or local Cargo state by themselves."
+  },
+  "size_policy": {
+    "max_pack_bytes": 32768,
+    "attachable_to_agent_mail": true,
+    "canonical_encoding": "pretty-json",
+    "volatile_fields_must_be_scrubbed": true
+  },
+  "timestamp_policy": {
+    "timestamp_basis": "section observed_at_utc values compared to pack created_at_utc",
+    "max_source_age_seconds": 900,
+    "required_suffix": "Z"
+  },
+  "required_sections": [
+    "ready_queue_state",
+    "reservations",
+    "dirty_paths",
+    "proof_outcomes",
+    "disk_pressure",
+    "chosen_action",
+    "final_closeout",
+    "source_hashes",
+    "safety_invariants"
+  ],
+  "required_source_hashes": [
+    "ready_queue_state",
+    "reservations",
+    "dirty_paths",
+    "proof_outcomes",
+    "disk_pressure",
+    "chosen_action",
+    "final_closeout"
+  ],
+  "allowed_actions": [
+    "claim_and_validate_remote",
+    "defer_tracker_blocked",
+    "proceed_source_only_without_cargo",
+    "recommend_reopen_stale_in_progress",
+    "close_parent_epic"
+  ],
+  "safety_invariants": [
+    "no_deletion_commands",
+    "no_branch_or_worktree_commands",
+    "no_local_cargo_fallback",
+    "report_only_until_reserved",
+    "source_hashes_cover_all_sections",
+    "closeout_requires_commit_or_explicit_defer",
+    "proof_claims_require_remote_exit"
+  ],
+  "forbidden_command_fragments": [
+    "git reset --hard",
+    "git clean -fd",
+    "rm -rf",
+    "git worktree add",
+    "git checkout -b",
+    "git switch -c",
+    " cargo test ",
+    " cargo check ",
+    " cargo clippy ",
+    " cargo bench "
+  ],
+  "closeout_contradiction_rules": [
+    {
+      "rule_id": "local-fallback-proof-claim",
+      "finding": "proof_claimed_with_local_fallback",
+      "severity": "error",
+      "trigger": "proof_outcomes.local_fallback_detected == true && final_closeout.proof_claimed == true",
+      "operator_action": "reject closeout proof and rerun through RCH_REQUIRE_REMOTE=1"
+    },
+    {
+      "rule_id": "missing-source-hash",
+      "finding": "source_hash_missing",
+      "severity": "error",
+      "trigger": "any required_source_hashes entry is absent or not sha256-prefixed",
+      "operator_action": "rebuild the evidence pack from current ready, reservation, dirty, proof, disk, action, and closeout sources"
+    },
+    {
+      "rule_id": "stale-source-snapshot",
+      "finding": "stale_source_snapshot",
+      "severity": "warning",
+      "trigger": "any section evidence_age_seconds > timestamp_policy.max_source_age_seconds",
+      "operator_action": "refresh current-state sources before claiming, reopening, or closing tracker work"
+    },
+    {
+      "rule_id": "close-without-commit-or-defer",
+      "finding": "closeout_missing_commit_or_defer",
+      "severity": "error",
+      "trigger": "final_closeout.status == closed && final_closeout.commit == '' && chosen_action.action != defer_tracker_blocked",
+      "operator_action": "do not close the bead until a commit or explicit defer evidence is attached"
+    },
+    {
+      "rule_id": "open-child-epic-closeout",
+      "finding": "epic_closeout_has_open_children",
+      "severity": "error",
+      "trigger": "chosen_action.action == close_parent_epic && final_closeout.open_child_count != 0",
+      "operator_action": "leave the parent open until every child is closed or explicitly superseded"
+    }
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "happy_path",
+      "description": "Ready bead is claimable, source and tracker reservations are clean, remote proof passed, and closeout evidence is internally consistent.",
+      "expected_replay_status": "accepted",
+      "expected_findings": [],
+      "pack": {
+        "schema_version": "swarm-evidence-pack-v1",
+        "pack_id": "happy-path-vjc3pv6",
+        "created_at_utc": "2026-05-19T00:20:00Z",
+        "source_hashes": {
+          "ready_queue_state": "sha256:happy-ready-queue",
+          "reservations": "sha256:happy-reservations",
+          "dirty_paths": "sha256:happy-dirty-paths",
+          "proof_outcomes": "sha256:happy-proof-outcomes",
+          "disk_pressure": "sha256:happy-disk-pressure",
+          "chosen_action": "sha256:happy-chosen-action",
+          "final_closeout": "sha256:happy-final-closeout"
+        },
+        "ready_queue_state": {
+          "observed_at_utc": "2026-05-19T00:18:30Z",
+          "evidence_age_seconds": 90,
+          "ready_beads": ["asupersync-vjc3pv.6"],
+          "in_progress_beads": [],
+          "stale_in_progress": []
+        },
+        "reservations": {
+          "observed_at_utc": "2026-05-19T00:18:45Z",
+          "evidence_age_seconds": 75,
+          "tracker_reserved": false,
+          "active": []
+        },
+        "dirty_paths": {
+          "observed_at_utc": "2026-05-19T00:18:50Z",
+          "evidence_age_seconds": 70,
+          "count": 0,
+          "paths": []
+        },
+        "proof_outcomes": {
+          "observed_at_utc": "2026-05-19T00:19:30Z",
+          "evidence_age_seconds": 30,
+          "remote_required": true,
+          "local_fallback_detected": false,
+          "proofs": [
+            {
+              "proof_id": "swarm-evidence-pack-contract",
+              "worker": "ts2",
+              "remote_exit": 0,
+              "artifact_retrieved": true,
+              "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_swarm_evidence_pack CARGO_INCREMENTAL=0 cargo test -p asupersync --test swarm_evidence_pack_contract -- --nocapture"
+            }
+          ]
+        },
+        "disk_pressure": {
+          "observed_at_utc": "2026-05-19T00:19:35Z",
+          "evidence_age_seconds": 25,
+          "status": "ok",
+          "free_bytes": 85899345920,
+          "retrieval_blocked": false
+        },
+        "chosen_action": {
+          "observed_at_utc": "2026-05-19T00:19:40Z",
+          "evidence_age_seconds": 20,
+          "action": "claim_and_validate_remote",
+          "bead_id": "asupersync-vjc3pv.6",
+          "requires_tracker_reservation": true,
+          "requires_remote_proof": true,
+          "mutation_authorized_by_pack": false
+        },
+        "final_closeout": {
+          "observed_at_utc": "2026-05-19T00:19:50Z",
+          "evidence_age_seconds": 10,
+          "status": "closed",
+          "commit": "459d424cc",
+          "proof_claimed": true,
+          "proof_remote_exit": 0,
+          "open_child_count": 0,
+          "close_reason": "source and contract evidence complete"
+        },
+        "safety_invariants": {
+          "no_deletion_commands": true,
+          "no_branch_or_worktree_commands": true,
+          "no_local_cargo_fallback": true,
+          "report_only_until_reserved": true,
+          "source_hashes_cover_all_sections": true,
+          "closeout_requires_commit_or_explicit_defer": true,
+          "proof_claims_require_remote_exit": true
+        }
+      }
+    },
+    {
+      "fixture_id": "blocked_tracker",
+      "description": "Tracker files are actively reserved by another agent, so source-only work may proceed only if source paths are clean; tracker mutation is deferred.",
+      "expected_replay_status": "deferred",
+      "expected_findings": ["tracker_blocked"],
+      "pack": {
+        "schema_version": "swarm-evidence-pack-v1",
+        "pack_id": "blocked-tracker-vjc3pv6",
+        "created_at_utc": "2026-05-19T00:21:00Z",
+        "source_hashes": {
+          "ready_queue_state": "sha256:blocked-ready-queue",
+          "reservations": "sha256:blocked-reservations",
+          "dirty_paths": "sha256:blocked-dirty-paths",
+          "proof_outcomes": "sha256:blocked-proof-outcomes",
+          "disk_pressure": "sha256:blocked-disk-pressure",
+          "chosen_action": "sha256:blocked-chosen-action",
+          "final_closeout": "sha256:blocked-final-closeout"
+        },
+        "ready_queue_state": {
+          "observed_at_utc": "2026-05-19T00:19:00Z",
+          "evidence_age_seconds": 120,
+          "ready_beads": ["asupersync-vjc3pv.4"],
+          "in_progress_beads": ["asupersync-vjc3pv.2"],
+          "stale_in_progress": []
+        },
+        "reservations": {
+          "observed_at_utc": "2026-05-19T00:19:05Z",
+          "evidence_age_seconds": 115,
+          "tracker_reserved": true,
+          "active": [
+            {
+              "path": ".beads/issues.jsonl",
+              "holder": "AmberRabbit",
+              "exclusive": true
+            }
+          ]
+        },
+        "dirty_paths": {
+          "observed_at_utc": "2026-05-19T00:19:10Z",
+          "evidence_age_seconds": 110,
+          "count": 1,
+          "paths": ["scripts/reservation_aware_work_finder.py"]
+        },
+        "proof_outcomes": {
+          "observed_at_utc": "2026-05-19T00:19:20Z",
+          "evidence_age_seconds": 100,
+          "remote_required": true,
+          "local_fallback_detected": false,
+          "proofs": []
+        },
+        "disk_pressure": {
+          "observed_at_utc": "2026-05-19T00:19:25Z",
+          "evidence_age_seconds": 95,
+          "status": "warn",
+          "free_bytes": 5368709120,
+          "retrieval_blocked": false
+        },
+        "chosen_action": {
+          "observed_at_utc": "2026-05-19T00:19:30Z",
+          "evidence_age_seconds": 90,
+          "action": "defer_tracker_blocked",
+          "bead_id": "asupersync-vjc3pv.4",
+          "requires_tracker_reservation": true,
+          "requires_remote_proof": false,
+          "mutation_authorized_by_pack": false
+        },
+        "final_closeout": {
+          "observed_at_utc": "2026-05-19T00:19:35Z",
+          "evidence_age_seconds": 85,
+          "status": "deferred",
+          "commit": "",
+          "proof_claimed": false,
+          "proof_remote_exit": null,
+          "open_child_count": 4,
+          "close_reason": "tracker reservation held by another agent"
+        },
+        "safety_invariants": {
+          "no_deletion_commands": true,
+          "no_branch_or_worktree_commands": true,
+          "no_local_cargo_fallback": true,
+          "report_only_until_reserved": true,
+          "source_hashes_cover_all_sections": true,
+          "closeout_requires_commit_or_explicit_defer": true,
+          "proof_claims_require_remote_exit": true
+        }
+      }
+    },
+    {
+      "fixture_id": "disk_critical_source_only_fallback",
+      "description": "Disk pressure blocks artifact retrieval and remote proof admission, so the pack recommends source-only work with no local Cargo fallback and no cleanup command.",
+      "expected_replay_status": "source_only",
+      "expected_findings": ["disk_critical_source_only"],
+      "pack": {
+        "schema_version": "swarm-evidence-pack-v1",
+        "pack_id": "disk-critical-source-only-vjc3pv6",
+        "created_at_utc": "2026-05-19T00:22:00Z",
+        "source_hashes": {
+          "ready_queue_state": "sha256:disk-ready-queue",
+          "reservations": "sha256:disk-reservations",
+          "dirty_paths": "sha256:disk-dirty-paths",
+          "proof_outcomes": "sha256:disk-proof-outcomes",
+          "disk_pressure": "sha256:disk-pressure",
+          "chosen_action": "sha256:disk-chosen-action",
+          "final_closeout": "sha256:disk-final-closeout"
+        },
+        "ready_queue_state": {
+          "observed_at_utc": "2026-05-19T00:20:30Z",
+          "evidence_age_seconds": 90,
+          "ready_beads": ["asupersync-vjc3pv.6"],
+          "in_progress_beads": [],
+          "stale_in_progress": []
+        },
+        "reservations": {
+          "observed_at_utc": "2026-05-19T00:20:40Z",
+          "evidence_age_seconds": 80,
+          "tracker_reserved": false,
+          "active": []
+        },
+        "dirty_paths": {
+          "observed_at_utc": "2026-05-19T00:20:45Z",
+          "evidence_age_seconds": 75,
+          "count": 0,
+          "paths": []
+        },
+        "proof_outcomes": {
+          "observed_at_utc": "2026-05-19T00:21:00Z",
+          "evidence_age_seconds": 60,
+          "remote_required": true,
+          "local_fallback_detected": false,
+          "proofs": [
+            {
+              "proof_id": "swarm-evidence-pack-contract",
+              "worker": "",
+              "remote_exit": null,
+              "artifact_retrieved": false,
+              "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_swarm_evidence_pack CARGO_INCREMENTAL=0 cargo test -p asupersync --test swarm_evidence_pack_contract -- --nocapture"
+            }
+          ]
+        },
+        "disk_pressure": {
+          "observed_at_utc": "2026-05-19T00:21:10Z",
+          "evidence_age_seconds": 50,
+          "status": "critical",
+          "free_bytes": 104857600,
+          "retrieval_blocked": true
+        },
+        "chosen_action": {
+          "observed_at_utc": "2026-05-19T00:21:20Z",
+          "evidence_age_seconds": 40,
+          "action": "proceed_source_only_without_cargo",
+          "bead_id": "asupersync-vjc3pv.6",
+          "requires_tracker_reservation": true,
+          "requires_remote_proof": false,
+          "mutation_authorized_by_pack": false
+        },
+        "final_closeout": {
+          "observed_at_utc": "2026-05-19T00:21:30Z",
+          "evidence_age_seconds": 30,
+          "status": "deferred",
+          "commit": "",
+          "proof_claimed": false,
+          "proof_remote_exit": null,
+          "open_child_count": 1,
+          "close_reason": "remote proof unavailable under disk pressure; no local fallback claimed"
+        },
+        "safety_invariants": {
+          "no_deletion_commands": true,
+          "no_branch_or_worktree_commands": true,
+          "no_local_cargo_fallback": true,
+          "report_only_until_reserved": true,
+          "source_hashes_cover_all_sections": true,
+          "closeout_requires_commit_or_explicit_defer": true,
+          "proof_claims_require_remote_exit": true
+        }
+      }
+    },
+    {
+      "fixture_id": "stale_in_progress",
+      "description": "An inactive owner leaves an in-progress bead stale; the pack recommends a report-only reopen until tracker reservation and agent confirmation exist.",
+      "expected_replay_status": "needs_operator_action",
+      "expected_findings": ["stale_in_progress"],
+      "pack": {
+        "schema_version": "swarm-evidence-pack-v1",
+        "pack_id": "stale-in-progress-vjc3pv6",
+        "created_at_utc": "2026-05-19T00:23:00Z",
+        "source_hashes": {
+          "ready_queue_state": "sha256:stale-ready-queue",
+          "reservations": "sha256:stale-reservations",
+          "dirty_paths": "sha256:stale-dirty-paths",
+          "proof_outcomes": "sha256:stale-proof-outcomes",
+          "disk_pressure": "sha256:stale-disk-pressure",
+          "chosen_action": "sha256:stale-chosen-action",
+          "final_closeout": "sha256:stale-final-closeout"
+        },
+        "ready_queue_state": {
+          "observed_at_utc": "2026-05-19T00:02:00Z",
+          "evidence_age_seconds": 1260,
+          "ready_beads": [],
+          "in_progress_beads": ["asupersync-old999"],
+          "stale_in_progress": [
+            {
+              "bead_id": "asupersync-old999",
+              "owner": "DormantAgent",
+              "last_updated_age_seconds": 86400
+            }
+          ]
+        },
+        "reservations": {
+          "observed_at_utc": "2026-05-19T00:22:00Z",
+          "evidence_age_seconds": 60,
+          "tracker_reserved": false,
+          "active": []
+        },
+        "dirty_paths": {
+          "observed_at_utc": "2026-05-19T00:22:10Z",
+          "evidence_age_seconds": 50,
+          "count": 0,
+          "paths": []
+        },
+        "proof_outcomes": {
+          "observed_at_utc": "2026-05-19T00:22:20Z",
+          "evidence_age_seconds": 40,
+          "remote_required": true,
+          "local_fallback_detected": false,
+          "proofs": []
+        },
+        "disk_pressure": {
+          "observed_at_utc": "2026-05-19T00:22:30Z",
+          "evidence_age_seconds": 30,
+          "status": "ok",
+          "free_bytes": 64424509440,
+          "retrieval_blocked": false
+        },
+        "chosen_action": {
+          "observed_at_utc": "2026-05-19T00:22:40Z",
+          "evidence_age_seconds": 20,
+          "action": "recommend_reopen_stale_in_progress",
+          "bead_id": "asupersync-old999",
+          "requires_tracker_reservation": true,
+          "requires_remote_proof": false,
+          "mutation_authorized_by_pack": false
+        },
+        "final_closeout": {
+          "observed_at_utc": "2026-05-19T00:22:50Z",
+          "evidence_age_seconds": 10,
+          "status": "deferred",
+          "commit": "",
+          "proof_claimed": false,
+          "proof_remote_exit": null,
+          "open_child_count": 0,
+          "close_reason": "stale reopen recommendation is report-only"
+        },
+        "safety_invariants": {
+          "no_deletion_commands": true,
+          "no_branch_or_worktree_commands": true,
+          "no_local_cargo_fallback": true,
+          "report_only_until_reserved": true,
+          "source_hashes_cover_all_sections": true,
+          "closeout_requires_commit_or_explicit_defer": true,
+          "proof_claims_require_remote_exit": true
+        }
+      }
+    },
+    {
+      "fixture_id": "all_children_closed_epic_closeout",
+      "description": "Parent epic is ready for closeout because every child is closed and the final closeout summarizes child commits without claiming a fresh proof lane.",
+      "expected_replay_status": "ready_to_close_parent",
+      "expected_findings": [],
+      "pack": {
+        "schema_version": "swarm-evidence-pack-v1",
+        "pack_id": "all-children-closed-epic-vjc3pv6",
+        "created_at_utc": "2026-05-19T00:24:00Z",
+        "source_hashes": {
+          "ready_queue_state": "sha256:epic-ready-queue",
+          "reservations": "sha256:epic-reservations",
+          "dirty_paths": "sha256:epic-dirty-paths",
+          "proof_outcomes": "sha256:epic-proof-outcomes",
+          "disk_pressure": "sha256:epic-disk-pressure",
+          "chosen_action": "sha256:epic-chosen-action",
+          "final_closeout": "sha256:epic-final-closeout"
+        },
+        "ready_queue_state": {
+          "observed_at_utc": "2026-05-19T00:23:00Z",
+          "evidence_age_seconds": 60,
+          "ready_beads": ["asupersync-vjc3pv"],
+          "in_progress_beads": [],
+          "stale_in_progress": [],
+          "children": [
+            {"bead_id": "asupersync-vjc3pv.1", "status": "closed"},
+            {"bead_id": "asupersync-vjc3pv.2", "status": "closed"},
+            {"bead_id": "asupersync-vjc3pv.3", "status": "closed"},
+            {"bead_id": "asupersync-vjc3pv.4", "status": "closed"},
+            {"bead_id": "asupersync-vjc3pv.5", "status": "closed"},
+            {"bead_id": "asupersync-vjc3pv.6", "status": "closed"}
+          ]
+        },
+        "reservations": {
+          "observed_at_utc": "2026-05-19T00:23:05Z",
+          "evidence_age_seconds": 55,
+          "tracker_reserved": false,
+          "active": []
+        },
+        "dirty_paths": {
+          "observed_at_utc": "2026-05-19T00:23:10Z",
+          "evidence_age_seconds": 50,
+          "count": 0,
+          "paths": []
+        },
+        "proof_outcomes": {
+          "observed_at_utc": "2026-05-19T00:23:20Z",
+          "evidence_age_seconds": 40,
+          "remote_required": false,
+          "local_fallback_detected": false,
+          "proofs": []
+        },
+        "disk_pressure": {
+          "observed_at_utc": "2026-05-19T00:23:30Z",
+          "evidence_age_seconds": 30,
+          "status": "ok",
+          "free_bytes": 75161927680,
+          "retrieval_blocked": false
+        },
+        "chosen_action": {
+          "observed_at_utc": "2026-05-19T00:23:40Z",
+          "evidence_age_seconds": 20,
+          "action": "close_parent_epic",
+          "bead_id": "asupersync-vjc3pv",
+          "requires_tracker_reservation": true,
+          "requires_remote_proof": false,
+          "mutation_authorized_by_pack": false
+        },
+        "final_closeout": {
+          "observed_at_utc": "2026-05-19T00:23:50Z",
+          "evidence_age_seconds": 10,
+          "status": "ready_to_close",
+          "commit": "",
+          "proof_claimed": false,
+          "proof_remote_exit": null,
+          "open_child_count": 0,
+          "close_reason": "all child beads closed; tracker-only parent closeout is safe after reservation"
+        },
+        "safety_invariants": {
+          "no_deletion_commands": true,
+          "no_branch_or_worktree_commands": true,
+          "no_local_cargo_fallback": true,
+          "report_only_until_reserved": true,
+          "source_hashes_cover_all_sections": true,
+          "closeout_requires_commit_or_explicit_defer": true,
+          "proof_claims_require_remote_exit": true
+        }
+      }
+    }
+  ],
+  "validation": {
+    "json_probe": "jq empty artifacts/swarm_evidence_pack_contract_v1.json",
+    "format_check": "rustfmt --edition 2024 --check tests/swarm_evidence_pack_contract.rs",
+    "remote_required_contract_test": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_swarm_evidence_pack CARGO_INCREMENTAL=0 cargo test -p asupersync --test swarm_evidence_pack_contract -- --nocapture"
+  }
+}
