@@ -11,9 +11,10 @@
 //!
 //! Expected behavior:
 //! - WINDOW_UPDATE with delta=0: PROTOCOL_ERROR
-//! - WINDOW_UPDATE with delta>0: accepted unless the flow-control window overflows
+//! - Connection WINDOW_UPDATE with delta>0: accepted unless the flow-control window overflows
+//! - Stream WINDOW_UPDATE with delta>0: accepted only for an existing stream
 //! - Delta too large (>i32::MAX): flow_control error
-//! - Valid range deltas: accepted with proper window updates or rejected on overflow
+//! - Valid range deltas: accepted with proper window updates or rejected on idle-stream/overflow
 
 use arbitrary::Arbitrary;
 use asupersync::http::h2::{
@@ -21,11 +22,11 @@ use asupersync::http::h2::{
     frame::{SettingsFrame, WindowUpdateFrame as LiveWindowUpdateFrame},
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 const ZERO_INCREMENT_ERROR: &str = "WINDOW_UPDATE with zero increment";
 const INCREMENT_TOO_LARGE_ERROR: &str = "window increment too large";
 const WINDOW_OVERFLOW_ERROR: &str = "flow control window overflow";
+const IDLE_STREAM_ERROR: &str = "WINDOW_UPDATE received on idle stream";
 
 /// HTTP/2 WINDOW_UPDATE frame
 #[derive(Debug, Clone, Arbitrary)]
@@ -34,22 +35,8 @@ struct WindowUpdateFrame {
     increment: u32,
 }
 
-/// Stream flow control information
-#[derive(Debug, Clone)]
-struct FlowControlState {
-    send_window: i32,
-}
-
 fn validated_window_i32(window: i64) -> i32 {
     i32::try_from(window).expect("validated H2 flow-control window must fit i32")
-}
-
-impl Default for FlowControlState {
-    fn default() -> Self {
-        Self {
-            send_window: 65535, // Default window size
-        }
-    }
 }
 
 /// WINDOW_UPDATE test scenario
@@ -62,17 +49,18 @@ struct WindowUpdateScenario {
     max_frames: u8,
 }
 
-/// Mock HTTP/2 connection for WINDOW_UPDATE validation
-struct MockH2Connection {
+/// Fuzz-local oracle for the WINDOW_UPDATE invariants this target exercises.
+///
+/// The target does not synthesize HEADERS frames, so all positive stream-level
+/// updates are idle-stream errors under the live `Connection` state machine.
+struct WindowUpdateOracle {
     connection_send_window: i32,
-    streams: HashMap<u32, FlowControlState>,
 }
 
-impl MockH2Connection {
+impl WindowUpdateOracle {
     fn new() -> Self {
         Self {
             connection_send_window: 65535, // Default connection window
-            streams: HashMap::new(),
         }
     }
 
@@ -90,29 +78,21 @@ impl MockH2Connection {
             return Err(ZERO_INCREMENT_ERROR.to_string());
         }
 
-        // Apply window update
-        if frame.stream_id == 0 {
-            // Connection-level window update
-            let new_window = i64::from(self.connection_send_window) + i64::from(increment);
-
-            // Check for window overflow per RFC 9113 §6.9.1
-            if new_window > i64::from(i32::MAX) {
-                return Err(WINDOW_OVERFLOW_ERROR.to_string());
-            }
-
-            self.connection_send_window = validated_window_i32(new_window);
-        } else {
-            // Stream-level window update
-            let stream = self.streams.entry(frame.stream_id).or_default();
-            let new_window = i64::from(stream.send_window) + i64::from(increment);
-
-            if new_window > i64::from(i32::MAX) {
-                return Err(WINDOW_OVERFLOW_ERROR.to_string());
-            }
-
-            stream.send_window = validated_window_i32(new_window);
+        // The fuzz target emits only WINDOW_UPDATE frames. Without an earlier
+        // HEADERS frame, any positive stream-level update targets an idle
+        // stream and must be a connection-level PROTOCOL_ERROR.
+        if frame.stream_id != 0 {
+            return Err(IDLE_STREAM_ERROR.to_string());
         }
 
+        let new_window = i64::from(self.connection_send_window) + i64::from(increment);
+
+        // Check for window overflow per RFC 9113 §6.9.1.
+        if new_window > i64::from(i32::MAX) {
+            return Err(WINDOW_OVERFLOW_ERROR.to_string());
+        }
+
+        self.connection_send_window = validated_window_i32(new_window);
         Ok(())
     }
 }
@@ -141,7 +121,7 @@ fn generate_edge_case_frames() -> Vec<WindowUpdateFrame> {
         WindowUpdateFrame {
             stream_id: 1,
             increment: 1,
-        }, // Stream minimum valid
+        }, // Positive idle-stream update
         WindowUpdateFrame {
             stream_id: 0,
             increment: 32768,
@@ -149,7 +129,7 @@ fn generate_edge_case_frames() -> Vec<WindowUpdateFrame> {
         WindowUpdateFrame {
             stream_id: 3,
             increment: 65535,
-        }, // Large valid
+        }, // Positive idle-stream update
         // Edge cases for overflow testing
         WindowUpdateFrame {
             stream_id: 0,
@@ -179,7 +159,7 @@ fn generate_edge_case_frames() -> Vec<WindowUpdateFrame> {
     ]
 }
 
-fn assert_mock_window_update_error(context: &str, actual: &str, expected: &str) {
+fn assert_oracle_window_update_error(context: &str, actual: &str, expected: &str) {
     assert_eq!(
         actual, expected,
         "{context}: wrong WINDOW_UPDATE diagnostic"
@@ -192,7 +172,7 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
         return;
     }
 
-    let mut connection = MockH2Connection::new();
+    let mut connection = WindowUpdateOracle::new();
     let mut zero_delta_errors = 0;
     let mut expected_zero_failures = 0;
 
@@ -232,15 +212,21 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
             Err(err) => {
                 if test_frame.increment == 0 {
                     zero_delta_errors += 1;
-                    assert_mock_window_update_error("zero delta", &err, ZERO_INCREMENT_ERROR);
+                    assert_oracle_window_update_error("zero delta", &err, ZERO_INCREMENT_ERROR);
                 } else if test_frame.increment > i32::MAX as u32 {
-                    assert_mock_window_update_error(
+                    assert_oracle_window_update_error(
                         "invalid increment",
                         &err,
                         INCREMENT_TOO_LARGE_ERROR,
                     );
+                } else if test_frame.stream_id != 0 {
+                    assert_oracle_window_update_error(
+                        "idle stream increment",
+                        &err,
+                        IDLE_STREAM_ERROR,
+                    );
                 } else {
-                    assert_mock_window_update_error(
+                    assert_oracle_window_update_error(
                         "valid increment overflow",
                         &err,
                         WINDOW_OVERFLOW_ERROR,
@@ -264,7 +250,7 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
 });
 
 /// Test specific RFC 9113 §6.9.1 violations
-fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
+fn test_specific_rfc_violations(connection: &mut WindowUpdateOracle) {
     // Test 1: Connection-level zero increment (stream_id=0)
     let conn_zero_frame = WindowUpdateFrame {
         stream_id: 0,
@@ -275,7 +261,7 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         result.is_err(),
         "Connection-level WINDOW_UPDATE with zero increment should fail"
     );
-    assert_mock_window_update_error(
+    assert_oracle_window_update_error(
         "connection zero increment",
         &result.unwrap_err(),
         ZERO_INCREMENT_ERROR,
@@ -291,15 +277,32 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         result.is_err(),
         "Stream-level WINDOW_UPDATE with zero increment should fail"
     );
-    assert_mock_window_update_error(
+    assert_oracle_window_update_error(
         "stream zero increment",
         &result.unwrap_err(),
         ZERO_INCREMENT_ERROR,
     );
 
-    // Test 3: Valid minimum increment should succeed
-    let valid_frame = WindowUpdateFrame {
+    // Test 3: Positive stream-level increment without an opened stream fails
+    // closed just like the live connection state machine.
+    let idle_stream_frame = WindowUpdateFrame {
         stream_id: 1,
+        increment: 1,
+    };
+    let result = connection.process_window_update(&idle_stream_frame);
+    assert!(
+        result.is_err(),
+        "idle stream WINDOW_UPDATE with increment=1 should fail"
+    );
+    assert_oracle_window_update_error(
+        "idle stream increment",
+        &result.unwrap_err(),
+        IDLE_STREAM_ERROR,
+    );
+
+    // Test 4: Valid connection-level minimum increment should succeed.
+    let valid_frame = WindowUpdateFrame {
+        stream_id: 0,
         increment: 1,
     };
     let result = connection.process_window_update(&valid_frame);
@@ -309,7 +312,7 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         result
     );
 
-    // Test 4: Large valid increment should succeed
+    // Test 5: Large valid connection-level increment should succeed.
     let large_valid_frame = WindowUpdateFrame {
         stream_id: 0,
         increment: 32768,
@@ -321,7 +324,7 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         result
     );
 
-    // Test 5: Increment too large should fail
+    // Test 6: Increment too large should fail before stream-state checks.
     let too_large_frame = WindowUpdateFrame {
         stream_id: 0,
         increment: (i32::MAX as u32) + 1,
@@ -331,15 +334,15 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         result.is_err(),
         "WINDOW_UPDATE with increment > i32::MAX should fail"
     );
-    assert_mock_window_update_error(
+    assert_oracle_window_update_error(
         "oversized increment",
         &result.unwrap_err(),
         INCREMENT_TOO_LARGE_ERROR,
     );
 
-    // Test 6: Maximum in-range increment overflows the current stream window.
+    // Test 7: Maximum in-range increment overflows the current connection window.
     let max_in_range_frame = WindowUpdateFrame {
-        stream_id: 3,
+        stream_id: 0,
         increment: i32::MAX as u32,
     };
     let result = connection.process_window_update(&max_in_range_frame);
@@ -348,8 +351,8 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
         "WINDOW_UPDATE that exceeds i32::MAX window should fail: {:?}",
         result
     );
-    assert_mock_window_update_error(
-        "stream window overflow",
+    assert_oracle_window_update_error(
+        "connection window overflow",
         &result.unwrap_err(),
         WINDOW_OVERFLOW_ERROR,
     );
@@ -407,6 +410,11 @@ fn assert_live_window_update_delta_zero() {
         Some(1),
         ZERO_INCREMENT_ERROR,
     );
+
+    let err = connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(1, 1)))
+        .expect_err("idle-stream WINDOW_UPDATE should fail");
+    assert_live_h2_error(&err, ErrorCode::ProtocolError, None, IDLE_STREAM_ERROR);
 
     connection
         .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(0, 1)))
@@ -477,15 +485,11 @@ mod tests {
             frames: vec![
                 WindowUpdateFrame {
                     stream_id: 0,
-                    increment: 1, // Valid increment
+                    increment: 1, // Valid connection increment
                 },
                 WindowUpdateFrame {
-                    stream_id: 1,
-                    increment: 32768, // Valid increment
-                },
-                WindowUpdateFrame {
-                    stream_id: 3,
-                    increment: i32::MAX as u32, // Maximum valid
+                    stream_id: 0,
+                    increment: 32768, // Valid connection increment
                 },
             ],
             include_edge_cases: false,
@@ -541,7 +545,7 @@ mod tests {
                 WindowUpdateFrame {
                     stream_id: 2,
                     increment: 2048,
-                }, // Valid
+                }, // Invalid (idle stream)
                 WindowUpdateFrame {
                     stream_id: 0,
                     increment: 0,
@@ -553,7 +557,7 @@ mod tests {
                 WindowUpdateFrame {
                     stream_id: 4,
                     increment: 512,
-                }, // Valid
+                }, // Invalid (idle stream)
             ],
             include_edge_cases: false,
             max_frames: 10,
