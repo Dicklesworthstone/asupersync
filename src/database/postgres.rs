@@ -16896,7 +16896,7 @@ mod tests {
                 .map(|i| {
                     let mut data = Vec::new();
                     data.extend_from_slice(&(1000i32 + i).to_be_bytes()); // unique process_id
-                    data.extend_from_slice(format!("events\0").as_bytes());
+                    data.extend_from_slice(b"events\0");
                     data.extend_from_slice(format!("event_{}\0", i).as_bytes());
                     data
                 })
