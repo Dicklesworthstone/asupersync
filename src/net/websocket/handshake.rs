@@ -621,10 +621,9 @@ impl ServerHandshake {
     pub fn accept(&self, request: &HttpRequest) -> Result<AcceptResponse, HandshakeError> {
         // Validate HTTP method
         if request.method != "GET" {
-            return Err(HandshakeError::InvalidRequest(format!(
-                "method must be GET, got '{}'",
-                request.method
-            )));
+            return Err(HandshakeError::InvalidRequest(
+                "method must be GET".to_string()
+            ));
         }
 
         // Check Upgrade header
@@ -632,9 +631,9 @@ impl ServerHandshake {
             .header("upgrade")
             .ok_or(HandshakeError::MissingHeader("Upgrade"))?;
         if !header_has_token(upgrade, "websocket") {
-            return Err(HandshakeError::InvalidRequest(format!(
-                "Upgrade header must contain 'websocket', got '{upgrade}'"
-            )));
+            return Err(HandshakeError::InvalidRequest(
+                "Upgrade header must contain 'websocket'".to_string()
+            ));
         }
 
         // Check Connection header
@@ -642,9 +641,9 @@ impl ServerHandshake {
             .header("connection")
             .ok_or(HandshakeError::MissingHeader("Connection"))?;
         if !header_has_token(connection, "upgrade") {
-            return Err(HandshakeError::InvalidRequest(format!(
-                "Connection header must contain 'Upgrade', got '{connection}'"
-            )));
+            return Err(HandshakeError::InvalidRequest(
+                "Connection header must contain 'Upgrade'".to_string()
+            ));
         }
 
         // Check WebSocket version
@@ -652,7 +651,9 @@ impl ServerHandshake {
             .header("sec-websocket-version")
             .ok_or(HandshakeError::MissingHeader("Sec-WebSocket-Version"))?;
         if version != "13" {
-            return Err(HandshakeError::UnsupportedVersion(version.to_string()));
+            return Err(HandshakeError::UnsupportedVersion(
+                "Unsupported WebSocket version".to_string()
+            ));
         }
 
         // Get and validate client key
