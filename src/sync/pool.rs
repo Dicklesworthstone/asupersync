@@ -957,6 +957,29 @@ where
     }
 }
 
+impl<R, F> Drop for WaitForNotification<'_, '_, R, F>
+where
+    R: Send + 'static,
+    F: AsyncResourceFactory<Resource = R>,
+{
+    fn drop(&mut self) {
+        if let Some(id) = *self.waiter_id {
+            // Remove from main waiters queue
+            let mut state = self.pool.state.lock();
+            if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
+                state.waiters.remove(idx);
+            }
+            drop(state);
+
+            // Remove from return_wakers list
+            let mut wakers = self.pool.return_wakers.lock();
+            if let Some(idx) = wakers.iter().position(|(wid, _)| *wid == id) {
+                wakers.remove(idx);
+            }
+        }
+    }
+}
+
 struct HealthCheckGuard<'a, R, F>
 where
     R: Send + 'static,
