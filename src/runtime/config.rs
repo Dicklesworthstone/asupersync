@@ -7643,6 +7643,19 @@ impl ControllerInterferenceDigitalTwinRequest {
                     reason,
                 ));
             }
+            if !controller_versions
+                .iter()
+                .any(|version| version.controller == entry.controller)
+            {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::MissingEvidence,
+                    vec![entry.controller.clone()],
+                    format!(
+                        "input evidence hash for unclaimed controller {} is not listed in controller_versions",
+                        entry.controller
+                    ),
+                ));
+            }
         }
         if let Some(reason) = duplicate_child_evidence_controller(input_evidence_hashes) {
             findings.push(ControllerInterferenceFinding::fail_closed(
@@ -7657,6 +7670,19 @@ impl ControllerInterferenceDigitalTwinRequest {
                     ControllerInterferenceFindingClass::MissingEvidence,
                     vec![state.controller.clone()],
                     reason,
+                ));
+            }
+            if !controller_versions.iter().any(|version| {
+                version.controller == state.controller
+                    && version.contract_version == state.contract_version
+            }) {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::MissingEvidence,
+                    vec![state.controller.clone()],
+                    format!(
+                        "state vector for unclaimed controller {} version {} is not listed in controller_versions",
+                        state.controller, state.contract_version
+                    ),
                 ));
             }
             if state.evidence_age_hours > self.budget.max_evidence_age_hours {

@@ -241,6 +241,61 @@ fn controller_interference_twin_fails_closed_for_stale_evidence_reuse() {
 }
 
 #[test]
+fn controller_interference_twin_fails_closed_for_unclaimed_controller_state() {
+    let mut request = base_request();
+    request
+        .input_evidence_hashes
+        .push(SignedProfileBundleChildEvidenceHash {
+            controller: "rogue".to_string(),
+            artifact_id: "artifacts/rogue_smoke_contract_v1.json".to_string(),
+            digest_sha256: digest('9'),
+        });
+    request
+        .state_vectors
+        .push(ControllerInterferenceStateVector {
+            step_index: 6,
+            controller: "rogue".to_string(),
+            contract_version: "rogue-v1".to_string(),
+            policy_hash: "sha256:rogue-policy".to_string(),
+            evidence_hash: digest('9'),
+            confidence_percent: 95,
+            evidence_age_hours: 2,
+            queue_pressure_basis_points: 4_000,
+            tail_risk_basis_points: 4_000,
+            memory_pressure_basis_points: 4_000,
+            shed_noncritical_basis_points: 400,
+            preserved_telemetry_basis_points: 9_600,
+            target_agent_ceiling: 384,
+            selected_profile: HostProfileId::LocalityFirst64C256G,
+            no_win: false,
+            fallback_active: false,
+        });
+
+    let report = request.evaluate();
+
+    assert_eq!(
+        report.verdict,
+        ControllerInterferenceTwinVerdict::FailClosed
+    );
+    assert!(has_class(
+        &report,
+        ControllerInterferenceFindingClass::MissingEvidence
+    ));
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding.controllers.len() == 1
+                && finding.controllers[0] == "rogue"
+                && finding
+                    .reason
+                    .contains("is not listed in controller_versions")
+        }),
+        "unclaimed controller findings missing from {:#?}",
+        report.findings
+    );
+    assert_eq!(report.fallback_decision, "fail_closed_reject_bundle");
+}
+
+#[test]
 fn controller_interference_twin_detects_oscillation() {
     let mut request = base_request();
     request.state_vectors = vec![
