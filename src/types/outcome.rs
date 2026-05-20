@@ -602,6 +602,64 @@ impl<T, E> Outcome<T, E> {
         }
     }
 
+    /// Unwraps the contained `Ok` value, panicking with a custom message if not `Ok`.
+    ///
+    /// Similar to [`Result::expect`], but for `Outcome`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::Outcome;
+    ///
+    /// let outcome: Outcome<u32, &str> = Outcome::ok(42);
+    /// assert_eq!(outcome.expect("should be ok"), 42);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics with the provided message if the outcome is not `Ok`.
+    #[track_caller]
+    pub fn expect(self, msg: &str) -> T
+    where
+        E: fmt::Debug,
+    {
+        match self {
+            Self::Ok(v) => v,
+            Self::Err(e) => panic!("{msg}: {e:?}"),
+            Self::Cancelled(r) => panic!("{msg}: cancelled with {r:?}"),
+            Self::Panicked(p) => panic!("{msg}: panicked with {p}"),
+        }
+    }
+
+    /// Unwraps the contained `Err` value, panicking with a custom message if not `Err`.
+    ///
+    /// Similar to [`Result::expect_err`], but for `Outcome`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::Outcome;
+    ///
+    /// let outcome: Outcome<u32, &str> = Outcome::err("failed");
+    /// assert_eq!(outcome.expect_err("should be error"), "failed");
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics with the provided message if the outcome is not `Err`.
+    #[track_caller]
+    pub fn expect_err(self, msg: &str) -> E
+    where
+        T: fmt::Debug,
+    {
+        match self {
+            Self::Err(e) => e,
+            Self::Ok(v) => panic!("{msg}: got Ok({v:?})"),
+            Self::Cancelled(r) => panic!("{msg}: got Cancelled({r:?})"),
+            Self::Panicked(p) => panic!("{msg}: got Panicked({p})"),
+        }
+    }
+
     /// Returns the success value or a default.
     #[inline]
     pub fn unwrap_or(self, default: T) -> T {
