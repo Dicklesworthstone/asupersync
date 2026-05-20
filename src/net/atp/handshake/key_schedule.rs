@@ -1,9 +1,13 @@
 //! QUIC Key Schedule Management
 //!
-//! Handles QUIC key derivation, key phases, and key updates according to RFC 9000.
+//! Handles QUIC key derivation, key phases, and key updates according to RFC 9001.
+//! Implements proper HKDF-based key derivation with Initial salt, TLS secrets,
+//! and key update mechanisms.
 
-use crate::net::atp::handshake::state_machine::{PacketSpace, HandshakeError};
+use crate::net::atp::handshake::state_machine::{HandshakeError, PacketSpace};
 use crate::types::outcome::Outcome;
+use hkdf::Hkdf;
+use sha2::Sha256;
 use std::collections::HashMap;
 
 /// Key phase identifier
@@ -85,7 +89,12 @@ impl KeySchedule {
         local_keys: KeyMaterial,
         remote_keys: KeyMaterial,
     ) -> Outcome<(), HandshakeError> {
-        self.current_keys.insert(PacketSpace::Initial, (local_keys, remote_keys));
+        // Verify keys are not zero
+        KeyDerivation::verify_non_zero_keys(&local_keys)?;
+        KeyDerivation::verify_non_zero_keys(&remote_keys)?;
+
+        self.current_keys
+            .insert(PacketSpace::Initial, (local_keys, remote_keys));
         self.keys_established.insert(PacketSpace::Initial, true);
         Ok(())
     }
@@ -96,7 +105,12 @@ impl KeySchedule {
         local_keys: KeyMaterial,
         remote_keys: KeyMaterial,
     ) -> Outcome<(), HandshakeError> {
-        self.current_keys.insert(PacketSpace::Handshake, (local_keys, remote_keys));
+        // Verify keys are not zero
+        KeyDerivation::verify_non_zero_keys(&local_keys)?;
+        KeyDerivation::verify_non_zero_keys(&remote_keys)?;
+
+        self.current_keys
+            .insert(PacketSpace::Handshake, (local_keys, remote_keys));
         self.keys_established.insert(PacketSpace::Handshake, true);
         Ok(())
     }
@@ -107,7 +121,12 @@ impl KeySchedule {
         local_keys: KeyMaterial,
         remote_keys: KeyMaterial,
     ) -> Outcome<(), HandshakeError> {
-        self.current_keys.insert(PacketSpace::Application, (local_keys, remote_keys));
+        // Verify keys are not zero
+        KeyDerivation::verify_non_zero_keys(&local_keys)?;
+        KeyDerivation::verify_non_zero_keys(&remote_keys)?;
+
+        self.current_keys
+            .insert(PacketSpace::Application, (local_keys, remote_keys));
         self.keys_established.insert(PacketSpace::Application, true);
         self.current_phase = KeyPhase::INITIAL;
         Ok(())
@@ -134,7 +153,7 @@ impl KeySchedule {
     }
 
     /// Initiate a key update (generate next phase keys)
-    pub fn initiate_key_update(&mut self) -> Outcome<(), HandshakeError> {
+    pub fn initiate_key_update(&mut self, local_traffic_secret: &[u8], remote_traffic_secret: &[u8]) -> Outcome<(), HandshakeError> {
         if !self.keys_established(PacketSpace::Application) {
             return Err(HandshakeError::ProtectionError {
                 reason: "cannot update keys before 1-RTT keys established".to_string(),
@@ -147,10 +166,16 @@ impl KeySchedule {
             });
         }
 
-        // In a real implementation, this would derive new keys from the TLS application secrets
-        // For now, we'll create placeholder keys
-        let local_keys = KeyMaterial::zero(32, 12);
-        let remote_keys = KeyMaterial::zero(32, 12);
+        // Derive new keys from current traffic secrets using key update mechanism
+        let local_keys = match KeyDerivation::derive_updated_keys(local_traffic_secret) {
+            Ok(keys) => keys,
+            Err(e) => return Err(e),
+        };
+
+        let remote_keys = match KeyDerivation::derive_updated_keys(remote_traffic_secret) {
+            Ok(keys) => keys,
+            Err(e) => return Err(e),
+        };
 
         self.next_phase_keys = Some((local_keys, remote_keys));
         Ok(())
@@ -159,7 +184,12 @@ impl KeySchedule {
     /// Commit to next key phase (after receiving key update from peer)
     pub fn commit_key_update(&mut self) -> Outcome<(), HandshakeError> {
         if let Some((local_keys, remote_keys)) = self.next_phase_keys.take() {
-            self.current_keys.insert(PacketSpace::Application, (local_keys, remote_keys));
+            // Verify updated keys are not zero
+            KeyDerivation::verify_non_zero_keys(&local_keys)?;
+            KeyDerivation::verify_non_zero_keys(&remote_keys)?;
+
+            self.current_keys
+                .insert(PacketSpace::Application, (local_keys, remote_keys));
             self.current_phase = self.current_phase.next();
             self.key_update_count += 1;
             Ok(())
@@ -178,11 +208,9 @@ impl KeySchedule {
                 self.keys_established.insert(space, false);
                 Ok(())
             }
-            PacketSpace::Application => {
-                Err(HandshakeError::ProtectionError {
-                    reason: "cannot discard 1-RTT keys".to_string(),
-                })
-            }
+            PacketSpace::Application => Err(HandshakeError::ProtectionError {
+                reason: "cannot discard 1-RTT keys".to_string(),
+            }),
         }
     }
 
@@ -216,51 +244,177 @@ impl Default for KeySchedule {
     }
 }
 
-/// Key derivation utilities
+/// QUIC key derivation constants from RFC 9001
+const INITIAL_SALT: &[u8] = &[
+    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
+    0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a
+];
+
+/// Key derivation utilities implementing RFC 9001 QUIC-TLS
 pub struct KeyDerivation;
 
 impl KeyDerivation {
-    /// Derive initial keys from connection ID (simplified version)
-    pub fn derive_initial_keys(connection_id: &[u8]) -> Outcome<(KeyMaterial, KeyMaterial), HandshakeError> {
-        // In a real implementation, this would use HKDF with the Initial salt
-        // For now, we'll create deterministic keys based on connection ID
-        let mut local_key = vec![0u8; 32];
-        let mut remote_key = vec![0u8; 32];
-
-        // Simple deterministic derivation for testing
-        for (i, &byte) in connection_id.iter().enumerate() {
-            if i < 32 {
-                local_key[i] = byte;
-                remote_key[i] = byte.wrapping_add(1);
-            }
+    /// Derive initial keys from connection ID using RFC 9001 Initial salt
+    pub fn derive_initial_keys(
+        connection_id: &[u8],
+    ) -> Outcome<(KeyMaterial, KeyMaterial), HandshakeError> {
+        if connection_id.is_empty() {
+            return Err(HandshakeError::ProtectionError {
+                reason: "connection ID cannot be empty for initial key derivation".to_string(),
+            });
         }
 
-        let local_iv = vec![0u8; 12];
-        let remote_iv = vec![1u8; 12];
+        // HKDF-Extract with Initial salt
+        let hkdf = Hkdf::<Sha256>::new(Some(INITIAL_SALT), connection_id);
 
-        let local_hp = vec![2u8; 32];
-        let remote_hp = vec![3u8; 32];
+        // Derive client initial secret
+        let client_secret = Self::hkdf_expand_label(&hkdf, 32, b"client in", &[])?;
 
-        let local_keys = KeyMaterial::new(local_key, local_iv, local_hp);
-        let remote_keys = KeyMaterial::new(remote_key, remote_iv, remote_hp);
+        // Derive server initial secret
+        let server_secret = Self::hkdf_expand_label(&hkdf, 32, b"server in", &[])?;
 
-        Ok((local_keys, remote_keys))
+        // Derive key material from secrets
+        let client_keys = Self::derive_keys_from_secret(&client_secret)?;
+        let server_keys = Self::derive_keys_from_secret(&server_secret)?;
+
+        Ok((client_keys, server_keys))
     }
 
-    /// Derive handshake keys from TLS secrets (simplified version)
-    pub fn derive_handshake_keys(_handshake_secret: &[u8]) -> Outcome<(KeyMaterial, KeyMaterial), HandshakeError> {
-        // In a real implementation, this would use HKDF-Expand with handshake secret
-        let local_keys = KeyMaterial::zero(32, 12);
-        let remote_keys = KeyMaterial::zero(32, 12);
-        Ok((local_keys, remote_keys))
+    /// Derive handshake keys from TLS handshake secret
+    pub fn derive_handshake_keys(
+        handshake_secret: &[u8],
+    ) -> Outcome<(KeyMaterial, KeyMaterial), HandshakeError> {
+        if handshake_secret.is_empty() {
+            return Err(HandshakeError::ProtectionError {
+                reason: "handshake secret cannot be empty".to_string(),
+            });
+        }
+
+        Self::derive_keys_from_secret(handshake_secret).map(|keys| (keys.clone(), keys))
     }
 
-    /// Derive 1-RTT keys from TLS application secrets (simplified version)
-    pub fn derive_application_keys(_app_secret: &[u8]) -> Outcome<(KeyMaterial, KeyMaterial), HandshakeError> {
-        // In a real implementation, this would use HKDF-Expand with application secret
-        let local_keys = KeyMaterial::zero(32, 12);
-        let remote_keys = KeyMaterial::zero(32, 12);
-        Ok((local_keys, remote_keys))
+    /// Derive 1-RTT application keys from TLS application secret
+    pub fn derive_application_keys(
+        app_secret: &[u8],
+    ) -> Outcome<(KeyMaterial, KeyMaterial), HandshakeError> {
+        if app_secret.is_empty() {
+            return Err(HandshakeError::ProtectionError {
+                reason: "application secret cannot be empty".to_string(),
+            });
+        }
+
+        Self::derive_keys_from_secret(app_secret).map(|keys| (keys.clone(), keys))
+    }
+
+    /// Derive updated keys for key update from current traffic secret
+    pub fn derive_updated_keys(
+        current_secret: &[u8],
+    ) -> Outcome<KeyMaterial, HandshakeError> {
+        if current_secret.is_empty() {
+            return Err(HandshakeError::ProtectionError {
+                reason: "current secret cannot be empty for key update".to_string(),
+            });
+        }
+
+        // Update traffic secret using HKDF-Expand-Label
+        let hkdf = Hkdf::<Sha256>::from_prk(current_secret)
+            .map_err(|_| HandshakeError::ProtectionError {
+                reason: "invalid PRK for key update".to_string(),
+            })?;
+
+        let updated_secret = Self::hkdf_expand_label(&hkdf, 32, b"traffic upd", &[])?;
+
+        Self::derive_keys_from_secret(&updated_secret)
+    }
+
+    /// Derive key material (key, IV, header protection key) from a traffic secret
+    fn derive_keys_from_secret(secret: &[u8]) -> Outcome<KeyMaterial, HandshakeError> {
+        let hkdf = Hkdf::<Sha256>::from_prk(secret)
+            .map_err(|_| HandshakeError::ProtectionError {
+                reason: "invalid secret for key derivation".to_string(),
+            })?;
+
+        // Derive packet protection key (32 bytes for AES-256-GCM)
+        let key = Self::hkdf_expand_label(&hkdf, 32, b"quic key", &[])?;
+
+        // Derive IV (12 bytes for AES-GCM)
+        let iv = Self::hkdf_expand_label(&hkdf, 12, b"quic iv", &[])?;
+
+        // Derive header protection key (32 bytes for AES-256)
+        let hp_key = Self::hkdf_expand_label(&hkdf, 32, b"quic hp", &[])?;
+
+        Ok(KeyMaterial::new(key, iv, hp_key))
+    }
+
+    /// HKDF-Expand-Label implementation for QUIC (RFC 9001, Section 5.1)
+    fn hkdf_expand_label(
+        hkdf: &Hkdf<Sha256>,
+        length: usize,
+        label: &[u8],
+        context: &[u8],
+    ) -> Outcome<Vec<u8>, HandshakeError> {
+        if length > 255 {
+            return Err(HandshakeError::ProtectionError {
+                reason: "HKDF length too large".to_string(),
+            });
+        }
+
+        // Construct HkdfLabel structure
+        let mut info = Vec::new();
+
+        // Length (2 bytes, big-endian)
+        info.extend_from_slice(&(length as u16).to_be_bytes());
+
+        // Label with "tls13 " prefix (1 byte length + data)
+        let prefixed_label = [b"tls13 ", label].concat();
+        if prefixed_label.len() > 255 {
+            return Err(HandshakeError::ProtectionError {
+                reason: "label too long".to_string(),
+            });
+        }
+        info.push(prefixed_label.len() as u8);
+        info.extend_from_slice(&prefixed_label);
+
+        // Context (1 byte length + data)
+        if context.len() > 255 {
+            return Err(HandshakeError::ProtectionError {
+                reason: "context too long".to_string(),
+            });
+        }
+        info.push(context.len() as u8);
+        info.extend_from_slice(context);
+
+        // Expand
+        let mut output = vec![0u8; length];
+        hkdf.expand(&info, &mut output)
+            .map_err(|_| HandshakeError::ProtectionError {
+                reason: "HKDF expand failed".to_string(),
+            })?;
+
+        Ok(output)
+    }
+
+    /// Verify that key material is not all zeros (security check)
+    pub fn verify_non_zero_keys(keys: &KeyMaterial) -> Outcome<(), HandshakeError> {
+        if keys.key.iter().all(|&b| b == 0) {
+            return Err(HandshakeError::ProtectionError {
+                reason: "derived packet protection key is all zeros".to_string(),
+            });
+        }
+
+        if keys.iv.iter().all(|&b| b == 0) {
+            return Err(HandshakeError::ProtectionError {
+                reason: "derived IV is all zeros".to_string(),
+            });
+        }
+
+        if keys.hp_key.iter().all(|&b| b == 0) {
+            return Err(HandshakeError::ProtectionError {
+                reason: "derived header protection key is all zeros".to_string(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -282,13 +436,29 @@ mod tests {
     fn test_key_installation() {
         let mut schedule = KeySchedule::new();
 
-        let local_keys = KeyMaterial::zero(32, 12);
-        let remote_keys = KeyMaterial::zero(32, 12);
+        // Create non-zero test keys
+        let local_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
+        let remote_keys = KeyMaterial::new(vec![4u8; 32], vec![5u8; 12], vec![6u8; 32]);
 
-        assert!(schedule.install_initial_keys(local_keys, remote_keys).is_ok());
+        assert!(
+            schedule
+                .install_initial_keys(local_keys, remote_keys)
+                .is_ok()
+        );
         assert!(schedule.keys_established(PacketSpace::Initial));
         assert!(schedule.local_keys(PacketSpace::Initial).is_some());
         assert!(schedule.remote_keys(PacketSpace::Initial).is_some());
+    }
+
+    #[test]
+    fn test_zero_key_rejection() {
+        let mut schedule = KeySchedule::new();
+
+        // Zero keys should be rejected
+        let zero_keys = KeyMaterial::zero(32, 12);
+        let non_zero_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
+
+        assert!(schedule.install_initial_keys(zero_keys, non_zero_keys).is_err());
     }
 
     #[test]
@@ -296,15 +466,19 @@ mod tests {
         let mut schedule = KeySchedule::new();
 
         // Install 1-RTT keys first
-        let local_keys = KeyMaterial::zero(32, 12);
-        let remote_keys = KeyMaterial::zero(32, 12);
-        schedule.install_application_keys(local_keys, remote_keys).unwrap();
+        let local_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
+        let remote_keys = KeyMaterial::new(vec![4u8; 32], vec![5u8; 12], vec![6u8; 32]);
+        schedule
+            .install_application_keys(local_keys, remote_keys)
+            .unwrap();
 
         assert_eq!(schedule.current_key_phase(), KeyPhase::INITIAL);
         assert!(!schedule.key_update_pending());
 
-        // Initiate key update
-        assert!(schedule.initiate_key_update().is_ok());
+        // Initiate key update with traffic secrets
+        let local_traffic_secret = vec![0x10u8; 32];
+        let remote_traffic_secret = vec![0x20u8; 32];
+        assert!(schedule.initiate_key_update(&local_traffic_secret, &remote_traffic_secret).is_ok());
         assert!(schedule.key_update_pending());
 
         // Commit key update
@@ -318,13 +492,19 @@ mod tests {
     fn test_key_discard_rules() {
         let mut schedule = KeySchedule::new();
 
-        let local_keys = KeyMaterial::zero(32, 12);
-        let remote_keys = KeyMaterial::zero(32, 12);
+        let local_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
+        let remote_keys = KeyMaterial::new(vec![4u8; 32], vec![5u8; 12], vec![6u8; 32]);
 
         // Install all keys
-        schedule.install_initial_keys(local_keys.clone(), remote_keys.clone()).unwrap();
-        schedule.install_handshake_keys(local_keys.clone(), remote_keys.clone()).unwrap();
-        schedule.install_application_keys(local_keys, remote_keys).unwrap();
+        schedule
+            .install_initial_keys(local_keys.clone(), remote_keys.clone())
+            .unwrap();
+        schedule
+            .install_handshake_keys(local_keys.clone(), remote_keys.clone())
+            .unwrap();
+        schedule
+            .install_application_keys(local_keys, remote_keys)
+            .unwrap();
 
         // Initial keys can be discarded after handshake keys are established
         assert!(schedule.can_discard_initial_keys());
@@ -344,20 +524,132 @@ mod tests {
     }
 
     #[test]
-    fn test_key_derivation() {
+    fn test_initial_key_derivation() {
         let connection_id = b"test_connection_id";
         let result = KeyDerivation::derive_initial_keys(connection_id);
 
         assert!(result.is_ok());
-        let (local_keys, remote_keys) = result.unwrap();
+        let (client_keys, server_keys) = result.unwrap();
 
-        assert_eq!(local_keys.key.len(), 32);
-        assert_eq!(local_keys.iv.len(), 12);
-        assert_eq!(remote_keys.key.len(), 32);
-        assert_eq!(remote_keys.iv.len(), 12);
+        // Verify key lengths
+        assert_eq!(client_keys.key.len(), 32);
+        assert_eq!(client_keys.iv.len(), 12);
+        assert_eq!(client_keys.hp_key.len(), 32);
+        assert_eq!(server_keys.key.len(), 32);
+        assert_eq!(server_keys.iv.len(), 12);
+        assert_eq!(server_keys.hp_key.len(), 32);
 
         // Keys should be different
-        assert_ne!(local_keys.key, remote_keys.key);
+        assert_ne!(client_keys.key, server_keys.key);
+        assert_ne!(client_keys.iv, server_keys.iv);
+        assert_ne!(client_keys.hp_key, server_keys.hp_key);
+
+        // Keys should not be zero
+        assert!(KeyDerivation::verify_non_zero_keys(&client_keys).is_ok());
+        assert!(KeyDerivation::verify_non_zero_keys(&server_keys).is_ok());
+    }
+
+    #[test]
+    fn test_empty_connection_id_rejection() {
+        let result = KeyDerivation::derive_initial_keys(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_handshake_key_derivation() {
+        let handshake_secret = vec![0x42u8; 32];
+        let result = KeyDerivation::derive_handshake_keys(&handshake_secret);
+
+        assert!(result.is_ok());
+        let (keys1, keys2) = result.unwrap();
+
+        // Keys should not be zero
+        assert!(KeyDerivation::verify_non_zero_keys(&keys1).is_ok());
+        assert!(KeyDerivation::verify_non_zero_keys(&keys2).is_ok());
+    }
+
+    #[test]
+    fn test_application_key_derivation() {
+        let app_secret = vec![0x55u8; 32];
+        let result = KeyDerivation::derive_application_keys(&app_secret);
+
+        assert!(result.is_ok());
+        let (keys1, keys2) = result.unwrap();
+
+        // Keys should not be zero
+        assert!(KeyDerivation::verify_non_zero_keys(&keys1).is_ok());
+        assert!(KeyDerivation::verify_non_zero_keys(&keys2).is_ok());
+    }
+
+    #[test]
+    fn test_key_update_derivation() {
+        let current_secret = vec![0xAAu8; 32];
+        let result = KeyDerivation::derive_updated_keys(&current_secret);
+
+        assert!(result.is_ok());
+        let updated_keys = result.unwrap();
+
+        // Updated keys should not be zero
+        assert!(KeyDerivation::verify_non_zero_keys(&updated_keys).is_ok());
+    }
+
+    #[test]
+    fn test_empty_secret_rejection() {
+        assert!(KeyDerivation::derive_handshake_keys(&[]).is_err());
+        assert!(KeyDerivation::derive_application_keys(&[]).is_err());
+        assert!(KeyDerivation::derive_updated_keys(&[]).is_err());
+    }
+
+    #[test]
+    fn test_rfc9001_initial_keys_deterministic() {
+        // Test with a known connection ID to ensure deterministic derivation
+        let connection_id = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+        let result1 = KeyDerivation::derive_initial_keys(&connection_id);
+        let result2 = KeyDerivation::derive_initial_keys(&connection_id);
+
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+
+        let (client_keys1, server_keys1) = result1.unwrap();
+        let (client_keys2, server_keys2) = result2.unwrap();
+
+        // Derivation should be deterministic
+        assert_eq!(client_keys1.key, client_keys2.key);
+        assert_eq!(client_keys1.iv, client_keys2.iv);
+        assert_eq!(client_keys1.hp_key, client_keys2.hp_key);
+        assert_eq!(server_keys1.key, server_keys2.key);
+        assert_eq!(server_keys1.iv, server_keys2.iv);
+        assert_eq!(server_keys1.hp_key, server_keys2.hp_key);
+    }
+
+    #[test]
+    fn test_key_update_progression() {
+        // Test that key updates produce different keys
+        let initial_secret = vec![0x11u8; 32];
+        let first_update = KeyDerivation::derive_updated_keys(&initial_secret).unwrap();
+
+        // Use first update as input for second update
+        // In practice, we'd derive new traffic secret first, but this tests the mechanism
+        let second_secret = vec![0x22u8; 32];
+        let second_update = KeyDerivation::derive_updated_keys(&second_secret).unwrap();
+
+        // Updates should produce different keys
+        assert_ne!(first_update.key, second_update.key);
+        assert_ne!(first_update.iv, second_update.iv);
+        assert_ne!(first_update.hp_key, second_update.hp_key);
+    }
+
+    #[test]
+    fn test_zero_key_material_detection() {
+        let zero_keys = KeyMaterial::zero(32, 12);
+        assert!(KeyDerivation::verify_non_zero_keys(&zero_keys).is_err());
+
+        let non_zero_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
+        assert!(KeyDerivation::verify_non_zero_keys(&non_zero_keys).is_ok());
+
+        // Mixed case - only key is zero
+        let mixed_keys = KeyMaterial::new(vec![0u8; 32], vec![2u8; 12], vec![3u8; 32]);
+        assert!(KeyDerivation::verify_non_zero_keys(&mixed_keys).is_err());
     }
 
     #[test]
@@ -376,7 +668,9 @@ mod tests {
         let mut schedule = KeySchedule::new();
 
         // Try to update keys without 1-RTT keys established
-        let result = schedule.initiate_key_update();
+        let local_traffic_secret = vec![0x10u8; 32];
+        let remote_traffic_secret = vec![0x20u8; 32];
+        let result = schedule.initiate_key_update(&local_traffic_secret, &remote_traffic_secret);
         assert!(result.is_err());
     }
 
@@ -384,14 +678,19 @@ mod tests {
     fn test_double_key_update() {
         let mut schedule = KeySchedule::new();
 
-        let local_keys = KeyMaterial::zero(32, 12);
-        let remote_keys = KeyMaterial::zero(32, 12);
-        schedule.install_application_keys(local_keys, remote_keys).unwrap();
+        let local_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
+        let remote_keys = KeyMaterial::new(vec![4u8; 32], vec![5u8; 12], vec![6u8; 32]);
+        schedule
+            .install_application_keys(local_keys, remote_keys)
+            .unwrap();
+
+        let local_traffic_secret = vec![0x10u8; 32];
+        let remote_traffic_secret = vec![0x20u8; 32];
 
         // First update should succeed
-        assert!(schedule.initiate_key_update().is_ok());
+        assert!(schedule.initiate_key_update(&local_traffic_secret, &remote_traffic_secret).is_ok());
 
         // Second update while first is pending should fail
-        assert!(schedule.initiate_key_update().is_err());
+        assert!(schedule.initiate_key_update(&local_traffic_secret, &remote_traffic_secret).is_err());
     }
 }
