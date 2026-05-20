@@ -894,7 +894,7 @@ mod tests {
         }
 
         // Validate total coverage
-        let total_size: u64 = boundaries.iter().map(|b| b.size).sum();
+        let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
         assert_eq!(total_size, artifact_data.len() as u64);
     }
 
@@ -903,11 +903,11 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 10000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 10000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::ContentDefined,
-                metadata: ChunkMetadata::Artifact {
+                metadata: Some(ChunkMetadata::Artifact {
                     build_context: ArtifactBuildContext {
                         build_system: "cargo".to_string(),
                         build_timestamp: None,
@@ -915,15 +915,15 @@ mod tests {
                         toolchain_version: "rustc-1.70.0".to_string(),
                     },
                     proof_strength: ProofStrength::Enhanced,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 10000,
-                size: 10000,
-                hash: [1; 32], // Same hash = potential duplication
+                byte_offset: 10000,
+                size_bytes: 10000,
+                content_hash: [1; 32], // Same hash = potential duplication
                 strategy: ChunkStrategy::ContentDefined,
-                metadata: ChunkMetadata::Artifact {
+                metadata: Some(ChunkMetadata::Artifact {
                     build_context: ArtifactBuildContext {
                         build_system: "cargo".to_string(),
                         build_timestamp: None,
@@ -931,7 +931,7 @@ mod tests {
                         toolchain_version: "rustc-1.70.0".to_string(),
                     },
                     proof_strength: ProofStrength::Basic,
-                },
+                }),
             },
         ];
 
@@ -974,11 +974,11 @@ mod tests {
     fn boundary_validation_enforces_artifact_requirements() {
         let invalid_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 10000,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 10000,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::FixedSize, // Wrong strategy!
-            metadata: ChunkMetadata::Artifact {
+            metadata: Some(ChunkMetadata::Artifact {
                 build_context: ArtifactBuildContext {
                     build_system: "cargo".to_string(),
                     build_timestamp: None,
@@ -986,7 +986,7 @@ mod tests {
                     toolchain_version: "rustc-1.70.0".to_string(),
                 },
                 proof_strength: ProofStrength::Basic,
-            },
+            }),
         };
 
         let result = ArtifactProfile::validate_boundaries(&[invalid_boundary]);

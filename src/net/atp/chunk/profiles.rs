@@ -3,7 +3,7 @@
 //! This module defines the common interface that all chunking profiles implement,
 //! along with shared utilities for chunk boundary computation and validation.
 
-use crate::atp::manifest::{ChunkPlan, ChunkStrategy, ChunkBoundary, ChunkMetadata};
+use crate::atp::manifest::{ChunkPlan, ChunkStrategy, ChunkBoundary, ChunkMetadata, ThroughputTier};
 use super::ChunkingProfileError;
 
 /// Common interface for all chunking profiles.
@@ -157,7 +157,7 @@ pub mod utils {
                 ));
             }
 
-            if boundary.size_bytes_bytes == 0 {
+            if boundary.size_bytes == 0 {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
                     format!("boundary {} has zero size", i)
                 ));
@@ -170,7 +170,7 @@ pub mod utils {
                 ));
             }
 
-            last_end = boundary.byte_offset + boundary.size_bytes_bytes;
+            last_end = boundary.byte_offset + boundary.size_bytes;
         }
 
         Ok(())
@@ -270,23 +270,23 @@ pub mod utils {
             let valid_boundaries = vec![
                 ChunkBoundary {
                     index: 0,
-                    offset: 0,
-                    size: 1000,
-                    hash: [1; 32],
+                    byte_offset: 0,
+                    size_bytes: 1000,
+                    content_hash: [1; 32],
                     strategy: ChunkStrategy::FixedSize,
-                    metadata: super::super::ChunkMetadata::BulkFile {
-                        throughput_tier: super::super::ThroughputTier::Standard,
-                    },
+                    metadata: Some(ChunkMetadata::BulkFile {
+                        throughput_tier: ThroughputTier::Standard,
+                    }),
                 },
                 ChunkBoundary {
                     index: 1,
-                    offset: 1000,
-                    size: 500,
-                    hash: [2; 32],
+                    byte_offset: 1000,
+                    size_bytes: 500,
+                    content_hash: [2; 32],
                     strategy: ChunkStrategy::FixedSize,
-                    metadata: super::super::ChunkMetadata::BulkFile {
-                        throughput_tier: super::super::ThroughputTier::Standard,
-                    },
+                    metadata: Some(ChunkMetadata::BulkFile {
+                        throughput_tier: ThroughputTier::Standard,
+                    }),
                 },
             ];
 
@@ -296,23 +296,23 @@ pub mod utils {
             let invalid_boundaries = vec![
                 ChunkBoundary {
                     index: 0,
-                    offset: 0,
-                    size: 1000,
-                    hash: [1; 32],
+                    byte_offset: 0,
+                    size_bytes: 1000,
+                    content_hash: [1; 32],
                     strategy: ChunkStrategy::FixedSize,
-                    metadata: super::super::ChunkMetadata::BulkFile {
-                        throughput_tier: super::super::ThroughputTier::Standard,
-                    },
+                    metadata: Some(ChunkMetadata::BulkFile {
+                        throughput_tier: ThroughputTier::Standard,
+                    }),
                 },
                 ChunkBoundary {
                     index: 1,
-                    offset: 1500, // Gap!
-                    size: 500,
-                    hash: [2; 32],
+                    byte_offset: 1500, // Gap!
+                    size_bytes: 500,
+                    content_hash: [2; 32],
                     strategy: ChunkStrategy::FixedSize,
-                    metadata: super::super::ChunkMetadata::BulkFile {
-                        throughput_tier: super::super::ThroughputTier::Standard,
-                    },
+                    metadata: Some(ChunkMetadata::BulkFile {
+                        throughput_tier: ThroughputTier::Standard,
+                    }),
                 },
             ];
 
