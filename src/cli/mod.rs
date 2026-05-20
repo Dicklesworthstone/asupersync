@@ -57,6 +57,7 @@
 pub mod args;
 pub mod atp_command_tree;
 pub mod atp_config;
+pub mod atp_user_journey;
 pub mod completion;
 pub mod doctor;
 pub mod error;
@@ -69,6 +70,11 @@ pub mod signal;
 pub use args::{
     AtpDoctorArgs, AtpProofArgs, AtpVerifyArgs, COMMON_ARGS_HELP, CommonArgs, parse_color_choice,
     parse_output_format,
+};
+pub use atp_user_journey::{
+    ATP_USER_JOURNEY_CONTRACT_VERSION, ATP_USER_JOURNEY_REQUIRED_LOG_FIELDS,
+    AtpUserJourneyContract, AtpUserJourneyScenario, atp_user_journey_contract,
+    atp_user_journey_required_log_fields, atp_user_journey_scenarios,
 };
 pub use completion::{Completable, CompletionItem, Shell, generate_completions};
 pub use doctor::{
@@ -114,6 +120,11 @@ pub use signal::{CancellationToken, Signal, SignalHandler};
 /// ```
 pub mod prelude {
     pub use super::args::{COMMON_ARGS_HELP, CommonArgs};
+    pub use super::atp_user_journey::{
+        ATP_USER_JOURNEY_CONTRACT_VERSION, ATP_USER_JOURNEY_REQUIRED_LOG_FIELDS,
+        AtpUserJourneyContract, AtpUserJourneyScenario, atp_user_journey_contract,
+        atp_user_journey_required_log_fields, atp_user_journey_scenarios,
+    };
     pub use super::doctor::{
         CapabilityEdge, ContractCompatibility, ContractErrorEnvelope, CoreDiagnosticsCommand,
         CoreDiagnosticsEvidence, CoreDiagnosticsFinding, CoreDiagnosticsFixture,

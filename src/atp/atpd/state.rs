@@ -1,7 +1,7 @@
 //! Persistent atpd state schema and redacted export model.
 
-use crate::atp::inbox::ObjectDigest;
-use crate::atp::quota::{
+use crate::asupersync::atp::inbox::ObjectDigest;
+use crate::asupersync::atp::quota::{
     QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaRow, QuotaUsage, RetentionClock,
     RetentionPolicy, RetentionRecord,
 };
@@ -672,7 +672,7 @@ fn parse_scoped_record_id(scoped_id: &str) -> Result<(AtpdStateCollection, &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::quota::{QuotaLimit, RetentionRule};
+    use crate::asupersync::atp::quota::{QuotaLimit, RetentionRule};
 
     fn digest(byte: u8) -> ObjectDigest {
         ObjectDigest::new([byte; 32])
