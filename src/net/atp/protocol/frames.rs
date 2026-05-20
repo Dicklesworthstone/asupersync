@@ -68,6 +68,20 @@ pub enum FrameType {
     Error = 0x0301,
     /// Graceful close frame.
     Close = 0x0302,
+
+    // H3/WebTransport adapter categories.
+    /// Generic control category for adapter-level mapping.
+    Control = 0x0400,
+    /// Generic data category for adapter-level mapping.
+    Data = 0x0401,
+    /// Generic proof category for adapter-level mapping.
+    Proof = 0x0402,
+    /// Generic repair category for adapter-level mapping.
+    Repair = 0x0403,
+    /// Generic session category for adapter-level mapping.
+    Session = 0x0404,
+    /// Generic manifest category for adapter-level mapping.
+    Manifest = 0x0405,
 }
 
 impl FrameType {
@@ -95,6 +109,12 @@ impl FrameType {
             0x0300 => Ok(FrameType::Cancel),
             0x0301 => Ok(FrameType::Error),
             0x0302 => Ok(FrameType::Close),
+            0x0400 => Ok(FrameType::Control),
+            0x0401 => Ok(FrameType::Data),
+            0x0402 => Ok(FrameType::Proof),
+            0x0403 => Ok(FrameType::Repair),
+            0x0404 => Ok(FrameType::Session),
+            0x0405 => Ok(FrameType::Manifest),
             other => Err(FrameError::UnknownFrameType(other)),
         }
     }
@@ -201,6 +221,20 @@ impl Frame {
     /// Get payload as slice
     pub fn payload(&self) -> &[u8] {
         &self.payload
+    }
+
+    /// Create an adapter-level placeholder frame for incomplete protocol surfaces.
+    pub fn new_placeholder(frame_type: FrameType) -> Result<Self, FrameError> {
+        let payload = match frame_type {
+            FrameType::Control => b"ATP-CONTROL-PLACEHOLDER".to_vec(),
+            FrameType::Data => b"ATP-DATA-PLACEHOLDER".to_vec(),
+            FrameType::Proof => b"ATP-PROOF-PLACEHOLDER".to_vec(),
+            FrameType::Repair => b"ATP-REPAIR-PLACEHOLDER".to_vec(),
+            FrameType::Session => b"ATP-SESSION-PLACEHOLDER".to_vec(),
+            FrameType::Manifest => b"ATP-MANIFEST-PLACEHOLDER".to_vec(),
+            other => format!("ATP-{other:?}-PLACEHOLDER").into_bytes(),
+        };
+        Self::new(ProtocolVersion::CURRENT, frame_type, payload)
     }
 }
 

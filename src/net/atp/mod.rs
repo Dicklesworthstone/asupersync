@@ -19,6 +19,7 @@
 // pub mod chunk;
 // pub mod loss;
 // pub mod path;
+#[path = "protocol/mod.rs"]
 pub mod protocol;
 // pub mod quic;
 // pub mod rendezvous;

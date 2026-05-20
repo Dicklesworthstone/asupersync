@@ -19,3 +19,6 @@ pub use session::*;
 pub use transcript::*;
 pub use transport_params::*;
 pub use varint::*;
+
+/// Compatibility name for adapter code that treats ATP frames abstractly.
+pub type AtpFrame = Frame;
