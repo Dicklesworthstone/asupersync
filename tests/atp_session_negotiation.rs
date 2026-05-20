@@ -76,7 +76,7 @@ fn e2e_first_contact_pairing_logs_transcript_proof() {
         CapabilityAction::Write,
         &features,
     );
-    let policy = policy(
+    let mut policy = policy(
         peer("bob"),
         SessionContextKind::Direct,
         CapabilityAction::Write,
@@ -87,7 +87,7 @@ fn e2e_first_contact_pairing_logs_transcript_proof() {
 
     client.start_client_hello(&hello).unwrap();
     let (server_hello, _server_frame, server_proof) =
-        server.accept_client_hello(&hello, &policy).unwrap();
+        server.accept_client_hello(&hello, &mut policy).unwrap();
     let (session, client_proof) = client
         .finish_client(&hello, &server_hello, &policy)
         .unwrap();
@@ -117,7 +117,7 @@ fn e2e_expired_and_revoked_grants_fail_before_storage() {
     )
     .with_features(&features)
     .with_requested_actions(&[CapabilityAction::Write]);
-    let policy = policy(
+    let mut policy = policy(
         bob,
         SessionContextKind::Direct,
         CapabilityAction::Write,
@@ -133,7 +133,7 @@ fn e2e_expired_and_revoked_grants_fail_before_storage() {
     .with_validity(0, 500);
     let mut server = SessionNegotiator::server(bob);
     let expired_error = server
-        .accept_client_hello(&base.clone().with_grants(vec![expired]), &policy)
+        .accept_client_hello(&base.clone().with_grants(vec![expired]), &mut policy)
         .unwrap_err();
     assert_eq!(expired_error.code(), "missing_grant_action");
 
@@ -146,7 +146,7 @@ fn e2e_expired_and_revoked_grants_fail_before_storage() {
     .revoked();
     let mut server = SessionNegotiator::server(bob);
     let revoked_error = server
-        .accept_client_hello(&base.with_grants(vec![revoked]), &policy)
+        .accept_client_hello(&base.with_grants(vec![revoked]), &mut policy)
         .unwrap_err();
     assert_eq!(revoked_error.code(), "missing_grant_action");
 }
@@ -183,10 +183,11 @@ fn e2e_relay_mailbox_swarm_and_downgrade_paths_are_explicit() {
             AtpFeature::Repair,
         ];
         let hello = hello(context, action, &offered);
-        let policy = policy(peer("bob"), context, action, &supported);
+        let mut policy = policy(peer("bob"), context, action, &supported);
         let mut server = SessionNegotiator::server(peer("bob"));
 
-        let (server_hello, _frame, _proof) = server.accept_client_hello(&hello, &policy).unwrap();
+        let (server_hello, _frame, _proof) =
+            server.accept_client_hello(&hello, &mut policy).unwrap();
 
         assert!(server_hello.selected_features.contains(context_feature));
         assert!(server_hello.selected_features.contains(AtpFeature::Repair));
@@ -220,7 +221,7 @@ fn e2e_replay_path_and_object_escalation_are_fail_closed() {
             .with_manifest_root(root),
     );
     let features = [AtpFeature::EncryptionPolicy];
-    let policy = policy(
+    let mut policy = policy(
         bob,
         SessionContextKind::Direct,
         CapabilityAction::Write,
@@ -241,10 +242,10 @@ fn e2e_replay_path_and_object_escalation_are_fail_closed() {
     .with_path_id(path)
     .with_manifest_root(root)
     .with_grants(vec![scoped_grant.clone()]);
-    let replay_policy = policy.clone().with_seen_nonce(replay_nonce);
+    let mut replay_policy = policy.clone().with_seen_nonce(replay_nonce);
     let mut server = SessionNegotiator::server(bob);
     let replay_error = server
-        .accept_client_hello(&replay_hello, &replay_policy)
+        .accept_client_hello(&replay_hello, &mut replay_policy)
         .unwrap_err();
     assert_eq!(replay_error.code(), "replayed_nonce");
 
@@ -262,9 +263,37 @@ fn e2e_replay_path_and_object_escalation_are_fail_closed() {
     .with_grants(vec![scoped_grant]);
     let mut server = SessionNegotiator::server(bob);
     let scope_error = server
-        .accept_client_hello(&escalation, &policy)
+        .accept_client_hello(&escalation, &mut policy)
         .unwrap_err();
     assert_eq!(scope_error.code(), "missing_grant_action");
+}
+
+#[test]
+fn e2e_successful_accept_updates_replay_cache() {
+    let features = [AtpFeature::EncryptionPolicy];
+    let hello = hello(
+        SessionContextKind::Direct,
+        CapabilityAction::Write,
+        &features,
+    );
+    let mut policy = policy(
+        peer("bob"),
+        SessionContextKind::Direct,
+        CapabilityAction::Write,
+        &features,
+    );
+    let mut server = SessionNegotiator::server(peer("bob"));
+
+    server.accept_client_hello(&hello, &mut policy).unwrap();
+
+    assert!(policy.seen_nonces.contains(&hello.nonce));
+
+    let mut replay_server = SessionNegotiator::server(peer("bob"));
+    let replay_error = replay_server
+        .accept_client_hello(&hello, &mut policy)
+        .unwrap_err();
+
+    assert_eq!(replay_error.code(), "replayed_nonce");
 }
 
 #[test]
@@ -275,14 +304,15 @@ fn e2e_feature_confusion_is_rejected_on_client_finish() {
         CapabilityAction::Write,
         &features,
     );
-    let policy = policy(
+    let mut policy = policy(
         peer("bob"),
         SessionContextKind::Direct,
         CapabilityAction::Write,
         &features,
     );
     let mut server = SessionNegotiator::server(peer("bob"));
-    let (mut server_hello, _frame, _proof) = server.accept_client_hello(&hello, &policy).unwrap();
+    let (mut server_hello, _frame, _proof) =
+        server.accept_client_hello(&hello, &mut policy).unwrap();
     server_hello.selected_features =
         FeatureSet::from_slice(&[AtpFeature::EncryptionPolicy, AtpFeature::Compression]);
 
