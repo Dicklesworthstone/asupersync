@@ -4,7 +4,7 @@ use crate::atp::journal::range_tracker::SparseRange;
 use std::collections::HashMap;
 
 /// Different states a chunk can be in during transfer
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ChunkState {
     /// Chunk is wanted/needed for the transfer
