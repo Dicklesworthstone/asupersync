@@ -224,7 +224,7 @@ mod tests {
         assert!(VarInt::decode(&mut partial).unwrap().is_none());
 
         // Complete with remaining bytes
-        partial.put(buf);
+        partial.put_slice(&buf);
         let decoded = VarInt::decode(&mut partial).unwrap().unwrap();
         assert_eq!(decoded.value(), 16384);
     }

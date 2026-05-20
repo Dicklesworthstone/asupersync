@@ -873,7 +873,7 @@ mod tests {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf).unwrap();
 
-        let mut decode_buf = buf.freeze();
+        let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
     }
@@ -886,7 +886,7 @@ mod tests {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf).unwrap();
 
-        let mut decode_buf = buf.freeze();
+        let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
     }
@@ -902,7 +902,7 @@ mod tests {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf).unwrap();
 
-        let mut decode_buf = buf.freeze();
+        let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
     }
@@ -915,7 +915,7 @@ mod tests {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf).unwrap();
 
-        let mut decode_buf = buf.freeze();
+        let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
     }
@@ -930,7 +930,7 @@ mod tests {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf).unwrap();
 
-        let mut decode_buf = buf.freeze();
+        let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
     }
@@ -948,7 +948,7 @@ mod tests {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf).unwrap();
 
-        let mut decode_buf = buf.freeze();
+        let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
     }
@@ -962,7 +962,7 @@ mod tests {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf).unwrap();
 
-        let mut decode_buf = buf.freeze();
+        let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
     }
