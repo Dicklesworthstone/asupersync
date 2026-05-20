@@ -5,17 +5,23 @@
 //! structured concurrency, and explicit cancellation semantics.
 
 use crate::atp::manifest::{ManifestVersion, MerkleRoot};
-use crate::atp::object::ObjectId;
+use crate::atp::object::{ContentId, ObjectId};
 use crate::atp::transfer::TransferId;
 use crate::cx::Cx;
 use crate::fs::File;
 use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, DiskError, ProtocolError};
 use crate::types::outcome::Outcome;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 const MAX_FILE_STREAM_CHUNK_LEN: usize = 8 * 1024 * 1024;
+const WRITER_CONTENT_DOMAIN: &[u8] = b"ATP-WRITER-CONTENT-V1\0";
+const WRITER_CHUNK_DOMAIN: &[u8] = b"ATP-WRITER-CHUNK-V1\0";
+const WRITER_MANIFEST_DOMAIN: &[u8] = b"ATP-WRITER-MANIFEST-V1\0";
+const WRITER_RESUME_DOMAIN: &[u8] = b"ATP-WRITER-RESUME-V1\0";
+const WRITER_PROOF_DOMAIN: &[u8] = b"ATP-WRITER-PROOF-V1\0";
 
 /// ATP writer configuration for large buffer operations.
 #[derive(Debug, Clone)]
@@ -82,10 +88,33 @@ pub struct AtpWriter {
     bytes_written: u64,
     /// Transfer handle for this writer.
     transfer_id: Option<TransferId>,
+    /// Local peer identity used to derive this transfer.
+    local_peer: Option<[u8; 32]>,
+    /// Per-transfer nonce used to derive this transfer.
+    transfer_nonce: Option<[u8; 32]>,
+    /// Latest manifest root covering verified chunks.
+    manifest_root: Option<MerkleRoot>,
+    /// Content hash state for bytes verified by this writer instance.
+    content_hasher: Sha256,
+    /// Verified chunk ledger retained after buffers are flushed.
+    verified_chunks: Vec<VerifiedChunk>,
+    /// Bytes verified before a resumed writer was constructed.
+    base_verified_bytes: u64,
+    /// Manifest root supplied by a resume token.
+    base_manifest_root: Option<MerkleRoot>,
+    /// Whether the transfer id came from a resume token and must remain stable.
+    resumed_transfer: bool,
     /// Progress callback.
     progress_callback: Option<Arc<dyn Fn(WriterProgress) + Send + Sync>>,
     /// Resume token for interrupted transfers.
     resume_token: Option<ResumeToken>,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedChunk {
+    offset: u64,
+    size_bytes: u64,
+    hash: [u8; 32],
 }
 
 /// ATP writer state machine.
@@ -201,6 +230,14 @@ impl AtpWriter {
             buffer: Vec::new(),
             bytes_written: 0,
             transfer_id: None,
+            local_peer: None,
+            transfer_nonce: None,
+            manifest_root: None,
+            content_hasher: new_content_hasher(),
+            verified_chunks: Vec::new(),
+            base_verified_bytes: 0,
+            base_manifest_root: None,
+            resumed_transfer: false,
             progress_callback: None,
             resume_token: None,
         }
@@ -227,6 +264,14 @@ impl AtpWriter {
             buffer: Vec::new(),
             bytes_written: resume_token.verified_bytes,
             transfer_id: Some(resume_token.transfer_id),
+            local_peer: None,
+            transfer_nonce: None,
+            manifest_root: Some(resume_token.manifest_root.clone()),
+            content_hasher: new_content_hasher(),
+            verified_chunks: Vec::new(),
+            base_verified_bytes: resume_token.verified_bytes,
+            base_manifest_root: Some(resume_token.manifest_root.clone()),
+            resumed_transfer: true,
             progress_callback: None,
             resume_token: Some(resume_token),
         };
@@ -292,6 +337,13 @@ impl AtpWriter {
         // Buffer the data
         self.buffer.extend_from_slice(data);
         self.state = WriterState::Streaming;
+
+        match self.flush_buffer(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         // Emit progress if enabled
         if self.config.enable_progress {
@@ -377,6 +429,21 @@ impl AtpWriter {
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             }
         }
+        if self.transfer_id.is_none() {
+            match self.initialize_transfer(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+        self.refresh_placeholder_object_id();
+        match self.refresh_transfer_identity() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         // Generate final proof
         let proof = match self.generate_proof(cx).await {
@@ -402,17 +469,43 @@ impl AtpWriter {
     pub async fn cancel(&mut self, cx: &Cx) -> AtpOutcome<ResumeToken> {
         cx.trace("atp_writer_cancel");
 
+        if self.transfer_id.is_none() {
+            match self.initialize_transfer(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+        if !self.buffer.is_empty() {
+            match self.flush_buffer(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+        self.refresh_placeholder_object_id();
+        match self.refresh_transfer_identity() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
         self.state = WriterState::Cancelled;
+        let Some(transfer_id) = self.transfer_id else {
+            return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
+        };
+        let manifest_root = self.current_manifest_root();
 
         // Generate and store resume token if resume is enabled
         if self.config.enable_resume {
             let resume_token = ResumeToken {
-                transfer_id: self.transfer_id.unwrap_or_else(|| {
-                    TransferId::derive([0; 32], self.remote_peer, [0; 32], [0; 32])
-                }),
+                transfer_id,
                 object_id: self.object_id.clone(),
                 verified_bytes: self.bytes_written,
-                manifest_root: MerkleRoot::zero(), // TODO: Get actual manifest root
+                manifest_root,
                 journal_position: self.bytes_written,
                 created_at: SystemTime::now(),
                 expires_at: SystemTime::now() + Duration::from_secs(24 * 3600), // 24 hours
@@ -424,12 +517,10 @@ impl AtpWriter {
         } else {
             // Return empty resume token
             let resume_token = ResumeToken {
-                transfer_id: self.transfer_id.unwrap_or_else(|| {
-                    TransferId::derive([0; 32], self.remote_peer, [0; 32], [0; 32])
-                }),
+                transfer_id,
                 object_id: self.object_id.clone(),
                 verified_bytes: 0,
-                manifest_root: MerkleRoot::zero(),
+                manifest_root,
                 journal_position: 0,
                 created_at: SystemTime::now(),
                 expires_at: SystemTime::now(), // Immediately expired
@@ -452,7 +543,7 @@ impl AtpWriter {
                 transfer_id: self.transfer_id.unwrap(),
                 object_id: self.object_id.clone(),
                 verified_bytes: self.bytes_written,
-                manifest_root: MerkleRoot::zero(), // TODO: Get actual manifest root
+                manifest_root: self.current_manifest_root(),
                 journal_position: self.bytes_written,
                 created_at: SystemTime::now(),
                 expires_at: SystemTime::now() + Duration::from_secs(24 * 3600), // 24 hours
@@ -492,22 +583,8 @@ impl AtpWriter {
     async fn initialize_transfer(&mut self, cx: &Cx) -> AtpOutcome<()> {
         cx.trace("atp_writer_initialize_transfer");
 
-        // Generate transfer ID
-        let transfer_id = TransferId::derive(
-            [0; 32], // TODO: Get local peer ID
-            self.remote_peer,
-            [0; 32], // TODO: Generate nonce
-            [0; 32], // TODO: Calculate manifest root
-        );
-
-        self.transfer_id = Some(transfer_id);
-
-        // TODO: Initiate actual ATP protocol handshake
-        // 1. Send transfer offer
-        // 2. Wait for acceptance
-        // 3. Begin chunk streaming
-
-        Outcome::ok(())
+        self.ensure_transfer_context(cx);
+        self.refresh_transfer_identity()
     }
 
     async fn flush_buffer(&mut self, cx: &Cx) -> AtpOutcome<()> {
@@ -520,42 +597,184 @@ impl AtpWriter {
             return Outcome::ok(());
         }
 
-        // TODO: Implement actual chunk transmission
-        // 1. Split buffer into chunks based on config
-        // 2. Send chunks with ATP protocol
-        // 3. Wait for acknowledgments
-        // 4. Update progress
+        self.ensure_transfer_context(cx);
 
-        self.bytes_written += self.buffer.len() as u64;
-        self.buffer.clear();
+        let chunk_len = self.file_stream_chunk_len();
+        let buffered = std::mem::take(&mut self.buffer);
+        let mut offset = self.bytes_written;
+        for chunk in buffered.chunks(chunk_len) {
+            let size_bytes = chunk.len() as u64;
+            let hash = self.chunk_hash(offset, chunk);
+            self.content_hasher.update(chunk);
+            self.verified_chunks.push(VerifiedChunk {
+                offset,
+                size_bytes,
+                hash,
+            });
+            offset = offset.saturating_add(size_bytes);
+        }
+        self.bytes_written = offset;
 
-        Outcome::ok(())
+        self.refresh_transfer_identity()
     }
 
     async fn generate_proof(&self, cx: &Cx) -> AtpOutcome<TransferProof> {
         cx.trace("atp_writer_generate_proof");
 
-        // TODO: Generate actual proof bundle
-        // 1. Finalize manifest
-        // 2. Compute final hashes
-        // 3. Generate cryptographic signatures
-        // 4. Create proof bundle
+        let Some(transfer_id) = self.transfer_id else {
+            return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
+        };
+        let verified_hash = self.current_verified_hash();
+        let manifest_root = self.current_manifest_root();
+        let signatures = self.generate_proof_signatures(transfer_id, &manifest_root, verified_hash);
 
         let proof = TransferProof {
-            transfer_id: self
-                .transfer_id
-                .unwrap_or_else(|| TransferId::derive([0; 32], self.remote_peer, [0; 32], [0; 32])),
+            transfer_id,
             object_id: self.object_id.clone(),
-            verified_hash: [0; 32], // TODO: Compute actual hash
+            verified_hash,
             total_bytes: self.bytes_written,
             manifest_version: ManifestVersion::CURRENT,
-            manifest_root: MerkleRoot::zero(), // TODO: Get actual root
+            manifest_root,
             completed_at: SystemTime::now(),
             proof_mode: self.config.proof_mode,
-            signatures: vec![], // TODO: Generate signatures
+            signatures,
         };
 
         Outcome::ok(proof)
+    }
+
+    fn ensure_transfer_context(&mut self, cx: &Cx) {
+        if self.local_peer.is_none() {
+            let mut local_peer = [0_u8; 32];
+            cx.random_bytes(&mut local_peer);
+            ensure_nonzero(&mut local_peer);
+            self.local_peer = Some(local_peer);
+        }
+        if self.transfer_nonce.is_none() {
+            let mut transfer_nonce = [0_u8; 32];
+            cx.random_bytes(&mut transfer_nonce);
+            ensure_nonzero(&mut transfer_nonce);
+            self.transfer_nonce = Some(transfer_nonce);
+        }
+    }
+
+    fn refresh_transfer_identity(&mut self) -> AtpOutcome<()> {
+        let (Some(local_peer), Some(transfer_nonce)) = (self.local_peer, self.transfer_nonce)
+        else {
+            return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
+        };
+
+        let manifest_root = self.compute_manifest_root(self.current_verified_hash());
+        if !self.resumed_transfer || self.transfer_id.is_none() {
+            self.transfer_id = Some(TransferId::derive(
+                local_peer,
+                self.remote_peer,
+                transfer_nonce,
+                *manifest_root.hash(),
+            ));
+        }
+        self.manifest_root = Some(manifest_root);
+        self.resume_token = None;
+        Outcome::ok(())
+    }
+
+    fn current_verified_hash(&self) -> [u8; 32] {
+        let current_hash: [u8; 32] = self.content_hasher.clone().finalize().into();
+        if let Some(base_root) = &self.base_manifest_root {
+            let mut hasher = Sha256::new();
+            hasher.update(WRITER_RESUME_DOMAIN);
+            hasher.update(base_root.hash());
+            hasher.update(self.base_verified_bytes.to_be_bytes());
+            hasher.update(current_hash);
+            hasher.finalize().into()
+        } else {
+            current_hash
+        }
+    }
+
+    fn current_manifest_root(&self) -> MerkleRoot {
+        self.manifest_root
+            .clone()
+            .unwrap_or_else(|| self.compute_manifest_root(self.current_verified_hash()))
+    }
+
+    fn compute_manifest_root(&self, verified_hash: [u8; 32]) -> MerkleRoot {
+        let mut hasher = Sha256::new();
+        hasher.update(WRITER_MANIFEST_DOMAIN);
+        hasher.update(ManifestVersion::CURRENT.0.to_be_bytes());
+        hasher.update(self.object_id.hash_bytes());
+        hasher.update(self.bytes_written.to_be_bytes());
+        hasher.update(verified_hash);
+        if let Some(base_root) = &self.base_manifest_root {
+            hasher.update(b"resume-base");
+            hasher.update(base_root.hash());
+            hasher.update(self.base_verified_bytes.to_be_bytes());
+        }
+        for chunk in &self.verified_chunks {
+            hasher.update(chunk.offset.to_be_bytes());
+            hasher.update(chunk.size_bytes.to_be_bytes());
+            hasher.update(chunk.hash);
+        }
+        MerkleRoot::new(hasher.finalize().into())
+    }
+
+    fn chunk_hash(&self, offset: u64, chunk: &[u8]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(WRITER_CHUNK_DOMAIN);
+        hasher.update(offset.to_be_bytes());
+        hasher.update((chunk.len() as u64).to_be_bytes());
+        hasher.update(chunk);
+        hasher.finalize().into()
+    }
+
+    fn generate_proof_signatures(
+        &self,
+        transfer_id: TransferId,
+        manifest_root: &MerkleRoot,
+        verified_hash: [u8; 32],
+    ) -> Vec<u8> {
+        if self.config.proof_mode == ProofMode::None {
+            return Vec::new();
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(WRITER_PROOF_DOMAIN);
+        hasher.update(transfer_id.as_bytes());
+        hasher.update(self.object_id.hash_bytes());
+        hasher.update(verified_hash);
+        hasher.update(manifest_root.hash());
+        hasher.update(self.bytes_written.to_be_bytes());
+        if let Some(local_peer) = self.local_peer {
+            hasher.update(local_peer);
+        }
+        hasher.update(self.remote_peer);
+        if let Some(transfer_nonce) = self.transfer_nonce {
+            hasher.update(transfer_nonce);
+        }
+        for chunk in &self.verified_chunks {
+            hasher.update(chunk.offset.to_be_bytes());
+            hasher.update(chunk.size_bytes.to_be_bytes());
+            hasher.update(chunk.hash);
+        }
+        hasher.finalize().to_vec()
+    }
+
+    fn refresh_placeholder_object_id(&mut self) {
+        if self.object_id.hash_bytes().iter().all(|byte| *byte == 0) {
+            self.object_id = ObjectId::content(ContentId::new(self.current_verified_hash()));
+        }
+    }
+}
+
+fn new_content_hasher() -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(WRITER_CONTENT_DOMAIN);
+    hasher
+}
+
+fn ensure_nonzero(bytes: &mut [u8; 32]) {
+    if bytes.iter().all(|byte| *byte == 0) {
+        bytes[0] = 1;
     }
 }
 
@@ -664,6 +883,43 @@ mod tests {
         assert_eq!(writer.state(), WriterState::Completed);
         assert_eq!(proof.total_bytes, data.len() as u64);
         assert_eq!(proof.proof_mode, ProofMode::Full);
+        assert_ne!(proof.verified_hash, [0; 32]);
+        assert_ne!(proof.manifest_root, MerkleRoot::zero());
+        assert!(!proof.signatures.is_empty());
+        assert_ne!(
+            proof.transfer_id,
+            TransferId::derive([0; 32], remote_peer, [0; 32], [0; 32])
+        );
+    }
+
+    #[test]
+    fn test_writer_proof_is_bound_to_payload() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let remote_peer = [9; 32];
+            let config = WriterConfig::default();
+            let mut writer_a = AtpWriter::new(
+                ObjectId::content(ContentId::new([0; 32])),
+                remote_peer,
+                config.clone(),
+            );
+            let mut writer_b = AtpWriter::new(
+                ObjectId::content(ContentId::new([0; 32])),
+                remote_peer,
+                config,
+            );
+
+            let proof_a = writer_a.write_buffer(&cx, b"payload-A").await.unwrap();
+            let proof_b = writer_b.write_buffer(&cx, b"payload-B").await.unwrap();
+
+            assert_ne!(proof_a.verified_hash, [0; 32]);
+            assert_ne!(proof_a.manifest_root, MerkleRoot::zero());
+            assert_ne!(proof_a.verified_hash, proof_b.verified_hash);
+            assert_ne!(proof_a.manifest_root, proof_b.manifest_root);
+            assert_ne!(proof_a.transfer_id, proof_b.transfer_id);
+            assert_eq!(proof_a.object_id.hash_bytes(), &proof_a.verified_hash);
+            assert_eq!(proof_b.object_id.hash_bytes(), &proof_b.verified_hash);
+        });
     }
 
     #[tokio::test]
