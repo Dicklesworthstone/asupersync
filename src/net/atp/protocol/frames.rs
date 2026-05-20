@@ -7,6 +7,7 @@ use crate::bytes::BytesMut;
 use crate::codec::Encoder;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::varint::{VarInt, VarIntError};
+use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -90,7 +91,10 @@ pub enum FrameType {
 impl FrameType {
     /// Convert to wire format (varint)
     pub fn to_varint(self) -> VarInt {
-        VarInt::new(self as u64).expect("frame type fits in varint")
+        match VarInt::new(self as u64) {
+            Outcome::Ok(varint) => varint,
+            _ => panic!("frame type fits in varint"),
+        }
     }
 
     /// Parse from wire format
@@ -143,10 +147,15 @@ impl FrameHeader {
         frame_type: FrameType,
         payload_length: u64,
     ) -> Result<Self, FrameError> {
+        let payload_varint = match VarInt::new(payload_length) {
+            Outcome::Ok(varint) => varint,
+            _ => return Err(FrameError::InvalidFormat("Invalid payload length".to_string())),
+        };
+
         Ok(FrameHeader {
             version,
             frame_type,
-            payload_length: VarInt::new(payload_length)?,
+            payload_length: payload_varint,
             extensions: HashMap::new(),
         })
     }
@@ -162,7 +171,10 @@ impl FrameHeader {
         let mut len = 0;
 
         // Version (varint)
-        len += VarInt::new(self.version.0 as u64).unwrap().encoded_len();
+        len += match VarInt::new(self.version.0 as u64) {
+            Outcome::Ok(varint) => varint.encoded_len(),
+            _ => panic!("version fits in varint"),
+        };
 
         // Frame type (varint)
         len += self.frame_type.to_varint().encoded_len();
@@ -177,10 +189,14 @@ impl FrameHeader {
 
         // Extensions (extension_id:varint + length:varint + data)
         for (extension_id, data) in &self.extensions {
-            len += VarInt::new(*extension_id as u64)
-                .expect("u16 extension id fits in varint")
-                .encoded_len();
-            len += VarInt::new(data.len() as u64).unwrap().encoded_len(); // data length
+            len += match VarInt::new(*extension_id as u64) {
+                Outcome::Ok(varint) => varint.encoded_len(),
+                _ => panic!("u16 extension id fits in varint"),
+            };
+            len += match VarInt::new(data.len() as u64) {
+                Outcome::Ok(varint) => varint.encoded_len(),
+                _ => panic!("data length fits in varint"),
+            };
             len += data.len(); // data
         }
 

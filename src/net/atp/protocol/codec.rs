@@ -9,7 +9,9 @@ use crate::net::atp::protocol::frames::{
     Frame, FrameError, FrameHeader, FrameType, MAX_EXTENSION_COUNT, MAX_EXTENSION_SIZE,
     MAX_FRAME_SIZE, MAX_HEADER_SIZE, ProtocolVersion,
 };
+use crate::net::atp::protocol::outcome::{AtpOutcome, ProtocolError};
 use crate::net::atp::protocol::varint::VarInt;
+use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::io;
 
@@ -40,6 +42,16 @@ impl AtpFrameCodec {
         }
     }
 
+    /// Helper to convert AtpOutcome to FrameError for codec compatibility
+    fn atp_to_frame_error<T>(outcome: AtpOutcome<T>) -> Result<T, FrameError> {
+        match outcome {
+            Outcome::Ok(value) => Ok(value),
+            Outcome::Err(_) => Err(FrameError::InvalidFormat("ATP protocol error".to_string())),
+            Outcome::Cancelled(_) => Err(FrameError::UnexpectedEof),
+            Outcome::Panicked(_) => Err(FrameError::UnexpectedEof),
+        }
+    }
+
     /// Create codec with custom maximum frame size
     pub fn with_max_frame_size(max_frame_size: u64) -> Self {
         Self {
@@ -66,7 +78,7 @@ impl AtpFrameCodec {
             }
 
             let mut temp = BytesMut::from(&buf[*pos..]);
-            if let Ok(Some(varint)) = VarInt::decode(&mut temp) {
+            if let Outcome::Ok(Some(varint)) = VarInt::decode(&mut temp) {
                 *pos += (buf.len() - *pos) - temp.len();
                 Some(varint)
             } else {
@@ -257,21 +269,27 @@ impl Encoder<Frame> for AtpFrameCodec {
         // Encode header
 
         // Version
-        VarInt::new(frame.header.version.0 as u64)?.encode(dst)?;
+        let version_varint = Self::atp_to_frame_error(VarInt::new(frame.header.version.0 as u64))?;
+        Self::atp_to_frame_error(version_varint.encode(dst))?;
 
         // Frame type
-        frame.header.frame_type.to_varint().encode(dst)?;
+        Self::atp_to_frame_error(frame.header.frame_type.to_varint().encode(dst))?;
 
         // Payload length
-        frame.header.payload_length.encode(dst)?;
+        Self::atp_to_frame_error(frame.header.payload_length.encode(dst))?;
 
         // Extension count
-        VarInt::new(frame.header.extensions.len() as u64)?.encode(dst)?;
+        let ext_count_varint = Self::atp_to_frame_error(VarInt::new(frame.header.extensions.len() as u64))?;
+        Self::atp_to_frame_error(ext_count_varint.encode(dst))?;
 
         // Extensions
         for (ext_id, ext_data) in &frame.header.extensions {
-            VarInt::new(*ext_id as u64)?.encode(dst)?;
-            VarInt::new(ext_data.len() as u64)?.encode(dst)?;
+            let ext_id_varint = Self::atp_to_frame_error(VarInt::new(*ext_id as u64))?;
+            Self::atp_to_frame_error(ext_id_varint.encode(dst))?;
+
+            let ext_len_varint = Self::atp_to_frame_error(VarInt::new(ext_data.len() as u64))?;
+            Self::atp_to_frame_error(ext_len_varint.encode(dst))?;
+
             dst.put_slice(ext_data);
         }
 

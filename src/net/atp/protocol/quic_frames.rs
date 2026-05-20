@@ -23,6 +23,7 @@
 
 use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::net::atp::protocol::varint::{VarInt, VarIntError};
+use crate::types::outcome::Outcome;
 
 /// QUIC frame type constants as defined in RFC 9000
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -81,7 +82,10 @@ pub enum QuicFrameType {
 impl QuicFrameType {
     /// Convert to wire format varint
     pub fn to_varint(self) -> VarInt {
-        VarInt::new(self as u64).expect("frame type fits in varint")
+        match VarInt::new(self as u64) {
+            Outcome::Ok(varint) => varint,
+            _ => panic!("frame type fits in varint"),
+        }
     }
 
     /// Parse from wire format varint
@@ -400,7 +404,10 @@ impl QuicFrame {
                     frame_type |= 0x01; // FIN bit
                 }
 
-                VarInt::new(frame_type)?.encode_to_buf(buf)?;
+                match VarInt::new(frame_type) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => return Err(QuicFrameError::InvalidFormat("Invalid frame type".to_string())),
+                }
                 stream_id.encode_to_buf(buf)?;
 
                 if let Some(offset_val) = offset {
@@ -408,7 +415,10 @@ impl QuicFrame {
                 }
 
                 if !data.is_empty() {
-                    VarInt::new(data.len() as u64)?.encode_to_buf(buf)?;
+                    match VarInt::new(data.len() as u64) {
+                        Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                        _ => return Err(QuicFrameError::InvalidFormat("Invalid data length".to_string())),
+                    }
                 }
 
                 buf.put_slice(data);
@@ -841,7 +851,10 @@ trait VarIntBufExt {
 impl VarIntBufExt for VarInt {
     fn encode_to_buf<B: BufMut>(&self, buf: &mut B) -> Result<(), QuicFrameError> {
         let mut temp = BytesMut::new();
-        self.encode(&mut temp)?;
+        match self.encode(&mut temp) {
+            Outcome::Ok(()) => {}
+            _ => return Err(QuicFrameError::InvalidFormat("VarInt encode failed".to_string())),
+        }
         buf.put_slice(&temp);
         Ok(())
     }
@@ -852,13 +865,15 @@ impl VarIntBufExt for VarInt {
 
         let original_len = temp.len();
         match VarInt::decode(&mut temp) {
-            Ok(Some(varint)) => {
+            Outcome::Ok(Some(varint)) => {
                 let consumed = original_len - temp.len();
                 buf.advance(consumed);
                 Ok(Some(varint))
             }
-            Ok(None) => Ok(None), // Need more data
-            Err(e) => Err(e.into()),
+            Outcome::Ok(None) => Ok(None), // Need more data
+            _ => Err(QuicFrameError::InvalidFormat(
+                "Invalid varint encoding".to_string(),
+            )),
         }
     }
 }

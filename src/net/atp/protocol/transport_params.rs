@@ -7,6 +7,7 @@
 
 use crate::bytes::{BufMut, Bytes, BytesMut};
 use crate::net::atp::protocol::varint::{VarInt, VarIntError};
+use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 
 /// QUIC Transport Parameter IDs from RFC 9000
@@ -52,7 +53,10 @@ pub enum TransportParameterId {
 impl TransportParameterId {
     /// Convert to VarInt for wire format
     pub fn to_varint(self) -> VarInt {
-        VarInt::new(self as u64).expect("transport parameter ID fits in varint")
+        match VarInt::new(self as u64) {
+            Outcome::Ok(varint) => varint,
+            _ => panic!("transport parameter ID fits in varint"),
+        }
     }
 
     /// Parse from VarInt
@@ -163,8 +167,15 @@ impl TransportParameterValue {
         match self {
             TransportParameterValue::VarInt(v) => {
                 let mut temp = BytesMut::new();
-                v.encode(&mut temp)?;
-                VarInt::new(temp.len() as u64)?.encode_to_buf(buf)?;
+                match v.encode(&mut temp) {
+                    Outcome::Ok(()) => {}
+                    _ => return Err(TransportParameterError::EncodingFailed("VarInt encode failed".to_string())),
+                }
+                let len_varint = match VarInt::new(temp.len() as u64) {
+                    Outcome::Ok(varint) => varint,
+                    _ => return Err(TransportParameterError::EncodingFailed("Invalid length".to_string())),
+                };
+                len_varint.encode_to_buf(buf)?;
                 buf.put_slice(&temp);
             }
             TransportParameterValue::Bytes(bytes) => {

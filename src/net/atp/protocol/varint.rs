@@ -7,6 +7,8 @@
 //! - 8 bytes: values 1073741824+ (0b11xxxxxx ... 8 total bytes)
 
 use crate::bytes::{BufMut, BytesMut};
+use crate::net::atp::protocol::outcome::{AtpOutcome, ProtocolError};
+use crate::types::outcome::Outcome;
 use std::io;
 
 /// Maximum value that can be encoded in a varint.
@@ -18,11 +20,11 @@ pub struct VarInt(pub u64);
 
 impl VarInt {
     /// Create a new varint, ensuring the value is within range.
-    pub fn new(value: u64) -> Result<Self, VarIntError> {
+    pub fn new(value: u64) -> AtpOutcome<Self> {
         if value > VARINT_MAX {
-            return Err(VarIntError::ValueTooLarge(value));
+            return AtpOutcome::protocol_error(ProtocolError::InvalidVarInt);
         }
-        Ok(VarInt(value))
+        Outcome::Ok(VarInt(value))
     }
 
     /// Get the raw value.
@@ -57,7 +59,7 @@ impl VarInt {
     }
 
     /// Encode the varint to a buffer.
-    pub fn encode(self, buf: &mut BytesMut) -> Result<(), VarIntError> {
+    pub fn encode(self, buf: &mut BytesMut) -> AtpOutcome<()> {
         let value = self.0;
 
         if value < 64 {
@@ -73,16 +75,16 @@ impl VarInt {
             // 8 byte encoding: 0b11xxxxxx ... (8 bytes total)
             buf.put_u64(0xC000000000000000 | value);
         } else {
-            return Err(VarIntError::ValueTooLarge(value));
+            return AtpOutcome::protocol_error(ProtocolError::InvalidVarInt);
         }
 
-        Ok(())
+        Outcome::Ok(())
     }
 
     /// Decode a varint from a buffer.
-    pub fn decode(buf: &mut BytesMut) -> Result<Option<Self>, VarIntError> {
+    pub fn decode(buf: &mut BytesMut) -> AtpOutcome<Option<Self>> {
         if buf.is_empty() {
-            return Ok(None);
+            return Outcome::Ok(None);
         }
 
         let first_byte = buf[0];
@@ -95,7 +97,7 @@ impl VarInt {
         };
 
         if buf.len() < length {
-            return Ok(None); // Need more data
+            return Outcome::Ok(None); // Need more data
         }
 
         let value = match length {
@@ -123,10 +125,10 @@ impl VarInt {
         };
 
         if value > VARINT_MAX {
-            return Err(VarIntError::ValueTooLarge(value));
+            return AtpOutcome::protocol_error(ProtocolError::InvalidVarInt);
         }
 
-        Ok(Some(VarInt(value)))
+        Outcome::Ok(Some(VarInt(value)))
     }
 
     /// Peek at the length of the next varint without consuming it.
