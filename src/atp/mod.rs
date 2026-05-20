@@ -14,6 +14,7 @@ pub mod grant;
 pub mod identity;
 pub mod inbox;
 pub mod journal;
+pub mod logging;
 pub mod manifest;
 pub mod object;
 pub mod path;
@@ -41,6 +42,10 @@ pub use identity::{DurablePeerIdentity, IdentityError};
 pub use inbox::{
     AllowAction, DaemonDiagnostics, GrantQuota, GrantScope, InboxDiagnostics, InboxError,
     InboxItem, InboxJsonRow, InboxOffer, InboxState, LocalInbox, ObjectDigest, ReceiveGrant,
+};
+pub use logging::{
+    AtpEvent, AtpLogger, AtpLoggerConfig, AtpSubsystem, EventContext, LogFormat, atp_logger,
+    init_atp_logger,
 };
 pub use policy::{
     Capability, CapabilityAction, PolicyDecision, PolicyEnforcer, ResourceScope, TemporalScope,
