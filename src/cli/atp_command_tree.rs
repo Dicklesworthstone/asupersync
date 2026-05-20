@@ -457,8 +457,8 @@ pub struct AtpConfigArgs {
     pub scope: String,
 }
 
-/// Re-export existing ATP command args for compatibility
-pub use super::super::bin::asupersync::{AtpDoctorArgs, AtpVerifyArgs, AtpProofArgs};
+/// Re-export ATP command args from the args module
+pub use super::args::{AtpDoctorArgs, AtpVerifyArgs, AtpProofArgs};
 
 /// JSON output schema for ATP status command.
 #[derive(Debug, Serialize, Deserialize)]

@@ -213,7 +213,7 @@ impl AtpConfigManager {
         all_paths.iter()
             .map(|(source, path)| ConfigSourceInfo {
                 source: *source,
-                path: path.clone(),
+                path: path.to_path_buf(),
                 exists: path.exists(),
                 loaded: self.layers.contains_key(source),
             })

@@ -3,6 +3,7 @@
 //! Provides common argument patterns for CLI tools with consistent behavior.
 
 use super::output::{ColorChoice, OutputFormat};
+use clap::{ArgAction, Args};
 use std::path::PathBuf;
 
 /// Common CLI arguments shared across tools.
@@ -168,6 +169,48 @@ Environment Variables:
   CLICOLOR_FORCE            Force colors even when not a TTY
   CI                        Automatically use JSON output in CI environments
 ";
+
+/// ATP doctor command arguments.
+#[derive(Args, Debug)]
+pub struct AtpDoctorArgs {
+    /// Report platform filesystem, network, and service-manager capabilities
+    #[arg(long = "platform", action = ArgAction::SetTrue)]
+    pub platform: bool,
+}
+
+/// ATP verify command arguments.
+#[derive(Args, Debug)]
+pub struct AtpVerifyArgs {
+    /// Path to the ATP proof bundle file to verify
+    #[arg(value_name = "BUNDLE_PATH")]
+    pub bundle_path: PathBuf,
+    /// Require all verification stages to pass
+    #[arg(long = "strict", action = ArgAction::SetTrue)]
+    pub strict: bool,
+    /// Minimum chunk verification coverage (0.0 to 1.0)
+    #[arg(long = "min-coverage", default_value = "0.95")]
+    pub min_coverage: f64,
+    /// Enable strict replay validation
+    #[arg(long = "strict-replay", action = ArgAction::SetTrue)]
+    pub strict_replay: bool,
+    /// Show detailed verification report
+    #[arg(long = "verbose", action = ArgAction::SetTrue)]
+    pub verbose: bool,
+}
+
+/// ATP proof command arguments.
+#[derive(Args, Debug)]
+pub struct AtpProofArgs {
+    /// Path to the ATP proof bundle file to display
+    #[arg(value_name = "BUNDLE_PATH")]
+    pub bundle_path: PathBuf,
+    /// Show concise summary instead of full details
+    #[arg(long = "summary", action = ArgAction::SetTrue)]
+    pub summary: bool,
+    /// Show only specific sections (manifest,content,repair,peer,path,journal,replay)
+    #[arg(long = "section", value_delimiter = ',')]
+    pub sections: Vec<String>,
+}
 
 #[cfg(test)]
 mod tests {

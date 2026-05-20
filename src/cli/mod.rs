@@ -66,7 +66,10 @@ pub mod progress;
 pub mod signal;
 
 // Re-export commonly used types
-pub use args::{COMMON_ARGS_HELP, CommonArgs, parse_color_choice, parse_output_format};
+pub use args::{
+    AtpDoctorArgs, AtpProofArgs, AtpVerifyArgs, COMMON_ARGS_HELP, CommonArgs, parse_color_choice,
+    parse_output_format,
+};
 pub use completion::{Completable, CompletionItem, Shell, generate_completions};
 pub use doctor::{
     CapabilityEdge, ContractCompatibility, ContractErrorEnvelope, CoreDiagnosticsCommand,

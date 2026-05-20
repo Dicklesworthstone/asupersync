@@ -28,14 +28,15 @@ use asupersync::cli::doctor::{
     validate_advanced_diagnostics_report_extension_contract,
 };
 use asupersync::cli::{
-    CliError, ColorChoice, CommonArgs, CoreDiagnosticsReport, CoreDiagnosticsReportBundle,
-    CoreDiagnosticsSummary, ExitCode, InvariantAnalyzerReport, LockContentionAnalyzerReport,
-    OperatorModelContract, Output, OutputFormat, Outputtable, RemediationRecipeBundle,
-    ScreenEngineContract, StructuredLoggingContract, WorkspaceScanReport,
-    analyze_workspace_invariants, analyze_workspace_lock_contention,
-    core_diagnostics_report_bundle, core_diagnostics_report_contract, operator_model_contract,
-    parse_color_choice, parse_output_format, remediation_recipe_bundle, scan_workspace,
-    screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
+    AtpDoctorArgs, AtpProofArgs, AtpVerifyArgs, CliError, ColorChoice, CommonArgs,
+    CoreDiagnosticsReport, CoreDiagnosticsReportBundle, CoreDiagnosticsSummary, ExitCode,
+    InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
+    OutputFormat, Outputtable, RemediationRecipeBundle, ScreenEngineContract,
+    StructuredLoggingContract, WorkspaceScanReport, analyze_workspace_invariants,
+    analyze_workspace_lock_contention, core_diagnostics_report_bundle,
+    core_diagnostics_report_contract, operator_model_contract, parse_color_choice,
+    parse_output_format, remediation_recipe_bundle, scan_workspace, screen_engine_contract,
+    structured_logging_contract, validate_core_diagnostics_report,
     validate_core_diagnostics_report_contract,
 };
 use asupersync::conformance::{
@@ -158,45 +159,6 @@ enum AtpCommand {
     Verify(AtpVerifyArgs),
     /// Display ATP proof bundle information
     Proof(AtpProofArgs),
-}
-
-#[derive(Args, Debug)]
-struct AtpDoctorArgs {
-    /// Report platform filesystem, network, and service-manager capabilities
-    #[arg(long = "platform", action = ArgAction::SetTrue)]
-    platform: bool,
-}
-
-#[derive(Args, Debug)]
-struct AtpVerifyArgs {
-    /// Path to the ATP proof bundle file to verify
-    #[arg(value_name = "BUNDLE_PATH")]
-    bundle_path: std::path::PathBuf,
-    /// Require all verification stages to pass
-    #[arg(long = "strict", action = ArgAction::SetTrue)]
-    strict: bool,
-    /// Minimum chunk verification coverage (0.0 to 1.0)
-    #[arg(long = "min-coverage", default_value = "0.95")]
-    min_coverage: f64,
-    /// Enable strict replay validation
-    #[arg(long = "strict-replay", action = ArgAction::SetTrue)]
-    strict_replay: bool,
-    /// Show detailed verification report
-    #[arg(long = "verbose", action = ArgAction::SetTrue)]
-    verbose: bool,
-}
-
-#[derive(Args, Debug)]
-struct AtpProofArgs {
-    /// Path to the ATP proof bundle file to display
-    #[arg(value_name = "BUNDLE_PATH")]
-    bundle_path: std::path::PathBuf,
-    /// Show concise summary instead of full details
-    #[arg(long = "summary", action = ArgAction::SetTrue)]
-    summary: bool,
-    /// Show only specific sections (manifest,content,repair,peer,path,journal,replay)
-    #[arg(long = "section", value_delimiter = ',')]
-    sections: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1039,10 +1001,16 @@ fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError>
             &format!("failed to read proof bundle: {e}"),
         ).exit_code(ExitCode::USER_ERROR))?;
 
-    let bundle: AtpProofBundle = serde_json::from_slice(&bundle_data)
+    let serializable_bundle: asupersync::atp::proof::SerializableAtpProofBundle = serde_json::from_slice(&bundle_data)
         .map_err(|e| CliError::new(
             "parse_error",
             &format!("failed to parse proof bundle: {e}"),
+        ).exit_code(ExitCode::USER_ERROR))?;
+
+    let bundle: asupersync::atp::proof::AtpProofBundle = serializable_bundle.try_into()
+        .map_err(|e| CliError::new(
+            "conversion_error",
+            &format!("failed to convert proof bundle: {e}"),
         ).exit_code(ExitCode::USER_ERROR))?;
 
     // Configure verification policy
@@ -1086,7 +1054,7 @@ fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError>
         return Err(CliError::new(
             "verification_failed",
             "ATP proof bundle verification failed",
-        ).exit_code(ExitCode::COMMAND_ERROR));
+        ).exit_code(ExitCode::USER_ERROR));
     }
 
     Ok(())
@@ -1102,10 +1070,16 @@ fn atp_proof(args: &AtpProofArgs, output: &mut Output) -> Result<(), CliError> {
             &format!("failed to read proof bundle: {e}"),
         ).exit_code(ExitCode::USER_ERROR))?;
 
-    let bundle: AtpProofBundle = serde_json::from_slice(&bundle_data)
+    let serializable_bundle: asupersync::atp::proof::SerializableAtpProofBundle = serde_json::from_slice(&bundle_data)
         .map_err(|e| CliError::new(
             "parse_error",
             &format!("failed to parse proof bundle: {e}"),
+        ).exit_code(ExitCode::USER_ERROR))?;
+
+    let bundle: asupersync::atp::proof::AtpProofBundle = serializable_bundle.try_into()
+        .map_err(|e| CliError::new(
+            "conversion_error",
+            &format!("failed to convert proof bundle: {e}"),
         ).exit_code(ExitCode::USER_ERROR))?;
 
     // Prepare output based on requested format
@@ -1786,6 +1760,7 @@ enum AtpVerifyOutput {
     Detailed {
         status: String,
         bundle_path: String,
+        #[serde(skip)]
         verification_result: asupersync::atp::verify::AtpVerificationResult,
     },
 }
@@ -1895,12 +1870,14 @@ enum AtpProofOutput {
     #[serde(rename = "full")]
     Full {
         bundle_path: String,
+        #[serde(skip)]
         bundle: asupersync::atp::proof::AtpProofBundle,
     },
     #[serde(rename = "sections")]
     Sections {
         bundle_path: String,
         sections: Vec<String>,
+        #[serde(skip)]
         bundle: asupersync::atp::proof::AtpProofBundle,
     },
 }

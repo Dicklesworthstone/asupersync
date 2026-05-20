@@ -88,7 +88,7 @@ tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
 tls-webpki-roots = ["tls", "dep:webpki-roots"]
 # Enable CLI tooling (trace inspection).
-cli = ["dep:clap", "dep:time", "trace-compression", "dep:serde_yaml", "dep:chrono", "dep:env_logger"]
+cli = ["dep:clap", "dep:time", "trace-compression", "dep:serde_yaml", "dep:chrono", "dep:env_logger", "config-file"]
 # Enable SQLite async wrapper with blocking pool integration.
 sqlite = ["dep:rusqlite"]
 # Enable PostgreSQL async client with wire protocol.
