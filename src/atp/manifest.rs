@@ -2811,4 +2811,375 @@ mod tests {
         // Should have proper schema ID
         assert_eq!(manifest.schema_id, "atp.manifest.v1");
     }
+
+    mod atp_g2_tests {
+        use super::*;
+        use crate::atp::object::{Object, ObjectGraph, ObjectKind, ContentId};
+        use std::collections::BTreeMap;
+
+        /// Create a test repair group for validation testing.
+        fn create_test_repair_group(object_id: ObjectId) -> RepairGroup {
+            let group_id = RepairGroupId::new(&object_id, 0, 1024);
+
+            RepairGroup {
+                group_id: group_id.clone(),
+                object_id: object_id.clone(),
+                source_block_number: 0,
+                chunk_range: ChunkRange {
+                    start_chunk: 0,
+                    end_chunk: 10,
+                    start_offset: 0,
+                    end_offset: 10240,
+                },
+                source_symbols_k: 1000,
+                k_prime: 1024,
+                symbol_size: 1024,
+                repair_layout: RepairLayout {
+                    total_repair_symbols: 200,
+                    overhead_ratio: 0.2,
+                    systematic_config: SystematicConfig {
+                        systematic_rows: 1000,
+                        sub_symbols: 1,
+                        alignment: 8,
+                    },
+                    interleaving: InterleavingPattern {
+                        block_size: 1,
+                        depth: 1,
+                        pattern_type: InterleavingType::None,
+                    },
+                },
+                hash_domain: HashDomain {
+                    domain_id: "test-domain".to_string(),
+                    hash_algorithm: HashAlgorithm::Sha256,
+                    context: b"test-context".to_vec(),
+                },
+                transform_policy: None,
+                auth_domain: AuthenticationDomain {
+                    domain_id: "test-auth-domain".to_string(),
+                    required_proof_strength: ProofStrength::Basic,
+                    auth_algorithm: AuthenticationAlgorithm::HmacSha256,
+                    peer_identity_required: false,
+                    transfer_identity_binding: true,
+                    session_binding: true,
+                },
+                capability_policy: None,
+                manifest_root: MerkleRoot::from_hash([0u8; 32]),
+            }
+        }
+
+        /// Create a test manifest with repair groups.
+        fn create_test_manifest_with_repair_groups() -> Manifest {
+            let content_id = ContentId::from_hash([1u8; 32]);
+            let object_id = ObjectId::content(content_id);
+
+            let mut graph = ObjectGraph::new();
+            let object = Object {
+                id: object_id.clone(),
+                kind: ObjectKind::Blob,
+                size_bytes: Some(10240),
+                content: Some(vec![0u8; 10240]),
+                children: BTreeMap::new(),
+            };
+            graph.add_object(object).unwrap();
+
+            // Create manifest with repair group
+            let repair_group = create_test_repair_group(object_id.clone());
+            let group_id = repair_group.group_id.clone();
+
+            let mut manifest = Manifest::from_graph(&graph, MetadataPolicy::Portable).unwrap();
+            manifest.repair_groups.insert(group_id.clone(), repair_group);
+
+            // Add symbols to the manifest object referencing the repair group
+            if let Some(manifest_obj) = manifest.objects.get_mut(&object_id) {
+                manifest_obj.raptorq_symbols = vec![
+                    RaptorQSymbol {
+                        source_block: 0,
+                        esi: 0,
+                        size_bytes: 1024,
+                        content_hash: [1u8; 32],
+                        is_source: true,
+                        repair_group_id: Some(group_id.clone()),
+                        auth_tag: Some([2u8; 32]),
+                    },
+                    RaptorQSymbol {
+                        source_block: 0,
+                        esi: 1000,
+                        size_bytes: 1024,
+                        content_hash: [3u8; 32],
+                        is_source: false,
+                        repair_group_id: Some(group_id),
+                        auth_tag: Some([4u8; 32]),
+                    },
+                ];
+            }
+
+            manifest
+        }
+
+        #[test]
+        fn test_repair_group_id_generation() {
+            let object_id = ObjectId::content(ContentId::from_hash([1u8; 32]));
+            let group_id1 = RepairGroupId::new(&object_id, 0, 1024);
+            let group_id2 = RepairGroupId::new(&object_id, 0, 1024);
+            let group_id3 = RepairGroupId::new(&object_id, 1, 1024);
+
+            // Same parameters should produce same ID
+            assert_eq!(group_id1, group_id2);
+
+            // Different source block should produce different ID
+            assert_ne!(group_id1, group_id3);
+
+            // ID should be 16 bytes
+            assert_eq!(group_id1.as_bytes().len(), 16);
+        }
+
+        #[test]
+        fn test_repair_group_validation_success() {
+            let manifest = create_test_manifest_with_repair_groups();
+
+            // Should validate successfully
+            let result = manifest.validate();
+            assert!(result.is_ok(), "Validation failed: {:?}", result);
+        }
+
+        #[test]
+        fn test_repair_group_validation_invalid_group_id() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Corrupt the group ID in the repair group
+            let wrong_object_id = ObjectId::content(ContentId::from_hash([99u8; 32]));
+            let correct_group_id = RepairGroupId::new(&wrong_object_id, 0, 1024);
+
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.group_id = correct_group_id; // Wrong ID for this repair group
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+        }
+
+        #[test]
+        fn test_repair_group_validation_k_prime_constraint() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Make K' < K (invalid)
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.k_prime = 500; // Less than source_symbols_k (1000)
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+        }
+
+        #[test]
+        fn test_repair_group_validation_symbol_reference_error() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Add a symbol that references a non-existent repair group
+            let fake_group_id = RepairGroupId::new(&ObjectId::content(ContentId::from_hash([99u8; 32])), 99, 999);
+
+            if let Some(manifest_obj) = manifest.objects.values_mut().next() {
+                manifest_obj.raptorq_symbols.push(RaptorQSymbol {
+                    source_block: 0,
+                    esi: 1001,
+                    size_bytes: 1024,
+                    content_hash: [5u8; 32],
+                    is_source: false,
+                    repair_group_id: Some(fake_group_id),
+                    auth_tag: Some([6u8; 32]),
+                });
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupReferenceError(_))));
+        }
+
+        #[test]
+        fn test_repair_group_validation_missing_auth_tag() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Remove auth tag from a symbol that has repair group ID
+            if let Some(manifest_obj) = manifest.objects.values_mut().next() {
+                if let Some(symbol) = manifest_obj.raptorq_symbols.get_mut(0) {
+                    symbol.auth_tag = None;
+                }
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupAuthenticationError(_))));
+        }
+
+        #[test]
+        fn test_repair_group_validation_chunk_range_errors() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Invalid chunk range (end <= start)
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.chunk_range.end_chunk = repair_group.chunk_range.start_chunk;
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+        }
+
+        #[test]
+        fn test_repair_group_validation_zero_symbol_size() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Zero symbol size should fail
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.symbol_size = 0;
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+        }
+
+        #[test]
+        fn test_repair_group_validation_overhead_ratio_bounds() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Overhead ratio out of bounds (negative)
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.repair_layout.overhead_ratio = -0.1;
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+
+            // Fix and try too large overhead ratio
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.repair_layout.overhead_ratio = 15.0; // > 10.0 max
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+        }
+
+        #[test]
+        fn test_repair_group_validation_empty_domain_id() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Empty authentication domain ID
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.auth_domain.domain_id.clear();
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+        }
+
+        #[test]
+        fn test_repair_group_manifest_root_binding() {
+            let mut manifest = create_test_manifest_with_repair_groups();
+
+            // Manifest root mismatch
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.manifest_root = MerkleRoot::from_hash([99u8; 32]);
+            }
+
+            let result = manifest.validate();
+            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+        }
+
+        #[test]
+        fn test_merkle_root_includes_repair_groups() {
+            let manifest = create_test_manifest_with_repair_groups();
+
+            // Compute root with repair groups
+            let root_with_groups = MerkleRoot::from_manifest_components(
+                &manifest.objects,
+                &manifest.chunk_plan,
+                &manifest.raptorq_layout,
+                &manifest.compression_policy,
+                &manifest.encryption_policy,
+                &manifest.capability_policy,
+                &manifest.transform_order,
+                &manifest.transform_proof_policy,
+                &manifest.repair_groups,
+            );
+
+            // Compute root without repair groups
+            let root_without_groups = MerkleRoot::from_manifest_components(
+                &manifest.objects,
+                &manifest.chunk_plan,
+                &manifest.raptorq_layout,
+                &manifest.compression_policy,
+                &manifest.encryption_policy,
+                &manifest.capability_policy,
+                &manifest.transform_order,
+                &manifest.transform_proof_policy,
+                &BTreeMap::new(),
+            );
+
+            // Roots should be different when repair groups are included
+            assert_ne!(root_with_groups, root_without_groups);
+
+            // The manifest's computed root should match the one with repair groups
+            let computed_manifest_root = MerkleRoot::from_manifest_components(
+                &manifest.objects,
+                &manifest.chunk_plan,
+                &manifest.raptorq_layout,
+                &manifest.compression_policy,
+                &manifest.encryption_policy,
+                &manifest.capability_policy,
+                &manifest.transform_order,
+                &manifest.transform_proof_policy,
+                &manifest.repair_groups,
+            );
+
+            // Should match since validate() passes
+            assert_eq!(manifest.merkle_root, computed_manifest_root);
+        }
+
+        #[test]
+        fn test_repair_group_interleaving_pattern_hashing() {
+            let object_id = ObjectId::content(ContentId::from_hash([1u8; 32]));
+
+            // Test different interleaving patterns produce different hashes
+            let mut repair_group1 = create_test_repair_group(object_id.clone());
+            repair_group1.repair_layout.interleaving.pattern_type = InterleavingType::None;
+
+            let mut repair_group2 = repair_group1.clone();
+            repair_group2.repair_layout.interleaving.pattern_type = InterleavingType::Block;
+
+            let mut repair_group3 = repair_group1.clone();
+            repair_group3.repair_layout.interleaving.pattern_type = InterleavingType::Randomized(12345);
+
+            let groups1 = {
+                let mut map = BTreeMap::new();
+                map.insert(repair_group1.group_id.clone(), repair_group1);
+                map
+            };
+
+            let groups2 = {
+                let mut map = BTreeMap::new();
+                map.insert(repair_group2.group_id.clone(), repair_group2);
+                map
+            };
+
+            let groups3 = {
+                let mut map = BTreeMap::new();
+                map.insert(repair_group3.group_id.clone(), repair_group3);
+                map
+            };
+
+            let root1 = MerkleRoot::from_manifest_components(
+                &BTreeMap::new(), &None, &None, &None, &None, &None, &None, &None, &groups1
+            );
+
+            let root2 = MerkleRoot::from_manifest_components(
+                &BTreeMap::new(), &None, &None, &None, &None, &None, &None, &None, &groups2
+            );
+
+            let root3 = MerkleRoot::from_manifest_components(
+                &BTreeMap::new(), &None, &None, &None, &None, &None, &None, &None, &groups3
+            );
+
+            // All should be different
+            assert_ne!(root1, root2);
+            assert_ne!(root1, root3);
+            assert_ne!(root2, root3);
+        }
+    }
 }
