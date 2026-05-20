@@ -12,21 +12,20 @@
 //! - Verification boundaries are preserved across transforms
 
 use crate::atp::manifest::{
-    EncryptionAlgorithm, EncryptionMetadata, EncryptionPolicy,
-    KeyDerivation, KeyDerivationFunction, TransformOrder, TransformType,
-    ObjectKind, EncryptionDomain, PrivacyLevel,
+    EncryptionAlgorithm, EncryptionDomain, EncryptionMetadata, EncryptionPolicy, KeyDerivation,
+    KeyDerivationFunction, ObjectKind, PrivacyLevel, TransformOrder, TransformType,
 };
 use std::collections::BTreeMap;
 
-pub mod policy;
 pub mod algorithms;
-pub mod validation;
 pub mod domains;
+pub mod policy;
+pub mod validation;
 
-pub use policy::*;
 pub use algorithms::*;
-pub use validation::*;
 pub use domains::*;
+pub use policy::*;
+pub use validation::*;
 
 /// Encryption result with metadata for verification.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +68,8 @@ pub enum EncryptionError {
     KeyDerivationFailed(String),
     /// Authentication failed.
     AuthenticationFailed,
+    /// Invalid encryption metadata.
+    InvalidMetadata(String),
     /// Invalid key material.
     InvalidKey(String),
     /// Transform order violation.
@@ -85,11 +86,14 @@ impl std::fmt::Display for EncryptionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PolicyViolation(msg) => write!(f, "encryption policy violation: {msg}"),
-            Self::UnsupportedAlgorithm(alg) => write!(f, "unsupported encryption algorithm: {alg:?}"),
+            Self::UnsupportedAlgorithm(alg) => {
+                write!(f, "unsupported encryption algorithm: {alg:?}")
+            }
             Self::EncryptionFailed(msg) => write!(f, "encryption failed: {msg}"),
             Self::DecryptionFailed(msg) => write!(f, "decryption failed: {msg}"),
             Self::KeyDerivationFailed(msg) => write!(f, "key derivation failed: {msg}"),
             Self::AuthenticationFailed => write!(f, "authentication failed"),
+            Self::InvalidMetadata(msg) => write!(f, "invalid encryption metadata: {msg}"),
             Self::InvalidKey(msg) => write!(f, "invalid key: {msg}"),
             Self::TransformOrderViolation(msg) => write!(f, "transform order violation: {msg}"),
             Self::DomainViolation(msg) => write!(f, "encryption domain violation: {msg}"),
@@ -126,7 +130,10 @@ impl KeyMaterial {
     }
 
     /// Validate key material for algorithm.
-    pub fn validate_for_algorithm(&self, algorithm: EncryptionAlgorithm) -> Result<(), EncryptionError> {
+    pub fn validate_for_algorithm(
+        &self,
+        algorithm: EncryptionAlgorithm,
+    ) -> Result<(), EncryptionError> {
         let expected_key_size = match algorithm {
             EncryptionAlgorithm::None => 0,
             EncryptionAlgorithm::ChaCha20Poly1305 => 32, // 256-bit key
@@ -134,9 +141,10 @@ impl KeyMaterial {
         };
 
         if self.key.len() != expected_key_size {
-            return Err(EncryptionError::InvalidKey(
-                format!("expected {expected_key_size} bytes, got {}", self.key.len()),
-            ));
+            return Err(EncryptionError::InvalidKey(format!(
+                "expected {expected_key_size} bytes, got {}",
+                self.key.len()
+            )));
         }
 
         Ok(())
@@ -147,6 +155,9 @@ impl KeyMaterial {
 pub struct EncryptionEngine;
 
 impl EncryptionEngine {
+    const CHACHA20POLY1305_NONCE_LEN: usize = 12;
+    const CHACHA20POLY1305_TAG_LEN: usize = 16;
+
     /// Apply encryption according to policy and domain.
     pub fn encrypt(
         data: &[u8],
@@ -158,9 +169,9 @@ impl EncryptionEngine {
     ) -> Result<EncryptionResult, EncryptionError> {
         // Validate encryption is allowed for this object kind
         if !policy.apply_to_kinds.contains(&object_kind) {
-            return Err(EncryptionError::PolicyViolation(
-                format!("encryption not allowed for object kind {object_kind:?}"),
-            ));
+            return Err(EncryptionError::PolicyViolation(format!(
+                "encryption not allowed for object kind {object_kind:?}"
+            )));
         }
 
         // Validate encryption domain if specified
@@ -181,18 +192,20 @@ impl EncryptionEngine {
 
         // Apply encryption
         let (ciphertext, auth_tag, metadata) = match policy.algorithm {
-            EncryptionAlgorithm::None => (data.to_vec(), vec![], EncryptionMetadata {
-                algorithm: EncryptionAlgorithm::None,
-                iv: vec![],
-                auth_tag: vec![],
-                key_derivation: key_material.derivation.clone(),
-            }),
+            EncryptionAlgorithm::None => (
+                data.to_vec(),
+                vec![],
+                EncryptionMetadata {
+                    algorithm: EncryptionAlgorithm::None,
+                    iv: vec![],
+                    auth_tag: vec![],
+                    key_derivation: key_material.derivation.clone(),
+                },
+            ),
             EncryptionAlgorithm::ChaCha20Poly1305 => {
                 Self::encrypt_chacha20poly1305(data, key_material)?
             }
-            EncryptionAlgorithm::Aes256Gcm => {
-                Self::encrypt_aes256gcm(data, key_material)?
-            }
+            EncryptionAlgorithm::Aes256Gcm => Self::encrypt_aes256gcm(data, key_material)?,
         };
 
         // Compute ciphertext hash
@@ -244,8 +257,8 @@ impl EncryptionEngine {
 
     /// Check if encryption is enabled for object type in policy.
     pub fn is_encryption_enabled(policy: &EncryptionPolicy, object_kind: ObjectKind) -> bool {
-        !matches!(policy.algorithm, EncryptionAlgorithm::None) &&
-        policy.apply_to_kinds.contains(&object_kind)
+        !matches!(policy.algorithm, EncryptionAlgorithm::None)
+            && policy.apply_to_kinds.contains(&object_kind)
     }
 
     /// Validate domain compatibility with policy.
@@ -255,24 +268,31 @@ impl EncryptionEngine {
     ) -> Result<(), EncryptionError> {
         // Check if KDF is allowed in domain
         if !domain.allowed_kdfs.contains(&policy.key_derivation.kdf) {
-            return Err(EncryptionError::DomainViolation(
-                format!("KDF {:?} not allowed in domain {}",
-                       policy.key_derivation.kdf, domain.domain_id),
-            ));
+            return Err(EncryptionError::DomainViolation(format!(
+                "KDF {:?} not allowed in domain {}",
+                policy.key_derivation.kdf, domain.domain_id
+            )));
         }
 
         Ok(())
     }
 
     /// Validate transform position in the transform order.
-    fn validate_transform_position(transform_order: &TransformOrder) -> Result<(), EncryptionError> {
-        let encryption_pos = transform_order.transforms.iter()
+    fn validate_transform_position(
+        transform_order: &TransformOrder,
+    ) -> Result<(), EncryptionError> {
+        let encryption_pos = transform_order
+            .transforms
+            .iter()
             .position(|&t| t == TransformType::Encryption);
 
         if let Some(pos) = encryption_pos {
             // Encryption should come after compression and chunking
-            if let Some(comp_pos) = transform_order.transforms.iter()
-                .position(|&t| t == TransformType::Compression) {
+            if let Some(comp_pos) = transform_order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::Compression)
+            {
                 if pos <= comp_pos {
                     return Err(EncryptionError::TransformOrderViolation(
                         "encryption must come after compression".to_string(),
@@ -280,8 +300,11 @@ impl EncryptionEngine {
                 }
             }
 
-            if let Some(chunk_pos) = transform_order.transforms.iter()
-                .position(|&t| t == TransformType::Chunking) {
+            if let Some(chunk_pos) = transform_order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::Chunking)
+            {
                 if pos <= chunk_pos {
                     return Err(EncryptionError::TransformOrderViolation(
                         "encryption must come after chunking".to_string(),
@@ -290,8 +313,11 @@ impl EncryptionEngine {
             }
 
             // Encryption should come before error correction
-            if let Some(ec_pos) = transform_order.transforms.iter()
-                .position(|&t| t == TransformType::ErrorCorrection) {
+            if let Some(ec_pos) = transform_order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::ErrorCorrection)
+            {
                 if pos >= ec_pos {
                     return Err(EncryptionError::TransformOrderViolation(
                         "encryption must come before error correction".to_string(),
@@ -324,16 +350,17 @@ impl EncryptionEngine {
         plaintext: &[u8],
         key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, Vec<u8>, EncryptionMetadata), EncryptionError> {
-        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadInPlace, Nonce};
+        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce};
 
         let cipher = ChaCha20Poly1305::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
-        let nonce_bytes = Self::generate_iv(12); // ChaCha20Poly1305 uses 12-byte nonce
+        let nonce_bytes = Self::generate_iv(Self::CHACHA20POLY1305_NONCE_LEN);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let mut buffer = plaintext.to_vec();
-        let tag = cipher.encrypt_in_place_detached(nonce, b"", &mut buffer)
+        let tag = cipher
+            .encrypt_in_place_detached(nonce, b"", &mut buffer)
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
         let metadata = EncryptionMetadata {
@@ -352,10 +379,25 @@ impl EncryptionEngine {
         metadata: &EncryptionMetadata,
         key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, bool), EncryptionError> {
-        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadInPlace, Nonce, Tag};
+        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce, Tag};
 
         let cipher = ChaCha20Poly1305::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
+
+        if metadata.iv.len() != Self::CHACHA20POLY1305_NONCE_LEN {
+            return Err(EncryptionError::InvalidMetadata(format!(
+                "ChaCha20-Poly1305 nonce must be {} bytes, got {}",
+                Self::CHACHA20POLY1305_NONCE_LEN,
+                metadata.iv.len(),
+            )));
+        }
+        if metadata.auth_tag.len() != Self::CHACHA20POLY1305_TAG_LEN {
+            return Err(EncryptionError::InvalidMetadata(format!(
+                "ChaCha20-Poly1305 auth tag must be {} bytes, got {}",
+                Self::CHACHA20POLY1305_TAG_LEN,
+                metadata.auth_tag.len(),
+            )));
+        }
 
         let nonce = Nonce::from_slice(&metadata.iv);
         let tag = Tag::from_slice(&metadata.auth_tag);
@@ -373,7 +415,9 @@ impl EncryptionEngine {
         _key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, Vec<u8>, EncryptionMetadata), EncryptionError> {
         // TODO: Implement AES-256-GCM when aes-gcm crate is added
-        Err(EncryptionError::UnsupportedAlgorithm(EncryptionAlgorithm::Aes256Gcm))
+        Err(EncryptionError::UnsupportedAlgorithm(
+            EncryptionAlgorithm::Aes256Gcm,
+        ))
     }
 
     /// Decrypt using AES-256-GCM AEAD (placeholder).
@@ -383,7 +427,9 @@ impl EncryptionEngine {
         _key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, bool), EncryptionError> {
         // TODO: Implement AES-256-GCM when aes-gcm crate is added
-        Err(EncryptionError::UnsupportedAlgorithm(EncryptionAlgorithm::Aes256Gcm))
+        Err(EncryptionError::UnsupportedAlgorithm(
+            EncryptionAlgorithm::Aes256Gcm,
+        ))
     }
 }
 
@@ -400,15 +446,18 @@ mod tests {
             iterations: None,
         };
 
-        let key_material = KeyMaterial::new(
-            key,
-            "test-key".to_string(),
-            1,
-            derivation,
-        );
+        let key_material = KeyMaterial::new(key, "test-key".to_string(), 1, derivation);
 
-        assert!(key_material.validate_for_algorithm(EncryptionAlgorithm::ChaCha20Poly1305).is_ok());
-        assert!(key_material.validate_for_algorithm(EncryptionAlgorithm::Aes256Gcm).is_ok());
+        assert!(
+            key_material
+                .validate_for_algorithm(EncryptionAlgorithm::ChaCha20Poly1305)
+                .is_ok()
+        );
+        assert!(
+            key_material
+                .validate_for_algorithm(EncryptionAlgorithm::Aes256Gcm)
+                .is_ok()
+        );
 
         // Wrong key size
         let bad_key_material = KeyMaterial::new(
@@ -456,20 +505,103 @@ mod tests {
             None,
             &key_material,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
-        assert_eq!(result.metadata.algorithm, EncryptionAlgorithm::ChaCha20Poly1305);
+        assert_eq!(
+            result.metadata.algorithm,
+            EncryptionAlgorithm::ChaCha20Poly1305
+        );
         assert_eq!(result.metadata.iv.len(), 12); // ChaCha20Poly1305 nonce size
         assert!(!result.auth_tag.is_empty());
 
-        let decrypted = EncryptionEngine::decrypt(
-            &result.ciphertext,
-            &result.metadata,
-            &key_material,
-        ).unwrap();
+        let decrypted =
+            EncryptionEngine::decrypt(&result.ciphertext, &result.metadata, &key_material).unwrap();
 
         assert_eq!(decrypted.plaintext, test_data);
         assert!(decrypted.authenticated);
+    }
+
+    #[test]
+    fn chacha20poly1305_decrypt_rejects_malformed_nonce_lengths() {
+        let test_data = b"metadata length validation";
+        let key_material = KeyMaterial::new(
+            vec![1u8; 32],
+            "test-key".to_string(),
+            1,
+            KeyDerivation {
+                kdf: KeyDerivationFunction::Direct,
+                salt: vec![],
+                iterations: None,
+            },
+        );
+        let policy = EncryptionPolicy {
+            algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
+            key_derivation: key_material.derivation.clone(),
+            apply_to_kinds: vec![ObjectKind::FileObject],
+            encrypt_metadata: false,
+        };
+
+        let result = EncryptionEngine::encrypt(
+            test_data,
+            ObjectKind::FileObject,
+            &policy,
+            None,
+            &key_material,
+            None,
+        )
+        .unwrap();
+
+        for invalid_nonce in [Vec::new(), vec![0u8; 11], vec![0u8; 13]] {
+            let mut metadata = result.metadata.clone();
+            metadata.iv = invalid_nonce;
+
+            let err = EncryptionEngine::decrypt(&result.ciphertext, &metadata, &key_material)
+                .unwrap_err();
+
+            assert!(matches!(err, EncryptionError::InvalidMetadata(_)));
+        }
+    }
+
+    #[test]
+    fn chacha20poly1305_decrypt_rejects_malformed_auth_tag_lengths() {
+        let test_data = b"metadata length validation";
+        let key_material = KeyMaterial::new(
+            vec![1u8; 32],
+            "test-key".to_string(),
+            1,
+            KeyDerivation {
+                kdf: KeyDerivationFunction::Direct,
+                salt: vec![],
+                iterations: None,
+            },
+        );
+        let policy = EncryptionPolicy {
+            algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
+            key_derivation: key_material.derivation.clone(),
+            apply_to_kinds: vec![ObjectKind::FileObject],
+            encrypt_metadata: false,
+        };
+
+        let result = EncryptionEngine::encrypt(
+            test_data,
+            ObjectKind::FileObject,
+            &policy,
+            None,
+            &key_material,
+            None,
+        )
+        .unwrap();
+
+        for invalid_tag in [Vec::new(), vec![0u8; 15], vec![0u8; 17]] {
+            let mut metadata = result.metadata.clone();
+            metadata.auth_tag = invalid_tag;
+
+            let err = EncryptionEngine::decrypt(&result.ciphertext, &metadata, &key_material)
+                .unwrap_err();
+
+            assert!(matches!(err, EncryptionError::InvalidMetadata(_)));
+        }
     }
 
     #[test]
