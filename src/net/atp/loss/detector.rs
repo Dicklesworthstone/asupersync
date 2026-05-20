@@ -8,7 +8,7 @@ use crate::net::quic_native::{
     AckRange, PacketNumberSpace, QuicTransportMachine, RttEstimator, SentPacketMeta,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 /// ATP-enhanced loss detector with adaptive algorithms.
@@ -108,6 +108,12 @@ struct NetworkConditions {
     bytes_in_flight: u64,
     /// Congestion window.
     congestion_window: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CanonicalAckRange {
+    smallest: u64,
+    largest: u64,
 }
 
 /// Transport recovery state used by ATP loss analysis.
@@ -336,18 +342,13 @@ impl AtpLossDetector {
 
         // Find newly acknowledged packets
         let mut newly_acked = Vec::new();
-        let mut lost_packets = Vec::new();
-
-        let largest_newly_acked = ack_ranges.iter().map(|range| range.largest).max();
+        let acked_packet_numbers = acked_sent_packet_index(&state.sent_packets, ack_ranges);
+        let largest_newly_acked = acked_packet_numbers.iter().copied().max();
 
         // Process acknowledgments
         let mut remaining_packets = VecDeque::new();
         while let Some(packet) = state.sent_packets.pop_front() {
-            let is_acked = ack_ranges.iter().any(|range| {
-                packet.packet_number >= range.smallest && packet.packet_number <= range.largest
-            });
-
-            if is_acked {
+            if acked_packet_numbers.contains(&packet.packet_number) {
                 newly_acked.push(packet);
             } else {
                 remaining_packets.push_back(packet);
@@ -795,6 +796,83 @@ pub struct LossAnalysisExport {
     pub config: LossDetectionConfig,
 }
 
+fn canonical_ack_ranges(ack_ranges: &[AckRange]) -> Vec<CanonicalAckRange> {
+    let mut ranges: Vec<_> = ack_ranges
+        .iter()
+        .map(|range| CanonicalAckRange {
+            smallest: range.smallest,
+            largest: range.largest,
+        })
+        .collect();
+    ranges.sort_unstable_by_key(|range| (range.smallest, range.largest));
+
+    let mut merged: Vec<CanonicalAckRange> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(last) = merged.last_mut() {
+            if range.smallest <= last.largest.saturating_add(1) {
+                last.largest = last.largest.max(range.largest);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+fn acked_sent_packet_index(
+    sent_packets: &VecDeque<SentPacketMeta>,
+    ack_ranges: &[AckRange],
+) -> HashSet<u64> {
+    let ranges = canonical_ack_ranges(ack_ranges);
+    let mut acked_packet_numbers = HashSet::with_capacity(sent_packets.len());
+
+    if sent_packets_are_packet_number_ordered(sent_packets) {
+        let mut range_idx = 0;
+        for packet in sent_packets {
+            while let Some(range) = ranges.get(range_idx) {
+                if packet.packet_number <= range.largest {
+                    break;
+                }
+                range_idx += 1;
+            }
+
+            let Some(range) = ranges.get(range_idx) else {
+                break;
+            };
+
+            if packet.packet_number >= range.smallest {
+                acked_packet_numbers.insert(packet.packet_number);
+            }
+        }
+    } else {
+        for packet in sent_packets {
+            if canonical_ranges_contain_packet(&ranges, packet.packet_number) {
+                acked_packet_numbers.insert(packet.packet_number);
+            }
+        }
+    }
+
+    acked_packet_numbers
+}
+
+fn sent_packets_are_packet_number_ordered(sent_packets: &VecDeque<SentPacketMeta>) -> bool {
+    let mut previous_packet_number = None;
+    for packet in sent_packets {
+        if previous_packet_number.is_some_and(|previous| packet.packet_number < previous) {
+            return false;
+        }
+        previous_packet_number = Some(packet.packet_number);
+    }
+    true
+}
+
+fn canonical_ranges_contain_packet(ranges: &[CanonicalAckRange], packet_number: u64) -> bool {
+    let range_idx = ranges.partition_point(|range| range.largest < packet_number);
+    ranges
+        .get(range_idx)
+        .is_some_and(|range| packet_number >= range.smallest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,5 +1071,86 @@ mod tests {
         assert_eq!(acked_state.latest_rtt_micros, Some(30_000));
         assert_eq!(acked_state.smoothed_rtt_micros, Some(30_000));
         assert_eq!(acked_state.rttvar_micros, Some(15_000));
+    }
+
+    #[test]
+    fn ack_matching_canonicalizes_ranges_before_hash_lookup() {
+        let mut detector = AtpLossDetector::new();
+        let rtt = RttEstimator::default();
+
+        for pn in 0..13 {
+            detector.on_packet_sent(create_test_packet(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                pn * 1000,
+            ));
+        }
+
+        let ack_ranges = [
+            AckRange::new(9, 7).unwrap(),
+            AckRange::new(3, 1).unwrap(),
+            AckRange::new(8, 5).unwrap(),
+        ];
+        let result = detector
+            .on_ack_received(
+                PacketNumberSpace::ApplicationData,
+                &ack_ranges,
+                0,
+                10_000,
+                &test_transport_state(&rtt),
+            )
+            .expect("ACK ranges should be processed");
+
+        assert_eq!(
+            result
+                .lost_packets
+                .iter()
+                .map(|packet| packet.packet_number)
+                .collect::<Vec<_>>(),
+            vec![0, 4]
+        );
+        assert_eq!(
+            detector.spaces[PacketNumberSpace::ApplicationData as usize]
+                .sent_packets
+                .iter()
+                .map(|packet| packet.packet_number)
+                .collect::<Vec<_>>(),
+            vec![10, 11, 12]
+        );
+    }
+
+    #[test]
+    fn ack_matching_ignores_unsent_packet_numbers() {
+        let mut detector = AtpLossDetector::new();
+        let rtt = RttEstimator::default();
+
+        for pn in 0..5 {
+            detector.on_packet_sent(create_test_packet(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                pn * 1000,
+            ));
+        }
+
+        let ack_ranges = [AckRange::new(1_000_000, 1_000_000).unwrap()];
+        let result = detector
+            .on_ack_received(
+                PacketNumberSpace::ApplicationData,
+                &ack_ranges,
+                0,
+                10_000,
+                &test_transport_state(&rtt),
+            )
+            .expect("Unsent ACK should not fail");
+
+        assert!(result.lost_packets.is_empty());
+        assert_eq!(
+            detector.spaces[PacketNumberSpace::ApplicationData as usize]
+                .sent_packets
+                .iter()
+                .map(|packet| packet.packet_number)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
     }
 }
