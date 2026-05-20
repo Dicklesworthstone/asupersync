@@ -723,10 +723,7 @@ impl Session {
     /// Endpoint observations recorded for a peer.
     #[must_use]
     pub fn observations(&self, peer_id: PeerId) -> &[EndpointObservation] {
-        self.observations
-            .get(&peer_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.observations.get(&peer_id).map_or(&[], Vec::as_slice)
     }
 
     /// Number of hole-punch attempts consumed by a peer.
@@ -1000,8 +997,9 @@ impl Service {
     /// # Errors
     ///
     /// Returns a typed error when the session is missing or expired, the
-    /// candidate is expired, the signature verifier rejects it, the candidate
-    /// nonce was already used for this peer, or quotas would be exceeded.
+    /// candidate is expired, the signature verifier rejects it, relay
+    /// authorization fails, the candidate nonce was already used for this peer,
+    /// or quotas would be exceeded.
     pub fn register_candidate<V>(
         &mut self,
         now_micros: u64,
@@ -1028,7 +1026,9 @@ impl Service {
         if !verifier.verify(&signed) {
             return Err(Error::InvalidSignature);
         }
-        validate_relay_candidate(now_micros, &signed, session, verifier)?;
+        if let Err(error) = validate_relay_candidate(now_micros, &signed, session, verifier) {
+            return Err(error.public_error());
+        }
         if session
             .seen_candidate_nonces
             .contains(&(peer_id, signed.candidate_nonce))
@@ -1071,18 +1071,46 @@ impl Service {
     }
 }
 
+/// Private relay authorization detail for internal diagnostics.
+///
+/// Public callers only receive [`Error::RelayAuthorizationFailed`] so they
+/// cannot distinguish valid peers, relay trust relationships, or expiry windows
+/// by probing the rendezvous service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayCandidateValidationError {
+    UnexpectedAuthorization,
+    MissingAuthorization,
+    BindingMismatch,
+    ExpiredAuthorization,
+    UntrustedRelay,
+    InvalidSignature,
+}
+
+impl RelayCandidateValidationError {
+    const fn public_error(self) -> Error {
+        match self {
+            Self::UnexpectedAuthorization => Error::UnexpectedRelayAuthorization,
+            Self::MissingAuthorization
+            | Self::BindingMismatch
+            | Self::ExpiredAuthorization
+            | Self::UntrustedRelay
+            | Self::InvalidSignature => Error::RelayAuthorizationFailed,
+        }
+    }
+}
+
 fn validate_relay_candidate<V>(
     now_micros: u64,
     signed: &SignedCandidate,
     session: &Session,
     verifier: &V,
-) -> Result<(), Error>
+) -> Result<(), RelayCandidateValidationError>
 where
     V: CandidateSignatureVerifier,
 {
     if !matches!(signed.candidate.transport, CandidateTransport::Relay) {
         if signed.candidate.relay_authorization.is_some() {
-            return Err(Error::UnexpectedRelayAuthorization);
+            return Err(RelayCandidateValidationError::UnexpectedAuthorization);
         }
         return Ok(());
     }
@@ -1091,7 +1119,7 @@ where
         .candidate
         .relay_authorization
         .as_ref()
-        .ok_or(Error::MissingRelayAuthorization)?;
+        .ok_or(RelayCandidateValidationError::MissingAuthorization)?;
     let mut mismatch = 0_u8;
     mismatch |= u8::from(!constant_time_peer_id_eq(
         authorization.subject_peer_id,
@@ -1106,19 +1134,19 @@ where
         signed.peer_id,
     ));
     if mismatch != 0 {
-        return Err(Error::RelayAuthorizationMismatch);
+        return Err(RelayCandidateValidationError::BindingMismatch);
     }
     if now_micros >= authorization.expires_at_micros {
-        return Err(Error::ExpiredRelayAuthorization);
+        return Err(RelayCandidateValidationError::ExpiredAuthorization);
     }
     if !session
         .trusted_relays
         .contains(&authorization.relay_peer_id)
     {
-        return Err(Error::UntrustedRelay);
+        return Err(RelayCandidateValidationError::UntrustedRelay);
     }
     if !verifier.verify_relay_authorization(signed, authorization) {
-        return Err(Error::InvalidRelayAuthorization);
+        return Err(RelayCandidateValidationError::InvalidSignature);
     }
     Ok(())
 }
@@ -1218,21 +1246,10 @@ pub enum Error {
     /// Non-relay candidate carried relay authorization.
     #[error("unexpected relay authorization")]
     UnexpectedRelayAuthorization,
-    /// Relay candidate did not carry relay authorization.
-    #[error("missing relay authorization")]
-    MissingRelayAuthorization,
-    /// Relay authorization fields did not bind to the advertised candidate.
-    #[error("relay authorization mismatch")]
-    RelayAuthorizationMismatch,
-    /// Relay authorization has expired.
-    #[error("relay authorization expired")]
-    ExpiredRelayAuthorization,
-    /// Relay identity is not trusted by this session.
-    #[error("untrusted relay")]
-    UntrustedRelay,
-    /// Relay authorization signature was invalid.
-    #[error("invalid relay authorization")]
-    InvalidRelayAuthorization,
+    /// Relay authorization failed. Detailed reasons are kept internal to avoid
+    /// exposing valid peer ids, timing windows, or trust relationships.
+    #[error("authorization failed")]
+    RelayAuthorizationFailed,
     /// Session or peer quota would be exceeded.
     #[error("rendezvous quota exceeded")]
     QuotaExceeded,
@@ -1714,7 +1731,7 @@ mod tests {
                     },
                 )
                 .expect_err("missing relay auth"),
-            Error::MissingRelayAuthorization
+            Error::RelayAuthorizationFailed
         );
 
         let untrusted_auth = relay_authorization(peer(9), peer(1), transfer_nonce);
@@ -1734,7 +1751,7 @@ mod tests {
                     },
                 )
                 .expect_err("untrusted relay"),
-            Error::UntrustedRelay
+            Error::RelayAuthorizationFailed
         );
     }
 
@@ -1798,7 +1815,7 @@ mod tests {
                     },
                 )
                 .expect_err("wrong relay subject"),
-            Error::RelayAuthorizationMismatch
+            Error::RelayAuthorizationFailed
         );
 
         let bad_signature = signed_relay_candidate(
@@ -1817,7 +1834,38 @@ mod tests {
                     },
                 )
                 .expect_err("bad relay signature"),
-            Error::InvalidRelayAuthorization
+            Error::RelayAuthorizationFailed
+        );
+    }
+
+    #[test]
+    fn relay_authorization_failures_keep_private_diagnostics() {
+        let transfer_nonce = nonce(7);
+        let relay = peer(9);
+        let session =
+            Session::new(transfer_nonce, 1_000, Quotas::default()).with_trusted_relays(&[relay]);
+
+        let wrong_subject = signed_relay_candidate(
+            peer(1),
+            transfer_nonce,
+            candidate_nonce(9),
+            Some(relay_authorization(relay, peer(2), transfer_nonce)),
+        );
+        let detail = validate_relay_candidate(
+            10,
+            &wrong_subject,
+            &session,
+            &RelayVerifier {
+                relay_authorization_valid: true,
+            },
+        )
+        .expect_err("wrong relay subject");
+
+        assert_eq!(detail, RelayCandidateValidationError::BindingMismatch);
+        assert_eq!(detail.public_error(), Error::RelayAuthorizationFailed);
+        assert_eq!(
+            Error::RelayAuthorizationFailed.to_string(),
+            "authorization failed"
         );
     }
 
