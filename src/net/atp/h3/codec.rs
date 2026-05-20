@@ -1,8 +1,9 @@
 //! H3 frame codec for ATP-over-WebTransport.
 
 use super::{AtpH3Error, AtpH3Result};
-use crate::net::atp::protocol::{AtpFrame, FrameType};
-// Remove unused std::io imports
+use crate::bytes::BytesMut;
+use crate::codec::{Decoder, Encoder};
+use crate::net::atp::protocol::{AtpFrame, AtpFrameCodec, FrameType};
 
 /// WebTransport frame type identifiers for ATP frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,52 +167,45 @@ impl H3FrameCodec {
         self.deserialize_atp_frame(atp_payload, wt_frame_type.to_atp_frame_type())
     }
 
-    /// Serialize an ATP frame to bytes (placeholder implementation).
+    /// Serialize an ATP frame to canonical ATP binary bytes.
     fn serialize_atp_frame(&self, frame: &AtpFrame) -> AtpH3Result<Vec<u8>> {
-        // TODO: Implement proper ATP frame serialization
-        // This is a placeholder that would integrate with the actual ATP protocol codec
-        match frame.frame_type() {
-            FrameType::Control => Ok(b"ATP-CONTROL".to_vec()),
-            FrameType::Data => Ok(b"ATP-DATA".to_vec()),
-            FrameType::Proof => Ok(b"ATP-PROOF".to_vec()),
-            FrameType::Repair => Ok(b"ATP-REPAIR".to_vec()),
-            FrameType::Session => Ok(b"ATP-SESSION".to_vec()),
-            FrameType::Manifest => Ok(b"ATP-MANIFEST".to_vec()),
-            _ => Err(AtpH3Error::Codec(
-                "Unsupported ATP frame type for serialization".to_string(),
-            )),
-        }
+        let mut codec = AtpFrameCodec::new();
+        let mut encoded = BytesMut::with_capacity(frame.encoded_len());
+        codec
+            .encode(frame.clone(), &mut encoded)
+            .map_err(|err| AtpH3Error::Codec(format!("ATP frame encode failed: {err}")))?;
+        Ok(encoded.to_vec())
     }
 
-    /// Deserialize bytes to an ATP frame (placeholder implementation).
+    /// Deserialize canonical ATP binary bytes to an ATP frame.
     fn deserialize_atp_frame(
         &self,
         payload: &[u8],
         frame_type: FrameType,
     ) -> AtpH3Result<AtpFrame> {
-        // TODO: Implement proper ATP frame deserialization
-        // This is a placeholder that would integrate with the actual ATP protocol codec
-        let _payload_str = std::str::from_utf8(payload)
-            .map_err(|e| AtpH3Error::Codec(format!("Invalid UTF-8 in frame payload: {}", e)))?;
+        let mut codec = AtpFrameCodec::new();
+        let mut bytes = BytesMut::from(payload);
+        let frame = codec
+            .decode(&mut bytes)
+            .map_err(|err| AtpH3Error::Codec(format!("ATP frame decode failed: {err}")))?
+            .ok_or_else(|| AtpH3Error::Codec("ATP frame payload is incomplete".to_string()))?;
 
-        // Create a placeholder ATP frame - this would be replaced with actual ATP frame construction
-        match frame_type {
-            FrameType::Control
-            | FrameType::Data
-            | FrameType::Proof
-            | FrameType::Repair
-            | FrameType::Session
-            | FrameType::Manifest => {
-                // Placeholder: return a mock ATP frame
-                // In reality, this would parse the payload and construct the appropriate ATP frame
-                AtpFrame::new_placeholder(frame_type)
-                    .map_err(|e| AtpH3Error::Codec(format!("Failed to create ATP frame: {}", e)))
-            }
-            _ => Err(AtpH3Error::Codec(format!(
-                "Cannot deserialize unsupported frame type: {:?}",
-                frame_type
-            ))),
+        if !bytes.is_empty() {
+            return Err(AtpH3Error::Codec(format!(
+                "ATP frame payload has {} trailing bytes",
+                bytes.len()
+            )));
         }
+
+        if frame.frame_type() != frame_type {
+            return Err(AtpH3Error::Codec(format!(
+                "WebTransport frame type {:?} does not match ATP frame type {:?}",
+                frame_type,
+                frame.frame_type()
+            )));
+        }
+
+        Ok(frame)
     }
 
     /// Get the maximum frame size.
@@ -234,6 +228,7 @@ impl Default for H3FrameCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::atp::protocol::ProtocolVersion;
 
     #[test]
     fn test_webtransport_frame_type_conversion() {
@@ -261,12 +256,13 @@ mod tests {
     fn test_frame_encode_decode_roundtrip() {
         let codec = H3FrameCodec::new();
 
-        // This test would work with actual ATP frames once the protocol module is implemented
-        // For now, we test the frame format structure
-
-        // Test encoding a mock frame
-        let mock_frame = AtpFrame::new_placeholder(FrameType::Control).unwrap();
-        let encoded = codec.encode_atp_frame(&mock_frame).unwrap();
+        let frame = AtpFrame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::Control,
+            b"control payload".to_vec(),
+        )
+        .unwrap();
+        let encoded = codec.encode_atp_frame(&frame).unwrap();
 
         // Verify frame structure: type + length + payload
         assert!(encoded.len() >= 5);
@@ -275,6 +271,7 @@ mod tests {
         // Test decoding
         let decoded = codec.decode_atp_frame(&encoded).unwrap();
         assert_eq!(decoded.frame_type(), FrameType::Control);
+        assert_eq!(decoded.payload(), b"control payload");
     }
 
     #[test]
@@ -284,8 +281,13 @@ mod tests {
         // Frame that would exceed limit should fail
         codec.set_max_frame_size(5); // Very small limit
 
-        let mock_frame = AtpFrame::new_placeholder(FrameType::Data).unwrap();
-        let result = codec.encode_atp_frame(&mock_frame);
+        let frame = AtpFrame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::Data,
+            b"payload-too-large-for-limit".to_vec(),
+        )
+        .unwrap();
+        let result = codec.encode_atp_frame(&frame);
         assert!(result.is_err());
 
         if let Err(AtpH3Error::Codec(msg)) = result {
@@ -307,5 +309,17 @@ mod tests {
         // Truncated frame
         let truncated_frame = vec![0x01, 0x00, 0x00, 0x00, 0x10]; // Claims 16 bytes but only has header
         assert!(codec.decode_atp_frame(&truncated_frame).is_err());
+    }
+
+    #[test]
+    fn test_mismatched_outer_and_inner_frame_type_rejected() {
+        let codec = H3FrameCodec::new();
+        let frame =
+            AtpFrame::new(ProtocolVersion::CURRENT, FrameType::Data, b"data".to_vec()).unwrap();
+        let mut encoded = codec.encode_atp_frame(&frame).unwrap();
+        encoded[0] = WebTransportFrameType::Control as u8;
+
+        let err = codec.decode_atp_frame(&encoded).unwrap_err();
+        assert!(matches!(err, AtpH3Error::Codec(message) if message.contains("does not match")));
     }
 }

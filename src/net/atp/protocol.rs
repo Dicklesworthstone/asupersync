@@ -17,7 +17,7 @@ pub enum FrameType {
     Manifest,
 }
 
-/// ATP frame placeholder for H3 adapter development.
+/// ATP frame used by adapter development surfaces.
 #[derive(Debug)]
 pub struct AtpFrame {
     frame_type: FrameType,
@@ -25,19 +25,17 @@ pub struct AtpFrame {
 }
 
 impl AtpFrame {
-    /// Create a placeholder ATP frame for testing.
-    pub fn new_placeholder(frame_type: FrameType) -> Result<Self, String> {
+    /// Create an ATP frame with explicit payload bytes.
+    pub fn new(frame_type: FrameType, payload: Vec<u8>) -> Result<Self, String> {
         Ok(Self {
             frame_type,
-            payload: match frame_type {
-                FrameType::Control => b"ATP-CONTROL-PLACEHOLDER".to_vec(),
-                FrameType::Data => b"ATP-DATA-PLACEHOLDER".to_vec(),
-                FrameType::Proof => b"ATP-PROOF-PLACEHOLDER".to_vec(),
-                FrameType::Repair => b"ATP-REPAIR-PLACEHOLDER".to_vec(),
-                FrameType::Session => b"ATP-SESSION-PLACEHOLDER".to_vec(),
-                FrameType::Manifest => b"ATP-MANIFEST-PLACEHOLDER".to_vec(),
-            },
+            payload,
         })
+    }
+
+    /// Create an ATP frame with no payload.
+    pub fn empty(frame_type: FrameType) -> Result<Self, String> {
+        Self::new(frame_type, Vec::new())
     }
 
     /// Get the frame type.
