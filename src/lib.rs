@@ -21,6 +21,7 @@
 //! - [`types`]: Core types (identifiers, outcomes, budgets, policies)
 //! - [`record`]: Internal records for tasks, regions, obligations
 //! - [`trace`](mod@trace): Tracing infrastructure for deterministic replay
+//! - [`atp`]: ATP data movement layer primitives
 //! - [`runtime`]: Scheduler and runtime state
 //! - [`cx`]: Capability context and scope API
 //! - [`combinator`]: Join, race, timeout combinators
@@ -157,6 +158,7 @@ compile_error!("feature `kafka` is unsupported on wasm32 browser preview builds.
 pub mod actor;
 pub mod adapter_certification;
 pub mod app;
+pub mod atp;
 pub mod audit;
 pub mod bytes;
 pub mod cancel;

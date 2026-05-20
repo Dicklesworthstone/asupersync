@@ -1,0 +1,721 @@
+//! ATP Path Graph candidate and outcome model.
+//!
+//! The path graph treats every possible route to a peer as a typed candidate
+//! with explicit security properties, budgets, trace identity, and terminal
+//! outcome. Later NAT traversal, Tailscale, relay, mailbox, and path-racing
+//! code should consume these types instead of inventing local enums.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+/// Stable identifier for one path candidate inside a path race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PathCandidateId(u64);
+
+impl PathCandidateId {
+    /// Construct a candidate id from a stable numeric value.
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Return the raw candidate id.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Stable trace identifier used to correlate path attempts with transfer logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PathTraceId(u64);
+
+impl PathTraceId {
+    /// Construct a path trace id.
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Return the raw trace id.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// ATP path candidate kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PathKind {
+    /// LAN multicast or local-network discovery candidate.
+    LanMulticast,
+    /// Explicit user-provided public UDP address.
+    ExplicitPublicUdp,
+    /// Public IPv6 address without NAT traversal.
+    PublicIpv6,
+    /// UDP hole-punched path established through rendezvous.
+    NatPunchedUdp,
+    /// Existing Tailscale/private-route address, if detected.
+    TailscaleIp,
+    /// ATP relay carrying UDP-like packets.
+    AtpRelayUdp,
+    /// ATP relay over TCP/TLS on port 443 for UDP-hostile networks.
+    AtpRelayTcpTls443,
+    /// MASQUE/CONNECT-UDP-style relay adapter.
+    MasqueConnectUdp,
+    /// Store-and-forward encrypted mailbox path.
+    OfflineMailbox,
+}
+
+impl PathKind {
+    /// Every path kind in deterministic display/preference order.
+    pub const ALL: [Self; 9] = [
+        Self::LanMulticast,
+        Self::ExplicitPublicUdp,
+        Self::PublicIpv6,
+        Self::NatPunchedUdp,
+        Self::TailscaleIp,
+        Self::AtpRelayUdp,
+        Self::AtpRelayTcpTls443,
+        Self::MasqueConnectUdp,
+        Self::OfflineMailbox,
+    ];
+}
+
+/// Security and privacy properties of a candidate path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathSecurity {
+    /// Whether the path requires authenticated ATP peer identity.
+    pub authenticated_peer: bool,
+    /// Whether ATP payload bytes remain encrypted end to end.
+    pub end_to_end_encrypted: bool,
+    /// Whether the remote peer can directly see the local public IP.
+    pub exposes_local_ip_to_peer: bool,
+    /// Whether a third-party relay sees peer metadata or traffic timing.
+    pub relay_metadata_visible: bool,
+    /// Whether the path can complete while peers are not online together.
+    pub store_and_forward: bool,
+}
+
+impl PathSecurity {
+    /// Conservative security defaults for a path kind.
+    #[must_use]
+    pub const fn for_kind(kind: PathKind) -> Self {
+        match kind {
+            PathKind::LanMulticast
+            | PathKind::ExplicitPublicUdp
+            | PathKind::PublicIpv6
+            | PathKind::NatPunchedUdp
+            | PathKind::TailscaleIp => Self {
+                authenticated_peer: true,
+                end_to_end_encrypted: true,
+                exposes_local_ip_to_peer: true,
+                relay_metadata_visible: false,
+                store_and_forward: false,
+            },
+            PathKind::AtpRelayUdp | PathKind::AtpRelayTcpTls443 | PathKind::MasqueConnectUdp => {
+                Self {
+                    authenticated_peer: true,
+                    end_to_end_encrypted: true,
+                    exposes_local_ip_to_peer: false,
+                    relay_metadata_visible: true,
+                    store_and_forward: false,
+                }
+            }
+            PathKind::OfflineMailbox => Self {
+                authenticated_peer: true,
+                end_to_end_encrypted: true,
+                exposes_local_ip_to_peer: false,
+                relay_metadata_visible: true,
+                store_and_forward: true,
+            },
+        }
+    }
+}
+
+/// Attempt budget for one candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathBudget {
+    /// Maximum time spent establishing the path.
+    pub connect_timeout_micros: u64,
+    /// Maximum time spent draining a losing attempt after cancellation.
+    pub loser_drain_timeout_micros: u64,
+    /// Maximum probe bytes allowed before the path is validated.
+    pub max_probe_bytes: u64,
+}
+
+impl Default for PathBudget {
+    fn default() -> Self {
+        Self {
+            connect_timeout_micros: 3_000_000,
+            loser_drain_timeout_micros: 250_000,
+            max_probe_bytes: 16 * 1_200,
+        }
+    }
+}
+
+/// Successful path outcome categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathSuccessKind {
+    /// A direct UDP path was validated.
+    DirectValidated,
+    /// A Tailscale/private-route path was selected.
+    TailscaleSelected,
+    /// A relay path was selected.
+    RelaySelected,
+    /// An encrypted offline mailbox accepted the transfer.
+    MailboxAccepted,
+}
+
+/// Failed path outcome categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFailureKind {
+    /// Candidate exceeded its connection budget.
+    Timeout,
+    /// NAT behavior prevented a viable punched UDP route.
+    HardNat,
+    /// UDP appears blocked on this route.
+    UdpBlocked,
+    /// Peer or relay authentication failed.
+    AuthFailure,
+    /// Local or remote policy denied this candidate.
+    PolicyDenied,
+    /// Relay was unavailable or refused the attempt.
+    RelayUnavailable,
+    /// Platform cannot support this path kind.
+    UnsupportedPlatform,
+    /// Protocol exchange failed in a non-auth, non-policy way.
+    ProtocolError,
+}
+
+/// Cancellation reason for a path attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathCancelReason {
+    /// Another candidate won the race.
+    LoserOfRace,
+    /// The owning ATP region was cancelled.
+    ParentCancelled,
+    /// The candidate exceeded its budget while being cancelled or drained.
+    BudgetExceeded,
+}
+
+/// Terminal outcome of one path attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathOutcomeResult {
+    /// Path was usable.
+    Success(PathSuccessKind),
+    /// Path failed.
+    Failure(PathFailureKind),
+    /// Path was cancelled.
+    Cancelled(PathCancelReason),
+}
+
+/// Measured outcome for one candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathOutcome {
+    /// Terminal category.
+    pub result: PathOutcomeResult,
+    /// Monotonic completion timestamp in microseconds.
+    pub completed_at_micros: u64,
+    /// Optional observed RTT.
+    pub observed_rtt_micros: Option<u64>,
+    /// Probe/control bytes sent while establishing the path.
+    pub bytes_sent: u64,
+    /// Probe/control bytes received while establishing the path.
+    pub bytes_received: u64,
+}
+
+impl PathOutcome {
+    /// Construct a successful outcome.
+    #[must_use]
+    pub const fn success(
+        kind: PathSuccessKind,
+        completed_at_micros: u64,
+        observed_rtt_micros: Option<u64>,
+    ) -> Self {
+        Self {
+            result: PathOutcomeResult::Success(kind),
+            completed_at_micros,
+            observed_rtt_micros,
+            bytes_sent: 0,
+            bytes_received: 0,
+        }
+    }
+
+    /// Construct a failed outcome.
+    #[must_use]
+    pub const fn failure(kind: PathFailureKind, completed_at_micros: u64) -> Self {
+        Self {
+            result: PathOutcomeResult::Failure(kind),
+            completed_at_micros,
+            observed_rtt_micros: None,
+            bytes_sent: 0,
+            bytes_received: 0,
+        }
+    }
+
+    /// Construct a cancelled outcome.
+    #[must_use]
+    pub const fn cancelled(reason: PathCancelReason, completed_at_micros: u64) -> Self {
+        Self {
+            result: PathOutcomeResult::Cancelled(reason),
+            completed_at_micros,
+            observed_rtt_micros: None,
+            bytes_sent: 0,
+            bytes_received: 0,
+        }
+    }
+
+    /// Attach byte counters to this outcome.
+    #[must_use]
+    pub const fn with_bytes(mut self, bytes_sent: u64, bytes_received: u64) -> Self {
+        self.bytes_sent = bytes_sent;
+        self.bytes_received = bytes_received;
+        self
+    }
+
+    /// Whether the outcome is a success.
+    #[must_use]
+    pub const fn is_success(self) -> bool {
+        matches!(self.result, PathOutcomeResult::Success(_))
+    }
+}
+
+/// Attempt state for one path candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathAttemptState {
+    /// Candidate has not started.
+    Pending,
+    /// Candidate is actively attempting connection.
+    Racing,
+    /// Candidate completed successfully.
+    Succeeded(PathOutcome),
+    /// Candidate completed unsuccessfully.
+    Failed(PathOutcome),
+    /// Candidate was cancelled.
+    Cancelled(PathOutcome),
+    /// Candidate lost the race and was drained under structured cleanup.
+    DrainedLoser {
+        /// Candidate that won the race.
+        winner: PathCandidateId,
+        /// Cleanup outcome recorded for this loser.
+        outcome: PathOutcome,
+    },
+}
+
+impl PathAttemptState {
+    /// Whether this state is terminal.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded(_) | Self::Failed(_) | Self::Cancelled(_) | Self::DrainedLoser { .. }
+        )
+    }
+}
+
+/// One candidate edge in the ATP path graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathCandidate {
+    /// Candidate identifier.
+    pub id: PathCandidateId,
+    /// Path type.
+    pub kind: PathKind,
+    /// Trace identifier.
+    pub trace_id: PathTraceId,
+    /// Attempt budget.
+    pub budget: PathBudget,
+    /// Security properties.
+    pub security: PathSecurity,
+    /// Current attempt state.
+    pub state: PathAttemptState,
+}
+
+impl PathCandidate {
+    /// Construct a candidate with kind-derived security defaults.
+    #[must_use]
+    pub fn new(id: PathCandidateId, kind: PathKind, trace_id: PathTraceId) -> Self {
+        Self {
+            id,
+            kind,
+            trace_id,
+            budget: PathBudget::default(),
+            security: PathSecurity::for_kind(kind),
+            state: PathAttemptState::Pending,
+        }
+    }
+
+    /// Override the attempt budget.
+    #[must_use]
+    pub const fn with_budget(mut self, budget: PathBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Override security metadata.
+    #[must_use]
+    pub const fn with_security(mut self, security: PathSecurity) -> Self {
+        self.security = security;
+        self
+    }
+}
+
+/// Cleanup record emitted when a path candidate loses a race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathLoserCleanup {
+    /// Losing candidate.
+    pub candidate_id: PathCandidateId,
+    /// Winning candidate.
+    pub winner: PathCandidateId,
+    /// Whether cancellation was requested.
+    pub cancel_requested: bool,
+    /// Whether the loser drained to a terminal state.
+    pub drained: bool,
+}
+
+/// Errors from the deterministic path-race model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathRaceError {
+    /// Candidate id already exists.
+    DuplicateCandidate(PathCandidateId),
+    /// Candidate id was not present in the race.
+    UnknownCandidate(PathCandidateId),
+    /// A terminal candidate cannot be started again.
+    TerminalCandidate(PathCandidateId),
+}
+
+impl fmt::Display for PathRaceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateCandidate(id) => write!(f, "duplicate path candidate {}", id.get()),
+            Self::UnknownCandidate(id) => write!(f, "unknown path candidate {}", id.get()),
+            Self::TerminalCandidate(id) => {
+                write!(
+                    f,
+                    "terminal path candidate cannot be restarted {}",
+                    id.get()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PathRaceError {}
+
+/// Deterministic model for racing path candidates.
+#[derive(Debug, Clone, Default)]
+pub struct PathRace {
+    candidates: BTreeMap<PathCandidateId, PathCandidate>,
+    winner: Option<PathCandidateId>,
+    cleanup: Vec<PathLoserCleanup>,
+}
+
+impl PathRace {
+    /// Create an empty path race.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a candidate to the race.
+    pub fn add_candidate(&mut self, candidate: PathCandidate) -> Result<(), PathRaceError> {
+        if self.candidates.contains_key(&candidate.id) {
+            return Err(PathRaceError::DuplicateCandidate(candidate.id));
+        }
+        self.candidates.insert(candidate.id, candidate);
+        Ok(())
+    }
+
+    /// Start one candidate.
+    pub fn start_candidate(&mut self, id: PathCandidateId) -> Result<(), PathRaceError> {
+        let candidate = self
+            .candidates
+            .get_mut(&id)
+            .ok_or(PathRaceError::UnknownCandidate(id))?;
+        if candidate.state.is_terminal() {
+            return Err(PathRaceError::TerminalCandidate(id));
+        }
+        candidate.state = PathAttemptState::Racing;
+        Ok(())
+    }
+
+    /// Start every pending candidate.
+    pub fn start_all(&mut self) -> Result<(), PathRaceError> {
+        let ids = self.candidates.keys().copied().collect::<Vec<_>>();
+        for id in ids {
+            self.start_candidate(id)?;
+        }
+        Ok(())
+    }
+
+    /// Record a terminal outcome for one candidate.
+    ///
+    /// The first successful outcome wins. Active non-winning candidates are
+    /// immediately marked as drained losers, modeling the structured
+    /// cancellation requirement that losers do not remain live after a race.
+    pub fn record_outcome(
+        &mut self,
+        id: PathCandidateId,
+        outcome: PathOutcome,
+    ) -> Result<(), PathRaceError> {
+        if let Some(winner) = self.winner {
+            if winner != id {
+                self.drain_loser(id, winner, outcome)?;
+                return Ok(());
+            }
+        }
+
+        let candidate = self
+            .candidates
+            .get_mut(&id)
+            .ok_or(PathRaceError::UnknownCandidate(id))?;
+        candidate.state = match outcome.result {
+            PathOutcomeResult::Success(_) => PathAttemptState::Succeeded(outcome),
+            PathOutcomeResult::Failure(_) => PathAttemptState::Failed(outcome),
+            PathOutcomeResult::Cancelled(_) => PathAttemptState::Cancelled(outcome),
+        };
+
+        if outcome.is_success() && self.winner.is_none() {
+            self.winner = Some(id);
+            self.drain_active_losers(id, outcome.completed_at_micros)?;
+        }
+        Ok(())
+    }
+
+    /// Winner candidate id, if a path succeeded.
+    #[must_use]
+    pub const fn winner(&self) -> Option<PathCandidateId> {
+        self.winner
+    }
+
+    /// Borrow a candidate by id.
+    #[must_use]
+    pub fn candidate(&self, id: PathCandidateId) -> Option<&PathCandidate> {
+        self.candidates.get(&id)
+    }
+
+    /// Cleanup records for candidates that lost after a winner was chosen.
+    #[must_use]
+    pub fn cleanup_records(&self) -> &[PathLoserCleanup] {
+        &self.cleanup
+    }
+
+    /// Return true when every candidate is terminal.
+    #[must_use]
+    pub fn all_terminal(&self) -> bool {
+        self.candidates
+            .values()
+            .all(|candidate| candidate.state.is_terminal())
+    }
+
+    fn drain_active_losers(
+        &mut self,
+        winner: PathCandidateId,
+        completed_at_micros: u64,
+    ) -> Result<(), PathRaceError> {
+        let loser_ids = self
+            .candidates
+            .keys()
+            .copied()
+            .filter(|id| *id != winner)
+            .collect::<Vec<_>>();
+        for loser_id in loser_ids {
+            let loser_state = self
+                .candidates
+                .get(&loser_id)
+                .ok_or(PathRaceError::UnknownCandidate(loser_id))?
+                .state;
+            if loser_state.is_terminal() {
+                continue;
+            }
+            let outcome =
+                PathOutcome::cancelled(PathCancelReason::LoserOfRace, completed_at_micros);
+            self.drain_loser(loser_id, winner, outcome)?;
+        }
+        Ok(())
+    }
+
+    fn drain_loser(
+        &mut self,
+        loser_id: PathCandidateId,
+        winner: PathCandidateId,
+        outcome: PathOutcome,
+    ) -> Result<(), PathRaceError> {
+        let loser = self
+            .candidates
+            .get_mut(&loser_id)
+            .ok_or(PathRaceError::UnknownCandidate(loser_id))?;
+        loser.state = PathAttemptState::DrainedLoser { winner, outcome };
+        if !self
+            .cleanup
+            .iter()
+            .any(|record| record.candidate_id == loser_id)
+        {
+            self.cleanup.push(PathLoserCleanup {
+                candidate_id: loser_id,
+                winner,
+                cancel_requested: true,
+                drained: true,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(raw: u64, kind: PathKind) -> PathCandidate {
+        PathCandidate::new(PathCandidateId::new(raw), kind, PathTraceId::new(raw + 100))
+    }
+
+    #[test]
+    fn path_kind_all_contains_every_candidate_type() {
+        assert_eq!(PathKind::ALL.len(), 9);
+        assert!(PathKind::ALL.contains(&PathKind::LanMulticast));
+        assert!(PathKind::ALL.contains(&PathKind::ExplicitPublicUdp));
+        assert!(PathKind::ALL.contains(&PathKind::PublicIpv6));
+        assert!(PathKind::ALL.contains(&PathKind::NatPunchedUdp));
+        assert!(PathKind::ALL.contains(&PathKind::TailscaleIp));
+        assert!(PathKind::ALL.contains(&PathKind::AtpRelayUdp));
+        assert!(PathKind::ALL.contains(&PathKind::AtpRelayTcpTls443));
+        assert!(PathKind::ALL.contains(&PathKind::MasqueConnectUdp));
+        assert!(PathKind::ALL.contains(&PathKind::OfflineMailbox));
+    }
+
+    #[test]
+    fn security_defaults_distinguish_direct_relay_and_mailbox_paths() {
+        let direct = PathSecurity::for_kind(PathKind::NatPunchedUdp);
+        assert!(direct.exposes_local_ip_to_peer);
+        assert!(!direct.relay_metadata_visible);
+        assert!(!direct.store_and_forward);
+
+        let relay = PathSecurity::for_kind(PathKind::AtpRelayTcpTls443);
+        assert!(!relay.exposes_local_ip_to_peer);
+        assert!(relay.relay_metadata_visible);
+        assert!(!relay.store_and_forward);
+
+        let mailbox = PathSecurity::for_kind(PathKind::OfflineMailbox);
+        assert!(!mailbox.exposes_local_ip_to_peer);
+        assert!(mailbox.relay_metadata_visible);
+        assert!(mailbox.store_and_forward);
+    }
+
+    #[test]
+    fn first_success_wins_and_active_losers_are_drained() {
+        let direct = PathCandidateId::new(1);
+        let relay = PathCandidateId::new(2);
+        let tailscale = PathCandidateId::new(3);
+        let mut race = PathRace::new();
+        race.add_candidate(candidate(direct.get(), PathKind::NatPunchedUdp))
+            .expect("direct candidate");
+        race.add_candidate(candidate(relay.get(), PathKind::AtpRelayUdp))
+            .expect("relay candidate");
+        race.add_candidate(candidate(tailscale.get(), PathKind::TailscaleIp))
+            .expect("tailscale candidate");
+        race.start_all().expect("start race");
+
+        race.record_outcome(
+            relay,
+            PathOutcome::success(PathSuccessKind::RelaySelected, 20_000, Some(8_000))
+                .with_bytes(240, 240),
+        )
+        .expect("record relay success");
+
+        assert_eq!(race.winner(), Some(relay));
+        assert!(race.all_terminal());
+        assert_eq!(race.cleanup_records().len(), 2);
+        assert!(
+            race.cleanup_records().iter().all(|record| {
+                record.winner == relay && record.cancel_requested && record.drained
+            })
+        );
+        assert!(matches!(
+            race.candidate(direct).expect("direct").state,
+            PathAttemptState::DrainedLoser { winner, .. } if winner == relay
+        ));
+        assert!(matches!(
+            race.candidate(tailscale).expect("tailscale").state,
+            PathAttemptState::DrainedLoser { winner, .. } if winner == relay
+        ));
+    }
+
+    #[test]
+    fn failures_do_not_select_winner() {
+        let direct = PathCandidateId::new(1);
+        let public_ipv6 = PathCandidateId::new(2);
+        let mut race = PathRace::new();
+        race.add_candidate(candidate(direct.get(), PathKind::NatPunchedUdp))
+            .expect("direct candidate");
+        race.add_candidate(candidate(public_ipv6.get(), PathKind::PublicIpv6))
+            .expect("ipv6 candidate");
+        race.start_all().expect("start race");
+
+        race.record_outcome(direct, PathOutcome::failure(PathFailureKind::HardNat, 10))
+            .expect("hard nat");
+        race.record_outcome(
+            public_ipv6,
+            PathOutcome::failure(PathFailureKind::UdpBlocked, 12),
+        )
+        .expect("udp blocked");
+
+        assert_eq!(race.winner(), None);
+        assert!(race.all_terminal());
+        assert!(race.cleanup_records().is_empty());
+    }
+
+    #[test]
+    fn late_loser_outcome_cannot_replace_winner() {
+        let direct = PathCandidateId::new(1);
+        let relay = PathCandidateId::new(2);
+        let mut race = PathRace::new();
+        race.add_candidate(candidate(direct.get(), PathKind::NatPunchedUdp))
+            .expect("direct candidate");
+        race.add_candidate(candidate(relay.get(), PathKind::AtpRelayUdp))
+            .expect("relay candidate");
+        race.start_all().expect("start race");
+
+        race.record_outcome(
+            direct,
+            PathOutcome::success(PathSuccessKind::DirectValidated, 10, Some(3)),
+        )
+        .expect("direct wins");
+        race.record_outcome(
+            relay,
+            PathOutcome::success(PathSuccessKind::RelaySelected, 11, Some(4)),
+        )
+        .expect("late loser is drained");
+
+        assert_eq!(race.winner(), Some(direct));
+        assert!(matches!(
+            race.candidate(relay).expect("relay").state,
+            PathAttemptState::DrainedLoser { winner, .. } if winner == direct
+        ));
+    }
+
+    #[test]
+    fn policy_denied_is_a_failure_not_success() {
+        let outcome = PathOutcome::failure(PathFailureKind::PolicyDenied, 42);
+        assert!(!outcome.is_success());
+        assert!(matches!(
+            outcome.result,
+            PathOutcomeResult::Failure(PathFailureKind::PolicyDenied)
+        ));
+    }
+
+    #[test]
+    fn duplicate_candidate_ids_are_rejected() {
+        let mut race = PathRace::new();
+        let first = candidate(1, PathKind::PublicIpv6);
+        let duplicate = candidate(1, PathKind::AtpRelayUdp);
+        race.add_candidate(first).expect("first candidate");
+        let err = race
+            .add_candidate(duplicate)
+            .expect_err("duplicate id must fail");
+        assert_eq!(
+            err,
+            PathRaceError::DuplicateCandidate(PathCandidateId::new(1))
+        );
+    }
+}
