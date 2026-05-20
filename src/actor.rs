@@ -221,8 +221,11 @@ impl<A: Actor> ActorHandle<A> {
     /// Send a message to the actor using two-phase reserve/send.
     ///
     /// Returns an error if the actor has stopped or the mailbox is full.
-    pub async fn send(&self, cx: &Cx, msg: A::Message) -> Result<(), SendError<A::Message>> {
-        self.sender.send(cx, msg).await
+    pub async fn send(&self, cx: &Cx, msg: A::Message) -> Outcome<(), SendError<A::Message>> {
+        match self.sender.send(cx, msg).await {
+            Ok(()) => Outcome::ok(()),
+            Err(e) => Outcome::err(e),
+        }
     }
 
     /// Try to send a message without blocking.
@@ -443,8 +446,11 @@ impl<M> Clone for ActorRef<M> {
 
 impl<M: Send + 'static> ActorRef<M> {
     /// Send a message to the actor.
-    pub async fn send(&self, cx: &Cx, msg: M) -> Result<(), SendError<M>> {
-        self.sender.send(cx, msg).await
+    pub async fn send(&self, cx: &Cx, msg: M) -> Outcome<(), SendError<M>> {
+        match self.sender.send(cx, msg).await {
+            Ok(()) => Outcome::ok(()),
+            Err(e) => Outcome::err(e),
+        }
     }
 
     /// Reserve a slot in the mailbox (two-phase send: reserve -> commit).
@@ -916,12 +922,12 @@ fn supervised_restart_timestamp(cx: &Cx) -> u64 {
     )
 }
 
-async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Result<(), JoinError> {
+async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Outcome<(), JoinError> {
     if cx.checkpoint().is_err() {
-        return Err(actor_cancel_join_error(cx));
+        return Outcome::err(actor_cancel_join_error(cx));
     }
     if delay.is_zero() {
-        return Ok(());
+        return Outcome::ok(());
     }
 
     let now = cx
@@ -930,9 +936,9 @@ async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Result<(), J
     let mut sleeper = crate::time::sleep(now, delay);
     std::future::poll_fn(|task_cx| {
         if cx.checkpoint().is_err() {
-            return std::task::Poll::Ready(Err(actor_cancel_join_error(cx)));
+            return std::task::Poll::Ready(Outcome::err(actor_cancel_join_error(cx)));
         }
-        Pin::new(&mut sleeper).poll(task_cx).map(|()| Ok(()))
+        Pin::new(&mut sleeper).poll(task_cx).map(|()| Outcome::ok(()))
     })
     .await
 }
