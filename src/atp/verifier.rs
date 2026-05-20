@@ -9,6 +9,7 @@
 
 use crate::atp::manifest::{GraphCommit, Manifest, ManifestError, MerkleRoot};
 use crate::atp::object::{ContentId, Object, ObjectGraph, ObjectGraphError, ObjectId, ObjectKind};
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// Stable verifier stage names used in logs and error taxonomy.
@@ -33,6 +34,16 @@ pub enum VerificationStage {
 }
 
 impl VerificationStage {
+    const REQUIRED_FINAL_PROOF_STAGES: [Self; 7] = [
+        Self::ChunkHash,
+        Self::ObjectContent,
+        Self::GraphMerkle,
+        Self::Manifest,
+        Self::Commit,
+        Self::ProofBundle,
+        Self::Finalizer,
+    ];
+
     /// Returns the stable snake-case stage label.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -59,6 +70,12 @@ impl VerificationStage {
             Self::ProofBundle => 6,
             Self::Finalizer => 7,
         }
+    }
+
+    /// Returns the mandatory stages for a final ATP proof bundle.
+    #[must_use]
+    pub const fn required_final_proof_stages() -> &'static [Self] {
+        &Self::REQUIRED_FINAL_PROOF_STAGES
     }
 }
 
@@ -169,6 +186,67 @@ pub struct FinalizerProof {
     pub final_output_exposed: bool,
 }
 
+/// Deterministic verifier-owned finalizer state used to prove cleanup balance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierFinalizerLedger {
+    /// Stage where cleanup/finalization was observed.
+    pub stage: VerificationStage,
+    /// Number of verifier leases acquired before cleanup.
+    pub leases_acquired: usize,
+    /// Number of verifier leases released by cleanup.
+    pub leases_released: usize,
+    /// Whether cancellation was requested before cleanup completed.
+    pub cancellation_requested: bool,
+    /// Whether final output was exposed despite cancellation.
+    pub final_output_exposed: bool,
+}
+
+impl VerifierFinalizerLedger {
+    /// Creates an empty finalizer ledger for a verifier stage.
+    #[must_use]
+    pub const fn new(stage: VerificationStage) -> Self {
+        Self {
+            stage,
+            leases_acquired: 0,
+            leases_released: 0,
+            cancellation_requested: false,
+            final_output_exposed: false,
+        }
+    }
+
+    /// Records an acquired verifier lease.
+    pub fn acquire_lease(&mut self) {
+        self.leases_acquired += 1;
+    }
+
+    /// Records a released verifier lease.
+    pub fn release_lease(&mut self) {
+        self.leases_released += 1;
+    }
+
+    /// Records cancellation before verifier cleanup completed.
+    pub fn request_cancellation(&mut self) {
+        self.cancellation_requested = true;
+    }
+
+    /// Records final output exposure.
+    pub fn expose_final_output(&mut self) {
+        self.final_output_exposed = true;
+    }
+
+    /// Converts the ledger into the stable finalizer proof checked by the verifier.
+    #[must_use]
+    pub const fn to_proof(&self) -> FinalizerProof {
+        FinalizerProof {
+            stage: self.stage,
+            leases_acquired: self.leases_acquired,
+            leases_released: self.leases_released,
+            cancellation_requested: self.cancellation_requested,
+            final_output_exposed: self.final_output_exposed,
+        }
+    }
+}
+
 /// Fail-closed verifier errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationError {
@@ -268,6 +346,16 @@ pub enum VerificationError {
         /// Configured maximum entry count.
         limit: usize,
     },
+    /// Final proof bundle is missing a mandatory verifier stage.
+    MissingProofStage {
+        /// Missing stage.
+        stage: VerificationStage,
+    },
+    /// Final proof bundle contains duplicate evidence for a verifier stage.
+    DuplicateProofStage {
+        /// Duplicated stage.
+        stage: VerificationStage,
+    },
     /// Proof bundle digest mismatch.
     ProofBundleDigestMismatch {
         /// Expected digest.
@@ -309,9 +397,10 @@ impl VerificationError {
                 VerificationStage::Manifest
             }
             Self::InvalidCommit { .. } => VerificationStage::Commit,
-            Self::TooManyProofEntries { .. } | Self::ProofBundleDigestMismatch { .. } => {
-                VerificationStage::ProofBundle
-            }
+            Self::TooManyProofEntries { .. }
+            | Self::MissingProofStage { .. }
+            | Self::DuplicateProofStage { .. }
+            | Self::ProofBundleDigestMismatch { .. } => VerificationStage::ProofBundle,
             Self::FinalizerLeaseLeak { .. } | Self::CancelledFinalExposure { .. } => {
                 VerificationStage::Finalizer
             }
@@ -349,6 +438,12 @@ impl VerificationError {
             Self::MerkleRootMismatch { .. } => "merkle root mismatch".to_string(),
             Self::TooManyProofEntries { count, limit } => {
                 format!("proof bundle entry count {count} exceeds verifier limit {limit}")
+            }
+            Self::MissingProofStage { stage } => {
+                format!("proof bundle missing {} evidence", stage.as_str())
+            }
+            Self::DuplicateProofStage { stage } => {
+                format!("proof bundle has duplicate {} evidence", stage.as_str())
             }
             Self::ProofBundleDigestMismatch { .. } => "proof bundle digest mismatch".to_string(),
             Self::FinalizerLeaseLeak { acquired, released } => {
@@ -575,6 +670,25 @@ impl AtpVerifier {
         ))
     }
 
+    /// Verifies a final proof bundle digest and mandatory stage coverage.
+    pub fn verify_final_proof_bundle(
+        &self,
+        bundle: &ProofBundleVerification,
+    ) -> Result<VerificationEvidence, VerificationError> {
+        let evidence = self.verify_proof_bundle(bundle)?;
+        self.verify_final_proof_stage_coverage(bundle)?;
+
+        Ok(VerificationEvidence::new(
+            VerificationStage::ProofBundle,
+            format!(
+                "entries={} required_stages={}",
+                bundle.entries.len(),
+                VerificationStage::required_final_proof_stages().len()
+            ),
+            evidence.digest,
+        ))
+    }
+
     /// Verifies finalizer and cancellation evidence.
     pub fn verify_finalizer_proof(
         &self,
@@ -598,6 +712,34 @@ impl AtpVerifier {
             ),
             None,
         ))
+    }
+
+    /// Verifies finalizer and cancellation evidence from a deterministic ledger.
+    pub fn verify_finalizer_ledger(
+        &self,
+        ledger: &VerifierFinalizerLedger,
+    ) -> Result<VerificationEvidence, VerificationError> {
+        self.verify_finalizer_proof(&ledger.to_proof())
+    }
+
+    fn verify_final_proof_stage_coverage(
+        &self,
+        bundle: &ProofBundleVerification,
+    ) -> Result<(), VerificationError> {
+        let mut seen = BTreeSet::new();
+        for entry in &bundle.entries {
+            if !seen.insert(entry.stage) {
+                return Err(VerificationError::DuplicateProofStage { stage: entry.stage });
+            }
+        }
+
+        for stage in VerificationStage::required_final_proof_stages() {
+            if !seen.contains(stage) {
+                return Err(VerificationError::MissingProofStage { stage: *stage });
+            }
+        }
+
+        Ok(())
     }
 
     fn verify_file_object(
@@ -886,6 +1028,96 @@ mod tests {
     }
 
     #[test]
+    fn final_proof_bundle_requires_stage_coverage() {
+        let verifier = AtpVerifier::default();
+        let merkle_root = MerkleRoot::new([8; 32]);
+        let incomplete = ProofBundleVerification {
+            merkle_root,
+            entries: vec![ProofBundleEntry {
+                stage: VerificationStage::ChunkHash,
+                digest: ContentId::from_bytes(b"chunk"),
+            }],
+            expected_digest: ContentId::from_bytes(b"placeholder"),
+        };
+        let incomplete = ProofBundleVerification {
+            expected_digest: proof_bundle_digest(&incomplete),
+            ..incomplete
+        };
+
+        let err = verifier
+            .verify_final_proof_bundle(&incomplete)
+            .expect_err("final proof must include all mandatory stages");
+
+        assert_eq!(err.stage(), VerificationStage::ProofBundle);
+        assert_eq!(
+            err.redacted_reason(),
+            "proof bundle missing object_content evidence"
+        );
+    }
+
+    #[test]
+    fn final_proof_bundle_rejects_duplicate_stage_even_with_fresh_digest() {
+        let verifier = AtpVerifier::default();
+        let entries = VerificationStage::required_final_proof_stages()
+            .iter()
+            .copied()
+            .chain(std::iter::once(VerificationStage::Commit))
+            .map(|stage| ProofBundleEntry {
+                stage,
+                digest: ContentId::from_bytes(stage.as_str().as_bytes()),
+            })
+            .collect::<Vec<_>>();
+        let bundle = ProofBundleVerification {
+            merkle_root: MerkleRoot::new([6; 32]),
+            entries,
+            expected_digest: ContentId::from_bytes(b"placeholder"),
+        };
+        let bundle = ProofBundleVerification {
+            expected_digest: proof_bundle_digest(&bundle),
+            ..bundle
+        };
+
+        let err = verifier
+            .verify_final_proof_bundle(&bundle)
+            .expect_err("duplicate stage evidence must fail closed");
+
+        assert_eq!(err.stage(), VerificationStage::ProofBundle);
+        assert_eq!(
+            err.redacted_reason(),
+            "proof bundle has duplicate commit evidence"
+        );
+    }
+
+    #[test]
+    fn final_proof_bundle_accepts_complete_unique_pipeline() {
+        let verifier = AtpVerifier::default();
+        let entries = VerificationStage::required_final_proof_stages()
+            .iter()
+            .copied()
+            .map(|stage| ProofBundleEntry {
+                stage,
+                digest: ContentId::from_bytes(stage.as_str().as_bytes()),
+            })
+            .collect::<Vec<_>>();
+        let bundle = ProofBundleVerification {
+            merkle_root: MerkleRoot::new([7; 32]),
+            entries,
+            expected_digest: ContentId::from_bytes(b"placeholder"),
+        };
+        let bundle = ProofBundleVerification {
+            expected_digest: proof_bundle_digest(&bundle),
+            ..bundle
+        };
+
+        let evidence = verifier
+            .verify_final_proof_bundle(&bundle)
+            .expect("complete final proof should verify");
+
+        assert_eq!(evidence.stage, VerificationStage::ProofBundle);
+        assert!(evidence.summary.contains("required_stages=7"));
+    }
+
+    #[test]
     fn finalizer_proof_rejects_leaks_and_cancelled_exposure() {
         let verifier = AtpVerifier::default();
 
@@ -912,6 +1144,45 @@ mod tests {
             .expect_err("cancelled final exposure must fail");
         assert_eq!(
             exposure.redacted_reason(),
+            "cancelled verifier exposed final output at commit"
+        );
+    }
+
+    #[test]
+    fn finalizer_ledger_proves_balanced_cleanup_after_cancellation() {
+        let verifier = AtpVerifier::default();
+        let mut ledger = VerifierFinalizerLedger::new(VerificationStage::Finalizer);
+        ledger.acquire_lease();
+        ledger.acquire_lease();
+        ledger.request_cancellation();
+        ledger.release_lease();
+        ledger.release_lease();
+
+        let evidence = verifier
+            .verify_finalizer_ledger(&ledger)
+            .expect("balanced cancelled cleanup should verify");
+
+        assert_eq!(evidence.stage, VerificationStage::Finalizer);
+        assert!(evidence.summary.contains("leases=2"));
+        assert!(evidence.summary.contains("cancellation_requested=true"));
+    }
+
+    #[test]
+    fn finalizer_ledger_rejects_cancelled_output_exposure() {
+        let verifier = AtpVerifier::default();
+        let mut ledger = VerifierFinalizerLedger::new(VerificationStage::Commit);
+        ledger.acquire_lease();
+        ledger.request_cancellation();
+        ledger.expose_final_output();
+        ledger.release_lease();
+
+        let err = verifier
+            .verify_finalizer_ledger(&ledger)
+            .expect_err("cancelled final exposure must fail");
+
+        assert_eq!(err.stage(), VerificationStage::Finalizer);
+        assert_eq!(
+            err.redacted_reason(),
             "cancelled verifier exposed final output at commit"
         );
     }
