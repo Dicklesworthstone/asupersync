@@ -1030,7 +1030,7 @@ impl SessionNegotiator {
     pub fn accept_client_hello(
         &mut self,
         hello: &ClientHello,
-        policy: &SessionPolicy,
+        policy: &mut SessionPolicy,
     ) -> Result<(ServerHello, Frame, SessionProofArtifact), SessionError> {
         self.expect_role(SessionRole::Server)?;
         self.expect_state(&SessionNegotiationState::Idle)?;
@@ -1286,11 +1286,12 @@ impl SessionError {
 
 fn build_server_hello(
     hello: &ClientHello,
-    policy: &SessionPolicy,
+    policy: &mut SessionPolicy,
 ) -> Result<ServerHello, SessionError> {
     validate_client_hello(hello, policy)?;
     let (selected_features, downgrade_warnings) = select_features(hello, policy)?;
     let accepted_grants = authorize_actions(hello, policy)?;
+    reserve_client_nonce(hello, policy)?;
     let session_id = derive_session_id(hello, &selected_features);
 
     Ok(ServerHello {
@@ -1322,6 +1323,17 @@ fn validate_client_hello(hello: &ClientHello, policy: &SessionPolicy) -> Result<
         return Err(SessionError::ManifestRootRequired);
     }
     Ok(())
+}
+
+fn reserve_client_nonce(
+    hello: &ClientHello,
+    policy: &mut SessionPolicy,
+) -> Result<(), SessionError> {
+    if policy.seen_nonces.insert(hello.nonce) {
+        Ok(())
+    } else {
+        Err(SessionError::ReplayedNonce)
+    }
 }
 
 fn validate_nonce(nonce: TransferNonce) -> Result<(), SessionError> {
@@ -1673,7 +1685,7 @@ mod tests {
 
     fn negotiate(
         hello: &ClientHello,
-        policy: &SessionPolicy,
+        policy: &mut SessionPolicy,
     ) -> Result<
         (
             NegotiatedSession,
@@ -1698,9 +1710,9 @@ mod tests {
     #[test]
     fn direct_first_contact_pairing_establishes_session() {
         let hello = hello_for(SessionContextKind::Direct);
-        let policy = policy_for(SessionContextKind::Direct);
+        let mut policy = policy_for(SessionContextKind::Direct);
 
-        let (session, client_proof, server_proof) = negotiate(&hello, &policy).unwrap();
+        let (session, client_proof, server_proof) = negotiate(&hello, &mut policy).unwrap();
 
         assert_eq!(session.context, SessionContextKind::Direct);
         assert!(
@@ -1744,13 +1756,13 @@ mod tests {
             .with_features(&[AtpFeature::EncryptionPolicy, feature])
             .with_requested_actions(&[action])
             .with_grants(vec![grant_for(bob, alice, &[action], context)]);
-            let policy = SessionPolicy::new(bob, 100)
+            let mut policy = SessionPolicy::new(bob, 100)
                 .with_supported_features(&[AtpFeature::EncryptionPolicy, feature])
                 .with_required_features(&[AtpFeature::EncryptionPolicy])
                 .with_required_actions(&[action])
                 .with_accepted_contexts(&[context]);
 
-            let (session, _client_proof, _server_proof) = negotiate(&hello, &policy).unwrap();
+            let (session, _client_proof, _server_proof) = negotiate(&hello, &mut policy).unwrap();
             assert_eq!(session.context, context);
             assert!(session.selected_features.contains(feature));
         }
@@ -1765,11 +1777,12 @@ mod tests {
             AtpFeature::H3Adapter,
             AtpFeature::WebTransportAdapter,
         ]);
-        let policy = policy_for(SessionContextKind::Direct)
+        let mut policy = policy_for(SessionContextKind::Direct)
             .with_supported_features(&[AtpFeature::EncryptionPolicy, AtpFeature::Repair]);
         let mut server = SessionNegotiator::server(policy.local_peer);
 
-        let (server_hello, _frame, proof) = server.accept_client_hello(&hello, &policy).unwrap();
+        let (server_hello, _frame, proof) =
+            server.accept_client_hello(&hello, &mut policy).unwrap();
 
         assert!(server_hello.selected_features.contains(AtpFeature::Repair));
         assert!(
@@ -1791,10 +1804,10 @@ mod tests {
     #[test]
     fn missing_required_feature_fails_closed() {
         let hello = hello_for(SessionContextKind::Direct).with_features(&[AtpFeature::Repair]);
-        let policy = policy_for(SessionContextKind::Direct);
+        let mut policy = policy_for(SessionContextKind::Direct);
         let mut server = SessionNegotiator::server(policy.local_peer);
 
-        let error = server.accept_client_hello(&hello, &policy).unwrap_err();
+        let error = server.accept_client_hello(&hello, &mut policy).unwrap_err();
 
         assert_eq!(error.code(), "missing_required_feature");
         assert_eq!(
@@ -1817,7 +1830,7 @@ mod tests {
         )
         .with_features(&[AtpFeature::EncryptionPolicy])
         .with_requested_actions(&[CapabilityAction::Write]);
-        let policy = policy_for(SessionContextKind::Direct);
+        let mut policy = policy_for(SessionContextKind::Direct);
 
         let expired = grant_for(
             bob,
@@ -1828,7 +1841,7 @@ mod tests {
         .with_validity(0, 50);
         let mut server = SessionNegotiator::server(policy.local_peer);
         let error = server
-            .accept_client_hello(&base.clone().with_grants(vec![expired]), &policy)
+            .accept_client_hello(&base.clone().with_grants(vec![expired]), &mut policy)
             .unwrap_err();
         assert_eq!(error.code(), "missing_grant_action");
 
@@ -1841,7 +1854,7 @@ mod tests {
         .revoked();
         let mut server = SessionNegotiator::server(policy.local_peer);
         let error = server
-            .accept_client_hello(&base.with_grants(vec![revoked]), &policy)
+            .accept_client_hello(&base.with_grants(vec![revoked]), &mut policy)
             .unwrap_err();
         assert_eq!(error.code(), "missing_grant_action");
     }
@@ -1849,10 +1862,28 @@ mod tests {
     #[test]
     fn replayed_nonce_is_rejected_before_authorization() {
         let hello = hello_for(SessionContextKind::Direct);
-        let policy = policy_for(SessionContextKind::Direct).with_seen_nonce(hello.nonce);
+        let mut policy = policy_for(SessionContextKind::Direct).with_seen_nonce(hello.nonce);
         let mut server = SessionNegotiator::server(policy.local_peer);
 
-        let error = server.accept_client_hello(&hello, &policy).unwrap_err();
+        let error = server.accept_client_hello(&hello, &mut policy).unwrap_err();
+
+        assert_eq!(error.code(), "replayed_nonce");
+    }
+
+    #[test]
+    fn successful_accept_records_nonce_for_future_replay_rejection() {
+        let hello = hello_for(SessionContextKind::Direct);
+        let mut policy = policy_for(SessionContextKind::Direct);
+        let mut server = SessionNegotiator::server(policy.local_peer);
+
+        server.accept_client_hello(&hello, &mut policy).unwrap();
+
+        assert!(policy.seen_nonces.contains(&hello.nonce));
+
+        let mut replay_server = SessionNegotiator::server(policy.local_peer);
+        let error = replay_server
+            .accept_client_hello(&hello, &mut policy)
+            .unwrap_err();
 
         assert_eq!(error.code(), "replayed_nonce");
     }
@@ -1874,7 +1905,7 @@ mod tests {
             [CapabilityAction::Write],
             scope,
         );
-        let policy = policy_for(SessionContextKind::Direct).require_manifest_binding();
+        let mut policy = policy_for(SessionContextKind::Direct).require_manifest_binding();
 
         let path_escalation = ClientHello::new(
             alice,
@@ -1890,7 +1921,7 @@ mod tests {
         .with_grants(vec![grant.clone()]);
         let mut server = SessionNegotiator::server(policy.local_peer);
         let error = server
-            .accept_client_hello(&path_escalation, &policy)
+            .accept_client_hello(&path_escalation, &mut policy)
             .unwrap_err();
         assert_eq!(error.code(), "missing_grant_action");
 
@@ -1908,7 +1939,7 @@ mod tests {
         .with_grants(vec![grant]);
         let mut server = SessionNegotiator::server(policy.local_peer);
         let error = server
-            .accept_client_hello(&object_escalation, &policy)
+            .accept_client_hello(&object_escalation, &mut policy)
             .unwrap_err();
         assert_eq!(error.code(), "missing_grant_action");
     }
@@ -1928,7 +1959,7 @@ mod tests {
     fn server_feature_confusion_is_rejected_by_client() {
         let hello =
             hello_for(SessionContextKind::Direct).with_features(&[AtpFeature::EncryptionPolicy]);
-        let policy = policy_for(SessionContextKind::Direct);
+        let mut policy = policy_for(SessionContextKind::Direct);
         let mut client = SessionNegotiator::client(hello.initiator);
         client.start_client_hello(&hello).unwrap();
 
