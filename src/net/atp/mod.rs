@@ -19,6 +19,7 @@ pub mod handshake;
 // TODO: Fix compilation issues in ATP network modules
 // pub mod chunk;
 // pub mod loss;
+pub mod datagram;
 pub mod path;
 #[path = "protocol/mod.rs"]
 pub mod protocol;
@@ -33,6 +34,7 @@ pub mod stun;
 // Re-export key types for H3 adapter
 pub use protocol::{AtpFrame, FrameType};
 
+pub use datagram::*;
 pub use handshake::*;
 // pub use loss::*;
 pub use path::*;
