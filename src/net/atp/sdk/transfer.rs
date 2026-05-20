@@ -2,6 +2,8 @@
 
 use crate::cx::Cx;
 use crate::net::atp::protocol::{AtpOutcome, IdempotencyKey, AtpError, DiskError};
+use crate::runtime::io_op::IoOp;
+use crate::runtime::state::RuntimeState;
 use super::{
     AtpSession, TransferId, TransferProgress, TransferPhase, SessionConfig,
     SdkMode, TransferPolicy
@@ -472,8 +474,22 @@ impl AtpSession {
             });
         };
 
-        // Start the background task
-        let _task_handle = cx.spawn(background_task);
+        // Create obligation for background transfer task to ensure quiescence tracking
+        let mut task_obligation = IoOp::submit(
+            cx.runtime_state(),
+            cx.current_task(),
+            cx.current_region(),
+            Some(format!("ATP transfer background task {}", transfer_id)),
+        ).map_err(|_| AtpError::Platform(crate::net::atp::protocol::PlatformError::InternalError))?;
+
+        // Start the background task with obligation tracking
+        let background_task_with_obligation = async move {
+            background_task.await;
+            // Complete obligation when background task finishes
+            task_obligation.complete(cx.runtime_state()).ok();
+        };
+
+        let _task_handle = cx.spawn(background_task_with_obligation);
 
         // Send initial progress
         let initial_progress = TransferProgress {
@@ -720,8 +736,22 @@ impl AtpSession {
             });
         };
 
-        // Start the background task
-        let _task_handle = cx.spawn(background_task);
+        // Create obligation for background transfer task to ensure quiescence tracking
+        let mut task_obligation = IoOp::submit(
+            cx.runtime_state(),
+            cx.current_task(),
+            cx.current_region(),
+            Some(format!("ATP send background task {}", transfer_id)),
+        ).map_err(|_| AtpError::Platform(crate::net::atp::protocol::PlatformError::InternalError))?;
+
+        // Start the background task with obligation tracking
+        let background_task_with_obligation = async move {
+            background_task.await;
+            // Complete obligation when background task finishes
+            task_obligation.complete(cx.runtime_state()).ok();
+        };
+
+        let _task_handle = cx.spawn(background_task_with_obligation);
 
         AtpOutcome::Ok(ActiveTransfer {
             transfer_id: transfer_id.clone(),
