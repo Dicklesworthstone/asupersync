@@ -22,7 +22,7 @@ pub mod profiles;
 pub mod bulk_file;
 pub mod dedupe;
 // TODO: Fix syntax errors in these modules
-// pub mod sync_tree;
+pub mod sync_tree;
 // pub mod media;
 // pub mod sparse_image;
 pub mod artifact;

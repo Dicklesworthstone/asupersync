@@ -16,10 +16,7 @@ use asupersync::atp::{
     proof::{AtpProofBundle, AtpProofBundleBuilder, ChunkBitmap},
     stream_object::{StreamManifest, StreamEpoch, EpochState, ByteRange},
 };
-use asupersync::net::atp::chunk::{
-    ChunkingProfile, BulkFileProfile, SyncTreeProfile, MediaProfile,
-    SparseImageProfile, ArtifactProfile, StreamProfile,
-};
+use asupersync::net::atp::chunk::ChunkingProfile;
 use std::collections::BTreeMap;
 
 /// Test comprehensive ATP-C object graph creation with all object kinds

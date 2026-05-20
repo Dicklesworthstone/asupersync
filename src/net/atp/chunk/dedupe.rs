@@ -11,10 +11,40 @@ use crate::bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// Parameters for content-defined chunking.
+#[derive(Debug, Clone)]
+pub struct CdcParameters {
+    pub window_size: usize,
+    pub target_chunk_size: u64,
+    pub min_chunk_size: u64,
+    pub max_chunk_size: u64,
+}
+
+/// Criteria for chunk reuse in deduplication.
+#[derive(Debug, Clone)]
+pub struct ChunkReuseCriteria {
+    pub content_hash_match: bool,
+    pub size_match: bool,
+    pub profile_match: bool,
+}
+
+/// Verification data for chunk integrity.
+#[derive(Debug, Clone)]
+pub struct ChunkVerification {
+    pub content_hash: [u8; 32],
+    pub size_bytes: u64,
+    pub verification_method: String,
+}
+
 /// Content-defined chunking engine with rolling hash boundary detection.
 pub struct CdcEngine;
 
 impl CdcEngine {
+    /// Create a new CDC engine.
+    pub fn new() -> Self {
+        Self
+    }
+
     /// Compute content-defined chunk boundaries using rolling hash.
     pub fn compute_cdc_boundaries(
         data: &[u8],
@@ -138,11 +168,13 @@ pub struct ChunkIdentity {
     /// SHA-256 hash of chunk content.
     pub content_hash: [u8; 32],
     /// Chunk size in bytes.
-    pub size: u64,
+    pub size_bytes: u64,
     /// Chunking algorithm/profile that produced this chunk.
     pub chunking_profile: String,
-    /// Optional context hash for capability scoping.
-    pub context_hash: Option<[u8; 32]>,
+    /// Capability scope for authorized access.
+    pub capability_scope: String,
+    /// Chunk verification data.
+    pub verification: ChunkVerification,
 }
 
 impl ChunkIdentity {

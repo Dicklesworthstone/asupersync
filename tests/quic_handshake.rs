@@ -1,18 +1,24 @@
 //! Integration tests for QUIC handshake implementation
 
+use asupersync::bytes::Bytes;
+use asupersync::cx::Cx;
 use asupersync::net::atp::handshake::{
-    QuicHandshakeMachine, EndpointRole, HandshakeState, QuicVersion,
-    VersionNegotiationPacket, VersionNegotiation,
-    RetryPacket, RetryTokenHandler,
-    TransportParameters, TransportParamId,
-    KeySchedule, KeyMaterial, KeyDerivation, PacketSpace,
-    HandshakeTracer, TraceLevel, HandshakeEvent,
+    EndpointRole, HandshakeEvent, HandshakeState, HandshakeTracer, KeyDerivation, KeySchedule,
+    PacketSpace, QuicHandshakeMachine, QuicVersion, RetryPacket, RetryTokenHandler, TraceLevel,
+    TransportParamId, TransportParameters, VersionNegotiation, VersionNegotiationPacket,
 };
 use asupersync::net::atp::quic::AtpPacketProtectionConfig;
-use asupersync::cx::Cx;
-use asupersync::bytes::Bytes;
-use std::time::Duration;
+use asupersync::{Budget, RegionId, TaskId};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
+
+fn test_cx() -> Cx {
+    Cx::new(
+        RegionId::new_for_test(1, 0),
+        TaskId::new_for_test(1, 0),
+        Budget::INFINITE,
+    )
+}
 
 #[test]
 fn test_client_server_handshake_basic() {
@@ -21,10 +27,10 @@ fn test_client_server_handshake_basic() {
     let timeout = Duration::from_secs(30);
 
     let mut client = QuicHandshakeMachine::new(EndpointRole::Client, config.clone(), timeout);
-    let mut server = QuicHandshakeMachine::new(EndpointRole::Server, config, timeout);
+    let _server = QuicHandshakeMachine::new(EndpointRole::Server, config, timeout);
 
     // Start client handshake
-    let cx = Cx::root("test-handshake");
+    let cx = test_cx();
     let result = client.start(&cx, QuicVersion::V1 as u32);
     assert!(result.is_ok());
 
@@ -37,7 +43,11 @@ fn test_client_server_handshake_basic() {
     let traces = client.trace_events();
     assert_eq!(traces.len(), 1);
     match &traces[0] {
-        HandshakeEvent::Started { role, initial_version, .. } => {
+        HandshakeEvent::Started {
+            role,
+            initial_version,
+            ..
+        } => {
             assert_eq!(*role, EndpointRole::Client);
             assert_eq!(*initial_version, QuicVersion::V1 as u32);
         }
@@ -67,12 +77,21 @@ fn test_version_negotiation() {
     assert_eq!(decoded.supported_versions, supported_versions);
 
     // Test version selection
-    assert_eq!(packet.select_version(QuicVersion::V1 as u32), Some(QuicVersion::V1 as u32));
+    assert_eq!(
+        packet.select_version(QuicVersion::V1 as u32),
+        Some(QuicVersion::V1 as u32)
+    );
     assert_eq!(packet.select_version(0xabcdef00), Some(0x12345678)); // Should select highest
 
     // Test negotiation utilities
-    assert!(!VersionNegotiation::is_negotiation_needed(QuicVersion::V1 as u32, &supported_versions));
-    assert!(VersionNegotiation::is_negotiation_needed(0xabcdef00, &supported_versions));
+    assert!(!VersionNegotiation::is_negotiation_needed(
+        QuicVersion::V1 as u32,
+        &supported_versions
+    ));
+    assert!(VersionNegotiation::is_negotiation_needed(
+        0xabcdef00,
+        &supported_versions
+    ));
 }
 
 #[test]
@@ -84,7 +103,9 @@ fn test_retry_token_validation() {
     let original_dest_cid = b"original_connection_id";
 
     // Generate token
-    let token = handler.generate_token(client_addr, original_dest_cid).unwrap();
+    let token = handler
+        .generate_token(client_addr, original_dest_cid)
+        .unwrap();
     assert!(!token.is_empty());
 
     // Validate with correct parameters
@@ -132,8 +153,16 @@ fn test_retry_packet_integrity() {
 fn test_transport_parameters() {
     // Test client defaults
     let client_params = TransportParameters::client_defaults();
-    assert!(client_params.get_integer(TransportParamId::MaxIdleTimeout).is_some());
-    assert!(client_params.get_integer(TransportParamId::InitialMaxData).is_some());
+    assert!(
+        client_params
+            .get_integer(TransportParamId::MaxIdleTimeout)
+            .is_some()
+    );
+    assert!(
+        client_params
+            .get_integer(TransportParamId::InitialMaxData)
+            .is_some()
+    );
     assert!(!client_params.has_flag(TransportParamId::DisableActiveMigration));
 
     // Test custom parameters
@@ -143,18 +172,32 @@ fn test_transport_parameters() {
     params.set_flag(TransportParamId::DisableActiveMigration);
     params.set_bytes(
         TransportParamId::StatelessResetToken,
-        Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x23, 0x45, 0x67,
-                           0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98]),
+        Bytes::from_static(&[
+            0xde, 0xad, 0xbe, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc,
+            0xba, 0x98,
+        ]),
     );
 
     // Test encoding and decoding
     let encoded = params.encode().unwrap();
     let decoded = TransportParameters::decode(&encoded).unwrap();
 
-    assert_eq!(decoded.get_integer(TransportParamId::MaxIdleTimeout), Some(60000));
-    assert_eq!(decoded.get_integer(TransportParamId::InitialMaxData), Some(2048 * 1024));
+    assert_eq!(
+        decoded.get_integer(TransportParamId::MaxIdleTimeout),
+        Some(60000)
+    );
+    assert_eq!(
+        decoded.get_integer(TransportParamId::InitialMaxData),
+        Some(2048 * 1024)
+    );
     assert!(decoded.has_flag(TransportParamId::DisableActiveMigration));
-    assert_eq!(decoded.get_bytes(TransportParamId::StatelessResetToken).unwrap().len(), 16);
+    assert_eq!(
+        decoded
+            .get_bytes(TransportParamId::StatelessResetToken)
+            .unwrap()
+            .len(),
+        16
+    );
 
     // Test validation
     assert!(params.validate().is_ok());
@@ -165,7 +208,10 @@ fn test_transport_parameters() {
     assert!(invalid_params.validate().is_err());
 
     // Test timeout conversion
-    assert_eq!(params.max_idle_timeout(), Some(Duration::from_millis(60000)));
+    assert_eq!(
+        params.max_idle_timeout(),
+        Some(Duration::from_millis(60000))
+    );
 }
 
 #[test]
@@ -179,17 +225,24 @@ fn test_key_schedule_lifecycle() {
 
     // Install Initial keys
     let (local_initial, remote_initial) = KeyDerivation::derive_initial_keys(b"test_cid").unwrap();
-    schedule.install_initial_keys(local_initial, remote_initial).unwrap();
+    schedule
+        .install_initial_keys(local_initial, remote_initial)
+        .unwrap();
     assert!(schedule.keys_established(PacketSpace::Initial));
 
     // Install Handshake keys
-    let (local_handshake, remote_handshake) = KeyDerivation::derive_handshake_keys(b"handshake_secret").unwrap();
-    schedule.install_handshake_keys(local_handshake, remote_handshake).unwrap();
+    let (local_handshake, remote_handshake) =
+        KeyDerivation::derive_handshake_keys(b"handshake_secret").unwrap();
+    schedule
+        .install_handshake_keys(local_handshake, remote_handshake)
+        .unwrap();
     assert!(schedule.keys_established(PacketSpace::Handshake));
 
     // Install 1-RTT keys
     let (local_app, remote_app) = KeyDerivation::derive_application_keys(b"app_secret").unwrap();
-    schedule.install_application_keys(local_app, remote_app).unwrap();
+    schedule
+        .install_application_keys(local_app, remote_app)
+        .unwrap();
     assert!(schedule.keys_established(PacketSpace::Application));
 
     // Test key discard rules
@@ -213,8 +266,12 @@ fn test_key_update_lifecycle() {
     let mut schedule = KeySchedule::new();
 
     // Install 1-RTT keys
-    let (local_keys, remote_keys) = KeyDerivation::derive_application_keys(b"app_secret").unwrap();
-    schedule.install_application_keys(local_keys, remote_keys).unwrap();
+    let local_secret = [1u8; 32];
+    let remote_secret = [2u8; 32];
+    let (local_keys, remote_keys) = KeyDerivation::derive_application_keys(&local_secret).unwrap();
+    schedule
+        .install_application_keys(local_keys, remote_keys)
+        .unwrap();
 
     // Initial state
     assert_eq!(schedule.current_key_phase().0, 0);
@@ -222,7 +279,9 @@ fn test_key_update_lifecycle() {
     assert_eq!(schedule.key_update_count(), 0);
 
     // Initiate key update
-    schedule.initiate_key_update().unwrap();
+    schedule
+        .initiate_key_update(&local_secret, &remote_secret)
+        .unwrap();
     assert!(schedule.key_update_pending());
 
     // Commit key update
@@ -233,7 +292,11 @@ fn test_key_update_lifecycle() {
 
     // Cannot update without 1-RTT keys
     let mut empty_schedule = KeySchedule::new();
-    assert!(empty_schedule.initiate_key_update().is_err());
+    assert!(
+        empty_schedule
+            .initiate_key_update(&local_secret, &remote_secret)
+            .is_err()
+    );
 }
 
 #[test]
@@ -297,7 +360,7 @@ fn test_handshake_timeout() {
     let timeout = Duration::from_millis(10); // Very short timeout for testing
     let mut machine = QuicHandshakeMachine::new(EndpointRole::Client, config, timeout);
 
-    let cx = Cx::root("test-timeout");
+    let cx = test_cx();
     machine.start(&cx, QuicVersion::V1 as u32).unwrap();
 
     // Wait for timeout
@@ -312,7 +375,11 @@ fn test_handshake_timeout() {
 
     // Check that timeout was recorded in traces
     let traces = machine.trace_events();
-    assert!(traces.iter().any(|event| matches!(event, HandshakeEvent::Failed { .. })));
+    assert!(
+        traces
+            .iter()
+            .any(|event| matches!(event, HandshakeEvent::Failed { .. }))
+    );
 }
 
 #[test]
@@ -321,7 +388,7 @@ fn test_invalid_version_handling() {
     let timeout = Duration::from_secs(30);
     let mut machine = QuicHandshakeMachine::new(EndpointRole::Client, config, timeout);
 
-    let cx = Cx::root("test-invalid-version");
+    let cx = test_cx();
     let result = machine.start(&cx, 0x12345678); // Unsupported version
 
     assert!(result.is_err());
@@ -330,7 +397,10 @@ fn test_invalid_version_handling() {
     // Check error type
     match machine.state() {
         HandshakeState::Failed { error, .. } => {
-            assert!(matches!(error, asupersync::net::atp::handshake::HandshakeError::UnsupportedVersion { .. }));
+            assert!(matches!(
+                error,
+                asupersync::net::atp::handshake::HandshakeError::UnsupportedVersion { .. }
+            ));
         }
         _ => panic!("Expected failed state"),
     }
