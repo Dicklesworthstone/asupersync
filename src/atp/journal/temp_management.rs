@@ -385,7 +385,7 @@ impl TempPathManager {
     // Private helper methods
 
     fn generate_temp_filename(&self, operation_id: &str) -> Result<String, TempManagementError> {
-        let counter = self.counter.fetch_add(1, Ordering::SeqCst);
+        let counter = self.counter.fetch_add(1, Ordering::Relaxed);
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
