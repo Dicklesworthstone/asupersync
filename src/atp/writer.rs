@@ -420,6 +420,10 @@ impl AtpWriter {
 
     /// Get the current resume token for this writer.
     pub fn resume_token(&self) -> Option<ResumeToken> {
+        if let Some(resume_token) = &self.resume_token {
+            return Some(resume_token.clone());
+        }
+
         if self.config.enable_resume && self.transfer_id.is_some() {
             Some(ResumeToken {
                 transfer_id: self.transfer_id.unwrap(),

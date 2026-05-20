@@ -71,6 +71,11 @@ impl H3Session {
         &self.state
     }
 
+    /// Get the frame codec bound to this session.
+    pub fn codec(&self) -> &H3FrameCodec {
+        &self.codec
+    }
+
     /// Check if the session is active.
     pub fn is_active(&self) -> bool {
         matches!(self.state, SessionState::Active)
