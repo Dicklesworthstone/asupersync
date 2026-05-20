@@ -443,7 +443,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active (broad RFC6455 conformance registry wired; runtime e2e coverage remains lane-specific) | Mixed | Medium |
 | HTTP stack (HTTP/1.1 + HTTP/2) | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/h1/`, `src/http/h2/`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
 | QUIC + HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs` (native core feature surfaces exposed via `quic`/`http3`; historical wrapper sources in `src/net/quic/` and `src/http/h3/` remain parked outside the core feature graph; support matrix: `artifacts/http3_qpack_support_matrix_v1.json`) | Feature-gated | Active | Mixed | Medium |
-| Web framework (router/extractors/middleware/request-region; `Sse` finite bounded batch; `StreamingSse` pull API has request-region E2E proof and HTTP/1 transport drain proof) | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | In progress | Active | Mixed | Medium |
+| Web framework primitives (router/extractors/local middleware/request-region/SSE helpers; not axum/warp parity) | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | Partial native primitives | Active (bounded) | Mixed | Medium |
 | gRPC | `tonic` + `prost` + `tower` + `hyper` | `src/grpc/` | Built-in | Active | Mixed | Medium |
 | Database clients | `tokio-postgres`, `mysql_async`, `sqlx` | `src/database/{postgres,mysql,sqlite}.rs` | Feature-gated | Active | Mixed | Medium |
 | Messaging clients | async Redis/NATS/Kafka crates | `src/messaging/{redis,nats,kafka}.rs` | In progress | Early | Mixed | Medium |
@@ -457,6 +457,17 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | Tokio-locked third-party crates | crates that require Tokio runtime traits directly | boundary adapters via service/runtime integration points | Adapter needed | N/A | N/A | High |
 
 This map is about capability coverage, not API compatibility. Asupersync intentionally uses a different model centered on `Cx`, regions, explicit cancellation, and deterministic replay.
+
+Web framework status is deliberately bounded. `src/web/` contains a lightweight
+router, typed extractors, response conversion, local `Handler` middleware
+wrappers, request-region helpers, health/static/multipart/session/security
+utilities, and bounded `Sse` / `StreamingSse` surfaces. It is not an
+axum/warp/tower-http-compatible framework: handlers operate on Asupersync's
+lightweight `Request` / `Response` types, middleware wraps the local `Handler`
+trait rather than Tower layers, async handlers use explicit `Cx`-aware wrappers,
+and request-region support is not a full server-integrated async request
+lifecycle. Treat this as native web primitives on top of the HTTP and service
+modules, not framework parity.
 
 Filesystem status is deliberately conservative. `src/fs/` currently exposes
 `File`, buffered readers/writers, metadata, directory/path helpers,
