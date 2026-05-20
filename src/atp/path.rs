@@ -80,6 +80,47 @@ impl PathKind {
         Self::MasqueConnectUdp,
         Self::OfflineMailbox,
     ];
+
+    /// Coarse family used by path diagnostics and selection explanations.
+    #[must_use]
+    pub const fn family(self) -> PathFamily {
+        match self {
+            Self::LanMulticast
+            | Self::ExplicitPublicUdp
+            | Self::PublicIpv6
+            | Self::NatPunchedUdp => PathFamily::Direct,
+            Self::TailscaleIp => PathFamily::Tailscale,
+            Self::AtpRelayUdp | Self::AtpRelayTcpTls443 | Self::MasqueConnectUdp => {
+                PathFamily::Relay
+            }
+            Self::OfflineMailbox => PathFamily::OfflineMailbox,
+        }
+    }
+
+    /// Whether this candidate is a direct peer-to-peer route.
+    #[must_use]
+    pub const fn is_direct(self) -> bool {
+        matches!(self.family(), PathFamily::Direct)
+    }
+
+    /// Whether this candidate uses ATP-owned or MASQUE-style relay transport.
+    #[must_use]
+    pub const fn is_relay(self) -> bool {
+        matches!(self.family(), PathFamily::Relay)
+    }
+}
+
+/// Coarse route family used in path doctor and path trace output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PathFamily {
+    /// Direct peer-to-peer path.
+    Direct,
+    /// Optional Tailscale/private-network path.
+    Tailscale,
+    /// Relay-backed online path.
+    Relay,
+    /// Store-and-forward offline mailbox path.
+    OfflineMailbox,
 }
 
 /// Security and privacy properties of a candidate path.
@@ -373,6 +414,80 @@ pub struct PathLoserCleanup {
     pub drained: bool,
 }
 
+/// Deterministic explanation for the current path-race selection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathSelectionReason {
+    /// Direct LAN/public IPv6/public UDP/NAT-punched path won.
+    DirectCandidateValidated,
+    /// Tailscale candidate won; Tailscale stays optional.
+    TailscaleCandidateValidated,
+    /// Relay candidate won after direct/private paths did not win first.
+    RelayFallbackValidated,
+    /// Offline mailbox path accepted store-and-forward delivery.
+    OfflineMailboxAccepted,
+    /// No candidate has reached a terminal state yet.
+    RaceStillPending,
+    /// Every candidate is terminal and none succeeded.
+    NoSuccessfulCandidate,
+    /// Internal invariant breach: winner id no longer maps to a candidate.
+    MissingWinnerCandidate,
+}
+
+impl PathSelectionReason {
+    /// Stable machine-readable reason code for logs and doctor output.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::DirectCandidateValidated => "direct_candidate_validated",
+            Self::TailscaleCandidateValidated => "tailscale_candidate_validated",
+            Self::RelayFallbackValidated => "relay_fallback_validated",
+            Self::OfflineMailboxAccepted => "offline_mailbox_accepted",
+            Self::RaceStillPending => "race_still_pending",
+            Self::NoSuccessfulCandidate => "no_successful_candidate",
+            Self::MissingWinnerCandidate => "missing_winner_candidate",
+        }
+    }
+}
+
+/// Path-race snapshot for doctor, trace, and deterministic test assertions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathDiagnosticSnapshot {
+    /// Winning candidate, if any.
+    pub winner: Option<PathCandidateId>,
+    /// Winning path kind, if the winner is still present.
+    pub selected_kind: Option<PathKind>,
+    /// Why this race is currently in its selection state.
+    pub reason: PathSelectionReason,
+    /// Total candidates in the race.
+    pub candidate_count: usize,
+    /// Candidates that are still actively racing.
+    pub racing_count: usize,
+    /// Candidates that succeeded before loser draining.
+    pub success_count: usize,
+    /// Candidates that failed.
+    pub failure_count: usize,
+    /// Candidates that were cancelled without becoming drained losers.
+    pub cancelled_count: usize,
+    /// Candidates drained because a different path won.
+    pub drained_loser_count: usize,
+    /// Direct path candidates.
+    pub direct_count: usize,
+    /// Tailscale path candidates.
+    pub tailscale_count: usize,
+    /// Relay path candidates.
+    pub relay_count: usize,
+    /// Offline mailbox path candidates.
+    pub mailbox_count: usize,
+}
+
+impl PathDiagnosticSnapshot {
+    /// Coarse family for the selected path, if any.
+    #[must_use]
+    pub fn selected_family(self) -> Option<PathFamily> {
+        self.selected_kind.map(PathKind::family)
+    }
+}
+
 /// Errors from the deterministic path-race model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathRaceError {
@@ -500,6 +615,61 @@ impl PathRace {
         &self.cleanup
     }
 
+    /// Build a deterministic diagnostic snapshot for path doctor/trace output.
+    #[must_use]
+    pub fn diagnostic_snapshot(&self) -> PathDiagnosticSnapshot {
+        let mut snapshot = PathDiagnosticSnapshot {
+            winner: self.winner,
+            selected_kind: self
+                .winner
+                .and_then(|winner| self.candidates.get(&winner).map(|candidate| candidate.kind)),
+            reason: PathSelectionReason::RaceStillPending,
+            candidate_count: self.candidates.len(),
+            racing_count: 0,
+            success_count: 0,
+            failure_count: 0,
+            cancelled_count: 0,
+            drained_loser_count: 0,
+            direct_count: 0,
+            tailscale_count: 0,
+            relay_count: 0,
+            mailbox_count: 0,
+        };
+
+        for candidate in self.candidates.values() {
+            match candidate.kind.family() {
+                PathFamily::Direct => snapshot.direct_count += 1,
+                PathFamily::Tailscale => snapshot.tailscale_count += 1,
+                PathFamily::Relay => snapshot.relay_count += 1,
+                PathFamily::OfflineMailbox => snapshot.mailbox_count += 1,
+            }
+
+            match candidate.state {
+                PathAttemptState::Pending => {}
+                PathAttemptState::Racing => snapshot.racing_count += 1,
+                PathAttemptState::Succeeded(_) => snapshot.success_count += 1,
+                PathAttemptState::Failed(_) => snapshot.failure_count += 1,
+                PathAttemptState::Cancelled(_) => snapshot.cancelled_count += 1,
+                PathAttemptState::DrainedLoser { .. } => snapshot.drained_loser_count += 1,
+            }
+        }
+
+        snapshot.reason = match (snapshot.winner, snapshot.selected_kind) {
+            (Some(_), Some(kind)) => match kind.family() {
+                PathFamily::Direct => PathSelectionReason::DirectCandidateValidated,
+                PathFamily::Tailscale => PathSelectionReason::TailscaleCandidateValidated,
+                PathFamily::Relay => PathSelectionReason::RelayFallbackValidated,
+                PathFamily::OfflineMailbox => PathSelectionReason::OfflineMailboxAccepted,
+            },
+            (Some(_), None) => PathSelectionReason::MissingWinnerCandidate,
+            (None, None) if self.all_terminal() => PathSelectionReason::NoSuccessfulCandidate,
+            (None, None) => PathSelectionReason::RaceStillPending,
+            (None, Some(_)) => PathSelectionReason::MissingWinnerCandidate,
+        };
+
+        snapshot
+    }
+
     /// Return true when every candidate is terminal.
     #[must_use]
     pub fn all_terminal(&self) -> bool {
@@ -603,6 +773,24 @@ mod tests {
     }
 
     #[test]
+    fn path_family_classifies_direct_relay_tailscale_and_mailbox() {
+        assert_eq!(PathKind::LanMulticast.family(), PathFamily::Direct);
+        assert_eq!(PathKind::ExplicitPublicUdp.family(), PathFamily::Direct);
+        assert_eq!(PathKind::PublicIpv6.family(), PathFamily::Direct);
+        assert_eq!(PathKind::NatPunchedUdp.family(), PathFamily::Direct);
+        assert_eq!(PathKind::TailscaleIp.family(), PathFamily::Tailscale);
+        assert_eq!(PathKind::AtpRelayUdp.family(), PathFamily::Relay);
+        assert_eq!(PathKind::AtpRelayTcpTls443.family(), PathFamily::Relay);
+        assert_eq!(PathKind::MasqueConnectUdp.family(), PathFamily::Relay);
+        assert_eq!(
+            PathKind::OfflineMailbox.family(),
+            PathFamily::OfflineMailbox
+        );
+        assert!(PathKind::PublicIpv6.is_direct());
+        assert!(PathKind::AtpRelayTcpTls443.is_relay());
+    }
+
+    #[test]
     fn first_success_wins_and_active_losers_are_drained() {
         let direct = PathCandidateId::new(1);
         let relay = PathCandidateId::new(2);
@@ -639,6 +827,17 @@ mod tests {
             race.candidate(tailscale).expect("tailscale").state,
             PathAttemptState::DrainedLoser { winner, .. } if winner == relay
         ));
+
+        let snapshot = race.diagnostic_snapshot();
+        assert_eq!(snapshot.winner, Some(relay));
+        assert_eq!(snapshot.selected_kind, Some(PathKind::AtpRelayUdp));
+        assert_eq!(snapshot.reason, PathSelectionReason::RelayFallbackValidated);
+        assert_eq!(snapshot.reason.code(), "relay_fallback_validated");
+        assert_eq!(snapshot.selected_family(), Some(PathFamily::Relay));
+        assert_eq!(snapshot.direct_count, 1);
+        assert_eq!(snapshot.tailscale_count, 1);
+        assert_eq!(snapshot.relay_count, 1);
+        assert_eq!(snapshot.drained_loser_count, 2);
     }
 
     #[test]
@@ -663,6 +862,11 @@ mod tests {
         assert_eq!(race.winner(), None);
         assert!(race.all_terminal());
         assert!(race.cleanup_records().is_empty());
+
+        let snapshot = race.diagnostic_snapshot();
+        assert_eq!(snapshot.reason, PathSelectionReason::NoSuccessfulCandidate);
+        assert_eq!(snapshot.failure_count, 2);
+        assert_eq!(snapshot.selected_kind, None);
     }
 
     #[test]
@@ -692,6 +896,33 @@ mod tests {
             race.candidate(relay).expect("relay").state,
             PathAttemptState::DrainedLoser { winner, .. } if winner == direct
         ));
+
+        let snapshot = race.diagnostic_snapshot();
+        assert_eq!(
+            snapshot.reason,
+            PathSelectionReason::DirectCandidateValidated
+        );
+        assert_eq!(snapshot.selected_kind, Some(PathKind::NatPunchedUdp));
+        assert_eq!(snapshot.selected_family(), Some(PathFamily::Direct));
+    }
+
+    #[test]
+    fn diagnostic_snapshot_reports_pending_race() {
+        let mut race = PathRace::new();
+        race.add_candidate(candidate(1, PathKind::PublicIpv6))
+            .expect("ipv6 candidate");
+        race.add_candidate(candidate(2, PathKind::TailscaleIp))
+            .expect("tailscale candidate");
+        race.start_candidate(PathCandidateId::new(1))
+            .expect("start ipv6");
+
+        let snapshot = race.diagnostic_snapshot();
+        assert_eq!(snapshot.reason, PathSelectionReason::RaceStillPending);
+        assert_eq!(snapshot.candidate_count, 2);
+        assert_eq!(snapshot.racing_count, 1);
+        assert_eq!(snapshot.direct_count, 1);
+        assert_eq!(snapshot.tailscale_count, 1);
+        assert_eq!(snapshot.selected_kind, None);
     }
 
     #[test]
