@@ -2,7 +2,7 @@
 
 use super::{AtpH3Error, AtpH3Result};
 use crate::net::atp::protocol::{AtpFrame, FrameType};
-use std::io::{Read, Write};
+// Remove unused std::io imports
 
 /// WebTransport frame type identifiers for ATP frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,9 +31,10 @@ impl WebTransportFrameType {
             FrameType::Repair => Ok(Self::Repair),
             FrameType::Session => Ok(Self::Session),
             FrameType::Manifest => Ok(Self::Manifest),
-            _ => Err(AtpH3Error::UnsupportedFeature(
-                format!("ATP frame type {:?} cannot be mapped to WebTransport", frame_type)
-            )),
+            _ => Err(AtpH3Error::UnsupportedFeature(format!(
+                "ATP frame type {:?} cannot be mapped to WebTransport",
+                frame_type
+            ))),
         }
     }
 
@@ -87,9 +88,11 @@ impl H3FrameCodec {
         let atp_payload = self.serialize_atp_frame(frame)?;
 
         if atp_payload.len() > self.max_frame_size {
-            return Err(AtpH3Error::Codec(
-                format!("Frame size {} exceeds maximum {}", atp_payload.len(), self.max_frame_size)
-            ));
+            return Err(AtpH3Error::Codec(format!(
+                "Frame size {} exceeds maximum {}",
+                atp_payload.len(),
+                self.max_frame_size
+            )));
         }
 
         let mut encoded = Vec::with_capacity(5 + atp_payload.len());
@@ -111,7 +114,7 @@ impl H3FrameCodec {
     pub fn decode_atp_frame(&self, data: &[u8]) -> AtpH3Result<AtpFrame> {
         if data.len() < 5 {
             return Err(AtpH3Error::Codec(
-                "Frame too short: missing header".to_string()
+                "Frame too short: missing header".to_string(),
             ));
         }
 
@@ -124,28 +127,36 @@ impl H3FrameCodec {
             0x04 => WebTransportFrameType::Repair,
             0x05 => WebTransportFrameType::Session,
             0x06 => WebTransportFrameType::Manifest,
-            _ => return Err(AtpH3Error::Codec(
-                format!("Unknown WebTransport frame type: 0x{:02x}", wt_frame_type)
-            )),
+            _ => {
+                return Err(AtpH3Error::Codec(format!(
+                    "Unknown WebTransport frame type: 0x{:02x}",
+                    wt_frame_type
+                )));
+            }
         };
 
         // Read length
         let length_bytes = &data[1..5];
         let length = u32::from_be_bytes([
-            length_bytes[0], length_bytes[1],
-            length_bytes[2], length_bytes[3]
+            length_bytes[0],
+            length_bytes[1],
+            length_bytes[2],
+            length_bytes[3],
         ]) as usize;
 
         if data.len() < 5 + length {
-            return Err(AtpH3Error::Codec(
-                format!("Frame truncated: expected {} bytes, got {}", 5 + length, data.len())
-            ));
+            return Err(AtpH3Error::Codec(format!(
+                "Frame truncated: expected {} bytes, got {}",
+                5 + length,
+                data.len()
+            )));
         }
 
         if length > self.max_frame_size {
-            return Err(AtpH3Error::Codec(
-                format!("Frame too large: {} bytes exceeds maximum {}", length, self.max_frame_size)
-            ));
+            return Err(AtpH3Error::Codec(format!(
+                "Frame too large: {} bytes exceeds maximum {}",
+                length, self.max_frame_size
+            )));
         }
 
         // Extract ATP frame payload
@@ -167,13 +178,17 @@ impl H3FrameCodec {
             FrameType::Session => Ok(b"ATP-SESSION".to_vec()),
             FrameType::Manifest => Ok(b"ATP-MANIFEST".to_vec()),
             _ => Err(AtpH3Error::Codec(
-                "Unsupported ATP frame type for serialization".to_string()
+                "Unsupported ATP frame type for serialization".to_string(),
             )),
         }
     }
 
     /// Deserialize bytes to an ATP frame (placeholder implementation).
-    fn deserialize_atp_frame(&self, payload: &[u8], frame_type: FrameType) -> AtpH3Result<AtpFrame> {
+    fn deserialize_atp_frame(
+        &self,
+        payload: &[u8],
+        frame_type: FrameType,
+    ) -> AtpH3Result<AtpFrame> {
         // TODO: Implement proper ATP frame deserialization
         // This is a placeholder that would integrate with the actual ATP protocol codec
         let _payload_str = std::str::from_utf8(payload)
@@ -181,20 +196,21 @@ impl H3FrameCodec {
 
         // Create a placeholder ATP frame - this would be replaced with actual ATP frame construction
         match frame_type {
-            FrameType::Control |
-            FrameType::Data |
-            FrameType::Proof |
-            FrameType::Repair |
-            FrameType::Session |
-            FrameType::Manifest => {
+            FrameType::Control
+            | FrameType::Data
+            | FrameType::Proof
+            | FrameType::Repair
+            | FrameType::Session
+            | FrameType::Manifest => {
                 // Placeholder: return a mock ATP frame
                 // In reality, this would parse the payload and construct the appropriate ATP frame
                 AtpFrame::new_placeholder(frame_type)
                     .map_err(|e| AtpH3Error::Codec(format!("Failed to create ATP frame: {}", e)))
             }
-            _ => Err(AtpH3Error::Codec(
-                format!("Cannot deserialize unsupported frame type: {:?}", frame_type)
-            )),
+            _ => Err(AtpH3Error::Codec(format!(
+                "Cannot deserialize unsupported frame type: {:?}",
+                frame_type
+            ))),
         }
     }
 

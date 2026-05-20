@@ -32,7 +32,7 @@ pub use protocol::{AtpFrame, FrameType};
 
 // pub use loss::*;
 pub use path::*;
-pub use protocol::*;
+// pub use protocol::*;  // Individual types imported above
 // pub use quic::*;
 // pub use sdk::*;
 
