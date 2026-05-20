@@ -453,13 +453,27 @@ impl AtpLossDetector {
 
             if is_lost {
                 lost_bytes += packet.bytes;
-                lost_packets.push(LostPacketInfo {
-                    packet_number: packet.packet_number,
-                    bytes: packet.bytes,
-                    sent_time_micros: packet.time_sent_micros,
-                    detected_time_micros: now_micros,
-                    reason: loss_reason.unwrap(),
-                });
+                if let Some(reason) = loss_reason {
+                    lost_packets.push(LostPacketInfo {
+                        packet_number: packet.packet_number,
+                        bytes: packet.bytes,
+                        sent_time_micros: packet.time_sent_micros,
+                        detected_time_micros: now_micros,
+                        reason,
+                    });
+                } else {
+                    // Edge case: packet marked as lost but no specific reason set
+                    // Fall back to time threshold as a safe default
+                    lost_packets.push(LostPacketInfo {
+                        packet_number: packet.packet_number,
+                        bytes: packet.bytes,
+                        sent_time_micros: packet.time_sent_micros,
+                        detected_time_micros: now_micros,
+                        reason: LossReason::TimeThreshold {
+                            threshold_micros: time_threshold,
+                        },
+                    });
+                }
             } else {
                 remaining_packets.push_back(packet);
             }
