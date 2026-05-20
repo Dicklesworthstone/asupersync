@@ -53,42 +53,40 @@ impl AtpFrameCodec {
         self.decode_state = DecodeState::Header;
     }
 
-    /// Decode frame header from buffer
+    /// Decode frame header from buffer (zero-copy optimization)
     fn decode_header(buf: &mut BytesMut) -> Result<Option<FrameHeader>, FrameError> {
-        // Clone buffer to avoid partial consumption on failure
-        let mut temp_buf = buf.clone();
+        // First pass: check if we have enough bytes for complete header without consuming
+        let original_len = buf.len();
+        let mut cursor = 0;
 
-        // Version (varint)
-        let version_varint = match VarInt::decode(&mut temp_buf) {
-            Ok(Some(v)) => v,
-            Ok(None) => return Ok(None), // Need more data
-            Err(e) => return Err(e.into()),
+        // Helper to try parsing varint at cursor position
+        let try_parse_varint = |buf: &[u8], pos: &mut usize| -> Option<VarInt> {
+            if *pos >= buf.len() {
+                return None;
+            }
+
+            let mut temp = BytesMut::from(&buf[*pos..]);
+            if let Ok(Some(varint)) = VarInt::decode(&mut temp) {
+                *pos += (buf.len() - *pos) - temp.len();
+                Some(varint)
+            } else {
+                None
+            }
         };
 
+        // Parse version
+        let version_varint = try_parse_varint(buf, &mut cursor)?;
         let version = ProtocolVersion(version_varint.value() as u32);
-
-        // Validate version
         if version != ProtocolVersion::V0 {
             return Err(FrameError::UnsupportedVersion(version.0));
         }
 
-        // Frame type (varint)
-        let frame_type_varint = match VarInt::decode(&mut temp_buf) {
-            Ok(Some(v)) => v,
-            Ok(None) => return Ok(None), // Need more data
-            Err(e) => return Err(e.into()),
-        };
-
+        // Parse frame type
+        let frame_type_varint = try_parse_varint(buf, &mut cursor)?;
         let frame_type = FrameType::from_varint(frame_type_varint)?;
 
-        // Payload length (varint)
-        let payload_length = match VarInt::decode(&mut temp_buf) {
-            Ok(Some(v)) => v,
-            Ok(None) => return Ok(None), // Need more data
-            Err(e) => return Err(e.into()),
-        };
-
-        // Validate payload length
+        // Parse payload length
+        let payload_length = try_parse_varint(buf, &mut cursor)?;
         if payload_length.value() > MAX_FRAME_SIZE {
             return Err(FrameError::FrameTooLarge {
                 size: payload_length.value(),
@@ -96,37 +94,19 @@ impl AtpFrameCodec {
             });
         }
 
-        // Extension count (varint)
-        let extension_count = match VarInt::decode(&mut temp_buf) {
-            Ok(Some(v)) => v,
-            Ok(None) => return Ok(None), // Need more data
-            Err(e) => return Err(e.into()),
-        };
-
-        // Bounds check extension count to prevent DoS
+        // Parse extension count
+        let extension_count = try_parse_varint(buf, &mut cursor)?;
         if extension_count.value() > MAX_EXTENSION_COUNT {
             return Err(FrameError::ExtensionTooLarge {
                 size: extension_count.value(),
             });
         }
 
-        // Extensions
+        // Parse extensions
         let mut extensions = HashMap::new();
-
         for _ in 0..extension_count.value() {
-            // Extension ID (varint)
-            let ext_id = match VarInt::decode(&mut temp_buf) {
-                Ok(Some(v)) => v.value() as u16,
-                Ok(None) => return Ok(None), // Need more data
-                Err(e) => return Err(e.into()),
-            };
-
-            // Extension data length (varint)
-            let ext_len = match VarInt::decode(&mut temp_buf) {
-                Ok(Some(v)) => v,
-                Ok(None) => return Ok(None), // Need more data
-                Err(e) => return Err(e.into()),
-            };
+            let ext_id = try_parse_varint(buf, &mut cursor)?.value() as u16;
+            let ext_len = try_parse_varint(buf, &mut cursor)?;
 
             if ext_len.value() > MAX_EXTENSION_SIZE {
                 return Err(FrameError::ExtensionTooLarge {
@@ -134,27 +114,26 @@ impl AtpFrameCodec {
                 });
             }
 
-            // Extension data
-            if temp_buf.len() < ext_len.value() as usize {
+            // Check extension data availability
+            if cursor + ext_len.value() as usize > buf.len() {
                 return Ok(None); // Need more data
             }
 
-            let ext_data = temp_buf.split_to(ext_len.value() as usize).to_vec();
+            let ext_data = buf[cursor..cursor + ext_len.value() as usize].to_vec();
             extensions.insert(ext_id, ext_data);
+            cursor += ext_len.value() as usize;
 
-            // Check total header size to prevent DoS
-            let total_header_consumed = buf.len() - temp_buf.len();
-            if total_header_consumed > MAX_HEADER_SIZE as usize {
+            // Check total header size
+            if cursor > MAX_HEADER_SIZE as usize {
                 return Err(FrameError::FrameTooLarge {
-                    size: total_header_consumed as u64,
+                    size: cursor as u64,
                     max: MAX_HEADER_SIZE,
                 });
             }
         }
 
-        // Success - consume from original buffer
-        let consumed = buf.len() - temp_buf.len();
-        let _ = buf.split_to(consumed);
+        // Success - advance original buffer by consumed bytes
+        let _ = buf.split_to(cursor);
 
         Ok(Some(FrameHeader {
             version,
