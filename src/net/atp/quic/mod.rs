@@ -7,9 +7,11 @@
 //! - Handles ATP-specific recovery and cancellation semantics
 
 pub mod metrics;
+pub mod packet_protection;
 pub mod recovery;
 pub mod transfer_brain;
 
 pub use metrics::*;
+pub use packet_protection::*;
 pub use recovery::*;
 pub use transfer_brain::*;

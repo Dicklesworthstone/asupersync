@@ -49,7 +49,7 @@ pub mod websocket;
 /// MessagePort-based coordination utilities for browser worker runtimes.
 pub mod worker_channel;
 
-pub use atp::{
+pub use atp::protocol::{
     AtpFrameCodec, Frame as AtpFrame, FrameError, FrameHeader, FrameType, ProtocolVersion,
     SessionTranscript, TranscriptHash, TranscriptHasher, VarInt, VarIntError,
 };
