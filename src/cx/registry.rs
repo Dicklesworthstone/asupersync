@@ -865,7 +865,8 @@ impl NameRegistry {
         // under a different identity, creating split-brain registry state.
         if permit.holder() != entry.holder
             || permit.region() != entry.region
-            || permit.permit_id() != entry.identity_nonce // ubs:ignore - not a secret
+            || permit.permit_id() != entry.identity_nonce
+        // ubs:ignore - not a secret
         {
             // Re-insert the pending entry so the original holder can still commit.
             self.pending.insert(name.clone(), entry);
@@ -914,7 +915,8 @@ impl NameRegistry {
         };
         if permit.holder() != entry.holder
             || permit.region() != entry.region
-            || permit.permit_id() != entry.identity_nonce // ubs:ignore - not a secret
+            || permit.permit_id() != entry.identity_nonce
+        // ubs:ignore - not a secret
         {
             return Err(NameLeaseError::PermissionDenied {
                 name: name.to_string(),

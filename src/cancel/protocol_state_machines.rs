@@ -406,7 +406,9 @@ impl CancelStateMachine for RegionStateMachine {
                 }
             }
 
-            (state @ RegionState::Finalizing { .. }, RegionEvent::FinalizerStarted) => state.clone(),
+            (state @ RegionState::Finalizing { .. }, RegionEvent::FinalizerStarted) => {
+                state.clone()
+            }
             (state @ RegionState::Finalizing { .. }, RegionEvent::Cancel { .. }) => state.clone(),
             (state @ RegionState::Finalized, RegionEvent::Cancel { .. }) => state.clone(),
 

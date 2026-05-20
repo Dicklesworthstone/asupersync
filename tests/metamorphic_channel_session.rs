@@ -7,7 +7,9 @@
 //! on metamorphic relations that must hold regardless of specific inputs
 //! or operation ordering.
 
-use asupersync::channel::session::{TrackedOneshotPermit, TrackedOneshotSender, TrackedSender, tracked_channel};
+use asupersync::channel::session::{
+    TrackedOneshotPermit, TrackedOneshotSender, TrackedSender, tracked_channel,
+};
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
 use asupersync::obligation::graded::{AbortedProof, CommittedProof, SendPermit};

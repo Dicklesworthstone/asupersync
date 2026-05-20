@@ -357,8 +357,7 @@ impl SignalDispatcher {
             .spawn(move || {
                 let s_handle = poller_shutdown_handle;
                 let p_handle = poller_pending_handle;
-                let handles: [windows_sys::Win32::Foundation::HANDLE; 2] =
-                    [s_handle.0, p_handle.0];
+                let handles: [windows_sys::Win32::Foundation::HANDLE; 2] = [s_handle.0, p_handle.0];
                 let mut last_seen: Vec<u64> = vec![0; poller_slots.len()];
                 loop {
                     // SAFETY: handles array contains two valid event

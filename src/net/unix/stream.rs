@@ -1107,7 +1107,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after unix epoch")
             .as_nanos();
-        let name = format!( // ubs:ignore - test helper
+        let name = format!(
+            // ubs:ignore - test helper
             "asupersync_connect_abstract_{}_{}",
             std::process::id(), // ubs:ignore - test helper
             nonce

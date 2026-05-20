@@ -622,7 +622,7 @@ impl ServerHandshake {
         // Validate HTTP method
         if request.method != "GET" {
             return Err(HandshakeError::InvalidRequest(
-                "method must be GET".to_string()
+                "method must be GET".to_string(),
             ));
         }
 
@@ -632,7 +632,7 @@ impl ServerHandshake {
             .ok_or(HandshakeError::MissingHeader("Upgrade"))?;
         if !header_has_token(upgrade, "websocket") {
             return Err(HandshakeError::InvalidRequest(
-                "Upgrade header must contain 'websocket'".to_string()
+                "Upgrade header must contain 'websocket'".to_string(),
             ));
         }
 
@@ -642,7 +642,7 @@ impl ServerHandshake {
             .ok_or(HandshakeError::MissingHeader("Connection"))?;
         if !header_has_token(connection, "upgrade") {
             return Err(HandshakeError::InvalidRequest(
-                "Connection header must contain 'Upgrade'".to_string()
+                "Connection header must contain 'Upgrade'".to_string(),
             ));
         }
 
@@ -652,7 +652,7 @@ impl ServerHandshake {
             .ok_or(HandshakeError::MissingHeader("Sec-WebSocket-Version"))?;
         if version != "13" {
             return Err(HandshakeError::UnsupportedVersion(
-                "Unsupported WebSocket version".to_string()
+                "Unsupported WebSocket version".to_string(),
             ));
         }
 

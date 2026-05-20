@@ -38,7 +38,6 @@ fn test_waker(_id: usize) -> (Waker, Arc<AtomicUsize>) {
     (waker, counter)
 }
 
-
 /// Extract comparable state from expired timers for assertions.
 fn expired_signatures(expired: &[ExpiredTimer]) -> Vec<(u64, u64)> {
     expired.iter().map(|t| (t.deadline, t.timer_id)).collect()

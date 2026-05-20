@@ -343,7 +343,11 @@ impl<T> Arena<T> {
                         continue;
                     }
 
-                    if let Slot::Vacant { next_free, generation } = &mut self.arena.slots[i] {
+                    if let Slot::Vacant {
+                        next_free,
+                        generation,
+                    } = &mut self.arena.slots[i]
+                    {
                         if *generation == 0 {
                             continue;
                         }
@@ -407,7 +411,11 @@ impl<T> Arena<T> {
                 if retire_slot {
                     skip_link = true;
                 }
-            } else if let Slot::Vacant { next_free, generation } = &mut guard.arena.slots[i] {
+            } else if let Slot::Vacant {
+                next_free,
+                generation,
+            } = &mut guard.arena.slots[i]
+            {
                 if *generation == 0 {
                     skip_link = true;
                 } else {
@@ -536,7 +544,11 @@ impl<T> Iterator for DrainValues<'_, T> {
                 let old = core::mem::replace(
                     &mut self.arena.slots[i],
                     Slot::Vacant {
-                        next_free: if retire_slot { None } else { self.arena.free_head },
+                        next_free: if retire_slot {
+                            None
+                        } else {
+                            self.arena.free_head
+                        },
                         generation: new_gen,
                     },
                 );
