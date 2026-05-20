@@ -348,12 +348,8 @@ impl MerkleRoot {
     pub fn from_graph(graph: &ObjectGraph) -> Self {
         let mut hasher = Sha256::new();
 
-        // Add graph structure in deterministic order
-        let mut object_ids: Vec<_> = graph.objects().collect();
-        object_ids.sort_by_key(|(id, _)| (*id).clone());
-
-        // Hash all object data in canonical order
-        for (id, object) in object_ids {
+        // Hash all object data in canonical order (BTreeMap iteration is already sorted)
+        for (id, object) in graph.objects() {
             // Object ID
             hasher.update(id.hash_bytes());
 
@@ -365,11 +361,12 @@ impl MerkleRoot {
                 hasher.update(size.to_be_bytes());
             }
 
-            // Children in sorted order
-            let mut edges = object.children.clone();
-            edges.sort_by(|a, b| a.name.cmp(&b.name));
+            // Children in sorted order (avoid clone by creating sorted indices)
+            let mut child_indices: Vec<usize> = (0..object.children.len()).collect();
+            child_indices.sort_by(|&a, &b| object.children[a].name.cmp(&object.children[b].name));
 
-            for edge in edges {
+            for &idx in &child_indices {
+                let edge = &object.children[idx];
                 hasher.update(edge.name.as_bytes());
                 hasher.update(edge.child_id.hash_bytes());
                 hasher.update([u8::from(edge.is_symlink)]);
