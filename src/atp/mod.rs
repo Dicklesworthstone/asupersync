@@ -16,6 +16,7 @@ pub mod path;
 pub mod platform;
 pub mod proof;
 pub mod sdk;
+pub mod stream_object;
 pub mod transfer;
 pub mod verifier;
 pub mod verify;

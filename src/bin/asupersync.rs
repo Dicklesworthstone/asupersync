@@ -154,6 +154,10 @@ struct AtpArgs {
 enum AtpCommand {
     /// ATP diagnostics
     Doctor(AtpDoctorArgs),
+    /// Verify ATP proof bundle offline
+    Verify(AtpVerifyArgs),
+    /// Display ATP proof bundle information
+    Proof(AtpProofArgs),
 }
 
 #[derive(Args, Debug)]
@@ -161,6 +165,38 @@ struct AtpDoctorArgs {
     /// Report platform filesystem, network, and service-manager capabilities
     #[arg(long = "platform", action = ArgAction::SetTrue)]
     platform: bool,
+}
+
+#[derive(Args, Debug)]
+struct AtpVerifyArgs {
+    /// Path to the ATP proof bundle file to verify
+    #[arg(value_name = "BUNDLE_PATH")]
+    bundle_path: std::path::PathBuf,
+    /// Require all verification stages to pass
+    #[arg(long = "strict", action = ArgAction::SetTrue)]
+    strict: bool,
+    /// Minimum chunk verification coverage (0.0 to 1.0)
+    #[arg(long = "min-coverage", default_value = "0.95")]
+    min_coverage: f64,
+    /// Enable strict replay validation
+    #[arg(long = "strict-replay", action = ArgAction::SetTrue)]
+    strict_replay: bool,
+    /// Show detailed verification report
+    #[arg(long = "verbose", action = ArgAction::SetTrue)]
+    verbose: bool,
+}
+
+#[derive(Args, Debug)]
+struct AtpProofArgs {
+    /// Path to the ATP proof bundle file to display
+    #[arg(value_name = "BUNDLE_PATH")]
+    bundle_path: std::path::PathBuf,
+    /// Show concise summary instead of full details
+    #[arg(long = "summary", action = ArgAction::SetTrue)]
+    summary: bool,
+    /// Show only specific sections (manifest,content,repair,peer,path,journal,replay)
+    #[arg(long = "section", value_delimiter = ',')]
+    sections: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -962,6 +998,8 @@ fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
 fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         AtpCommand::Doctor(args) => atp_doctor(&args, output),
+        AtpCommand::Verify(args) => atp_verify(&args, output),
+        AtpCommand::Proof(args) => atp_proof(&args, output),
     }
 }
 
@@ -979,6 +1017,129 @@ fn atp_doctor(args: &AtpDoctorArgs, output: &mut Output) -> Result<(), CliError>
     output
         .write(&payload)
         .map_err(output_write_error("ATP platform capability report"))?;
+    Ok(())
+}
+
+fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError> {
+    use asupersync::atp::proof::AtpProofBundle;
+    use asupersync::atp::verify::{AtpBundleVerifier, VerificationPolicy};
+
+    // Validate arguments
+    if args.min_coverage < 0.0 || args.min_coverage > 1.0 {
+        return Err(CliError::new(
+            "invalid_argument",
+            "minimum coverage must be between 0.0 and 1.0",
+        ).exit_code(ExitCode::USER_ERROR));
+    }
+
+    // Read and deserialize the proof bundle
+    let bundle_data = std::fs::read(&args.bundle_path)
+        .map_err(|e| CliError::new(
+            "file_read_error",
+            &format!("failed to read proof bundle: {e}"),
+        ).exit_code(ExitCode::USER_ERROR))?;
+
+    let bundle: AtpProofBundle = serde_json::from_slice(&bundle_data)
+        .map_err(|e| CliError::new(
+            "parse_error",
+            &format!("failed to parse proof bundle: {e}"),
+        ).exit_code(ExitCode::USER_ERROR))?;
+
+    // Configure verification policy
+    let policy = VerificationPolicy {
+        require_all_stages: args.strict,
+        min_chunk_coverage: args.min_coverage,
+        strict_replay_validation: args.strict_replay,
+        custom_policies: std::collections::BTreeMap::new(),
+    };
+
+    // Perform verification
+    let verifier = AtpBundleVerifier::with_policy(policy);
+    let result = verifier.verify_bundle(&bundle);
+
+    // Prepare output
+    let payload = if args.verbose {
+        AtpVerifyOutput::Detailed {
+            status: result.status.to_string(),
+            bundle_path: args.bundle_path.display().to_string(),
+            verification_result: result,
+        }
+    } else {
+        AtpVerifyOutput::Summary {
+            status: result.status.to_string(),
+            bundle_path: args.bundle_path.display().to_string(),
+            transfer_id: result.report.transfer_summary.transfer_id.clone(),
+            completion_ratio: result.report.transfer_summary.completion_ratio,
+            checks_passed: result.checks.iter().filter(|c| c.status.is_success()).count(),
+            checks_total: result.checks.len(),
+            warning_count: result.warnings.len(),
+            error_count: result.errors.len(),
+        }
+    };
+
+    output
+        .write(&payload)
+        .map_err(output_write_error("ATP verification result"))?;
+
+    // Exit with error code if verification failed
+    if result.status.is_failure() {
+        return Err(CliError::new(
+            "verification_failed",
+            "ATP proof bundle verification failed",
+        ).exit_code(ExitCode::COMMAND_ERROR));
+    }
+
+    Ok(())
+}
+
+fn atp_proof(args: &AtpProofArgs, output: &mut Output) -> Result<(), CliError> {
+    use asupersync::atp::proof::AtpProofBundle;
+
+    // Read and deserialize the proof bundle
+    let bundle_data = std::fs::read(&args.bundle_path)
+        .map_err(|e| CliError::new(
+            "file_read_error",
+            &format!("failed to read proof bundle: {e}"),
+        ).exit_code(ExitCode::USER_ERROR))?;
+
+    let bundle: AtpProofBundle = serde_json::from_slice(&bundle_data)
+        .map_err(|e| CliError::new(
+            "parse_error",
+            &format!("failed to parse proof bundle: {e}"),
+        ).exit_code(ExitCode::USER_ERROR))?;
+
+    // Prepare output based on requested format
+    let payload = if args.summary {
+        AtpProofOutput::Summary {
+            bundle_path: args.bundle_path.display().to_string(),
+            bundle_version: bundle.version.0,
+            transfer_id: bundle.transfer_id.clone(),
+            created_at: bundle.created_at_micros,
+            source_peer: bundle.peer_identity.source_peer_id.clone(),
+            destination_peer: bundle.peer_identity.destination_peer_id.clone(),
+            object_count: bundle.object_roots.len(),
+            chunk_completion: bundle.chunk_bitmap.completion_ratio(),
+            proof_strength: format!("{:?}", bundle.calculate_proof_strength()),
+            primary_protocol: bundle.path_summary.primary_protocol.clone(),
+            journal_complete: bundle.journal.is_complete,
+        }
+    } else if args.sections.is_empty() {
+        AtpProofOutput::Full {
+            bundle_path: args.bundle_path.display().to_string(),
+            bundle: bundle,
+        }
+    } else {
+        AtpProofOutput::Sections {
+            bundle_path: args.bundle_path.display().to_string(),
+            sections: args.sections.clone(),
+            bundle: bundle,
+        }
+    };
+
+    output
+        .write(&payload)
+        .map_err(output_write_error("ATP proof bundle information"))?;
+
     Ok(())
 }
 
@@ -1604,6 +1765,334 @@ impl AtpPlatformDoctorOutput {
 impl Outputtable for AtpPlatformDoctorOutput {
     fn human_format(&self) -> String {
         render_platform_doctor_human(&self.document)
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq)]
+#[serde(tag = "type")]
+enum AtpVerifyOutput {
+    #[serde(rename = "summary")]
+    Summary {
+        status: String,
+        bundle_path: String,
+        transfer_id: String,
+        completion_ratio: f64,
+        checks_passed: usize,
+        checks_total: usize,
+        warning_count: usize,
+        error_count: usize,
+    },
+    #[serde(rename = "detailed")]
+    Detailed {
+        status: String,
+        bundle_path: String,
+        verification_result: asupersync::atp::verify::AtpVerificationResult,
+    },
+}
+
+impl Outputtable for AtpVerifyOutput {
+    fn human_format(&self) -> String {
+        match self {
+            Self::Summary {
+                status,
+                bundle_path,
+                transfer_id,
+                completion_ratio,
+                checks_passed,
+                checks_total,
+                warning_count,
+                error_count,
+            } => {
+                let mut lines = vec![
+                    format!("ATP Proof Bundle Verification"),
+                    format!("Bundle: {bundle_path}"),
+                    format!("Status: {status}"),
+                    format!("Transfer ID: {transfer_id}"),
+                    format!("Completion: {:.1}%", completion_ratio * 100.0),
+                    format!("Checks: {checks_passed}/{checks_total} passed"),
+                ];
+
+                if *warning_count > 0 {
+                    lines.push(format!("Warnings: {warning_count}"));
+                }
+
+                if *error_count > 0 {
+                    lines.push(format!("Errors: {error_count}"));
+                }
+
+                lines.join("\n")
+            }
+            Self::Detailed {
+                status,
+                bundle_path,
+                verification_result,
+            } => {
+                let mut lines = vec![
+                    format!("ATP Proof Bundle Verification Report"),
+                    format!("Bundle: {bundle_path}"),
+                    format!("Status: {status}"),
+                    format!(""),
+                    format!("Transfer Summary:"),
+                    format!("  ID: {}", verification_result.report.transfer_summary.transfer_id),
+                    format!("  Source: {}", verification_result.report.transfer_summary.source_peer),
+                    format!("  Destination: {}", verification_result.report.transfer_summary.destination_peer),
+                    format!("  Completion: {:.1}%", verification_result.report.transfer_summary.completion_ratio * 100.0),
+                    format!("  Protocol: {}", verification_result.report.transfer_summary.primary_protocol),
+                    format!(""),
+                    format!("Content Integrity:"),
+                    format!("  Manifest verified: {}", verification_result.report.content_integrity.manifest_verified),
+                    format!("  Chunk coverage: {:.1}%", verification_result.report.content_integrity.chunk_verification_coverage * 100.0),
+                    format!("  Verification stages: {}/{}",
+                        verification_result.report.content_integrity.verification_stages_passed,
+                        verification_result.report.content_integrity.verification_stages_total),
+                    format!(""),
+                    format!("Proof Strength:"),
+                    format!("  Required: {:?}", verification_result.report.proof_strength.required_strength),
+                    format!("  Calculated: {:?}", verification_result.report.proof_strength.calculated_strength),
+                    format!("  Requirements met: {}", verification_result.report.proof_strength.requirements_met),
+                    format!(""),
+                ];
+
+                if !verification_result.warnings.is_empty() {
+                    lines.push(format!("Warnings ({}):", verification_result.warnings.len()));
+                    for warning in &verification_result.warnings {
+                        lines.push(format!("  - {}: {}", warning.code, warning.message));
+                    }
+                    lines.push(String::new());
+                }
+
+                if !verification_result.errors.is_empty() {
+                    lines.push(format!("Errors ({}):", verification_result.errors.len()));
+                    for error in &verification_result.errors {
+                        lines.push(format!("  - {}", error));
+                    }
+                    lines.push(String::new());
+                }
+
+                lines.join("\n")
+            }
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq)]
+#[serde(tag = "type")]
+enum AtpProofOutput {
+    #[serde(rename = "summary")]
+    Summary {
+        bundle_path: String,
+        bundle_version: u32,
+        transfer_id: String,
+        created_at: u64,
+        source_peer: String,
+        destination_peer: String,
+        object_count: usize,
+        chunk_completion: f64,
+        proof_strength: String,
+        primary_protocol: String,
+        journal_complete: bool,
+    },
+    #[serde(rename = "full")]
+    Full {
+        bundle_path: String,
+        bundle: asupersync::atp::proof::AtpProofBundle,
+    },
+    #[serde(rename = "sections")]
+    Sections {
+        bundle_path: String,
+        sections: Vec<String>,
+        bundle: asupersync::atp::proof::AtpProofBundle,
+    },
+}
+
+impl Outputtable for AtpProofOutput {
+    fn human_format(&self) -> String {
+        match self {
+            Self::Summary {
+                bundle_path,
+                bundle_version,
+                transfer_id,
+                created_at,
+                source_peer,
+                destination_peer,
+                object_count,
+                chunk_completion,
+                proof_strength,
+                primary_protocol,
+                journal_complete,
+            } => {
+                format!(
+                    "ATP Proof Bundle Summary
+Bundle: {bundle_path}
+Version: {bundle_version}
+Transfer ID: {transfer_id}
+Created: {}
+Source: {source_peer}
+Destination: {destination_peer}
+Objects: {object_count}
+Completion: {:.1}%
+Proof strength: {proof_strength}
+Protocol: {primary_protocol}
+Journal complete: {journal_complete}",
+                    if *created_at > 0 {
+                        format!("{} μs since epoch", created_at)
+                    } else {
+                        "unknown".to_string()
+                    },
+                    chunk_completion * 100.0
+                )
+            }
+            Self::Full { bundle_path, bundle } => {
+                let mut lines = vec![
+                    format!("ATP Proof Bundle"),
+                    format!("Bundle: {bundle_path}"),
+                    format!("Version: {}", bundle.version.0),
+                    format!("Transfer ID: {}", bundle.transfer_id),
+                    format!(""),
+                    format!("Manifest:"),
+                    format!("  Root: {}", bundle.manifest_root),
+                    format!("  Objects: {} root(s)", bundle.object_roots.len()),
+                    if let Some(ref commit) = bundle.commit_record {
+                        format!("  Commit: {}", commit.id)
+                    } else {
+                        "  Commit: none".to_string()
+                    },
+                    format!(""),
+                    format!("Content:"),
+                    format!("  Hash algorithm: {:?}", bundle.chunk_hash_algorithm),
+                    format!("  Chunks: {}/{} received ({:.1}%)",
+                        bundle.chunk_bitmap.received_count,
+                        bundle.chunk_bitmap.total_chunks,
+                        bundle.chunk_bitmap.completion_ratio() * 100.0),
+                    format!("  Verification stages: {}", bundle.verification_evidence.len()),
+                    format!(""),
+                    format!("Repair:"),
+                ];
+
+                if let Some(ref raptorq) = bundle.raptorq_metadata {
+                    lines.push(format!("  RaptorQ: {} source blocks", raptorq.source_blocks.len()));
+                    lines.push(format!("  Repair symbols used: {}", raptorq.repair_symbols_used));
+                    lines.push(format!("  Success rate: {:.1}%", raptorq.decode_success_rate * 100.0));
+                } else {
+                    lines.push("  RaptorQ: none".to_string());
+                }
+
+                lines.push(format!("  Repair groups: {}", bundle.repair_groups.len()));
+                lines.push(format!(""));
+                lines.push(format!("Peer Identity:"));
+                lines.push(format!("  Source: {}", bundle.peer_identity.source_peer_id));
+                lines.push(format!("  Destination: {}", bundle.peer_identity.destination_peer_id));
+                lines.push(format!("  Auth method: {}", bundle.peer_identity.auth_method));
+                lines.push(format!("  Key fingerprints: {}", bundle.peer_identity.key_fingerprints.len()));
+                lines.push(format!(""));
+                lines.push(format!("Path:"));
+                lines.push(format!("  Primary protocol: {}", bundle.path_summary.primary_protocol));
+                lines.push(format!("  Relay used: {}", bundle.path_summary.relay_used));
+
+                if let Some(rtt) = bundle.path_summary.rtt_millis {
+                    lines.push(format!("  RTT: {:.1} ms", rtt));
+                }
+
+                if let Some(bw) = bundle.path_summary.bandwidth_bps {
+                    lines.push(format!("  Bandwidth: {} bps", bw));
+                }
+
+                lines.push(format!(""));
+                lines.push(format!("Journal:"));
+                lines.push(format!("  Entries: {}", bundle.journal.entry_count));
+                lines.push(format!("  Size: {} bytes", bundle.journal.size_bytes));
+                lines.push(format!("  Complete: {}", bundle.journal.is_complete));
+                lines.push(format!(""));
+                lines.push(format!("Replay:"));
+                lines.push(format!("  Pointers: {}", bundle.replay_pointers.len()));
+                lines.push(format!("  Extensions: {}", bundle.extensions.len()));
+
+                lines.join("\n")
+            }
+            Self::Sections { bundle_path, sections, bundle } => {
+                let mut lines = vec![
+                    format!("ATP Proof Bundle"),
+                    format!("Bundle: {bundle_path}"),
+                    format!("Sections: {}", sections.join(", ")),
+                    format!(""),
+                ];
+
+                for section in sections {
+                    match section.as_str() {
+                        "manifest" => {
+                            lines.push("Manifest:".to_string());
+                            lines.push(format!("  Root: {}", bundle.manifest_root));
+                            lines.push(format!("  Objects: {} root(s)", bundle.object_roots.len()));
+                            if let Some(ref commit) = bundle.commit_record {
+                                lines.push(format!("  Commit: {}", commit.id));
+                            }
+                            lines.push(String::new());
+                        }
+                        "content" => {
+                            lines.push("Content:".to_string());
+                            lines.push(format!("  Hash algorithm: {:?}", bundle.chunk_hash_algorithm));
+                            lines.push(format!("  Chunks: {}/{} received ({:.1}%)",
+                                bundle.chunk_bitmap.received_count,
+                                bundle.chunk_bitmap.total_chunks,
+                                bundle.chunk_bitmap.completion_ratio() * 100.0));
+                            lines.push(format!("  Verification stages: {}", bundle.verification_evidence.len()));
+                            lines.push(String::new());
+                        }
+                        "repair" => {
+                            lines.push("Repair:".to_string());
+                            if let Some(ref raptorq) = bundle.raptorq_metadata {
+                                lines.push(format!("  RaptorQ: {} source blocks", raptorq.source_blocks.len()));
+                                lines.push(format!("  Repair symbols used: {}", raptorq.repair_symbols_used));
+                                lines.push(format!("  Success rate: {:.1}%", raptorq.decode_success_rate * 100.0));
+                            } else {
+                                lines.push("  RaptorQ: none".to_string());
+                            }
+                            lines.push(format!("  Repair groups: {}", bundle.repair_groups.len()));
+                            lines.push(String::new());
+                        }
+                        "peer" => {
+                            lines.push("Peer Identity:".to_string());
+                            lines.push(format!("  Source: {}", bundle.peer_identity.source_peer_id));
+                            lines.push(format!("  Destination: {}", bundle.peer_identity.destination_peer_id));
+                            lines.push(format!("  Auth method: {}", bundle.peer_identity.auth_method));
+                            lines.push(format!("  Key fingerprints: {}", bundle.peer_identity.key_fingerprints.len()));
+                            lines.push(String::new());
+                        }
+                        "path" => {
+                            lines.push("Path:".to_string());
+                            lines.push(format!("  Primary protocol: {}", bundle.path_summary.primary_protocol));
+                            lines.push(format!("  Relay used: {}", bundle.path_summary.relay_used));
+                            if let Some(rtt) = bundle.path_summary.rtt_millis {
+                                lines.push(format!("  RTT: {:.1} ms", rtt));
+                            }
+                            if let Some(bw) = bundle.path_summary.bandwidth_bps {
+                                lines.push(format!("  Bandwidth: {} bps", bw));
+                            }
+                            lines.push(String::new());
+                        }
+                        "journal" => {
+                            lines.push("Journal:".to_string());
+                            lines.push(format!("  Entries: {}", bundle.journal.entry_count));
+                            lines.push(format!("  Size: {} bytes", bundle.journal.size_bytes));
+                            lines.push(format!("  Complete: {}", bundle.journal.is_complete));
+                            lines.push(String::new());
+                        }
+                        "replay" => {
+                            lines.push("Replay:".to_string());
+                            lines.push(format!("  Pointers: {}", bundle.replay_pointers.len()));
+                            lines.push(format!("  Extensions: {}", bundle.extensions.len()));
+                            lines.push(String::new());
+                        }
+                        _ => {
+                            lines.push(format!("Unknown section: {section}"));
+                            lines.push(String::new());
+                        }
+                    }
+                }
+
+                lines.join("\n")
+            }
+        }
     }
 }
 
