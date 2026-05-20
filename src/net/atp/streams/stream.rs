@@ -199,11 +199,18 @@ impl AtpStream {
             });
         }
 
+        if self.final_send_size.is_some() {
+            return Outcome::err(StreamError::InvalidState {
+                stream_id: self.id,
+                state: "Cannot queue send data after stream final size is known".to_string(),
+            });
+        }
+
         self.send_buffer.push_back(data.clone());
         self.ready_to_send = true;
 
         if fin {
-            self.final_send_size = Some(self.next_send_offset + data.len() as u64);
+            self.final_send_size = Some(self.next_send_offset + self.pending_send_bytes());
             self.send_state = SendState::DataSent;
         }
 
@@ -221,6 +228,15 @@ impl AtpStream {
     /// Get data ready to send (respecting flow control)
     pub fn get_send_data(&mut self, max_bytes: u64) -> Option<(u64, Bytes, bool)> {
         if !self.ready_to_send || self.send_blocked {
+            return None;
+        }
+
+        if max_bytes == 0
+            && self
+                .send_buffer
+                .front()
+                .is_some_and(|data| !data.is_empty())
+        {
             return None;
         }
 
@@ -244,8 +260,15 @@ impl AtpStream {
             self.bytes_in_flight += bytes_to_send;
 
             let is_fin = self.final_send_size == Some(self.next_send_offset);
+            if is_fin {
+                self.update_stream_state_on_send_complete();
+            }
 
             Some((offset, data_to_send, is_fin))
+        } else if self.final_send_size == Some(self.next_send_offset) {
+            self.ready_to_send = false;
+            self.update_stream_state_on_send_complete();
+            Some((self.next_send_offset, Bytes::new(), true))
         } else {
             None
         }
@@ -375,9 +398,9 @@ impl AtpStream {
     /// Close the stream gracefully (send FIN)
     pub fn close(&mut self) {
         if self.can_send() && self.final_send_size.is_none() {
-            self.final_send_size = Some(self.next_send_offset);
+            self.final_send_size = Some(self.next_send_offset + self.pending_send_bytes());
             self.send_state = SendState::DataSent;
-            self.ready_to_send = !self.send_buffer.is_empty();
+            self.ready_to_send = true;
         }
     }
 
@@ -436,6 +459,29 @@ impl AtpStream {
     /// Clear the send buffer
     fn clear_send_buffer(&mut self) {
         self.send_buffer.clear();
+    }
+
+    /// Count queued but unsent payload bytes.
+    fn pending_send_bytes(&self) -> u64 {
+        self.send_buffer
+            .iter()
+            .map(|segment| segment.len() as u64)
+            .sum()
+    }
+
+    /// Update stream state when local send is complete.
+    fn update_stream_state_on_send_complete(&mut self) {
+        match &self.state {
+            StreamState::Open => {
+                self.state = StreamState::LocalClosed;
+            }
+            StreamState::RemoteClosed => {
+                self.state = StreamState::Closed;
+            }
+            _ => {
+                // Already closed or reset.
+            }
+        }
     }
 
     /// Update stream state when receive is complete
@@ -566,5 +612,116 @@ mod tests {
         );
         assert_eq!(received.len(), 1);
         assert!(matches!(stream.receive_state, ReceiveState::DataRecvd));
+    }
+
+    #[test]
+    fn test_stream_close_emits_fin_only_frame() {
+        let mut stream = AtpStream::new(StreamId::new(16), true, StreamPriority::Data, true);
+
+        stream.close();
+
+        if let Some((offset, data, fin)) = stream.get_send_data(1000) {
+            assert_eq!(offset, 0);
+            assert!(data.is_empty());
+            assert!(fin);
+        } else {
+            panic!("close without buffered data should emit a FIN-only frame");
+        }
+
+        assert!(!stream.has_send_data());
+        assert!(matches!(stream.state, StreamState::LocalClosed));
+    }
+
+    #[test]
+    fn test_stream_close_fin_covers_buffered_unsent_data() {
+        let cx = test_cx();
+        let mut stream = AtpStream::new(StreamId::new(20), true, StreamPriority::Data, true);
+
+        assert!(stream.queue_send(&cx, Bytes::from("hello"), false).is_ok());
+        assert!(stream.queue_send(&cx, Bytes::from("world"), false).is_ok());
+
+        stream.close();
+
+        if let Some((offset, data, fin)) = stream.get_send_data(5) {
+            assert_eq!(offset, 0);
+            assert_eq!(data, Bytes::from("hello"));
+            assert!(!fin);
+        } else {
+            panic!("first buffered segment should be sendable after close");
+        }
+
+        if let Some((offset, data, fin)) = stream.get_send_data(5) {
+            assert_eq!(offset, 5);
+            assert_eq!(data, Bytes::from("world"));
+            assert!(fin);
+        } else {
+            panic!("final buffered segment should carry FIN after close");
+        }
+
+        assert!(!stream.has_send_data());
+        assert!(matches!(stream.state, StreamState::LocalClosed));
+    }
+
+    #[test]
+    fn test_stream_queue_fin_accounts_for_prior_buffered_data() {
+        let cx = test_cx();
+        let mut stream = AtpStream::new(StreamId::new(24), true, StreamPriority::Data, true);
+
+        assert!(stream.queue_send(&cx, Bytes::from("hello"), false).is_ok());
+        assert!(stream.queue_send(&cx, Bytes::from("world"), true).is_ok());
+
+        if let Some((offset, data, fin)) = stream.get_send_data(5) {
+            assert_eq!(offset, 0);
+            assert_eq!(data, Bytes::from("hello"));
+            assert!(!fin);
+        } else {
+            panic!("previously queued data should be sent before FIN");
+        }
+
+        if let Some((offset, data, fin)) = stream.get_send_data(5) {
+            assert_eq!(offset, 5);
+            assert_eq!(data, Bytes::from("world"));
+            assert!(fin);
+        } else {
+            panic!("segment queued with FIN should carry FIN at combined final size");
+        }
+
+        assert!(!stream.has_send_data());
+        assert!(matches!(stream.state, StreamState::LocalClosed));
+    }
+
+    #[test]
+    fn test_stream_get_send_data_zero_budget_does_not_emit_payload_frame() {
+        let cx = test_cx();
+        let mut stream = AtpStream::new(StreamId::new(28), true, StreamPriority::Data, true);
+
+        assert!(stream.queue_send(&cx, Bytes::from("hello"), false).is_ok());
+
+        assert!(stream.get_send_data(0).is_none());
+        assert!(stream.has_send_data());
+
+        if let Some((offset, data, fin)) = stream.get_send_data(5) {
+            assert_eq!(offset, 0);
+            assert_eq!(data, Bytes::from("hello"));
+            assert!(!fin);
+        } else {
+            panic!("payload should still be sendable after zero-budget poll");
+        }
+    }
+
+    #[test]
+    fn test_stream_rejects_queue_send_after_final_size_is_known() {
+        let cx = test_cx();
+        let mut stream = AtpStream::new(StreamId::new(32), true, StreamPriority::Data, true);
+
+        assert!(stream.queue_send(&cx, Bytes::from("final"), true).is_ok());
+
+        match stream.queue_send(&cx, Bytes::from("late"), false) {
+            Outcome::Err(StreamError::InvalidState { stream_id, state }) => {
+                assert_eq!(stream_id, StreamId::new(32));
+                assert!(state.contains("final size"));
+            }
+            other => panic!("late send after FIN should be rejected, got {other:?}"),
+        }
     }
 }

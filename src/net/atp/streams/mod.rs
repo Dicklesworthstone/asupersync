@@ -237,7 +237,13 @@ impl StreamManager {
     pub fn close_stream(&mut self, cx: &Cx, stream_id: StreamId) -> Outcome<(), StreamError> {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             stream.close();
-            self.scheduler.unregister_stream(stream_id);
+            if stream.has_send_data() {
+                self.scheduler.mark_ready(stream_id);
+            } else if stream.is_closed() {
+                self.scheduler.unregister_stream(stream_id);
+            } else {
+                self.scheduler.mark_blocked(stream_id);
+            }
             cx.trace(&format!("stream_closed stream_id={:?}", stream_id));
             Outcome::ok(())
         } else {
@@ -324,5 +330,63 @@ impl StreamManager {
     /// Check if all streams are closed (for connection drain)
     pub fn all_streams_closed(&self) -> bool {
         self.streams.values().all(|stream| stream.is_closed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_cx() -> Cx {
+        Cx::for_testing()
+    }
+
+    fn assert_stream_id(outcome: Outcome<StreamId, StreamError>, context: &str) -> StreamId {
+        match outcome {
+            Outcome::Ok(stream_id) => stream_id,
+            other => panic!("{context}: expected stream id, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn close_stream_keeps_fin_schedulable_when_previously_blocked() {
+        let cx = test_cx();
+        let mut manager = StreamManager::new(false);
+        let stream_id = assert_stream_id(
+            manager.open_stream(&cx, true, StreamPriority::Data),
+            "open client bidirectional stream",
+        );
+
+        assert!(manager.mark_stream_blocked(stream_id).is_ok());
+        assert!(manager.next_scheduled_stream().is_none());
+
+        assert!(manager.close_stream(&cx, stream_id).is_ok());
+        assert_eq!(manager.next_scheduled_stream(), Some(stream_id));
+    }
+
+    #[test]
+    fn close_stream_does_not_reschedule_after_fin_is_drained() {
+        let cx = test_cx();
+        let mut manager = StreamManager::new(false);
+        let stream_id = assert_stream_id(
+            manager.open_stream(&cx, true, StreamPriority::Data),
+            "open client bidirectional stream",
+        );
+
+        assert!(manager.close_stream(&cx, stream_id).is_ok());
+        assert_eq!(manager.next_scheduled_stream(), Some(stream_id));
+
+        let Some(stream) = manager.get_stream_mut(stream_id) else {
+            panic!("test stream should remain registered until both halves close");
+        };
+        let Some((offset, data, fin)) = stream.get_send_data(1024) else {
+            panic!("close should produce a FIN-only frame");
+        };
+        assert_eq!(offset, 0);
+        assert!(data.is_empty());
+        assert!(fin);
+
+        assert!(manager.close_stream(&cx, stream_id).is_ok());
+        assert!(manager.next_scheduled_stream().is_none());
     }
 }
