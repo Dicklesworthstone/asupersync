@@ -729,12 +729,8 @@ mod tests {
 
     impl DiskFaultModel {
         fn new() -> Self {
-            let mut bitmap = ChunkBitmap::new(
-                MATRIX_TRANSFER.to_string(),
-                CHUNK_SIZE * 2,
-                CHUNK_SIZE,
-                1,
-            );
+            let mut bitmap =
+                ChunkBitmap::new(MATRIX_TRANSFER.to_string(), CHUNK_SIZE * 2, CHUNK_SIZE, 1);
             bitmap.initialize_wanted_chunks(1);
 
             Self {
@@ -809,8 +805,12 @@ mod tests {
                         verified_hash: [2; 32],
                         timestamp: 30,
                     });
-                    self.bitmap
-                        .update_chunk_state(DATA_OFFSET, ChunkState::Written, 40, Some([2; 32]));
+                    self.bitmap.update_chunk_state(
+                        DATA_OFFSET,
+                        ChunkState::Written,
+                        40,
+                        Some([2; 32]),
+                    );
                     self.records.push(JournalRecord::ChunkWritten {
                         transfer_id: MATRIX_TRANSFER.to_string(),
                         chunk_offset: DATA_OFFSET,
@@ -997,8 +997,7 @@ mod tests {
     #[test]
     fn disk_fault_matrix_preserves_repair_decode_and_compaction_records() {
         let recovered =
-            DiskFaultModel::run_until(DiskFaultPhase::JournalCompaction, CrashCut::After)
-                .recover();
+            DiskFaultModel::run_until(DiskFaultPhase::JournalCompaction, CrashCut::After).recover();
 
         assert_eq!(recovered.disposition, RecoveryDisposition::Finalized);
         assert_eq!(recovered.chunk_state, Some(ChunkState::Committed));
