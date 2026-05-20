@@ -52,7 +52,7 @@ CONTEXT_ALLOWED = {
         'tokio', 'hyper'  # For benchmark comparisons
     },
     'dev-dependencies': {
-        'tokio', 'async-std', 'smol', 'axum', 'hyper', 'reqwest'  # Dev/test only
+        'tokio', 'tokio-util', 'tokio-stream', 'async-std', 'smol', 'axum', 'hyper', 'reqwest'  # Dev/test only
     },
     'fuzz-feature': {
         'tokio', 'axum', 'hyper'  # Fuzz feature intentionally includes tonic/tokio
@@ -134,7 +134,7 @@ def check_banned_dependencies(metadata: Dict) -> List[Dict]:
 
         seen_packages.add(package_name)
         current_path = path + [package_name]
-        context = get_package_context(package_name, metadata)
+        context = get_package_context(package_name, metadata, current_path)
 
         # Check exact matches
         if package_name in BANNED_DEPENDENCIES:

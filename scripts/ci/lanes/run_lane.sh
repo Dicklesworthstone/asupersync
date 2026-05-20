@@ -205,6 +205,11 @@ case "$LANE_ID" in
         cargo metadata --format-version 1 | python3 scripts/ci/check_banned_deps.py 2>&1 | tee -a "$LANE_LOG"
         ;;
 
+    "atp_core_deps")
+        echo "Running ATP core dependency validation..." | tee -a "$LANE_LOG"
+        timeout "$TIMEOUT" scripts/ci/check_atp_core_deps.sh 2>&1 | tee -a "$LANE_LOG"
+        ;;
+
     "platform_caps")
         echo "Running platform capabilities test..." | tee -a "$LANE_LOG"
         timeout "$TIMEOUT" cargo test platform_capabilities --no-fail-fast 2>&1 | tee -a "$LANE_LOG"
