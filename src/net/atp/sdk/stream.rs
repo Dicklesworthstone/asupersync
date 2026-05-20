@@ -138,14 +138,29 @@ impl AtpSession {
         let (data_tx, data_rx) = mpsc::channel(config.backpressure_threshold / config.chunk_size);
         let (progress_tx, progress_rx) = mpsc::channel(100);
 
-        // Start background transfer task
+        // Start background transfer task in a detached future
         let session = self.clone();
-        let cx = cx.clone();
+        let cx_clone = cx.clone();
         let transfer_id_clone = transfer_id.clone();
         let config_clone = config.clone();
 
-        // TODO: Replace with proper Cx::spawn background task
-        // For now, just setup the channels without background processing
+        // Spawn the background transfer task using async runtime
+        std::thread::spawn(move || {
+            let rt = crate::runtime::builder::RuntimeBuilder::new()
+                .build_lab()
+                .unwrap();
+            let cx = crate::cx::Cx::root();
+            rt.block_on(async move {
+                let _ = Self::writer_transfer_task(
+                    session,
+                    cx_clone,
+                    transfer_id_clone,
+                    data_rx,
+                    progress_tx,
+                    config_clone,
+                ).await;
+            });
+        });
 
         Ok(AtpWriter {
             transfer_id,
@@ -166,14 +181,29 @@ impl AtpSession {
         let (data_tx, data_rx) = mpsc::channel(config.backpressure_threshold / config.chunk_size);
         let (progress_tx, progress_rx) = mpsc::channel(100);
 
-        // Start background transfer task
+        // Start background transfer task in a detached future
         let session = self.clone();
-        let cx = cx.clone();
+        let cx_clone = cx.clone();
         let transfer_id_clone = transfer_id.clone();
         let config_clone = config.clone();
 
-        // TODO: Replace with proper Cx::spawn background task
-        // For now, just setup the channels without background processing
+        // Spawn the background transfer task using async runtime
+        std::thread::spawn(move || {
+            let rt = crate::runtime::builder::RuntimeBuilder::new()
+                .build_lab()
+                .unwrap();
+            let cx = crate::cx::Cx::root();
+            rt.block_on(async move {
+                let _ = Self::reader_transfer_task(
+                    session,
+                    cx_clone,
+                    transfer_id_clone,
+                    data_tx,
+                    progress_tx,
+                    config_clone,
+                ).await;
+            });
+        });
 
         Ok(AtpReader {
             transfer_id,
