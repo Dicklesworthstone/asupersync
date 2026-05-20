@@ -4,7 +4,7 @@
 //! replay, verification, and protocol debugging. Transcripts are stable across
 //! platforms and include all protocol-relevant fields.
 
-use crate::net::atp::protocol::frames::{Frame, FrameHeader, ProtocolVersion};
+use crate::net::atp::protocol::frames::Frame;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -40,19 +40,19 @@ impl TranscriptHasher {
     /// - Payload hash (not full payload for efficiency)
     pub fn update_frame(&mut self, frame: &Frame) {
         // Frame sequence number (ensures ordering)
-        self.hasher.update(&self.frame_count.to_le_bytes());
+        self.hasher.update(self.frame_count.to_le_bytes());
         self.frame_count += 1;
 
         // Protocol version
-        self.hasher.update(&frame.header.version.0.to_le_bytes());
+        self.hasher.update(frame.header.version.0.to_le_bytes());
 
         // Frame type (as u16)
         self.hasher
-            .update(&(frame.header.frame_type as u16).to_le_bytes());
+            .update((frame.header.frame_type as u16).to_le_bytes());
 
         // Payload length
         self.hasher
-            .update(&frame.header.payload_length.value().to_le_bytes());
+            .update(frame.header.payload_length.value().to_le_bytes());
 
         // Extensions (sorted by ID for canonical ordering)
         let mut sorted_extensions: BTreeMap<u16, &Vec<u8>> = BTreeMap::new();
@@ -62,18 +62,18 @@ impl TranscriptHasher {
 
         // Extension count
         self.hasher
-            .update(&(sorted_extensions.len() as u32).to_le_bytes());
+            .update((sorted_extensions.len() as u32).to_le_bytes());
 
         // Extension data (in sorted order)
         for (ext_id, ext_data) in sorted_extensions {
-            self.hasher.update(&ext_id.to_le_bytes());
-            self.hasher.update(&(ext_data.len() as u32).to_le_bytes());
+            self.hasher.update(ext_id.to_le_bytes());
+            self.hasher.update((ext_data.len() as u32).to_le_bytes());
             self.hasher.update(ext_data);
         }
 
         // Payload hash (not full payload to avoid large memory usage)
         let payload_hash = Sha256::digest(&frame.payload);
-        self.hasher.update(&payload_hash);
+        self.hasher.update(payload_hash);
     }
 
     /// Get the current transcript hash
@@ -217,17 +217,27 @@ impl Default for SessionTranscript {
 /// Transcript-related errors
 #[derive(Debug, thiserror::Error)]
 pub enum TranscriptError {
+    /// Transcript hash encoding or length is invalid.
     #[error("invalid transcript hash: {0}")]
     InvalidHash(String),
 
+    /// Transcript hash did not match the expected checkpoint.
     #[error("transcript verification failed: expected {expected}, got {actual}")]
     VerificationFailed {
+        /// Expected transcript hash.
         expected: TranscriptHash,
+        /// Actual transcript hash.
         actual: TranscriptHash,
     },
 
+    /// Transcript checkpoint sequence did not match expectations.
     #[error("frame sequence error: expected frame {expected}, got {actual}")]
-    SequenceError { expected: u64, actual: u64 },
+    SequenceError {
+        /// Expected frame count.
+        expected: u64,
+        /// Actual frame count.
+        actual: u64,
+    },
 }
 
 /// Utility for verifying transcript integrity between sessions
@@ -286,7 +296,7 @@ impl TranscriptVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::atp::protocol::frames::FrameType;
+    use crate::net::atp::protocol::frames::{FrameType, ProtocolVersion};
 
     #[test]
     fn test_transcript_deterministic() {

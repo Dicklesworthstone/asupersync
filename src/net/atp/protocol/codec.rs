@@ -3,12 +3,12 @@
 //! Implements encoding and decoding of ATP binary frames using the standard
 //! asupersync codec traits. Handles frame boundaries, validation, and error recovery.
 
-use crate::bytes::{BufMut, BytesMut};
+use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
 use crate::net::atp::protocol::frames::{
     Frame, FrameError, FrameHeader, FrameType, MAX_EXTENSION_SIZE, MAX_FRAME_SIZE, ProtocolVersion,
 };
-use crate::net::atp::protocol::varint::{VarInt, VarIntError};
+use crate::net::atp::protocol::varint::VarInt;
 use std::collections::HashMap;
 use std::io;
 
@@ -136,7 +136,7 @@ impl AtpFrameCodec {
 
         // Success - consume from original buffer
         let consumed = buf.len() - temp_buf.len();
-        buf.split_to(consumed);
+        let _ = buf.split_to(consumed);
 
         Ok(Some(FrameHeader {
             version,
@@ -179,7 +179,6 @@ impl Decoder for AtpFrameCodec {
                                     header,
                                     remaining: payload_len,
                                 };
-                                continue;
                             }
                         }
                         None => {

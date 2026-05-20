@@ -90,7 +90,7 @@ impl VarInt {
 
         let value = match length {
             1 => {
-                buf.split_to(1); // Consume the byte
+                let _ = buf.split_to(1); // Consume the byte
                 (first_byte & prefix) as u64
             }
             2 => {
@@ -105,10 +105,9 @@ impl VarInt {
             }
             8 => {
                 let bytes = buf.split_to(8);
-                let val = u64::from_be_bytes([
+                u64::from_be_bytes([
                     bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-                ]) & 0x3FFFFFFFFFFFFFFF;
-                val
+                ]) & 0x3FFFFFFFFFFFFFFF
             }
             _ => unreachable!(),
         };
@@ -152,12 +151,15 @@ impl From<VarInt> for u64 {
 /// Varint encoding/decoding errors.
 #[derive(Debug, thiserror::Error)]
 pub enum VarIntError {
+    /// Value cannot fit in ATP's QUIC-style 62-bit varint space.
     #[error("varint value too large: {value} > {max}", value = .0, max = VARINT_MAX)]
     ValueTooLarge(u64),
 
+    /// Input ended before a complete varint was available.
     #[error("unexpected end of input while reading varint")]
     UnexpectedEof,
 
+    /// Varint used a non-canonical or otherwise invalid encoding.
     #[error("invalid varint encoding")]
     InvalidEncoding,
 }
@@ -222,7 +224,7 @@ mod tests {
         assert!(VarInt::decode(&mut partial).unwrap().is_none());
 
         // Complete with remaining bytes
-        partial.unsplit(buf);
+        partial.put(buf);
         let decoded = VarInt::decode(&mut partial).unwrap().unwrap();
         assert_eq!(decoded.value(), 16384);
     }

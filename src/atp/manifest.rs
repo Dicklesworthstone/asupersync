@@ -256,7 +256,9 @@ pub enum ManifestError {
     InvalidFormat(String),
     /// Merkle root verification failed.
     MerkleRootMismatch {
+        /// Expected Merkle root from the manifest.
         expected: MerkleRoot,
+        /// Merkle root computed from the graph.
         computed: MerkleRoot,
     },
 }
@@ -405,7 +407,7 @@ mod hex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::object::{ContentId, Object, ObjectEdge};
+    use crate::atp::object::{ContentId, Object};
 
     #[test]
     fn manifest_version_support_check_works() {
@@ -428,7 +430,7 @@ mod tests {
     fn merkle_root_from_simple_graph() {
         let mut graph = ObjectGraph::new();
         let file = Object::file(b"test content".to_vec());
-        let file_id = file.id.clone();
+        let _file_id = file.id.clone();
         graph.add_root(file).unwrap();
 
         let root = MerkleRoot::from_graph(&graph);

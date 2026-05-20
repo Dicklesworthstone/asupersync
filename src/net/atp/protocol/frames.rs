@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// ATP Protocol Version
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProtocolVersion(pub u32);
 
 impl ProtocolVersion {
@@ -30,27 +30,43 @@ impl fmt::Display for ProtocolVersion {
 #[repr(u16)]
 pub enum FrameType {
     // Session establishment
+    /// Client-side session hello.
     Handshake = 0x0001,
+    /// Server-side session hello acknowledgement.
     HandshakeAck = 0x0002,
+    /// Capability and feature advertisement.
     Capabilities = 0x0003,
+    /// Capability and feature acknowledgement.
     CapabilitiesAck = 0x0004,
 
     // Object transfer
+    /// Object manifest payload.
     ObjectManifest = 0x0100,
+    /// Object chunk/range request.
     ObjectRequest = 0x0101,
+    /// Object data payload.
     ObjectData = 0x0102,
+    /// Object completion marker.
     ObjectComplete = 0x0103,
+    /// Object transfer error.
     ObjectError = 0x0104,
 
     // Path and connection management
+    /// Path graph update payload.
     PathUpdate = 0x0200,
+    /// Path validation challenge.
     PathChallenge = 0x0201,
+    /// Path validation response.
     PathResponse = 0x0202,
+    /// Keep-alive frame.
     KeepAlive = 0x0203,
 
     // Control frames
+    /// Cancel an in-flight operation.
     Cancel = 0x0300,
+    /// Protocol error frame.
     Error = 0x0301,
+    /// Graceful close frame.
     Close = 0x0302,
 }
 
@@ -137,7 +153,7 @@ impl FrameHeader {
             .encoded_len();
 
         // Extensions (extension_id:varint + length:varint + data)
-        for (_, data) in &self.extensions {
+        for data in self.extensions.values() {
             len += VarInt::new(0).unwrap().encoded_len(); // extension_id as varint
             len += VarInt::new(data.len() as u64).unwrap().encoded_len(); // data length
             len += data.len(); // data
@@ -191,26 +207,41 @@ impl Frame {
 /// Frame encoding and decoding errors
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
+    /// Varint encoding or decoding error.
     #[error("varint encoding error: {0}")]
     VarInt(#[from] VarIntError),
 
+    /// Frame type is unknown to this protocol version.
     #[error("unknown frame type: {0}")]
     UnknownFrameType(u64),
 
+    /// Protocol version is unsupported.
     #[error("unsupported protocol version: {0}")]
     UnsupportedVersion(u32),
 
+    /// Frame exceeds the configured maximum.
     #[error("frame too large: {size} bytes (max: {max})")]
-    FrameTooLarge { size: u64, max: u64 },
+    FrameTooLarge {
+        /// Observed frame size.
+        size: u64,
+        /// Configured frame-size limit.
+        max: u64,
+    },
 
+    /// Frame payload or header had invalid structure.
     #[error("invalid frame format: {0}")]
     InvalidFormat(String),
 
+    /// Frame data ended before the expected boundary.
     #[error("unexpected end of frame data")]
     UnexpectedEof,
 
+    /// Extension payload exceeds the extension-size limit.
     #[error("extension too large: {size} bytes")]
-    ExtensionTooLarge { size: u64 },
+    ExtensionTooLarge {
+        /// Observed extension payload size.
+        size: u64,
+    },
 }
 
 /// Maximum frame size (1MB to prevent memory exhaustion)
