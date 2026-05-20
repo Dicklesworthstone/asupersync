@@ -54,14 +54,18 @@ impl DefendedFrameProcessor {
 
         // Check memory requirements based on frame type
         let memory_needed = self.estimate_frame_memory(frame);
-        if !self.resource_manager.allocate_memory(peer_id, memory_needed) {
+        if !self
+            .resource_manager
+            .allocate_memory(peer_id, memory_needed)
+        {
             // Frame was recorded but memory allocation failed - mark as processed
             self.resource_manager.frame_processed(&peer_id);
             return Err(ResourceError::MemoryLimitExceeded {
                 peer_id,
                 requested: memory_needed,
                 limit: self.resource_manager.limits().max_memory_per_peer,
-            }.into());
+            }
+            .into());
         }
 
         // Additional frame-specific checks
@@ -73,7 +77,8 @@ impl DefendedFrameProcessor {
                         return Err(ResourceError::ManifestSizeExceeded {
                             size: manifest_size,
                             limit: self.resource_manager.limits().max_manifest_size,
-                        }.into());
+                        }
+                        .into());
                     }
                 }
             }
@@ -103,7 +108,8 @@ impl DefendedFrameProcessor {
 
     /// Clean up resources after failed frame processing.
     fn cleanup_frame_processing(&mut self, peer_id: &PeerId, memory_used: u64) {
-        self.resource_manager.deallocate_memory(peer_id, memory_used);
+        self.resource_manager
+            .deallocate_memory(peer_id, memory_used);
         self.resource_manager.frame_processed(peer_id);
     }
 
@@ -154,11 +160,12 @@ impl DefendedFrameProcessor {
     /// Perform periodic maintenance.
     pub fn maintain(&mut self) {
         // Clean up inactive peers every 5 minutes
-        self.resource_manager.cleanup_inactive_peers(Duration::from_secs(300));
+        self.resource_manager
+            .cleanup_inactive_peers(Duration::from_secs(300));
 
         // Log resource pressure warnings
         if self.resource_manager.is_under_pressure() {
-            log::warn!(
+            crate::tracing_compat::warn!(
                 "ATP protocol under resource pressure: {} tracked peers, {} total memory",
                 self.resource_manager.peer_count(),
                 self.resource_manager.total_memory_usage()
@@ -178,7 +185,7 @@ impl DefendedFrameProcessor {
 
     /// Force cleanup of a problematic peer.
     pub fn force_cleanup_peer(&mut self, peer_id: &PeerId) {
-        log::warn!("Force cleaning up resources for peer {:?}", peer_id);
+        crate::tracing_compat::warn!("Force cleaning up resources for peer {:?}", peer_id);
         self.resource_manager.force_cleanup_peer(peer_id);
     }
 }
@@ -223,7 +230,7 @@ mod tests {
                 max_frame_rate: 2,
                 rate_limit_window: 1,
                 ..Default::default()
-            }
+            },
         );
 
         let frame = create_test_frame(FrameType::ObjectRequest, 100);
@@ -266,7 +273,7 @@ mod tests {
             crate::net::atp::protocol::resource_manager::ResourceLimits {
                 max_sessions_per_peer: 1,
                 ..Default::default()
-            }
+            },
         );
 
         let handshake_frame = create_test_frame(FrameType::Handshake, 100);

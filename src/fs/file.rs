@@ -169,6 +169,19 @@ impl File {
         })
         .await
     }
+
+    /// Reads into an owned buffer on the blocking I/O pool.
+    ///
+    /// The returned buffer is the same allocation passed by the caller, allowing
+    /// chunked readers to reuse a single allocation across async boundaries.
+    pub async fn read_into_vec(&mut self, mut buf: Vec<u8>) -> io::Result<(Vec<u8>, usize)> {
+        self.with_inner(move |inner| {
+            let mut inner_ref: &std::fs::File = &inner;
+            let bytes_read = Read::read(&mut inner_ref, buf.as_mut_slice())?;
+            Ok((buf, bytes_read))
+        })
+        .await
+    }
 }
 
 // Phase 0: Poll-based traits use direct blocking I/O against the underlying
@@ -293,6 +306,45 @@ mod tests {
             crate::assert_with_log!(&buf == b"56789", "seek contents", b"56789", buf);
         });
         crate::test_complete!("test_file_seek");
+    }
+
+    #[test]
+    fn test_file_read_into_vec_reuses_owned_buffer() {
+        init_test("test_file_read_into_vec_reuses_owned_buffer");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("test_read_into_vec.txt");
+            std::fs::write(&path, b"abcdefg").unwrap();
+
+            let mut file = File::open(&path).await.unwrap();
+            let buffer = vec![0_u8; 4];
+            let capacity = buffer.capacity();
+
+            let (buffer, bytes_read) = file.read_into_vec(buffer).await.unwrap();
+            crate::assert_with_log!(bytes_read == 4, "first bytes read", 4usize, bytes_read);
+            crate::assert_with_log!(
+                &buffer[..bytes_read] == b"abcd",
+                "first chunk",
+                b"abcd",
+                &buffer[..bytes_read]
+            );
+            crate::assert_with_log!(
+                buffer.capacity() == capacity,
+                "buffer capacity reused",
+                capacity,
+                buffer.capacity()
+            );
+
+            let (buffer, bytes_read) = file.read_into_vec(buffer).await.unwrap();
+            crate::assert_with_log!(bytes_read == 3, "second bytes read", 3usize, bytes_read);
+            crate::assert_with_log!(
+                &buffer[..bytes_read] == b"efg",
+                "second chunk",
+                b"efg",
+                &buffer[..bytes_read]
+            );
+        });
+        crate::test_complete!("test_file_read_into_vec_reuses_owned_buffer");
     }
 
     #[test]

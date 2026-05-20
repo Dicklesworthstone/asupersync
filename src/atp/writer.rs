@@ -4,15 +4,18 @@
 //! the simple write(really_big_buffer) experience while preserving ATP correctness,
 //! structured concurrency, and explicit cancellation semantics.
 
-use crate::types::outcome::Outcome;
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, DiskError, ProtocolError};
-use crate::atp::object::{ObjectId, ContentId};
-use crate::atp::transfer::{TransferId, TransferState};
 use crate::atp::manifest::{ManifestVersion, MerkleRoot};
+use crate::atp::object::ObjectId;
+use crate::atp::transfer::TransferId;
 use crate::cx::Cx;
+use crate::fs::File;
+use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, DiskError, ProtocolError};
+use crate::types::outcome::Outcome;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+const MAX_FILE_STREAM_CHUNK_LEN: usize = 8 * 1024 * 1024;
 
 /// ATP writer configuration for large buffer operations.
 #[derive(Debug, Clone)]
@@ -38,8 +41,8 @@ pub struct WriterConfig {
 impl Default for WriterConfig {
     fn default() -> Self {
         Self {
-            chunk_size: 256 * 1024,     // 256KB default
-            min_chunk_size: 64 * 1024,  // 64KB minimum
+            chunk_size: 256 * 1024,          // 256KB default
+            min_chunk_size: 64 * 1024,       // 64KB minimum
             max_chunk_size: 2 * 1024 * 1024, // 2MB maximum
             enable_progress: true,
             backpressure_threshold: 16 * 1024 * 1024, // 16MB
@@ -179,12 +182,9 @@ pub struct TransferProof {
 
 impl AtpWriter {
     /// Create a new ATP writer for the given object and remote peer.
-    pub fn new(
-        object_id: ObjectId,
-        remote_peer: [u8; 32],
-        config: WriterConfig,
-    ) -> Self {
-        let id = format!("writer-{}-{}",
+    pub fn new(object_id: ObjectId, remote_peer: [u8; 32], config: WriterConfig) -> Self {
+        let id = format!(
+            "writer-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -218,7 +218,7 @@ impl AtpWriter {
 
         let id = format!("writer-resumed-{:?}", resume_token.transfer_id);
 
-        let mut writer = Self {
+        let writer = Self {
             id,
             object_id: resume_token.object_id.clone(),
             remote_peer,
@@ -237,7 +237,7 @@ impl AtpWriter {
     /// Set a progress callback for this writer.
     pub fn set_progress_callback<F>(&mut self, callback: F)
     where
-        F: Fn(WriterProgress) + Send + Sync + 'static
+        F: Fn(WriterProgress) + Send + Sync + 'static,
     {
         self.progress_callback = Some(Arc::new(callback));
     }
@@ -251,7 +251,7 @@ impl AtpWriter {
     pub fn progress(&self) -> WriterProgress {
         WriterProgress {
             bytes_written: self.bytes_written,
-            total_bytes: None, // Unknown for streaming
+            total_bytes: None,      // Unknown for streaming
             transfer_rate_bps: 0.0, // TODO: Calculate from recent history
             estimated_completion: None,
             chunks_completed: self.bytes_written / self.config.chunk_size,
@@ -271,7 +271,7 @@ impl AtpWriter {
         // Initialize transfer on first write
         if self.transfer_id.is_none() {
             match self.initialize_transfer(cx).await {
-                Outcome::Ok(()) => {},
+                Outcome::Ok(()) => {}
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -282,7 +282,7 @@ impl AtpWriter {
         if self.buffer.len() + data.len() > self.config.backpressure_threshold as usize {
             self.state = WriterState::Backpressure;
             match self.flush_buffer(cx).await {
-                Outcome::Ok(()) => {},
+                Outcome::Ok(()) => {}
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -308,8 +308,8 @@ impl AtpWriter {
         cx.trace(&format!("atp_writer_write_buffer {} bytes", buffer.len()));
 
         // Write all data
-        let bytes_written = match self.write_all(cx, buffer).await {
-            Outcome::Ok(bytes) => bytes,
+        match self.write_all(cx, buffer).await {
+            Outcome::Ok(_) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -320,23 +320,42 @@ impl AtpWriter {
     }
 
     /// Write data from a file path.
-    pub async fn write_file<P: AsRef<Path>>(&mut self, cx: &Cx, path: P) -> AtpOutcome<TransferProof> {
+    pub async fn write_file<P: AsRef<Path>>(
+        &mut self,
+        cx: &Cx,
+        path: P,
+    ) -> AtpOutcome<TransferProof> {
         let path = path.as_ref();
         cx.trace(&format!("atp_writer_write_file {:?}", path));
 
-        // TODO: Implement efficient file streaming
-        // 1. Open file with appropriate buffering
-        // 2. Stream chunks while respecting backpressure
-        // 3. Handle file errors gracefully
-        // 4. Emit progress during streaming
-
-        // For now, read entire file and write
-        let data = match std::fs::read(path) {
-            Ok(data) => data,
+        let mut file = match File::open(path).await {
+            Ok(file) => file,
             Err(_) => return Outcome::Err(AtpError::Disk(DiskError::IoError)),
         };
 
-        self.write_buffer(cx, &data).await
+        let mut chunk = vec![0; self.file_stream_chunk_len()];
+        loop {
+            let bytes_read = match file.read_into_vec(chunk).await {
+                Ok((buffer, bytes_read)) => {
+                    chunk = buffer;
+                    bytes_read
+                }
+                Err(_) => return Outcome::Err(AtpError::Disk(DiskError::IoError)),
+            };
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            match self.write_all(cx, &chunk[..bytes_read]).await {
+                Outcome::Ok(_) => {}
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+
+        self.finalize(cx).await
     }
 
     /// Finalize the transfer and get the proof bundle.
@@ -352,7 +371,7 @@ impl AtpWriter {
         // Flush any remaining buffered data
         if !self.buffer.is_empty() {
             match self.flush_buffer(cx).await {
-                Outcome::Ok(()) => {},
+                Outcome::Ok(()) => {}
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -388,9 +407,9 @@ impl AtpWriter {
         // Generate resume token if resume is enabled
         if self.config.enable_resume {
             let resume_token = ResumeToken {
-                transfer_id: self.transfer_id.unwrap_or_else(||
+                transfer_id: self.transfer_id.unwrap_or_else(|| {
                     TransferId::derive([0; 32], self.remote_peer, [0; 32], [0; 32])
-                ),
+                }),
                 object_id: self.object_id.clone(),
                 verified_bytes: self.bytes_written,
                 manifest_root: MerkleRoot::zero(), // TODO: Get actual manifest root
@@ -403,9 +422,9 @@ impl AtpWriter {
         } else {
             // Return empty resume token
             let resume_token = ResumeToken {
-                transfer_id: self.transfer_id.unwrap_or_else(||
+                transfer_id: self.transfer_id.unwrap_or_else(|| {
                     TransferId::derive([0; 32], self.remote_peer, [0; 32], [0; 32])
-                ),
+                }),
                 object_id: self.object_id.clone(),
                 verified_bytes: 0,
                 manifest_root: MerkleRoot::zero(),
@@ -441,6 +460,27 @@ impl AtpWriter {
 
     // Private methods
 
+    fn file_stream_chunk_len(&self) -> usize {
+        let max_chunk_size = self.config.max_chunk_size.max(1);
+        let hard_limit = match u64::try_from(MAX_FILE_STREAM_CHUNK_LEN) {
+            Ok(limit) => limit,
+            Err(_) => u64::MAX,
+        };
+        let target_chunk_size = self
+            .config
+            .chunk_size
+            .max(self.config.min_chunk_size)
+            .min(max_chunk_size)
+            .min(self.config.backpressure_threshold.max(1))
+            .min(hard_limit)
+            .max(1);
+
+        match usize::try_from(target_chunk_size) {
+            Ok(chunk_len) => chunk_len,
+            Err(_) => MAX_FILE_STREAM_CHUNK_LEN,
+        }
+    }
+
     async fn initialize_transfer(&mut self, cx: &Cx) -> AtpOutcome<()> {
         cx.trace("atp_writer_initialize_transfer");
 
@@ -463,7 +503,10 @@ impl AtpWriter {
     }
 
     async fn flush_buffer(&mut self, cx: &Cx) -> AtpOutcome<()> {
-        cx.trace(&format!("atp_writer_flush_buffer {} bytes", self.buffer.len()));
+        cx.trace(&format!(
+            "atp_writer_flush_buffer {} bytes",
+            self.buffer.len()
+        ));
 
         if self.buffer.is_empty() {
             return Outcome::ok(());
@@ -491,9 +534,9 @@ impl AtpWriter {
         // 4. Create proof bundle
 
         let proof = TransferProof {
-            transfer_id: self.transfer_id.unwrap_or_else(||
-                TransferId::derive([0; 32], self.remote_peer, [0; 32], [0; 32])
-            ),
+            transfer_id: self
+                .transfer_id
+                .unwrap_or_else(|| TransferId::derive([0; 32], self.remote_peer, [0; 32], [0; 32])),
             object_id: self.object_id.clone(),
             verified_hash: [0; 32], // TODO: Compute actual hash
             total_bytes: self.bytes_written,
@@ -515,11 +558,7 @@ pub struct AtpSink {
 
 impl AtpSink {
     /// Create a new ATP sink.
-    pub fn new(
-        object_id: ObjectId,
-        remote_peer: [u8; 32],
-        config: WriterConfig,
-    ) -> Self {
+    pub fn new(object_id: ObjectId, remote_peer: [u8; 32], config: WriterConfig) -> Self {
         Self {
             writer: AtpWriter::new(object_id, remote_peer, config),
         }
@@ -543,7 +582,7 @@ impl AtpSink {
     /// Set progress callback.
     pub fn set_progress_callback<F>(&mut self, callback: F)
     where
-        F: Fn(WriterProgress) + Send + Sync + 'static
+        F: Fn(WriterProgress) + Send + Sync + 'static,
     {
         self.writer.set_progress_callback(callback);
     }
@@ -552,8 +591,9 @@ impl AtpSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cx::scope;
+    use crate::atp::object::ContentId;
     use crate::lab::LabRuntime;
+    use crate::scope;
 
     #[test]
     fn test_writer_config_defaults() {
@@ -618,7 +658,36 @@ mod tests {
             assert_eq!(writer.state(), WriterState::Completed);
             assert_eq!(proof.total_bytes, data.len() as u64);
             assert_eq!(proof.proof_mode, ProofMode::Full);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_write_file_streams_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.bin");
+        let payload = b"chunk-one/chunk-two/chunk-three";
+        std::fs::write(&path, payload).unwrap();
+
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let object_id = ObjectId::content(ContentId::new([1; 32]));
+            let remote_peer = [2; 32];
+            let mut config = WriterConfig::default();
+            config.chunk_size = 5;
+            config.min_chunk_size = 1;
+            config.max_chunk_size = 5;
+            config.backpressure_threshold = 8;
+
+            let mut writer = AtpWriter::new(object_id, remote_peer, config);
+            let proof = writer.write_file(cx, &path).await.unwrap();
+
+            assert_eq!(writer.state(), WriterState::Completed);
+            assert_eq!(proof.total_bytes, payload.len() as u64);
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -641,7 +710,9 @@ mod tests {
             assert_eq!(writer.state(), WriterState::Cancelled);
             assert!(resume_token.is_valid());
             assert_eq!(resume_token.verified_bytes, data.len() as u64);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -665,7 +736,9 @@ mod tests {
             // Close and get proof
             let proof = sink.close(cx).await.unwrap();
             assert_eq!(proof.total_bytes, data.len() as u64);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -683,12 +756,16 @@ mod tests {
             let resume_token = writer1.cancel(cx).await.unwrap();
 
             // Resume with new writer
-            let mut writer2 = AtpWriter::from_resume_token(resume_token, remote_peer, config).await.unwrap();
+            let mut writer2 = AtpWriter::from_resume_token(resume_token, remote_peer, config)
+                .await
+                .unwrap();
             writer2.write_all(cx, b" Second part").await.unwrap();
             let proof = writer2.finalize(cx).await.unwrap();
 
             assert!(proof.total_bytes >= 21); // "First part Second part"
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -711,6 +788,8 @@ mod tests {
 
             let proof = writer.finalize(cx).await.unwrap();
             assert_eq!(proof.total_bytes, large_data.len() as u64);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }
