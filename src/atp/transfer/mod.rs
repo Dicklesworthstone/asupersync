@@ -545,6 +545,15 @@ impl TransferActor {
             }
             actor.journal.push(entry.clone());
         }
+        // Note: After journal replay, open_obligations will be empty since journal entries
+        // only track settled obligations. This is correct for the current synchronous design
+        // where obligations are opened and immediately settled within the same operation.
+        //
+        // FUTURE: To support asynchronous obligations that can remain open across operations,
+        // the journal format would need to be enhanced to track obligation lifecycle events:
+        // - Add obligation_opened field to track when obligations are created
+        // - Keep existing obligation field for when they are settled
+        // - During replay, reconstruct open_obligations from opened-but-not-settled entries
         actor.assert_quiescent()?;
         Ok(actor)
     }
@@ -1011,5 +1020,60 @@ mod tests {
             assert_eq!(actor.state(), TransferState::Failed);
             assert_eq!(actor.open_obligation_count(), 0);
         }
+    }
+
+    #[test]
+    fn restart_from_journal_preserves_obligation_state() {
+        // Test demonstrates current synchronous obligation behavior and documents
+        // expected behavior for future asynchronous obligation support
+        let mut actor = actor();
+
+        // Apply commands that create and immediately settle obligations
+        actor
+            .apply(cmd(
+                1,
+                TransferCommandKind::Accept {
+                    obligation: TransferObligationId::new(101),
+                },
+            ))
+            .unwrap();
+        actor
+            .apply(cmd(
+                2,
+                TransferCommandKind::Start {
+                    path_id: 42,
+                    obligation: TransferObligationId::new(102),
+                },
+            ))
+            .unwrap();
+
+        // All obligations should be settled, none open
+        assert_eq!(actor.open_obligation_count(), 0);
+        assert_eq!(actor.settled_obligations().len(), 2);
+
+        // Restart from journal
+        let restarted = TransferActor::restart_from_journal(
+            actor.actor_id,
+            actor.transfer_id,
+            actor.manifest.clone(),
+            actor.peer_capabilities.clone(),
+            actor.topology.clone(),
+            actor.journal(),
+        )
+        .unwrap();
+
+        // After restart, state should be preserved
+        assert_eq!(restarted.state(), TransferState::Running);
+        assert_eq!(restarted.open_obligation_count(), 0);
+        assert_eq!(restarted.settled_obligations().len(), 2);
+
+        // The two settled obligations should match the original
+        let original_settled = actor.settled_obligations();
+        let restarted_settled = restarted.settled_obligations();
+        assert_eq!(original_settled, restarted_settled);
+
+        // Verify specific obligation IDs and outcomes are preserved
+        assert!(original_settled.contains(&(TransferObligationId::new(101), ObligationOutcome::Committed)));
+        assert!(original_settled.contains(&(TransferObligationId::new(102), ObligationOutcome::Committed)));
     }
 }
