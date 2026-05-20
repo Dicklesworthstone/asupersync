@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ATP Benchmark Output",
+  "description": "JSON schema for ATP bench command output (ATP-I1)",
+  "type": "object",
+  "properties": {
+    "config": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": ["bulk-file", "sync-tree", "media", "sparse-image", "artifact", "stream", "clean-lan", "lossy-wifi", "relay-only", "auto"],
+          "description": "Transfer profile used for benchmark"
+        },
+        "test_size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Size of test data in bytes"
+        },
+        "iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of benchmark iterations"
+        },
+        "target_peer": {
+          "type": ["string", "null"],
+          "description": "Target peer for network benchmarks"
+        }
+      },
+      "required": ["profile", "test_size_bytes", "iterations"],
+      "additionalProperties": false
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "iteration": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "duration_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "throughput_bps": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "peak_throughput_bps": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cpu_usage_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "memory_usage_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "network_metrics": {
+            "type": "object",
+            "properties": {
+              "rtt_ms": {
+                "type": "number",
+                "minimum": 0
+              },
+              "packet_loss_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "active_connections": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "repair_symbols_used": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "dedup_savings_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "compression_ratio": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": ["rtt_ms", "packet_loss_rate", "active_connections", "repair_symbols_used", "dedup_savings_bytes", "compression_ratio"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["iteration", "duration_seconds", "throughput_bps", "peak_throughput_bps", "cpu_usage_percent", "memory_usage_bytes", "network_metrics"],
+        "additionalProperties": false
+      }
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "avg_throughput_bps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "throughput_std_dev": {
+          "type": "number",
+          "minimum": 0
+        },
+        "best_throughput_bps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "worst_throughput_bps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "avg_cpu_usage_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "avg_memory_usage_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": ["avg_throughput_bps", "throughput_std_dev", "best_throughput_bps", "worst_throughput_bps", "avg_cpu_usage_percent", "avg_memory_usage_bytes"],
+      "additionalProperties": false
+    },
+    "system_info": {
+      "type": "object",
+      "properties": {
+        "os": {
+          "type": "string",
+          "description": "Operating system name and version"
+        },
+        "cpu": {
+          "type": "string",
+          "description": "CPU model and core count"
+        },
+        "total_memory_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "network_interface": {
+          "type": "string",
+          "description": "Primary network interface used"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["os", "cpu", "total_memory_bytes", "network_interface", "timestamp"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["config", "results", "summary", "system_info"],
+  "additionalProperties": false
+}

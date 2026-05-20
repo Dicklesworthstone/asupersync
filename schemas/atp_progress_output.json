@@ -1,0 +1,208 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ATP Progress Output",
+  "description": "JSON schema for ATP progress reporting (ATP-I1)",
+  "type": "object",
+  "properties": {
+    "transfer_id": {
+      "type": "string",
+      "description": "Unique transfer identifier"
+    },
+    "operation": {
+      "type": "string",
+      "enum": ["send", "receive", "sync", "mirror", "verify", "cancel"],
+      "description": "Type of operation in progress"
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["initializing", "scanning", "chunking", "hashing", "connecting", "negotiating", "transferring", "verifying", "finalizing", "completed", "failed"],
+      "description": "Current operation phase"
+    },
+    "progress": {
+      "type": "object",
+      "properties": {
+        "bytes_processed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bytes processed so far"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total bytes to process"
+        },
+        "files_processed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Files processed so far"
+        },
+        "total_files": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total files to process"
+        },
+        "chunks_processed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Chunks processed so far"
+        },
+        "total_chunks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total chunks to process"
+        },
+        "percentage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Overall completion percentage"
+        }
+      },
+      "required": ["bytes_processed", "total_bytes", "files_processed", "total_files", "percentage"],
+      "additionalProperties": false
+    },
+    "performance": {
+      "type": "object",
+      "properties": {
+        "current_rate_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Current transfer rate in bytes per second"
+        },
+        "average_rate_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Average transfer rate in bytes per second"
+        },
+        "peak_rate_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Peak transfer rate achieved"
+        },
+        "eta_seconds": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Estimated time to completion in seconds"
+        },
+        "elapsed_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Time elapsed since operation start"
+        }
+      },
+      "required": ["current_rate_bps", "average_rate_bps", "peak_rate_bps", "elapsed_seconds"],
+      "additionalProperties": false
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "connections": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of active connections"
+        },
+        "rtt_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Round-trip time in milliseconds"
+        },
+        "packet_loss_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Packet loss rate (0.0 to 1.0)"
+        },
+        "congestion_window": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Current congestion window size in bytes"
+        }
+      },
+      "required": ["connections", "rtt_ms", "packet_loss_rate"],
+      "additionalProperties": false
+    },
+    "repair": {
+      "type": "object",
+      "properties": {
+        "symbols_sent": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Repair symbols sent"
+        },
+        "symbols_received": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Repair symbols received"
+        },
+        "overhead_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Current repair overhead ratio"
+        },
+        "recovery_operations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of successful recoveries"
+        }
+      },
+      "required": ["symbols_sent", "symbols_received", "overhead_ratio", "recovery_operations"],
+      "additionalProperties": false
+    },
+    "deduplication": {
+      "type": "object",
+      "properties": {
+        "chunks_deduplicated": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of chunks deduplicated"
+        },
+        "bytes_saved": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bytes saved through deduplication"
+        },
+        "savings_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Deduplication savings ratio"
+        }
+      },
+      "required": ["chunks_deduplicated", "bytes_saved", "savings_ratio"],
+      "additionalProperties": false
+    },
+    "current_file": {
+      "type": ["object", "null"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path of file currently being processed"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Size of current file in bytes"
+        },
+        "progress": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Progress on current file (0.0 to 1.0)"
+        }
+      },
+      "required": ["path", "size_bytes", "progress"],
+      "additionalProperties": false
+    },
+    "status_message": {
+      "type": "string",
+      "description": "Human-readable status message"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when this progress was captured"
+    }
+  },
+  "required": ["transfer_id", "operation", "phase", "progress", "performance", "network", "repair", "deduplication", "status_message", "timestamp"],
+  "additionalProperties": false
+}

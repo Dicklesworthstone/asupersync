@@ -11,6 +11,7 @@ use crate::atp::manifest::{
 use crate::atp::object::ObjectId;
 use crate::types::outcome::Outcome;
 use sha2::{Digest, Sha256};
+use hmac::KeyInit;
 use std::time::{Duration, SystemTime};
 
 /// Errors specific to repair symbol reception and validation.
@@ -242,9 +243,12 @@ impl RepairReceiver {
         self.validate_symbol_parameters(symbol, repair_group)?;
 
         // Check session and replay protection
-        if let Some(session) = self.sessions.get_mut(group_id) {
-            self.validate_session_and_replay(symbol, session)?;
-        }
+        let session_valid = if let Some(session) = self.sessions.get_mut(group_id) {
+            Self::validate_session_and_replay_static(symbol, session)?;
+            true
+        } else {
+            false
+        };
 
         // Validate authentication tag
         self.validate_authentication(symbol, repair_group)?;
@@ -291,8 +295,7 @@ impl RepairReceiver {
     }
 
     /// Validate session status and check for replay attacks.
-    fn validate_session_and_replay(
-        &self,
+    fn validate_session_and_replay_static(
         symbol: &RaptorQSymbol,
         session: &mut RepairSessionContext,
     ) -> Result<(), RepairReceiveError> {
@@ -375,7 +378,7 @@ impl RepairReceiver {
         // Include all critical symbol and group parameters in the MAC
         mac.update(b"ATP-G2-RepairSymbol");
         mac.update(&repair_group.group_id.as_bytes());
-        mac.update(&repair_group.manifest_root.hash);
+        mac.update(repair_group.manifest_root.hash());
         mac.update(repair_group.object_id.hash_bytes());
         mac.update(&repair_group.source_block_number.to_be_bytes());
         mac.update(&repair_group.source_symbols_k.to_be_bytes());

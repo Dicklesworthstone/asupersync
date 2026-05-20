@@ -55,6 +55,8 @@
 //! - 10-13: Application-specific (test failure, oracle violation, etc.)
 
 pub mod args;
+pub mod atp_command_tree;
+pub mod atp_config;
 pub mod completion;
 pub mod doctor;
 pub mod error;

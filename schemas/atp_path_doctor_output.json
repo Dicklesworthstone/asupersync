@@ -1,0 +1,281 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ATP Path Doctor Output",
+  "description": "JSON schema for ATP path doctor diagnostics (ATP-I1)",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "object",
+      "properties": {
+        "overall_health": {
+          "type": "string",
+          "enum": ["healthy", "degraded", "critical", "unreachable"],
+          "description": "Overall path health assessment"
+        },
+        "reachable_peers": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of reachable peers"
+        },
+        "total_peers": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of peers tested"
+        },
+        "avg_latency_ms": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Average latency to reachable peers"
+        },
+        "best_path_throughput_bps": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Best achievable throughput"
+        }
+      },
+      "required": ["overall_health", "reachable_peers", "total_peers"],
+      "additionalProperties": false
+    },
+    "network_interfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Interface name"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["ethernet", "wifi", "cellular", "loopback", "vpn", "bridge", "unknown"],
+            "description": "Interface type"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["up", "down", "degraded"],
+            "description": "Interface operational status"
+          },
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "IP addresses assigned"
+            }
+          },
+          "mtu": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Maximum transmission unit"
+          },
+          "speed_bps": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "Interface speed in bits per second"
+          },
+          "utilization_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Current utilization percentage"
+          }
+        },
+        "required": ["name", "type", "status", "addresses", "mtu"],
+        "additionalProperties": false
+      }
+    },
+    "connectivity_tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Target peer or service tested"
+          },
+          "test_type": {
+            "type": "string",
+            "enum": ["ping", "tcp_connect", "udp_ping", "quic_handshake", "atp_handshake"],
+            "description": "Type of connectivity test"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["success", "timeout", "unreachable", "rejected", "error"],
+            "description": "Test result status"
+          },
+          "latency_ms": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Round-trip latency"
+          },
+          "packet_loss_rate": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Packet loss rate observed"
+          },
+          "error_message": {
+            "type": ["string", "null"],
+            "description": "Error message if test failed"
+          },
+          "interface_used": {
+            "type": ["string", "null"],
+            "description": "Network interface used for test"
+          }
+        },
+        "required": ["target", "test_type", "status"],
+        "additionalProperties": false
+      }
+    },
+    "nat_traversal": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["none", "full_cone", "restricted_cone", "port_restricted", "symmetric", "unknown"],
+          "description": "Detected NAT type"
+        },
+        "upnp_available": {
+          "type": "boolean",
+          "description": "UPnP port mapping available"
+        },
+        "stun_servers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "server": {
+                "type": "string",
+                "description": "STUN server address"
+              },
+              "status": {
+                "type": "string",
+                "enum": ["reachable", "unreachable", "timeout"],
+                "description": "STUN server reachability"
+              },
+              "public_ip": {
+                "type": ["string", "null"],
+                "description": "Public IP address discovered"
+              },
+              "public_port": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "Public port discovered"
+              }
+            },
+            "required": ["server", "status"],
+            "additionalProperties": false
+          }
+        },
+        "relay_connectivity": {
+          "type": "object",
+          "properties": {
+            "available_relays": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of available relay servers"
+            },
+            "best_relay_latency_ms": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "description": "Latency to best relay server"
+            },
+            "relay_capacity": {
+              "type": ["string", "null"],
+              "enum": ["low", "medium", "high", "unlimited"],
+              "description": "Estimated relay capacity"
+            }
+          },
+          "required": ["available_relays"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["type", "upnp_available", "stun_servers", "relay_connectivity"],
+      "additionalProperties": false
+    },
+    "bandwidth_tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Target for bandwidth test"
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["upload", "download", "bidirectional"],
+            "description": "Test direction"
+          },
+          "throughput_bps": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Measured throughput in bytes per second"
+          },
+          "duration_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Test duration"
+          },
+          "test_size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Amount of data transferred"
+          },
+          "efficiency": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Protocol efficiency ratio"
+          }
+        },
+        "required": ["target", "direction", "throughput_bps", "duration_seconds", "test_size_bytes", "efficiency"],
+        "additionalProperties": false
+      }
+    },
+    "path_recommendations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["performance", "reliability", "security", "configuration"],
+            "description": "Recommendation category"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["info", "warning", "error", "critical"],
+            "description": "Issue severity"
+          },
+          "title": {
+            "type": "string",
+            "description": "Short recommendation title"
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed recommendation description"
+          },
+          "action": {
+            "type": ["string", "null"],
+            "description": "Recommended action to take"
+          }
+        },
+        "required": ["category", "severity", "title", "description"],
+        "additionalProperties": false
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when diagnostics were performed"
+    },
+    "test_duration_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Total time taken for all diagnostics"
+    }
+  },
+  "required": ["summary", "network_interfaces", "connectivity_tests", "nat_traversal", "bandwidth_tests", "path_recommendations", "timestamp", "test_duration_seconds"],
+  "additionalProperties": false
+}

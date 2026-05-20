@@ -1,0 +1,239 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ATP Proof Output",
+  "description": "JSON schema for ATP proof command output (ATP-I1)",
+  "type": "object",
+  "properties": {
+    "bundle_path": {
+      "type": "string",
+      "description": "Path to the proof bundle file"
+    },
+    "bundle_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hash of the proof bundle"
+    },
+    "manifest": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "merkle_root": {
+          "type": "string",
+          "description": "Merkle root of the object graph"
+        },
+        "object_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunk_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunking_profile": {
+          "type": ["string", "null"],
+          "enum": ["bulk-file", "sync-tree", "media", "sparse-image", "artifact", "stream", null]
+        },
+        "compression_enabled": {
+          "type": "boolean"
+        },
+        "encryption_enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": ["version", "merkle_root", "object_count", "total_size_bytes", "chunk_count", "compression_enabled", "encryption_enabled"],
+      "additionalProperties": false
+    },
+    "repair": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "source_symbols": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "repair_symbols": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "overhead_ratio": {
+          "type": "number",
+          "minimum": 0
+        },
+        "symbol_size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "repair_groups": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of repair groups (ATP-G2)"
+        }
+      },
+      "required": ["enabled"],
+      "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "properties": {
+        "hash_algorithm": {
+          "type": "string",
+          "enum": ["SHA256", "BLAKE3"]
+        },
+        "integrity_proofs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of integrity proofs included"
+        },
+        "deduplication_savings": {
+          "type": "object",
+          "properties": {
+            "bytes_saved": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unique_chunks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_chunks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "dedup_ratio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": ["bytes_saved", "unique_chunks", "total_chunks", "dedup_ratio"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["hash_algorithm", "integrity_proofs", "deduplication_savings"],
+      "additionalProperties": false
+    },
+    "peer": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "type": ["string", "null"],
+          "description": "Peer identity or public key"
+        },
+        "signatures": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of digital signatures"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Peer capabilities declared"
+        }
+      },
+      "required": ["signatures", "capabilities"],
+      "additionalProperties": false
+    },
+    "path": {
+      "type": "object",
+      "properties": {
+        "establishment_proofs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of path establishment proofs"
+        },
+        "relay_hops": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of relay hops used"
+        },
+        "network_conditions": {
+          "type": "object",
+          "properties": {
+            "rtt_samples": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "bandwidth_samples": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "packet_loss_samples": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": ["rtt_samples", "bandwidth_samples", "packet_loss_samples"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["establishment_proofs", "relay_hops", "network_conditions"],
+      "additionalProperties": false
+    },
+    "journal": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of journal entries"
+        },
+        "start_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "duration_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "checkpoints": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of resumption checkpoints"
+        }
+      },
+      "required": ["entries", "start_time", "end_time", "duration_seconds", "checkpoints"],
+      "additionalProperties": false
+    },
+    "replay": {
+      "type": "object",
+      "properties": {
+        "deterministic": {
+          "type": "boolean",
+          "description": "Transfer is deterministically replayable"
+        },
+        "trace_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verification_points": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": ["deterministic", "trace_events", "verification_points"],
+      "additionalProperties": false
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Proof generation timestamp"
+    }
+  },
+  "required": ["bundle_path", "bundle_hash", "manifest", "repair", "content", "peer", "path", "journal", "replay", "timestamp"],
+  "additionalProperties": false
+}

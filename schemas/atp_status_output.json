@@ -1,0 +1,216 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ATP Status Output",
+  "description": "JSON schema for ATP status command output (ATP-I1)",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "object",
+      "properties": {
+        "active_transfers": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of currently active transfers"
+        },
+        "queued_transfers": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of queued transfers waiting for resources"
+        },
+        "completed_transfers": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of completed transfers"
+        },
+        "failed_transfers": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of failed transfers"
+        },
+        "total_throughput_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Combined throughput in bytes per second"
+        },
+        "estimated_completion_seconds": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Estimated completion time for all active transfers"
+        }
+      },
+      "required": ["active_transfers", "queued_transfers", "completed_transfers", "failed_transfers", "total_throughput_bps"],
+      "additionalProperties": false
+    },
+    "transfers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique transfer identifier"
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["send", "receive", "sync"],
+            "description": "Transfer direction"
+          },
+          "source": {
+            "type": "string",
+            "description": "Source path or description"
+          },
+          "destination": {
+            "type": "string",
+            "description": "Destination path or peer identifier"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["Queued", "Connecting", "Negotiating", "Transferring", "Verifying", "Completed", "Failed", "Cancelled", "Paused"],
+            "description": "Current transfer state"
+          },
+          "progress": {
+            "type": "object",
+            "properties": {
+              "bytes_transferred": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "total_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "files_transferred": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "total_files": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "percentage": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "current_rate_bps": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "average_rate_bps": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "eta_seconds": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              }
+            },
+            "required": ["bytes_transferred", "total_bytes", "files_transferred", "total_files", "percentage", "current_rate_bps", "average_rate_bps"],
+            "additionalProperties": false
+          },
+          "performance": {
+            "type": "object",
+            "properties": {
+              "rtt_ms": {
+                "type": "number",
+                "minimum": 0
+              },
+              "packet_loss_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "active_connections": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "repair_symbols_used": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "dedup_savings_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "compression_ratio": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": ["rtt_ms", "packet_loss_rate", "active_connections", "repair_symbols_used", "dedup_savings_bytes", "compression_ratio"],
+            "additionalProperties": false
+          },
+          "error": {
+            "type": ["string", "null"],
+            "description": "Error message if transfer failed"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Additional transfer-specific metadata"
+          }
+        },
+        "required": ["id", "direction", "source", "destination", "state", "progress", "performance"],
+        "additionalProperties": false
+      }
+    },
+    "system": {
+      "type": "object",
+      "properties": {
+        "cpu_usage_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "memory_usage_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_available_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "disk_cache_usage_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "network_interfaces": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "interface_type": {
+                "type": "string"
+              },
+              "utilization_bps": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "capacity_bps": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "active": {
+                "type": "boolean"
+              }
+            },
+            "required": ["name", "interface_type", "utilization_bps", "capacity_bps", "active"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["cpu_usage_percent", "memory_usage_bytes", "memory_available_bytes", "disk_cache_usage_bytes", "network_interfaces"],
+      "additionalProperties": false
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when this status was captured"
+    }
+  },
+  "required": ["summary", "transfers", "system", "timestamp"],
+  "additionalProperties": false
+}
