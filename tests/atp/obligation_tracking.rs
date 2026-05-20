@@ -225,7 +225,7 @@ impl AtpObligationTracker {
     }
 
     /// Enable/disable leak detection
-    pub fn set_leak_detection(&self, enabled: bool) {
+    pub fn set_leak_detection(&mut self, enabled: bool) {
         self.leak_detection_enabled = enabled;
     }
 

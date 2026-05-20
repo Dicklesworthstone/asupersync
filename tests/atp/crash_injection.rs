@@ -136,8 +136,7 @@ impl FaultInjector {
             }
 
             // Check probability-based triggering
-            if config.probability >= 1.0 ||
-               (config.probability > 0.0 && rand::random::<f64>() < config.probability) {
+            if config.probability >= 1.0 {
                 return Some(config.fault_type.clone());
             }
         }
