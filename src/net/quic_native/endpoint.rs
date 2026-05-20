@@ -124,7 +124,12 @@ pub enum QuicUdpEndpointError {
     /// Endpoint is shutting down.
     ShuttingDown,
     /// Packet too large for configured limits.
-    PacketTooLarge { size: usize, limit: usize },
+    PacketTooLarge {
+        /// Observed packet size in bytes.
+        size: usize,
+        /// Configured packet-size limit in bytes.
+        limit: usize,
+    },
     /// Address resolution failed.
     AddressResolution(String),
 }

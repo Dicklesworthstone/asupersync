@@ -314,7 +314,7 @@ pub struct ApplicationMetadata {
 }
 
 /// Platform-specific metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlatformMetadata {
     /// Unix file permissions (mode bits).
     pub unix_mode: Option<u32>,
@@ -328,19 +328,6 @@ pub struct PlatformMetadata {
     pub modified_time_nanos: Option<u64>,
     /// File access time (nanoseconds since epoch).
     pub accessed_time_nanos: Option<u64>,
-}
-
-impl Default for PlatformMetadata {
-    fn default() -> Self {
-        Self {
-            unix_mode: None,
-            windows_attributes: None,
-            extended_attributes: BTreeMap::new(),
-            created_time_nanos: None,
-            modified_time_nanos: None,
-            accessed_time_nanos: None,
-        }
-    }
 }
 
 /// Core object metadata.
@@ -522,7 +509,7 @@ impl Object {
         for edge in children {
             bytes.extend_from_slice(edge.name.as_bytes());
             bytes.extend_from_slice(edge.child_id.hash_bytes());
-            bytes.push(if edge.is_symlink { 1 } else { 0 });
+            bytes.push(u8::from(edge.is_symlink));
             if let Some(target) = &edge.symlink_target {
                 bytes.extend_from_slice(target.as_os_str().as_encoded_bytes());
             }
@@ -626,13 +613,11 @@ impl ObjectGraph {
     }
 
     /// Get all root objects.
-    #[must_use]
     pub fn roots(&self) -> impl Iterator<Item = &ObjectId> {
         self.roots.iter()
     }
 
     /// Get all objects in the graph.
-    #[must_use]
     pub fn objects(&self) -> impl Iterator<Item = (&ObjectId, &Object)> {
         self.objects.iter()
     }

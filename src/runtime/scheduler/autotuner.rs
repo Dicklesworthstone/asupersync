@@ -240,7 +240,7 @@ impl SchedulerAutotuner {
 
         // High ready dispatch suggests reducing handoff frequency for better batching
         if obs.ready_dispatch_ratio_bps > 7000 {
-            let new_limit = current.saturating_mul(2).max(1).min(64);
+            let new_limit = current.saturating_mul(2).clamp(1, 64);
             if new_limit != current {
                 return Some((
                     new_limit,
