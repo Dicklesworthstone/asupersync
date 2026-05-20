@@ -83,6 +83,7 @@
 //! ```
 
 use std::marker::PhantomData;
+use crate::types::outcome::Outcome;
 
 // ---------- Core session type building blocks ----------
 
@@ -247,7 +248,7 @@ where
     ///
     /// Consumes this endpoint and returns a new one at state `Next`.
     /// Uses the crate's two-phase send (reserve/commit) for cancel-safety.
-    pub async fn send(self, cx: &crate::cx::Cx, value: T) -> Result<Endpoint<Next>, SessionError> {
+    pub async fn send(self, cx: &crate::cx::Cx, value: T) -> Outcome<Endpoint<Next>, SessionError> {
         let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(value);
         tx.send(cx, boxed)
@@ -269,7 +270,7 @@ where
     /// Receive a value from the peer, advancing the protocol to the next state.
     ///
     /// Consumes this endpoint and returns the value plus a new endpoint at state `Next`.
-    pub async fn recv(self, cx: &crate::cx::Cx) -> Result<(T, Endpoint<Next>), SessionError> {
+    pub async fn recv(self, cx: &crate::cx::Cx) -> Outcome<(T, Endpoint<Next>), SessionError> {
         let Self { tx, mut rx, .. } = self;
         let boxed = rx.recv(cx).await.map_err(|e| match e {
             crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
@@ -294,7 +295,7 @@ impl<A: Session, B: Session> Endpoint<Choose<A, B>> {
     /// Choose the left branch of the protocol.
     ///
     /// Sends the choice to the peer and returns an endpoint at state `A`.
-    pub async fn choose_left(self, cx: &crate::cx::Cx) -> Result<Endpoint<A>, SessionError> {
+    pub async fn choose_left(self, cx: &crate::cx::Cx) -> Outcome<Endpoint<A>, SessionError> {
         let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(Branch::Left);
         tx.send(cx, boxed)
@@ -310,7 +311,7 @@ impl<A: Session, B: Session> Endpoint<Choose<A, B>> {
     /// Choose the right branch of the protocol.
     ///
     /// Sends the choice to the peer and returns an endpoint at state `B`.
-    pub async fn choose_right(self, cx: &crate::cx::Cx) -> Result<Endpoint<B>, SessionError> {
+    pub async fn choose_right(self, cx: &crate::cx::Cx) -> Outcome<Endpoint<B>, SessionError> {
         let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(Branch::Right);
         tx.send(cx, boxed)
@@ -336,7 +337,7 @@ impl<A: Session, B: Session> Endpoint<Offer<A, B>> {
     /// Wait for the peer to choose a branch.
     ///
     /// Returns the chosen branch as an `Offered` enum.
-    pub async fn offer(self, cx: &crate::cx::Cx) -> Result<Offered<A, B>, SessionError> {
+    pub async fn offer(self, cx: &crate::cx::Cx) -> Outcome<Offered<A, B>, SessionError> {
         let Self { tx, mut rx, .. } = self;
         let boxed = rx.recv(cx).await.map_err(|e| match e {
             crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
