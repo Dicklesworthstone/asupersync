@@ -8,7 +8,8 @@
 
 use asupersync::net::atp::chunk::dedupe::{CdcEngine, ChunkCache, ChunkReuseManager};
 use asupersync::net::atp::chunk::dedupe::{ChunkIdentity, CdcParameters, ChunkReuseCriteria, ChunkVerification};
-use asupersync::atp::manifest::{ChunkingProfile, ChunkStrategy};
+use asupersync::net::atp::chunk::ChunkingProfile;
+use asupersync::atp::manifest::ChunkStrategy;
 use std::collections::HashMap;
 
 #[test]
