@@ -12,11 +12,13 @@ pub mod doctor;
 pub mod manifest;
 pub mod object;
 pub mod path;
+pub mod repair_receiver;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod platform;
 pub mod proof;
-pub mod sdk;
-pub mod stream_object;
+// TODO: Fix compilation issues in ATP SDK
+// pub mod sdk;
+// pub mod stream_object;
 pub mod transfer;
 pub mod verifier;
 pub mod verify;

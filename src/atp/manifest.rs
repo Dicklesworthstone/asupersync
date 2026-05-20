@@ -323,6 +323,7 @@ impl MerkleRoot {
         capability_policy: &Option<CapabilityPolicy>,
         transform_order: &Option<TransformOrder>,
         transform_proof_policy: &Option<TransformProofPolicy>,
+        repair_groups: &BTreeMap<RepairGroupId, RepairGroup>,
     ) -> Self {
         let mut hasher = Sha256::new();
 
@@ -433,6 +434,57 @@ impl MerkleRoot {
             }
         }
 
+        // Hash repair groups in deterministic order
+        for (group_id, repair_group) in repair_groups {
+            hasher.update(group_id.as_bytes());
+            hasher.update(repair_group.object_id.hash_bytes());
+            hasher.update(repair_group.source_block_number.to_be_bytes());
+            hasher.update(repair_group.source_symbols_k.to_be_bytes());
+            hasher.update(repair_group.k_prime.to_be_bytes());
+            hasher.update(repair_group.symbol_size.to_be_bytes());
+
+            // Hash chunk range
+            hasher.update(repair_group.chunk_range.start_chunk.to_be_bytes());
+            hasher.update(repair_group.chunk_range.end_chunk.to_be_bytes());
+            hasher.update(repair_group.chunk_range.start_offset.to_be_bytes());
+            hasher.update(repair_group.chunk_range.end_offset.to_be_bytes());
+
+            // Hash repair layout
+            hasher.update(repair_group.repair_layout.total_repair_symbols.to_be_bytes());
+            hasher.update(repair_group.repair_layout.overhead_ratio.to_be_bytes());
+            hasher.update(repair_group.repair_layout.systematic_config.systematic_rows.to_be_bytes());
+            hasher.update(repair_group.repair_layout.systematic_config.sub_symbols.to_be_bytes());
+            hasher.update(repair_group.repair_layout.systematic_config.alignment.to_be_bytes());
+
+            // Hash interleaving pattern
+            hasher.update(repair_group.repair_layout.interleaving.block_size.to_be_bytes());
+            hasher.update(repair_group.repair_layout.interleaving.depth.to_be_bytes());
+            match repair_group.repair_layout.interleaving.pattern_type {
+                InterleavingType::None => hasher.update([0]),
+                InterleavingType::Block => hasher.update([1]),
+                InterleavingType::Matrix => hasher.update([2]),
+                InterleavingType::Randomized(seed) => {
+                    hasher.update([3]);
+                    hasher.update(seed.to_be_bytes());
+                }
+            }
+
+            // Hash domains
+            hasher.update(repair_group.hash_domain.domain_id.as_bytes());
+            hasher.update([repair_group.hash_domain.hash_algorithm as u8]);
+            hasher.update(&repair_group.hash_domain.context);
+
+            hasher.update(repair_group.auth_domain.domain_id.as_bytes());
+            hasher.update([repair_group.auth_domain.required_proof_strength as u8]);
+            hasher.update([repair_group.auth_domain.auth_algorithm as u8]);
+            hasher.update([u8::from(repair_group.auth_domain.peer_identity_required)]);
+            hasher.update([u8::from(repair_group.auth_domain.transfer_identity_binding)]);
+            hasher.update([u8::from(repair_group.auth_domain.session_binding)]);
+
+            // Hash manifest root binding
+            hasher.update(&repair_group.manifest_root.hash);
+        }
+
         Self {
             hash: hasher.finalize().into(),
         }
@@ -482,6 +534,8 @@ pub struct Manifest {
     pub transform_order: Option<TransformOrder>,
     /// Transform proof policy for ATP-C4.
     pub transform_proof_policy: Option<TransformProofPolicy>,
+    /// Repair groups for ATP-G2 symbol authentication.
+    pub repair_groups: BTreeMap<RepairGroupId, RepairGroup>,
     /// Unknown optional fields for forward compatibility.
     pub unknown_optional_fields: Vec<UnknownField>,
     /// Manifest creation timestamp (nanoseconds since epoch).
@@ -634,6 +688,179 @@ pub struct RaptorQSymbol {
     pub content_hash: [u8; 32],
     /// Whether this is a source symbol (true) or repair symbol (false).
     pub is_source: bool,
+    /// Repair group this symbol belongs to.
+    pub repair_group_id: Option<RepairGroupId>,
+    /// Authentication tag binding symbol to group and manifest.
+    pub auth_tag: Option<[u8; 32]>,
+}
+
+/// Repair group identifier for binding symbols to decode context.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RepairGroupId(pub [u8; 16]);
+
+impl RepairGroupId {
+    /// Create a new repair group ID from object and source block parameters.
+    #[must_use]
+    pub fn new(object_id: &ObjectId, source_block_number: u32, k_prime: u32) -> Self {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"ATP-G2-RepairGroup");
+        hasher.update(object_id.hash_bytes());
+        hasher.update(source_block_number.to_be_bytes());
+        hasher.update(k_prime.to_be_bytes());
+
+        let hash = hasher.finalize();
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&hash[..16]);
+        Self(id)
+    }
+
+    /// Get the raw bytes of this group ID.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+impl fmt::Display for RepairGroupId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+/// RepairGroup manifest record containing all decode-critical parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairGroup {
+    /// Unique identifier for this repair group.
+    pub group_id: RepairGroupId,
+    /// Object this repair group belongs to.
+    pub object_id: ObjectId,
+    /// Source block number within the object.
+    pub source_block_number: u32,
+    /// Chunk range covered by this source block.
+    pub chunk_range: ChunkRange,
+    /// Source symbol count (K) for this block.
+    pub source_symbols_k: u32,
+    /// Extended source symbol count (K') for systematic decoding.
+    pub k_prime: u32,
+    /// Symbol size in bytes.
+    pub symbol_size: u32,
+    /// Repair symbol layout configuration.
+    pub repair_layout: RepairLayout,
+    /// Hash domain for symbol integrity verification.
+    pub hash_domain: HashDomain,
+    /// Transform policy that was applied to source data.
+    pub transform_policy: Option<TransformOrder>,
+    /// Authentication domain for symbol verification.
+    pub auth_domain: AuthenticationDomain,
+    /// Capability policy for access control.
+    pub capability_policy: Option<CapabilityPolicy>,
+    /// Manifest root this group is bound to.
+    pub manifest_root: MerkleRoot,
+}
+
+/// Chunk range specification for repair groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkRange {
+    /// Starting chunk index.
+    pub start_chunk: u32,
+    /// Ending chunk index (exclusive).
+    pub end_chunk: u32,
+    /// Starting byte offset within the object.
+    pub start_offset: u64,
+    /// Ending byte offset within the object (exclusive).
+    pub end_offset: u64,
+}
+
+/// Repair symbol layout configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairLayout {
+    /// Total repair symbols available.
+    pub total_repair_symbols: u32,
+    /// Repair symbol overhead ratio (R/K).
+    pub overhead_ratio: f32,
+    /// Systematic encoding parameters.
+    pub systematic_config: SystematicConfig,
+    /// Symbol interleaving pattern.
+    pub interleaving: InterleavingPattern,
+}
+
+/// Systematic encoding configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystematicConfig {
+    /// Number of systematic rows.
+    pub systematic_rows: u32,
+    /// Sub-symbol configuration.
+    pub sub_symbols: u32,
+    /// Alignment requirements.
+    pub alignment: u32,
+}
+
+/// Symbol interleaving pattern for improved burst error resilience.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterleavingPattern {
+    /// Interleaving block size.
+    pub block_size: u32,
+    /// Interleaving depth.
+    pub depth: u32,
+    /// Pattern type.
+    pub pattern_type: InterleavingType,
+}
+
+/// Types of symbol interleaving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterleavingType {
+    /// No interleaving.
+    None,
+    /// Block-based interleaving.
+    Block,
+    /// Matrix-based interleaving.
+    Matrix,
+    /// Randomized interleaving with seed.
+    Randomized(u32),
+}
+
+/// Hash domain for symbol integrity verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashDomain {
+    /// Domain identifier string.
+    pub domain_id: String,
+    /// Hash algorithm used for symbols.
+    pub hash_algorithm: HashAlgorithm,
+    /// Additional context for hash computation.
+    pub context: Vec<u8>,
+}
+
+/// Authentication domain for repair symbol verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticationDomain {
+    /// Domain identifier for this auth context.
+    pub domain_id: String,
+    /// Required proof strength for symbols in this domain.
+    pub required_proof_strength: ProofStrength,
+    /// Authentication algorithm specification.
+    pub auth_algorithm: AuthenticationAlgorithm,
+    /// Peer identity requirements.
+    pub peer_identity_required: bool,
+    /// Transfer identity binding.
+    pub transfer_identity_binding: bool,
+    /// Session binding requirements.
+    pub session_binding: bool,
+}
+
+/// Authentication algorithm types for repair symbols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticationAlgorithm {
+    /// HMAC-SHA256 with symmetric keys.
+    HmacSha256,
+    /// EdDSA signatures for asymmetric authentication.
+    EdDsa,
+    /// X25519 ECDH for session-bound authentication.
+    X25519Ecdh,
 }
 
 /// Compression metadata for an object.
@@ -741,7 +968,7 @@ pub enum PrivacyLevel {
 }
 
 /// Transform proof policy for ATP-C4 requirements.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TransformProofPolicy {
     /// Required transform order validation.
     pub enforce_transform_order: bool,
@@ -854,6 +1081,7 @@ impl Manifest {
             &capability_policy,
             &transform_order,
             &transform_proof_policy,
+            &BTreeMap::new(), // Empty repair groups for now
         );
 
         let created_timestamp_nanos = std::time::SystemTime::now()
@@ -875,6 +1103,7 @@ impl Manifest {
             capability_policy,
             transform_order,
             transform_proof_policy,
+            repair_groups: BTreeMap::new(),
             unknown_optional_fields: Vec::new(),
             created_timestamp_nanos,
             schema_id: "atp.manifest.v1".to_string(),
@@ -979,6 +1208,9 @@ impl Manifest {
         // ATP-C4: Validate transform proof policies
         self.validate_transform_policies()?;
 
+        // ATP-G2: Validate repair groups
+        self.validate_repair_groups()?;
+
         // Verify Merkle root
         let computed_root = MerkleRoot::from_manifest_components(
             &self.objects,
@@ -989,6 +1221,7 @@ impl Manifest {
             &self.capability_policy,
             &self.transform_order,
             &self.transform_proof_policy,
+            &self.repair_groups,
         );
 
         if computed_root != self.merkle_root {
@@ -1235,6 +1468,191 @@ impl Manifest {
         Ok(())
     }
 
+    /// Validate repair groups for ATP-G2 requirements.
+    fn validate_repair_groups(&self) -> Result<(), ManifestError> {
+        // Validate each repair group individually
+        for repair_group in self.repair_groups.values() {
+            self.validate_repair_group(repair_group)?;
+        }
+
+        // Validate repair group symbol references
+        for manifest_obj in self.objects.values() {
+            for symbol in &manifest_obj.raptorq_symbols {
+                if let Some(group_id) = &symbol.repair_group_id {
+                    // Verify repair group exists
+                    if !self.repair_groups.contains_key(group_id) {
+                        return Err(ManifestError::RepairGroupReferenceError(
+                            format!("symbol references non-existent repair group: {group_id}")
+                        ));
+                    }
+
+                    // Verify symbol belongs to correct object
+                    let repair_group = &self.repair_groups[group_id];
+                    if repair_group.object_id != manifest_obj.id {
+                        return Err(ManifestError::RepairGroupReferenceError(
+                            format!(
+                                "symbol in object {} references repair group for object {}",
+                                manifest_obj.id, repair_group.object_id
+                            )
+                        ));
+                    }
+
+                    // Verify authentication tag is present
+                    if symbol.auth_tag.is_none() {
+                        return Err(ManifestError::RepairGroupAuthenticationError(
+                            format!("repair symbol missing authentication tag: group {group_id}")
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Validate repair group consistency with RaptorQ layout
+        if let Some(layout) = &self.raptorq_layout {
+            for repair_group in self.repair_groups.values() {
+                self.validate_repair_group_layout_consistency(repair_group, layout)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate individual repair group for ATP-G2 requirements.
+    fn validate_repair_group(&self, repair_group: &RepairGroup) -> Result<(), ManifestError> {
+        // Validate group ID matches computed value
+        let expected_id = RepairGroupId::new(
+            &repair_group.object_id,
+            repair_group.source_block_number,
+            repair_group.k_prime,
+        );
+        if repair_group.group_id != expected_id {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!(
+                    "repair group ID mismatch: expected {expected_id}, got {}",
+                    repair_group.group_id
+                )
+            ));
+        }
+
+        // Validate object exists in manifest
+        if !self.objects.contains_key(&repair_group.object_id) {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!("repair group references non-existent object: {}", repair_group.object_id)
+            ));
+        }
+
+        // Validate K' >= K (extended source symbols)
+        if repair_group.k_prime < repair_group.source_symbols_k {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!(
+                    "k_prime ({}) must be >= source_symbols_k ({}) for group {}",
+                    repair_group.k_prime, repair_group.source_symbols_k, repair_group.group_id
+                )
+            ));
+        }
+
+        // Validate symbol size is non-zero
+        if repair_group.symbol_size == 0 {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!("symbol_size cannot be zero for group {}", repair_group.group_id)
+            ));
+        }
+
+        // Validate chunk range consistency
+        if repair_group.chunk_range.end_chunk <= repair_group.chunk_range.start_chunk {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!("invalid chunk range for group {}: end <= start", repair_group.group_id)
+            ));
+        }
+
+        if repair_group.chunk_range.end_offset <= repair_group.chunk_range.start_offset {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!("invalid byte range for group {}: end <= start", repair_group.group_id)
+            ));
+        }
+
+        // Validate repair layout
+        if repair_group.repair_layout.total_repair_symbols == 0 {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!("total_repair_symbols cannot be zero for group {}", repair_group.group_id)
+            ));
+        }
+
+        if repair_group.repair_layout.overhead_ratio < 0.0 || repair_group.repair_layout.overhead_ratio > 10.0 {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!(
+                    "overhead_ratio ({}) out of range [0.0, 10.0] for group {}",
+                    repair_group.repair_layout.overhead_ratio, repair_group.group_id
+                )
+            ));
+        }
+
+        // Validate systematic encoding parameters
+        if repair_group.repair_layout.systematic_config.systematic_rows == 0 {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!("systematic_rows cannot be zero for group {}", repair_group.group_id)
+            ));
+        }
+
+        // Validate authentication domain
+        if repair_group.auth_domain.domain_id.is_empty() {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!("authentication domain_id cannot be empty for group {}", repair_group.group_id)
+            ));
+        }
+
+        // Validate manifest root binding
+        if repair_group.manifest_root != self.merkle_root {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!(
+                    "repair group manifest_root mismatch for group {}: expected {}, got {}",
+                    repair_group.group_id, self.merkle_root, repair_group.manifest_root
+                )
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate repair group consistency with RaptorQ layout.
+    fn validate_repair_group_layout_consistency(
+        &self,
+        repair_group: &RepairGroup,
+        layout: &RaptorQRepairLayout,
+    ) -> Result<(), ManifestError> {
+        // Verify symbol size matches layout
+        if repair_group.symbol_size != layout.symbol_size {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!(
+                    "repair group symbol_size ({}) does not match layout symbol_size ({}) for group {}",
+                    repair_group.symbol_size, layout.symbol_size, repair_group.group_id
+                )
+            ));
+        }
+
+        // Verify K is within layout bounds
+        if repair_group.source_symbols_k > layout.source_symbols {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!(
+                    "repair group source_symbols_k ({}) exceeds layout source_symbols ({}) for group {}",
+                    repair_group.source_symbols_k, layout.source_symbols, repair_group.group_id
+                )
+            ));
+        }
+
+        // Verify total repair symbols is reasonable
+        if repair_group.repair_layout.total_repair_symbols > layout.total_symbols {
+            return Err(ManifestError::RepairGroupValidationError(
+                format!(
+                    "repair group total_repair_symbols ({}) exceeds layout total_symbols ({}) for group {}",
+                    repair_group.repair_layout.total_repair_symbols, layout.total_symbols, repair_group.group_id
+                )
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Get the total number of objects in the manifest.
     #[must_use]
     pub fn object_count(&self) -> usize {
@@ -1475,6 +1893,12 @@ pub enum ManifestError {
     EncryptionDomainViolation(String),
     /// Plaintext hash unavailable when required.
     PlaintextHashUnavailable(String),
+    /// Repair group validation failed.
+    RepairGroupValidationError(String),
+    /// Repair group reference error.
+    RepairGroupReferenceError(String),
+    /// Repair group authentication error.
+    RepairGroupAuthenticationError(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -1539,6 +1963,15 @@ impl fmt::Display for ManifestError {
             }
             Self::PlaintextHashUnavailable(msg) => {
                 write!(f, "plaintext hash unavailable: {msg}")
+            }
+            Self::RepairGroupValidationError(msg) => {
+                write!(f, "repair group validation error: {msg}")
+            }
+            Self::RepairGroupReferenceError(msg) => {
+                write!(f, "repair group reference error: {msg}")
+            }
+            Self::RepairGroupAuthenticationError(msg) => {
+                write!(f, "repair group authentication error: {msg}")
             }
         }
     }

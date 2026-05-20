@@ -10,10 +10,9 @@ use crate::net::atp::protocol::outcome::{AtpOutcome, AtpError};
 use crate::types::outcome::Outcome;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
-use serde::{Serialize, Deserialize};
 
 /// Rolling manifest epoch representing a verified prefix of a stream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamEpoch {
     /// Epoch sequence number (monotonically increasing).
     pub epoch_sequence: u64,
@@ -199,7 +198,7 @@ impl EpochState {
 }
 
 /// Rolling manifest for a stream object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamManifest {
     /// Stream object identifier.
     pub object_id: ObjectId,
@@ -523,7 +522,7 @@ pub enum ConsumptionPolicy {
 }
 
 /// Proof bundle record for stream consumption.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamProofRecord {
     /// Stream object identifier.
     pub object_id: ObjectId,

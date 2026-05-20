@@ -554,8 +554,8 @@ impl ArtifactProfile {
         }
 
         // Check for significant variation in entropy
-        let max_entropy = entropies.iter().fold(0.0, |a, &b| a.max(b));
-        let min_entropy = entropies.iter().fold(8.0, |a, &b| a.min(b));
+        let max_entropy = entropies.iter().fold(0.0f32, |a: f32, &b| a.max(b));
+        let min_entropy = entropies.iter().fold(8.0f32, |a: f32, &b| a.min(b));
 
         (max_entropy - min_entropy) > 2.0 // Significant variation
     }
