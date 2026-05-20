@@ -83,19 +83,19 @@ impl ChunkingProfile {
     /// Whether this profile supports streaming/progressive consumption.
     #[must_use]
     pub const fn supports_streaming(self) -> bool {
-        matches!(self, /* Self::Media | */ Self::Stream)
+        matches!(self, Self::Stream)
     }
 
     /// Whether this profile prioritizes deduplication efficiency.
     #[must_use]
     pub const fn optimizes_for_deduplication(self) -> bool {
-        matches!(self, /* Self::SyncTree | */ Self::Artifact)
+        matches!(self, Self::Artifact)
     }
 
     /// Whether this profile handles sparse data efficiently.
     #[must_use]
     pub const fn supports_sparse_data(self) -> bool {
-        matches!(self, /* Self::SparseImage */ )
+        false // TODO: Enable when SparseImage profile is available
     }
 
     /// Whether this profile provides reproducible chunking for proof strength.

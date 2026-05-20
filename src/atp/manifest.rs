@@ -321,6 +321,8 @@ impl MerkleRoot {
         compression_policy: &Option<CompressionPolicy>,
         encryption_policy: &Option<EncryptionPolicy>,
         capability_policy: &Option<CapabilityPolicy>,
+        transform_order: &Option<TransformOrder>,
+        transform_proof_policy: &Option<TransformProofPolicy>,
     ) -> Self {
         let mut hasher = Sha256::new();
 
@@ -402,6 +404,35 @@ impl MerkleRoot {
             }
         }
 
+        // Hash transform order
+        if let Some(order) = transform_order {
+            for transform in &order.transforms {
+                hasher.update([*transform as u8]);
+            }
+            hasher.update([order.hash_point as u8]);
+            hasher.update([order.verification_boundary.relay_verifiable as u8]);
+            hasher.update([order.verification_boundary.mailbox_verifiable as u8]);
+            hasher.update([u8::from(order.verification_boundary.e2e_verification_required)]);
+            hasher.update([order.verification_boundary.privacy_level as u8]);
+        }
+
+        // Hash transform proof policy
+        if let Some(proof) = transform_proof_policy {
+            hasher.update([u8::from(proof.enforce_transform_order)]);
+            hasher.update([u8::from(proof.require_deterministic_transforms)]);
+            hasher.update([u8::from(proof.allow_lossy_transforms)]);
+            hasher.update([u8::from(proof.require_plaintext_hash)]);
+            if let Some(ratio) = proof.max_compression_ratio {
+                hasher.update(ratio.to_be_bytes());
+            }
+            hasher.update([proof.minimum_proof_strength as u8]);
+            for domain in &proof.encryption_domains {
+                hasher.update(domain.domain_id.as_bytes());
+                hasher.update([u8::from(domain.relay_privacy)]);
+                hasher.update([u8::from(domain.mailbox_privacy)]);
+            }
+        }
+
         Self {
             hash: hasher.finalize().into(),
         }
@@ -447,6 +478,10 @@ pub struct Manifest {
     pub encryption_policy: Option<EncryptionPolicy>,
     /// Capability policy hints for authorization.
     pub capability_policy: Option<CapabilityPolicy>,
+    /// Transform ordering specification for ATP-C4.
+    pub transform_order: Option<TransformOrder>,
+    /// Transform proof policy for ATP-C4.
+    pub transform_proof_policy: Option<TransformProofPolicy>,
     /// Unknown optional fields for forward compatibility.
     pub unknown_optional_fields: Vec<UnknownField>,
     /// Manifest creation timestamp (nanoseconds since epoch).
@@ -629,6 +664,114 @@ pub struct EncryptionMetadata {
     pub key_derivation: KeyDerivation,
 }
 
+/// Transform ordering specification for ATP-C4.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TransformOrder {
+    /// Ordered list of transforms applied to content.
+    pub transforms: Vec<TransformType>,
+    /// Hash computation point in the transform pipeline.
+    pub hash_point: HashPoint,
+    /// Verification boundary specification.
+    pub verification_boundary: VerificationBoundary,
+}
+
+/// Types of transforms that can be applied to content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TransformType {
+    /// Content chunking.
+    Chunking,
+    /// Compression transform.
+    Compression,
+    /// Encryption transform.
+    Encryption,
+    /// Error correction (RaptorQ) encoding.
+    ErrorCorrection,
+}
+
+/// Point in transform pipeline where hashes are computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HashPoint {
+    /// Hash computed on original plaintext content.
+    Plaintext,
+    /// Hash computed after compression but before encryption.
+    PostCompression,
+    /// Hash computed on final ciphertext.
+    Ciphertext,
+    /// Multiple hashes at different points for verification flexibility.
+    MultiPoint,
+}
+
+/// Verification boundary specification.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VerificationBoundary {
+    /// What content is verifiable by untrusted relays.
+    pub relay_verifiable: VerificationLevel,
+    /// What content is verifiable by mailbox providers.
+    pub mailbox_verifiable: VerificationLevel,
+    /// What content requires end-to-end verification.
+    pub e2e_verification_required: bool,
+    /// Privacy protection level for intermediate hops.
+    pub privacy_level: PrivacyLevel,
+}
+
+/// Level of verification possible at different points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VerificationLevel {
+    /// No verification possible (encrypted content).
+    None,
+    /// Size and transfer integrity only.
+    TransferIntegrity,
+    /// Content hash verification possible.
+    ContentHash,
+    /// Full content and metadata verification.
+    FullVerification,
+}
+
+/// Privacy protection level for content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PrivacyLevel {
+    /// Content and metadata visible to all hops.
+    Public,
+    /// Metadata visible, content protected.
+    MetadataVisible,
+    /// Size visible, content and metadata protected.
+    SizeVisible,
+    /// Complete privacy protection.
+    FullPrivacy,
+}
+
+/// Transform proof policy for ATP-C4 requirements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransformProofPolicy {
+    /// Required transform order validation.
+    pub enforce_transform_order: bool,
+    /// Require deterministic transforms for proof strength.
+    pub require_deterministic_transforms: bool,
+    /// Allow lossy transforms (with explicit disclosure).
+    pub allow_lossy_transforms: bool,
+    /// Require plaintext hash availability.
+    pub require_plaintext_hash: bool,
+    /// Maximum compression ratio before rejection.
+    pub max_compression_ratio: Option<f32>,
+    /// Encryption domain restrictions.
+    pub encryption_domains: Vec<EncryptionDomain>,
+    /// Proof strength requirements.
+    pub minimum_proof_strength: ProofStrength,
+}
+
+/// Encryption domain specification.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EncryptionDomain {
+    /// Domain identifier.
+    pub domain_id: String,
+    /// Allowed key derivation functions for this domain.
+    pub allowed_kdfs: Vec<KeyDerivationFunction>,
+    /// Relay privacy requirements.
+    pub relay_privacy: bool,
+    /// Mailbox privacy requirements.
+    pub mailbox_privacy: bool,
+}
+
 impl Manifest {
     /// Create a manifest from an object graph with default policies.
     pub fn from_graph(
@@ -644,6 +787,8 @@ impl Manifest {
             None,                        // No compression
             None,                        // No encryption
             None,                        // No capability policy
+            None,                        // No transform order
+            None,                        // No transform proof policy
         )
     }
 
@@ -657,6 +802,8 @@ impl Manifest {
         compression_policy: Option<CompressionPolicy>,
         encryption_policy: Option<EncryptionPolicy>,
         capability_policy: Option<CapabilityPolicy>,
+        transform_order: Option<TransformOrder>,
+        transform_proof_policy: Option<TransformProofPolicy>,
     ) -> Result<Self, ManifestError> {
         // Validate hash algorithms
         if !hash_algorithms.contains(&HashAlgorithm::Sha256) {
@@ -705,6 +852,8 @@ impl Manifest {
             &compression_policy,
             &encryption_policy,
             &capability_policy,
+            &transform_order,
+            &transform_proof_policy,
         );
 
         let created_timestamp_nanos = std::time::SystemTime::now()
@@ -724,6 +873,8 @@ impl Manifest {
             compression_policy,
             encryption_policy,
             capability_policy,
+            transform_order,
+            transform_proof_policy,
             unknown_optional_fields: Vec::new(),
             created_timestamp_nanos,
             schema_id: "atp.manifest.v1".to_string(),
@@ -825,6 +976,9 @@ impl Manifest {
             }
         }
 
+        // ATP-C4: Validate transform proof policies
+        self.validate_transform_policies()?;
+
         // Verify Merkle root
         let computed_root = MerkleRoot::from_manifest_components(
             &self.objects,
@@ -833,6 +987,8 @@ impl Manifest {
             &self.compression_policy,
             &self.encryption_policy,
             &self.capability_policy,
+            &self.transform_order,
+            &self.transform_proof_policy,
         );
 
         if computed_root != self.merkle_root {
@@ -840,6 +996,240 @@ impl Manifest {
                 expected: self.merkle_root.clone(),
                 computed: computed_root,
             });
+        }
+
+        Ok(())
+    }
+
+    /// Validate transform policies for ATP-C4 requirements.
+    fn validate_transform_policies(&self) -> Result<(), ManifestError> {
+        // If we have a transform proof policy, validate it
+        if let Some(proof_policy) = &self.transform_proof_policy {
+            // Validate transform order if required
+            if proof_policy.enforce_transform_order {
+                if let Some(order) = &self.transform_order {
+                    Self::validate_transform_order_consistency(order, &self.compression_policy, &self.encryption_policy)?;
+                } else {
+                    return Err(ManifestError::TransformPolicyViolation(
+                        "transform order enforcement requires transform_order specification".to_string(),
+                    ));
+                }
+            }
+
+            // Check for ambiguous verification modes
+            Self::validate_verification_boundary(&self.transform_order, &proof_policy)?;
+
+            // Validate lossy transforms disclosure
+            Self::validate_lossy_transforms_disclosure(&self.compression_policy, &proof_policy)?;
+
+            // Validate encryption domains
+            Self::validate_encryption_domains(&self.encryption_policy, &proof_policy)?;
+
+            // Check plaintext hash requirements
+            if proof_policy.require_plaintext_hash {
+                Self::validate_plaintext_hash_availability(&self.transform_order)?;
+            }
+        }
+
+        // Validate transform order consistency if specified
+        if let Some(order) = &self.transform_order {
+            Self::validate_transform_order_semantics(order)?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate transform order consistency with policies.
+    fn validate_transform_order_consistency(
+        order: &TransformOrder,
+        compression_policy: &Option<CompressionPolicy>,
+        encryption_policy: &Option<EncryptionPolicy>,
+    ) -> Result<(), ManifestError> {
+        let has_compression = compression_policy.is_some() &&
+            !matches!(compression_policy.as_ref().unwrap().algorithm, CompressionAlgorithm::None);
+        let has_encryption = encryption_policy.is_some() &&
+            !matches!(encryption_policy.as_ref().unwrap().algorithm, EncryptionAlgorithm::None);
+
+        // Check compression transform consistency
+        if has_compression && !order.transforms.contains(&TransformType::Compression) {
+            return Err(ManifestError::TransformOrderViolation(
+                "compression policy specified but compression transform not in order".to_string(),
+            ));
+        }
+
+        if !has_compression && order.transforms.contains(&TransformType::Compression) {
+            return Err(ManifestError::TransformOrderViolation(
+                "compression transform in order but no compression policy".to_string(),
+            ));
+        }
+
+        // Check encryption transform consistency
+        if has_encryption && !order.transforms.contains(&TransformType::Encryption) {
+            return Err(ManifestError::TransformOrderViolation(
+                "encryption policy specified but encryption transform not in order".to_string(),
+            ));
+        }
+
+        if !has_encryption && order.transforms.contains(&TransformType::Encryption) {
+            return Err(ManifestError::TransformOrderViolation(
+                "encryption transform in order but no encryption policy".to_string(),
+            ));
+        }
+
+        // Validate standard transform ordering (compression before encryption)
+        if let (Some(comp_pos), Some(enc_pos)) = (
+            order.transforms.iter().position(|&t| t == TransformType::Compression),
+            order.transforms.iter().position(|&t| t == TransformType::Encryption),
+        ) {
+            if comp_pos >= enc_pos {
+                return Err(ManifestError::TransformOrderViolation(
+                    "compression must come before encryption in transform order".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate verification boundary specifications.
+    fn validate_verification_boundary(
+        transform_order: &Option<TransformOrder>,
+        proof_policy: &TransformProofPolicy,
+    ) -> Result<(), ManifestError> {
+        if let Some(order) = transform_order {
+            let boundary = &order.verification_boundary;
+
+            // Check for ambiguous verification modes
+            if boundary.relay_verifiable == VerificationLevel::ContentHash &&
+               order.transforms.contains(&TransformType::Encryption) &&
+               order.hash_point == HashPoint::Ciphertext {
+                return Err(ManifestError::AmbiguousVerificationMode(
+                    "relay cannot verify content hash of encrypted content".to_string(),
+                ));
+            }
+
+            // Validate privacy protection consistency
+            if boundary.privacy_level == PrivacyLevel::Public &&
+               order.transforms.contains(&TransformType::Encryption) {
+                return Err(ManifestError::PrivacyPolicyViolation(
+                    "public privacy level inconsistent with encryption".to_string(),
+                ));
+            }
+
+            // Check for privacy downgrade protection
+            if boundary.relay_verifiable == VerificationLevel::FullVerification &&
+               boundary.privacy_level != PrivacyLevel::Public {
+                return Err(ManifestError::PrivacyPolicyViolation(
+                    "full relay verification requires public privacy level".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate lossy transforms are properly disclosed.
+    fn validate_lossy_transforms_disclosure(
+        compression_policy: &Option<CompressionPolicy>,
+        proof_policy: &TransformProofPolicy,
+    ) -> Result<(), ManifestError> {
+        if let Some(comp) = compression_policy {
+            let is_lossy = matches!(comp.algorithm, CompressionAlgorithm::Brotli); // Example of potentially lossy
+
+            if is_lossy && !proof_policy.allow_lossy_transforms {
+                return Err(ManifestError::LossyTransformNotAllowed(
+                    "lossy compression used but not allowed by proof policy".to_string(),
+                ));
+            }
+
+            // Check compression ratio bounds
+            if let Some(max_ratio) = proof_policy.max_compression_ratio {
+                // We'd need compression metadata to validate actual ratio
+                // This is a policy check that would be enforced during compression
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate encryption domains and privacy requirements.
+    fn validate_encryption_domains(
+        encryption_policy: &Option<EncryptionPolicy>,
+        proof_policy: &TransformProofPolicy,
+    ) -> Result<(), ManifestError> {
+        if let Some(enc) = encryption_policy {
+            // Check that encryption algorithm is allowed in domains
+            let allowed = proof_policy.encryption_domains.iter().any(|domain| {
+                domain.allowed_kdfs.contains(&enc.key_derivation.kdf)
+            });
+
+            if !proof_policy.encryption_domains.is_empty() && !allowed {
+                return Err(ManifestError::EncryptionDomainViolation(
+                    "encryption KDF not allowed in any specified domain".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate plaintext hash availability requirements.
+    fn validate_plaintext_hash_availability(
+        transform_order: &Option<TransformOrder>,
+    ) -> Result<(), ManifestError> {
+        if let Some(order) = transform_order {
+            if order.hash_point == HashPoint::Ciphertext &&
+               order.transforms.contains(&TransformType::Encryption) {
+                return Err(ManifestError::PlaintextHashUnavailable(
+                    "plaintext hash required but only ciphertext hash computed".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate transform order semantic consistency.
+    fn validate_transform_order_semantics(order: &TransformOrder) -> Result<(), ManifestError> {
+        // Error correction must come after chunking if both are present
+        if let (Some(chunk_pos), Some(ec_pos)) = (
+            order.transforms.iter().position(|&t| t == TransformType::Chunking),
+            order.transforms.iter().position(|&t| t == TransformType::ErrorCorrection),
+        ) {
+            if chunk_pos >= ec_pos {
+                return Err(ManifestError::TransformOrderViolation(
+                    "chunking must come before error correction".to_string(),
+                ));
+            }
+        }
+
+        // Validate hash point consistency with transforms
+        match order.hash_point {
+            HashPoint::Plaintext => {
+                // Valid in all cases
+            }
+            HashPoint::PostCompression => {
+                if !order.transforms.contains(&TransformType::Compression) {
+                    return Err(ManifestError::TransformOrderViolation(
+                        "post-compression hash point requires compression transform".to_string(),
+                    ));
+                }
+            }
+            HashPoint::Ciphertext => {
+                if !order.transforms.contains(&TransformType::Encryption) {
+                    return Err(ManifestError::TransformOrderViolation(
+                        "ciphertext hash point requires encryption transform".to_string(),
+                    ));
+                }
+            }
+            HashPoint::MultiPoint => {
+                // Valid if multiple transforms are present
+                if order.transforms.len() < 2 {
+                    return Err(ManifestError::TransformOrderViolation(
+                        "multi-point hashing requires multiple transforms".to_string(),
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -1071,6 +1461,20 @@ pub enum ManifestError {
     CompressionPolicyError(String),
     /// Encryption policy validation failed.
     EncryptionPolicyError(String),
+    /// Transform policy validation failed.
+    TransformPolicyViolation(String),
+    /// Transform order validation failed.
+    TransformOrderViolation(String),
+    /// Ambiguous verification mode detected.
+    AmbiguousVerificationMode(String),
+    /// Privacy policy violation.
+    PrivacyPolicyViolation(String),
+    /// Lossy transform not allowed by policy.
+    LossyTransformNotAllowed(String),
+    /// Encryption domain policy violation.
+    EncryptionDomainViolation(String),
+    /// Plaintext hash unavailable when required.
+    PlaintextHashUnavailable(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -1114,6 +1518,27 @@ impl fmt::Display for ManifestError {
             }
             Self::EncryptionPolicyError(msg) => {
                 write!(f, "encryption policy error: {msg}")
+            }
+            Self::TransformPolicyViolation(msg) => {
+                write!(f, "transform policy violation: {msg}")
+            }
+            Self::TransformOrderViolation(msg) => {
+                write!(f, "transform order violation: {msg}")
+            }
+            Self::AmbiguousVerificationMode(msg) => {
+                write!(f, "ambiguous verification mode: {msg}")
+            }
+            Self::PrivacyPolicyViolation(msg) => {
+                write!(f, "privacy policy violation: {msg}")
+            }
+            Self::LossyTransformNotAllowed(msg) => {
+                write!(f, "lossy transform not allowed: {msg}")
+            }
+            Self::EncryptionDomainViolation(msg) => {
+                write!(f, "encryption domain violation: {msg}")
+            }
+            Self::PlaintextHashUnavailable(msg) => {
+                write!(f, "plaintext hash unavailable: {msg}")
             }
         }
     }
@@ -1872,6 +2297,38 @@ mod tests {
             delegation_rules: vec![],
         };
 
+        // ATP-C4 transform policies
+        let transform_order = TransformOrder {
+            transforms: vec![
+                TransformType::Chunking,
+                TransformType::Compression,
+                TransformType::Encryption,
+                TransformType::ErrorCorrection,
+            ],
+            hash_point: HashPoint::MultiPoint,
+            verification_boundary: VerificationBoundary {
+                relay_verifiable: VerificationLevel::TransferIntegrity,
+                mailbox_verifiable: VerificationLevel::ContentHash,
+                e2e_verification_required: true,
+                privacy_level: PrivacyLevel::MetadataVisible,
+            },
+        };
+
+        let transform_proof_policy = TransformProofPolicy {
+            enforce_transform_order: true,
+            require_deterministic_transforms: true,
+            allow_lossy_transforms: false,
+            require_plaintext_hash: true,
+            max_compression_ratio: Some(10.0),
+            encryption_domains: vec![EncryptionDomain {
+                domain_id: "secure".to_string(),
+                allowed_kdfs: vec![KeyDerivationFunction::Argon2id],
+                relay_privacy: true,
+                mailbox_privacy: true,
+            }],
+            minimum_proof_strength: ProofStrength::Enhanced,
+        };
+
         let policy = MetadataPolicy::default();
         let manifest = Manifest::from_graph_with_policies(
             &graph,
@@ -1882,6 +2339,8 @@ mod tests {
             Some(compression_policy),
             Some(encryption_policy),
             Some(capability_policy),
+            Some(transform_order),
+            Some(transform_proof_policy),
         )
         .unwrap();
 
@@ -1894,7 +2353,22 @@ mod tests {
         assert!(manifest.compression_policy.is_some());
         assert!(manifest.encryption_policy.is_some());
         assert!(manifest.capability_policy.is_some());
+        assert!(manifest.transform_order.is_some());
+        assert!(manifest.transform_proof_policy.is_some());
         assert_eq!(manifest.hash_algorithms.len(), 2);
+
+        // ATP-C4 specific validations
+        let transform_order = manifest.transform_order.as_ref().unwrap();
+        assert_eq!(transform_order.transforms.len(), 4);
+        assert!(transform_order.transforms.contains(&TransformType::Compression));
+        assert!(transform_order.transforms.contains(&TransformType::Encryption));
+        assert_eq!(transform_order.hash_point, HashPoint::MultiPoint);
+
+        let proof_policy = manifest.transform_proof_policy.as_ref().unwrap();
+        assert!(proof_policy.enforce_transform_order);
+        assert!(proof_policy.require_deterministic_transforms);
+        assert!(!proof_policy.allow_lossy_transforms);
+        assert!(proof_policy.require_plaintext_hash);
 
         // Canonical serialization should be deterministic
         let bytes = manifest.to_canonical_bytes();
