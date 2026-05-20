@@ -475,12 +475,40 @@ impl AtpQuicConnectionState {
         candidate: AtpPathCandidate,
         now_micros: u64,
     ) -> Result<PathValidationChallenge, AtpQuicConnectionError> {
-        if !candidate
-            .endpoints()
-            .is_nat_rebinding_from(self.path_manager.active_path().endpoints())
-        {
+        // Enhanced NAT rebinding detection with timing and connection state validation
+        let active_path = self.path_manager.active_path();
+        let candidate_endpoints = candidate.endpoints();
+        let active_endpoints = active_path.endpoints();
+
+        // Basic endpoint check: local same, remote different (original logic)
+        if !(candidate_endpoints.local() == active_endpoints.local()
+             && candidate_endpoints.remote() != active_endpoints.remote()) {
             return Err(AtpQuicConnectionError::NotNatRebinding);
         }
+
+        // Timing validation: NAT rebinding typically happens quickly due to NAT table
+        // expiration, while load balancer changes or legitimate topology updates are gradual
+        const NAT_REBINDING_WINDOW_MICROS: u64 = 30_000_000; // 30 seconds
+        let time_since_active_path = now_micros.saturating_sub(active_path.observed_at_micros());
+        let candidate_age = now_micros.saturating_sub(candidate.observed_at_micros());
+
+        // If the active path has been stable for too long, endpoint change is more likely
+        // to be legitimate topology change (load balancer rotation, etc.) rather than NAT rebinding
+        if time_since_active_path > NAT_REBINDING_WINDOW_MICROS {
+            return Err(AtpQuicConnectionError::NotNatRebinding);
+        }
+
+        // Ensure candidate observation is recent - stale observations shouldn't trigger rebinding
+        if candidate_age > NAT_REBINDING_WINDOW_MICROS {
+            return Err(AtpQuicConnectionError::NotNatRebinding);
+        }
+
+        // Connection state validation: ensure we're in a state where NAT rebinding makes sense
+        // If there are pending migrations, this might be a cascading change rather than rebinding
+        if !self.pending_challenges.is_empty() {
+            return Err(AtpQuicConnectionError::NotNatRebinding);
+        }
+
         self.request_migration(cx, candidate, PathMigrationReason::NatRebinding, now_micros)
     }
 
