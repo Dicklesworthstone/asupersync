@@ -31,6 +31,16 @@ impl VarInt {
         self.0
     }
 
+    /// Create a new varint from a value known to be valid (for literals and known-safe values).
+    ///
+    /// # Safety
+    /// This panics if the value is too large. Only use with compile-time constants
+    /// or values you are certain are within the varint range.
+    #[inline]
+    pub fn from_u64_unchecked(value: u64) -> Self {
+        VarInt::new(value).expect("varint value exceeds maximum allowed value")
+    }
+
     /// Calculate the encoded length without actually encoding.
     #[inline]
     pub fn encoded_len(self) -> usize {
@@ -136,9 +146,11 @@ impl VarInt {
     }
 }
 
-impl From<u64> for VarInt {
-    fn from(value: u64) -> Self {
-        VarInt::new(value).expect("varint value too large")
+impl TryFrom<u64> for VarInt {
+    type Error = VarIntError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        VarInt::new(value)
     }
 }
 
@@ -192,7 +204,7 @@ mod tests {
         ];
 
         for (value, expected_len) in cases {
-            let varint = VarInt::new(value).unwrap();
+            let varint = VarInt::new(value).expect("test value should be valid");
             assert_eq!(varint.encoded_len(), expected_len, "value={value}");
         }
     }
@@ -205,27 +217,33 @@ mod tests {
 
         for &value in &values {
             let mut buf = BytesMut::new();
-            let varint = VarInt::new(value).unwrap();
-            varint.encode(&mut buf).unwrap();
+            let varint = VarInt::new(value).expect("test value should be valid");
+            varint.encode(&mut buf).expect("encoding should succeed");
 
-            let decoded = VarInt::decode(&mut buf).unwrap().unwrap();
+            let decoded = VarInt::decode(&mut buf)
+                .expect("decoding should succeed")
+                .expect("should have decoded a varint");
             assert_eq!(decoded.value(), value, "value={value}");
         }
     }
 
     #[test]
     fn test_varint_partial_decode() {
-        let varint = VarInt::new(16384).unwrap(); // 4-byte encoding
+        let varint = VarInt::new(16384).expect("test value should be valid"); // 4-byte encoding
         let mut buf = BytesMut::new();
-        varint.encode(&mut buf).unwrap();
+        varint.encode(&mut buf).expect("encoding should succeed");
 
         // Try decoding with partial data
         let mut partial = buf.split_to(2); // Only first 2 bytes
-        assert!(VarInt::decode(&mut partial).unwrap().is_none());
+        assert!(VarInt::decode(&mut partial)
+            .expect("partial decode should not error")
+            .is_none());
 
         // Complete with remaining bytes
         partial.put_slice(&buf);
-        let decoded = VarInt::decode(&mut partial).unwrap().unwrap();
+        let decoded = VarInt::decode(&mut partial)
+            .expect("decoding should succeed")
+            .expect("should have decoded a varint");
         assert_eq!(decoded.value(), 16384);
     }
 
@@ -238,17 +256,17 @@ mod tests {
     #[test]
     fn test_varint_peek_len() {
         let test_cases = [
-            (VarInt::new(0).unwrap(), 1),
-            (VarInt::new(64).unwrap(), 2),
-            (VarInt::new(16384).unwrap(), 4),
-            (VarInt::new(1073741824).unwrap(), 8),
+            (VarInt::new(0).expect("test value should be valid"), 1),
+            (VarInt::new(64).expect("test value should be valid"), 2),
+            (VarInt::new(16384).expect("test value should be valid"), 4),
+            (VarInt::new(1073741824).expect("test value should be valid"), 8),
         ];
 
         for (varint, expected_len) in test_cases {
             let mut buf = BytesMut::new();
-            varint.encode(&mut buf).unwrap();
+            varint.encode(&mut buf).expect("encoding should succeed");
 
-            assert_eq!(VarInt::peek_len(&buf).unwrap(), expected_len);
+            assert_eq!(VarInt::peek_len(&buf).expect("buffer should have varint"), expected_len);
         }
     }
 }
