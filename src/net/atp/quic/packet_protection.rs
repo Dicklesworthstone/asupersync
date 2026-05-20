@@ -7,11 +7,16 @@
 use crate::cx::Cx;
 use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, ProtocolError};
 use crate::net::quic_native::tls::{
-    DeterministicQuicCryptoProvider, HeaderProtectionMask, KeyUpdateEvent, PacketProtectionRequest,
-    PacketProtectionSpace, ProtectedPacket, ProtectionKeySnapshot, ProtectionProof,
-    QuicHandshakeTranscript, QuicPacketProtectionProvider, QuicTlsError, RustlsQuicCryptoProvider,
-    RustlsQuicProviderSide, TranscriptHash, UnprotectedPacket,
+    HeaderProtectionMask, KeyUpdateEvent, PacketProtectionRequest, PacketProtectionSpace,
+    ProtectedPacket, ProtectionKeySnapshot, ProtectionProof, QuicHandshakeTranscript,
+    QuicPacketProtectionProvider, QuicTlsError, TranscriptHash, UnprotectedPacket,
 };
+
+#[cfg(any(test, feature = "test-internals"))]
+use crate::net::quic_native::tls::DeterministicQuicCryptoProvider;
+
+#[cfg(feature = "tls")]
+use crate::net::quic_native::tls::{RustlsQuicCryptoProvider, RustlsQuicProviderSide};
 use crate::types::outcome::Outcome;
 use std::sync::Arc;
 
@@ -93,42 +98,55 @@ impl AtpPacketProtection {
             Box<dyn QuicPacketProtectionProvider + Send + Sync>,
             &'static str,
         ) = if config.use_deterministic {
+            #[cfg(any(test, feature = "test-internals"))]
             match &config.provider_options {
-                ProviderOptions::Deterministic { scenario } => {
-                    let provider = DeterministicQuicCryptoProvider::new(scenario.clone());
+                ProviderOptions::Deterministic { .. } => {
+                    let provider = DeterministicQuicCryptoProvider::new();
                     (Box::new(provider), "deterministic")
                 }
                 #[cfg(feature = "tls")]
                 ProviderOptions::Rustls { .. } => {
-                    let provider = DeterministicQuicCryptoProvider::new("test".to_string());
+                    let provider = DeterministicQuicCryptoProvider::new();
                     (Box::new(provider), "deterministic")
                 }
+            }
+            #[cfg(not(any(test, feature = "test-internals")))]
+            {
+                return Outcome::err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
             }
         } else {
             #[cfg(feature = "tls")]
             match &config.provider_options {
-                ProviderOptions::Rustls { side } => {
-                    let provider = RustlsQuicCryptoProvider::new_v1(*side)
-                        .map_err(|e| AtpError::Protocol(ProtocolError::SessionStateMismatch))?;
-                    (Box::new(provider), "rustls-quic-ring")
-                }
-                ProviderOptions::Deterministic { scenario } => {
-                    let provider = DeterministicQuicCryptoProvider::new(scenario.clone());
+                ProviderOptions::Rustls { side } => match RustlsQuicCryptoProvider::new_v1(*side) {
+                    Ok(provider) => (Box::new(provider), "rustls-quic-ring"),
+                    Err(_) => {
+                        return Outcome::err(AtpError::Protocol(
+                            ProtocolError::SessionStateMismatch,
+                        ));
+                    }
+                },
+                #[cfg(any(test, feature = "test-internals"))]
+                ProviderOptions::Deterministic { .. } => {
+                    let provider = DeterministicQuicCryptoProvider::new();
                     (Box::new(provider), "deterministic")
                 }
             }
-            #[cfg(not(feature = "tls"))]
+            #[cfg(all(not(feature = "tls"), any(test, feature = "test-internals")))]
             {
                 match &config.provider_options {
-                    ProviderOptions::Deterministic { scenario } => {
-                        let provider = DeterministicQuicCryptoProvider::new(scenario.clone());
+                    ProviderOptions::Deterministic { .. } => {
+                        let provider = DeterministicQuicCryptoProvider::new();
                         (Box::new(provider), "deterministic")
                     }
                 }
             }
+            #[cfg(all(not(feature = "tls"), not(any(test, feature = "test-internals"))))]
+            {
+                return Outcome::err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
+            }
         };
 
-        Ok(Self {
+        Outcome::ok(Self {
             provider,
             config,
             provider_kind,
@@ -153,7 +171,8 @@ impl AtpPacketProtection {
         let result = self
             .provider
             .derive_keys(space, transcript, secret_seed)
-            .map_err(|e| self.map_tls_error(e));
+            .map_err(|e| self.map_tls_error(e))
+            .into();
 
         if self.config.enable_proof_logging {
             match &result {
@@ -178,7 +197,7 @@ impl AtpPacketProtection {
     /// Verify transcript with ATP error handling.
     pub async fn verify_transcript(&self, cx: &Cx, expected: TranscriptHash) -> AtpOutcome<()> {
         if !self.config.enable_transcript_verification {
-            return Ok(());
+            return Outcome::ok(());
         }
 
         cx.trace("atp_packet_protection_verify_transcript");
@@ -186,6 +205,7 @@ impl AtpPacketProtection {
         self.provider
             .verify_transcript(expected)
             .map_err(|e| self.map_tls_error(e))
+            .into()
     }
 
     /// Protect a packet with ATP error handling.
@@ -208,7 +228,8 @@ impl AtpPacketProtection {
         let result = self
             .provider
             .protect_packet(request)
-            .map_err(|e| self.map_tls_error(e));
+            .map_err(|e| self.map_tls_error(e))
+            .into();
 
         if self.config.enable_proof_logging {
             match &result {
@@ -250,7 +271,8 @@ impl AtpPacketProtection {
         let result = self
             .provider
             .unprotect_packet(packet, associated_data)
-            .map_err(|e| self.map_tls_error(e));
+            .map_err(|e| self.map_tls_error(e))
+            .into();
 
         if self.config.enable_proof_logging {
             match &result {
@@ -291,6 +313,7 @@ impl AtpPacketProtection {
         self.provider
             .header_protection_mask(space, sample)
             .map_err(|e| self.map_tls_error(e))
+            .into()
     }
 
     /// Update keys for next phase with ATP error handling.
@@ -313,7 +336,8 @@ impl AtpPacketProtection {
         let result = self
             .provider
             .update_key(space, next_phase)
-            .map_err(|e| self.map_tls_error(e));
+            .map_err(|e| self.map_tls_error(e))
+            .into();
 
         if self.config.enable_proof_logging {
             match &result {
@@ -342,6 +366,7 @@ impl AtpPacketProtection {
         self.provider
             .discard_keys(space)
             .map_err(|e| self.map_tls_error(e))
+            .into()
     }
 
     /// Map QuicTlsError to AtpError with appropriate classification.
