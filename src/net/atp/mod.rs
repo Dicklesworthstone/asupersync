@@ -20,6 +20,7 @@ pub mod handshake;
 // pub mod chunk;
 // pub mod loss;
 pub mod datagram;
+pub mod discovery;
 pub mod path;
 #[path = "protocol/mod.rs"]
 pub mod protocol;
@@ -35,6 +36,7 @@ pub mod stun;
 pub use protocol::{AtpFrame, FrameType};
 
 pub use datagram::*;
+pub use discovery::*;
 pub use handshake::*;
 // pub use loss::*;
 pub use path::*;
