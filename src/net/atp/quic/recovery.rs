@@ -186,8 +186,8 @@ struct RecoveryTimer {
     deadline: Instant,
     /// Associated packet number space.
     space: PacketNumberSpace,
-    /// Cancellation reason (TODO: Integrate with Cx cancellation).
-    _cancel_reason: Option<CancelReason>,
+    /// Cancellation reason if timer was cancelled.
+    cancel_reason: Option<CancelReason>,
     /// Whether timer is active.
     is_active: bool,
 }
@@ -537,7 +537,7 @@ impl AtpRecoveryManager {
             let timer = RecoveryTimer {
                 deadline,
                 space,
-                _cancel_reason: None, // TODO: Integrate with Cx cancellation
+                cancel_reason: None,
                 is_active: true,
             };
 
@@ -546,18 +546,24 @@ impl AtpRecoveryManager {
     }
 
     fn cancel_pto_timer(&mut self, space: PacketNumberSpace) {
+        self.cancel_pto_timer_with_reason(space, None);
+    }
+
+    fn cancel_pto_timer_with_reason(&mut self, space: PacketNumberSpace, reason: Option<CancelReason>) {
         let timer_id = format!("pto_{}_{:?}", self.connection_id, space);
         if let Some(timer) = self.timers.get_mut(&timer_id) {
             timer.is_active = false;
-            // Timer cancellation handled by setting is_active = false
+            timer.cancel_reason = reason;
         }
     }
 
     fn handle_cancellation(&mut self, reason: CancelReason) -> AtpOutcome<Vec<RecoveryAction>> {
-        // Cancel all active timers
+        // Cancel all active timers and record cancellation reason
         for timer in self.timers.values_mut() {
-            timer.is_active = false;
-            // Timer cancellation handled by setting is_active = false
+            if timer.is_active {
+                timer.is_active = false;
+                timer.cancel_reason = Some(reason.clone());
+            }
         }
 
         self.log_event(RecoveryEventType::RecoveryStateChanged {
@@ -567,6 +573,53 @@ impl AtpRecoveryManager {
         });
 
         AtpOutcome::cancelled(reason)
+    }
+
+    /// Cancel recovery operations with structured cancellation.
+    ///
+    /// This method integrates recovery timer cancellation with ATP's structured
+    /// cancellation protocol, ensuring all timers are properly cancelled with
+    /// the provided reason.
+    pub async fn cancel_recovery(&mut self, cx: &Cx, reason: CancelReason) -> AtpOutcome<()> {
+        cx.trace(&format!("atp_recovery_cancel {:?}", reason));
+
+        // Check if we're already cancelled via Cx
+        if let Some(cx_reason) = cx.cancel_reason() {
+            // Use the Cx cancellation reason if available
+            match self.handle_cancellation(cx_reason.clone()) {
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                _ => return AtpOutcome::cancelled(cx_reason),
+            }
+        }
+
+        // Otherwise use the provided reason
+        match self.handle_cancellation(reason.clone()) {
+            Outcome::Cancelled(r) => AtpOutcome::cancelled(r),
+            _ => AtpOutcome::cancelled(reason),
+        }
+    }
+
+    /// Check if any recovery timers have been cancelled.
+    ///
+    /// Returns the cancellation reason for the first cancelled timer found,
+    /// or None if no timers have been cancelled.
+    pub fn cancellation_reason(&self) -> Option<&CancelReason> {
+        self.timers
+            .values()
+            .find_map(|timer| timer.cancel_reason.as_ref())
+    }
+
+    /// Get the number of active timers.
+    pub fn active_timer_count(&self) -> usize {
+        self.timers.values().filter(|timer| timer.is_active).count()
+    }
+
+    /// Get the number of cancelled timers.
+    pub fn cancelled_timer_count(&self) -> usize {
+        self.timers
+            .values()
+            .filter(|timer| !timer.is_active && timer.cancel_reason.is_some())
+            .count()
     }
 }
 
@@ -933,8 +986,14 @@ mod tests {
                     loss_delay_micros,
                 )),
                 _ => None,
-            })
-            .expect("loss event");
+            });
+        assert!(
+            loss_event.is_some(),
+            "expected loss event in recovery log"
+        );
+        let Some(loss_event) = loss_event else {
+            return;
+        };
 
         assert_eq!(loss_event.0, Some(PacketNumberSpace::ApplicationData));
         assert_eq!(loss_event.1, &vec![0, 1, 2]);
@@ -1009,8 +1068,14 @@ mod tests {
         let ack_event = manager
             .recovery_log()
             .iter()
-            .find(|event| matches!(event.event_type, RecoveryEventType::AckReceived { .. }))
-            .expect("ack event");
+            .find(|event| matches!(event.event_type, RecoveryEventType::AckReceived { .. }));
+        assert!(
+            ack_event.is_some(),
+            "expected ack event in recovery log"
+        );
+        let Some(ack_event) = ack_event else {
+            return;
+        };
 
         assert_eq!(ack_event.space, Some(PacketNumberSpace::ApplicationData));
         assert_eq!(ack_event.transport_state.pto_count, 0);
