@@ -1739,6 +1739,8 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`docs/doctor_remediation_recipe_contract.md`](./docs/doctor_remediation_recipe_contract.md) | **Doctor Remediation DSL Contract**: machine-readable recipe schema, confidence scoring model, risk bands, and extension policy |
 | [`docs/doctor_diagnostics_report_contract.md`](./docs/doctor_diagnostics_report_contract.md) | **Doctor Core Report Contract**: summary/findings/evidence/commands/provenance schema with deterministic fixture bundle |
 | [`docs/doctor_cli_packaging_contract.md`](./docs/doctor_cli_packaging_contract.md) | **Doctor CLI Packaging Contract**: deterministic package payload, config templates, manifest policy, install smoke, and upgrade guidance |
+| [`docs/atp_architecture.md`](./docs/atp_architecture.md) | **ATP Architecture**: object-graph transfer model, native QUIC boundary, path graph, verification boundary, session negotiation, proof lanes, and CLI/daemon/SDK/relay/mailbox/swarm/replay examples |
+| [`docs/atp_contributor_guide.md`](./docs/atp_contributor_guide.md) | **ATP Contributor Guide**: Beads-to-code map, edit rules, proof commands, and implementation boundaries for ATP work |
 | [`docs/raptorq_baseline_bench_profile.md`](./docs/raptorq_baseline_bench_profile.md) | **RaptorQ Baseline Packet**: deterministic bench/profile corpus + repro commands |
 | [`docs/raptorq_unit_test_matrix.md`](./docs/raptorq_unit_test_matrix.md) | **RaptorQ Unit Matrix**: unit/E2E scenario coverage and replay/log schema mapping |
 | [`docs/macro-dsl.md`](./docs/macro-dsl.md) | **Macro DSL**: scope!/spawn!/join!/race! usage, patterns, examples |
