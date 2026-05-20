@@ -158,6 +158,7 @@ compile_error!("feature `kafka` is unsupported on wasm32 browser preview builds.
 pub mod actor;
 pub mod adapter_certification;
 pub mod app;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod atp;
 pub mod audit;
 pub mod bytes;

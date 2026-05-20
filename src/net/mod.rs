@@ -6,6 +6,7 @@
 #![allow(clippy::unused_async)]
 
 /// ATP (Asupersync Transfer Protocol) - Self-contained data movement layer.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod atp;
 /// DNS resolution with caching and Happy Eyeballs support.
 pub mod dns;
@@ -14,13 +15,14 @@ pub mod happy_eyeballs;
 /// Native QUIC protocol core codecs and types (Tokio-free, runtime-agnostic).
 pub mod quic_core;
 /// Native QUIC transport state machines (TLS, recovery, streams).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod quic_native;
 /// Native QUIC API surface (T4.1).
 ///
 /// This module intentionally aliases the Tokio-free native QUIC stack so users
 /// can enable `feature = "quic"` and import `asupersync::net::quic::*` through
 /// a stable feature boundary while T4.2/T4.3 continue transport hardening.
-#[cfg(feature = "quic")]
+#[cfg(all(feature = "quic", not(target_arch = "wasm32")))]
 pub mod quic {
     /// Native QUIC connection type.
     pub type QuicConnection = super::quic_native::NativeQuicConnection;
@@ -49,16 +51,18 @@ pub mod websocket;
 /// MessagePort-based coordination utilities for browser worker runtimes.
 pub mod worker_channel;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use atp::protocol::{
     AtpFrameCodec, Frame as AtpFrame, FrameError, FrameHeader, FrameType, ProtocolVersion,
     SessionTranscript, TranscriptHash, TranscriptHasher, VarInt, VarIntError,
 };
 pub use happy_eyeballs::{HappyEyeballsConfig, connect as happy_eyeballs_connect};
-#[cfg(feature = "quic")]
+#[cfg(all(feature = "quic", not(target_arch = "wasm32")))]
 pub use quic::{
     QuicConfig, QuicConnection, QuicError, RecvStream as QuicRecvStream,
     SendStream as QuicSendStream,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use quic_native::{
     AckEvent, AckRange, CryptoLevel, FlowControlError, FlowCredit, KeyUpdateEvent,
     NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, PacketNumberSpace,

@@ -23,6 +23,16 @@ fn to_json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("serialize JSON")
 }
 
+#[cfg(target_arch = "wasm32")]
+fn error_message(err: wasm_bindgen::JsValue) -> String {
+    err.as_string().unwrap_or_else(|| format!("{err:?}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn error_message(err: String) -> String {
+    err
+}
+
 fn incompatible_consumer_version_json() -> String {
     to_json(&WasmAbiVersion {
         major: WASM_ABI_MAJOR_VERSION + 1,
@@ -55,7 +65,7 @@ fn runtime_create_and_close_round_trip() {
     ));
 
     let err = runtime_close(runtime_json, None).expect_err("double close must fail");
-    let msg = err;
+    let msg = error_message(err);
     if let Ok(failure) = serde_json::from_str::<WasmAbiFailure>(&msg) {
         assert_eq!(failure.code, WasmAbiErrorCode::InvalidHandle);
     } else {
@@ -231,7 +241,7 @@ fn fetch_request_surface_and_validation() {
         body: None,
     };
     let err = fetch_request(to_json(&bad_request), None).expect_err("empty URL must fail");
-    let msg = err;
+    let msg = error_message(err);
     assert!(msg.contains("must not be empty"));
 
     let bad_method = WasmFetchRequest {
@@ -241,6 +251,7 @@ fn fetch_request_surface_and_validation() {
         body: None,
     };
     let err = fetch_request(to_json(&bad_method), None).expect_err("unsupported method must fail");
+    let err = error_message(err);
     assert!(err.contains("unsupported fetch method"));
 
     let body_on_get = WasmFetchRequest {
@@ -250,6 +261,7 @@ fn fetch_request_surface_and_validation() {
         body: Some(vec![1, 2, 3]),
     };
     let err = fetch_request(to_json(&body_on_get), None).expect_err("GET body must be rejected");
+    let err = error_message(err);
     assert!(err.contains("does not permit a request body"));
 }
 
@@ -269,6 +281,7 @@ fn runtime_create_rejects_incompatible_consumer_version_at_adapter_boundary() {
 
     let err = runtime_create(Some(incompatible_consumer_version_json()))
         .expect_err("incompatible consumer version must fail");
+    let err = error_message(err);
     let failure: WasmAbiFailure = parse_json(&err);
     assert_eq!(failure.code, WasmAbiErrorCode::CompatibilityRejected);
     assert!(failure.message.contains("ABI incompatible"));
@@ -492,6 +505,7 @@ fn websocket_bridge_close_and_validation_surface() {
         None,
     )
     .expect_err("non-websocket scheme must fail");
+    let err = error_message(err);
     assert!(err.contains("must start with ws:// or wss://"));
 
     let scope_close_json = scope_close(scope_json, None).expect("scope_close succeeds");
@@ -555,6 +569,7 @@ fn websocket_close_failure_preserves_host_state_for_retry() {
         None,
     )
     .expect_err("oversized close reason must fail");
+    let err = error_message(err);
     assert!(err.contains("exceeds 123 bytes"), "got: {err}");
 
     let diagnostics = dispatcher_diagnostics_for_tests();
@@ -642,6 +657,7 @@ fn websocket_cancel_failure_preserves_host_state_for_cleanup() {
         None,
     )
     .expect_err("oversized cancel message must fail");
+    let err = error_message(err);
     assert!(err.contains("exceeds 123 bytes"), "got: {err}");
 
     let diagnostics = dispatcher_diagnostics_for_tests();
@@ -908,6 +924,7 @@ fn websocket_url_validation_rejects_empty_and_bad_schemes() {
         None,
     )
     .expect_err("empty URL must fail");
+    let err = error_message(err);
     assert!(err.contains("must not be empty"), "got: {err}");
 
     // HTTP scheme
@@ -916,6 +933,7 @@ fn websocket_url_validation_rejects_empty_and_bad_schemes() {
         None,
     )
     .expect_err("http scheme must fail");
+    let err = error_message(err);
     assert!(
         err.contains("must start with ws:// or wss://"),
         "got: {err}"
@@ -927,6 +945,7 @@ fn websocket_url_validation_rejects_empty_and_bad_schemes() {
         None,
     )
     .expect_err("https scheme must fail");
+    let err = error_message(err);
     assert!(
         err.contains("must start with ws:// or wss://"),
         "got: {err}"
@@ -1041,6 +1060,7 @@ fn runtime_close_drains_open_scope_task_and_fetch_handles() {
     ));
 
     let stale_scope = scope_close(scope_json, None).expect_err("scope handle should be stale");
+    let stale_scope = error_message(stale_scope);
     assert!(stale_scope.contains("stale handle") || stale_scope.contains("released"));
 
     let stale_task = task_cancel(
@@ -1052,6 +1072,7 @@ fn runtime_close_drains_open_scope_task_and_fetch_handles() {
         None,
     )
     .expect_err("task handle should be stale");
+    let stale_task = error_message(stale_task);
     assert!(stale_task.contains("stale handle") || stale_task.contains("released"));
 
     let stale_fetch = task_join(
@@ -1062,6 +1083,7 @@ fn runtime_close_drains_open_scope_task_and_fetch_handles() {
         None,
     )
     .expect_err("fetch handle should be invalid for task join");
+    let stale_fetch = error_message(stale_fetch);
     assert!(stale_fetch.contains("stale handle") || stale_fetch.contains("released"));
 
     let diagnostics = dispatcher_diagnostics_for_tests();
@@ -1117,6 +1139,7 @@ fn scope_close_drains_nested_task_and_preserves_runtime() {
     ));
 
     let stale_inner = scope_close(inner_scope_json, None).expect_err("inner scope should be stale");
+    let stale_inner = error_message(stale_inner);
     assert!(stale_inner.contains("stale handle") || stale_inner.contains("released"));
 
     let stale_nested = task_join(
@@ -1127,6 +1150,7 @@ fn scope_close_drains_nested_task_and_preserves_runtime() {
         None,
     )
     .expect_err("nested task should be stale");
+    let stale_nested = error_message(stale_nested);
     assert!(stale_nested.contains("stale handle") || stale_nested.contains("released"));
 
     let runtime_close_json = runtime_close(runtime_json, None).expect("runtime_close succeeds");
@@ -1214,6 +1238,7 @@ fn cancelled_task_join_preserves_cancellation_payload_and_invalidates_handle() {
         None,
     )
     .expect_err("joined task handle should be stale");
+    let stale_join = error_message(stale_join);
     assert!(stale_join.contains("stale handle") || stale_join.contains("released"));
 
     let stale_cancel = task_cancel(
@@ -1225,6 +1250,7 @@ fn cancelled_task_join_preserves_cancellation_payload_and_invalidates_handle() {
         None,
     )
     .expect_err("joined task should not accept another cancel");
+    let stale_cancel = error_message(stale_cancel);
     assert!(stale_cancel.contains("stale handle") || stale_cancel.contains("released"));
 
     scope_close(scope_json, None).expect("scope_close succeeds");

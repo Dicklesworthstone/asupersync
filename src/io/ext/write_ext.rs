@@ -1,14 +1,48 @@
 //! AsyncWrite extension methods.
 
-use crate::atp::manifest::{
-    deterministic_f32_be_bytes, deterministic_f32_le_bytes,
-    deterministic_f64_be_bytes, deterministic_f64_le_bytes,
-};
 use crate::io::AsyncWrite;
 use std::future::Future;
 use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+fn deterministic_f32_be_bytes(value: f32) -> [u8; 4] {
+    deterministic_f32_bits(value).to_be_bytes()
+}
+
+fn deterministic_f32_le_bytes(value: f32) -> [u8; 4] {
+    deterministic_f32_bits(value).to_le_bytes()
+}
+
+fn deterministic_f64_be_bytes(value: f64) -> [u8; 8] {
+    deterministic_f64_bits(value).to_be_bytes()
+}
+
+fn deterministic_f64_le_bytes(value: f64) -> [u8; 8] {
+    deterministic_f64_bits(value).to_le_bytes()
+}
+
+fn deterministic_f32_bits(value: f32) -> u32 {
+    const CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
+    if value.is_nan() {
+        CANONICAL_NAN_BITS
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    }
+}
+
+fn deterministic_f64_bits(value: f64) -> u64 {
+    const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+    if value.is_nan() {
+        CANONICAL_NAN_BITS
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    }
+}
 
 /// Minimal buffer trait for write_all_buf.
 pub trait Buf {

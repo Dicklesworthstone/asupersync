@@ -28,7 +28,6 @@ use crate::types::{
     BrowserOperatorConsoleSnapshot, decode_json_payload, decode_optional_consumer_version,
     encode_json_payload,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use asupersync::types::WasmDispatcherDiagnostics;
 use asupersync::types::{
     WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
@@ -674,10 +673,13 @@ fn close_browser_websocket_socket(
 }
 
 /// Reset helper for host-side deterministic tests.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn reset_dispatcher_for_tests() {
     DISPATCHER.with(|dispatcher| {
         *dispatcher.borrow_mut() = WasmExportDispatcher::new();
+    });
+    #[cfg(target_arch = "wasm32")]
+    INFLIGHT_FETCHES.with(|fetches| {
+        fetches.borrow_mut().clear();
     });
     INFLIGHT_WEBSOCKETS.with(|sockets| {
         sockets.borrow_mut().clear();
@@ -685,7 +687,6 @@ pub fn reset_dispatcher_for_tests() {
 }
 
 /// Host-side diagnostics helper for export-boundary tests.
-#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn dispatcher_diagnostics_for_tests() -> WasmDispatcherDiagnostics {
     DISPATCHER.with(|dispatcher| dispatcher.borrow().diagnostic_snapshot())
