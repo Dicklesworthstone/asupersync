@@ -19,8 +19,7 @@ use crate::atp::manifest::{
     ArtifactBuildContext, CdcParams, ChunkBoundary, ChunkMetadata, ChunkPlan, ChunkStrategy,
     ProofStrength,
 };
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use sha2::{Sha256, Digest};
 
 /// Artifact chunking profile implementation.
 pub struct ArtifactProfile;
@@ -377,29 +376,19 @@ impl ArtifactProfile {
 
     /// Compute deterministic environment hash from artifact.
     fn compute_environment_hash(data: &[u8]) -> [u8; 32] {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = Sha256::new();
 
         // Hash build-relevant portions of the artifact
         let sample_size = 1024.min(data.len());
-        data[..sample_size].hash(&mut hasher);
+        hasher.update(&data[..sample_size]);
 
         if data.len() > sample_size * 2 {
             // Also hash from the end for better distribution
-            data[data.len() - sample_size..].hash(&mut hasher);
+            hasher.update(&data[data.len() - sample_size..]);
         }
 
-        // Convert to 32-byte array
-        let hash_val = hasher.finish();
-        let mut result = [0u8; 32];
-        result[..8].copy_from_slice(&hash_val.to_be_bytes());
-
-        // Fill rest with derived values for better distribution
-        for i in 1..4 {
-            let derived = hash_val.wrapping_mul(i as u64).wrapping_add(0x9e3779b9);
-            result[i * 8..(i + 1) * 8].copy_from_slice(&derived.to_be_bytes());
-        }
-
-        result
+        // Return 32-byte SHA-256 hash
+        hasher.finalize().into()
     }
 
     /// Detect toolchain version from artifact metadata.
