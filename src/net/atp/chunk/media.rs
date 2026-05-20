@@ -87,7 +87,7 @@ impl ChunkingProfileTrait for MediaProfile {
                 ));
             }
 
-            if !matches!(boundary.metadata, Some(ChunkMetadata::Media { .. }) {
+            if !matches!(boundary.metadata, Some(ChunkMetadata::Media { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
                     "media profile requires Media metadata".to_string()
                 ));
@@ -108,7 +108,7 @@ impl ChunkingProfileTrait for MediaProfile {
             }
 
             // Validate priority range
-            if let Some(ChunkMetadata::Media { decoding_priority, .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::Media { decoding_priority, .. }) = &boundary.metadata {
                 if *decoding_priority > 100 {
                     return Err(ChunkingProfileError::InvalidChunkParameters(
                         format!("decoding priority {} above maximum 100", decoding_priority)
@@ -433,13 +433,13 @@ impl MediaProfile {
 
         // Sort by priority (descending), then by index (ascending) for ties
         indexed_boundaries.sort_by(|(a_idx, a), (b_idx, b)| {
-            let a_priority = if let Some(ChunkMetadata::Media { decoding_priority, .. } = &a.metadata {
+            let a_priority = if let Some(ChunkMetadata::Media { decoding_priority, .. }) = &a.metadata {
                 *decoding_priority
             } else {
                 0
             };
 
-            let b_priority = if let Some(ChunkMetadata::Media { decoding_priority, .. } = &b.metadata {
+            let b_priority = if let Some(ChunkMetadata::Media { decoding_priority, .. }) = &b.metadata {
                 *decoding_priority
             } else {
                 0
@@ -615,7 +615,7 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::ObjectSpecific));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Media { .. }));
+            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Media { .. })));
         }
 
         // Validate total coverage

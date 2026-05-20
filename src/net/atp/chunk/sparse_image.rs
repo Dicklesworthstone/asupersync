@@ -11,11 +11,11 @@
 //! - Optimized for VM images, disk images, and large sparse datasets
 //! - Maintains file system hole semantics during reconstruction
 
-use crate::atp::manifest::{ChunkPlan, ChunkStrategy};
 use super::{
-    ChunkBoundary, ChunkMetadata, ChunkingProfileError, SparseHoleMetadata,
     profiles::{utils, ChunkingProfile as ChunkingProfileTrait},
+    ChunkBoundary, ChunkMetadata, ChunkingProfileError, SparseHoleMetadata,
 };
+use crate::atp::manifest::{ChunkPlan, ChunkStrategy};
 use std::collections::BTreeMap;
 
 /// Sparse image chunking profile implementation.
@@ -42,22 +42,15 @@ impl ChunkingProfileTrait for SparseImageProfile {
         let chunk_plan = Self::chunk_plan(data.len() as u64);
         let sparse_regions = Self::detect_sparse_regions(data);
 
-        let positions = Self::find_sparse_aware_boundaries(
-            data,
-            &chunk_plan,
-            &sparse_regions,
-        )?;
+        let positions = Self::find_sparse_aware_boundaries(data, &chunk_plan, &sparse_regions)?;
 
         let boundaries = utils::positions_to_boundaries(
             data,
             &positions,
             ChunkStrategy::ObjectSpecific,
             |index, offset, size, chunk_data| {
-                let (is_sparse_hole, hole_metadata) = Self::analyze_chunk_sparsity(
-                    chunk_data,
-                    offset,
-                    &sparse_regions,
-                );
+                let (is_sparse_hole, hole_metadata) =
+                    Self::analyze_chunk_sparsity(chunk_data, offset, &sparse_regions);
 
                 ChunkMetadata::SparseImage {
                     is_sparse_hole,
@@ -76,42 +69,49 @@ impl ChunkingProfileTrait for SparseImageProfile {
         for boundary in boundaries {
             if !matches!(boundary.strategy, ChunkStrategy::ObjectSpecific) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "sparse image profile requires object-specific chunking".to_string()
+                    "sparse image profile requires object-specific chunking".to_string(),
                 ));
             }
 
-            if !matches!(boundary.metadata, Some(ChunkMetadata::SparseImage { .. }) {
+            if !matches!(boundary.metadata, Some(ChunkMetadata::SparseImage { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "sparse image profile requires SparseImage metadata".to_string()
+                    "sparse image profile requires SparseImage metadata".to_string(),
                 ));
             }
 
             if boundary.size_bytes < Self::min_chunking_threshold() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} below minimum {}",
-                           boundary.size_bytes, Self::min_chunking_threshold())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} below minimum {}",
+                    boundary.size_bytes,
+                    Self::min_chunking_threshold()
+                )));
             }
 
             if boundary.size_bytes > Self::max_chunk_size() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} above maximum {}",
-                           boundary.size_bytes, Self::max_chunk_size())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} above maximum {}",
+                    boundary.size_bytes,
+                    Self::max_chunk_size()
+                )));
             }
 
             // Validate sparse hole metadata
-            if let Some(ChunkMetadata::SparseImage { is_sparse_hole, hole_metadata, .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::SparseImage {
+                is_sparse_hole,
+                hole_metadata,
+                ..
+            }) = &boundary.metadata
+            {
                 if *is_sparse_hole && hole_metadata.is_none() {
                     return Err(ChunkingProfileError::SparseHoleDetectionFailed(
-                        "sparse hole chunks must include hole metadata".to_string()
+                        "sparse hole chunks must include hole metadata".to_string(),
                     ));
                 }
 
                 if let Some(metadata) = hole_metadata {
                     if metadata.hole_size > boundary.size_bytes {
                         return Err(ChunkingProfileError::SparseHoleDetectionFailed(
-                            "hole size cannot exceed chunk size".to_string()
+                            "hole size cannot exceed chunk size".to_string(),
                         ));
                     }
                 }
@@ -201,8 +201,9 @@ impl SparseImageProfile {
             let region = Self::analyze_region_type(scan_data, i as u64);
 
             // Only create regions for significant sparse areas
-            if region.region_type != SparseRegionType::DataFilled &&
-               (region.end - region.start) >= min_hole_size {
+            if region.region_type != SparseRegionType::DataFilled
+                && (region.end - region.start) >= min_hole_size
+            {
                 regions.push(region.clone());
             }
 
@@ -316,7 +317,8 @@ impl SparseImageProfile {
             let remaining = data.len() - current_pos;
 
             // Check if we're at the start of a sparse region
-            let sparse_region = sparse_regions.iter()
+            let sparse_region = sparse_regions
+                .iter()
                 .find(|region| region.start == current_pos as u64);
 
             let chunk_size = if let Some(region) = sparse_region {
@@ -366,8 +368,10 @@ impl SparseImageProfile {
 
                         let mut attributes = BTreeMap::new();
                         attributes.insert("pattern".to_string(), region.fill_pattern.clone());
-                        attributes.insert("region_type".to_string(),
-                                        format!("{:?}", region.region_type).into_bytes());
+                        attributes.insert(
+                            "region_type".to_string(),
+                            format!("{:?}", region.region_type).into_bytes(),
+                        );
 
                         let hole_metadata = SparseHoleMetadata {
                             hole_size,
@@ -457,7 +461,12 @@ impl SparseImageProfile {
         for boundary in boundaries {
             total_size += boundary.size_bytes;
 
-            if let Some(ChunkMetadata::SparseImage { is_sparse_hole, hole_metadata, .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::SparseImage {
+                is_sparse_hole,
+                hole_metadata,
+                ..
+            }) = &boundary.metadata
+            {
                 if *is_sparse_hole {
                     if let Some(metadata) = hole_metadata {
                         sparse_size += metadata.hole_size;
@@ -485,11 +494,23 @@ impl SparseImageProfile {
 
         // Sort data chunks first, then holes
         indexed_boundaries.sort_by(|(a_idx, a), (b_idx, b)| {
-            let a_is_sparse = matches!(a.metadata, ChunkMetadata::SparseImage { is_sparse_hole: true, .. });
-            let b_is_sparse = matches!(b.metadata, ChunkMetadata::SparseImage { is_sparse_hole: true, .. });
+            let a_is_sparse = matches!(
+                a.metadata,
+                ChunkMetadata::SparseImage {
+                    is_sparse_hole: true,
+                    ..
+                }
+            );
+            let b_is_sparse = matches!(
+                b.metadata,
+                ChunkMetadata::SparseImage {
+                    is_sparse_hole: true,
+                    ..
+                }
+            );
 
             match (a_is_sparse, b_is_sparse) {
-                (false, true) => std::cmp::Ordering::Less,  // Data before holes
+                (false, true) => std::cmp::Ordering::Less, // Data before holes
                 (true, false) => std::cmp::Ordering::Greater, // Holes after data
                 _ => a_idx.cmp(b_idx), // Maintain original order within same type
             }
@@ -503,7 +524,12 @@ impl SparseImageProfile {
         let mut hole_manifest = BTreeMap::new();
 
         for boundary in boundaries {
-            if let Some(ChunkMetadata::SparseImage { is_sparse_hole: true, hole_metadata: Some(ref metadata), .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::SparseImage {
+                is_sparse_hole: true,
+                hole_metadata: Some(ref metadata),
+                ..
+            }) = &boundary.metadata
+            {
                 hole_manifest.insert(boundary.byte_offset, metadata.clone());
             }
         }
@@ -570,33 +596,33 @@ mod tests {
         assert!(regions.len() >= 2); // Should find zero and pattern regions
 
         // Check for zero region
-        let zero_region = regions.iter()
+        let zero_region = regions
+            .iter()
             .find(|r| r.region_type == SparseRegionType::ZeroFilled);
         assert!(zero_region.is_some());
 
         // Check for pattern region
-        let pattern_region = regions.iter()
+        let pattern_region = regions
+            .iter()
             .find(|r| r.region_type == SparseRegionType::PatternFilled);
         assert!(pattern_region.is_some());
     }
 
     #[test]
     fn chunk_sparsity_analysis() {
-        let sparse_regions = vec![
-            SparseRegion {
-                start: 1000,
-                end: 9000,
-                region_type: SparseRegionType::ZeroFilled,
-                fill_pattern: vec![0],
-            }
-        ];
+        let sparse_regions = vec![SparseRegion {
+            start: 1000,
+            end: 9000,
+            region_type: SparseRegionType::ZeroFilled,
+            fill_pattern: vec![0],
+        }];
 
         // Chunk that overlaps with sparse region
         let sparse_chunk = vec![0u8; 4000];
         let (is_sparse, metadata) = SparseImageProfile::analyze_chunk_sparsity(
             &sparse_chunk,
             2000, // Overlaps with sparse region
-            &sparse_regions
+            &sparse_regions,
         );
         assert!(is_sparse);
         assert!(metadata.is_some());
@@ -606,7 +632,7 @@ mod tests {
         let (not_sparse, no_metadata) = SparseImageProfile::analyze_chunk_sparsity(
             &data_chunk,
             0, // Before sparse region
-            &sparse_regions
+            &sparse_regions,
         );
         assert!(!not_sparse);
         assert!(no_metadata.is_none());
@@ -628,10 +654,14 @@ mod tests {
     #[test]
     fn pattern_repetition_detection() {
         let high_repetition = b"PATTERN".repeat(200);
-        assert!(SparseImageProfile::has_high_pattern_repetition(&high_repetition));
+        assert!(SparseImageProfile::has_high_pattern_repetition(
+            &high_repetition
+        ));
 
         let no_repetition = (0..1400).map(|i| (i % 256) as u8).collect::<Vec<_>>();
-        assert!(!SparseImageProfile::has_high_pattern_repetition(&no_repetition));
+        assert!(!SparseImageProfile::has_high_pattern_repetition(
+            &no_repetition
+        ));
     }
 
     #[test]
@@ -646,12 +676,21 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::ObjectSpecific));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::SparseImage { .. }));
+            assert!(matches!(
+                boundary.metadata,
+                Some(ChunkMetadata::SparseImage { .. })
+            ));
         }
 
         // Check that sparse regions are detected
         let has_sparse = boundaries.iter().any(|b| {
-            matches!(b.metadata, ChunkMetadata::SparseImage { is_sparse_hole: true, .. })
+            matches!(
+                b.metadata,
+                ChunkMetadata::SparseImage {
+                    is_sparse_hole: true,
+                    ..
+                }
+            )
         });
         assert!(has_sparse);
 
@@ -706,7 +745,7 @@ mod tests {
                 hash: [1; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
                 metadata: ChunkMetadata::SparseImage {
-                    is_sparse_hole: true,  // Sparse chunk
+                    is_sparse_hole: true, // Sparse chunk
                     hole_metadata: Some(SparseHoleMetadata {
                         hole_size: 50000,
                         hole_type: "zero-filled".to_string(),
@@ -800,7 +839,7 @@ mod tests {
             strategy: ChunkStrategy::ObjectSpecific,
             metadata: ChunkMetadata::SparseImage {
                 is_sparse_hole: true, // Marked as hole
-                hole_metadata: None, // But no metadata!
+                hole_metadata: None,  // But no metadata!
             },
         };
 

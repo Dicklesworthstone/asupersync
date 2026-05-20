@@ -627,7 +627,7 @@ impl ArtifactProfile {
             total_size += boundary.size_bytes;
             unique_hashes.insert(boundary.content_hash);
 
-            if let Some(ChunkMetadata::Artifact { proof_strength, .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::Artifact { proof_strength, .. }) = &boundary.metadata {
                 *proof_strength_distribution.entry(*proof_strength).or_insert(0) += 1;
             }
         }
@@ -887,7 +887,7 @@ mod tests {
             assert!(matches!(boundary.metadata, Some(ChunkMetadata::Artifact { .. }));
 
             // Check build context
-            if let Some(ChunkMetadata::Artifact { build_context, .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::Artifact { build_context, .. }) = &boundary.metadata {
                 assert!(!build_context.build_system.is_empty());
                 assert!(!build_context.toolchain_version.is_empty());
             }
