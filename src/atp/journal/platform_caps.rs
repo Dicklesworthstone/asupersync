@@ -11,6 +11,41 @@ use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
+
+/// Static operation costs to avoid repeated HashMap allocation
+static OPERATION_COSTS: OnceLock<HashMap<&'static str, u32>> = OnceLock::new();
+
+/// Get operation costs HashMap (initialized once)
+fn get_operation_costs() -> &'static HashMap<&'static str, u32> {
+    OPERATION_COSTS.get_or_init(|| {
+        let mut costs = HashMap::new();
+        costs.insert("prealloc", 10);
+        costs.insert("write", 1);
+        costs.insert("sync", 50);
+        costs.insert("rename", 5);
+        costs
+    })
+}
+
+/// Filesystem type constants to avoid allocations
+const FS_TYPE_APFS: &str = "apfs";
+const FS_TYPE_NTFS: &str = "ntfs";
+const FS_TYPE_UNKNOWN: &str = "unknown";
+const FS_TYPE_EXT4: &str = "ext4";
+const FS_TYPE_EXT3: &str = "ext3";
+const FS_TYPE_EXT2: &str = "ext2";
+const FS_TYPE_BTRFS: &str = "btrfs";
+const FS_TYPE_XFS: &str = "xfs";
+const FS_TYPE_ZFS: &str = "zfs";
+const FS_TYPE_TMPFS: &str = "tmpfs";
+const FS_TYPE_MINIX: &str = "minix";
+const FS_TYPE_MSDOS: &str = "msdos";
+const FS_TYPE_REISERFS: &str = "reiserfs";
+const FS_TYPE_NFS: &str = "nfs";
+
+/// System call names to avoid allocations
+const SYSCALL_STATFS: &str = "statfs";
 
 /// Detected platform capabilities for filesystem operations
 #[derive(Debug, Clone)]
@@ -102,7 +137,7 @@ pub struct PerformanceHints {
     /// Whether sequential access is preferred
     pub prefers_sequential_access: bool,
     /// Cost estimate for various operations
-    pub operation_costs: HashMap<String, u32>,
+    pub operation_costs: HashMap<&'static str, u32>,
     /// Expected latency characteristics
     pub latency_profile: LatencyProfile,
 }
@@ -335,11 +370,7 @@ impl PlatformCapabilities {
             _ => true,
         };
 
-        let mut operation_costs = HashMap::new();
-        operation_costs.insert("prealloc".to_string(), 10);
-        operation_costs.insert("write".to_string(), 1);
-        operation_costs.insert("sync".to_string(), 50);
-        operation_costs.insert("rename".to_string(), 5);
+        let operation_costs = get_operation_costs().clone();
 
         let latency_profile = Self::detect_latency_profile(&filesystem.fs_type);
 
@@ -363,17 +394,17 @@ impl PlatformCapabilities {
 
         #[cfg(target_os = "macos")]
         {
-            Outcome::Ok("apfs".to_string()) // Assume APFS on modern macOS
+            Outcome::Ok(FS_TYPE_APFS.to_string()) // Assume APFS on modern macOS
         }
 
         #[cfg(target_os = "windows")]
         {
-            Outcome::Ok("ntfs".to_string()) // Assume NTFS on Windows
+            Outcome::Ok(FS_TYPE_NTFS.to_string()) // Assume NTFS on Windows
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
-            Outcome::Ok("unknown".to_string())
+            Outcome::Ok(FS_TYPE_UNKNOWN.to_string())
         }
     }
 
@@ -389,20 +420,20 @@ impl PlatformCapabilities {
 
         unsafe {
             if libc::statfs(path_cstr.as_ptr(), statfs_buf.as_mut_ptr()) != 0 {
-                return Outcome::Err(CapabilityError::SystemCall("statfs".to_string()));
+                return Outcome::Err(CapabilityError::SystemCall(SYSCALL_STATFS.to_string()));
             }
 
             let statfs = statfs_buf.assume_init();
             let fs_type = match statfs.f_type as u64 {
-                0xEF53 => "ext4",         // EXT2/3/4
-                0x58465342 => "xfs",      // XFS
-                0x9123683E => "btrfs",    // BTRFS
-                0x6969 => "nfs",          // NFS
-                0x01021994 => "tmpfs",    // TMPFS
-                0x137F => "minix",        // MINIX
-                0x4d44 => "msdos",        // FAT
-                0x52654973 => "reiserfs", // ReiserFS
-                _ => "unknown",
+                0xEF53 => FS_TYPE_EXT4,         // EXT2/3/4
+                0x58465342 => FS_TYPE_XFS,      // XFS
+                0x9123683E => FS_TYPE_BTRFS,    // BTRFS
+                0x6969 => FS_TYPE_NFS,          // NFS
+                0x01021994 => FS_TYPE_TMPFS,    // TMPFS
+                0x137F => FS_TYPE_MINIX,        // MINIX
+                0x4d44 => FS_TYPE_MSDOS,        // FAT
+                0x52654973 => FS_TYPE_REISERFS, // ReiserFS
+                _ => FS_TYPE_UNKNOWN,
             };
 
             Outcome::Ok(fs_type.to_string())
@@ -580,10 +611,10 @@ pub enum CapabilityError {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_platform_detection() {
-        let cx = crate::cx::Cx::new(); // TODO: Fix this
-        let caps = PlatformCapabilities::detect(&cx).await;
+    #[test]
+    fn test_platform_detection() {
+        let cx = crate::cx::Cx::for_testing();
+        let caps = futures_lite::future::block_on(PlatformCapabilities::detect(&cx));
         assert!(caps.is_ok());
 
         let caps = caps.unwrap();
@@ -594,10 +625,12 @@ mod tests {
         assert!(caps.io_capabilities.max_io_size > 0);
     }
 
-    #[tokio::test]
-    async fn test_filesystem_feature_detection() {
+    #[test]
+    fn test_filesystem_feature_detection() {
+        let cx = crate::cx::Cx::for_testing();
         let temp_dir = std::env::temp_dir();
-        let caps = PlatformCapabilities::detect_for_path(&crate::cx::Cx::new(), &temp_dir).await;
+        let caps =
+            futures_lite::future::block_on(PlatformCapabilities::detect_for_path(&cx, &temp_dir));
         assert!(caps.is_ok());
 
         let caps = caps.unwrap();
