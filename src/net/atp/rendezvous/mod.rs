@@ -1092,10 +1092,20 @@ where
         .relay_authorization
         .as_ref()
         .ok_or(Error::MissingRelayAuthorization)?;
-    if authorization.subject_peer_id != signed.peer_id
-        || authorization.transfer_nonce != session.nonce
-        || authorization.relay_peer_id == signed.peer_id
-    {
+    let mut mismatch = 0_u8;
+    mismatch |= u8::from(!constant_time_peer_id_eq(
+        authorization.subject_peer_id,
+        signed.peer_id,
+    ));
+    mismatch |= u8::from(!constant_time_transfer_nonce_eq(
+        authorization.transfer_nonce,
+        session.nonce,
+    ));
+    mismatch |= u8::from(constant_time_peer_id_eq(
+        authorization.relay_peer_id,
+        signed.peer_id,
+    ));
+    if mismatch != 0 {
         return Err(Error::RelayAuthorizationMismatch);
     }
     if now_micros >= authorization.expires_at_micros {
@@ -1111,6 +1121,32 @@ where
         return Err(Error::InvalidRelayAuthorization);
     }
     Ok(())
+}
+
+#[inline]
+fn constant_time_peer_id_eq(left: PeerId, right: PeerId) -> bool {
+    let left_bytes = left.bytes();
+    let right_bytes = right.bytes();
+    constant_time_eq(&left_bytes, &right_bytes)
+}
+
+#[inline]
+fn constant_time_transfer_nonce_eq(left: TransferNonce, right: TransferNonce) -> bool {
+    let left_bytes = left.get().to_be_bytes();
+    let right_bytes = right.get().to_be_bytes();
+    constant_time_eq(&left_bytes, &right_bytes)
+}
+
+#[inline]
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let max_len = left.len().max(right.len());
+    let mut diff = left.len() ^ right.len();
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+    diff == 0
 }
 
 fn validate_capability_context(now_micros: u64, signed: &SignedCandidate) -> Result<(), Error> {
@@ -1301,6 +1337,22 @@ mod tests {
         ) -> bool {
             self.relay_authorization_valid && authorization.signature().bytes() == [9, 9]
         }
+    }
+
+    #[test]
+    fn relay_authorization_binding_helpers_match_expected_values() {
+        let peer_a = peer(1);
+        let peer_b = peer(2);
+        let nonce_a = nonce(7);
+        let nonce_b = nonce(8);
+
+        assert!(constant_time_peer_id_eq(peer_a, peer_a));
+        assert!(!constant_time_peer_id_eq(peer_a, peer_b));
+        assert!(constant_time_transfer_nonce_eq(nonce_a, nonce_a));
+        assert!(!constant_time_transfer_nonce_eq(nonce_a, nonce_b));
+        assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
+        assert!(!constant_time_eq(&[9, 2, 3], &[1, 2, 3]));
+        assert!(!constant_time_eq(&[1, 2, 3], &[1, 2, 3, 4]));
     }
 
     #[test]
