@@ -38,7 +38,7 @@ pub use oracle::{AtpTransferOracle, AtpTransferState, AtpOracleResult, AtpOracle
 pub use replay::{AtpReplayCoordinator, TraceMinimizer, TraceMinimizerConfig, ReplayError, AtpReplayResult};
 
 use crate::lab::oracle::{OracleReport, OracleStats};
-use crate::trace::{TraceBuffer, TraceEvent};
+use crate::trace::{TraceBuffer, TraceEvent, TraceBufferHandle};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -86,53 +86,57 @@ impl TransferOracle {
     /// Validate a transfer operation with configured checks.
     pub fn validate_transfer(&self, state: &TransferState) -> TransferOracleResult {
         let mut violations = Vec::new();
-        let mut stats = OracleStats::default();
+        let mut stats = OracleStats {
+            entities_tracked: 0,
+            events_recorded: 0,
+        };
 
         if self.manifest_checks {
             if let Some(violation) = self.check_manifest_integrity(state) {
                 violations.push(violation);
-                stats.violations += 1;
+                stats.entities_tracked += 1;
             }
-            stats.checks += 1;
+            stats.events_recorded += 1;
         }
 
         if self.journal_checks {
             if let Some(violation) = self.check_journal_consistency(state) {
                 violations.push(violation);
-                stats.violations += 1;
+                stats.entities_tracked += 1;
             }
-            stats.checks += 1;
+            stats.events_recorded += 1;
         }
 
         if self.quiescence_checks {
             if let Some(violation) = self.check_quiescence(state) {
                 violations.push(violation);
-                stats.violations += 1;
+                stats.entities_tracked += 1;
             }
-            stats.checks += 1;
+            stats.events_recorded += 1;
         }
 
         if self.obligation_checks {
             if let Some(violation) = self.check_obligation_leaks(state) {
                 violations.push(violation);
-                stats.violations += 1;
+                stats.entities_tracked += 1;
             }
-            stats.checks += 1;
+            stats.events_recorded += 1;
         }
 
         if self.path_consistency_checks {
             if let Some(violation) = self.check_path_consistency(state) {
                 violations.push(violation);
-                stats.violations += 1;
+                stats.entities_tracked += 1;
             }
-            stats.checks += 1;
+            stats.events_recorded += 1;
         }
 
+        let passed = stats.entities_tracked == 0;
         TransferOracleResult {
             oracle_name: self.oracle_name.clone(),
             violations,
             stats,
-            passed: stats.violations == 0,
+            passed,
         }
     }
 
@@ -304,8 +308,8 @@ impl CrashpackBuilder {
         self
     }
 
-    pub fn with_trace(mut self, trace: &TraceBuffer) -> Self {
-        self.trace_buffer = Some(trace.clone());
+    pub fn with_trace(mut self, trace: TraceBuffer) -> Self {
+        self.trace_buffer = Some(trace);
         self
     }
 
@@ -329,7 +333,8 @@ impl CrashpackBuilder {
             schema_version: ATP_CRASHPACK_SCHEMA_VERSION,
             oracle_results: self.oracle_results,
             trace_events: self.trace_buffer
-                .map(|buf| buf.events().collect())
+                .as_ref()
+                .map(|buf| buf.iter().cloned().collect())
                 .unwrap_or_default(),
             seeds: self.seeds,
             artifact_paths: self.artifact_paths,
@@ -400,8 +405,8 @@ impl AtpCrashpack {
 
         for result in &self.oracle_results {
             journal.push_str(&format!("oracle: {}\n", result.oracle_name));
-            journal.push_str(&format!("  checks: {}\n", result.stats.checks));
-            journal.push_str(&format!("  violations: {}\n", result.stats.violations));
+            journal.push_str(&format!("  events_recorded: {}\n", result.stats.events_recorded));
+            journal.push_str(&format!("  entities_tracked: {}\n", result.stats.entities_tracked));
             journal.push_str(&format!("  passed: {}\n", result.passed));
         }
 
@@ -412,7 +417,7 @@ impl AtpCrashpack {
         // Pathlog
         let pathlog = self.trace_events
             .iter()
-            .filter(|e| matches!(e, TraceEvent::Spawn { .. } | TraceEvent::TaskComplete { .. }))
+            .filter(|e| e.to_string().contains("spawn") || e.to_string().contains("complete"))
             .map(|e| format!("{:?}", e))
             .collect::<Vec<_>>()
             .join("\n");

@@ -41,7 +41,10 @@ impl AtpTransferOracle {
     /// Run all enabled oracle checks against the transfer state.
     pub fn validate(&self, state: &AtpTransferState) -> AtpOracleResult {
         let mut evidence_ledger = AtpEvidenceLedger::new();
-        let mut stats = OracleStats::default();
+        let mut stats = OracleStats {
+            entities_tracked: 0,
+            events_recorded: 0,
+        };
         let mut passed = true;
 
         // Manifest integrity check
@@ -50,10 +53,10 @@ impl AtpTransferOracle {
             let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
 
             evidence_ledger.record_oracle_result("manifest_integrity", evidence, None);
-            stats.checks += 1;
+            stats.events_recorded += 1;
 
             if !oracle_passed {
-                stats.violations += 1;
+                stats.entities_tracked += 1;
                 passed = false;
             }
         }
@@ -64,10 +67,10 @@ impl AtpTransferOracle {
             let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
 
             evidence_ledger.record_oracle_result("journal_consistency", evidence, None);
-            stats.checks += 1;
+            stats.events_recorded += 1;
 
             if !oracle_passed {
-                stats.violations += 1;
+                stats.entities_tracked += 1;
                 passed = false;
             }
         }
@@ -78,10 +81,10 @@ impl AtpTransferOracle {
             let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
 
             evidence_ledger.record_oracle_result("quiescence", evidence, None);
-            stats.checks += 1;
+            stats.events_recorded += 1;
 
             if !oracle_passed {
-                stats.violations += 1;
+                stats.entities_tracked += 1;
                 passed = false;
             }
         }
@@ -92,10 +95,10 @@ impl AtpTransferOracle {
             let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
 
             evidence_ledger.record_oracle_result("obligation_leak", evidence, None);
-            stats.checks += 1;
+            stats.events_recorded += 1;
 
             if !oracle_passed {
-                stats.violations += 1;
+                stats.entities_tracked += 1;
                 passed = false;
             }
         }
@@ -106,10 +109,10 @@ impl AtpTransferOracle {
             let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
 
             evidence_ledger.record_oracle_result("path_consistency", evidence, None);
-            stats.checks += 1;
+            stats.events_recorded += 1;
 
             if !oracle_passed {
-                stats.violations += 1;
+                stats.entities_tracked += 1;
                 passed = false;
             }
         }
@@ -120,10 +123,10 @@ impl AtpTransferOracle {
             let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
 
             evidence_ledger.record_oracle_result("proof_bundle_validity", evidence, None);
-            stats.checks += 1;
+            stats.events_recorded += 1;
 
             if !oracle_passed {
-                stats.violations += 1;
+                stats.entities_tracked += 1;
                 passed = false;
             }
         }

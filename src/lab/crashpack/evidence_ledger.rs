@@ -42,6 +42,13 @@ impl AtpEvidenceLedger {
         evidence: EvidenceEntry,
         artifact_path: Option<PathBuf>,
     ) {
+        // Store artifact path if provided
+        if let Some(ref path) = artifact_path {
+            if !self.artifact_paths.contains(path) {
+                self.artifact_paths.push(path.clone());
+            }
+        }
+
         let entry = AtpEvidenceEntry {
             oracle_name: oracle_name.into(),
             evidence,
@@ -53,13 +60,6 @@ impl AtpEvidenceLedger {
         };
 
         self.entries.push(entry);
-
-        // Store artifact path if provided
-        if let Some(path) = artifact_path {
-            if !self.artifact_paths.contains(&path) {
-                self.artifact_paths.push(path);
-            }
-        }
     }
 
     /// Record a seed used for deterministic reproduction.

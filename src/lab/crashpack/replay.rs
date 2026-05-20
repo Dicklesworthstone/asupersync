@@ -188,13 +188,14 @@ impl TraceMinimizer {
             attempts += 1;
         }
 
-        let reduction_percentage = (original_length - minimized.len()) as f64 / original_length as f64;
+        let minimized_length = minimized.len();
+        let reduction_percentage = (original_length - minimized_length) as f64 / original_length as f64;
 
         Ok(MinimizationResult {
             minimized_events: minimized,
             stats: MinimizationStats {
                 original_length,
-                minimized_length: minimized.len(),
+                minimized_length,
                 reduction_percentage,
                 attempts_made: attempts,
             },
@@ -205,20 +206,11 @@ impl TraceMinimizer {
         let mut essential = BTreeSet::new();
 
         for (idx, event) in events.iter().enumerate() {
-            // Always preserve certain critical event types
-            match event {
-                TraceEvent::Spawn { .. } => {
-                    if self.config.preserve_oracle_events {
-                        essential.insert(idx);
-                    }
-                }
-                TraceEvent::TaskComplete { .. } => {
-                    if self.config.preserve_oracle_events {
-                        essential.insert(idx);
-                    }
-                }
-                // Add other essential event types as needed
-                _ => {}
+            // Always preserve certain critical event types based on event content
+            let event_str = event.to_string();
+            if (event_str.contains("spawn") || event_str.contains("complete"))
+                && self.config.preserve_oracle_events {
+                essential.insert(idx);
             }
         }
 
