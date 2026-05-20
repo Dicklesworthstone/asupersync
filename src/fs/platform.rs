@@ -667,11 +667,11 @@ fn derive_degradation_policy(
     }
 }
 
-fn collect_probes(
-    filesystem: &FilesystemCapabilityProfile,
-    network: &NetworkCapabilityProfile,
-    service: &ServiceCapabilityProfile,
-) -> Vec<&CapabilityProbe> {
+fn collect_probes<'a>(
+    filesystem: &'a FilesystemCapabilityProfile,
+    network: &'a NetworkCapabilityProfile,
+    service: &'a ServiceCapabilityProfile,
+) -> Vec<&'a CapabilityProbe> {
     vec![
         &filesystem.sparse_files,
         &filesystem.preallocation,
