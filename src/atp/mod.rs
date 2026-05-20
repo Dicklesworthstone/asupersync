@@ -9,3 +9,4 @@
 pub mod manifest;
 pub mod object;
 pub mod path;
+pub mod verifier;
