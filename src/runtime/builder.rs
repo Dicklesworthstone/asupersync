@@ -3238,6 +3238,18 @@ impl Runtime {
     /// thread the handle through every layer.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _guard = ScopedRuntimeHandle::new(self.handle());
+        // #41: install an ambient Cx backed by this runtime's drivers
+        // (IO + timer + blocking pool + observability). Without it,
+        // `Cx::current()` returns None inside the polled future, so
+        // public async networking APIs (e.g. `TcpListener::accept`)
+        // fall back to a tight `accept4` / `WouldBlock` poll instead
+        // of waiting through the configured reactor. Wrap the existing
+        // execution path in `_cx_guard` so the Cx is installed for the
+        // duration of the future poll and uninstalled on return —
+        // mirrors `block_on_with_cx` but builds the Cx for callers
+        // who don't have a request-scoped one to thread in.
+        let request_cx = self.request_cx_with_budget(Budget::INFINITE);
+        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
         run_future_with_budget(future, self.inner.config.poll_budget)
     }
 
