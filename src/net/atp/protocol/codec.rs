@@ -68,7 +68,7 @@ impl AtpFrameCodec {
     /// Decode frame header from buffer (zero-copy optimization)
     fn decode_header(buf: &mut BytesMut) -> Result<Option<FrameHeader>, FrameError> {
         // First pass: check if we have enough bytes for complete header without consuming
-        let original_len = buf.len();
+        let _original_len = buf.len();
         let mut cursor = 0;
 
         // Helper to try parsing varint at cursor position

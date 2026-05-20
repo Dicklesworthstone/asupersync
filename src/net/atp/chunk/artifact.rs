@@ -64,7 +64,7 @@ impl ChunkingProfileTrait for ArtifactProfile {
             data,
             &positions,
             ChunkStrategy::ContentDefined,
-            |index, offset, size, chunk_data| {
+            |index, _offset, _size, chunk_data| {
                 let proof_strength = Self::compute_proof_strength(chunk_data, index);
 
                 ChunkMetadata::Artifact {
@@ -241,7 +241,7 @@ impl ArtifactProfile {
         position: usize,
     ) -> bool {
         // Base hash boundary
-        let hash_boundary = (hash & base_mask) == 0;
+        let _hash_boundary = (hash & base_mask) == 0;
 
         // Structural boundaries for build artifacts
         let structural_boundary = if position > 0 && position < data.len() - 1 {
@@ -758,7 +758,7 @@ mod regex {
 
         pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
             // Simple version number detection
-            for (i, part) in text.split_whitespace().enumerate() {
+            for (_i, part) in text.split_whitespace().enumerate() {
                 if Self::is_version_like(part) {
                     return Some(Match {
                         text: part,

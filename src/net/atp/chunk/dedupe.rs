@@ -514,7 +514,7 @@ impl ChunkReuseManager {
         }
 
         // Check size matches
-        if chunk_identity.size != expected_boundary.size_bytes {
+        if chunk_identity.size_bytes != expected_boundary.size_bytes {
             return false;
         }
 

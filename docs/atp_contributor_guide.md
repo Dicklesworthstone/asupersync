@@ -47,7 +47,7 @@ the listed files, and run or extend the listed proof lane.
 | SDK facade | `ATP-B4`, `asupersync-sbk7th` | planned `src/net/atp/sdk/` or stable `src/atp/sdk/` facade | Cx-first send/receive/sync/stream tests, diagnostics, cancellation and resume e2e |
 | Daemon, identity, peer directory, receive preflight | `ATP-H1`, `ATP-H2`, `ATP-H5`, `ATP-H6`, `ATP-H7` | planned `src/atp/daemon/`, `src/atp/identity/` | AppSpec lifecycle, PeerId/TransferId, key-store, quota, consent, quarantine tests |
 | CLI, share/pairing, first-run packaging | `ATP-B5`, `ATP-I5`, `ATP-I6` | `src/bin/asupersync.rs`, packaging scripts | deterministic CLI output, share-code, service-integration, shell-completion, upgrade smoke tests |
-| Mailbox, relay, path doctor | `ATP-F5`, `ATP-F10`, `ATP-J4` | planned relay/mailbox/path-provider modules | encrypted store-and-forward, relay opacity, TCP/TLS 443 fallback, path-doctor e2e |
+| Mailbox, relay, Tailscale candidate, path doctor | `ATP-F5`, `ATP-F6`, `ATP-F10`, `ATP-J4` | planned relay/mailbox/path-provider modules plus optional Tailscale path provider | encrypted store-and-forward, relay opacity, TCP/TLS 443 fallback, Tailscale candidate selection, path-doctor e2e |
 | Lab, replay, crashpacks, benchmark cartel | `ATP-L`, `ATP-N` | planned `src/atp/lab/`, replay/minimizer modules, benchmark adapters | deterministic NAT/network/disk/adversary models, transfer oracles, replay minimization, comparator scripts |
 | Governance, dependency gates, Definition of Done | `ATP-M`, `ATP-N`, `asupersync-jaghjr`, `asupersync-xvaftm` | docs, artifacts, dependency-audit tests | module-map contract, no-external-QUIC checks, proof-lane manifest, unit/e2e/logging DoD |
 

@@ -12,8 +12,8 @@
 //! - Maintains file system hole semantics during reconstruction
 
 use super::{
-    profiles::{utils, ChunkingProfile as ChunkingProfileTrait},
     ChunkBoundary, ChunkMetadata, ChunkingProfileError, SparseHoleMetadata,
+    profiles::{ChunkingProfile as ChunkingProfileTrait, utils},
 };
 use crate::atp::manifest::{ChunkPlan, ChunkStrategy};
 use std::collections::BTreeMap;
@@ -48,7 +48,7 @@ impl ChunkingProfileTrait for SparseImageProfile {
             data,
             &positions,
             ChunkStrategy::ObjectSpecific,
-            |index, offset, size, chunk_data| {
+            |index, offset, _size, chunk_data| {
                 let (is_sparse_hole, hole_metadata) =
                     Self::analyze_chunk_sparsity(chunk_data, offset, &sparse_regions);
 

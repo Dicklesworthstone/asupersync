@@ -11,11 +11,11 @@
 //! - Optimized for streaming consumption patterns
 //! - Adaptive sizing based on content type detection
 
-use crate::atp::manifest::{ChunkPlan, ChunkStrategy};
 use super::{
     ChunkBoundary, ChunkMetadata, ChunkingProfileError,
-    profiles::{utils, ChunkingProfile as ChunkingProfileTrait},
+    profiles::{ChunkingProfile as ChunkingProfileTrait, utils},
 };
+use crate::atp::manifest::{ChunkPlan, ChunkStrategy};
 
 /// Media chunking profile implementation.
 pub struct MediaProfile;
@@ -54,16 +54,13 @@ impl ChunkingProfileTrait for MediaProfile {
             &positions,
             ChunkStrategy::ObjectSpecific,
             |index, offset, size, chunk_data| {
-                let is_keyframe_boundary = Self::is_keyframe_boundary(
-                    chunk_data,
-                    &content_type,
-                    index
-                );
+                let is_keyframe_boundary =
+                    Self::is_keyframe_boundary(chunk_data, &content_type, index);
                 let decoding_priority = Self::compute_decoding_priority(
                     chunk_data,
                     &content_type,
                     index,
-                    positions.len()
+                    positions.len(),
                 );
 
                 ChunkMetadata::Media {
@@ -83,36 +80,42 @@ impl ChunkingProfileTrait for MediaProfile {
         for boundary in boundaries {
             if !matches!(boundary.strategy, ChunkStrategy::ObjectSpecific) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "media profile requires object-specific chunking".to_string()
+                    "media profile requires object-specific chunking".to_string(),
                 ));
             }
 
             if !matches!(boundary.metadata, Some(ChunkMetadata::Media { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "media profile requires Media metadata".to_string()
+                    "media profile requires Media metadata".to_string(),
                 ));
             }
 
             if boundary.size_bytes < Self::min_chunking_threshold() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} below minimum {}",
-                           boundary.size_bytes, Self::min_chunking_threshold())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} below minimum {}",
+                    boundary.size_bytes,
+                    Self::min_chunking_threshold()
+                )));
             }
 
             if boundary.size_bytes > Self::max_chunk_size() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} above maximum {}",
-                           boundary.size_bytes, Self::max_chunk_size())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} above maximum {}",
+                    boundary.size_bytes,
+                    Self::max_chunk_size()
+                )));
             }
 
             // Validate priority range
-            if let Some(ChunkMetadata::Media { decoding_priority, .. }) = &boundary.metadata {
+            if let Some(ChunkMetadata::Media {
+                decoding_priority, ..
+            }) = &boundary.metadata
+            {
                 if *decoding_priority > 100 {
-                    return Err(ChunkingProfileError::InvalidChunkParameters(
-                        format!("decoding priority {} above maximum 100", decoding_priority)
-                    ));
+                    return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                        "decoding priority {} above maximum 100",
+                        decoding_priority
+                    )));
                 }
             }
         }
@@ -187,7 +190,8 @@ impl MediaProfile {
         if data.starts_with(b"\x00\x00\x00\x18ftypmp4") || // MP4
            data.starts_with(b"\x00\x00\x00\x20ftypisom") || // ISO MP4
            data.starts_with(b"RIFF") && data.get(8..12) == Some(b"AVI ") || // AVI
-           data.starts_with(b"\x1A\x45\xDF\xA3") // WebM/Matroska
+           data.starts_with(b"\x1A\x45\xDF\xA3")
+        // WebM/Matroska
         {
             return MediaContentType::Video;
         }
@@ -197,7 +201,8 @@ impl MediaProfile {
            data.starts_with(b"\xFF\xFB") || data.starts_with(b"\xFF\xFA") || // MP3
            data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WAVE") || // WAV
            data.starts_with(b"fLaC") || // FLAC
-           data.starts_with(b"OggS") // Ogg
+           data.starts_with(b"OggS")
+        // Ogg
         {
             return MediaContentType::Audio;
         }
@@ -206,7 +211,8 @@ impl MediaProfile {
         if data.starts_with(b"\xFF\xD8\xFF") || // JPEG
            data.starts_with(b"\x89PNG\r\n\x1A\n") || // PNG
            data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") || // WebP
-           data.starts_with(b"GIF8") // GIF
+           data.starts_with(b"GIF8")
+        // GIF
         {
             return MediaContentType::Image;
         }
@@ -338,7 +344,7 @@ impl MediaProfile {
         data.starts_with(b"\x00\x00\x00\x01") || // H.264/H.265 start code
         data.starts_with(b"\x00\x00\x01") ||     // MPEG start code
         data.starts_with(b"\xFF\xFE") ||         // Some video formats
-        (data[0] == 0x1A && data[1] == 0x45)     // WebM cluster start
+        (data[0] == 0x1A && data[1] == 0x45) // WebM cluster start
     }
 
     /// Determine if this chunk represents a keyframe boundary.
@@ -355,8 +361,7 @@ impl MediaProfile {
                 }
 
                 // Look for keyframe indicators
-                chunk_data.windows(4).any(|w| w == b"\x00\x00\x00\x01") &&
-                chunk_data.len() > 100 // Reasonable keyframe size
+                chunk_data.windows(4).any(|w| w == b"\x00\x00\x00\x01") && chunk_data.len() > 100 // Reasonable keyframe size
             }
             MediaContentType::Image => {
                 // First chunk of progressive images
@@ -406,11 +411,7 @@ impl MediaProfile {
             }
             MediaContentType::Unknown => {
                 // Default progressive priority
-                if chunk_index == 0 {
-                    90
-                } else {
-                    70
-                }
+                if chunk_index == 0 { 90 } else { 70 }
             }
         };
 
@@ -433,13 +434,19 @@ impl MediaProfile {
 
         // Sort by priority (descending), then by index (ascending) for ties
         indexed_boundaries.sort_by(|(a_idx, a), (b_idx, b)| {
-            let a_priority = if let Some(ChunkMetadata::Media { decoding_priority, .. }) = &a.metadata {
+            let a_priority = if let Some(ChunkMetadata::Media {
+                decoding_priority, ..
+            }) = &a.metadata
+            {
                 *decoding_priority
             } else {
                 0
             };
 
-            let b_priority = if let Some(ChunkMetadata::Media { decoding_priority, .. }) = &b.metadata {
+            let b_priority = if let Some(ChunkMetadata::Media {
+                decoding_priority, ..
+            }) = &b.metadata
+            {
                 *decoding_priority
             } else {
                 0
@@ -465,7 +472,8 @@ impl MediaProfile {
         // Find the minimum set of chunks needed for startup
         let startup_chunks = Self::get_startup_chunk_set(boundaries);
 
-        let startup_bytes: u64 = startup_chunks.iter()
+        let startup_bytes: u64 = startup_chunks
+            .iter()
             .map(|&idx| boundaries[idx].size_bytes)
             .sum();
 
@@ -521,19 +529,31 @@ mod tests {
     fn content_type_detection() {
         // Test MP4 detection
         let mp4_header = b"\x00\x00\x00\x18ftypmp4\x00\x00\x00\x00";
-        assert_eq!(MediaProfile::detect_content_type(mp4_header), MediaContentType::Video);
+        assert_eq!(
+            MediaProfile::detect_content_type(mp4_header),
+            MediaContentType::Video
+        );
 
         // Test PNG detection
         let png_header = b"\x89PNG\r\n\x1A\n\x00\x00\x00\rIHDR";
-        assert_eq!(MediaProfile::detect_content_type(png_header), MediaContentType::Image);
+        assert_eq!(
+            MediaProfile::detect_content_type(png_header),
+            MediaContentType::Image
+        );
 
         // Test MP3 detection
         let mp3_header = b"ID3\x03\x00\x00\x00\x00\x00\x00";
-        assert_eq!(MediaProfile::detect_content_type(mp3_header), MediaContentType::Audio);
+        assert_eq!(
+            MediaProfile::detect_content_type(mp3_header),
+            MediaContentType::Audio
+        );
 
         // Test unknown
         let unknown_header = b"unknown format here";
-        assert_eq!(MediaProfile::detect_content_type(unknown_header), MediaContentType::Unknown);
+        assert_eq!(
+            MediaProfile::detect_content_type(unknown_header),
+            MediaContentType::Unknown
+        );
     }
 
     #[test]
@@ -578,7 +598,7 @@ mod tests {
             &vec![0u8; 1000],
             &MediaContentType::Video,
             0,
-            10
+            10,
         );
         assert!(priority >= 90);
 
@@ -587,7 +607,7 @@ mod tests {
             &vec![0u8; 1000],
             &MediaContentType::Video,
             9,
-            10
+            10,
         );
         assert!(priority < 50);
 
@@ -596,13 +616,13 @@ mod tests {
             &vec![0u8; 200_000],
             &MediaContentType::Video,
             5,
-            10
+            10,
         );
         let priority_small = MediaProfile::compute_decoding_priority(
             &vec![0u8; 1000],
             &MediaContentType::Video,
             5,
-            10
+            10,
         );
         assert!(priority_large > priority_small);
     }
@@ -615,7 +635,10 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::ObjectSpecific));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Media { .. })));
+            assert!(matches!(
+                boundary.metadata,
+                Some(ChunkMetadata::Media { .. })
+            ));
         }
 
         // Validate total coverage
@@ -781,9 +804,7 @@ mod tests {
         let startup_set = MediaProfile::get_startup_chunk_set(&boundaries);
 
         // Should include enough chunks for 256KB threshold
-        let startup_bytes: u64 = startup_set.iter()
-            .map(|&idx| boundaries[idx].size)
-            .sum();
+        let startup_bytes: u64 = startup_set.iter().map(|&idx| boundaries[idx].size).sum();
         assert!(startup_bytes >= 256 * 1024);
     }
 }

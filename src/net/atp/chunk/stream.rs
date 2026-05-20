@@ -45,7 +45,7 @@ impl ChunkingProfileTrait for StreamProfile {
             data,
             &positions,
             ChunkStrategy::FixedSize,
-            |index, offset, size, chunk_data| {
+            |index, offset, _size, chunk_data| {
                 let sequence = Self::compute_sequence_number(index, offset);
                 let early_consumption_safe =
                     Self::is_early_consumption_safe(chunk_data, index, positions.len());

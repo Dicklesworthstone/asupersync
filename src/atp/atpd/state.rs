@@ -2,7 +2,7 @@
 
 use crate::atp::inbox::ObjectDigest;
 use crate::atp::quota::{
-    QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaRow, RetentionClock,
+    QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaRow, QuotaUsage, RetentionClock,
     RetentionPolicy, RetentionRecord,
 };
 use serde::{Deserialize, Serialize};
@@ -272,6 +272,34 @@ pub struct AtpdStateExport {
     pub settings: AtpdStateSettings,
 }
 
+/// Persistent store integrity report for corrupted-store recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpdIntegrityReport {
+    /// Required collections absent from the state map.
+    pub missing_collections: Vec<AtpdStateCollection>,
+    /// Buckets whose recorded usage does not match stored records.
+    pub quota_mismatches: Vec<AtpdQuotaMismatch>,
+}
+
+impl AtpdIntegrityReport {
+    /// Return true when the schema and quota ledger are internally consistent.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.missing_collections.is_empty() && self.quota_mismatches.is_empty()
+    }
+}
+
+/// Quota mismatch found during integrity validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpdQuotaMismatch {
+    /// Bucket with inconsistent accounting.
+    pub bucket: QuotaBucket,
+    /// Usage recomputed from records.
+    pub expected: QuotaUsage,
+    /// Usage currently recorded in the ledger.
+    pub actual: QuotaUsage,
+}
+
 /// Durable store settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtpdStateSettings {
@@ -402,6 +430,45 @@ impl AtpdPersistentState {
             .collect();
         self.retention_policy
             .expired_records(&records, now_epoch_secs)
+    }
+
+    /// Validate schema coverage and quota accounting without mutating state.
+    #[must_use]
+    pub fn integrity_report(&self) -> AtpdIntegrityReport {
+        let missing_collections = required_collections()
+            .into_iter()
+            .filter(|collection| !self.records.contains_key(collection))
+            .collect();
+
+        let mut expected_usage: BTreeMap<QuotaBucket, QuotaUsage> = BTreeMap::new();
+        for record in self.records.values().flat_map(BTreeMap::values) {
+            let usage = expected_usage
+                .entry(record.collection.quota_bucket())
+                .or_default();
+            usage.bytes = usage.bytes.saturating_add(record.bytes);
+            usage.records = usage.records.saturating_add(1);
+        }
+
+        let mut buckets: BTreeSet<_> = expected_usage.keys().copied().collect();
+        buckets.extend(self.quota_ledger.rows().iter().map(|row| row.bucket));
+
+        let quota_mismatches = buckets
+            .into_iter()
+            .filter_map(|bucket| {
+                let expected = expected_usage.get(&bucket).copied().unwrap_or_default();
+                let actual = self.quota_ledger.usage(bucket);
+                (expected != actual).then_some(AtpdQuotaMismatch {
+                    bucket,
+                    expected,
+                    actual,
+                })
+            })
+            .collect();
+
+        AtpdIntegrityReport {
+            missing_collections,
+            quota_mismatches,
+        }
     }
 
     /// Export a redacted or full state bundle.
@@ -681,6 +748,40 @@ mod tests {
                 .get(&AtpdStateCollection::Cache)
                 .map(BTreeMap::len),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn integrity_report_detects_corrupt_quota_accounting() {
+        let mut state = AtpdPersistentState::new();
+        state.ensure_required_collections();
+        state
+            .records
+            .entry(AtpdStateCollection::Cache)
+            .or_default()
+            .insert(
+                "unaccounted".to_string(),
+                record(
+                    "unaccounted",
+                    AtpdStateCollection::Cache,
+                    9,
+                    10,
+                    StateSensitivity::PrivateContent,
+                ),
+            );
+
+        let report = state.integrity_report();
+        assert!(report.missing_collections.is_empty());
+        assert_eq!(
+            report.quota_mismatches,
+            vec![AtpdQuotaMismatch {
+                bucket: QuotaBucket::Cache,
+                expected: QuotaUsage {
+                    bytes: 9,
+                    records: 1
+                },
+                actual: QuotaUsage::default(),
+            }]
         );
     }
 

@@ -14,9 +14,9 @@ use super::supervision::{
 use std::fmt;
 
 pub use state::{
-    ATPD_STATE_SCHEMA_VERSION, AtpdExportMode, AtpdPersistentState, AtpdSchemaVersion,
-    AtpdStateCollection, AtpdStateError, AtpdStateExport, AtpdStateRecord, AtpdStateSettings,
-    StateExportPolicy, StateSensitivity, required_collections,
+    ATPD_STATE_SCHEMA_VERSION, AtpdExportMode, AtpdIntegrityReport, AtpdPersistentState,
+    AtpdQuotaMismatch, AtpdSchemaVersion, AtpdStateCollection, AtpdStateError, AtpdStateExport,
+    AtpdStateRecord, AtpdStateSettings, StateExportPolicy, StateSensitivity, required_collections,
 };
 
 /// Lifecycle phases for the daemon root.
