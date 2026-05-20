@@ -1,8 +1,10 @@
 //! Pairing and share code functionality for ATP capability grants.
 
-use super::{GrantError, GrantResult, GrantOperation, GrantAuditRecord};
+use super::{GrantAuditRecord, GrantError, GrantOperation, GrantResult};
 use crate::atp::identity::DurablePeerIdentity;
-use crate::atp::policy::{Capability, CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+use crate::atp::policy::{
+    Capability, CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope,
+};
 use crate::net::atp::protocol::PeerId;
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
@@ -134,7 +136,13 @@ impl PairingCode {
         }
 
         hasher.update(&scope.digest());
-        hasher.update(&SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().to_le_bytes());
+        hasher.update(
+            &SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_le_bytes(),
+        );
 
         let hash = hasher.finalize();
         let code_bytes = &hash[..12]; // Use first 12 bytes
@@ -362,9 +370,11 @@ impl PairingManager {
         // Get and remove the pairing code
         let mut pairing_code = match self.active_codes.remove(code) {
             Some(code) => code,
-            None => return Outcome::Err(GrantError::NotFound {
-                grant_id: code.to_string(),
-            }),
+            None => {
+                return Outcome::Err(GrantError::NotFound {
+                    grant_id: code.to_string(),
+                });
+            }
         };
 
         // Check if code is valid and can be used
@@ -379,7 +389,11 @@ impl PairingManager {
         }
 
         // Create capability for the requesting peer
-        let grant_id = format!("paired-{}-{}", code, peer_identity.peer_id_hex()[..8].to_string());
+        let grant_id = format!(
+            "paired-{}-{}",
+            code,
+            peer_identity.peer_id_hex()[..8].to_string()
+        );
 
         let capability = Capability::new(
             grant_id,
@@ -509,8 +523,7 @@ mod tests {
     fn create_test_identity() -> DurablePeerIdentity {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("identity.json");
-        let store = IdentityKeyStore::create(path, [1; 32], 1)
-            .expect("create key store");
+        let store = IdentityKeyStore::create(path, [1; 32], 1).expect("create key store");
         DurablePeerIdentity::from_key_store(&store).expect("durable identity")
     }
 
@@ -551,7 +564,8 @@ mod tests {
         );
 
         // Use the pairing code
-        let capability = manager.use_pairing_code(&code, &peer_identity)
+        let capability = manager
+            .use_pairing_code(&code, &peer_identity)
             .expect("use pairing code");
 
         assert_eq!(capability.subject, peer_identity.peer_id());
@@ -580,7 +594,8 @@ mod tests {
         );
 
         // First use should succeed
-        let _capability1 = manager.use_pairing_code(&code, &peer_identity)
+        let _capability1 = manager
+            .use_pairing_code(&code, &peer_identity)
             .expect("first use");
 
         // Second use should fail
@@ -613,7 +628,9 @@ mod tests {
             max_uses: Some(1),
         };
 
-        manager.active_codes.insert("TEST-CODE".to_string(), pairing_code);
+        manager
+            .active_codes
+            .insert("TEST-CODE".to_string(), pairing_code);
 
         // Wait a moment for expiry
         std::thread::sleep(Duration::from_millis(10));

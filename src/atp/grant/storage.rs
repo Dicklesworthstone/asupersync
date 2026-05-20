@@ -1,6 +1,9 @@
 //! Grant storage implementation for persistent capability management.
 
-use super::{GrantInfo, GrantOperation, GrantAuditRecord, GrantStats, GrantQuery, GrantState, GrantResult, GrantError};
+use super::{
+    GrantAuditRecord, GrantError, GrantInfo, GrantOperation, GrantQuery, GrantResult, GrantState,
+    GrantStats,
+};
 use crate::atp::policy::Capability;
 use crate::net::atp::protocol::PeerId;
 use crate::types::outcome::Outcome;
@@ -65,7 +68,9 @@ impl GrantStorage {
 
         // Ensure directory exists
         if let Err(e) = fs::create_dir_all(&base_dir) {
-            return Outcome::Err(GrantError::Storage(format!("failed to create storage directory: {e}")));
+            return Outcome::Err(GrantError::Storage(format!(
+                "failed to create storage directory: {e}"
+            )));
         }
 
         let mut storage = Self {
@@ -114,7 +119,9 @@ impl GrantStorage {
     pub fn get_grant(&self, grant_id: &str) -> GrantResult<GrantInfo> {
         match self.grants_cache.get(grant_id) {
             Some(record) => Ok(record.grant_info.clone()),
-            None => Outcome::Err(GrantError::NotFound { grant_id: grant_id.to_string() }),
+            None => Outcome::Err(GrantError::NotFound {
+                grant_id: grant_id.to_string(),
+            }),
         }
     }
 
@@ -122,7 +129,11 @@ impl GrantStorage {
     pub fn update_grant(&mut self, grant_id: &str, grant_info: GrantInfo) -> GrantResult<()> {
         let record = match self.grants_cache.get_mut(grant_id) {
             Some(record) => record,
-            None => return Outcome::Err(GrantError::NotFound { grant_id: grant_id.to_string() }),
+            None => {
+                return Outcome::Err(GrantError::NotFound {
+                    grant_id: grant_id.to_string(),
+                });
+            }
         };
 
         record.grant_info = grant_info;
@@ -136,8 +147,12 @@ impl GrantStorage {
     pub fn delete_grant(&mut self, grant_id: &str) -> GrantResult<()> {
         // Remove from cache
         match self.grants_cache.remove(grant_id) {
-            Some(_) => {},
-            None => return Outcome::Err(GrantError::NotFound { grant_id: grant_id.to_string() }),
+            Some(_) => {}
+            None => {
+                return Outcome::Err(GrantError::NotFound {
+                    grant_id: grant_id.to_string(),
+                });
+            }
         }
 
         // Remove file
@@ -217,7 +232,9 @@ impl GrantStorage {
     pub fn get_audit_records(&self, grant_id: &str) -> GrantResult<Vec<GrantAuditRecord>> {
         match self.grants_cache.get(grant_id) {
             Some(record) => Ok(record.audit_records.clone()),
-            None => Outcome::Err(GrantError::NotFound { grant_id: grant_id.to_string() }),
+            None => Outcome::Err(GrantError::NotFound {
+                grant_id: grant_id.to_string(),
+            }),
         }
     }
 
@@ -290,7 +307,11 @@ impl GrantStorage {
                     if let Some(extension) = entry.path().extension() {
                         if extension == "json" {
                             if let Err(e) = self.load_grant_file(&entry.path()) {
-                                eprintln!("Warning: failed to load grant file {:?}: {}", entry.path(), e);
+                                eprintln!(
+                                    "Warning: failed to load grant file {:?}: {}",
+                                    entry.path(),
+                                    e
+                                );
                             }
                         }
                     }
@@ -313,12 +334,20 @@ impl GrantStorage {
     fn load_grant_file(&mut self, path: &Path) -> GrantResult<()> {
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
-            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to read grant file: {e}"))),
+            Err(e) => {
+                return Outcome::err(GrantError::Storage(format!(
+                    "failed to read grant file: {e}"
+                )));
+            }
         };
 
         let record: GrantRecord = match serde_json::from_str(&content) {
             Ok(r) => r,
-            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to parse grant file: {e}"))),
+            Err(e) => {
+                return Outcome::err(GrantError::Storage(format!(
+                    "failed to parse grant file: {e}"
+                )));
+            }
         };
 
         let grant_id = record.grant_info.capability.grant_id.clone();
@@ -331,7 +360,11 @@ impl GrantStorage {
     fn load_audit_file(&mut self, path: &Path) -> GrantResult<()> {
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
-            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to read audit file: {e}"))),
+            Err(e) => {
+                return Outcome::err(GrantError::Storage(format!(
+                    "failed to read audit file: {e}"
+                )));
+            }
         };
 
         for line in content.lines() {
@@ -347,25 +380,39 @@ impl GrantStorage {
     fn persist_grant(&self, grant_id: &str) -> GrantResult<()> {
         let record = match self.grants_cache.get(grant_id) {
             Some(record) => record,
-            None => return Outcome::Err(GrantError::NotFound { grant_id: grant_id.to_string() }),
+            None => {
+                return Outcome::Err(GrantError::NotFound {
+                    grant_id: grant_id.to_string(),
+                });
+            }
         };
 
         // Ensure grants directory exists
         let grants_dir = self.base_dir.join("grants");
         if let Err(e) = fs::create_dir_all(&grants_dir) {
-            return Outcome::Err(GrantError::Storage(format!("failed to create grants directory: {e}")));
+            return Outcome::Err(GrantError::Storage(format!(
+                "failed to create grants directory: {e}"
+            )));
         }
 
         // Write grant file
         let file_path = self.grant_file_path(grant_id);
         let content = match serde_json::to_string_pretty(record) {
             Ok(c) => c,
-            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to serialize grant: {e}"))),
+            Err(e) => {
+                return Outcome::err(GrantError::Storage(format!(
+                    "failed to serialize grant: {e}"
+                )));
+            }
         };
 
         match fs::write(&file_path, content) {
-            Ok(_) => {},
-            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to write grant file: {e}"))),
+            Ok(_) => {}
+            Err(e) => {
+                return Outcome::err(GrantError::Storage(format!(
+                    "failed to write grant file: {e}"
+                )));
+            }
         }
 
         Outcome::ok(())
@@ -384,8 +431,12 @@ impl GrantStorage {
         }
 
         match fs::write(&audit_file, content) {
-            Ok(_) => {},
-            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to write audit log: {e}"))),
+            Ok(_) => {}
+            Err(e) => {
+                return Outcome::err(GrantError::Storage(format!(
+                    "failed to write audit log: {e}"
+                )));
+            }
         }
 
         Outcome::ok(())
@@ -393,8 +444,15 @@ impl GrantStorage {
 
     /// Get file path for a grant.
     fn grant_file_path(&self, grant_id: &str) -> String {
-        let safe_id = grant_id.chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        let safe_id = grant_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>();
 
         self.base_dir
@@ -416,7 +474,9 @@ impl Drop for GrantStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::policy::{Capability, CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+    use crate::atp::policy::{
+        Capability, CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope,
+    };
     use crate::net::atp::protocol::PeerId;
     use std::collections::HashSet;
     use std::time::Duration;
@@ -448,11 +508,16 @@ mod tests {
         let grant_id = grant_info.capability.grant_id.clone();
 
         // Store grant
-        storage.store_grant(grant_info.clone()).expect("store grant");
+        storage
+            .store_grant(grant_info.clone())
+            .expect("store grant");
 
         // Retrieve grant
         let retrieved = storage.get_grant(&grant_id).expect("get grant");
-        assert_eq!(retrieved.capability.grant_id, grant_info.capability.grant_id);
+        assert_eq!(
+            retrieved.capability.grant_id,
+            grant_info.capability.grant_id
+        );
         assert_eq!(retrieved.capability.subject, grant_info.capability.subject);
     }
 
@@ -464,11 +529,16 @@ mod tests {
         let grant_info = create_test_grant_info();
 
         // Store grant
-        storage.store_grant(grant_info.clone()).expect("store grant");
+        storage
+            .store_grant(grant_info.clone())
+            .expect("store grant");
 
         // Try to store again - should fail
         let result = storage.store_grant(grant_info);
-        assert!(matches!(result, Outcome::Err(GrantError::AlreadyExists { .. })));
+        assert!(matches!(
+            result,
+            Outcome::Err(GrantError::AlreadyExists { .. })
+        ));
     }
 
     #[test]
@@ -477,7 +547,9 @@ mod tests {
         let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage");
 
         let grant_info = create_test_grant_info();
-        storage.store_grant(grant_info.clone()).expect("store grant");
+        storage
+            .store_grant(grant_info.clone())
+            .expect("store grant");
 
         // Query by subject
         let query = GrantQuery {
@@ -487,7 +559,10 @@ mod tests {
 
         let results = storage.list_grants(&query).expect("list grants");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].capability.grant_id, grant_info.capability.grant_id);
+        assert_eq!(
+            results[0].capability.grant_id,
+            grant_info.capability.grant_id
+        );
 
         // Query by different subject
         let query = GrantQuery {
@@ -519,10 +594,14 @@ mod tests {
             capability_summary: "test summary".to_string(),
         };
 
-        storage.add_audit_record(audit_record.clone()).expect("add audit record");
+        storage
+            .add_audit_record(audit_record.clone())
+            .expect("add audit record");
 
         // Retrieve audit records
-        let records = storage.get_audit_records(&grant_id).expect("get audit records");
+        let records = storage
+            .get_audit_records(&grant_id)
+            .expect("get audit records");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].operation, GrantOperation::Used);
 
@@ -540,14 +619,19 @@ mod tests {
         // Create storage and store grant
         {
             let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage");
-            storage.store_grant(grant_info.clone()).expect("store grant");
+            storage
+                .store_grant(grant_info.clone())
+                .expect("store grant");
         }
 
         // Create new storage instance and verify grant is still there
         {
             let storage = GrantStorage::new(temp_dir.path()).expect("create storage");
             let retrieved = storage.get_grant(&grant_id).expect("get grant");
-            assert_eq!(retrieved.capability.grant_id, grant_info.capability.grant_id);
+            assert_eq!(
+                retrieved.capability.grant_id,
+                grant_info.capability.grant_id
+            );
         }
     }
 

@@ -19,11 +19,14 @@ mod tests;
 #[cfg(test)]
 mod basic_tests;
 
-pub use append_journal::{AppendJournal, JournalRecord, JournalConfig};
+pub use append_journal::{AppendJournal, JournalConfig, JournalRecord};
 pub use chunk_bitmap::{ChunkBitmap, ChunkState};
 pub use commit_policy::{AtomicPolicy, CommitPolicy, FsyncPolicy};
 pub use platform_caps::{FilesystemFeatures, PlatformCapabilities};
 pub use range_tracker::{ChunkRange, RangeTracker, SparseRange};
-pub use recovery::{RecoveryContext, RecoveryError, RecoveryStats, recover_journal_and_bitmap, load_or_create_bitmap};
+pub use recovery::{
+    RecoveryContext, RecoveryError, RecoveryStats, load_or_create_bitmap,
+    recover_journal_and_bitmap,
+};
 pub use sparse_writer::{SparseWriter, SparseWriterConfig, WriteOptions};
 pub use temp_management::{PathState, QuarantineReason, TempPathManager};

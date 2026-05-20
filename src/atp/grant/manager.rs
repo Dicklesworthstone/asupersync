@@ -1,13 +1,15 @@
 //! Comprehensive grant management for ATP capabilities.
 
+use super::storage::{GrantRecord, GrantStorage};
 use super::{
     CreateGrantRequest, GrantAuditRecord, GrantError, GrantInfo, GrantOperation, GrantQuery,
     GrantResult, GrantState, GrantStats, GrantTemplate,
 };
-use super::storage::{GrantStorage, GrantRecord};
 use crate::atp::identity::DurablePeerIdentity;
-use crate::atp::policy::{Capability, CapabilityAction, PolicyEnforcer, AccessRequest, PolicyDecision};
 use crate::atp::policy::verification::{CapabilitySigner, CapabilityVerifier, ValidationResult};
+use crate::atp::policy::{
+    AccessRequest, Capability, CapabilityAction, PolicyDecision, PolicyEnforcer,
+};
 use crate::net::atp::protocol::PeerId;
 use crate::security::keys::IdentityKeyStore;
 use crate::types::outcome::Outcome;
@@ -34,13 +36,10 @@ pub struct GrantManager {
 
 impl GrantManager {
     /// Create a new grant manager.
-    pub fn new<P: AsRef<Path>>(
-        storage_dir: P,
-        key_store: IdentityKeyStore,
-    ) -> GrantResult<Self> {
+    pub fn new<P: AsRef<Path>>(storage_dir: P, key_store: IdentityKeyStore) -> GrantResult<Self> {
         let storage = GrantStorage::new(storage_dir)?;
-        let signer = CapabilitySigner::new(key_store)
-            .map_err(|e| GrantError::Storage(e.to_string()))?;
+        let signer =
+            CapabilitySigner::new(key_store).map_err(|e| GrantError::Storage(e.to_string()))?;
         let verifier = CapabilityVerifier::new();
         let enforcer = Arc::new(Mutex::new(PolicyEnforcer::new()));
         let identity = signer.identity().clone();
@@ -82,7 +81,8 @@ impl GrantManager {
         );
 
         // Sign the capability
-        self.signer.sign_capability(&mut capability)
+        self.signer
+            .sign_capability(&mut capability)
             .map_err(|e| GrantError::Storage(e.to_string()))?;
 
         // Create grant info
@@ -118,7 +118,9 @@ impl GrantManager {
     /// Receive a grant from another peer.
     pub fn receive_grant(&mut self, capability: Capability) -> GrantResult<GrantInfo> {
         // Verify the capability
-        let validation = self.verifier.validate_capability(&capability)
+        let validation = self
+            .verifier
+            .validate_capability(&capability)
             .map_err(|e| GrantError::Storage(e.to_string()))?;
 
         if !validation.valid {
@@ -225,14 +227,22 @@ impl GrantManager {
         }
 
         // Create new grant with updated temporal scope
-        let new_grant_id = format!("{}-r{}", grant_id, SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+        let new_grant_id = format!(
+            "{}-r{}",
+            grant_id,
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
 
         let mut new_capability = old_grant.capability.clone();
         new_capability.grant_id = new_grant_id.clone();
         new_capability.issued_at = SystemTime::now();
 
         // Sign the new capability
-        self.signer.sign_capability(&mut new_capability)
+        self.signer
+            .sign_capability(&mut new_capability)
             .map_err(|e| GrantError::Storage(e.to_string()))?;
 
         // Create new grant info
@@ -285,18 +295,25 @@ impl GrantManager {
     pub fn evaluate_access(&mut self, request: &AccessRequest) -> GrantResult<PolicyDecision> {
         let mut enforcer = match self.enforcer.lock() {
             Ok(guard) => guard,
-            Err(e) => return Outcome::err(GrantError::Storage(format!("enforcer lock error: {e}"))),
+            Err(e) => {
+                return Outcome::err(GrantError::Storage(format!("enforcer lock error: {e}")));
+            }
         };
 
         let decision = enforcer.evaluate_access(request);
 
         // Record usage if access was granted
-        if let crate::atp::policy::CapabilityDecision::Granted { ref capability, .. } = decision.decision {
+        if let crate::atp::policy::CapabilityDecision::Granted { ref capability, .. } =
+            decision.decision
+        {
             // Update usage count in storage
             if let Ok(mut grant_info) = self.storage.get_grant(&capability.grant_id) {
                 grant_info.record_usage();
 
-                if let Err(e) = self.storage.update_grant(&capability.grant_id, grant_info.clone()) {
+                if let Err(e) = self
+                    .storage
+                    .update_grant(&capability.grant_id, grant_info.clone())
+                {
                     eprintln!("Warning: failed to update grant usage: {e}");
                 } else {
                     // Record audit event
@@ -333,8 +350,14 @@ impl GrantManager {
     }
 
     /// Create a grant from a template.
-    pub fn create_from_template(&mut self, template_name: &str, subject: PeerId) -> GrantResult<GrantInfo> {
-        let template = self.templates.get(template_name)
+    pub fn create_from_template(
+        &mut self,
+        template_name: &str,
+        subject: PeerId,
+    ) -> GrantResult<GrantInfo> {
+        let template = self
+            .templates
+            .get(template_name)
             .ok_or_else(|| GrantError::Storage(format!("template not found: {template_name}")))?;
 
         let mut request = CreateGrantRequest {
@@ -382,7 +405,13 @@ impl GrantManager {
         hasher.update(self.identity.peer_id().as_bytes());
         hasher.update(request.subject.as_bytes());
         hasher.update(&request.scope.digest());
-        hasher.update(&SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().to_le_bytes());
+        hasher.update(
+            &SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_le_bytes(),
+        );
 
         let hash = hasher.finalize();
         format!("grant-{}", hex::encode(&hash[..16]))
@@ -401,15 +430,18 @@ impl GrantManager {
         }
 
         context.insert("actions".to_string(), format!("{:?}", request.actions));
-        context.insert("scope_type".to_string(), match &request.scope {
-            crate::atp::policy::ResourceScope::Any => "any".to_string(),
-            crate::atp::policy::ResourceScope::Object(_) => "object".to_string(),
-            crate::atp::policy::ResourceScope::Path(_) => "path".to_string(),
-            crate::atp::policy::ResourceScope::Inbox => "inbox".to_string(),
-            crate::atp::policy::ResourceScope::Team(t) => format!("team:{t}"),
-            crate::atp::policy::ResourceScope::Relay { .. } => "relay".to_string(),
-            crate::atp::policy::ResourceScope::Cache { .. } => "cache".to_string(),
-        });
+        context.insert(
+            "scope_type".to_string(),
+            match &request.scope {
+                crate::atp::policy::ResourceScope::Any => "any".to_string(),
+                crate::atp::policy::ResourceScope::Object(_) => "object".to_string(),
+                crate::atp::policy::ResourceScope::Path(_) => "path".to_string(),
+                crate::atp::policy::ResourceScope::Inbox => "inbox".to_string(),
+                crate::atp::policy::ResourceScope::Team(t) => format!("team:{t}"),
+                crate::atp::policy::ResourceScope::Relay { .. } => "relay".to_string(),
+                crate::atp::policy::ResourceScope::Cache { .. } => "cache".to_string(),
+            },
+        );
 
         context
     }
@@ -436,7 +468,7 @@ impl GrantManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::policy::{CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+    use crate::atp::policy::{CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope};
     use crate::security::keys::IdentityKeyStore;
     use std::collections::HashSet;
     use std::time::Duration;
@@ -445,8 +477,8 @@ mod tests {
     fn create_test_manager() -> GrantManager {
         let temp_dir = tempdir().expect("tempdir");
         let key_store_path = temp_dir.path().join("keys.json");
-        let key_store = IdentityKeyStore::create(key_store_path, [1; 32], 1)
-            .expect("create key store");
+        let key_store =
+            IdentityKeyStore::create(key_store_path, [1; 32], 1).expect("create key store");
 
         GrantManager::new(temp_dir.path(), key_store).expect("create manager")
     }
@@ -471,18 +503,28 @@ mod tests {
         let grant_info = manager.issue_grant(request).expect("issue grant");
 
         // Verify grant was stored
-        let retrieved = manager.get_grant(&grant_info.capability.grant_id).expect("get grant");
-        assert_eq!(retrieved.capability.grant_id, grant_info.capability.grant_id);
+        let retrieved = manager
+            .get_grant(&grant_info.capability.grant_id)
+            .expect("get grant");
+        assert_eq!(
+            retrieved.capability.grant_id,
+            grant_info.capability.grant_id
+        );
     }
 
     #[test]
     fn grant_manager_creates_from_templates() {
         let mut manager = create_test_manager();
 
-        let grant_info = manager.create_from_template("read-once", crate::net::atp::protocol::PeerId::test(1))
+        let grant_info = manager
+            .create_from_template("read-once", crate::net::atp::protocol::PeerId::test(1))
             .expect("create from template");
 
-        assert!(grant_info.capability.grants_action(&CapabilityAction::ReadOnce));
+        assert!(
+            grant_info
+                .capability
+                .grants_action(&CapabilityAction::ReadOnce)
+        );
         assert_eq!(grant_info.capability.temporal.max_uses, Some(1));
     }
 
@@ -507,10 +549,14 @@ mod tests {
         let grant_info = manager.issue_grant(request).expect("issue grant");
 
         // Revoke the grant
-        manager.revoke_grant(&grant_info.capability.grant_id).expect("revoke grant");
+        manager
+            .revoke_grant(&grant_info.capability.grant_id)
+            .expect("revoke grant");
 
         // Verify grant is revoked
-        let revoked = manager.get_grant(&grant_info.capability.grant_id).expect("get grant");
+        let revoked = manager
+            .get_grant(&grant_info.capability.grant_id)
+            .expect("get grant");
         assert_eq!(revoked.state, GrantState::Revoked);
     }
 
@@ -534,7 +580,8 @@ mod tests {
         let grant_info = manager.issue_grant(request).expect("issue grant");
 
         // Check audit records
-        let audit_records = manager.get_audit_records(&grant_info.capability.grant_id)
+        let audit_records = manager
+            .get_audit_records(&grant_info.capability.grant_id)
             .expect("get audit records");
 
         assert_eq!(audit_records.len(), 1);
@@ -570,7 +617,9 @@ mod tests {
         assert_eq!(old_grant.state, GrantState::Rotated);
 
         // Verify new grant is active
-        let retrieved_new = manager.get_grant(&new_grant.capability.grant_id).expect("get new grant");
+        let retrieved_new = manager
+            .get_grant(&new_grant.capability.grant_id)
+            .expect("get new grant");
         assert_eq!(retrieved_new.state, GrantState::Active);
     }
 }

@@ -32,7 +32,9 @@ impl CapabilitySigner {
         let signing_data = self.create_signing_data(capability)?;
 
         // Sign with the key store
-        let signature = self.key_store.sign_data(&signing_data)
+        let signature = self
+            .key_store
+            .sign_data(&signing_data)
             .map_err(|e| CapabilityError::Storage(e.to_string()))?;
 
         capability.signature = signature;
@@ -54,7 +56,8 @@ impl CapabilitySigner {
             },
             temporal_hash: self.hash_temporal_scope(&capability.temporal),
             constraints_digest: capability.constraints.digest(),
-            issued_at_secs: capability.issued_at
+            issued_at_secs: capability
+                .issued_at
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
@@ -69,10 +72,22 @@ impl CapabilitySigner {
         let mut hasher = Sha256::new();
 
         if let Some(not_before) = temporal.not_before {
-            hasher.update(&not_before.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_le_bytes());
+            hasher.update(
+                &not_before
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_le_bytes(),
+            );
         }
         if let Some(not_after) = temporal.not_after {
-            hasher.update(&not_after.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_le_bytes());
+            hasher.update(
+                &not_after
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_le_bytes(),
+            );
         }
         if let Some(max_uses) = temporal.max_uses {
             hasher.update(&max_uses.to_le_bytes());
@@ -91,7 +106,8 @@ impl CapabilitySigner {
 /// Capability verifier for validating signed grants.
 pub struct CapabilityVerifier {
     /// Known peer identities for verification
-    trusted_peers: std::collections::HashMap<crate::net::atp::protocol::PeerId, DurablePeerIdentity>,
+    trusted_peers:
+        std::collections::HashMap<crate::net::atp::protocol::PeerId, DurablePeerIdentity>,
 }
 
 impl CapabilityVerifier {
@@ -111,10 +127,11 @@ impl CapabilityVerifier {
     /// Verify a capability signature.
     pub fn verify_capability(&self, capability: &Capability) -> CapabilityResult<bool> {
         // Get the issuer's identity
-        let issuer_identity = self.trusted_peers.get(&capability.issuer)
-            .ok_or_else(|| CapabilityError::InvalidCapability {
+        let issuer_identity = self.trusted_peers.get(&capability.issuer).ok_or_else(|| {
+            CapabilityError::InvalidCapability {
                 reason: "issuer not in trusted peers".to_string(),
-            })?;
+            }
+        })?;
 
         // Create the signing data
         let signing_data = self.create_verification_data(capability)?;
@@ -131,23 +148,31 @@ impl CapabilityVerifier {
     }
 
     /// Verify and validate a capability comprehensively.
-    pub fn validate_capability(&self, capability: &Capability) -> CapabilityResult<ValidationResult> {
+    pub fn validate_capability(
+        &self,
+        capability: &Capability,
+    ) -> CapabilityResult<ValidationResult> {
         let mut issues = Vec::new();
 
         // Check signature
         match self.verify_capability(capability) {
-            Ok(true) => {},
+            Ok(true) => {}
             Ok(false) => issues.push(ValidationIssue::InvalidSignature),
             Err(e) => issues.push(ValidationIssue::SignatureError(e.to_string())),
         }
 
         // Check if issuer is subject (self-signed) and issuer is trusted
-        if capability.issuer == capability.subject && !self.trusted_peers.contains_key(&capability.issuer) {
+        if capability.issuer == capability.subject
+            && !self.trusted_peers.contains_key(&capability.issuer)
+        {
             issues.push(ValidationIssue::UntrustedSelfSigned);
         }
 
         // Check temporal validity
-        if !capability.temporal.is_valid_at(std::time::SystemTime::now()) {
+        if !capability
+            .temporal
+            .is_valid_at(std::time::SystemTime::now())
+        {
             issues.push(ValidationIssue::TemporalViolation);
         }
 
@@ -180,7 +205,8 @@ impl CapabilityVerifier {
             },
             temporal_hash: self.hash_temporal_scope(&capability.temporal),
             constraints_digest: capability.constraints.digest(),
-            issued_at_secs: capability.issued_at
+            issued_at_secs: capability
+                .issued_at
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
@@ -195,10 +221,22 @@ impl CapabilityVerifier {
         let mut hasher = Sha256::new();
 
         if let Some(not_before) = temporal.not_before {
-            hasher.update(&not_before.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_le_bytes());
+            hasher.update(
+                &not_before
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_le_bytes(),
+            );
         }
         if let Some(not_after) = temporal.not_after {
-            hasher.update(&not_after.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_le_bytes());
+            hasher.update(
+                &not_after
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_le_bytes(),
+            );
         }
         if let Some(max_uses) = temporal.max_uses {
             hasher.update(&max_uses.to_le_bytes());
@@ -269,7 +307,7 @@ impl std::fmt::Display for ValidationIssue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::policy::{CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+    use crate::atp::policy::{CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope};
     use crate::net::atp::protocol::PeerId;
     use std::collections::HashSet;
     use std::time::{Duration, SystemTime};
@@ -278,8 +316,7 @@ mod tests {
     fn create_test_signer() -> CapabilitySigner {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("test-key.json");
-        let key_store = IdentityKeyStore::create(path, [1; 32], 1)
-            .expect("create key store");
+        let key_store = IdentityKeyStore::create(path, [1; 32], 1).expect("create key store");
         CapabilitySigner::new(key_store).expect("create signer")
     }
 
@@ -304,7 +341,9 @@ mod tests {
         let mut capability = create_test_capability(&signer);
 
         // Sign the capability
-        signer.sign_capability(&mut capability).expect("sign capability");
+        signer
+            .sign_capability(&mut capability)
+            .expect("sign capability");
         assert!(!capability.signature.is_empty());
 
         // Create verifier and add trusted peer
@@ -312,7 +351,9 @@ mod tests {
         verifier.add_trusted_peer(signer.identity().clone());
 
         // Verify the capability
-        let valid = verifier.verify_capability(&capability).expect("verify capability");
+        let valid = verifier
+            .verify_capability(&capability)
+            .expect("verify capability");
         assert!(valid);
     }
 
@@ -324,12 +365,16 @@ mod tests {
         // Create invalid capability (empty actions)
         capability.actions.clear();
 
-        signer.sign_capability(&mut capability).expect("sign capability");
+        signer
+            .sign_capability(&mut capability)
+            .expect("sign capability");
 
         let mut verifier = CapabilityVerifier::new();
         verifier.add_trusted_peer(signer.identity().clone());
 
-        let result = verifier.validate_capability(&capability).expect("validate capability");
+        let result = verifier
+            .validate_capability(&capability)
+            .expect("validate capability");
         assert!(!result.valid);
         assert!(result.issues.contains(&ValidationIssue::NoActions));
     }
@@ -343,12 +388,16 @@ mod tests {
         let past = SystemTime::now() - Duration::from_secs(100);
         capability.temporal = TemporalScope::window(past - Duration::from_secs(100), past);
 
-        signer.sign_capability(&mut capability).expect("sign capability");
+        signer
+            .sign_capability(&mut capability)
+            .expect("sign capability");
 
         let mut verifier = CapabilityVerifier::new();
         verifier.add_trusted_peer(signer.identity().clone());
 
-        let result = verifier.validate_capability(&capability).expect("validate capability");
+        let result = verifier
+            .validate_capability(&capability)
+            .expect("validate capability");
         assert!(!result.valid);
         assert!(result.issues.contains(&ValidationIssue::TemporalViolation));
     }
@@ -357,7 +406,9 @@ mod tests {
     fn untrusted_issuer_verification_fails() {
         let signer = create_test_signer();
         let mut capability = create_test_capability(&signer);
-        signer.sign_capability(&mut capability).expect("sign capability");
+        signer
+            .sign_capability(&mut capability)
+            .expect("sign capability");
 
         // Create verifier without adding the trusted peer
         let verifier = CapabilityVerifier::new();
@@ -372,8 +423,12 @@ mod tests {
         let capability1 = create_test_capability(&signer);
         let capability2 = create_test_capability(&signer);
 
-        let data1 = signer.create_signing_data(&capability1).expect("create signing data");
-        let data2 = signer.create_signing_data(&capability2).expect("create signing data");
+        let data1 = signer
+            .create_signing_data(&capability1)
+            .expect("create signing data");
+        let data2 = signer
+            .create_signing_data(&capability2)
+            .expect("create signing data");
 
         assert_eq!(data1, data2);
     }

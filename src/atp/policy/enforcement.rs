@@ -1,7 +1,7 @@
 //! Policy enforcement for ATP capability-based access control.
 
+use super::scope::{AtpPath, ObjectId};
 use super::{Capability, CapabilityAction, CapabilityDecision, DenialReason, ResourceScope};
-use super::scope::{ObjectId, AtpPath};
 use crate::net::atp::protocol::PeerId;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -150,7 +150,8 @@ impl PolicyEnforcer {
 
     /// Revoke a capability by grant ID.
     pub fn revoke_capability(&mut self, grant_id: &str) {
-        self.revoked_grants.insert(grant_id.to_string(), SystemTime::now());
+        self.revoked_grants
+            .insert(grant_id.to_string(), SystemTime::now());
         self.remove_capability(grant_id);
     }
 
@@ -178,9 +179,7 @@ impl PolicyEnforcer {
                 capability: self.create_admin_capability(&request.peer),
                 remaining_uses: None,
             },
-            EnforcementMode::Enforce | EnforcementMode::LogOnly => {
-                self.check_capabilities(request)
-            }
+            EnforcementMode::Enforce | EnforcementMode::LogOnly => self.check_capabilities(request),
         };
 
         // In log-only mode, convert denials to grants but log them
@@ -235,7 +234,9 @@ impl PolicyEnforcer {
         let usage_count = self.get_usage_count(&best_capability.grant_id);
 
         // Check if capability is currently valid
-        if let Some(denial_reason) = self.check_capability_validity(best_capability, request, usage_count) {
+        if let Some(denial_reason) =
+            self.check_capability_validity(best_capability, request, usage_count)
+        {
             return CapabilityDecision::Denied {
                 reason: denial_reason,
                 capability: Some(best_capability.clone()),
@@ -270,15 +271,28 @@ impl PolicyEnforcer {
         match &request.resource {
             AccessResource::Object(object_id) => capability.scope.covers_object(object_id),
             AccessResource::Path(path) => capability.scope.covers_path(path),
-            AccessResource::Inbox => matches!(capability.scope, ResourceScope::Any | ResourceScope::Inbox),
-            AccessResource::Team(team) => capability.scope == ResourceScope::Team(team.clone()) || capability.scope == ResourceScope::Any,
+            AccessResource::Inbox => {
+                matches!(capability.scope, ResourceScope::Any | ResourceScope::Inbox)
+            }
+            AccessResource::Team(team) => {
+                capability.scope == ResourceScope::Team(team.clone())
+                    || capability.scope == ResourceScope::Any
+            }
             AccessResource::Relay(destination) => capability.scope.covers_relay(destination),
-            AccessResource::Cache { object_type, size_bytes } => capability.scope.covers_cache(object_type, *size_bytes),
+            AccessResource::Cache {
+                object_type,
+                size_bytes,
+            } => capability.scope.covers_cache(object_type, *size_bytes),
         }
     }
 
     /// Check if a capability is currently valid for a request.
-    fn check_capability_validity(&self, capability: &Capability, request: &AccessRequest, usage_count: u64) -> Option<DenialReason> {
+    fn check_capability_validity(
+        &self,
+        capability: &Capability,
+        request: &AccessRequest,
+        usage_count: u64,
+    ) -> Option<DenialReason> {
         // Check if revoked
         if self.is_revoked(&capability.grant_id) {
             return Some(DenialReason::Revoked);
@@ -301,18 +315,27 @@ impl PolicyEnforcer {
         // Check constraints
         if let Some(transfer_size) = request.transfer_size {
             if !capability.constraints.check_transfer_size(transfer_size) {
-                return Some(DenialReason::ConstraintViolation("transfer size exceeded".to_string()));
+                return Some(DenialReason::ConstraintViolation(
+                    "transfer size exceeded".to_string(),
+                ));
             }
         }
 
         if let Some(client_ip) = request.client_ip {
-            if !capability.constraints.check_ip_allowed(&client_ip.to_string()) {
-                return Some(DenialReason::ConstraintViolation("IP not allowed".to_string()));
+            if !capability
+                .constraints
+                .check_ip_allowed(&client_ip.to_string())
+            {
+                return Some(DenialReason::ConstraintViolation(
+                    "IP not allowed".to_string(),
+                ));
             }
         }
 
         if !capability.constraints.check_time_allowed() {
-            return Some(DenialReason::ConstraintViolation("time restriction".to_string()));
+            return Some(DenialReason::ConstraintViolation(
+                "time restriction".to_string(),
+            ));
         }
 
         // Check for path traversal attempts
@@ -335,7 +358,8 @@ impl PolicyEnforcer {
     fn select_best_capability<'a>(&self, capabilities: &[&'a Capability]) -> &'a Capability {
         // For now, select the one with the least broad scope
         // In a real implementation, this could be more sophisticated
-        capabilities.iter()
+        capabilities
+            .iter()
             .min_by_key(|cap| self.capability_scope_breadth(&cap.scope))
             .unwrap_or(&capabilities[0])
     }
@@ -354,7 +378,7 @@ impl PolicyEnforcer {
 
     /// Create an administrative capability for disabled enforcement.
     fn create_admin_capability(&self, peer: &PeerId) -> Capability {
-        use super::{CapabilityAction, TemporalScope, ScopeConstraints};
+        use super::{CapabilityAction, ScopeConstraints, TemporalScope};
         use std::collections::HashSet;
 
         let mut actions = HashSet::new();
@@ -394,7 +418,7 @@ impl Default for PolicyEnforcer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::policy::{CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+    use crate::atp::policy::{CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope};
     use std::collections::HashSet;
     use std::time::Duration;
 
@@ -433,7 +457,9 @@ mod tests {
         let decision = enforcer.evaluate_access(&request);
         match decision.decision {
             CapabilityDecision::Granted { .. } => {}
-            CapabilityDecision::Denied { reason, .. } => panic!("Expected granted, got denied: {reason}"),
+            CapabilityDecision::Denied { reason, .. } => {
+                panic!("Expected granted, got denied: {reason}")
+            }
         }
     }
 
@@ -453,7 +479,10 @@ mod tests {
 
         let decision = enforcer.evaluate_access(&request);
         match decision.decision {
-            CapabilityDecision::Denied { reason: DenialReason::NoCapability, .. } => {}
+            CapabilityDecision::Denied {
+                reason: DenialReason::NoCapability,
+                ..
+            } => {}
             other => panic!("Expected NoCapability denial, got {other:?}"),
         }
     }
@@ -478,7 +507,10 @@ mod tests {
 
         let decision = enforcer.evaluate_access(&request);
         match decision.decision {
-            CapabilityDecision::Denied { reason: DenialReason::NoCapability, .. } => {}
+            CapabilityDecision::Denied {
+                reason: DenialReason::NoCapability,
+                ..
+            } => {}
             other => panic!("Expected NoCapability denial after revocation, got {other:?}"),
         }
     }
@@ -503,15 +535,27 @@ mod tests {
 
         // First use
         let decision1 = enforcer.evaluate_access(&request);
-        assert!(matches!(decision1.decision, CapabilityDecision::Granted { .. }));
+        assert!(matches!(
+            decision1.decision,
+            CapabilityDecision::Granted { .. }
+        ));
 
         // Second use
         let decision2 = enforcer.evaluate_access(&request);
-        assert!(matches!(decision2.decision, CapabilityDecision::Granted { .. }));
+        assert!(matches!(
+            decision2.decision,
+            CapabilityDecision::Granted { .. }
+        ));
 
         // Third use should be denied
         let decision3 = enforcer.evaluate_access(&request);
-        assert!(matches!(decision3.decision, CapabilityDecision::Denied { reason: DenialReason::UsageExhausted, .. }));
+        assert!(matches!(
+            decision3.decision,
+            CapabilityDecision::Denied {
+                reason: DenialReason::UsageExhausted,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -531,6 +575,9 @@ mod tests {
 
         let decision = enforcer.evaluate_access(&request);
         // Should be granted even without capabilities in log-only mode
-        assert!(matches!(decision.decision, CapabilityDecision::Granted { .. }));
+        assert!(matches!(
+            decision.decision,
+            CapabilityDecision::Granted { .. }
+        ));
     }
 }

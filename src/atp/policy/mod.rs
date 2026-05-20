@@ -14,8 +14,11 @@ pub mod enforcement;
 pub mod scope;
 pub mod verification;
 
-pub use enforcement::{PolicyDecision, PolicyEnforcer, AccessRequest, AccessResource, RequestContext, EnforcementContext};
-pub use scope::{ResourceScope, ScopeConstraints, ObjectId, AtpPath};
+pub use enforcement::{
+    AccessRequest, AccessResource, EnforcementContext, PolicyDecision, PolicyEnforcer,
+    RequestContext,
+};
+pub use scope::{AtpPath, ObjectId, ResourceScope, ScopeConstraints};
 
 /// Actions that can be granted for ATP operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -211,10 +214,22 @@ impl Capability {
 
         // Add temporal constraints
         if let Some(not_before) = self.temporal.not_before {
-            hasher.update(&not_before.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_le_bytes());
+            hasher.update(
+                &not_before
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_le_bytes(),
+            );
         }
         if let Some(not_after) = self.temporal.not_after {
-            hasher.update(&not_after.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_le_bytes());
+            hasher.update(
+                &not_after
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_le_bytes(),
+            );
         }
         if let Some(max_uses) = self.temporal.max_uses {
             hasher.update(&max_uses.to_le_bytes());

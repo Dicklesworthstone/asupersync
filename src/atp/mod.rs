@@ -7,10 +7,12 @@
 //! before endpoint, CLI, daemon, or relay code depends on it.
 
 pub mod actor;
+pub mod cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
 pub mod grant;
 pub mod identity;
+pub mod inbox;
 pub mod journal;
 pub mod manifest;
 pub mod object;
@@ -28,6 +30,8 @@ pub mod verifier;
 pub mod verify;
 pub mod writer;
 
-pub use grant::{GrantManager, PairingCode, PairingManager, GrantInfo, GrantQuery, GrantStats};
+pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};
-pub use policy::{Capability, CapabilityAction, PolicyEnforcer, ResourceScope, TemporalScope, PolicyDecision};
+pub use policy::{
+    Capability, CapabilityAction, PolicyDecision, PolicyEnforcer, ResourceScope, TemporalScope,
+};

@@ -4,8 +4,8 @@
 //! list, revoke, rotate, and enforce grants for ATP's capability-based access
 //! control system.
 
-use crate::atp::policy::{Capability, CapabilityError, CapabilityResult};
 use crate::atp::policy::verification::{CapabilitySigner, CapabilityVerifier, ValidationResult};
+use crate::atp::policy::{Capability, CapabilityError, CapabilityResult};
 use crate::net::atp::protocol::PeerId;
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
@@ -13,13 +13,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-pub mod storage;
 pub mod manager;
 pub mod pairing;
+pub mod storage;
 
 pub use manager::GrantManager;
 pub use pairing::{PairingCode, PairingFlow, PairingManager};
-pub use storage::{GrantStorage, GrantRecord};
+pub use storage::{GrantRecord, GrantStorage};
 
 /// Grant operation types for audit logging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +160,10 @@ impl GrantInfo {
     pub fn redacted_summary(&self) -> String {
         use crate::atp::policy::CapabilityAction;
 
-        let actions: Vec<String> = self.capability.actions.iter()
+        let actions: Vec<String> = self
+            .capability
+            .actions
+            .iter()
             .map(|a| format!("{a:?}"))
             .collect();
 
@@ -181,7 +184,10 @@ impl GrantInfo {
             actions.join(","),
             self.state,
             self.usage_count,
-            self.capability.temporal.max_uses.map_or("∞".to_string(), |u| u.to_string())
+            self.capability
+                .temporal
+                .max_uses
+                .map_or("∞".to_string(), |u| u.to_string())
         )
     }
 }
@@ -297,7 +303,9 @@ impl GrantTemplate {
     /// Create a read-once template.
     #[must_use]
     pub fn read_once() -> Self {
-        use crate::atp::policy::{CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+        use crate::atp::policy::{
+            CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope,
+        };
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::ReadOnce);
 
@@ -314,7 +322,9 @@ impl GrantTemplate {
     /// Create a 24-hour share template.
     #[must_use]
     pub fn share_24h() -> Self {
-        use crate::atp::policy::{CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+        use crate::atp::policy::{
+            CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope,
+        };
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::Share);
 
@@ -331,7 +341,9 @@ impl GrantTemplate {
     /// Create an inbox write template.
     #[must_use]
     pub fn inbox_write() -> Self {
-        use crate::atp::policy::{CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+        use crate::atp::policy::{
+            CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope,
+        };
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::WriteInbox);
 
@@ -348,7 +360,9 @@ impl GrantTemplate {
     /// Create a team read template.
     #[must_use]
     pub fn team_read(team: String) -> Self {
-        use crate::atp::policy::{CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+        use crate::atp::policy::{
+            CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope,
+        };
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::Read);
 
@@ -377,7 +391,7 @@ impl GrantTemplate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::policy::{CapabilityAction, ResourceScope, TemporalScope, ScopeConstraints};
+    use crate::atp::policy::{CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope};
     use crate::net::atp::protocol::PeerId;
     use std::collections::HashSet;
     use std::time::Duration;

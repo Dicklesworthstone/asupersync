@@ -107,11 +107,9 @@ impl ResourceScope {
     pub fn covers_relay(&self, destination: &str) -> bool {
         match self {
             Self::Any => true,
-            Self::Relay { destinations } => {
-                destinations.iter().any(|pattern| {
-                    glob_match(pattern, destination)
-                })
-            }
+            Self::Relay { destinations } => destinations
+                .iter()
+                .any(|pattern| glob_match(pattern, destination)),
             _ => false,
         }
     }
@@ -121,7 +119,10 @@ impl ResourceScope {
     pub fn covers_cache(&self, object_type: &str, size_bytes: u64) -> bool {
         match self {
             Self::Any => true,
-            Self::Cache { object_types, max_size_bytes } => {
+            Self::Cache {
+                object_types,
+                max_size_bytes,
+            } => {
                 let type_allowed = object_types.is_empty() || object_types.contains(object_type);
                 let size_allowed = max_size_bytes.map_or(true, |max| size_bytes <= max);
                 type_allowed && size_allowed
@@ -159,7 +160,10 @@ impl ResourceScope {
                     hasher.update(dest.as_bytes());
                 }
             }
-            Self::Cache { object_types, max_size_bytes } => {
+            Self::Cache {
+                object_types,
+                max_size_bytes,
+            } => {
                 hasher.update(b"cache");
                 let mut sorted_types: Vec<_> = object_types.iter().collect();
                 sorted_types.sort();
