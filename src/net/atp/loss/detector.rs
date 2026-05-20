@@ -3,9 +3,9 @@
 //! Advanced loss detection for ATP with improved accuracy and
 //! integration with transfer decision-making.
 
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, TransportError};
+use crate::net::atp::protocol::outcome::AtpOutcome;
 use crate::net::quic_native::{
-    AckEvent, AckRange, PacketNumberSpace, RttEstimator, SentPacketMeta,
+    AckRange, PacketNumberSpace, QuicTransportMachine, RttEstimator, SentPacketMeta,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -108,6 +108,59 @@ struct NetworkConditions {
     bytes_in_flight: u64,
     /// Congestion window.
     congestion_window: u64,
+}
+
+/// Transport recovery state used by ATP loss analysis.
+///
+/// The detector keeps its own sent-packet view for ATP decisions, but RTT and
+/// congestion context must come from the live transport recovery state so loss
+/// classification sees the same network conditions as QUIC recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LossTransportState {
+    /// Latest RTT sample.
+    pub latest_rtt_micros: Option<u64>,
+    /// Smoothed RTT estimate.
+    pub smoothed_rtt_micros: Option<u64>,
+    /// RTT variance estimate.
+    pub rttvar_micros: Option<u64>,
+    /// Bytes currently in flight according to transport recovery.
+    pub bytes_in_flight: u64,
+    /// Current congestion window in bytes.
+    pub congestion_window: u64,
+}
+
+impl LossTransportState {
+    /// Build a snapshot from the native QUIC transport machine.
+    #[must_use]
+    pub fn from_transport(transport: &QuicTransportMachine) -> Self {
+        Self::from_rtt_and_recovery(
+            transport.rtt(),
+            transport.bytes_in_flight(),
+            transport.congestion_window_bytes(),
+        )
+    }
+
+    /// Build a snapshot from explicit recovery counters and RTT estimator.
+    #[must_use]
+    pub fn from_rtt_and_recovery(
+        rtt: &RttEstimator,
+        bytes_in_flight: u64,
+        congestion_window: u64,
+    ) -> Self {
+        Self {
+            latest_rtt_micros: rtt.latest_rtt_micros(),
+            smoothed_rtt_micros: rtt.smoothed_rtt_micros(),
+            rttvar_micros: rtt.rttvar_micros(),
+            bytes_in_flight,
+            congestion_window,
+        }
+    }
+
+    fn base_rtt_micros(self) -> u64 {
+        self.latest_rtt_micros
+            .or(self.smoothed_rtt_micros)
+            .unwrap_or(333_000)
+    }
 }
 
 /// Detected loss patterns.
@@ -274,9 +327,9 @@ impl AtpLossDetector {
         &mut self,
         space: PacketNumberSpace,
         ack_ranges: &[AckRange],
-        ack_delay_micros: u64,
+        _ack_delay_micros: u64,
         now_micros: u64,
-        rtt: &RttEstimator,
+        transport_state: &LossTransportState,
     ) -> AtpOutcome<LossDetectionResult> {
         let space_idx = space as usize;
         let state = &mut self.spaces[space_idx];
@@ -311,11 +364,11 @@ impl AtpLossDetector {
         }
 
         // Detect losses
-        let loss_result = self.detect_losses(space, now_micros, rtt)?;
+        let loss_result = self.detect_losses(space, now_micros, transport_state)?;
 
         // Update pattern analysis
         if !loss_result.lost_packets.is_empty() {
-            self.update_pattern_analysis(&loss_result, rtt, now_micros);
+            self.update_pattern_analysis(&loss_result, transport_state);
         }
 
         // Update reordering tracking
@@ -329,12 +382,10 @@ impl AtpLossDetector {
         &mut self,
         space: PacketNumberSpace,
         now_micros: u64,
-        rtt: &RttEstimator,
+        transport_state: &LossTransportState,
     ) -> AtpOutcome<LossDetectionResult> {
         let space_idx = space as usize;
-        let state = &mut self.spaces[space_idx];
-
-        let Some(largest_acked) = state.largest_acked else {
+        let Some(largest_acked) = self.spaces[space_idx].largest_acked else {
             return Ok(LossDetectionResult::empty());
         };
 
@@ -344,7 +395,7 @@ impl AtpLossDetector {
 
         // Calculate thresholds
         let packet_threshold = self.get_adaptive_packet_threshold(space);
-        let time_threshold = self.calculate_time_threshold(rtt);
+        let time_threshold = self.calculate_time_threshold(*transport_state);
 
         // Check for packet threshold losses
         let packet_threshold_boundary = largest_acked.saturating_sub(packet_threshold as u64);
@@ -353,6 +404,7 @@ impl AtpLossDetector {
         let time_threshold_boundary = now_micros.saturating_sub(time_threshold);
 
         let mut remaining_packets = VecDeque::new();
+        let state = &mut self.spaces[space_idx];
         while let Some(packet) = state.sent_packets.pop_front() {
             let mut is_lost = false;
             let mut loss_reason = None;
@@ -453,13 +505,9 @@ impl AtpLossDetector {
         current_threshold.max(self.config.packet_threshold)
     }
 
-    fn calculate_time_threshold(&self, rtt: &RttEstimator) -> u64 {
-        let base_rtt = rtt
-            .latest_rtt_micros()
-            .or_else(|| rtt.smoothed_rtt_micros())
-            .unwrap_or(333_000); // 333ms default
-
-        let threshold = (base_rtt as f64 * self.config.time_threshold_multiplier) as u64;
+    fn calculate_time_threshold(&self, transport_state: LossTransportState) -> u64 {
+        let threshold = (transport_state.base_rtt_micros() as f64
+            * self.config.time_threshold_multiplier) as u64;
         threshold.max(self.config.min_time_threshold_micros)
     }
 
@@ -545,8 +593,7 @@ impl AtpLossDetector {
     fn update_pattern_analysis(
         &mut self,
         result: &LossDetectionResult,
-        rtt: &RttEstimator,
-        _now_micros: u64,
+        transport_state: &LossTransportState,
     ) {
         let loss_event = LossEvent {
             timestamp: Instant::now(),
@@ -557,10 +604,12 @@ impl AtpLossDetector {
                 .collect(),
             detection_method: result.detection_method,
             conditions: NetworkConditions {
-                rtt_micros: rtt.latest_rtt_micros(),
-                rttvar_micros: rtt.rttvar_micros(),
-                bytes_in_flight: 0,   // TODO: Get from transport
-                congestion_window: 0, // TODO: Get from transport
+                rtt_micros: transport_state
+                    .latest_rtt_micros
+                    .or(transport_state.smoothed_rtt_micros),
+                rttvar_micros: transport_state.rttvar_micros,
+                bytes_in_flight: transport_state.bytes_in_flight,
+                congestion_window: transport_state.congestion_window,
             },
         };
 
@@ -749,7 +798,9 @@ pub struct LossAnalysisExport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::quic_native::{AckRange, PacketNumberSpace, RttEstimator, SentPacketMeta};
+    use crate::net::quic_native::{
+        AckRange, PacketNumberSpace, QuicTransportMachine, RttEstimator, SentPacketMeta,
+    };
 
     fn create_test_packet(space: PacketNumberSpace, pn: u64, time: u64) -> SentPacketMeta {
         SentPacketMeta {
@@ -762,10 +813,14 @@ mod tests {
         }
     }
 
+    fn test_transport_state(rtt: &RttEstimator) -> LossTransportState {
+        LossTransportState::from_rtt_and_recovery(rtt, 4_800, 12_000)
+    }
+
     #[test]
     fn loss_detector_packet_threshold() {
         let mut detector = AtpLossDetector::new();
-        let mut rtt = RttEstimator::default();
+        let rtt = RttEstimator::default();
 
         // Send packets 0-5
         for pn in 0..6 {
@@ -784,7 +839,7 @@ mod tests {
                 &ack_ranges,
                 0,
                 10_000,
-                &rtt,
+                &test_transport_state(&rtt),
             )
             .expect("Should detect losses");
 
@@ -817,7 +872,7 @@ mod tests {
                 &ack_ranges,
                 0,
                 200_000, // 200ms later
-                &rtt,
+                &test_transport_state(&rtt),
             )
             .expect("Should detect losses");
 
@@ -831,7 +886,7 @@ mod tests {
 
         // Simulate burst losses
         for _ in 0..5 {
-            let mut rtt = RttEstimator::default();
+            let rtt = RttEstimator::default();
             for pn in 0..10 {
                 detector.on_packet_sent(create_test_packet(
                     PacketNumberSpace::ApplicationData,
@@ -848,19 +903,17 @@ mod tests {
                     &ack_ranges,
                     0,
                     50_000,
-                    &rtt,
+                    &test_transport_state(&rtt),
                 )
                 .unwrap();
         }
 
         // Should detect burst pattern
         detector.analyze_loss_patterns();
-        assert!(
-            detector
-                .pattern_analyzer
-                .patterns
-                .contains(&LossPattern::Burst)
-        );
+        assert!(detector
+            .pattern_analyzer
+            .patterns
+            .contains(&LossPattern::Burst));
     }
 
     #[test]
@@ -872,5 +925,73 @@ mod tests {
         tracker.adapt_threshold();
 
         assert!(tracker.current_threshold > initial_threshold);
+    }
+
+    #[test]
+    fn loss_pattern_analysis_records_transport_recovery_state() {
+        let mut detector = AtpLossDetector::new();
+        let mut rtt = RttEstimator::default();
+        rtt.update(100_000, 0);
+        let transport_state = LossTransportState::from_rtt_and_recovery(&rtt, 6_000, 24_000);
+
+        for pn in 0..6 {
+            detector.on_packet_sent(create_test_packet(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                pn * 1000,
+            ));
+        }
+
+        let ack_ranges = [AckRange::new(5, 5).unwrap()];
+        let result = detector
+            .on_ack_received(
+                PacketNumberSpace::ApplicationData,
+                &ack_ranges,
+                0,
+                10_000,
+                &transport_state,
+            )
+            .expect("Should detect losses");
+
+        assert!(!result.lost_packets.is_empty());
+        let event = detector
+            .pattern_analyzer
+            .loss_events
+            .back()
+            .expect("loss event recorded");
+        assert_eq!(event.conditions.rtt_micros, Some(100_000));
+        assert_eq!(event.conditions.rttvar_micros, Some(50_000));
+        assert_eq!(event.conditions.bytes_in_flight, 6_000);
+        assert_eq!(event.conditions.congestion_window, 24_000);
+    }
+
+    #[test]
+    fn transport_state_reads_native_quic_recovery_counters() {
+        let mut transport = QuicTransportMachine::new();
+        transport.on_packet_sent(create_test_packet(
+            PacketNumberSpace::ApplicationData,
+            0,
+            10_000,
+        ));
+        transport.on_packet_sent(create_test_packet(
+            PacketNumberSpace::ApplicationData,
+            1,
+            20_000,
+        ));
+
+        let initial_state = LossTransportState::from_transport(&transport);
+        assert_eq!(initial_state.bytes_in_flight, 2_400);
+        assert_eq!(
+            initial_state.congestion_window,
+            transport.congestion_window_bytes()
+        );
+        assert_eq!(initial_state.latest_rtt_micros, None);
+
+        let _ack = transport.on_ack_received(PacketNumberSpace::ApplicationData, &[1], 0, 50_000);
+        let acked_state = LossTransportState::from_transport(&transport);
+        assert_eq!(acked_state.bytes_in_flight, 1_200);
+        assert_eq!(acked_state.latest_rtt_micros, Some(30_000));
+        assert_eq!(acked_state.smoothed_rtt_micros, Some(30_000));
+        assert_eq!(acked_state.rttvar_micros, Some(15_000));
     }
 }
