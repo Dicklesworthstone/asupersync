@@ -529,6 +529,11 @@ impl AtpdPersistentState {
         })
     }
 
+    /// Export a privacy-safe diagnostics bundle with redaction forced on.
+    pub fn privacy_safe_diagnostics_export(&self) -> Result<AtpdStateExport, AtpdStateError> {
+        self.export(AtpdExportMode::Redacted, false)
+    }
+
     /// Restore a state schema from a trusted snapshot.
     pub fn restore(snapshot: Self) -> Result<Self, AtpdStateError> {
         if !snapshot.schema_version.is_supported() {
@@ -837,6 +842,27 @@ mod tests {
         assert_eq!(export.records.len(), 1);
         assert!(export.records[0].redacted);
         assert!(export.records[0].payload_digest.ends_with("..."));
+    }
+
+    #[test]
+    fn diagnostics_export_is_always_redacted_without_policy() {
+        let mut state = AtpdPersistentState::new();
+        state
+            .insert_record(
+                record(
+                    "diagnostic-a",
+                    AtpdStateCollection::Diagnostics,
+                    16,
+                    10,
+                    StateSensitivity::Internal,
+                )
+                .with_export_policy(StateExportPolicy::ExplicitPolicyRequired),
+            )
+            .unwrap();
+
+        let export = state.privacy_safe_diagnostics_export().unwrap();
+        assert_eq!(export.mode, "redacted");
+        assert!(export.records[0].redacted);
     }
 
     #[test]
