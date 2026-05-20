@@ -1,0 +1,172 @@
+{
+  "contract_version": "atp-quic-dependency-audit-gate-contract-v1",
+  "bead_id": "asupersync-jaghjr",
+  "created_date": "2026-05-20",
+  "description": "ATP dependency audit gates forbidding external QUIC stacks and Tokio runtime paths in ATP/native core",
+  "source_of_truth": {
+    "audit_script": "scripts/detect_forbidden_quic_deps.sh",
+    "cargo_manifest": "Cargo.toml",
+    "proof_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "atp_endpoint_contract": "artifacts/atp_native_quic_endpoint_contract_v1.json",
+    "no_tokio_contract": "artifacts/no_tokio_feature_boundary_contract_v1.json"
+  },
+  "enforcement_policy": {
+    "principle": "ATP must be internally self-contained and not rely on external QUIC endpoint libraries or Tokio runtime in production profiles",
+    "scope": "ATP/native core dependency tree for production and native feature profiles",
+    "blocking": "This bead is non-negotiable and should block ATP release signoff"
+  },
+  "forbidden_external_quic_stacks": [
+    {
+      "crate": "quinn",
+      "rationale": "External QUIC implementation - ATP uses native QUIC stack"
+    },
+    {
+      "crate": "quinn-proto",
+      "rationale": "Quinn protocol implementation - ATP uses native QUIC protocol"
+    },
+    {
+      "crate": "quinn-udp",
+      "rationale": "Quinn UDP layer - ATP uses native UDP handling"
+    },
+    {
+      "crate": "quiche",
+      "rationale": "Cloudflare QUIC implementation - ATP uses native QUIC"
+    },
+    {
+      "crate": "s2n-quic",
+      "rationale": "AWS s2n QUIC implementation - ATP uses native QUIC"
+    },
+    {
+      "crate": "s2n-quic-core",
+      "rationale": "s2n QUIC core components - ATP uses native core"
+    },
+    {
+      "crate": "s2n-quic-transport",
+      "rationale": "s2n QUIC transport layer - ATP uses native transport"
+    },
+    {
+      "crate": "h3-quinn",
+      "rationale": "HTTP/3 over Quinn - ATP uses native HTTP/3"
+    },
+    {
+      "crate": "h3-quiche",
+      "rationale": "HTTP/3 over quiche - ATP uses native HTTP/3"
+    },
+    {
+      "crate": "msquic",
+      "rationale": "Microsoft QUIC implementation - ATP uses native QUIC"
+    },
+    {
+      "crate": "msquic-sys",
+      "rationale": "Microsoft QUIC FFI bindings - ATP uses native implementation"
+    },
+    {
+      "crate": "cloudflare-quic",
+      "rationale": "Cloudflare QUIC stack - ATP uses native stack"
+    },
+    {
+      "crate": "neqo-transport",
+      "rationale": "Mozilla Neqo QUIC transport - ATP uses native transport"
+    },
+    {
+      "crate": "neqo-http3",
+      "rationale": "Mozilla Neqo HTTP/3 - ATP uses native HTTP/3"
+    },
+    {
+      "crate": "lsquic",
+      "rationale": "LiteSpeed QUIC implementation - ATP uses native QUIC"
+    },
+    {
+      "crate": "lsquic-sys",
+      "rationale": "LiteSpeed QUIC FFI bindings - ATP uses native implementation"
+    }
+  ],
+  "production_tokio_restrictions": {
+    "profiles": ["default-production", "metrics-production"],
+    "forbidden_crates": [
+      "tokio",
+      "tokio-util",
+      "tokio-stream",
+      "tokio-tungstenite",
+      "hyper",
+      "reqwest",
+      "axum",
+      "tower-http",
+      "async-std",
+      "smol"
+    ],
+    "rationale": "ATP production profiles must maintain no-Tokio guarantee for self-contained runtime"
+  },
+  "audit_profiles": [
+    {
+      "profile": "default-production",
+      "feature_args": "",
+      "checks": ["forbidden_quic_stacks", "forbidden_tokio_runtime"],
+      "description": "Core ATP runtime with no features enabled"
+    },
+    {
+      "profile": "metrics-production",
+      "feature_args": "--features metrics",
+      "checks": ["forbidden_quic_stacks", "forbidden_tokio_runtime"],
+      "description": "ATP runtime with OpenTelemetry metrics (Tokio-free)"
+    },
+    {
+      "profile": "quic-native",
+      "feature_args": "--features quic",
+      "checks": ["forbidden_quic_stacks"],
+      "description": "ATP native QUIC implementation (no external QUIC stacks)"
+    },
+    {
+      "profile": "http3-native",
+      "feature_args": "--features http3",
+      "checks": ["forbidden_quic_stacks"],
+      "description": "ATP native HTTP/3 over native QUIC (no external stacks)"
+    }
+  ],
+  "allowed_crypto_tls_dependencies": {
+    "rationale": "Crypto and TLS crates are allowed as they provide building blocks, not competing QUIC implementations",
+    "allowed_patterns": [
+      "rustls",
+      "rustls-*",
+      "ring",
+      "sha1",
+      "sha2",
+      "hmac",
+      "hkdf",
+      "x509-parser"
+    ]
+  },
+  "CI_integration": {
+    "script": "scripts/detect_forbidden_quic_deps.sh",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
+    "expected_exit_code": 0,
+    "on_failure": "Block PR/release - forbidden dependencies detected in ATP native core",
+    "report_artifacts": "artifacts/atp_quic_dependency_audit_*.json"
+  },
+  "proof_lane_integration": {
+    "manifest_file": "artifacts/proof_lane_manifest_v1.json",
+    "lane_id": "atp-native-quic-dependency-audit",
+    "guarantee_id": "atp-native-self-contained"
+  },
+  "documentation_requirements": {
+    "cargo_toml_comments": [
+      "# QUIC/HTTP3 is intentionally native-only for ATP and the runtime core.",
+      "# Do not add an external QUIC/H3 stack dependency here."
+    ],
+    "readme_claims": [
+      "ATP uses a native QUIC implementation, not external libraries"
+    ],
+    "forbidden_statements": [
+      "using Quinn for QUIC",
+      "backed by s2n-quic",
+      "powered by quiche"
+    ]
+  },
+  "acceptance_criteria": {
+    "audit_gates_reject_external_quic": "✓ Script detects and rejects Quinn, quiche, s2n-quic, h3-quinn, msquic wrappers in ATP core",
+    "production_tokio_guarantee_preserved": "✓ Default and metrics profiles remain Tokio-free as documented",
+    "adapter_crates_cannot_smuggle": "✓ Feature flags and adapter crates cannot introduce external QUIC into native ATP",
+    "ci_surfaces_violations_clearly": "✓ CI validation provides clear error messages for dependency violations",
+    "proof_lane_manifest_integration": "✓ Audit gates integrated into proof lane manifest with clear coverage documentation"
+  }
+}

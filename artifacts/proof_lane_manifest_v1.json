@@ -20,6 +20,7 @@
   "required_guarantee_ids": [
     "default-production-tokio-free",
     "metrics-production-tokio-free",
+    "atp-native-self-contained",
     "fuzz-tokio-quarantine",
     "workspace-tokio-audit",
     "feature-gated-native-surfaces",
@@ -344,6 +345,31 @@
         "feature name drift in Cargo.toml"
       ],
       "escalation_notes": "This is the minimum proof for edits to the manifest itself."
+    },
+    {
+      "lane_id": "atp-native-quic-dependency-audit",
+      "kind": "dependency_audit",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "atp-native-self-contained"
+      ],
+      "covers": "ATP native core remains self-contained with no external QUIC stacks or production Tokio dependencies.",
+      "explicit_not_covered": "Documented satellite crates (asupersync-tokio-compat), test features (fuzz), and conformance dependencies are outside this audit scope.",
+      "expected_signal": "exit code 0 with 'ATP Dependency Audit PASSED' message",
+      "source_paths": [
+        "Cargo.toml",
+        "scripts/detect_forbidden_quic_deps.sh",
+        "artifacts/atp_quic_dependency_audit_gate_contract_v1.json",
+        "artifacts/atp_native_quic_endpoint_contract_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "dependency version bump introduces forbidden transitive QUIC dependency",
+        "new feature accidentally pulls external QUIC stack",
+        "Tokio dependency creep in production profiles"
+      ],
+      "escalation_notes": "Any forbidden QUIC stack (quinn, s2n-quic, quiche) or Tokio dependency in ATP production profiles is a blocker. File immediately with dependency path."
     }
   ],
   "guarantees": [
@@ -373,6 +399,13 @@
       "description": "Workspace normal graph tokio edges are audited as scoped carve-outs rather than production regressions.",
       "lane_ids": [
         "workspace-normal-tokio-audit"
+      ]
+    },
+    {
+      "guarantee_id": "atp-native-self-contained",
+      "description": "ATP native core dependency tree contains no external QUIC stacks or Tokio runtime paths in production profiles.",
+      "lane_ids": [
+        "atp-native-quic-dependency-audit"
       ]
     },
     {
