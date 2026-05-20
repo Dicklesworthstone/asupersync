@@ -1,12 +1,13 @@
 //! ATP object management and content-addressed storage.
 
 use crate::cx::Cx;
-use crate::net::atp::protocol::{AtpOutcome, AtpError, ManifestError, DiskError};
-use super::TransferId;
-use std::path::{Path, PathBuf};
-use std::collections::HashMap;
+use crate::net::atp::protocol::{AtpError, AtpOutcome, DiskError, ManifestError, PlatformError};
+use crate::sync::{LockError, Mutex, MutexGuard};
+use crate::types::CancelReason;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Content-addressed object with hash-based identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,9 +195,19 @@ pub trait ObjectStore {
 }
 
 /// In-memory object store implementation.
-#[derive(Debug, Default)]
+type MemoryObjectMap = HashMap<ObjectHash, (Vec<u8>, AtpObject)>;
+
+#[derive(Debug)]
 pub struct MemoryObjectStore {
-    objects: std::sync::Mutex<HashMap<ObjectHash, (Vec<u8>, AtpObject)>>,
+    objects: Mutex<MemoryObjectMap>,
+}
+
+impl Default for MemoryObjectStore {
+    fn default() -> Self {
+        Self {
+            objects: Mutex::with_name("atp_memory_object_store", MemoryObjectMap::new()),
+        }
+    }
 }
 
 impl MemoryObjectStore {
@@ -213,12 +224,27 @@ impl MemoryObjectStore {
             .unwrap_or_default()
             .as_nanos() as u64
     }
+
+    async fn lock_objects(&self, cx: &Cx) -> AtpOutcome<MutexGuard<'_, MemoryObjectMap>> {
+        match self.objects.lock(cx).await {
+            Ok(objects) => AtpOutcome::ok(objects),
+            Err(LockError::Cancelled) => AtpOutcome::cancelled(
+                cx.cancel_reason()
+                    .cloned()
+                    .unwrap_or_else(CancelReason::parent_cancelled),
+            ),
+            Err(LockError::TimedOut(_)) => AtpOutcome::cancelled(CancelReason::timeout()),
+            Err(LockError::Poisoned | LockError::PolledAfterCompletion) => {
+                AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError))
+            }
+        }
+    }
 }
 
 impl ObjectStore for MemoryObjectStore {
     async fn store_object(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         data: Vec<u8>,
         content_type: &str,
         metadata: ObjectMetadata,
@@ -234,34 +260,64 @@ impl ObjectStore for MemoryObjectStore {
             created_at_nanos: Self::current_time_nanos(),
         };
 
-        let mut objects = self.objects.lock().unwrap();
+        let mut objects = match self.lock_objects(cx).await {
+            AtpOutcome::Ok(objects) => objects,
+            AtpOutcome::Err(error) => return AtpOutcome::Err(error),
+            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
+            AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
+        };
         objects.insert(hash, (data, object.clone()));
 
         Ok(object)
     }
 
-    async fn get_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<Vec<u8>>> {
-        let objects = self.objects.lock().unwrap();
+    async fn get_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<Vec<u8>>> {
+        let objects = match self.lock_objects(cx).await {
+            AtpOutcome::Ok(objects) => objects,
+            AtpOutcome::Err(error) => return AtpOutcome::Err(error),
+            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
+            AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
+        };
         Ok(objects.get(hash).map(|(data, _)| data.clone()))
     }
 
-    async fn get_object_info(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<AtpObject>> {
-        let objects = self.objects.lock().unwrap();
+    async fn get_object_info(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<AtpObject>> {
+        let objects = match self.lock_objects(cx).await {
+            AtpOutcome::Ok(objects) => objects,
+            AtpOutcome::Err(error) => return AtpOutcome::Err(error),
+            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
+            AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
+        };
         Ok(objects.get(hash).map(|(_, object)| object.clone()))
     }
 
-    async fn has_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
-        let objects = self.objects.lock().unwrap();
+    async fn has_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
+        let objects = match self.lock_objects(cx).await {
+            AtpOutcome::Ok(objects) => objects,
+            AtpOutcome::Err(error) => return AtpOutcome::Err(error),
+            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
+            AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
+        };
         Ok(objects.contains_key(hash))
     }
 
-    async fn delete_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
-        let mut objects = self.objects.lock().unwrap();
+    async fn delete_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
+        let mut objects = match self.lock_objects(cx).await {
+            AtpOutcome::Ok(objects) => objects,
+            AtpOutcome::Err(error) => return AtpOutcome::Err(error),
+            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
+            AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
+        };
         Ok(objects.remove(hash).is_some())
     }
 
-    async fn list_objects(&self, _cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
-        let objects = self.objects.lock().unwrap();
+    async fn list_objects(&self, cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
+        let objects = match self.lock_objects(cx).await {
+            AtpOutcome::Ok(objects) => objects,
+            AtpOutcome::Err(error) => return AtpOutcome::Err(error),
+            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
+            AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
+        };
         Ok(objects.keys().cloned().collect())
     }
 }
@@ -413,7 +469,8 @@ impl ObjectStore for FileSystemObjectStore {
             .await
             .map_err(|_| AtpError::Disk(DiskError::IoError))?;
 
-        while let Some(entry) = read_dir.next_entry()
+        while let Some(entry) = read_dir
+            .next_entry()
             .await
             .map_err(|_| AtpError::Disk(DiskError::IoError))?
         {
@@ -528,41 +585,51 @@ mod tests {
         crate::test_utils::init_test("memory_object_store");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(crate::types::Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(region, crate::types::Budget::INFINITE);
+        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+            region,
+            crate::types::Budget::INFINITE,
+        );
 
         let store = MemoryObjectStore::new();
         let data = b"test data".to_vec();
         let content_type = "text/plain";
         let metadata = ObjectMetadata::with_filename("test.txt");
 
-        let (_, result) = scope.spawn(&mut runtime.state, &cx, async move {
-            // Store object
-            let object = store.store_object(&cx, data.clone(), content_type, metadata).await.unwrap();
-            assert_eq!(object.size_bytes, data.len() as u64);
-            assert_eq!(object.content_type, content_type);
+        let (_, result) = scope
+            .spawn(&mut runtime.state, &cx, async move {
+                // Store object
+                let object = store
+                    .store_object(&cx, data.clone(), content_type, metadata)
+                    .await
+                    .unwrap();
+                assert_eq!(object.size_bytes, data.len() as u64);
+                assert_eq!(object.content_type, content_type);
 
-            // Check existence
-            let exists = store.has_object(&cx, &object.hash).await.unwrap();
-            assert!(exists);
+                // Check existence
+                let exists = store.has_object(&cx, &object.hash).await.unwrap();
+                assert!(exists);
 
-            // Retrieve object
-            let retrieved = store.get_object(&cx, &object.hash).await.unwrap();
-            assert_eq!(retrieved, Some(data));
+                // Retrieve object
+                let retrieved = store.get_object(&cx, &object.hash).await.unwrap();
+                assert_eq!(retrieved, Some(data));
 
-            // Get object info
-            let info = store.get_object_info(&cx, &object.hash).await.unwrap();
-            assert!(info.is_some());
-            assert_eq!(info.unwrap().hash, object.hash);
+                // Get object info
+                let info = store.get_object_info(&cx, &object.hash).await.unwrap();
+                assert!(info.is_some());
+                assert_eq!(info.unwrap().hash, object.hash);
 
-            // Delete object
-            let deleted = store.delete_object(&cx, &object.hash).await.unwrap();
-            assert!(deleted);
+                // Delete object
+                let deleted = store.delete_object(&cx, &object.hash).await.unwrap();
+                assert!(deleted);
 
-            let exists_after_delete = store.has_object(&cx, &object.hash).await.unwrap();
-            assert!(!exists_after_delete);
-        }).unwrap();
+                let exists_after_delete = store.has_object(&cx, &object.hash).await.unwrap();
+                assert!(!exists_after_delete);
+            })
+            .unwrap();
 
         runtime.run_until_stalled();
         result.join().unwrap();
@@ -610,9 +677,14 @@ mod tests {
         use tempfile::tempdir;
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(crate::types::Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(region, crate::types::Budget::INFINITE);
+        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+            region,
+            crate::types::Budget::INFINITE,
+        );
 
         let temp_dir = tempdir().unwrap();
         let store = FileSystemObjectStore::new(temp_dir.path().to_path_buf());
@@ -620,31 +692,36 @@ mod tests {
         let content_type = "application/octet-stream";
         let metadata = ObjectMetadata::with_filename("fstest.bin");
 
-        let (_, result) = scope.spawn(&mut runtime.state, &cx, async move {
-            // Store object
-            let object = store.store_object(&cx, data.clone(), content_type, metadata).await.unwrap();
+        let (_, result) = scope
+            .spawn(&mut runtime.state, &cx, async move {
+                // Store object
+                let object = store
+                    .store_object(&cx, data.clone(), content_type, metadata)
+                    .await
+                    .unwrap();
 
-            // Verify file was created
-            let object_path = store.object_path(&object.hash);
-            assert!(object_path.exists());
+                // Verify file was created
+                let object_path = store.object_path(&object.hash);
+                assert!(object_path.exists());
 
-            // Retrieve object
-            let retrieved = store.get_object(&cx, &object.hash).await.unwrap();
-            assert_eq!(retrieved, Some(data));
+                // Retrieve object
+                let retrieved = store.get_object(&cx, &object.hash).await.unwrap();
+                assert_eq!(retrieved, Some(data));
 
-            // Get object info
-            let info = store.get_object_info(&cx, &object.hash).await.unwrap();
-            assert!(info.is_some());
+                // Get object info
+                let info = store.get_object_info(&cx, &object.hash).await.unwrap();
+                assert!(info.is_some());
 
-            // List objects
-            let objects = store.list_objects(&cx).await.unwrap();
-            assert!(objects.contains(&object.hash));
+                // List objects
+                let objects = store.list_objects(&cx).await.unwrap();
+                assert!(objects.contains(&object.hash));
 
-            // Delete object
-            let deleted = store.delete_object(&cx, &object.hash).await.unwrap();
-            assert!(deleted);
-            assert!(!object_path.exists());
-        }).unwrap();
+                // Delete object
+                let deleted = store.delete_object(&cx, &object.hash).await.unwrap();
+                assert!(deleted);
+                assert!(!object_path.exists());
+            })
+            .unwrap();
 
         runtime.run_until_stalled();
         result.join().unwrap();
