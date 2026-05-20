@@ -1,7 +1,7 @@
 //! QUIC DATAGRAM Frame Implementation (RFC 9221)
 
-use crate::bytes::{BufMut, Bytes, BytesMut};
-use crate::net::atp::protocol::varint::VarInt;
+use crate::bytes::{Bytes, BytesMut};
+use crate::net::atp::protocol::varint::{VarInt, VARINT_MAX};
 use crate::types::outcome::Outcome;
 use std::fmt;
 
@@ -18,7 +18,7 @@ pub enum DatagramFrameType {
 impl DatagramFrameType {
     /// Convert to varint for wire encoding
     pub fn to_varint(self) -> VarInt {
-        VarInt::new(self as u64).expect("datagram frame type fits in varint")
+        VarInt::from_u64_unchecked(self as u64)
     }
 
     /// Parse from varint
@@ -80,53 +80,69 @@ impl DatagramFrame {
     /// Encode frame to wire format
     pub fn encode(&self, buf: &mut BytesMut) -> Outcome<(), DatagramError> {
         // Frame type
-        if let Err(_) = self.frame_type.to_varint().encode(buf) {
-            return Err(DatagramError::EncodingFailed("frame type".to_string()));
+        match self.frame_type.to_varint().encode(buf) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(_) => {
+                return Outcome::err(DatagramError::EncodingFailed("frame type".to_string()));
+            }
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Length field (only for DatagramWithLength)
         if self.has_length_field() {
             let length = match VarInt::new(self.data.len() as u64) {
-                Ok(len) => len,
-                Err(_) => {
-                    return Err(DatagramError::PayloadTooLarge {
+                Outcome::Ok(len) => len,
+                Outcome::Err(_) => {
+                    return Outcome::err(DatagramError::PayloadTooLarge {
                         size: self.data.len(),
-                        max: VarInt::max_value() as usize,
+                        max: VARINT_MAX as usize,
                     });
                 }
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             };
-            if let Err(_) = length.encode(buf) {
-                return Err(DatagramError::EncodingFailed("length".to_string()));
+            match length.encode(buf) {
+                Outcome::Ok(()) => {}
+                Outcome::Err(_) => {
+                    return Outcome::err(DatagramError::EncodingFailed("length".to_string()));
+                }
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             }
         }
 
         // Payload data
         buf.put_slice(&self.data);
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Decode frame from wire format
     pub fn decode(buf: &mut BytesMut, max_size: usize) -> Outcome<Self, DatagramError> {
         if buf.is_empty() {
-            return Err(DatagramError::InvalidFrame("empty buffer".to_string()));
+            return Outcome::err(DatagramError::InvalidFrame("empty buffer".to_string()));
         }
 
         // Parse frame type
         let frame_type_varint = match VarInt::decode(buf) {
-            Ok(Some(varint)) => varint,
-            Ok(None) => {
-                return Err(DatagramError::InvalidFrame(
+            Outcome::Ok(Some(varint)) => varint,
+            Outcome::Ok(None) => {
+                return Outcome::err(DatagramError::InvalidFrame(
                     "truncated frame type".to_string(),
                 ));
             }
-            Err(_) => return Err(DatagramError::InvalidFrame("frame type".to_string())),
+            Outcome::Err(_) => {
+                return Outcome::err(DatagramError::InvalidFrame("frame type".to_string()));
+            }
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
         let frame_type = match DatagramFrameType::from_varint(frame_type_varint) {
             Some(ft) => ft,
             None => {
-                return Err(DatagramError::InvalidFrame(
+                return Outcome::err(DatagramError::InvalidFrame(
                     "unknown frame type".to_string(),
                 ));
             }
@@ -137,7 +153,7 @@ impl DatagramFrame {
                 // No length field - consume rest of buffer
                 let payload = buf.split_to(buf.len()).freeze();
                 if payload.len() > max_size {
-                    return Err(DatagramError::PayloadTooLarge {
+                    return Outcome::err(DatagramError::PayloadTooLarge {
                         size: payload.len(),
                         max: max_size,
                     });
@@ -147,30 +163,40 @@ impl DatagramFrame {
             DatagramFrameType::DatagramWithLength => {
                 // Parse length field
                 let length_varint = match VarInt::decode(buf) {
-                    Ok(Some(varint)) => varint,
-                    Ok(None) => {
-                        return Err(DatagramError::InvalidFrame("truncated length".to_string()));
+                    Outcome::Ok(Some(varint)) => varint,
+                    Outcome::Ok(None) => {
+                        return Outcome::err(DatagramError::InvalidFrame(
+                            "truncated length".to_string(),
+                        ));
                     }
-                    Err(_) => return Err(DatagramError::InvalidFrame("length field".to_string())),
+                    Outcome::Err(_) => {
+                        return Outcome::err(DatagramError::InvalidFrame(
+                            "length field".to_string(),
+                        ));
+                    }
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
                 };
 
                 let length = length_varint.value() as usize;
                 if length > max_size {
-                    return Err(DatagramError::PayloadTooLarge {
+                    return Outcome::err(DatagramError::PayloadTooLarge {
                         size: length,
                         max: max_size,
                     });
                 }
 
                 if buf.len() < length {
-                    return Err(DatagramError::InvalidFrame("truncated payload".to_string()));
+                    return Outcome::err(DatagramError::InvalidFrame(
+                        "truncated payload".to_string(),
+                    ));
                 }
 
                 buf.split_to(length).freeze()
             }
         };
 
-        Ok(Self { frame_type, data })
+        Outcome::ok(Self { frame_type, data })
     }
 
     /// Calculate encoded frame size
@@ -182,7 +208,7 @@ impl DatagramFrame {
 
         // Length field (if present)
         if self.has_length_field() {
-            let length_varint = VarInt::new(self.data.len() as u64).expect("length fits");
+            let length_varint = VarInt::from_u64_unchecked(self.data.len() as u64);
             size += length_varint.encoded_len();
         }
 
@@ -226,7 +252,7 @@ pub enum DatagramError {
 }
 
 /// Datagram priority for congestion control
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DatagramPriority {
     /// High priority - path probes, critical beacons
     High = 3,
@@ -372,7 +398,10 @@ mod tests {
         let mut decode_buf = buf;
         let result = DatagramFrame::decode(&mut decode_buf, 1024);
 
-        assert!(matches!(result, Err(DatagramError::PayloadTooLarge { .. })));
+        assert!(matches!(
+            result,
+            Outcome::Err(DatagramError::PayloadTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -419,7 +448,10 @@ mod tests {
         // Empty buffer
         let mut empty_buf = BytesMut::new();
         let result = DatagramFrame::decode(&mut empty_buf, 1024);
-        assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
+        assert!(matches!(
+            result,
+            Outcome::Err(DatagramError::InvalidFrame(_))
+        ));
 
         // Unknown frame type
         let mut bad_type_buf = BytesMut::new();
@@ -428,7 +460,10 @@ mod tests {
             .encode(&mut bad_type_buf)
             .unwrap();
         let result = DatagramFrame::decode(&mut bad_type_buf, 1024);
-        assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
+        assert!(matches!(
+            result,
+            Outcome::Err(DatagramError::InvalidFrame(_))
+        ));
 
         // Truncated length field
         let mut truncated_buf = BytesMut::new();
@@ -437,7 +472,10 @@ mod tests {
             .encode(&mut truncated_buf)
             .unwrap(); // DatagramWithLength
         let result = DatagramFrame::decode(&mut truncated_buf, 1024);
-        assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
+        assert!(matches!(
+            result,
+            Outcome::Err(DatagramError::InvalidFrame(_))
+        ));
     }
 
     #[test]

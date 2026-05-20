@@ -55,6 +55,7 @@ impl Default for TempManagementConfig {
 
 /// Information about a temporary file being managed
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TempFileInfo {
     /// When the temp file was created
     created_at: SystemTime,

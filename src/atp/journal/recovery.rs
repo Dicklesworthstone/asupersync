@@ -21,7 +21,6 @@ impl ChunkId {
 }
 use crate::cx::Cx;
 use crate::fs;
-use bincode;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;

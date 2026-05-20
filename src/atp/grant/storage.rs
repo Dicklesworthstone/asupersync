@@ -1,11 +1,6 @@
 //! Grant storage implementation for persistent capability management.
 
-use super::{
-    GrantAuditRecord, GrantError, GrantInfo, GrantOperation, GrantQuery, GrantResult, GrantState,
-    GrantStats,
-};
-use crate::atp::policy::Capability;
-use crate::net::atp::protocol::PeerId;
+use super::{GrantAuditRecord, GrantError, GrantInfo, GrantQuery, GrantResult, GrantStats};
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -81,11 +76,11 @@ impl GrantStorage {
         };
 
         // Load existing data
-        if let Err(e) = storage.load_from_disk() {
+        if let Outcome::Err(e) = storage.load_from_disk() {
             eprintln!("Warning: failed to load existing grants: {e}");
         }
 
-        Ok(storage)
+        Outcome::ok(storage)
     }
 
     /// Store a grant.
@@ -118,7 +113,7 @@ impl GrantStorage {
     /// Retrieve a grant by ID.
     pub fn get_grant(&self, grant_id: &str) -> GrantResult<GrantInfo> {
         match self.grants_cache.get(grant_id) {
-            Some(record) => Ok(record.grant_info.clone()),
+            Some(record) => Outcome::ok(record.grant_info.clone()),
             None => Outcome::Err(GrantError::NotFound {
                 grant_id: grant_id.to_string(),
             }),
@@ -162,7 +157,7 @@ impl GrantStorage {
         }
 
         self.cache_dirty = true;
-        Ok(())
+        Outcome::ok(())
     }
 
     /// List grants matching query.
@@ -209,7 +204,7 @@ impl GrantStorage {
             results.truncate(limit);
         }
 
-        Ok(results)
+        Outcome::ok(results)
     }
 
     /// Add an audit record for a grant.
@@ -231,7 +226,7 @@ impl GrantStorage {
     /// Get audit records for a grant.
     pub fn get_audit_records(&self, grant_id: &str) -> GrantResult<Vec<GrantAuditRecord>> {
         match self.grants_cache.get(grant_id) {
-            Some(record) => Ok(record.audit_records.clone()),
+            Some(record) => Outcome::ok(record.audit_records.clone()),
             None => Outcome::Err(GrantError::NotFound {
                 grant_id: grant_id.to_string(),
             }),
@@ -278,23 +273,23 @@ impl GrantStorage {
     /// Flush all cached data to disk.
     pub fn flush(&mut self) -> GrantResult<()> {
         if !self.cache_dirty {
-            return Ok(());
+            return Outcome::ok(());
         }
 
         // Persist all grants
         for grant_id in self.grants_cache.keys() {
-            if let Err(e) = self.persist_grant(grant_id) {
+            if let Outcome::Err(e) = self.persist_grant(grant_id) {
                 eprintln!("Warning: failed to persist grant {}: {}", grant_id, e);
             }
         }
 
         // Persist audit log
-        if let Err(e) = self.persist_audit_log() {
+        if let Outcome::Err(e) = self.persist_audit_log() {
             eprintln!("Warning: failed to persist audit log: {}", e);
         }
 
         self.cache_dirty = false;
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Load data from disk.
@@ -306,7 +301,7 @@ impl GrantStorage {
                 for entry in entries.flatten() {
                     if let Some(extension) = entry.path().extension() {
                         if extension == "json" {
-                            if let Err(e) = self.load_grant_file(&entry.path()) {
+                            if let Outcome::Err(e) = self.load_grant_file(&entry.path()) {
                                 eprintln!(
                                     "Warning: failed to load grant file {:?}: {}",
                                     entry.path(),
@@ -322,12 +317,12 @@ impl GrantStorage {
         // Load audit log
         let audit_file = self.base_dir.join("audit.jsonl");
         if audit_file.exists() {
-            if let Err(e) = self.load_audit_file(&audit_file) {
+            if let Outcome::Err(e) = self.load_audit_file(&audit_file) {
                 eprintln!("Warning: failed to load audit file: {}", e);
             }
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Load a single grant file.
@@ -465,7 +460,7 @@ impl GrantStorage {
 
 impl Drop for GrantStorage {
     fn drop(&mut self) {
-        if let Err(e) = self.flush() {
+        if let Outcome::Err(e) = self.flush() {
             eprintln!("Warning: failed to flush grant storage on drop: {}", e);
         }
     }

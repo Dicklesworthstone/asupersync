@@ -30,6 +30,7 @@ pub struct AtpTransferBrain {
 
 /// State tracking for a single path.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PathState {
     /// Current metrics snapshot.
     metrics: AtpTransportMetrics,
@@ -47,6 +48,7 @@ struct PathState {
 
 /// Historical performance tracking for a path.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PathHistory {
     /// Recent throughput samples (bytes/second).
     throughput_samples: Vec<u64>,
@@ -169,6 +171,7 @@ struct DecisionHistory {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct HistoricalDecision {
     /// Decision identifier.
     decision_id: String,
@@ -183,6 +186,7 @@ struct HistoricalDecision {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DecisionOutcome {
     /// Transfer completion time.
     completion_time: Duration,

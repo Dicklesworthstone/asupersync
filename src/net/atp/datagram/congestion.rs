@@ -152,6 +152,7 @@ impl CongestionState {
 
 /// Prioritized datagram queue entry
 #[derive(Debug)]
+#[allow(dead_code)]
 struct QueuedDatagram {
     frame: DatagramFrame,
     metadata: DatagramMetadata,
@@ -197,7 +198,7 @@ impl CongestionController {
         // Check if datagram has expired
         if metadata.is_expired() {
             self.stats.expired_count += 1;
-            return Err(DatagramError::Expired);
+            return Outcome::err(DatagramError::Expired);
         }
 
         // Check queue depth limit
@@ -206,7 +207,7 @@ impl CongestionController {
             // Drop lower priority items first
             if !self.try_drop_lower_priority(metadata.priority) {
                 self.stats.dropped_count += 1;
-                return Err(DatagramError::CongestionDrop);
+                return Outcome::err(DatagramError::CongestionDrop);
             }
         }
 
@@ -223,7 +224,7 @@ impl CongestionController {
         });
 
         self.stats.enqueued_count += 1;
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Try to send next datagram if congestion allows
@@ -237,7 +238,7 @@ impl CongestionController {
 
         // Check if we can send based on congestion control
         if !self.can_send_now(now) {
-            return Ok(None);
+            return Outcome::ok(None);
         }
 
         // Find next datagram to send (highest priority first)
@@ -270,11 +271,11 @@ impl CongestionController {
                 self.stats.sent_count += 1;
                 self.state.last_send = now;
 
-                return Ok(Some((queued.frame, queued.metadata)));
+                return Outcome::ok(Some((queued.frame, queued.metadata)));
             }
         }
 
-        Ok(None)
+        Outcome::ok(None)
     }
 
     /// Update congestion state based on feedback
@@ -368,7 +369,7 @@ impl CongestionController {
     }
 
     /// Adaptive congestion control update
-    fn adaptive_update(&mut self, now: Instant) {
+    fn adaptive_update(&mut self, _now: Instant) {
         let loss_ratio = self.state.loss_ratio(Duration::from_secs(5));
         let avg_rtt = self.state.avg_rtt();
 
@@ -652,7 +653,10 @@ mod tests {
         if result.is_ok() {
             assert_eq!(controller.total_queue_depth(), 3);
         } else {
-            assert!(matches!(result, Err(DatagramError::CongestionDrop)));
+            assert!(matches!(
+                result,
+                Outcome::Err(DatagramError::CongestionDrop)
+            ));
         }
     }
 

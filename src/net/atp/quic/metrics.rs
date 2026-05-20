@@ -262,7 +262,7 @@ impl AtpTransportMetricsCollector {
             0.0
         };
 
-        let metrics = AtpTransportMetrics {
+        let mut metrics = AtpTransportMetrics {
             connection_id: self.connection_id.clone(),
             path_id: self.path_id.clone(),
             smoothed_rtt_micros: rtt.smoothed_rtt_micros(),
@@ -280,8 +280,9 @@ impl AtpTransportMetricsCollector {
             loss_rate,
             path_stability: self.stability_tracker.stability_score(),
             last_updated: Instant::now(),
-            path_doctor_assessment: None, // TODO: Compute after metrics construction
+            path_doctor_assessment: None,
         };
+        metrics.path_doctor_assessment = Some(self.assess_path_health(&metrics));
 
         metrics
     }

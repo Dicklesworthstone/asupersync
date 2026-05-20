@@ -112,6 +112,7 @@ struct SparseWriterState {
 
 /// Metadata for individual chunks
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ChunkMetadata {
     /// Offset in final file
     offset: u64,
@@ -127,6 +128,7 @@ struct ChunkMetadata {
 
 /// Verification state tracking
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 enum VerificationState {
     /// Not verified yet
     Pending,

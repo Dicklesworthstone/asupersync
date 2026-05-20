@@ -1,6 +1,6 @@
 //! Pairing and share code functionality for ATP capability grants.
 
-use super::{GrantAuditRecord, GrantError, GrantOperation, GrantResult};
+use super::{GrantError, GrantResult};
 use crate::atp::identity::DurablePeerIdentity;
 use crate::atp::policy::{
     Capability, CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope,
@@ -358,7 +358,7 @@ impl PairingManager {
             message,
         };
 
-        Ok(request)
+        Outcome::ok(request)
     }
 
     /// Use a pairing code to complete pairing.
@@ -422,13 +422,13 @@ impl PairingManager {
             }
         }
 
-        Ok(capability)
+        Outcome::ok(capability)
     }
 
     /// Cancel a pairing code.
     pub fn cancel_pairing_code(&mut self, code: &str) -> GrantResult<()> {
         match self.active_codes.remove(code) {
-            Some(_) => Ok(()),
+            Some(_) => Outcome::ok(()),
             None => Outcome::Err(GrantError::NotFound {
                 grant_id: code.to_string(),
             }),
@@ -444,7 +444,7 @@ impl PairingManager {
     /// Get a specific pairing code.
     pub fn get_pairing_code(&self, code: &str) -> GrantResult<PairingCode> {
         match self.active_codes.get(code) {
-            Some(code) => Ok(code.clone()),
+            Some(code) => Outcome::ok(code.clone()),
             None => Outcome::Err(GrantError::NotFound {
                 grant_id: code.to_string(),
             }),

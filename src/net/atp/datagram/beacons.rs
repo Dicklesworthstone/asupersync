@@ -25,7 +25,7 @@ pub struct PathBeacon {
 }
 
 /// Types of path beacons
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BeaconType {
     /// Regular periodic beacon
     Periodic,
@@ -296,6 +296,7 @@ pub struct BeaconManager {
     /// Beacon interval
     beacon_interval: Duration,
     /// Maximum beacon age before expiration
+    #[allow(dead_code)]
     max_beacon_age: Duration,
     /// Last beacon send time by path
     last_beacon_time: HashMap<u64, Instant>,

@@ -9,7 +9,7 @@ use crate::net::atp::protocol::frames::{
     Frame, FrameError, FrameHeader, FrameType, MAX_EXTENSION_COUNT, MAX_EXTENSION_SIZE,
     MAX_FRAME_SIZE, MAX_HEADER_SIZE, ProtocolVersion,
 };
-use crate::net::atp::protocol::outcome::{AtpOutcome, ProtocolError};
+use crate::net::atp::protocol::outcome::AtpOutcome;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;

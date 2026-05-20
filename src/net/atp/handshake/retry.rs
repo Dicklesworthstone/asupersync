@@ -6,7 +6,7 @@
 use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::net::atp::handshake::state_machine::{HandshakeError, QuicVersion};
 use crate::types::outcome::Outcome;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -50,10 +50,9 @@ impl RetryPacket {
 
         // Destination Connection ID
         if self.dest_cid.len() > 255 {
-            return Err(HandshakeError::ConnectionIdError {
+            return Outcome::err(HandshakeError::ConnectionIdError {
                 reason: "destination CID too long".to_string(),
-            })
-            .into();
+            });
         }
         buf.put_u8(self.dest_cid.len() as u8);
         buf.put_slice(&self.dest_cid);
@@ -87,7 +86,7 @@ impl RetryPacket {
     pub fn decode(data: &[u8], retry_key: &[u8; 32]) -> Outcome<Self, HandshakeError> {
         if data.len() < 23 {
             // Minimum: header(1) + version(4) + dcid_len(1) + scid_len(1) + tag(16)
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "retry packet too short".to_string(),
             });
         }
@@ -97,20 +96,20 @@ impl RetryPacket {
         // Check packet type
         let first_byte = buf.get_u8();
         if first_byte & 0xF0 != 0xF0 {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "not a retry packet".to_string(),
             });
         }
 
         let version = buf.get_u32();
         if !QuicVersion::is_supported(version) {
-            return Err(HandshakeError::UnsupportedVersion { version });
+            return Outcome::err(HandshakeError::UnsupportedVersion { version });
         }
 
         // Destination Connection ID
         let dest_cid_len = buf.get_u8() as usize;
         if buf.remaining() < dest_cid_len {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "insufficient data for destination CID".to_string(),
             });
         }
@@ -119,13 +118,13 @@ impl RetryPacket {
 
         // Source Connection ID
         if buf.is_empty() {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "missing source CID length".to_string(),
             });
         }
         let source_cid_len = buf.get_u8() as usize;
         if buf.remaining() < source_cid_len {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "insufficient data for source CID".to_string(),
             });
         }
@@ -134,7 +133,7 @@ impl RetryPacket {
 
         // Integrity tag is last 16 bytes
         if buf.remaining() < 16 {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "missing retry integrity tag".to_string(),
             });
         }
@@ -158,13 +157,18 @@ impl RetryPacket {
         let packet_without_tag = &data[..data.len() - 16];
         let pseudo_packet = packet.create_pseudo_retry_packet();
         let expected_tag =
-            Self::calculate_integrity_tag(packet_without_tag, &pseudo_packet, retry_key)?;
+            match Self::calculate_integrity_tag(packet_without_tag, &pseudo_packet, retry_key) {
+                Outcome::Ok(tag) => tag,
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            };
 
         if integrity_tag != expected_tag {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
 
-        Ok(packet)
+        Outcome::ok(packet)
     }
 
     /// Create pseudo retry packet for integrity tag calculation
@@ -181,10 +185,14 @@ impl RetryPacket {
         pseudo_packet: &[u8],
         key: &[u8; 32],
     ) -> Outcome<[u8; 16], HandshakeError> {
-        let mut mac =
-            HmacSha256::new_from_slice(key).map_err(|_| HandshakeError::ProtectionError {
-                reason: "invalid retry key".to_string(),
-            })?;
+        let mut mac = match HmacSha256::new_from_slice(key) {
+            Ok(mac) => mac,
+            Err(_) => {
+                return Outcome::err(HandshakeError::ProtectionError {
+                    reason: "invalid retry key".to_string(),
+                })
+            }
+        };
 
         mac.update(pseudo_packet);
         mac.update(retry_packet);
@@ -192,7 +200,7 @@ impl RetryPacket {
         let result = mac.finalize();
         let mut tag = [0u8; 16];
         tag.copy_from_slice(&result.into_bytes()[..16]);
-        Ok(tag)
+        Outcome::ok(tag)
     }
 }
 
@@ -219,12 +227,14 @@ impl RetryTokenHandler {
         client_addr: std::net::SocketAddr,
         original_dest_cid: &[u8],
     ) -> Outcome<Bytes, HandshakeError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| HandshakeError::ProtectionError {
-                reason: "system time error".to_string(),
-            })?
-            .as_secs();
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(_) => {
+                return Outcome::err(HandshakeError::ProtectionError {
+                    reason: "system time error".to_string(),
+                })
+            }
+        };
 
         let mut token = BytesMut::new();
 
@@ -250,18 +260,21 @@ impl RetryTokenHandler {
         token.put_slice(original_dest_cid);
 
         // Calculate HMAC
-        let mut mac = HmacSha256::new_from_slice(&self.secret_key).map_err(|_| {
-            HandshakeError::ProtectionError {
-                reason: "invalid token key".to_string(),
+        let mut mac = match HmacSha256::new_from_slice(&self.secret_key) {
+            Ok(mac) => mac,
+            Err(_) => {
+                return Outcome::err(HandshakeError::ProtectionError {
+                    reason: "invalid token key".to_string(),
+                })
             }
-        })?;
+        };
         mac.update(&token);
         let hmac_result = mac.finalize();
 
         // Append HMAC to token
         token.put_slice(&hmac_result.into_bytes());
 
-        Ok(token.freeze())
+        Outcome::ok(token.freeze())
     }
 
     /// Validate a retry token
@@ -273,45 +286,50 @@ impl RetryTokenHandler {
     ) -> Outcome<(), HandshakeError> {
         if token.len() < 32 {
             // Minimum size: timestamp(8) + addr(6+) + cid_len(1) + hmac(32)
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
 
         // Split token and HMAC
         let (token_data, hmac_bytes) = token.split_at(token.len() - 32);
 
         // Verify HMAC
-        let mut mac = HmacSha256::new_from_slice(&self.secret_key).map_err(|_| {
-            HandshakeError::ProtectionError {
-                reason: "invalid token key".to_string(),
+        let mut mac = match HmacSha256::new_from_slice(&self.secret_key) {
+            Ok(mac) => mac,
+            Err(_) => {
+                return Outcome::err(HandshakeError::ProtectionError {
+                    reason: "invalid token key".to_string(),
+                })
             }
-        })?;
+        };
         mac.update(token_data);
 
         if mac.verify_slice(hmac_bytes).is_err() {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
 
         let mut buf = token_data;
 
         // Check timestamp
         if buf.len() < 8 {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
         let timestamp = (&mut buf).get_u64();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| HandshakeError::ProtectionError {
-                reason: "system time error".to_string(),
-            })?
-            .as_secs();
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(_) => {
+                return Outcome::err(HandshakeError::ProtectionError {
+                    reason: "system time error".to_string(),
+                })
+            }
+        };
 
         if now.saturating_sub(timestamp) > self.token_lifetime {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
 
         // Validate client address
         if buf.is_empty() {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
         let addr_type = buf.get_u8();
 
@@ -328,33 +346,33 @@ impl RetryTokenHandler {
                 bytes.extend_from_slice(&addr.port().to_be_bytes());
                 bytes
             }
-            _ => return Err(HandshakeError::InvalidRetryToken),
+            _ => return Outcome::err(HandshakeError::InvalidRetryToken),
         };
 
         if buf.len() < expected_addr_bytes.len() {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
 
         let token_addr_bytes = &buf[..expected_addr_bytes.len()];
         if token_addr_bytes != expected_addr_bytes {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
         buf.advance(expected_addr_bytes.len());
 
         // Validate original destination CID
         if buf.is_empty() {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
         let cid_len = buf.get_u8() as usize;
         if buf.len() < cid_len {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
         let token_cid = &buf[..cid_len];
         if token_cid != original_dest_cid {
-            return Err(HandshakeError::InvalidRetryToken);
+            return Outcome::err(HandshakeError::InvalidRetryToken);
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 }
 

@@ -1260,7 +1260,12 @@ where
 
                         // Apply backoff delay if the supervisor computed one.
                         if let Some(backoff) = delay {
-                            wait_supervised_restart_delay(&cx, backoff).await?;
+                            match wait_supervised_restart_delay(&cx, backoff).await {
+                                Outcome::Ok(()) => {}
+                                Outcome::Err(err) => return Err(err),
+                                Outcome::Cancelled(_) => return Err(actor_cancel_join_error(&cx)),
+                                Outcome::Panicked(payload) => return Err(JoinError::Panicked(payload)),
+                            }
                         }
 
                         if cell.state.load() == ActorState::Stopping || cx.checkpoint().is_err() {

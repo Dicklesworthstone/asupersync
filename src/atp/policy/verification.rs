@@ -2,7 +2,7 @@
 
 use super::{Capability, CapabilityError, CapabilityResult};
 use crate::atp::identity::DurablePeerIdentity;
-use crate::security::keys::{IdentityKeyStore, KeyStoreError};
+use crate::security::keys::IdentityKeyStore;
 use crate::types::outcome::Outcome;
 use serde_json;
 
@@ -17,10 +17,12 @@ pub struct CapabilitySigner {
 impl CapabilitySigner {
     /// Create a new capability signer.
     pub fn new(key_store: IdentityKeyStore) -> CapabilityResult<Self> {
-        let identity = DurablePeerIdentity::from_key_store(&key_store)
-            .map_err(|e| CapabilityError::Storage(e.to_string()))?;
+        let identity = match DurablePeerIdentity::from_key_store(&key_store) {
+            Ok(identity) => identity,
+            Err(e) => return Outcome::err(CapabilityError::Storage(e.to_string())),
+        };
 
-        Ok(Self {
+        Outcome::ok(Self {
             identity,
             key_store,
         })
@@ -29,16 +31,25 @@ impl CapabilitySigner {
     /// Sign a capability grant.
     pub fn sign_capability(&self, capability: &mut Capability) -> CapabilityResult<()> {
         // Create canonical representation for signing
-        let signing_data = self.create_signing_data(capability)?;
+        let signing_data = match self.create_signing_data(capability) {
+            Outcome::Ok(data) => data,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
         // Sign with the key store
-        let signature = self
-            .key_store
-            .sign_data(&signing_data)
-            .map_err(|e| CapabilityError::Storage(e.to_string()))?;
+        let key_pair = match self.key_store.active_key_pair() {
+            Ok(key_pair) => key_pair,
+            Err(e) => return Outcome::err(CapabilityError::Storage(e.to_string())),
+        };
+        let signature = match key_pair.sign(&signing_data) {
+            Ok(signature) => signature,
+            Err(e) => return Outcome::err(CapabilityError::Storage(e.to_string())),
+        };
 
         capability.signature = signature;
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Create signing data for a capability.
@@ -63,7 +74,10 @@ impl CapabilitySigner {
                 .as_secs(),
         };
 
-        serde_json::to_vec(&signing_cap).map_err(CapabilityError::Serialization)
+        match serde_json::to_vec(&signing_cap) {
+            Ok(data) => Outcome::ok(data),
+            Err(e) => Outcome::err(CapabilityError::Serialization(e)),
+        }
     }
 
     /// Create a hash of temporal scope for signing.
@@ -127,14 +141,22 @@ impl CapabilityVerifier {
     /// Verify a capability signature.
     pub fn verify_capability(&self, capability: &Capability) -> CapabilityResult<bool> {
         // Get the issuer's identity
-        let issuer_identity = self.trusted_peers.get(&capability.issuer).ok_or_else(|| {
-            CapabilityError::InvalidCapability {
-                reason: "issuer not in trusted peers".to_string(),
+        let _issuer_identity = match self.trusted_peers.get(&capability.issuer) {
+            Some(identity) => identity,
+            None => {
+                return Outcome::err(CapabilityError::InvalidCapability {
+                    reason: "issuer not in trusted peers".to_string(),
+                });
             }
-        })?;
+        };
 
         // Create the signing data
-        let signing_data = self.create_verification_data(capability)?;
+        let _signing_data = match self.create_verification_data(capability) {
+            Outcome::Ok(data) => data,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
         // Create a temporary key store for verification
         // Note: In a real implementation, you'd want to cache these or use a different approach
@@ -144,7 +166,7 @@ impl CapabilityVerifier {
         // Verify the signature
         // TODO: Implement proper signature verification when key store API is available
         // For now, assume verification passes if we have the trusted identity
-        Ok(true)
+        Outcome::ok(true)
     }
 
     /// Verify and validate a capability comprehensively.
@@ -156,9 +178,11 @@ impl CapabilityVerifier {
 
         // Check signature
         match self.verify_capability(capability) {
-            Ok(true) => {}
-            Ok(false) => issues.push(ValidationIssue::InvalidSignature),
-            Err(e) => issues.push(ValidationIssue::SignatureError(e.to_string())),
+            Outcome::Ok(true) => {}
+            Outcome::Ok(false) => issues.push(ValidationIssue::InvalidSignature),
+            Outcome::Err(e) => issues.push(ValidationIssue::SignatureError(e.to_string())),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Check if issuer is subject (self-signed) and issuer is trusted
@@ -187,7 +211,7 @@ impl CapabilityVerifier {
         }
 
         let valid = issues.is_empty();
-        Ok(ValidationResult { valid, issues })
+        Outcome::ok(ValidationResult { valid, issues })
     }
 
     /// Create verification data for a capability.
@@ -212,7 +236,10 @@ impl CapabilityVerifier {
                 .as_secs(),
         };
 
-        serde_json::to_vec(&signing_cap).map_err(CapabilityError::Serialization)
+        match serde_json::to_vec(&signing_cap) {
+            Ok(data) => Outcome::ok(data),
+            Err(e) => Outcome::err(CapabilityError::Serialization(e)),
+        }
     }
 
     /// Create a hash of temporal scope for verification.

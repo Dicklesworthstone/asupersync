@@ -7,7 +7,7 @@
 use crate::net::atp::protocol::PeerId;
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod enforcement;

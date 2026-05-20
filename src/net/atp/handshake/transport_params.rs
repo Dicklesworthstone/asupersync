@@ -3,7 +3,7 @@
 //! Implements QUIC transport parameter encoding, decoding, and validation
 //! as specified in RFC 9000.
 
-use crate::bytes::{Buf, Bytes, BytesMut};
+use crate::bytes::{Bytes, BytesMut};
 use crate::net::atp::handshake::state_machine::HandshakeError;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::types::outcome::Outcome;
@@ -53,7 +53,7 @@ pub enum TransportParamId {
 impl TransportParamId {
     /// Convert to VarInt for wire encoding
     pub fn to_varint(self) -> VarInt {
-        VarInt::new(self as u64).expect("transport param ID fits in varint")
+        VarInt::from_u64_unchecked(self as u64)
     }
 
     /// Parse from VarInt
@@ -102,9 +102,14 @@ impl TransportParamValue {
     pub fn encode(&self) -> Bytes {
         match self {
             Self::Integer(value) => {
-                let varint = VarInt::new(*value).expect("value fits in varint");
                 let mut buf = BytesMut::new();
-                varint.encode(&mut buf).expect("varint encoding succeeds");
+                let varint = VarInt::from_u64_unchecked(*value);
+                match varint.encode(&mut buf) {
+                    Outcome::Ok(()) => {}
+                    Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                        unreachable!("validated varint encoding must succeed")
+                    }
+                }
                 buf.freeze()
             }
             Self::Bytes(bytes) => bytes.clone(),
@@ -117,8 +122,11 @@ impl TransportParamValue {
         match self {
             Self::Integer(value) => Some(*value),
             Self::Bytes(bytes) if !bytes.is_empty() => {
-                let mut buf = &bytes[..];
-                VarInt::decode(&mut buf).ok().flatten().map(|v| v.value())
+                let mut buf = BytesMut::from(&bytes[..]);
+                match VarInt::decode(&mut buf) {
+                    Outcome::Ok(Some(value)) => Some(value.value()),
+                    _ => None,
+                }
             }
             _ => None,
         }
@@ -224,76 +232,113 @@ impl TransportParameters {
 
         for (&param_id, param_value) in &self.params {
             // Parameter ID
-            let id_varint =
-                VarInt::new(param_id).map_err(|_| HandshakeError::InvalidTransportParam {
-                    param_id,
-                    reason: "parameter ID too large".to_string(),
-                })?;
-            id_varint
-                .encode(&mut buf)
-                .map_err(|_| HandshakeError::InvalidTransportParam {
-                    param_id,
-                    reason: "failed to encode parameter ID".to_string(),
-                })?;
+            let id_varint = match VarInt::new(param_id) {
+                Outcome::Ok(varint) => varint,
+                Outcome::Err(_) => {
+                    return Outcome::err(HandshakeError::InvalidTransportParam {
+                        param_id,
+                        reason: "parameter ID too large".to_string(),
+                    })
+                }
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            };
+            match id_varint.encode(&mut buf) {
+                Outcome::Ok(()) => {}
+                Outcome::Err(_) => {
+                    return Outcome::err(HandshakeError::InvalidTransportParam {
+                        param_id,
+                        reason: "failed to encode parameter ID".to_string(),
+                    })
+                }
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
 
             // Parameter value
             let value_bytes = param_value.encode();
-            let length_varint = VarInt::new(value_bytes.len() as u64).map_err(|_| {
-                HandshakeError::InvalidTransportParam {
-                    param_id,
-                    reason: "parameter value too large".to_string(),
+            let length_varint = match VarInt::new(value_bytes.len() as u64) {
+                Outcome::Ok(varint) => varint,
+                Outcome::Err(_) => {
+                    return Outcome::err(HandshakeError::InvalidTransportParam {
+                        param_id,
+                        reason: "parameter value too large".to_string(),
+                    })
                 }
-            })?;
-            length_varint
-                .encode(&mut buf)
-                .map_err(|_| HandshakeError::InvalidTransportParam {
-                    param_id,
-                    reason: "failed to encode parameter length".to_string(),
-                })?;
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            };
+            match length_varint.encode(&mut buf) {
+                Outcome::Ok(()) => {}
+                Outcome::Err(_) => {
+                    return Outcome::err(HandshakeError::InvalidTransportParam {
+                        param_id,
+                        reason: "failed to encode parameter length".to_string(),
+                    })
+                }
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
             buf.put_slice(&value_bytes);
         }
 
-        Ok(buf.freeze())
+        Outcome::ok(buf.freeze())
     }
 
     /// Decode transport parameters from TLS extension
     pub fn decode(data: &[u8]) -> Outcome<Self, HandshakeError> {
         let mut params = Self::new();
-        let mut buf = &data[..];
+        let mut buf = BytesMut::from(data);
 
         while !buf.is_empty() {
             // Parse parameter ID
-            let id_varint = VarInt::decode(&mut buf)
-                .map_err(|_| HandshakeError::InvalidTransportParam {
-                    param_id: 0,
-                    reason: "failed to decode parameter ID".to_string(),
-                })?
-                .ok_or_else(|| HandshakeError::InvalidTransportParam {
-                    param_id: 0,
-                    reason: "truncated parameter ID".to_string(),
-                })?;
+            let id_varint = match VarInt::decode(&mut buf) {
+                Outcome::Ok(Some(varint)) => varint,
+                Outcome::Ok(None) => {
+                    return Outcome::err(HandshakeError::InvalidTransportParam {
+                        param_id: 0,
+                        reason: "truncated parameter ID".to_string(),
+                    })
+                }
+                Outcome::Err(_) => {
+                    return Outcome::err(HandshakeError::InvalidTransportParam {
+                        param_id: 0,
+                        reason: "failed to decode parameter ID".to_string(),
+                    })
+                }
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            };
 
             let param_id = id_varint.value();
 
             // Check for duplicate parameter
             if params.params.contains_key(&param_id) {
-                return Err(HandshakeError::DuplicateTransportParam { param_id });
+                return Outcome::err(HandshakeError::DuplicateTransportParam { param_id });
             }
 
             // Parse parameter length
-            let length_varint = VarInt::decode(&mut buf)
-                .map_err(|_| HandshakeError::InvalidTransportParam {
-                    param_id,
-                    reason: "failed to decode parameter length".to_string(),
-                })?
-                .ok_or_else(|| HandshakeError::InvalidTransportParam {
-                    param_id,
-                    reason: "truncated parameter length".to_string(),
-                })?;
+            let length_varint = match VarInt::decode(&mut buf) {
+                Outcome::Ok(Some(varint)) => varint,
+                Outcome::Ok(None) => {
+                    return Outcome::err(HandshakeError::InvalidTransportParam {
+                        param_id,
+                        reason: "truncated parameter length".to_string(),
+                    })
+                }
+                Outcome::Err(_) => {
+                    return Outcome::err(HandshakeError::InvalidTransportParam {
+                        param_id,
+                        reason: "failed to decode parameter length".to_string(),
+                    })
+                }
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            };
 
             let length = length_varint.value() as usize;
             if buf.len() < length {
-                return Err(HandshakeError::InvalidTransportParam {
+                return Outcome::err(HandshakeError::InvalidTransportParam {
                     param_id,
                     reason: "truncated parameter value".to_string(),
                 });
@@ -303,8 +348,7 @@ impl TransportParameters {
             let value_bytes = if length == 0 {
                 TransportParamValue::Empty
             } else {
-                let bytes = Bytes::copy_from_slice(&buf[..length]);
-                buf.advance(length);
+                let bytes = buf.split_to(length).freeze();
 
                 // For known parameters that should be integers, decode as integer
                 if let Some(param_type) = TransportParamId::from_varint(id_varint) {
@@ -316,8 +360,8 @@ impl TransportParameters {
                         && param_type != TransportParamId::PreferredAddress
                     {
                         // Decode as integer
-                        let mut value_buf = &bytes[..];
-                        if let Ok(Some(int_varint)) = VarInt::decode(&mut value_buf) {
+                        let mut value_buf = BytesMut::from(&bytes[..]);
+                        if let Outcome::Ok(Some(int_varint)) = VarInt::decode(&mut value_buf) {
                             TransportParamValue::Integer(int_varint.value())
                         } else {
                             TransportParamValue::Bytes(bytes)
@@ -333,7 +377,7 @@ impl TransportParameters {
             params.params.insert(param_id, value_bytes);
         }
 
-        Ok(params)
+        Outcome::ok(params)
     }
 
     /// Validate transport parameters
@@ -341,7 +385,7 @@ impl TransportParameters {
         // Validate ACK delay exponent
         if let Some(exp) = self.get_integer(TransportParamId::AckDelayExponent) {
             if exp > 20 {
-                return Err(HandshakeError::InvalidTransportParam {
+                return Outcome::err(HandshakeError::InvalidTransportParam {
                     param_id: TransportParamId::AckDelayExponent as u64,
                     reason: "ACK delay exponent too large".to_string(),
                 });
@@ -351,7 +395,7 @@ impl TransportParameters {
         // Validate maximum ACK delay
         if let Some(delay) = self.get_integer(TransportParamId::MaxAckDelay) {
             if delay >= (1u64 << 14) {
-                return Err(HandshakeError::InvalidTransportParam {
+                return Outcome::err(HandshakeError::InvalidTransportParam {
                     param_id: TransportParamId::MaxAckDelay as u64,
                     reason: "maximum ACK delay too large".to_string(),
                 });
@@ -361,7 +405,7 @@ impl TransportParameters {
         // Validate maximum UDP payload size
         if let Some(size) = self.get_integer(TransportParamId::MaxUdpPayloadSize) {
             if size < 1200 {
-                return Err(HandshakeError::InvalidTransportParam {
+                return Outcome::err(HandshakeError::InvalidTransportParam {
                     param_id: TransportParamId::MaxUdpPayloadSize as u64,
                     reason: "maximum UDP payload size too small".to_string(),
                 });
@@ -371,7 +415,7 @@ impl TransportParameters {
         // Validate active connection ID limit
         if let Some(limit) = self.get_integer(TransportParamId::ActiveConnectionIdLimit) {
             if limit < 2 {
-                return Err(HandshakeError::InvalidTransportParam {
+                return Outcome::err(HandshakeError::InvalidTransportParam {
                     param_id: TransportParamId::ActiveConnectionIdLimit as u64,
                     reason: "active connection ID limit too small".to_string(),
                 });
@@ -381,14 +425,14 @@ impl TransportParameters {
         // Validate stateless reset token length
         if let Some(token) = self.get_bytes(TransportParamId::StatelessResetToken) {
             if token.len() != 16 {
-                return Err(HandshakeError::InvalidTransportParam {
+                return Outcome::err(HandshakeError::InvalidTransportParam {
                     param_id: TransportParamId::StatelessResetToken as u64,
                     reason: "stateless reset token must be 16 bytes".to_string(),
                 });
             }
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Get maximum idle timeout as duration
@@ -441,16 +485,12 @@ mod tests {
     fn test_client_defaults() {
         let params = TransportParameters::client_defaults();
 
-        assert!(
-            params
-                .get_integer(TransportParamId::MaxIdleTimeout)
-                .is_some()
-        );
-        assert!(
-            params
-                .get_integer(TransportParamId::InitialMaxData)
-                .is_some()
-        );
+        assert!(params
+            .get_integer(TransportParamId::MaxIdleTimeout)
+            .is_some());
+        assert!(params
+            .get_integer(TransportParamId::InitialMaxData)
+            .is_some());
         assert!(!params.has_flag(TransportParamId::DisableActiveMigration));
     }
 
@@ -481,7 +521,7 @@ mod tests {
         let result = TransportParameters::decode(&buf);
         assert!(matches!(
             result,
-            Err(HandshakeError::DuplicateTransportParam { .. })
+            Outcome::Err(HandshakeError::DuplicateTransportParam { .. })
         ));
     }
 

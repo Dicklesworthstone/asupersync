@@ -6,9 +6,64 @@
 
 use crate::net::atp::handshake::state_machine::{HandshakeError, PacketSpace};
 use crate::types::outcome::Outcome;
-use hkdf::Hkdf;
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
+
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Clone)]
+struct HkdfSha256 {
+    prk: Vec<u8>,
+}
+
+impl HkdfSha256 {
+    fn new(salt: Option<&[u8]>, ikm: &[u8]) -> Self {
+        let zero_salt = [0u8; 32];
+        let salt = salt.unwrap_or(&zero_salt);
+        Self {
+            prk: hmac_sha256(salt, ikm).to_vec(),
+        }
+    }
+
+    fn from_prk(prk: &[u8]) -> Result<Self, ()> {
+        if prk.len() < 32 {
+            return Err(());
+        }
+        Ok(Self { prk: prk.to_vec() })
+    }
+
+    fn expand(&self, info: &[u8], output: &mut [u8]) -> Result<(), ()> {
+        let blocks = output.len().div_ceil(32);
+        if blocks > u8::MAX as usize {
+            return Err(());
+        }
+
+        let mut previous = Vec::new();
+        let mut written = 0;
+        for block_index in 1..=blocks {
+            let mut mac =
+                HmacSha256::new_from_slice(&self.prk).expect("HMAC accepts any key length");
+            mac.update(&previous);
+            mac.update(info);
+            mac.update(&[block_index as u8]);
+            previous = mac.finalize().into_bytes().to_vec();
+
+            let remaining = output.len() - written;
+            let to_copy = remaining.min(previous.len());
+            output[written..written + to_copy].copy_from_slice(&previous[..to_copy]);
+            written += to_copy;
+        }
+
+        Ok(())
+    }
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(message);
+    mac.finalize().into_bytes().into()
+}
 
 /// Key phase identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -313,7 +368,7 @@ impl KeyDerivation {
         }
 
         // HKDF-Extract with Initial salt
-        let hkdf = Hkdf::<Sha256>::new(Some(INITIAL_SALT), connection_id);
+        let hkdf = HkdfSha256::new(Some(INITIAL_SALT), connection_id);
 
         // Derive client initial secret
         let client_secret = match Self::hkdf_expand_label(&hkdf, 32, b"client in", &[]) {
@@ -393,7 +448,7 @@ impl KeyDerivation {
         }
 
         // Update traffic secret using HKDF-Expand-Label
-        let hkdf = match Hkdf::<Sha256>::from_prk(current_secret) {
+        let hkdf = match HkdfSha256::from_prk(current_secret) {
             Ok(hkdf) => hkdf,
             Err(_) => {
                 return Outcome::Err(HandshakeError::ProtectionError {
@@ -414,7 +469,7 @@ impl KeyDerivation {
 
     /// Derive key material (key, IV, header protection key) from a traffic secret
     fn derive_keys_from_secret(secret: &[u8]) -> Outcome<KeyMaterial, HandshakeError> {
-        let hkdf = match Hkdf::<Sha256>::from_prk(secret) {
+        let hkdf = match HkdfSha256::from_prk(secret) {
             Ok(hkdf) => hkdf,
             Err(_) => {
                 return Outcome::Err(HandshakeError::ProtectionError {
@@ -452,7 +507,7 @@ impl KeyDerivation {
 
     /// HKDF-Expand-Label implementation for QUIC (RFC 9001, Section 5.1)
     fn hkdf_expand_label(
-        hkdf: &Hkdf<Sha256>,
+        hkdf: &HkdfSha256,
         length: usize,
         label: &[u8],
         context: &[u8],
@@ -548,11 +603,9 @@ mod tests {
         let local_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
         let remote_keys = KeyMaterial::new(vec![4u8; 32], vec![5u8; 12], vec![6u8; 32]);
 
-        assert!(
-            schedule
-                .install_initial_keys(local_keys, remote_keys)
-                .is_ok()
-        );
+        assert!(schedule
+            .install_initial_keys(local_keys, remote_keys)
+            .is_ok());
         assert!(schedule.keys_established(PacketSpace::Initial));
         assert!(schedule.local_keys(PacketSpace::Initial).is_some());
         assert!(schedule.remote_keys(PacketSpace::Initial).is_some());
@@ -566,11 +619,9 @@ mod tests {
         let zero_keys = KeyMaterial::zero(32, 12);
         let non_zero_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
 
-        assert!(
-            schedule
-                .install_initial_keys(zero_keys, non_zero_keys)
-                .is_err()
-        );
+        assert!(schedule
+            .install_initial_keys(zero_keys, non_zero_keys)
+            .is_err());
     }
 
     #[test]
@@ -590,11 +641,9 @@ mod tests {
         // Initiate key update with traffic secrets
         let local_traffic_secret = vec![0x10u8; 32];
         let remote_traffic_secret = vec![0x20u8; 32];
-        assert!(
-            schedule
-                .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
-                .is_ok()
-        );
+        assert!(schedule
+            .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
+            .is_ok());
         assert!(schedule.key_update_pending());
 
         // Commit key update
@@ -804,17 +853,13 @@ mod tests {
         let remote_traffic_secret = vec![0x20u8; 32];
 
         // First update should succeed
-        assert!(
-            schedule
-                .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
-                .is_ok()
-        );
+        assert!(schedule
+            .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
+            .is_ok());
 
         // Second update while first is pending should fail
-        assert!(
-            schedule
-                .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
-                .is_err()
-        );
+        assert!(schedule
+            .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
+            .is_err());
     }
 }

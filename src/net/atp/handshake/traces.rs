@@ -3,7 +3,7 @@
 //! Generates comprehensive traces for handshake replay, diagnostics, and debugging.
 
 use crate::net::atp::handshake::state_machine::{HandshakeEvent, PacketSpace};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Trace level for filtering events
@@ -209,7 +209,9 @@ impl HandshakeTracer {
             HandshakeEvent::TransportParams { params } => {
                 let params_json: Value = params
                     .iter()
-                    .map(|(&id, value)| (format!("0x{:02x}", id), hex::encode(value)))
+                    .map(|(&id, value)| {
+                        (format!("0x{:02x}", id), Value::String(hex::encode(value)))
+                    })
                     .collect::<serde_json::Map<_, _>>()
                     .into();
 

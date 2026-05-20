@@ -4,13 +4,11 @@
 //! list, revoke, rotate, and enforce grants for ATP's capability-based access
 //! control system.
 
-use crate::atp::policy::verification::{CapabilitySigner, CapabilityVerifier, ValidationResult};
-use crate::atp::policy::{Capability, CapabilityError, CapabilityResult};
+use crate::atp::policy::{Capability, CapabilityError};
 use crate::net::atp::protocol::PeerId;
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::time::SystemTime;
 
 pub mod manager;
@@ -71,7 +69,7 @@ pub struct GrantAuditRecord {
 }
 
 /// Grant lifecycle state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GrantState {
     /// Grant is pending acceptance
     Pending,
@@ -158,8 +156,6 @@ impl GrantInfo {
     /// Create a redacted summary for audit logs.
     #[must_use]
     pub fn redacted_summary(&self) -> String {
-        use crate::atp::policy::CapabilityAction;
-
         let actions: Vec<String> = self
             .capability
             .actions

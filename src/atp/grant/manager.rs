@@ -1,15 +1,13 @@
 //! Comprehensive grant management for ATP capabilities.
 
-use super::storage::{GrantRecord, GrantStorage};
+use super::storage::GrantStorage;
 use super::{
     CreateGrantRequest, GrantAuditRecord, GrantError, GrantInfo, GrantOperation, GrantQuery,
     GrantResult, GrantState, GrantStats, GrantTemplate,
 };
 use crate::atp::identity::DurablePeerIdentity;
-use crate::atp::policy::verification::{CapabilitySigner, CapabilityVerifier, ValidationResult};
-use crate::atp::policy::{
-    AccessRequest, Capability, CapabilityAction, PolicyDecision, PolicyEnforcer,
-};
+use crate::atp::policy::verification::{CapabilitySigner, CapabilityVerifier};
+use crate::atp::policy::{AccessRequest, Capability, PolicyDecision, PolicyEnforcer};
 use crate::net::atp::protocol::PeerId;
 use crate::security::keys::IdentityKeyStore;
 use crate::types::outcome::Outcome;
@@ -17,6 +15,17 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+
+macro_rules! grant_try {
+    ($expr:expr) => {
+        match $expr {
+            Outcome::Ok(value) => value,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+    };
+}
 
 /// Comprehensive grant manager for ATP capability system.
 pub struct GrantManager {
@@ -37,9 +46,13 @@ pub struct GrantManager {
 impl GrantManager {
     /// Create a new grant manager.
     pub fn new<P: AsRef<Path>>(storage_dir: P, key_store: IdentityKeyStore) -> GrantResult<Self> {
-        let storage = GrantStorage::new(storage_dir)?;
-        let signer =
-            CapabilitySigner::new(key_store).map_err(|e| GrantError::Storage(e.to_string()))?;
+        let storage = grant_try!(GrantStorage::new(storage_dir));
+        let signer = match CapabilitySigner::new(key_store) {
+            Outcome::Ok(signer) => signer,
+            Outcome::Err(e) => return Outcome::Err(GrantError::Storage(e.to_string())),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
         let verifier = CapabilityVerifier::new();
         let enforcer = Arc::new(Mutex::new(PolicyEnforcer::new()));
         let identity = signer.identity().clone();
@@ -57,17 +70,18 @@ impl GrantManager {
         };
 
         // Load existing grants into enforcer
-        if let Err(e) = manager.load_grants_into_enforcer() {
+        if let Outcome::Err(e) = manager.load_grants_into_enforcer() {
             eprintln!("Warning: failed to load grants into enforcer: {e}");
         }
 
-        Ok(manager)
+        Outcome::ok(manager)
     }
 
     /// Issue a new capability grant.
-    pub fn issue_grant(&mut self, mut request: CreateGrantRequest) -> GrantResult<GrantInfo> {
+    pub fn issue_grant(&mut self, request: CreateGrantRequest) -> GrantResult<GrantInfo> {
         // Generate unique grant ID
         let grant_id = self.generate_grant_id(&request);
+        let audit_context = self.create_audit_context(&request);
 
         // Create capability
         let mut capability = Capability::new(
@@ -81,9 +95,12 @@ impl GrantManager {
         );
 
         // Sign the capability
-        self.signer
-            .sign_capability(&mut capability)
-            .map_err(|e| GrantError::Storage(e.to_string()))?;
+        match self.signer.sign_capability(&mut capability) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(GrantError::Storage(e.to_string())),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         // Create grant info
         let mut grant_info = GrantInfo::new(capability);
@@ -92,7 +109,7 @@ impl GrantManager {
         }
 
         // Store the grant
-        self.storage.store_grant(grant_info.clone())?;
+        grant_try!(self.storage.store_grant(grant_info.clone()));
 
         // Add to policy enforcer
         if let Ok(mut enforcer) = self.enforcer.lock() {
@@ -106,22 +123,24 @@ impl GrantManager {
             actor: self.identity.peer_id(),
             target: Some(request.subject),
             timestamp: SystemTime::now(),
-            context: self.create_audit_context(&request),
+            context: audit_context,
             capability_summary: grant_info.redacted_summary(),
         };
 
-        self.storage.add_audit_record(audit_record)?;
+        grant_try!(self.storage.add_audit_record(audit_record));
 
-        Ok(grant_info)
+        Outcome::ok(grant_info)
     }
 
     /// Receive a grant from another peer.
     pub fn receive_grant(&mut self, capability: Capability) -> GrantResult<GrantInfo> {
         // Verify the capability
-        let validation = self
-            .verifier
-            .validate_capability(&capability)
-            .map_err(|e| GrantError::Storage(e.to_string()))?;
+        let validation = match self.verifier.validate_capability(&capability) {
+            Outcome::Ok(validation) => validation,
+            Outcome::Err(e) => return Outcome::Err(GrantError::Storage(e.to_string())),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
         if !validation.valid {
             let issues: Vec<String> = validation.issues.iter().map(|i| i.to_string()).collect();
@@ -129,7 +148,7 @@ impl GrantManager {
         }
 
         // Check if we already have this grant
-        if let Ok(_) = self.storage.get_grant(&capability.grant_id) {
+        if let Outcome::Ok(_) = self.storage.get_grant(&capability.grant_id) {
             return Outcome::Err(GrantError::AlreadyExists {
                 grant_id: capability.grant_id,
             });
@@ -139,7 +158,7 @@ impl GrantManager {
         let grant_info = GrantInfo::new(capability.clone());
 
         // Store the grant
-        self.storage.store_grant(grant_info.clone())?;
+        grant_try!(self.storage.store_grant(grant_info.clone()));
 
         // Add to policy enforcer if this grant is for us
         if capability.subject == self.identity.peer_id() {
@@ -159,15 +178,15 @@ impl GrantManager {
             capability_summary: grant_info.redacted_summary(),
         };
 
-        self.storage.add_audit_record(audit_record)?;
+        grant_try!(self.storage.add_audit_record(audit_record));
 
-        Ok(grant_info)
+        Outcome::ok(grant_info)
     }
 
     /// Revoke a capability grant.
     pub fn revoke_grant(&mut self, grant_id: &str) -> GrantResult<()> {
         // Get the grant
-        let mut grant_info = self.storage.get_grant(grant_id)?;
+        let mut grant_info = grant_try!(self.storage.get_grant(grant_id));
 
         // Check if we can revoke this grant (we must be the issuer)
         if grant_info.capability.issuer != self.identity.peer_id() {
@@ -185,7 +204,7 @@ impl GrantManager {
 
         // Revoke the grant
         grant_info.revoke();
-        self.storage.update_grant(grant_id, grant_info.clone())?;
+        grant_try!(self.storage.update_grant(grant_id, grant_info.clone()));
 
         // Remove from policy enforcer
         if let Ok(mut enforcer) = self.enforcer.lock() {
@@ -203,15 +222,15 @@ impl GrantManager {
             capability_summary: grant_info.redacted_summary(),
         };
 
-        self.storage.add_audit_record(audit_record)?;
+        grant_try!(self.storage.add_audit_record(audit_record));
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Rotate a capability grant (create new version).
     pub fn rotate_grant(&mut self, grant_id: &str) -> GrantResult<GrantInfo> {
         // Get the existing grant
-        let mut old_grant = self.storage.get_grant(grant_id)?;
+        let mut old_grant = grant_try!(self.storage.get_grant(grant_id));
 
         // Check if we can rotate this grant
         if old_grant.capability.issuer != self.identity.peer_id() {
@@ -241,19 +260,22 @@ impl GrantManager {
         new_capability.issued_at = SystemTime::now();
 
         // Sign the new capability
-        self.signer
-            .sign_capability(&mut new_capability)
-            .map_err(|e| GrantError::Storage(e.to_string()))?;
+        match self.signer.sign_capability(&mut new_capability) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(GrantError::Storage(e.to_string())),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         // Create new grant info
         let new_grant_info = GrantInfo::new(new_capability);
 
         // Store new grant
-        self.storage.store_grant(new_grant_info.clone())?;
+        grant_try!(self.storage.store_grant(new_grant_info.clone()));
 
         // Update old grant to mark as rotated
         old_grant.rotate(new_grant_id.clone());
-        self.storage.update_grant(grant_id, old_grant)?;
+        grant_try!(self.storage.update_grant(grant_id, old_grant));
 
         // Update policy enforcer
         if let Ok(mut enforcer) = self.enforcer.lock() {
@@ -276,9 +298,9 @@ impl GrantManager {
             capability_summary: new_grant_info.redacted_summary(),
         };
 
-        self.storage.add_audit_record(rotate_record)?;
+        grant_try!(self.storage.add_audit_record(rotate_record));
 
-        Ok(new_grant_info)
+        Outcome::ok(new_grant_info)
     }
 
     /// List grants matching criteria.
@@ -307,10 +329,10 @@ impl GrantManager {
             decision.decision
         {
             // Update usage count in storage
-            if let Ok(mut grant_info) = self.storage.get_grant(&capability.grant_id) {
+            if let Outcome::Ok(mut grant_info) = self.storage.get_grant(&capability.grant_id) {
                 grant_info.record_usage();
 
-                if let Err(e) = self
+                if let Outcome::Err(e) = self
                     .storage
                     .update_grant(&capability.grant_id, grant_info.clone())
                 {
@@ -334,7 +356,7 @@ impl GrantManager {
                         capability_summary: grant_info.redacted_summary(),
                     };
 
-                    if let Err(e) = self.storage.add_audit_record(audit_record) {
+                    if let Outcome::Err(e) = self.storage.add_audit_record(audit_record) {
                         eprintln!("Warning: failed to record usage audit: {e}");
                     }
                 }
@@ -355,12 +377,16 @@ impl GrantManager {
         template_name: &str,
         subject: PeerId,
     ) -> GrantResult<GrantInfo> {
-        let template = self
-            .templates
-            .get(template_name)
-            .ok_or_else(|| GrantError::Storage(format!("template not found: {template_name}")))?;
+        let template = match self.templates.get(template_name) {
+            Some(template) => template,
+            None => {
+                return Outcome::err(GrantError::Storage(format!(
+                    "template not found: {template_name}"
+                )));
+            }
+        };
 
-        let mut request = CreateGrantRequest {
+        let request = CreateGrantRequest {
             subject,
             scope: template.scope.clone(),
             actions: template.actions.clone(),
@@ -453,7 +479,7 @@ impl GrantManager {
             ..Default::default()
         };
 
-        let grants = self.storage.list_grants(&query)?;
+        let grants = grant_try!(self.storage.list_grants(&query));
 
         if let Ok(mut enforcer) = self.enforcer.lock() {
             for grant in grants {
@@ -461,7 +487,7 @@ impl GrantManager {
             }
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 }
 
@@ -520,11 +546,9 @@ mod tests {
             .create_from_template("read-once", crate::net::atp::protocol::PeerId::test(1))
             .expect("create from template");
 
-        assert!(
-            grant_info
-                .capability
-                .grants_action(&CapabilityAction::ReadOnce)
-        );
+        assert!(grant_info
+            .capability
+            .grants_action(&CapabilityAction::ReadOnce));
         assert_eq!(grant_info.capability.temporal.max_uses, Some(1));
     }
 

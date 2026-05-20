@@ -21,6 +21,7 @@ pub mod path;
 pub mod platform;
 pub mod policy;
 pub mod proof;
+pub mod quota;
 pub mod repair_receiver;
 pub mod sdk;
 pub mod stream_object;
@@ -42,4 +43,8 @@ pub use inbox::{
 };
 pub use policy::{
     Capability, CapabilityAction, PolicyDecision, PolicyEnforcer, ResourceScope, TemporalScope,
+};
+pub use quota::{
+    QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaLimit, QuotaRow, QuotaUsage,
+    RetentionClock, RetentionPolicy, RetentionRecord, RetentionRule,
 };

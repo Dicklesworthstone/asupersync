@@ -39,13 +39,13 @@ impl DatagramTransport {
         if local_enabled
             && (local_max_size < MIN_DATAGRAM_SIZE || local_max_size > MAX_DATAGRAM_SIZE)
         {
-            return Err(DatagramError::InvalidFrame(format!(
+            return Outcome::err(DatagramError::InvalidFrame(format!(
                 "invalid max datagram size: {} (must be {}-{})",
                 local_max_size, MIN_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE
             )));
         }
 
-        Ok(Self {
+        Outcome::ok(Self {
             local_max_size: if local_enabled { local_max_size } else { 0 },
             peer_max_size: None,
             local_enabled,
@@ -65,7 +65,10 @@ impl DatagramTransport {
 
     /// Create default enabled DATAGRAM transport
     pub fn default_enabled() -> Self {
-        Self::new(true, DEFAULT_MAX_DATAGRAM_SIZE).expect("default values are valid")
+        match Self::new(true, DEFAULT_MAX_DATAGRAM_SIZE) {
+            Outcome::Ok(transport) => transport,
+            _ => unreachable!("default values are valid"),
+        }
     }
 
     /// Add DATAGRAM transport parameter to local parameters
@@ -85,7 +88,7 @@ impl DatagramTransport {
     /// Process peer transport parameters for DATAGRAM support
     pub fn process_peer_params(
         &mut self,
-        params: &TransportParameters,
+        _params: &TransportParameters,
     ) -> Outcome<(), DatagramError> {
         // Look for max_datagram_frame_size parameter
         // TODO: Implement custom parameter lookup in TransportParameters
@@ -97,7 +100,7 @@ impl DatagramTransport {
             self.peer_max_size = Some(DEFAULT_MAX_DATAGRAM_SIZE);
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Check if DATAGRAM is supported by both peers
@@ -127,18 +130,18 @@ impl DatagramTransport {
     /// Validate datagram size against negotiated limits
     pub fn validate_size(&self, size: usize) -> Outcome<(), DatagramError> {
         if !self.is_enabled() {
-            return Err(DatagramError::NotSupported);
+            return Outcome::err(DatagramError::NotSupported);
         }
 
         let max_size = self.max_frame_size().unwrap() as usize;
         if size > max_size {
-            return Err(DatagramError::PayloadTooLarge {
+            return Outcome::err(DatagramError::PayloadTooLarge {
                 size,
                 max: max_size,
             });
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Check if peer supports DATAGRAM
@@ -241,19 +244,24 @@ impl DatagramConfig {
     pub fn validate(&self) -> Outcome<(), DatagramError> {
         if self.enabled {
             if self.max_frame_size < MIN_DATAGRAM_SIZE || self.max_frame_size > MAX_DATAGRAM_SIZE {
-                return Err(DatagramError::InvalidFrame(format!(
+                return Outcome::err(DatagramError::InvalidFrame(format!(
                     "invalid max frame size: {} (must be {}-{})",
                     self.max_frame_size, MIN_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE
                 )));
             }
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Create transport handler from configuration
     pub fn create_transport(&self) -> Outcome<DatagramTransport, DatagramError> {
-        self.validate()?;
+        match self.validate() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
         DatagramTransport::new(self.enabled, self.max_frame_size)
     }
 }

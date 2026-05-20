@@ -8,8 +8,8 @@ use crate::cx::Cx;
 use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, ProtocolError};
 use crate::net::quic_native::tls::{
     HeaderProtectionMask, PacketProtectionRequest, PacketProtectionSpace,
-    ProtectedPacket, ProtectionKeySnapshot, ProtectionProof, QuicHandshakeTranscript,
-    QuicPacketProtectionProvider, QuicTlsError, TranscriptHash, UnprotectedPacket,
+    ProtectedPacket, ProtectionKeySnapshot, QuicHandshakeTranscript, QuicPacketProtectionProvider,
+    QuicTlsError, TranscriptHash, UnprotectedPacket,
 };
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -167,7 +167,7 @@ impl AtpPacketProtection {
     ) -> AtpOutcome<ProtectionKeySnapshot> {
         cx.trace(&format!("atp_packet_protection_derive_keys {:?}", space));
 
-        let result = self
+        let result: AtpOutcome<ProtectionKeySnapshot> = self
             .provider
             .derive_keys(space, transcript, secret_seed)
             .map_err(|e| self.map_tls_error(e))
@@ -175,18 +175,19 @@ impl AtpPacketProtection {
 
         if self.config.enable_proof_logging {
             match &result {
-                Ok(snapshot) => {
+                Outcome::Ok(snapshot) => {
                     cx.trace(&format!(
                         "packet protection keys derived: space={:?} phase={} gen={}",
                         snapshot.space, snapshot.key_phase, snapshot.generation
                     ));
                 }
-                Err(err) => {
+                Outcome::Err(err) => {
                     cx.trace(&format!(
                         "packet protection key derivation failed: {:?}",
                         err
                     ));
                 }
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => {}
             }
         }
 
@@ -224,7 +225,7 @@ impl AtpPacketProtection {
             );
         }
 
-        let result = self
+        let result: AtpOutcome<ProtectedPacket> = self
             .provider
             .protect_packet(request)
             .map_err(|e| self.map_tls_error(e))
@@ -232,7 +233,7 @@ impl AtpPacketProtection {
 
         if self.config.enable_proof_logging {
             match &result {
-                Ok(packet) => {
+                Outcome::Ok(packet) => {
                     cx.trace(&format!(
                         "packet protected: space={:?} pn={} ciphertext_len={}",
                         packet.space,
@@ -240,9 +241,10 @@ impl AtpPacketProtection {
                         packet.ciphertext.len()
                     ));
                 }
-                Err(err) => {
+                Outcome::Err(err) => {
                     cx.trace(&format!("packet protection failed: {:?}", err));
                 }
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => {}
             }
         }
 
@@ -267,7 +269,7 @@ impl AtpPacketProtection {
             );
         }
 
-        let result = self
+        let result: AtpOutcome<UnprotectedPacket> = self
             .provider
             .unprotect_packet(packet, associated_data)
             .map_err(|e| self.map_tls_error(e))
@@ -275,17 +277,18 @@ impl AtpPacketProtection {
 
         if self.config.enable_proof_logging {
             match &result {
-                Ok(unprotected) => {
+                Outcome::Ok(unprotected) => {
                     cx.trace(&format!(
                         "packet unprotected: space={:?} pn={} payload_len={}",
                         packet.space,
                         packet.packet_number,
-                        unprotected.payload.len()
+                        unprotected.plaintext.len()
                     ));
                 }
-                Err(err) => {
+                Outcome::Err(err) => {
                     cx.trace(&format!("packet unprotection failed: {:?}", err));
                 }
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => {}
             }
         }
 
@@ -332,7 +335,7 @@ impl AtpPacketProtection {
             );
         }
 
-        let result = self
+        let result: AtpOutcome<ProtectionKeySnapshot> = self
             .provider
             .update_key(space, next_phase)
             .map_err(|e| self.map_tls_error(e))
@@ -340,15 +343,16 @@ impl AtpPacketProtection {
 
         if self.config.enable_proof_logging {
             match &result {
-                Ok(snapshot) => {
+                Outcome::Ok(snapshot) => {
                     cx.trace(&format!(
                         "key updated: space={:?} phase={} gen={}",
                         snapshot.space, snapshot.key_phase, snapshot.generation
                     ));
                 }
-                Err(err) => {
+                Outcome::Err(err) => {
                     cx.trace(&format!("key update failed: {:?}", err));
                 }
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => {}
             }
         }
 

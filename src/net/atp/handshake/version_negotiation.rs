@@ -75,7 +75,7 @@ impl VersionNegotiationPacket {
         // Check long header form
         let first_byte = buf.get_u8();
         if first_byte & 0x80 == 0 {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "not a long header packet".to_string(),
             });
         }
@@ -83,7 +83,7 @@ impl VersionNegotiationPacket {
         // Check version is 0
         let version = buf.get_u32();
         if version != 0 {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "version negotiation must have version 0".to_string(),
             });
         }
@@ -91,7 +91,7 @@ impl VersionNegotiationPacket {
         // Destination Connection ID
         let dest_cid_len = buf.get_u8() as usize;
         if buf.remaining() < dest_cid_len {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "insufficient data for destination CID".to_string(),
             });
         }
@@ -100,13 +100,13 @@ impl VersionNegotiationPacket {
 
         // Source Connection ID
         if buf.is_empty() {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "missing source CID length".to_string(),
             });
         }
         let source_cid_len = buf.get_u8() as usize;
         if buf.remaining() < source_cid_len {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "insufficient data for source CID".to_string(),
             });
         }
@@ -115,7 +115,7 @@ impl VersionNegotiationPacket {
 
         // Supported versions
         if buf.remaining() % 4 != 0 {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "invalid version list length".to_string(),
             });
         }
@@ -126,17 +126,16 @@ impl VersionNegotiationPacket {
         }
 
         if supported_versions.is_empty() {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "no supported versions".to_string(),
             });
         }
 
-        Ok(Self {
+        Outcome::ok(Self {
             source_cid,
             dest_cid,
             supported_versions,
         })
-        .into()
     }
 
     /// Check if a version is supported
@@ -185,10 +184,9 @@ impl VersionNegotiation {
     ) -> Outcome<(), HandshakeError> {
         // Destination CID must match original source CID
         if packet.dest_cid.as_ref() != original_source_cid {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "version negotiation destination CID mismatch".to_string(),
-            })
-            .into();
+            });
         }
 
         // Source CID must match original destination CID
@@ -205,12 +203,12 @@ impl VersionNegotiation {
             .any(|&v| QuicVersion::is_supported(v));
 
         if !has_supported {
-            return Err(HandshakeError::UnsupportedVersion {
+            return Outcome::err(HandshakeError::UnsupportedVersion {
                 version: 0, // No compatible version
             });
         }
 
-        Ok(()).into()
+        Outcome::ok(())
     }
 }
 

@@ -5,11 +5,19 @@
 //! root region, drain, stop, and join. Runtime wiring can consume this contract
 //! without inventing a second daemon topology.
 
+pub mod state;
+
 use super::supervision::{
     AtpdChildRole, AtpdChildSpec, AtpdRegionId, AtpdRestartPolicy, AtpdStopAction, AtpdTopology,
     AtpdTopologyError,
 };
 use std::fmt;
+
+pub use state::{
+    ATPD_STATE_SCHEMA_VERSION, AtpdExportMode, AtpdPersistentState, AtpdSchemaVersion,
+    AtpdStateCollection, AtpdStateError, AtpdStateExport, AtpdStateRecord, AtpdStateSettings,
+    StateExportPolicy, StateSensitivity, required_collections,
+};
 
 /// Lifecycle phases for the daemon root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

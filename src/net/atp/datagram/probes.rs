@@ -126,15 +126,24 @@ impl PathProbe {
 
     /// Encode probe to JSON bytes
     pub fn encode(&self) -> Outcome<Bytes, DatagramError> {
-        serde_json::to_vec(self)
-            .map(Bytes::from)
-            .map_err(|e| DatagramError::EncodingFailed(format!("probe encoding: {}", e)))
+        match serde_json::to_vec(self) {
+            Ok(bytes) => Outcome::ok(Bytes::from(bytes)),
+            Err(e) => Outcome::err(DatagramError::EncodingFailed(format!(
+                "probe encoding: {}",
+                e
+            ))),
+        }
     }
 
     /// Decode probe from JSON bytes
     pub fn decode(data: &[u8]) -> Outcome<Self, DatagramError> {
-        serde_json::from_slice(data)
-            .map_err(|e| DatagramError::InvalidFrame(format!("probe decoding: {}", e)))
+        match serde_json::from_slice(data) {
+            Ok(probe) => Outcome::ok(probe),
+            Err(e) => Outcome::err(DatagramError::InvalidFrame(format!(
+                "probe decoding: {}",
+                e
+            ))),
+        }
     }
 
     /// Get current timestamp in microseconds
@@ -289,7 +298,7 @@ impl ProbeManager {
         path_id: u64,
     ) -> Outcome<DatagramFrame, DatagramError> {
         if !self.transport.is_enabled() {
-            return Err(DatagramError::NotSupported);
+            return Outcome::err(DatagramError::NotSupported);
         }
 
         let probe_id = self.next_probe_id();
@@ -314,10 +323,20 @@ impl ProbeManager {
             }
         }
 
-        let probe_data = probe.encode()?;
+        let probe_data = match probe.encode() {
+            Outcome::Ok(bytes) => bytes,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
         // Validate size
-        self.transport.validate_size(probe_data.len())?;
+        match self.transport.validate_size(probe_data.len()) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         // Track pending probe
         self.pending_probes
@@ -330,18 +349,23 @@ impl ProbeManager {
             .update_probe_sent();
 
         // Create datagram frame
-        let metadata = DatagramMetadata::new("path_probe")
+        let _metadata = DatagramMetadata::new("path_probe")
             .with_priority(probe_type.priority())
             .with_correlation_id(probe_id)
             .with_path_id(path_id)
             .with_expiration(Instant::now() + probe_type.timeout());
 
-        Ok(DatagramFrame::with_length(probe_data))
+        Outcome::ok(DatagramFrame::with_length(probe_data))
     }
 
     /// Process incoming probe (request or response)
     pub fn process_probe(&mut self, data: &[u8]) -> Outcome<Option<DatagramFrame>, DatagramError> {
-        let probe = PathProbe::decode(data)?;
+        let probe = match PathProbe::decode(data) {
+            Outcome::Ok(probe) => probe,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
         if probe.is_response {
             // Handle probe response
@@ -372,7 +396,7 @@ impl ProbeManager {
             }
         }
 
-        Ok(None) // No response frame needed
+        Outcome::ok(None) // No response frame needed
     }
 
     /// Handle probe request - generate response
@@ -381,17 +405,27 @@ impl ProbeManager {
         request: PathProbe,
     ) -> Outcome<Option<DatagramFrame>, DatagramError> {
         let response = request.new_response();
-        let response_data = response.encode()?;
+        let response_data = match response.encode() {
+            Outcome::Ok(bytes) => bytes,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
         // Validate size
-        self.transport.validate_size(response_data.len())?;
+        match self.transport.validate_size(response_data.len()) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
-        let metadata = DatagramMetadata::new("path_probe_response")
+        let _metadata = DatagramMetadata::new("path_probe_response")
             .with_priority(DatagramPriority::High)
             .with_correlation_id(response.probe_id)
             .with_path_id(response.path_id);
 
-        Ok(Some(DatagramFrame::with_length(response_data)))
+        Outcome::ok(Some(DatagramFrame::with_length(response_data)))
     }
 
     /// Clean up expired pending probes

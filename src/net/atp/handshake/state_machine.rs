@@ -191,6 +191,7 @@ pub struct QuicHandshakeMachine {
     timeout: Duration,
 
     /// Packet protection config
+    #[allow(dead_code)]
     protection_config: AtpPacketProtectionConfig,
 
     /// Generated trace events
@@ -200,6 +201,7 @@ pub struct QuicHandshakeMachine {
     packet_numbers: HashMap<PacketSpace, u64>,
 
     /// Received packet tracking for replay protection
+    #[allow(dead_code)]
     received_packets: HashMap<PacketSpace, Vec<u64>>,
 }
 
