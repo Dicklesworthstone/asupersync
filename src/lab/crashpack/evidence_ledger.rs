@@ -3,7 +3,7 @@
 //! Extends the existing evidence infrastructure in `lab/oracle/evidence.rs`
 //! with ATP-specific failure recording and artifact path management.
 
-use crate::lab::oracle::evidence::{EvidenceStrength, OracleEvidence};
+use crate::lab::oracle::evidence::{EvidenceStrength, EvidenceEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -39,7 +39,7 @@ impl AtpEvidenceLedger {
     pub fn record_oracle_result(
         &mut self,
         oracle_name: impl Into<String>,
-        evidence: OracleEvidence,
+        evidence: EvidenceEntry,
         artifact_path: Option<PathBuf>,
     ) {
         let entry = AtpEvidenceEntry {
@@ -78,7 +78,7 @@ impl AtpEvidenceLedger {
             .iter()
             .filter(|entry| {
                 matches!(
-                    entry.evidence.strength(),
+                    entry.evidence.bayes_factor.strength,
                     EvidenceStrength::Positive
                         | EvidenceStrength::Strong
                         | EvidenceStrength::VeryStrong
@@ -92,7 +92,7 @@ impl AtpEvidenceLedger {
         let mut summary = EvidenceSummary::default();
 
         for entry in &self.entries {
-            match entry.evidence.strength() {
+            match entry.evidence.bayes_factor.strength {
                 EvidenceStrength::Against => summary.against += 1,
                 EvidenceStrength::Negligible => summary.negligible += 1,
                 EvidenceStrength::Positive => summary.positive += 1,
@@ -128,7 +128,7 @@ pub struct AtpEvidenceEntry {
     /// Name of the oracle that produced this evidence.
     pub oracle_name: String,
     /// The evidence record with Bayes factors and explanations.
-    pub evidence: OracleEvidence,
+    pub evidence: EvidenceEntry,
     /// Optional path to artifacts related to this evidence.
     pub artifact_path: Option<PathBuf>,
     /// Unix timestamp when this evidence was recorded.

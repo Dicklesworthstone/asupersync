@@ -32,6 +32,11 @@ pub mod evidence_ledger;
 pub mod oracle;
 pub mod replay;
 
+// Re-export key types for convenience
+pub use evidence_ledger::{AtpEvidenceLedger, AtpEvidenceEntry, EvidenceSummary};
+pub use oracle::{AtpTransferOracle, AtpTransferState, AtpOracleResult, AtpOracleChecks};
+pub use replay::{AtpReplayCoordinator, TraceMinimizer, TraceMinimizerConfig, ReplayError, AtpReplayResult};
+
 use crate::lab::oracle::{OracleReport, OracleStats};
 use crate::trace::{TraceBuffer, TraceEvent};
 use serde::{Deserialize, Serialize};
