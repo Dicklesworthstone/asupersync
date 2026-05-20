@@ -52,6 +52,7 @@ pub mod atp_lab;
 pub mod chaos;
 pub mod config;
 pub mod conformal;
+pub mod crashpack;
 pub mod dual_run;
 pub mod explorer;
 pub mod fuzz;
@@ -84,6 +85,12 @@ pub use config::LabConfig;
 pub use conformal::{
     CalibrationReport, ConformalCalibrator, ConformalConfig, ConformityScore, CoverageTracker,
     PredictionSet,
+};
+pub use crashpack::{
+    ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, AtpEvidenceLedger, AtpOracleResult,
+    AtpTransferOracle, AtpTransferState, CrashpackBuilder, CrashpackError, ReplayError,
+    TraceMinimizer, TraceMinimizerConfig, TransferOracle, TransferOracleResult, TransferState,
+    TransferViolation, ViolationSeverity,
 };
 pub use dual_run::{
     CancelTerminalPhase, CancellationRecord, CaptureAnnotation, CaptureManifest, ComparisonVerdict,

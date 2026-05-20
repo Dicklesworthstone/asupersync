@@ -9,7 +9,7 @@
 use asupersync::net::atp::chunk::dedupe::{CdcEngine, ChunkCache, ChunkReuseManager};
 use asupersync::net::atp::chunk::dedupe::{ChunkIdentity, CdcParameters, ChunkReuseCriteria, ChunkVerification};
 use asupersync::net::atp::chunk::ChunkingProfile;
-use asupersync::atp::manifest::ChunkStrategy;
+use asupersync::atp::manifest::{ChunkStrategy, ProofStrength};
 use std::collections::HashMap;
 
 #[test]
