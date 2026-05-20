@@ -27,7 +27,16 @@ pub use streams::{
     FlowControlError, FlowCredit, QuicStream, QuicStreamError, StreamDirection, StreamId,
     StreamRole, StreamTable, StreamTableError,
 };
-pub use tls::{CryptoLevel, KeyUpdateEvent, QuicTlsError, QuicTlsMachine};
+#[cfg(any(test, feature = "test-internals"))]
+pub use tls::DeterministicQuicCryptoProvider;
+pub use tls::{
+    CryptoLevel, HeaderProtectionMask, KeyUpdateEvent, PacketProtectionRequest,
+    PacketProtectionSpace, ProtectedPacket, ProtectionKeySnapshot, ProtectionProof,
+    QuicHandshakeTranscript, QuicPacketProtectionProvider, QuicTlsError, QuicTlsMachine,
+    TranscriptHash, UnprotectedPacket,
+};
+#[cfg(feature = "tls")]
+pub use tls::{RustlsQuicCryptoProvider, RustlsQuicProviderSide};
 pub use transport::{
     AckEvent, AckRange, PacketNumberSpace, QuicConnectionState, QuicTransportMachine, RttEstimator,
     SentPacketMeta, TransportError,

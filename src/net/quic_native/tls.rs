@@ -1,9 +1,15 @@
 //! QUIC-TLS/key-phase state machine.
 //!
-//! This module models QUIC crypto-level progression and key updates without
-//! coupling to a specific cryptographic backend.
+//! This module models QUIC crypto-level progression, packet-protection
+//! provider boundaries, and key updates without coupling QUIC protocol state to
+//! a specific cryptographic backend.
 
+use sha2::{Digest, Sha256};
+#[cfg(any(test, feature = "test-internals", feature = "tls"))]
+use std::collections::BTreeMap;
 use std::fmt;
+#[cfg(feature = "tls")]
+use std::sync::Arc;
 
 /// QUIC crypto level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -14,6 +20,51 @@ pub enum CryptoLevel {
     Handshake,
     /// Application (1-RTT) keys.
     OneRtt,
+}
+
+/// QUIC packet number space used for packet-protection key lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PacketProtectionSpace {
+    /// Initial packet number space.
+    Initial,
+    /// Handshake packet number space.
+    Handshake,
+    /// 0-RTT application packet number space.
+    ZeroRtt,
+    /// 1-RTT application packet number space.
+    OneRtt,
+}
+
+impl PacketProtectionSpace {
+    /// Stable lowercase label for logs and proof artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Handshake => "handshake",
+            Self::ZeroRtt => "zero_rtt",
+            Self::OneRtt => "one_rtt",
+        }
+    }
+
+    const fn code(self) -> u8 {
+        match self {
+            Self::Initial => 0,
+            Self::Handshake => 1,
+            Self::ZeroRtt => 2,
+            Self::OneRtt => 3,
+        }
+    }
+
+    /// Crypto level associated with this packet number space.
+    #[must_use]
+    pub const fn crypto_level(self) -> CryptoLevel {
+        match self {
+            Self::Initial => CryptoLevel::Initial,
+            Self::Handshake => CryptoLevel::Handshake,
+            Self::ZeroRtt | Self::OneRtt => CryptoLevel::OneRtt,
+        }
+    }
 }
 
 /// Result event from processing a key-update signal.
@@ -51,6 +102,53 @@ pub enum QuicTlsError {
     },
     /// Peer key-phase value is stale.
     StalePeerKeyPhase(bool),
+    /// Packet-protection keys have not been installed for a packet space/phase.
+    MissingKeys {
+        /// Packet number space.
+        space: PacketProtectionSpace,
+        /// Requested key phase bit.
+        key_phase: bool,
+    },
+    /// Packet-protection keys were already discarded for this packet space.
+    KeyDiscarded {
+        /// Packet number space.
+        space: PacketProtectionSpace,
+    },
+    /// Protected packet authentication tag did not verify.
+    BadPacketTag {
+        /// Packet number space.
+        space: PacketProtectionSpace,
+    },
+    /// Protected packet used a key phase that is inconsistent with installed keys.
+    WrongKeyPhase {
+        /// Packet number space.
+        space: PacketProtectionSpace,
+        /// Expected key phase.
+        expected: bool,
+        /// Observed key phase.
+        observed: bool,
+    },
+    /// Handshake transcript digest did not match provider state.
+    TranscriptMismatch {
+        /// Expected transcript hash.
+        expected: TranscriptHash,
+        /// Actual transcript hash.
+        actual: TranscriptHash,
+    },
+    /// Header-protection sample is too short for the provider.
+    HeaderProtectionSampleTooShort {
+        /// Observed sample length.
+        len: usize,
+        /// Minimum required sample length.
+        min: usize,
+    },
+    /// Provider reported a deterministic, redacted failure.
+    CryptoProviderFailure {
+        /// Provider kind.
+        provider: &'static str,
+        /// Stable failure code.
+        code: &'static str,
+    },
 }
 
 impl fmt::Display for QuicTlsError {
@@ -61,11 +159,1139 @@ impl fmt::Display for QuicTlsError {
                 write!(f, "invalid crypto transition: {from:?} -> {to:?}")
             }
             Self::StalePeerKeyPhase(phase) => write!(f, "stale peer key phase: {phase}"),
+            Self::MissingKeys { space, key_phase } => {
+                write!(
+                    f,
+                    "missing packet protection keys: space={}, key_phase={key_phase}",
+                    space.as_str()
+                )
+            }
+            Self::KeyDiscarded { space } => {
+                write!(
+                    f,
+                    "packet protection keys discarded: space={}",
+                    space.as_str()
+                )
+            }
+            Self::BadPacketTag { space } => {
+                write!(f, "packet authentication failed: space={}", space.as_str())
+            }
+            Self::WrongKeyPhase {
+                space,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "wrong packet key phase: space={}, expected={expected}, observed={observed}",
+                space.as_str()
+            ),
+            Self::TranscriptMismatch { expected, actual } => write!(
+                f,
+                "handshake transcript mismatch: expected={}, actual={}",
+                expected.short_hex(),
+                actual.short_hex()
+            ),
+            Self::HeaderProtectionSampleTooShort { len, min } => write!(
+                f,
+                "header protection sample too short: len={len}, min={min}"
+            ),
+            Self::CryptoProviderFailure { provider, code } => {
+                write!(
+                    f,
+                    "crypto provider failure: provider={provider}, code={code}"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for QuicTlsError {}
+
+impl QuicTlsError {
+    /// Stable machine-readable failure code.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::HandshakeNotConfirmed => "handshake_not_confirmed",
+            Self::InvalidTransition { .. } => "invalid_transition",
+            Self::StalePeerKeyPhase(_) => "stale_peer_key_phase",
+            Self::MissingKeys { .. } => "missing_keys",
+            Self::KeyDiscarded { .. } => "key_discarded",
+            Self::BadPacketTag { .. } => "bad_packet_tag",
+            Self::WrongKeyPhase { .. } => "wrong_key_phase",
+            Self::TranscriptMismatch { .. } => "transcript_mismatch",
+            Self::HeaderProtectionSampleTooShort { .. } => "header_sample_too_short",
+            Self::CryptoProviderFailure { code, .. } => code,
+        }
+    }
+}
+
+/// Redaction-safe transcript hash used by provider proofs and errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TranscriptHash([u8; 32]);
+
+impl TranscriptHash {
+    /// Construct from raw hash bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow raw hash bytes.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    /// Short lowercase hex prefix safe for logs.
+    #[must_use]
+    pub fn short_hex(self) -> String {
+        let mut out = String::with_capacity(16);
+        for byte in &self.0[..8] {
+            use std::fmt::Write as _;
+            let _ = write!(&mut out, "{byte:02x}");
+        }
+        out
+    }
+}
+
+/// Canonical QUIC handshake transcript accumulator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicHandshakeTranscript {
+    digest: TranscriptHash,
+    entries: u64,
+}
+
+impl Default for QuicHandshakeTranscript {
+    fn default() -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"asupersync/quic-handshake-transcript/v1");
+        Self {
+            digest: TranscriptHash::from_bytes(hasher.finalize().into()),
+            entries: 0,
+        }
+    }
+}
+
+impl QuicHandshakeTranscript {
+    /// Create an empty canonical transcript.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a labeled handshake message.
+    pub fn record(&mut self, label: &str, payload: &[u8]) {
+        let mut hasher = Sha256::new();
+        hasher.update(b"asupersync/quic-handshake-transcript/record/v1");
+        hasher.update(self.digest.as_bytes());
+        hasher.update(self.entries.to_be_bytes());
+        hasher.update(label.len().to_be_bytes());
+        hasher.update(label.as_bytes());
+        hasher.update(payload.len().to_be_bytes());
+        hasher.update(payload);
+        self.digest = TranscriptHash::from_bytes(hasher.finalize().into());
+        self.entries += 1;
+    }
+
+    /// Current transcript hash.
+    #[must_use]
+    pub const fn digest(&self) -> TranscriptHash {
+        self.digest
+    }
+
+    /// Number of recorded transcript entries.
+    #[must_use]
+    pub const fn entries(&self) -> u64 {
+        self.entries
+    }
+}
+
+/// Installed packet-protection key metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectionKeySnapshot {
+    /// Packet number space.
+    pub space: PacketProtectionSpace,
+    /// QUIC key phase bit.
+    pub key_phase: bool,
+    /// Key generation for this space/phase.
+    pub generation: u64,
+    /// Redacted key identifier for logs/proofs.
+    pub key_id: [u8; 16],
+    /// Transcript hash bound to the key derivation.
+    pub transcript_hash: TranscriptHash,
+}
+
+/// Packet-protection request.
+#[derive(Debug, Clone, Copy)]
+pub struct PacketProtectionRequest<'a> {
+    /// Packet number space.
+    pub space: PacketProtectionSpace,
+    /// QUIC key phase bit.
+    pub key_phase: bool,
+    /// Packet number.
+    pub packet_number: u64,
+    /// Header bytes authenticated but not encrypted.
+    pub associated_data: &'a [u8],
+    /// Payload bytes to protect.
+    pub payload: &'a [u8],
+}
+
+/// Protected packet output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedPacket {
+    /// Packet number space.
+    pub space: PacketProtectionSpace,
+    /// QUIC key phase bit.
+    pub key_phase: bool,
+    /// Packet number.
+    pub packet_number: u64,
+    /// Protected payload.
+    pub ciphertext: Vec<u8>,
+    /// Authentication tag.
+    pub tag: [u8; 16],
+    /// Redaction-safe provider proof.
+    pub proof: ProtectionProof,
+}
+
+/// Unprotected packet output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnprotectedPacket {
+    /// Packet number space.
+    pub space: PacketProtectionSpace,
+    /// QUIC key phase bit.
+    pub key_phase: bool,
+    /// Packet number.
+    pub packet_number: u64,
+    /// Plain payload.
+    pub plaintext: Vec<u8>,
+    /// Redaction-safe provider proof.
+    pub proof: ProtectionProof,
+}
+
+/// Header-protection mask output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderProtectionMask {
+    /// QUIC header-protection mask bytes.
+    pub bytes: [u8; 5],
+}
+
+/// Redaction-safe proof emitted by provider operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectionProof {
+    /// Provider kind.
+    pub provider_kind: &'static str,
+    /// Packet number space.
+    pub space: PacketProtectionSpace,
+    /// QUIC key phase bit.
+    pub key_phase: bool,
+    /// Key generation.
+    pub generation: u64,
+    /// Transcript hash bound to this operation.
+    pub transcript_hash: TranscriptHash,
+    /// Optional stable failure code.
+    pub failure_code: Option<&'static str>,
+}
+
+impl ProtectionProof {
+    fn success(provider_kind: &'static str, key: &ProtectionKeySnapshot) -> Self {
+        Self {
+            provider_kind,
+            space: key.space,
+            key_phase: key.key_phase,
+            generation: key.generation,
+            transcript_hash: key.transcript_hash,
+            failure_code: None,
+        }
+    }
+}
+
+/// Provider boundary for QUIC packet protection.
+pub trait QuicPacketProtectionProvider {
+    /// Stable provider kind for redacted logs.
+    fn provider_kind(&self) -> &'static str;
+
+    /// Derive and install packet-protection keys for a packet number space.
+    fn derive_keys(
+        &mut self,
+        space: PacketProtectionSpace,
+        transcript: &QuicHandshakeTranscript,
+        secret_seed: &[u8],
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError>;
+
+    /// Verify the provider's transcript binding.
+    fn verify_transcript(&self, expected: TranscriptHash) -> Result<(), QuicTlsError>;
+
+    /// Return installed key metadata for a space/phase.
+    fn key_snapshot(
+        &self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError>;
+
+    /// Protect a packet payload.
+    fn protect_packet(
+        &mut self,
+        request: PacketProtectionRequest<'_>,
+    ) -> Result<ProtectedPacket, QuicTlsError>;
+
+    /// Authenticate and decrypt a protected packet.
+    fn unprotect_packet(
+        &mut self,
+        packet: &ProtectedPacket,
+        associated_data: &[u8],
+    ) -> Result<UnprotectedPacket, QuicTlsError>;
+
+    /// Produce QUIC header-protection mask bytes.
+    fn header_protection_mask(
+        &self,
+        space: PacketProtectionSpace,
+        sample: &[u8],
+    ) -> Result<HeaderProtectionMask, QuicTlsError>;
+
+    /// Derive and install the next key phase.
+    fn update_key(
+        &mut self,
+        space: PacketProtectionSpace,
+        next_phase: bool,
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError>;
+
+    /// Discard keys for a packet number space.
+    fn discard_keys(&mut self, space: PacketProtectionSpace) -> Result<(), QuicTlsError>;
+}
+
+/// Local QUIC endpoint side for the rustls packet-protection provider.
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustlsQuicProviderSide {
+    /// Client endpoint.
+    Client,
+    /// Server endpoint.
+    Server,
+}
+
+#[cfg(feature = "tls")]
+impl RustlsQuicProviderSide {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Client => 0,
+            Self::Server => 1,
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl From<RustlsQuicProviderSide> for rustls::Side {
+    fn from(side: RustlsQuicProviderSide) -> Self {
+        match side {
+            RustlsQuicProviderSide::Client => Self::Client,
+            RustlsQuicProviderSide::Server => Self::Server,
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+struct RustlsDirectionalKeys {
+    header: Arc<dyn rustls::quic::HeaderProtectionKey>,
+    packet: Box<dyn rustls::quic::PacketKey>,
+}
+
+#[cfg(feature = "tls")]
+struct RustlsProtectionKeys {
+    local: RustlsDirectionalKeys,
+    remote: RustlsDirectionalKeys,
+}
+
+#[cfg(feature = "tls")]
+struct RustlsKeySlot {
+    snapshot: ProtectionKeySnapshot,
+    keys: RustlsProtectionKeys,
+    discarded: bool,
+}
+
+/// rustls-backed QUIC packet-protection provider.
+///
+/// This adapter is intentionally narrow: `quic_native` owns packet-space,
+/// key-phase, lifecycle, and proof state, while rustls owns TLS 1.3 QUIC key
+/// derivation plus AEAD/header-protection primitive operations. It is not an
+/// external QUIC implementation; it is the internal crypto-provider boundary
+/// required by the native QUIC endpoint.
+#[cfg(feature = "tls")]
+pub struct RustlsQuicCryptoProvider {
+    version: rustls::quic::Version,
+    side: RustlsQuicProviderSide,
+    suite: rustls::quic::Suite,
+    transcript_hash: TranscriptHash,
+    keys: BTreeMap<(PacketProtectionSpace, bool), RustlsKeySlot>,
+    next_1rtt: Option<rustls::quic::Secrets>,
+}
+
+#[cfg(feature = "tls")]
+impl RustlsQuicCryptoProvider {
+    /// Construct a QUIC v1 provider using rustls' ring-backed AES-128-GCM
+    /// initial suite.
+    pub fn new_v1(side: RustlsQuicProviderSide) -> Result<Self, QuicTlsError> {
+        let provider = rustls::crypto::ring::default_provider();
+        let suite = provider
+            .cipher_suites
+            .iter()
+            .find_map(|candidate| match (candidate.suite(), candidate.tls13()) {
+                (rustls::CipherSuite::TLS13_AES_128_GCM_SHA256, Some(suite)) => suite.quic_suite(),
+                _ => None,
+            })
+            .ok_or(QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-ring",
+                code: "missing_initial_suite",
+            })?;
+        Ok(Self::with_initial_suite(
+            rustls::quic::Version::V1,
+            side,
+            suite,
+        ))
+    }
+
+    /// Construct with an explicit rustls QUIC version and initial suite.
+    #[must_use]
+    pub fn with_initial_suite(
+        version: rustls::quic::Version,
+        side: RustlsQuicProviderSide,
+        suite: rustls::quic::Suite,
+    ) -> Self {
+        Self {
+            version,
+            side,
+            suite,
+            transcript_hash: QuicHandshakeTranscript::new().digest(),
+            keys: BTreeMap::new(),
+            next_1rtt: None,
+        }
+    }
+
+    /// Install rustls handshake or 1-RTT key material emitted by
+    /// `rustls::quic::Connection::write_hs`.
+    pub fn install_key_change(
+        &mut self,
+        key_change: rustls::quic::KeyChange,
+        transcript: &QuicHandshakeTranscript,
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError> {
+        self.transcript_hash = transcript.digest();
+        match key_change {
+            rustls::quic::KeyChange::Handshake { keys } => {
+                Ok(self.insert_keys(PacketProtectionSpace::Handshake, false, 0, keys))
+            }
+            rustls::quic::KeyChange::OneRtt { keys, next } => {
+                self.next_1rtt = Some(next);
+                Ok(self.insert_keys(PacketProtectionSpace::OneRtt, false, 0, keys))
+            }
+        }
+    }
+
+    fn insert_keys(
+        &mut self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+        generation: u64,
+        keys: rustls::quic::Keys,
+    ) -> ProtectionKeySnapshot {
+        self.insert_protection_keys(space, key_phase, generation, rustls_keys_from_full(keys))
+    }
+
+    fn insert_protection_keys(
+        &mut self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+        generation: u64,
+        keys: RustlsProtectionKeys,
+    ) -> ProtectionKeySnapshot {
+        let snapshot = ProtectionKeySnapshot {
+            space,
+            key_phase,
+            generation,
+            key_id: derive_rustls_key_id(
+                self.side,
+                self.version,
+                space,
+                key_phase,
+                generation,
+                self.transcript_hash,
+            ),
+            transcript_hash: self.transcript_hash,
+        };
+        self.keys.insert(
+            (space, key_phase),
+            RustlsKeySlot {
+                snapshot: snapshot.clone(),
+                keys,
+                discarded: false,
+            },
+        );
+        snapshot
+    }
+
+    fn installed_key(
+        &self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+    ) -> Result<&RustlsKeySlot, QuicTlsError> {
+        if let Some(slot) = self.keys.get(&(space, key_phase)) {
+            if slot.discarded {
+                return Err(QuicTlsError::KeyDiscarded { space });
+            }
+            return Ok(slot);
+        }
+
+        for ((candidate_space, candidate_phase), slot) in &self.keys {
+            if *candidate_space == space && !slot.discarded {
+                return Err(QuicTlsError::WrongKeyPhase {
+                    space,
+                    expected: *candidate_phase,
+                    observed: key_phase,
+                });
+            }
+        }
+
+        Err(QuicTlsError::MissingKeys { space, key_phase })
+    }
+
+    fn installed_any_phase(
+        &self,
+        space: PacketProtectionSpace,
+    ) -> Result<&RustlsKeySlot, QuicTlsError> {
+        self.keys
+            .iter()
+            .filter(|((candidate_space, _), slot)| *candidate_space == space && !slot.discarded)
+            .max_by_key(|(_, slot)| slot.snapshot.generation)
+            .map(|(_, slot)| slot)
+            .ok_or(QuicTlsError::MissingKeys {
+                space,
+                key_phase: false,
+            })
+    }
+}
+
+#[cfg(feature = "tls")]
+impl QuicPacketProtectionProvider for RustlsQuicCryptoProvider {
+    fn provider_kind(&self) -> &'static str {
+        "rustls-quic-ring"
+    }
+
+    fn derive_keys(
+        &mut self,
+        space: PacketProtectionSpace,
+        transcript: &QuicHandshakeTranscript,
+        secret_seed: &[u8],
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError> {
+        self.transcript_hash = transcript.digest();
+        match space {
+            PacketProtectionSpace::Initial => {
+                if secret_seed.is_empty() {
+                    return Err(QuicTlsError::CryptoProviderFailure {
+                        provider: self.provider_kind(),
+                        code: "empty_initial_dcid",
+                    });
+                }
+                let keys = self.suite.keys(secret_seed, self.side.into(), self.version);
+                Ok(self.insert_keys(PacketProtectionSpace::Initial, false, 0, keys))
+            }
+            PacketProtectionSpace::Handshake
+            | PacketProtectionSpace::ZeroRtt
+            | PacketProtectionSpace::OneRtt => self.key_snapshot(space, false).or_else(|_| {
+                Err(QuicTlsError::CryptoProviderFailure {
+                    provider: self.provider_kind(),
+                    code: "rustls_key_change_required",
+                })
+            }),
+        }
+    }
+
+    fn verify_transcript(&self, expected: TranscriptHash) -> Result<(), QuicTlsError> {
+        if self.transcript_hash == expected {
+            Ok(())
+        } else {
+            Err(QuicTlsError::TranscriptMismatch {
+                expected,
+                actual: self.transcript_hash,
+            })
+        }
+    }
+
+    fn key_snapshot(
+        &self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError> {
+        Ok(self.installed_key(space, key_phase)?.snapshot.clone())
+    }
+
+    fn protect_packet(
+        &mut self,
+        request: PacketProtectionRequest<'_>,
+    ) -> Result<ProtectedPacket, QuicTlsError> {
+        let slot = self.installed_key(request.space, request.key_phase)?;
+        let mut ciphertext = request.payload.to_vec();
+        let tag = slot
+            .keys
+            .local
+            .packet
+            .encrypt_in_place(
+                request.packet_number,
+                request.associated_data,
+                &mut ciphertext,
+            )
+            .map_err(|_| QuicTlsError::CryptoProviderFailure {
+                provider: self.provider_kind(),
+                code: "rustls_encrypt_error",
+            })?;
+        let mut tag_bytes = [0u8; 16];
+        tag_bytes.copy_from_slice(tag.as_ref());
+        Ok(ProtectedPacket {
+            space: request.space,
+            key_phase: request.key_phase,
+            packet_number: request.packet_number,
+            ciphertext,
+            tag: tag_bytes,
+            proof: ProtectionProof::success(self.provider_kind(), &slot.snapshot),
+        })
+    }
+
+    fn unprotect_packet(
+        &mut self,
+        packet: &ProtectedPacket,
+        associated_data: &[u8],
+    ) -> Result<UnprotectedPacket, QuicTlsError> {
+        let slot = self.installed_key(packet.space, packet.key_phase)?;
+        let mut payload_and_tag = Vec::with_capacity(packet.ciphertext.len() + packet.tag.len());
+        payload_and_tag.extend_from_slice(&packet.ciphertext);
+        payload_and_tag.extend_from_slice(&packet.tag);
+        let plaintext = slot
+            .keys
+            .remote
+            .packet
+            .decrypt_in_place(packet.packet_number, associated_data, &mut payload_and_tag)
+            .map_err(|_| QuicTlsError::BadPacketTag {
+                space: packet.space,
+            })?
+            .to_vec();
+        Ok(UnprotectedPacket {
+            space: packet.space,
+            key_phase: packet.key_phase,
+            packet_number: packet.packet_number,
+            plaintext,
+            proof: ProtectionProof::success(self.provider_kind(), &slot.snapshot),
+        })
+    }
+
+    fn header_protection_mask(
+        &self,
+        space: PacketProtectionSpace,
+        sample: &[u8],
+    ) -> Result<HeaderProtectionMask, QuicTlsError> {
+        let slot = self.installed_any_phase(space)?;
+        let min = slot.keys.local.header.sample_len();
+        if sample.len() < min {
+            return Err(QuicTlsError::HeaderProtectionSampleTooShort {
+                len: sample.len(),
+                min,
+            });
+        }
+
+        let mut first = match space {
+            PacketProtectionSpace::Initial
+            | PacketProtectionSpace::Handshake
+            | PacketProtectionSpace::ZeroRtt => 0x80,
+            PacketProtectionSpace::OneRtt => 0x40,
+        };
+        let original_first = first;
+        let mut packet_number = [0u8; 4];
+        slot.keys
+            .local
+            .header
+            .encrypt_in_place(&sample[..min], &mut first, &mut packet_number)
+            .map_err(|_| QuicTlsError::CryptoProviderFailure {
+                provider: self.provider_kind(),
+                code: "rustls_header_protection_error",
+            })?;
+
+        let mut bytes = [0u8; 5];
+        bytes[0] = first ^ original_first;
+        bytes[1..].copy_from_slice(&packet_number);
+        Ok(HeaderProtectionMask { bytes })
+    }
+
+    fn update_key(
+        &mut self,
+        space: PacketProtectionSpace,
+        next_phase: bool,
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError> {
+        if space != PacketProtectionSpace::OneRtt {
+            return Err(QuicTlsError::CryptoProviderFailure {
+                provider: self.provider_kind(),
+                code: "rustls_key_update_requires_1rtt",
+            });
+        }
+        let current = self.installed_any_phase(space)?;
+        if current.snapshot.key_phase == next_phase {
+            return Err(QuicTlsError::WrongKeyPhase {
+                space,
+                expected: !current.snapshot.key_phase,
+                observed: next_phase,
+            });
+        }
+        let generation = current.snapshot.generation + 1;
+        let local_header = Arc::clone(&current.keys.local.header);
+        let remote_header = Arc::clone(&current.keys.remote.header);
+        let next = self
+            .next_1rtt
+            .as_mut()
+            .ok_or(QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-ring",
+                code: "rustls_next_secret_missing",
+            })?;
+        let packet_keys = next.next_packet_keys();
+        let updated_keys = RustlsProtectionKeys {
+            local: RustlsDirectionalKeys {
+                header: local_header,
+                packet: packet_keys.local,
+            },
+            remote: RustlsDirectionalKeys {
+                header: remote_header,
+                packet: packet_keys.remote,
+            },
+        };
+        Ok(self.insert_protection_keys(space, next_phase, generation, updated_keys))
+    }
+
+    fn discard_keys(&mut self, space: PacketProtectionSpace) -> Result<(), QuicTlsError> {
+        let mut discarded = false;
+        for ((candidate_space, _), slot) in &mut self.keys {
+            if *candidate_space == space {
+                slot.discarded = true;
+                discarded = true;
+            }
+        }
+        if discarded {
+            Ok(())
+        } else {
+            Err(QuicTlsError::MissingKeys {
+                space,
+                key_phase: false,
+            })
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+fn rustls_keys_from_full(keys: rustls::quic::Keys) -> RustlsProtectionKeys {
+    RustlsProtectionKeys {
+        local: RustlsDirectionalKeys {
+            header: Arc::from(keys.local.header),
+            packet: keys.local.packet,
+        },
+        remote: RustlsDirectionalKeys {
+            header: Arc::from(keys.remote.header),
+            packet: keys.remote.packet,
+        },
+    }
+}
+
+#[cfg(feature = "tls")]
+fn derive_rustls_key_id(
+    side: RustlsQuicProviderSide,
+    version: rustls::quic::Version,
+    space: PacketProtectionSpace,
+    key_phase: bool,
+    generation: u64,
+    transcript_hash: TranscriptHash,
+) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync/rustls-quic-protection-key-id/v1");
+    hasher.update([side.code()]);
+    hasher.update([rustls_version_code(version)]);
+    hasher.update([space.code()]);
+    hasher.update([u8::from(key_phase)]);
+    hasher.update(generation.to_be_bytes());
+    hasher.update(transcript_hash.as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+#[cfg(feature = "tls")]
+fn rustls_version_code(version: rustls::quic::Version) -> u8 {
+    match version {
+        rustls::quic::Version::V1Draft => 0,
+        rustls::quic::Version::V1 => 1,
+        rustls::quic::Version::V2 => 2,
+        _ => 255,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeterministicKeySlot {
+    snapshot: ProtectionKeySnapshot,
+    secret: [u8; 32],
+    discarded: bool,
+}
+
+/// Deterministic provider for lab, unit, and e2e contract tests.
+///
+/// This provider is not a production secrecy provider. It exists so the QUIC
+/// state machine can prove provider lifecycle, transcript binding, key update,
+/// header protection, and fail-closed behavior without importing an external
+/// QUIC implementation.
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone)]
+pub struct DeterministicQuicCryptoProvider {
+    transcript_hash: TranscriptHash,
+    keys: BTreeMap<(PacketProtectionSpace, bool), DeterministicKeySlot>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl Default for DeterministicQuicCryptoProvider {
+    fn default() -> Self {
+        Self {
+            transcript_hash: QuicHandshakeTranscript::new().digest(),
+            keys: BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl DeterministicQuicCryptoProvider {
+    /// Construct an empty deterministic provider.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn installed_key(
+        &self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+    ) -> Result<&DeterministicKeySlot, QuicTlsError> {
+        if let Some(slot) = self.keys.get(&(space, key_phase)) {
+            if slot.discarded {
+                return Err(QuicTlsError::KeyDiscarded { space });
+            }
+            return Ok(slot);
+        }
+
+        for ((candidate_space, candidate_phase), slot) in &self.keys {
+            if *candidate_space == space && !slot.discarded {
+                return Err(QuicTlsError::WrongKeyPhase {
+                    space,
+                    expected: *candidate_phase,
+                    observed: key_phase,
+                });
+            }
+        }
+
+        Err(QuicTlsError::MissingKeys { space, key_phase })
+    }
+
+    fn insert_key(
+        &mut self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+        generation: u64,
+        secret_seed: &[u8],
+        transcript_hash: TranscriptHash,
+    ) -> ProtectionKeySnapshot {
+        let secret = derive_secret(space, key_phase, generation, transcript_hash, secret_seed);
+        let key_id = derive_key_id(&secret);
+        let snapshot = ProtectionKeySnapshot {
+            space,
+            key_phase,
+            generation,
+            key_id,
+            transcript_hash,
+        };
+        self.keys.insert(
+            (space, key_phase),
+            DeterministicKeySlot {
+                snapshot: snapshot.clone(),
+                secret,
+                discarded: false,
+            },
+        );
+        snapshot
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl QuicPacketProtectionProvider for DeterministicQuicCryptoProvider {
+    fn provider_kind(&self) -> &'static str {
+        "deterministic-lab"
+    }
+
+    fn derive_keys(
+        &mut self,
+        space: PacketProtectionSpace,
+        transcript: &QuicHandshakeTranscript,
+        secret_seed: &[u8],
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError> {
+        if secret_seed.is_empty() {
+            return Err(QuicTlsError::CryptoProviderFailure {
+                provider: self.provider_kind(),
+                code: "empty_secret_seed",
+            });
+        }
+        self.transcript_hash = transcript.digest();
+        Ok(self.insert_key(space, false, 0, secret_seed, transcript.digest()))
+    }
+
+    fn verify_transcript(&self, expected: TranscriptHash) -> Result<(), QuicTlsError> {
+        if self.transcript_hash == expected {
+            Ok(())
+        } else {
+            Err(QuicTlsError::TranscriptMismatch {
+                expected,
+                actual: self.transcript_hash,
+            })
+        }
+    }
+
+    fn key_snapshot(
+        &self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError> {
+        Ok(self.installed_key(space, key_phase)?.snapshot.clone())
+    }
+
+    fn protect_packet(
+        &mut self,
+        request: PacketProtectionRequest<'_>,
+    ) -> Result<ProtectedPacket, QuicTlsError> {
+        let slot = self.installed_key(request.space, request.key_phase)?;
+        let ciphertext = apply_keystream(
+            &slot.secret,
+            request.packet_number,
+            request.associated_data,
+            request.payload,
+        );
+        let tag = compute_tag(
+            &slot.secret,
+            request.space,
+            request.key_phase,
+            request.packet_number,
+            request.associated_data,
+            &ciphertext,
+        );
+        Ok(ProtectedPacket {
+            space: request.space,
+            key_phase: request.key_phase,
+            packet_number: request.packet_number,
+            ciphertext,
+            tag,
+            proof: ProtectionProof::success(self.provider_kind(), &slot.snapshot),
+        })
+    }
+
+    fn unprotect_packet(
+        &mut self,
+        packet: &ProtectedPacket,
+        associated_data: &[u8],
+    ) -> Result<UnprotectedPacket, QuicTlsError> {
+        let slot = self.installed_key(packet.space, packet.key_phase)?;
+        let expected = compute_tag(
+            &slot.secret,
+            packet.space,
+            packet.key_phase,
+            packet.packet_number,
+            associated_data,
+            &packet.ciphertext,
+        );
+        if expected != packet.tag {
+            return Err(QuicTlsError::BadPacketTag {
+                space: packet.space,
+            });
+        }
+        let plaintext = apply_keystream(
+            &slot.secret,
+            packet.packet_number,
+            associated_data,
+            &packet.ciphertext,
+        );
+        Ok(UnprotectedPacket {
+            space: packet.space,
+            key_phase: packet.key_phase,
+            packet_number: packet.packet_number,
+            plaintext,
+            proof: ProtectionProof::success(self.provider_kind(), &slot.snapshot),
+        })
+    }
+
+    fn header_protection_mask(
+        &self,
+        space: PacketProtectionSpace,
+        sample: &[u8],
+    ) -> Result<HeaderProtectionMask, QuicTlsError> {
+        const MIN_SAMPLE: usize = 16;
+        if sample.len() < MIN_SAMPLE {
+            return Err(QuicTlsError::HeaderProtectionSampleTooShort {
+                len: sample.len(),
+                min: MIN_SAMPLE,
+            });
+        }
+        let slot = self.installed_key(space, false).or_else(|_| {
+            self.keys
+                .iter()
+                .find(|((candidate_space, _), slot)| *candidate_space == space && !slot.discarded)
+                .map(|(_, slot)| slot)
+                .ok_or(QuicTlsError::MissingKeys {
+                    space,
+                    key_phase: false,
+                })
+        })?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"asupersync/quic-header-protection/v1");
+        hasher.update(slot.secret);
+        hasher.update(space.code().to_be_bytes());
+        hasher.update(sample);
+        let digest: [u8; 32] = hasher.finalize().into();
+        let mut bytes = [0u8; 5];
+        bytes.copy_from_slice(&digest[..5]);
+        Ok(HeaderProtectionMask { bytes })
+    }
+
+    fn update_key(
+        &mut self,
+        space: PacketProtectionSpace,
+        next_phase: bool,
+    ) -> Result<ProtectionKeySnapshot, QuicTlsError> {
+        let current = self
+            .keys
+            .iter()
+            .filter(|((candidate_space, _), slot)| *candidate_space == space && !slot.discarded)
+            .max_by_key(|(_, slot)| slot.snapshot.generation)
+            .map(|(_, slot)| slot.clone())
+            .ok_or(QuicTlsError::MissingKeys {
+                space,
+                key_phase: next_phase,
+            })?;
+        let next_generation = current.snapshot.generation + 1;
+        let next_secret = derive_secret(
+            space,
+            next_phase,
+            next_generation,
+            current.snapshot.transcript_hash,
+            &current.secret,
+        );
+        let key_id = derive_key_id(&next_secret);
+        let snapshot = ProtectionKeySnapshot {
+            space,
+            key_phase: next_phase,
+            generation: next_generation,
+            key_id,
+            transcript_hash: current.snapshot.transcript_hash,
+        };
+        self.keys.insert(
+            (space, next_phase),
+            DeterministicKeySlot {
+                snapshot: snapshot.clone(),
+                secret: next_secret,
+                discarded: false,
+            },
+        );
+        Ok(snapshot)
+    }
+
+    fn discard_keys(&mut self, space: PacketProtectionSpace) -> Result<(), QuicTlsError> {
+        let mut discarded = false;
+        for ((candidate_space, _), slot) in &mut self.keys {
+            if *candidate_space == space {
+                slot.discarded = true;
+                discarded = true;
+            }
+        }
+        if discarded {
+            Ok(())
+        } else {
+            Err(QuicTlsError::MissingKeys {
+                space,
+                key_phase: false,
+            })
+        }
+    }
+}
+
+fn derive_secret(
+    space: PacketProtectionSpace,
+    key_phase: bool,
+    generation: u64,
+    transcript_hash: TranscriptHash,
+    seed: &[u8],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync/quic-protection-secret/v1");
+    hasher.update([space.code()]);
+    hasher.update([u8::from(key_phase)]);
+    hasher.update(generation.to_be_bytes());
+    hasher.update(transcript_hash.as_bytes());
+    hasher.update(seed.len().to_be_bytes());
+    hasher.update(seed);
+    hasher.finalize().into()
+}
+
+fn derive_key_id(secret: &[u8; 32]) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync/quic-protection-key-id/v1");
+    hasher.update(secret);
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+fn apply_keystream(secret: &[u8; 32], packet_number: u64, aad: &[u8], input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut counter = 0u64;
+    while output.len() < input.len() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"asupersync/quic-protection-keystream/v1");
+        hasher.update(secret);
+        hasher.update(packet_number.to_be_bytes());
+        hasher.update(counter.to_be_bytes());
+        hasher.update(aad.len().to_be_bytes());
+        hasher.update(aad);
+        let block: [u8; 32] = hasher.finalize().into();
+        for byte in block {
+            if output.len() == input.len() {
+                break;
+            }
+            let idx = output.len();
+            output.push(input[idx] ^ byte);
+        }
+        counter += 1;
+    }
+    output
+}
+
+fn compute_tag(
+    secret: &[u8; 32],
+    space: PacketProtectionSpace,
+    key_phase: bool,
+    packet_number: u64,
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync/quic-protection-tag/v1");
+    hasher.update(secret);
+    hasher.update([space.code()]);
+    hasher.update([u8::from(key_phase)]);
+    hasher.update(packet_number.to_be_bytes());
+    hasher.update(aad.len().to_be_bytes());
+    hasher.update(aad);
+    hasher.update(ciphertext.len().to_be_bytes());
+    hasher.update(ciphertext);
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct KeyEpoch {
