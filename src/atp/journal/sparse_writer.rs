@@ -259,8 +259,8 @@ impl SparseWriter {
         }
 
         // Perform the write
-        let hash = match self.write_chunk_internal(offset, data, &options).await {
-            Ok(hash) => hash,
+        let (hash, synced) = match self.write_chunk_internal(offset, data, &options).await {
+            Ok((hash, synced)) => (hash, synced),
             Err(e) => return Outcome::Err(e),
         };
 
@@ -278,8 +278,7 @@ impl SparseWriter {
                     size: chunk_size,
                     hash,
                     written_at: Instant::now(),
-                    synced: options.force_sync
-                        || matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite),
+                    synced,
                 },
             );
             state.last_write_at = Instant::now();
@@ -492,7 +491,7 @@ impl SparseWriter {
         offset: u64,
         data: &[u8],
         options: &WriteOptions,
-    ) -> Result<[u8; 32], SparseWriterError> {
+    ) -> Result<([u8; 32], bool), SparseWriterError> {
         let mut state = self.state.lock().unwrap();
 
         let file = state
@@ -521,18 +520,25 @@ impl SparseWriter {
         };
 
         // Apply fsync if required
-        if options.force_sync || matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite)
+        let synced = if options.force_sync || matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite)
         {
             file.sync_data()
                 .map_err(|e| SparseWriterError::SyncFailed(e.to_string()))?;
-        }
+            true
+        } else {
+            false
+        };
 
-        Ok(hash)
+        Ok((hash, synced))
     }
 
     async fn apply_fsync_policy(&self) -> Outcome<(), SparseWriterError> {
         let mut state = self.state.lock().unwrap();
         let verified = matches!(state.verification_state, VerificationState::Verified { .. });
+
+        // Check sync requirements before borrowing file mutably
+        let needs_sync_for_every_write = matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite)
+            && state.written_chunks.values().any(|chunk| !chunk.synced);
 
         if let Some(ref mut file) = state.temp_file {
             match self.config.fsync_policy {
@@ -540,7 +546,20 @@ impl SparseWriter {
                     // No sync required
                 }
                 super::FsyncPolicy::EveryWrite => {
-                    // Already synced during writes
+                    if needs_sync_for_every_write {
+                        // Force sync for any unsynced chunks
+                        match file.sync_data() {
+                            Ok(_) => {
+                                // Mark all chunks as synced
+                                for chunk in state.written_chunks.values_mut() {
+                                    chunk.synced = true;
+                                }
+                            }
+                            Err(e) => {
+                                return Outcome::Err(SparseWriterError::SyncFailed(e.to_string()));
+                            }
+                        }
+                    }
                 }
                 super::FsyncPolicy::VerifiedChunks => {
                     // Sync only if verification passed
