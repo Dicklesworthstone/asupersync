@@ -92,7 +92,7 @@ impl Default for TransferRegistry {
 fn transfer_shard_index(transfer_id: TransferId, shard_count: usize) -> usize {
     let shard_count = shard_count.max(1);
     let mut prefix = [0_u8; 8];
-    prefix.copy_from_slice(&transfer_id.hash_bytes()[..8]);
+    prefix.copy_from_slice(&transfer_id.as_bytes()[..8]);
     let hash = u64::from_le_bytes(prefix);
     match u64::try_from(shard_count) {
         Ok(shards) => usize::try_from(hash % shards).unwrap_or(0),
@@ -248,7 +248,7 @@ impl AtpSession {
             TransferActorTopology::new(TransferRegionId::new(10), TransferRegionId::new(20)),
         ) {
             Ok(actor) => actor,
-            Err(e) => return Outcome::Err(AtpError::TransferActorCreation(format!("Failed to create transfer actor: {:?}", e))),
+            Err(e) => return Outcome::Err(AtpError::Protocol(ProtocolError::ActorCreation)),
         }));
 
         // Insert into registry (need to access the Arc contents)
@@ -296,7 +296,7 @@ impl AtpSession {
             TransferActorTopology::new(TransferRegionId::new(30), TransferRegionId::new(40)),
         ) {
             Ok(actor) => actor,
-            Err(_) => return Outcome::Err(AtpError::InvalidParameter("Failed to create transfer actor".to_string())),
+            Err(_) => return Outcome::Err(AtpError::Protocol(ProtocolError::ActorCreation)),
         }));
 
         // Insert into registry (need to access the Arc contents)
@@ -582,9 +582,9 @@ impl AtpSession {
         // For now, create a deterministic hash based on object ID and session context
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-MANIFEST-ROOT-V1\0");
-        hasher.update(object_id.hash_bytes());
+        hasher.update(object_id.as_bytes());
         hasher.update(&self.local_peer_id);
-        hasher.update(self.session_id.hash_bytes());
+        hasher.update(self.session_id.as_bytes());
 
         let hash = hasher.finalize();
         let mut result = [0u8; 32];
@@ -598,9 +598,9 @@ impl AtpSession {
 
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-RECEIVED-OBJECT-V1\0");
-        hasher.update(transfer_id.hash_bytes());
+        hasher.update(transfer_id.as_bytes());
         hasher.update(&self.local_peer_id);
-        hasher.update(self.session_id.hash_bytes());
+        hasher.update(self.session_id.as_bytes());
 
         let hash = hasher.finalize();
         let mut content_id_bytes = [0u8; 32];
@@ -616,8 +616,8 @@ impl AtpSession {
 
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-TRANSFER-VERIFICATION-V1\0");
-        hasher.update(transfer_id.hash_bytes());
-        hasher.update(object_id.hash_bytes());
+        hasher.update(transfer_id.as_bytes());
+        hasher.update(object_id.as_bytes());
         hasher.update(&self.local_peer_id);
 
         let hash = hasher.finalize();
@@ -649,9 +649,9 @@ impl AtpSession {
 
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-OBJECT-VERIFICATION-V1\0");
-        hasher.update(object_id.hash_bytes());
+        hasher.update(object_id.as_bytes());
         hasher.update(&self.local_peer_id);
-        hasher.update(self.session_id.hash_bytes());
+        hasher.update(self.session_id.as_bytes());
 
         let hash = hasher.finalize();
         let mut result = [0u8; 32];
@@ -662,7 +662,7 @@ impl AtpSession {
     /// Verify object ID consistency with computed hash.
     async fn verify_object_id_consistency(&self, cx: &Cx, object_id: &ObjectId, computed_hash: &[u8; 32]) -> AtpOutcome<bool> {
         // Check if object ID is content-addressed and matches hash
-        let object_bytes = object_id.hash_bytes();
+        let object_bytes = object_id.as_bytes();
         let hash_matches = object_bytes[0..8] == computed_hash[0..8]; // Check first 8 bytes for consistency
         Outcome::ok(hash_matches)
     }
@@ -672,7 +672,7 @@ impl AtpSession {
         // In a real implementation, this would verify cryptographic signatures
         // For now, do basic consistency check
         let signature_valid = computed_hash.iter().any(|&b| b != 0) && // Non-zero hash
-                              !object_id.hash_bytes().iter().all(|&b| b == 0); // Non-zero object ID
+                              !object_id.as_bytes().iter().all(|&b| b == 0); // Non-zero object ID
         Outcome::ok(signature_valid)
     }
 
@@ -683,7 +683,7 @@ impl AtpSession {
         // Create manifest with deterministic content
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-GRAPH-MANIFEST-V1\0");
-        hasher.update(root_object.hash_bytes());
+        hasher.update(root_object.as_bytes());
         hasher.update(&self.local_peer_id);
 
         let manifest_hash = hasher.finalize();
@@ -702,7 +702,7 @@ impl AtpSession {
         // For now, generate a deterministic order based on manifest
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-TRAVERSAL-ORDER-V1\0");
-        hasher.update(manifest.object_id().hash_bytes());
+        hasher.update(manifest.id.as_bytes());
         hasher.update(&self.local_peer_id);
 
         let order_hash = hasher.finalize();
@@ -726,16 +726,16 @@ impl AtpSession {
         // Generate deterministic object data based on object ID
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-OBJECT-DATA-V1\0");
-        hasher.update(object_id.hash_bytes());
+        hasher.update(object_id.as_bytes());
         hasher.update(&self.local_peer_id);
-        hasher.update(self.session_id.hash_bytes());
+        hasher.update(self.session_id.as_bytes());
 
         let data_hash = hasher.finalize();
 
         // Create object data with header
         let mut object_data = Vec::new();
         object_data.extend_from_slice(b"ATP-OBJ\x01"); // Magic + version
-        object_data.extend_from_slice(object_id.hash_bytes()); // Object ID
+        object_data.extend_from_slice(object_id.as_bytes()); // Object ID
         object_data.extend_from_slice(&(data_hash.len() as u32).to_be_bytes()); // Size
         object_data.extend_from_slice(&data_hash); // Content
 
@@ -749,15 +749,15 @@ impl AtpSession {
         // Generate proof data
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-GRAPH-PROOF-V1\0");
-        hasher.update(root_object.hash_bytes());
-        hasher.update(manifest.object_id().hash_bytes());
+        hasher.update(root_object.as_bytes());
+        hasher.update(manifest.id.as_bytes());
         hasher.update(&self.local_peer_id);
 
         let proof_hash = hasher.finalize();
 
         let mut proof_data = Vec::new();
         proof_data.extend_from_slice(b"ATP-PROOF\x01"); // Magic + version
-        proof_data.extend_from_slice(root_object.hash_bytes()); // Root object
+        proof_data.extend_from_slice(root_object.as_bytes()); // Root object
         proof_data.extend_from_slice(&proof_hash); // Proof hash
 
         Outcome::ok(proof_data)
@@ -1645,7 +1645,7 @@ mod tests {
             // Simulate streaming data of unknown final size
             for i in 0..10 {
                 let data = format!("Stream chunk {}", i);
-                writer.write_all(cx, data.hash_bytes()).await.unwrap();
+                writer.write_all(cx, data.as_bytes()).await.unwrap();
             }
 
             let proof = writer.finalize(cx).await.unwrap();
@@ -1689,7 +1689,7 @@ mod tests {
 
             // 2. Check send_object creates real transfer handle with non-zero IDs
             let handle = session.send_object(cx, object_id, remote_peer).await.unwrap();
-            assert_ne!(handle.transfer_id.hash_bytes(), &[0u8; 32], "Transfer ID should not be all zeros");
+            assert_ne!(handle.transfer_id.as_bytes(), &[0u8; 32], "Transfer ID should not be all zeros");
 
             // 3. Check receive_object creates real receipt with non-dummy values
             let transfer_id = handle.transfer_id.clone();
