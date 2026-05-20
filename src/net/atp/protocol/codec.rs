@@ -75,18 +75,24 @@ impl AtpFrameCodec {
         };
 
         // Parse version
-        let version_varint = try_parse_varint(buf, &mut cursor)?;
+        let Some(version_varint) = try_parse_varint(buf, &mut cursor) else {
+            return Ok(None); // Need more data
+        };
         let version = ProtocolVersion(version_varint.value() as u32);
         if version != ProtocolVersion::V0 {
             return Err(FrameError::UnsupportedVersion(version.0));
         }
 
         // Parse frame type
-        let frame_type_varint = try_parse_varint(buf, &mut cursor)?;
+        let Some(frame_type_varint) = try_parse_varint(buf, &mut cursor) else {
+            return Ok(None); // Need more data
+        };
         let frame_type = FrameType::from_varint(frame_type_varint)?;
 
         // Parse payload length
-        let payload_length = try_parse_varint(buf, &mut cursor)?;
+        let Some(payload_length) = try_parse_varint(buf, &mut cursor) else {
+            return Ok(None); // Need more data
+        };
         if payload_length.value() > MAX_FRAME_SIZE {
             return Err(FrameError::FrameTooLarge {
                 size: payload_length.value(),
@@ -95,7 +101,9 @@ impl AtpFrameCodec {
         }
 
         // Parse extension count
-        let extension_count = try_parse_varint(buf, &mut cursor)?;
+        let Some(extension_count) = try_parse_varint(buf, &mut cursor) else {
+            return Ok(None); // Need more data
+        };
         if extension_count.value() > MAX_EXTENSION_COUNT {
             return Err(FrameError::ExtensionTooLarge {
                 size: extension_count.value(),
@@ -105,8 +113,14 @@ impl AtpFrameCodec {
         // Parse extensions
         let mut extensions = HashMap::new();
         for _ in 0..extension_count.value() {
-            let ext_id = try_parse_varint(buf, &mut cursor)?.value() as u16;
-            let ext_len = try_parse_varint(buf, &mut cursor)?;
+            let Some(ext_id_varint) = try_parse_varint(buf, &mut cursor) else {
+                return Ok(None); // Need more data
+            };
+            let ext_id = ext_id_varint.value() as u16;
+
+            let Some(ext_len) = try_parse_varint(buf, &mut cursor) else {
+                return Ok(None); // Need more data
+            };
 
             if ext_len.value() > MAX_EXTENSION_SIZE {
                 return Err(FrameError::ExtensionTooLarge {
