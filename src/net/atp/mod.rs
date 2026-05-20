@@ -13,6 +13,9 @@
 //! - Cancellation-correct with proper obligation tracking
 //! - Platform-agnostic with explicit capability detection
 
+pub mod path;
 pub mod protocol;
+pub mod rendezvous;
+pub mod stun;
 
 pub use protocol::*;
