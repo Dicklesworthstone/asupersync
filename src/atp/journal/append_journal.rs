@@ -334,7 +334,12 @@ impl AppendJournal {
         for generation_num in 0..=self.generation {
             let file_path = self.config.base_dir.join(format!("journal_gen_{:06}.dat", generation_num));
             if file_path.exists() {
-                let entries = self.read_entries_from_file(&file_path)?;
+                let entries = match self.read_entries_from_file(&file_path) {
+                    Outcome::Ok(e) => e,
+                    Outcome::Err(err) => return Outcome::err(err),
+                    Outcome::Cancelled(r) => return Outcome::cancelled(r),
+                    Outcome::Panicked(p) => return Outcome::panicked(p),
+                };
                 for entry in entries {
                     all_entries.push(entry.record);
                 }

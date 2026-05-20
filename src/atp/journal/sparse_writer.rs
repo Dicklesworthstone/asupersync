@@ -517,13 +517,17 @@ impl SparseWriter {
                 super::FsyncPolicy::VerifiedChunks => {
                     // Sync only if verification passed
                     if matches!(state.verification_state, VerificationState::Verified { .. }) {
-                        file.sync_data()
-                            .map_err(|e| SparseWriterError::SyncFailed(e.to_string()))?;
+                        match file.sync_data() {
+                            Ok(_) => {},
+                            Err(e) => return Outcome::err(SparseWriterError::SyncFailed(e.to_string())),
+                        }
                     }
                 }
                 super::FsyncPolicy::BeforeCommit => {
-                    file.sync_data()
-                        .map_err(|e| SparseWriterError::SyncFailed(e.to_string()))?;
+                    match file.sync_data() {
+                        Ok(_) => {},
+                        Err(e) => return Outcome::err(SparseWriterError::SyncFailed(e.to_string())),
+                    }
                 }
             }
         }
@@ -533,40 +537,50 @@ impl SparseWriter {
 
     async fn atomic_commit(&self) -> Outcome<PathBuf, SparseWriterError> {
         let state = self.state.lock().unwrap();
-        let temp_path = state
-            .temp_path
-            .as_ref()
-            .ok_or(SparseWriterError::NoTempFile)?;
+        let temp_path = match state.temp_path.as_ref() {
+            Some(path) => path,
+            None => return Outcome::err(SparseWriterError::NoTempFile),
+        };
         let final_path = &state.final_path;
 
         match self.config.commit_policy {
             CommitPolicy::AtomicRename => {
-                std::fs::rename(temp_path, final_path)
-                    .map_err(|e| SparseWriterError::CommitFailed(e.to_string()))?;
+                match std::fs::rename(temp_path, final_path) {
+                    Ok(_) => {},
+                    Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                }
             }
             CommitPolicy::CopyAndVerify => {
-                std::fs::copy(temp_path, final_path)
-                    .map_err(|e| SparseWriterError::CommitFailed(e.to_string()))?;
+                match std::fs::copy(temp_path, final_path) {
+                    Ok(_) => {},
+                    Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                }
                 // TODO: Add verification step
             }
             CommitPolicy::LinkAndUnlink => {
                 #[cfg(unix)]
                 {
-                    std::fs::hard_link(temp_path, final_path)
-                        .map_err(|e| SparseWriterError::CommitFailed(e.to_string()))?;
-                    std::fs::remove_file(temp_path)
-                        .map_err(|e| SparseWriterError::CommitFailed(e.to_string()))?;
+                    match std::fs::hard_link(temp_path, final_path) {
+                        Ok(_) => {},
+                        Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                    }
+                    match std::fs::remove_file(temp_path) {
+                        Ok(_) => {},
+                        Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                    }
                 }
                 #[cfg(not(unix))]
                 {
                     // Fallback to copy on non-Unix systems
-                    std::fs::copy(temp_path, final_path)
-                        .map_err(|e| SparseWriterError::CommitFailed(e.to_string()))?;
+                    match std::fs::copy(temp_path, final_path) {
+                        Ok(_) => {},
+                        Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                    }
                 }
             }
         }
 
-        Ok(final_path.clone())
+        Outcome::ok(final_path.clone())
     }
 
     async fn cleanup_temp_file(&self) -> Result<(), SparseWriterError> {

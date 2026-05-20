@@ -748,6 +748,7 @@ pub fn plan_directory_sync(
     let source_paths = source.entries.keys().cloned().collect::<BTreeSet<_>>();
 
     append_case_conflict_decisions(source, destination, policy, &mut decisions);
+    append_identity_conflict_decisions(source, destination, policy, &mut decisions);
 
     for (path, source_entry) in &source.entries {
         if source_entry.kind == DirectoryEntryKind::Symlink {
@@ -853,6 +854,27 @@ fn append_case_conflict_decisions(
                 BTreeSet::from([MetadataCaveat::CaseSensitivity]),
             ));
         }
+    }
+}
+
+fn append_identity_conflict_decisions(
+    source: &DirectoryManifest,
+    destination: &DirectoryManifest,
+    policy: DirectorySyncPolicy,
+    decisions: &mut Vec<DirectorySyncDecision>,
+) {
+    let mut conflicted_paths = identity_conflicts(source);
+    conflicted_paths.extend(identity_conflicts(destination));
+
+    for path in conflicted_paths {
+        decisions.push(decision(
+            path,
+            None,
+            DirectorySyncAction::Conflict,
+            policy,
+            "stable_identity_conflict",
+            BTreeSet::new(),
+        ));
     }
 }
 
@@ -1002,15 +1024,37 @@ fn create_or_restore_action(policy: DirectorySyncPolicy) -> DirectorySyncAction 
 }
 
 fn identity_index(manifest: &DirectoryManifest) -> BTreeMap<String, DirectoryPath> {
-    manifest
-        .entries
-        .iter()
-        .filter_map(|(path, entry)| {
-            entry
-                .stable_identity()
-                .map(|identity| (identity.to_string(), path.clone()))
+    identity_groups(manifest)
+        .into_iter()
+        .filter_map(|(identity, paths)| {
+            if paths.len() == 1 {
+                paths.into_iter().next().map(|path| (identity, path))
+            } else {
+                None
+            }
         })
         .collect()
+}
+
+fn identity_conflicts(manifest: &DirectoryManifest) -> BTreeSet<DirectoryPath> {
+    identity_groups(manifest)
+        .into_values()
+        .filter(|paths| paths.len() > 1)
+        .flatten()
+        .collect()
+}
+
+fn identity_groups(manifest: &DirectoryManifest) -> BTreeMap<String, Vec<DirectoryPath>> {
+    let mut groups = BTreeMap::new();
+    for (path, entry) in &manifest.entries {
+        if let Some(identity) = entry.stable_identity() {
+            groups
+                .entry(identity.to_string())
+                .or_insert_with(Vec::new)
+                .push(path.clone());
+        }
+    }
+    groups
 }
 
 fn detect_rename(
