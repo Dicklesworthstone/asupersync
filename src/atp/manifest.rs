@@ -252,6 +252,20 @@ pub struct MerkleRoot {
     hash: [u8; 32],
 }
 
+fn deterministic_f32_be_bytes(value: f32) -> [u8; 4] {
+    const CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
+
+    let bits = if value.is_nan() {
+        CANONICAL_NAN_BITS
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    };
+
+    bits.to_be_bytes()
+}
+
 impl MerkleRoot {
     /// Construct from hash bytes.
     #[must_use]
@@ -372,7 +386,7 @@ impl MerkleRoot {
             hasher.update(layout.source_symbols.to_be_bytes());
             hasher.update(layout.total_symbols.to_be_bytes());
             hasher.update(layout.symbol_size.to_be_bytes());
-            hasher.update(layout.overhead_ratio.to_be_bytes());
+            hasher.update(deterministic_f32_be_bytes(layout.overhead_ratio));
 
             for sub_block in &layout.sub_blocks {
                 hasher.update(sub_block.index.to_be_bytes());
@@ -430,7 +444,7 @@ impl MerkleRoot {
             hasher.update([u8::from(proof.allow_lossy_transforms)]);
             hasher.update([u8::from(proof.require_plaintext_hash)]);
             if let Some(ratio) = proof.max_compression_ratio {
-                hasher.update(ratio.to_be_bytes());
+                hasher.update(deterministic_f32_be_bytes(ratio));
             }
             hasher.update([proof.minimum_proof_strength as u8]);
             for domain in &proof.encryption_domains {
@@ -457,7 +471,9 @@ impl MerkleRoot {
 
             // Hash repair layout
             hasher.update(repair_group.repair_layout.total_repair_symbols.to_be_bytes());
-            hasher.update(repair_group.repair_layout.overhead_ratio.to_be_bytes());
+            hasher.update(deterministic_f32_be_bytes(
+                repair_group.repair_layout.overhead_ratio,
+            ));
             hasher.update(repair_group.repair_layout.systematic_config.systematic_rows.to_be_bytes());
             hasher.update(repair_group.repair_layout.systematic_config.sub_symbols.to_be_bytes());
             hasher.update(repair_group.repair_layout.systematic_config.alignment.to_be_bytes());
@@ -1776,7 +1792,7 @@ impl Manifest {
             bytes.extend_from_slice(&layout.source_symbols.to_be_bytes());
             bytes.extend_from_slice(&layout.total_symbols.to_be_bytes());
             bytes.extend_from_slice(&layout.symbol_size.to_be_bytes());
-            bytes.extend_from_slice(&layout.overhead_ratio.to_be_bytes());
+            bytes.extend_from_slice(&deterministic_f32_be_bytes(layout.overhead_ratio));
 
             bytes.extend_from_slice(&(layout.sub_blocks.len() as u32).to_be_bytes());
             for sub_block in &layout.sub_blocks {
@@ -2109,6 +2125,22 @@ mod tests {
         // Empty graph should have consistent root
         let root2 = MerkleRoot::from_graph(&graph);
         assert_eq!(root, root2);
+    }
+
+    #[test]
+    fn deterministic_f32_manifest_bytes_are_stable() {
+        assert_eq!(
+            deterministic_f32_be_bytes(10.0),
+            10.0_f32.to_bits().to_be_bytes()
+        );
+        assert_eq!(
+            deterministic_f32_be_bytes(f32::from_bits(0x7fc0_0001)),
+            0x7fc0_0000_u32.to_be_bytes()
+        );
+        assert_eq!(
+            deterministic_f32_be_bytes(-0.0),
+            deterministic_f32_be_bytes(0.0)
+        );
     }
 
     #[test]
