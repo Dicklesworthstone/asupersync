@@ -47,6 +47,7 @@ impl PacketProtectionSpace {
         }
     }
 
+    #[cfg(any(test, feature = "test-internals", feature = "tls"))]
     const fn code(self) -> u8 {
         match self {
             Self::Initial => 0,
@@ -394,6 +395,7 @@ pub struct ProtectionProof {
 }
 
 impl ProtectionProof {
+    #[cfg(any(test, feature = "test-internals", feature = "tls"))]
     fn success(provider_kind: &'static str, key: &ProtectionKeySnapshot) -> Self {
         Self {
             provider_kind,
@@ -927,6 +929,7 @@ fn rustls_version_code(version: rustls::quic::Version) -> u8 {
     }
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone)]
 struct DeterministicKeySlot {
     snapshot: ProtectionKeySnapshot,
@@ -1217,6 +1220,7 @@ impl QuicPacketProtectionProvider for DeterministicQuicCryptoProvider {
     }
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn derive_secret(
     space: PacketProtectionSpace,
     key_phase: bool,
@@ -1235,6 +1239,7 @@ fn derive_secret(
     hasher.finalize().into()
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn derive_key_id(secret: &[u8; 32]) -> [u8; 16] {
     let mut hasher = Sha256::new();
     hasher.update(b"asupersync/quic-protection-key-id/v1");
@@ -1245,6 +1250,7 @@ fn derive_key_id(secret: &[u8; 32]) -> [u8; 16] {
     out
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn apply_keystream(secret: &[u8; 32], packet_number: u64, aad: &[u8], input: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(input.len());
     let mut counter = 0u64;
@@ -1269,6 +1275,7 @@ fn apply_keystream(secret: &[u8; 32], packet_number: u64, aad: &[u8], input: &[u
     output
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn compute_tag(
     secret: &[u8; 32],
     space: PacketProtectionSpace,

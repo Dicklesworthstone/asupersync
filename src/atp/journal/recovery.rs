@@ -405,14 +405,14 @@ pub async fn recover_journal_and_bitmap(
         fs::write(&bitmap_path, exported).await?;
     }
 
-    tracing::info!(
+    cx.trace(&format!(
         "Recovery completed: {} transfers, {} chunks, {} records processed ({} duplicates, {} corrupted)",
         stats.transfers_recovered,
         stats.chunks_recovered,
         stats.total_records,
         stats.duplicates_skipped,
         stats.corrupted_skipped
-    );
+    ));
 
     Ok((journal, bitmaps))
 }

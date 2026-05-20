@@ -2,125 +2,215 @@
 # ATP-M5: Core ATP Dependency Validation
 #
 # Validates that ATP core (without fuzz, test-internals, or dev features)
-# contains no external QUIC stacks or Tokio runtime dependencies.
+# contains no external QUIC stacks or Tokio runtime dependencies in the
+# resolved normal dependency graph.
 
 set -euo pipefail
 
 echo "=== ATP Core Dependency Validation ==="
 
-# Create audit report directory
-mkdir -p artifacts/audit
+ARTIFACT_DIR="artifacts/audit"
+mkdir -p "$ARTIFACT_DIR"
 
-# Check ATP core features (production-only)
-echo "Checking ATP core dependencies (production features only)..."
+if [[ ! -f Cargo.toml ]]; then
+    echo "ERROR: run from the asupersync project root" >&2
+    exit 2
+fi
 
-# Build metadata for core ATP features only
-CORE_FEATURES="default,metrics,quic,http3,tls,compression"
-echo "Core features: $CORE_FEATURES"
+audit_profile() {
+    local profile="$1"
+    local forbid_tokio="$2"
+    shift 2
 
-cargo metadata --no-deps --features "$CORE_FEATURES" --format-version 1 > artifacts/audit/atp-core-metadata.json
+    local tree_file="$ARTIFACT_DIR/atp-core-tree-${profile}.txt"
+    local violations_file="$ARTIFACT_DIR/atp-core-tree-${profile}.violations.json"
 
-# Extract just the workspace packages (not all transitive deps)
-echo "Analyzing workspace package dependencies..."
+    echo "Checking resolved normal dependency graph: $profile"
+    if ! cargo tree -e normal -p asupersync "$@" >"$tree_file"; then
+        echo "ERROR: failed to generate cargo tree for $profile" >&2
+        return 1
+    fi
 
-python3 - <<'EOF'
+    if ! python3 - "$profile" "$tree_file" "$violations_file" "$forbid_tokio" <<'EOF'
 import json
+import re
 import sys
 
-# Load core metadata
-with open('artifacts/audit/atp-core-metadata.json', 'r') as f:
-    metadata = json.load(f)
+profile, tree_path, violations_path, forbid_tokio_arg = sys.argv[1:5]
+forbid_tokio = forbid_tokio_arg == "true"
 
-# Get workspace members
-workspace_members = set(metadata.get('workspace_members', []))
-packages = metadata.get('packages', [])
-
-# Filter to just workspace packages
-workspace_packages = [pkg for pkg in packages if pkg.get('id') in workspace_members]
-
-print(f"Workspace packages: {len(workspace_packages)}")
-for pkg in workspace_packages:
-    print(f"  - {pkg.get('name')} v{pkg.get('version')}")
-
-# Check for banned dependencies in workspace packages only
-banned_core_deps = {
-    'quinn', 'quiche', 'h3', 'h3-quinn', 's2n-quic',
-    'tokio', 'tokio-util', 'tokio-stream',
-    'async-std', 'smol', 'glommio'
+forbidden_quic = {
+    "quinn",
+    "quinn-proto",
+    "quinn-udp",
+    "quiche",
+    "s2n-quic",
+    "s2n-quic-core",
+    "s2n-quic-transport",
+    "h3",
+    "h3-quinn",
+    "h3-quiche",
+    "msquic",
+    "msquic-sys",
+    "cloudflare-quic",
+    "neqo-transport",
+    "neqo-http3",
+    "lsquic",
+    "lsquic-sys",
 }
 
+forbidden_tokio = {
+    "tokio",
+    "tokio-util",
+    "tokio-stream",
+    "tokio-tungstenite",
+    "hyper",
+    "reqwest",
+    "axum",
+    "tower-http",
+    "async-std",
+    "smol",
+    "glommio",
+}
+
+tree_prefix = re.compile(r"^[\s│├└─]+")
+package_line = re.compile(r"^([A-Za-z0-9_.-]+)\s+v[0-9]")
 violations = []
+seen = set()
 
-for pkg in workspace_packages:
-    pkg_name = pkg.get('name', '')
+with open(tree_path, "r", encoding="utf-8") as tree:
+    for raw_line in tree:
+        line = tree_prefix.sub("", raw_line).strip()
+        match = package_line.match(line)
+        if not match:
+            continue
+        crate = match.group(1)
 
-    # Skip packages that are allowed to have these deps
-    if pkg_name in ('asupersync-tokio-compat', 'asupersync-conformance'):
-        continue
+        violation_class = None
+        if crate in forbidden_quic:
+            violation_class = "external-quic-stack"
+        elif forbid_tokio and crate in forbidden_tokio:
+            violation_class = "tokio-or-runtime-stack"
 
-    # Check direct dependencies (NOT dev dependencies)
-    for dep in pkg.get('dependencies', []):
-        dep_name = dep.get('name', '')
-        dep_kind = dep.get('kind', None)
-
-        # Skip dev dependencies - they're not part of the production build
-        if dep_kind == 'dev':
+        if violation_class is None:
             continue
 
-        if dep_name in banned_core_deps:
-            # Check if it's optional or feature-gated
-            dep_optional = dep.get('optional', False)
-            dep_features = dep.get('features', [])
+        key = (crate, violation_class)
+        if key in seen:
+            continue
+        seen.add(key)
+        violations.append(
+            {
+                "profile": profile,
+                "crate": crate,
+                "class": violation_class,
+                "tree_file": tree_path,
+            }
+        )
 
-            # Allow optional dependencies - they're only included when explicitly requested
-            if not dep_optional:
-                violations.append({
-                    'package': pkg_name,
-                    'banned_dep': dep_name,
-                    'reason': f'Direct dependency on banned package: {dep_name}',
-                    'optional': dep_optional,
-                    'features': dep_features
-                })
+with open(violations_path, "w", encoding="utf-8") as out:
+    json.dump(
+        {
+            "profile": profile,
+            "tree_file": tree_path,
+            "forbid_tokio": forbid_tokio,
+            "violations": violations,
+        },
+        out,
+        indent=2,
+        sort_keys=True,
+    )
+    out.write("\n")
 
 if violations:
-    print(f"\n✗ Found {len(violations)} core dependency violations:")
-    for v in violations:
-        print(f"  {v['package']} -> {v['banned_dep']}: {v['reason']}")
-        if v['optional']:
-            print(f"    (optional: {v['optional']}, features: {v['features']})")
+    print(f"  Found {len(violations)} forbidden dependencies:")
+    for violation in violations:
+        print(f"    {violation['class']}: {violation['crate']}")
     sys.exit(1)
-else:
-    print("\n✓ ATP core dependencies are clean - no banned packages found")
 
+print("  No forbidden dependencies found")
 EOF
-
-# Test production feature combinations (non-default)
-echo "Testing production feature builds..."
-
-# Test core runtime features without test-internals
-if cargo check --no-default-features --features "quic,http3,tls,compression" --lib >/dev/null 2>&1; then
-    echo "✓ Core ATP features build successfully"
-else
-    echo "⚠ Core ATP features may require additional dependencies (checking details...)"
-    # Try with proc-macros which might be needed
-    if cargo check --no-default-features --features "proc-macros,quic,http3,tls,compression" --lib >/dev/null 2>&1; then
-        echo "✓ Core ATP features build with proc-macros"
-    else
-        echo "⚠ Core ATP features have build dependencies (may be acceptable)"
+    then
+        echo "ERROR: dependency violations in $profile" >&2
+        return 1
     fi
-fi
+}
 
-# Test that metrics feature builds independently
-if cargo check --no-default-features --features "metrics" --lib >/dev/null 2>&1; then
-    echo "✓ Metrics feature builds independently"
-elif cargo check --no-default-features --features "metrics,proc-macros" --lib >/dev/null 2>&1; then
-    echo "✓ Metrics feature builds with proc-macros"
-else
-    echo "⚠ Metrics feature has build dependencies"
-fi
+assert_no_tokio_path() {
+    local profile="$1"
+    shift
+
+    local invert_file="$ARTIFACT_DIR/atp-core-tokio-invert-${profile}.txt"
+
+    echo "Checking Tokio inversion proof: $profile"
+    if ! cargo tree -e normal -p asupersync "$@" -i tokio >"$invert_file" 2>&1; then
+        echo "ERROR: failed to run Tokio inversion proof for $profile" >&2
+        cat "$invert_file" >&2
+        return 1
+    fi
+
+    if ! grep -q "nothing to print" "$invert_file"; then
+        echo "ERROR: Tokio is present in production profile $profile" >&2
+        cat "$invert_file" >&2
+        return 1
+    fi
+
+    echo "  Tokio not present"
+}
+
+require_feature_build() {
+    local label="$1"
+    local primary_features="$2"
+    local fallback_features="$3"
+
+    local primary_log="$ARTIFACT_DIR/atp-core-build-${label}-primary.log"
+    local fallback_log="$ARTIFACT_DIR/atp-core-build-${label}-fallback.log"
+
+    echo "Checking feature build: $label"
+    if cargo check --no-default-features --features "$primary_features" --lib >"$primary_log" 2>&1; then
+        echo "  Builds with features: $primary_features"
+        return 0
+    fi
+
+    if [[ -n "$fallback_features" ]] && cargo check --no-default-features --features "$fallback_features" --lib >"$fallback_log" 2>&1; then
+        echo "  Builds with features: $fallback_features"
+        return 0
+    fi
+
+    echo "ERROR: feature build failed for $label" >&2
+    echo "  primary log: $primary_log" >&2
+    if [[ -n "$fallback_features" ]]; then
+        echo "  fallback log: $fallback_log" >&2
+    fi
+    return 1
+}
+
+failures=0
+
+audit_profile "default-production" "true" || failures=$((failures + 1))
+audit_profile "metrics-production" "true" --features metrics || failures=$((failures + 1))
+audit_profile "quic-native" "false" --features quic || failures=$((failures + 1))
+audit_profile "http3-native" "false" --features http3 || failures=$((failures + 1))
+
+assert_no_tokio_path "default-production" || failures=$((failures + 1))
+assert_no_tokio_path "metrics-production" --features metrics || failures=$((failures + 1))
+
+require_feature_build \
+    "core" \
+    "quic,http3,tls,compression" \
+    "proc-macros,quic,http3,tls,compression" || failures=$((failures + 1))
+require_feature_build \
+    "metrics" \
+    "metrics" \
+    "metrics,proc-macros" || failures=$((failures + 1))
 
 echo ""
-echo "✓ ATP core dependency validation passed"
-echo "  - No external QUIC stacks in workspace packages"
-echo "  - No Tokio runtime in core features"
-echo "  - Core and metrics features build independently"
+if [[ "$failures" -ne 0 ]]; then
+    echo "ATP core dependency validation failed with $failures failure(s)" >&2
+    exit 1
+fi
+
+echo "ATP core dependency validation passed"
+echo "  - Resolved normal dependency graphs checked for default, metrics, quic, and http3 profiles"
+echo "  - Default and metrics production profiles prove Tokio is absent"
+echo "  - Core and metrics feature build checks fail closed"

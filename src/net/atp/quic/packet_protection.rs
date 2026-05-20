@@ -129,6 +129,12 @@ impl AtpPacketProtection {
                     let provider = DeterministicQuicCryptoProvider::new();
                     (Box::new(provider), "deterministic")
                 }
+                #[cfg(not(any(test, feature = "test-internals")))]
+                ProviderOptions::Deterministic { .. } => {
+                    return Outcome::err(AtpError::Protocol(
+                        ProtocolError::SessionStateMismatch,
+                    ));
+                }
             }
             #[cfg(all(not(feature = "tls"), any(test, feature = "test-internals")))]
             {

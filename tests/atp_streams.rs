@@ -3,13 +3,15 @@
 //! Tests for ATP stream scheduling, flow control, reassembly, and lifecycle.
 
 use asupersync::{
-    net::atp::streams::{
-        StreamManager, StreamPriority, StreamId, AtpStream,
-        ConnectionFlowControl, StreamScheduler,
-    },
-    cx::test_cx,
     bytes::Bytes,
+    net::atp::streams::{
+        AtpStream, ConnectionFlowControl, StreamId, StreamManager, StreamPriority, StreamScheduler,
+    },
 };
+
+fn test_cx() -> asupersync::cx::Cx {
+    asupersync::cx::Cx::for_testing()
+}
 
 #[test]
 fn test_stream_manager_lifecycle() {
@@ -82,12 +84,7 @@ fn test_connection_flow_control() {
 #[test]
 fn test_stream_send_receive() {
     let cx = test_cx();
-    let mut stream = AtpStream::new(
-        StreamId::new(0),
-        true,
-        StreamPriority::Data,
-        true,
-    );
+    let mut stream = AtpStream::new(StreamId::new(0), true, StreamPriority::Data, true);
 
     // Queue data for sending
     let data = Bytes::from("hello world");
@@ -112,12 +109,7 @@ fn test_stream_send_receive() {
 #[test]
 fn test_stream_out_of_order_reassembly() {
     let cx = test_cx();
-    let mut stream = AtpStream::new(
-        StreamId::new(4),
-        true,
-        StreamPriority::Data,
-        false,
-    );
+    let mut stream = AtpStream::new(StreamId::new(4), true, StreamPriority::Data, false);
 
     // Receive data out of order - second chunk first
     let data2 = stream.receive_data(&cx, 5, Bytes::from("world"), false).unwrap();
@@ -137,13 +129,17 @@ fn test_stream_reset_handling() {
 
     // Accept an incoming stream
     let stream_id = StreamId::new(0);
-    manager.accept_stream(&cx, stream_id, StreamPriority::Control).unwrap();
+    manager
+        .accept_stream(&cx, stream_id, StreamPriority::Control)
+        .unwrap();
 
     assert!(!manager.get_stream(stream_id).unwrap().is_closed());
 
     // Reset the stream
     use asupersync::net::atp::streams::StreamResetCode;
-    manager.reset_stream(&cx, stream_id, StreamResetCode::ApplicationClose).unwrap();
+    manager
+        .reset_stream(&cx, stream_id, StreamResetCode::ApplicationClose)
+        .unwrap();
 
     assert!(manager.get_stream(stream_id).unwrap().is_closed());
 }
@@ -151,12 +147,7 @@ fn test_stream_reset_handling() {
 #[test]
 fn test_stream_fin_handling() {
     let cx = test_cx();
-    let mut stream = AtpStream::new(
-        StreamId::new(8),
-        true,
-        StreamPriority::Data,
-        true,
-    );
+    let mut stream = AtpStream::new(StreamId::new(8), true, StreamPriority::Data, true);
 
     // Send with FIN
     let data = Bytes::from("final data");
@@ -176,7 +167,7 @@ fn test_stream_fin_handling() {
     assert_eq!(received.len(), 1);
 
     // Stream should show proper receive state
-    use asupersync::net::atp::streams::{ReceiveState};
+    use asupersync::net::atp::streams::ReceiveState;
     let stats = stream.statistics();
     assert!(matches!(stats.receive_state, ReceiveState::DataRecvd));
 }
@@ -184,12 +175,7 @@ fn test_stream_fin_handling() {
 #[test]
 fn test_stream_stop_sending() {
     let cx = test_cx();
-    let mut stream = AtpStream::new(
-        StreamId::new(12),
-        true,
-        StreamPriority::Repair,
-        false,
-    );
+    let mut stream = AtpStream::new(StreamId::new(12), true, StreamPriority::Repair, false);
 
     // Queue some data
     let data = Bytes::from("data to stop");

@@ -1,3 +1,7 @@
+mod asupersync {
+    pub use ::asupersync::*;
+}
+
 #[path = "../src/atp/atpd/mod.rs"]
 mod atpd;
 #[path = "../src/atp/supervision/mod.rs"]
