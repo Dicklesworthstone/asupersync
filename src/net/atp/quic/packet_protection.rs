@@ -192,10 +192,13 @@ impl AtpPacketProtection {
         cx: &Cx,
         request: PacketProtectionRequest<'_>,
     ) -> AtpOutcome<ProtectedPacket> {
-        cx.trace(&format!(
-            "atp_packet_protection_protect space={:?} pn={} phase={}",
-            request.space, request.packet_number, request.key_phase
-        ));
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields("atp_packet_protection_protect", &[
+                ("space", &format!("{:?}", request.space)),
+                ("pn", &request.packet_number.to_string()),
+                ("phase", &request.key_phase.to_string()),
+            ]);
+        }
 
         let result = self.provider
             .protect_packet(request)
@@ -225,10 +228,13 @@ impl AtpPacketProtection {
         packet: &ProtectedPacket,
         associated_data: &[u8],
     ) -> AtpOutcome<UnprotectedPacket> {
-        cx.trace(&format!(
-            "atp_packet_protection_unprotect space={:?} pn={} phase={}",
-            packet.space, packet.packet_number, packet.key_phase
-        ));
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields("atp_packet_protection_unprotect", &[
+                ("space", &format!("{:?}", packet.space)),
+                ("pn", &packet.packet_number.to_string()),
+                ("phase", &packet.key_phase.to_string()),
+            ]);
+        }
 
         let result = self.provider
             .unprotect_packet(packet, associated_data)
@@ -258,10 +264,12 @@ impl AtpPacketProtection {
         space: PacketProtectionSpace,
         sample: &[u8],
     ) -> AtpOutcome<HeaderProtectionMask> {
-        cx.trace(&format!(
-            "atp_packet_protection_header_mask space={:?} sample_len={}",
-            space, sample.len()
-        ));
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields("atp_packet_protection_header_mask", &[
+                ("space", &format!("{:?}", space)),
+                ("sample_len", &sample.len().to_string()),
+            ]);
+        }
 
         self.provider
             .header_protection_mask(space, sample)
@@ -275,10 +283,12 @@ impl AtpPacketProtection {
         space: PacketProtectionSpace,
         next_phase: bool,
     ) -> AtpOutcome<ProtectionKeySnapshot> {
-        cx.trace(&format!(
-            "atp_packet_protection_update_key space={:?} phase={}",
-            space, next_phase
-        ));
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields("atp_packet_protection_update_key", &[
+                ("space", &format!("{:?}", space)),
+                ("phase", &next_phase.to_string()),
+            ]);
+        }
 
         let result = self.provider
             .update_key(space, next_phase)
