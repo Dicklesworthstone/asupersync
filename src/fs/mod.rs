@@ -49,6 +49,7 @@ mod lines;
 mod metadata;
 mod open_options;
 mod path_ops;
+pub mod platform;
 mod read_dir;
 pub mod vfs;
 
@@ -65,6 +66,13 @@ pub use open_options::OpenOptions;
 pub use path_ops::{
     canonicalize, copy, hard_link, metadata, read, read_link, read_to_string, remove_file, rename,
     set_permissions, symlink_metadata, write, write_atomic,
+};
+pub use platform::{
+    CapabilityProbe, CapabilityStatus, FilesystemCapabilityProfile,
+    NativePlatformCapabilityProvider, NetworkCapabilityProfile, PLATFORM_CAPABILITY_REPORT_SCHEMA,
+    PlatformCapabilityProvider, PlatformCapabilityReport, PlatformDegradationPolicy,
+    PlatformTarget, ProbeSource, ServiceCapabilityProfile, build_platform_capability_report,
+    detect_platform_capabilities,
 };
 pub use read_dir::{DirEntry, ReadDir, read_dir};
 

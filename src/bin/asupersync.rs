@@ -40,6 +40,10 @@ use asupersync::conformance::{
     requirements_from_entries, scan_conformance_attributes,
 };
 use asupersync::cx::Cx;
+use asupersync::fs::{
+    CapabilityProbe, FilesystemCapabilityProfile, NetworkCapabilityProfile,
+    PlatformCapabilityReport, ServiceCapabilityProfile, detect_platform_capabilities,
+};
 use asupersync::lab::dual_run::{FinalDivergenceClass, ReplayPolicy, RerunDecision, SeedPlan};
 use asupersync::lab::replay::{
     DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
@@ -129,6 +133,8 @@ impl CommonArgsCli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// ATP protocol tooling
+    Atp(AtpArgs),
     /// Trace file inspection utilities
     Trace(TraceArgs),
     /// Conformance tooling
@@ -137,6 +143,25 @@ enum Command {
     Lab(LabArgs),
     /// Doctor tooling for deterministic workspace diagnostics
     Doctor(DoctorArgs),
+}
+
+#[derive(Args, Debug)]
+struct AtpArgs {
+    #[command(subcommand)]
+    command: AtpCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum AtpCommand {
+    /// ATP diagnostics
+    Doctor(AtpDoctorArgs),
+}
+
+#[derive(Args, Debug)]
+struct AtpDoctorArgs {
+    /// Report platform filesystem, network, and service-manager capabilities
+    #[arg(long = "platform", action = ArgAction::SetTrue)]
+    platform: bool,
 }
 
 #[derive(Args, Debug)]
@@ -927,11 +952,36 @@ fn main() {
 
 fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
     match command {
+        Command::Atp(args) => run_atp(args, output),
         Command::Trace(trace_args) => run_trace(trace_args, output),
         Command::Conformance(args) => run_conformance(args, output),
         Command::Lab(args) => run_lab(args, output),
         Command::Doctor(args) => run_doctor(args, output),
     }
+}
+
+fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
+    match args.command {
+        AtpCommand::Doctor(args) => atp_doctor(&args, output),
+    }
+}
+
+fn atp_doctor(args: &AtpDoctorArgs, output: &mut Output) -> Result<(), CliError> {
+    if !args.platform {
+        return Err(CliError::new(
+            "invalid_argument",
+            "atp doctor requires a diagnostic selector",
+        )
+        .detail("Use --platform to report ATP platform capabilities")
+        .exit_code(ExitCode::USER_ERROR));
+    }
+
+    let report = detect_platform_capabilities();
+    let payload = AtpPlatformDoctorOutput { report };
+    output
+        .write(&payload)
+        .map_err(output_write_error("ATP platform capability report"))?;
+    Ok(())
 }
 
 fn effective_output_format(command: &Command, default: OutputFormat) -> OutputFormat {
@@ -1539,6 +1589,98 @@ struct DoctorTaskConsoleViewOutput {
     truncated: bool,
     summary: TaskSummaryWire,
     tasks: Vec<TaskDetailsWire>,
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct AtpPlatformDoctorOutput {
+    report: PlatformCapabilityReport,
+}
+
+impl Outputtable for AtpPlatformDoctorOutput {
+    fn human_format(&self) -> String {
+        let report = &self.report;
+        let mut lines = vec![
+            format!("Schema: {}", report.schema_version),
+            format!(
+                "Target: {}/{}/{} pointer_width={}",
+                report.target.family,
+                report.target.os,
+                report.target.arch,
+                report.target.pointer_width
+            ),
+            "Filesystem:".to_string(),
+        ];
+        append_filesystem_capabilities(&mut lines, &report.filesystem);
+        lines.push("Network:".to_string());
+        append_network_capabilities(&mut lines, &report.network);
+        lines.push("Service:".to_string());
+        append_service_capabilities(&mut lines, &report.service);
+        lines.push("Degradation policy:".to_string());
+        lines.push(format!(
+            "  disk_writer_mode: {}",
+            report.degradation_policy.disk_writer_mode
+        ));
+        lines.push(format!(
+            "  atomic_commit_mode: {}",
+            report.degradation_policy.atomic_commit_mode
+        ));
+        lines.push(format!(
+            "  endpoint_mode: {}",
+            report.degradation_policy.endpoint_mode
+        ));
+        lines.push(format!(
+            "  packaging_mode: {}",
+            report.degradation_policy.packaging_mode
+        ));
+        lines.push(format!("Caveats: {}", report.caveats.len()));
+        for caveat in &report.caveats {
+            lines.push(format!("  - {caveat}"));
+        }
+        lines.push(format!(
+            "Suggested recovery commands: {}",
+            report.suggested_recovery_commands.len()
+        ));
+        for command in &report.suggested_recovery_commands {
+            lines.push(format!("  - {command}"));
+        }
+        lines.join("\n")
+    }
+}
+
+fn append_filesystem_capabilities(lines: &mut Vec<String>, profile: &FilesystemCapabilityProfile) {
+    append_capability(lines, &profile.sparse_files);
+    append_capability(lines, &profile.preallocation);
+    append_capability(lines, &profile.atomic_rename);
+    append_capability(lines, &profile.fsync_durability);
+    append_capability(lines, &profile.max_path_length);
+    append_capability(lines, &profile.case_sensitive_paths);
+    append_capability(lines, &profile.symlink_behavior);
+}
+
+fn append_network_capabilities(lines: &mut Vec<String>, profile: &NetworkCapabilityProfile) {
+    append_capability(lines, &profile.socket_buffers);
+    append_capability(lines, &profile.ipv6);
+    append_capability(lines, &profile.router_assist);
+}
+
+fn append_service_capabilities(lines: &mut Vec<String>, profile: &ServiceCapabilityProfile) {
+    append_capability(lines, &profile.service_manager);
+}
+
+fn append_capability(lines: &mut Vec<String>, capability: &CapabilityProbe) {
+    lines.push(format!(
+        "  {}: {} source={} detail={}",
+        capability.name,
+        capability.status.as_str(),
+        capability.source.as_str(),
+        capability.detail
+    ));
+    if let Some(reason) = &capability.degradation_reason {
+        lines.push(format!("    degradation: {reason}"));
+    }
+    if let Some(command) = &capability.suggested_recovery_command {
+        lines.push(format!("    recovery: {command}"));
+    }
 }
 
 impl Outputtable for DoctorTaskConsoleViewOutput {
@@ -8966,6 +9108,43 @@ lab:
         else {
             panic!("expected doctor evidence-timeline-contract command");
         };
+    }
+
+    #[test]
+    fn atp_doctor_platform_command_parses() {
+        let cli = Cli::try_parse_from(["asupersync", "atp", "doctor", "--platform"])
+            .expect("parse atp doctor --platform");
+
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Doctor(args),
+        }) = cli.command
+        else {
+            panic!("expected atp doctor command");
+        };
+        assert!(args.platform);
+    }
+
+    #[test]
+    fn atp_doctor_requires_platform_selector() {
+        let mut output = Output::with_writer(OutputFormat::Json, Vec::<u8>::new());
+        let err = atp_doctor(&AtpDoctorArgs { platform: false }, &mut output)
+            .expect_err("missing selector should fail");
+
+        assert_eq!(err.error_type, "invalid_argument");
+    }
+
+    #[test]
+    fn atp_platform_doctor_human_output_has_stable_sections() {
+        let payload = AtpPlatformDoctorOutput {
+            report: detect_platform_capabilities(),
+        };
+        let rendered = payload.human_format();
+
+        assert!(rendered.contains("Schema: asupersync.fs.platform_capability_report.v1"));
+        assert!(rendered.contains("Filesystem:"));
+        assert!(rendered.contains("Network:"));
+        assert!(rendered.contains("Service:"));
+        assert!(rendered.contains("Degradation policy:"));
     }
 
     #[test]
