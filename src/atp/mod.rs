@@ -6,7 +6,11 @@
 //! small on purpose: each submodule should expose a reusable, testable model
 //! before endpoint, CLI, daemon, or relay code depends on it.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod doctor;
 pub mod manifest;
 pub mod object;
 pub mod path;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod platform;
 pub mod verifier;

@@ -6,8 +6,6 @@ use asupersync::net::atp::protocol::outcome::{
     AtpError, AtpOutcome, IdempotencyKey, OutcomeClass, RetryPolicy, TransferTranscript,
     TransportError,
 };
-use asupersync::types::outcome::Outcome;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn disconnect_retry_preserves_idempotency() {
