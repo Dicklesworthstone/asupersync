@@ -589,6 +589,8 @@ pub struct ObjectGraph {
     objects: BTreeMap<ObjectId, Object>,
     /// Root objects (entry points).
     roots: BTreeSet<ObjectId>,
+    /// Objects that have at least one parent (for O(1) parent lookup).
+    objects_with_parents: BTreeSet<ObjectId>,
 }
 
 impl ObjectGraph {
@@ -601,6 +603,14 @@ impl ObjectGraph {
     /// Add an object to the graph.
     pub fn add_object(&mut self, object: Object) -> Result<(), ObjectGraphError> {
         let id = object.id.clone();
+
+        // Update parent index for all children of this object
+        for edge in &object.children {
+            self.objects_with_parents.insert(edge.child_id.clone());
+            // Remove child from roots if it was previously a root
+            self.roots.remove(&edge.child_id);
+        }
+
         self.objects.insert(id.clone(), object);
 
         // If this object has no parents, it's a root
@@ -643,10 +653,9 @@ impl ObjectGraph {
 
     /// Check if an object has a parent.
     #[must_use]
+    /// Check if an object has any parents (O(1) lookup using parent index).
     pub fn has_parent(&self, id: &ObjectId) -> bool {
-        self.objects
-            .values()
-            .any(|obj| obj.children.iter().any(|edge| &edge.child_id == id))
+        self.objects_with_parents.contains(id)
     }
 
     /// Validate the graph for consistency.
@@ -988,5 +997,146 @@ mod tests {
         assert!(ObjectKind::ALL.contains(&ObjectKind::SparseImage));
         assert!(ObjectKind::ALL.contains(&ObjectKind::ContainerLayer));
         assert!(ObjectKind::ALL.contains(&ObjectKind::ApplicationDefinedObject));
+    }
+
+    #[test]
+    fn object_graph_parent_index_tracks_objects_with_parents() {
+        let mut graph = ObjectGraph::new();
+
+        // Create file objects that will be children
+        let child1 = Object::file(b"child1".to_vec());
+        let child2 = Object::file(b"child2".to_vec());
+        let child1_id = child1.id.clone();
+        let child2_id = child2.id.clone();
+
+        // Add children to graph first
+        graph.add_object(child1).unwrap();
+        graph.add_object(child2).unwrap();
+
+        // Create directory with children
+        let edge1 = ObjectEdge::new(child1_id.clone(), "child1.txt".to_string());
+        let edge2 = ObjectEdge::new(child2_id.clone(), "child2.txt".to_string());
+        let dir = Object::directory(vec![edge1, edge2]);
+        let dir_id = dir.id.clone();
+
+        // Add directory to graph
+        graph.add_object(dir).unwrap();
+
+        // Children should be tracked as having parents
+        assert!(graph.has_parent(&child1_id), "child1 should have a parent");
+        assert!(graph.has_parent(&child2_id), "child2 should have a parent");
+
+        // Directory should not have a parent (it's a root)
+        assert!(!graph.has_parent(&dir_id), "directory should not have a parent");
+    }
+
+    #[test]
+    fn object_graph_parent_index_maintains_o1_lookup_performance() {
+        let mut graph = ObjectGraph::new();
+
+        // Create a hierarchy: root -> intermediate -> leaf
+        let leaf = Object::file(b"leaf content".to_vec());
+        let leaf_id = leaf.id.clone();
+
+        let edge_to_leaf = ObjectEdge::new(leaf_id.clone(), "leaf.txt".to_string());
+        let intermediate = Object::directory(vec![edge_to_leaf]);
+        let intermediate_id = intermediate.id.clone();
+
+        let edge_to_intermediate = ObjectEdge::new(intermediate_id.clone(), "intermediate".to_string());
+        let root = Object::directory(vec![edge_to_intermediate]);
+        let root_id = root.id.clone();
+
+        // Add objects in order
+        graph.add_object(leaf).unwrap();
+        graph.add_object(intermediate).unwrap();
+        graph.add_root(root).unwrap();
+
+        // Check parent relationships (these should be O(1) lookups)
+        assert!(!graph.has_parent(&root_id), "root should not have parent");
+        assert!(graph.has_parent(&intermediate_id), "intermediate should have parent");
+        assert!(graph.has_parent(&leaf_id), "leaf should have parent");
+
+        // Verify that objects_with_parents set contains exactly the non-root objects
+        assert_eq!(graph.objects_with_parents.len(), 2);
+        assert!(graph.objects_with_parents.contains(&intermediate_id));
+        assert!(graph.objects_with_parents.contains(&leaf_id));
+        assert!(!graph.objects_with_parents.contains(&root_id));
+    }
+
+    #[test]
+    fn object_graph_parent_index_removes_from_roots_when_child_added() {
+        let mut graph = ObjectGraph::new();
+
+        // Create a file that starts as a root
+        let file = Object::file(b"content".to_vec());
+        let file_id = file.id.clone();
+
+        // Add as root initially
+        graph.add_root(file).unwrap();
+
+        // Verify it's in roots and not in objects_with_parents
+        let roots: Vec<_> = graph.roots().cloned().collect();
+        assert!(roots.contains(&file_id));
+        assert!(!graph.has_parent(&file_id));
+
+        // Create a directory that contains the file as a child
+        let edge = ObjectEdge::new(file_id.clone(), "file.txt".to_string());
+        let dir = Object::directory(vec![edge]);
+        let dir_id = dir.id.clone();
+
+        // Add directory (which will update parent index for its children)
+        graph.add_object(dir).unwrap();
+
+        // File should now have a parent and be removed from roots
+        assert!(graph.has_parent(&file_id), "file should now have a parent");
+        assert!(!graph.has_parent(&dir_id), "directory should not have a parent");
+
+        // Check roots - file should be removed, directory should not be in roots yet
+        let roots: Vec<_> = graph.roots().cloned().collect();
+        assert!(!roots.contains(&file_id), "file should be removed from roots");
+        assert!(!roots.contains(&dir_id), "directory should not be auto-added to roots");
+    }
+
+    #[test]
+    fn object_graph_parent_index_consistency_with_existing_objects() {
+        let mut graph = ObjectGraph::new();
+
+        // Create multiple files
+        let file1 = Object::file(b"file1".to_vec());
+        let file2 = Object::file(b"file2".to_vec());
+        let file3 = Object::file(b"file3".to_vec());
+
+        let file1_id = file1.id.clone();
+        let file2_id = file2.id.clone();
+        let file3_id = file3.id.clone();
+
+        // Add files first (they start as potential roots)
+        graph.add_object(file1).unwrap();
+        graph.add_object(file2).unwrap();
+        graph.add_object(file3).unwrap();
+
+        // Initially no files have parents
+        assert!(!graph.has_parent(&file1_id));
+        assert!(!graph.has_parent(&file2_id));
+        assert!(!graph.has_parent(&file3_id));
+
+        // Create directory that references some files
+        let edge1 = ObjectEdge::new(file1_id.clone(), "file1.txt".to_string());
+        let edge2 = ObjectEdge::new(file2_id.clone(), "file2.txt".to_string());
+        // file3 is not referenced, so it remains without parent
+
+        let dir = Object::directory(vec![edge1, edge2]);
+        graph.add_object(dir).unwrap();
+
+        // Check final parent states
+        assert!(graph.has_parent(&file1_id), "file1 should have parent");
+        assert!(graph.has_parent(&file2_id), "file2 should have parent");
+        assert!(!graph.has_parent(&file3_id), "file3 should not have parent");
+
+        // Verify parent index contents
+        assert_eq!(graph.objects_with_parents.len(), 2);
+        assert!(graph.objects_with_parents.contains(&file1_id));
+        assert!(graph.objects_with_parents.contains(&file2_id));
+        assert!(!graph.objects_with_parents.contains(&file3_id));
     }
 }
