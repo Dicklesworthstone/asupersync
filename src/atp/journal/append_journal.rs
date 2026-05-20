@@ -692,13 +692,9 @@ impl AppendJournal {
                 return Outcome::Err(JournalError::WriteFailure(e.to_string()));
             }
 
-            // Optionally fsync
             if self.config.force_sync {
-                if let Err(e) = writer.flush() {
-                    return Outcome::Err(JournalError::SyncFailure(e.to_string()));
-                }
-                if let Err(e) = writer.get_ref().sync_data() {
-                    return Outcome::Err(JournalError::SyncFailure(e.to_string()));
+                if let Err(e) = sync_writer_data(writer) {
+                    return Outcome::Err(e);
                 }
             }
         }
@@ -733,11 +729,8 @@ impl AppendJournal {
     /// Flush any pending writes
     pub fn flush(&mut self) -> Outcome<(), JournalError> {
         if let Some(ref mut writer) = self.writer {
-            if let Err(e) = writer.flush() {
-                return Outcome::Err(JournalError::SyncFailure(e.to_string()));
-            }
-            if let Err(e) = writer.get_ref().sync_data() {
-                return Outcome::Err(JournalError::SyncFailure(e.to_string()));
+            if let Err(e) = sync_writer_data(writer) {
+                return Outcome::Err(e);
             }
         }
         Outcome::Ok(())
@@ -1073,6 +1066,18 @@ impl AppendJournal {
     }
 }
 
+fn sync_writer_data(writer: &mut BufWriter<File>) -> Result<(), JournalError> {
+    // BufWriter bytes must reach the file descriptor before the durability
+    // barrier. Calling sync_data before flush would fsync the old file state.
+    writer
+        .flush()
+        .map_err(|err| JournalError::SyncFailure(err.to_string()))?;
+    writer
+        .get_ref()
+        .sync_data()
+        .map_err(|err| JournalError::SyncFailure(err.to_string()))
+}
+
 /// Journal operation errors
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
@@ -1170,6 +1175,43 @@ mod tests {
         assert_eq!(stats.recent_entries_count, 1);
 
         // Cleanup
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn force_sync_append_is_recoverable_before_explicit_flush_or_drop() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_journal_force_sync_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let config = JournalConfig {
+            base_dir: temp_dir.clone(),
+            force_sync: true,
+            ..Default::default()
+        };
+
+        let mut journal = AppendJournal::new(config.clone()).unwrap();
+        let sequence = journal
+            .append(JournalRecord::Accept {
+                transfer_id: "durable_transfer".to_string(),
+                peer_id: "peer123".to_string(),
+                timestamp: 1234567890,
+            })
+            .unwrap();
+
+        assert_eq!(sequence, 0);
+        assert_eq!(journal.get_stats().sequence, 1);
+
+        let recovered = AppendJournal::new(config).unwrap();
+        let recovered_stats = recovered.get_stats();
+        assert_eq!(recovered_stats.sequence, 1);
+        assert_eq!(recovered_stats.recent_entries_count, 1);
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
