@@ -547,8 +547,11 @@ impl TransportParameters {
         let mut data_buf = BytesMut::from(&data[..]);
 
         while !data_buf.is_empty() {
-            let param_id_varint =
-                VarInt::decode(&mut data_buf)?.ok_or(TransportParameterError::UnexpectedEof)?;
+            let param_id_varint = match VarInt::decode(&mut data_buf) {
+                Outcome::Ok(Some(varint)) => varint,
+                Outcome::Ok(None) => return Err(TransportParameterError::UnexpectedEof),
+                _ => return Err(TransportParameterError::VarInt(VarIntError::InvalidEncoding)),
+            };
             let param_id = param_id_varint.value();
 
             // Check for duplicates
@@ -563,8 +566,11 @@ impl TransportParameters {
                 params.set_parameter(known_id, value);
             } else {
                 // Unknown parameter - preserve as extension
-                let length =
-                    VarInt::decode(&mut data_buf)?.ok_or(TransportParameterError::UnexpectedEof)?;
+                let length = match VarInt::decode(&mut data_buf) {
+                    Outcome::Ok(Some(varint)) => varint,
+                    Outcome::Ok(None) => return Err(TransportParameterError::UnexpectedEof),
+                    _ => return Err(TransportParameterError::VarInt(VarIntError::InvalidEncoding)),
+                };
 
                 if data_buf.len() < length.value() as usize {
                     return Err(TransportParameterError::UnexpectedEof);

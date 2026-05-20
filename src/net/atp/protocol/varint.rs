@@ -40,7 +40,10 @@ impl VarInt {
     /// or values you are certain are within the varint range.
     #[inline]
     pub fn from_u64_unchecked(value: u64) -> Self {
-        VarInt::new(value).expect("varint value exceeds maximum allowed value")
+        match VarInt::new(value) {
+            Outcome::Ok(varint) => varint,
+            _ => panic!("varint value exceeds maximum allowed value"),
+        }
     }
 
     /// Calculate the encoded length without actually encoding.
@@ -152,7 +155,10 @@ impl TryFrom<u64> for VarInt {
     type Error = VarIntError;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
-        VarInt::new(value)
+        match VarInt::new(value) {
+            Outcome::Ok(varint) => Ok(varint),
+            _ => Err(VarIntError::ValueTooLarge(value)),
+        }
     }
 }
 
