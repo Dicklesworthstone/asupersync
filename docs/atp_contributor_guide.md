@@ -20,7 +20,7 @@ QUIC crates or Tokio-runtime dependencies to core ATP.
 | Workstream | Primary files | Proof surface |
 | --- | --- | --- |
 | ATP object graph | `src/atp/object.rs` | inline unit tests, rch all-target check |
-| ATP manifest and commits | `src/atp/manifest.rs` | inline unit tests, graph-commit validation tests |
+| ATP manifest and commits | `src/atp/manifest.rs` | inline unit tests, graph-commit validation tests, `scripts/run_atp_manifest_e2e.sh` |
 | ATP path graph | `src/atp/path.rs` | inline unit tests |
 | ATP verification boundary | `src/atp/object.rs`, `src/atp/manifest.rs` | object graph, manifest, and commit validation tests |
 | ATP binary frames | `src/net/atp/protocol/frames.rs` | codec round-trip tests |
@@ -119,7 +119,13 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_session cargo test --test a
 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_endpoint cargo test --test atp_native_quic_endpoint_contract -- --nocapture
 ```
 
-For session-negotiation E2E, keep Cargo execution under `rch`:
+For ATP E2E scripts, keep Cargo execution under `rch`. The manifest script
+contains its own `rch exec` calls; the session script is run through an `rch`
+wrapper:
+
+```bash
+bash scripts/run_atp_manifest_e2e.sh
+```
 
 ```bash
 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_session_e2e bash scripts/run_atp_session_negotiation_e2e.sh

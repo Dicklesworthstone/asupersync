@@ -56,14 +56,19 @@ ATP must preserve the core Asupersync invariants:
 `src/atp/object.rs` models ATP as object-graph movement, not file copying.
 The core ids are `ContentId`, `ManifestId`, and `ObjectId`. Object kinds include
 files, directories, streams, symlinks, and application-defined records.
-`ObjectGraph::validate` checks child existence and cycles before manifest or
-verifier code trusts a graph.
+`ObjectGraph::validate` checks child existence and cycles before manifest,
+session, or transfer code trusts a graph.
 
 `src/atp/manifest.rs` turns object graphs into versioned, canonical manifest
 state. It records chunk plans, RaptorQ repair layout, compression policy,
 encryption policy, capability policy, and graph commits. `MerkleRoot` is derived
 from the graph and is the stable integrity anchor passed into session policy and
 verification.
+
+The committed manifest proof lane is `scripts/run_atp_manifest_e2e.sh`. It
+exercises canonical serialization, SHA-256 Merkle roots, policy validation,
+unknown-field handling, and graph commit semantics while routing every Cargo
+call through `rch`.
 
 ### Verification
 
@@ -240,5 +245,14 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_endpoint cargo test --test 
 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_fmt cargo fmt --check
 ```
 
-Use `scripts/run_atp_session_negotiation_e2e.sh` only through an `rch exec --`
-wrapper when it triggers Cargo work.
+Manifest E2E:
+
+```bash
+bash scripts/run_atp_manifest_e2e.sh
+```
+
+Session negotiation E2E:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_session_e2e bash scripts/run_atp_session_negotiation_e2e.sh
+```
