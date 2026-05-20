@@ -14,5 +14,8 @@ pub mod object;
 pub mod path;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod platform;
+pub mod proof;
+pub mod sdk;
 pub mod transfer;
 pub mod verifier;
+pub mod verify;

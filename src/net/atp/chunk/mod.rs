@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 pub mod profiles;
 pub mod bulk_file;
+pub mod dedupe;
 // TODO: Fix syntax errors in these modules
 // pub mod sync_tree;
 // pub mod media;
@@ -78,6 +79,30 @@ impl ChunkingProfile {
             Self::Artifact => artifact::ArtifactProfile::chunk_plan(object_size_bytes),
             Self::Stream => stream::StreamProfile::chunk_plan(object_size_bytes),
         }
+    }
+
+    /// Compute chunk boundaries using this profile.
+    #[must_use]
+    pub fn compute_boundaries(self, data: &[u8]) -> Result<Vec<ChunkBoundary>, ChunkingProfileError> {
+        use profiles::ChunkingProfile as ChunkingProfileTrait;
+
+        match self {
+            Self::BulkFile => bulk_file::BulkFileProfile::compute_boundaries(data),
+            Self::Artifact => artifact::ArtifactProfile::compute_boundaries(data),
+            Self::Stream => stream::StreamProfile::compute_boundaries(data),
+        }
+    }
+
+    /// Check if chunk can be deduplicated using CDC engine.
+    #[must_use]
+    pub const fn supports_deduplication(self) -> bool {
+        matches!(self, Self::Artifact | Self::Stream)
+    }
+
+    /// Check if profile supports incremental/streaming chunking.
+    #[must_use]
+    pub const fn supports_incremental_chunking(self) -> bool {
+        matches!(self, Self::Artifact | Self::Stream)
     }
 
     /// Whether this profile supports streaming/progressive consumption.
@@ -174,7 +199,7 @@ mod tests {
 
     #[test]
     fn chunking_profile_all_variants_listed() {
-        assert_eq!(ChunkingProfile::ALL.len(), 6);
+        assert_eq!(ChunkingProfile::ALL.len(), 3);
         for profile in ChunkingProfile::ALL {
             // Each profile should have a valid name
             assert!(!profile.name().is_empty());
@@ -220,24 +245,24 @@ mod tests {
     fn chunk_boundary_ordering() {
         let chunk1 = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 1024,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 1024,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::FixedSize,
-            metadata: ChunkMetadata::BulkFile {
+            metadata: Some(ChunkMetadata::BulkFile {
                 throughput_tier: ThroughputTier::Standard,
-            },
+            }),
         };
 
         let chunk2 = ChunkBoundary {
             index: 1,
-            offset: 1024,
-            size: 1024,
-            hash: [2; 32],
+            byte_offset: 1024,
+            size_bytes: 1024,
+            content_hash: [2; 32],
             strategy: ChunkStrategy::FixedSize,
-            metadata: ChunkMetadata::BulkFile {
+            metadata: Some(ChunkMetadata::BulkFile {
                 throughput_tier: ThroughputTier::Standard,
-            },
+            }),
         };
 
         assert!(chunk1 < chunk2);
