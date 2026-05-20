@@ -661,43 +661,61 @@ struct DeterministicRollingHash {
     hash: u64,
     window: Vec<u8>,
     position: usize,
+    filled: usize,
     polynomial: u64,
-    window_polynomial: u64,
+    powers: Vec<u64>,
 }
 
 impl DeterministicRollingHash {
     /// Create new deterministic rolling hash.
     fn new(window_size: usize) -> Self {
+        let window_size = window_size.max(1);
         let polynomial: u64 = 0x9e3779b9; // Well-known constant for determinism
+        let powers = Self::precompute_powers(polynomial, window_size);
         Self {
             window_size,
             hash: 0,
             window: vec![0; window_size],
             position: 0,
+            filled: 0,
             polynomial,
-            window_polynomial: polynomial.wrapping_pow(window_size as u32),
+            powers,
         }
     }
 
     /// Update hash with new byte.
     fn update(&mut self, byte: u8) -> u64 {
-        let old_byte = self.window[self.position % self.window_size];
-        self.window[self.position % self.window_size] = byte;
+        let insert_at = self.position;
 
-        // Deterministic polynomial rolling hash
+        if self.filled == self.window_size {
+            let old_byte = self.window[insert_at];
+            let old_contribution =
+                (old_byte as u64).wrapping_mul(self.powers[self.window_size - 1]);
+            self.hash = self.hash.wrapping_sub(old_contribution);
+        } else {
+            self.filled += 1;
+        }
+
         self.hash = self
             .hash
             .wrapping_mul(self.polynomial)
-            .wrapping_sub((old_byte as u64).wrapping_mul(self.window_polynomial))
             .wrapping_add(byte as u64);
-
-        self.position += 1;
+        self.window[insert_at] = byte;
+        self.position = (self.position + 1) % self.window_size;
         self.hash
     }
 
     /// Get current hash value.
     fn current_hash(&self) -> u64 {
         self.hash
+    }
+
+    fn precompute_powers(polynomial: u64, window_size: usize) -> Vec<u64> {
+        let mut powers = vec![1; window_size];
+        for index in 1..window_size {
+            powers[index] = powers[index - 1].wrapping_mul(polynomial);
+        }
+        powers
     }
 }
 
@@ -825,6 +843,27 @@ mod tests {
 
         assert_eq!(last_hash, hash1.current_hash());
         assert_ne!(last_hash, 0);
+    }
+
+    #[test]
+    fn deterministic_rolling_hash_matches_window_recompute_after_wrap() {
+        let data: Vec<u8> = (0..96)
+            .map(|value| ((value * 37 + 11) % 251) as u8)
+            .collect();
+        let window_size = 8;
+        let polynomial = 0x9e3779b9_u64;
+        let mut rolling = DeterministicRollingHash::new(window_size);
+
+        for (index, &byte) in data.iter().enumerate() {
+            let actual = rolling.update(byte);
+            let end = index + 1;
+            let start = end.saturating_sub(window_size);
+            let expected = data[start..end].iter().fold(0_u64, |hash, &window_byte| {
+                hash.wrapping_mul(polynomial)
+                    .wrapping_add(window_byte as u64)
+            });
+            assert_eq!(actual, expected, "rolling hash drift at byte {index}");
+        }
     }
 
     #[test]
