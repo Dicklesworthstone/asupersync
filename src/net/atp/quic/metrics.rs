@@ -3,7 +3,9 @@
 //! Exposes QUIC transport metrics to the ATP Transfer Brain for path selection,
 //! congestion adaptation, and performance monitoring.
 
+use crate::net::QuicTransportMachine;
 use crate::observability::metrics::{Counter, Gauge};
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 /// ATP transport metrics snapshot for Transfer Brain decision-making.

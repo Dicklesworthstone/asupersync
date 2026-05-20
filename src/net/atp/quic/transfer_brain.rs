@@ -4,6 +4,7 @@
 
 use super::metrics::{AtpTransportMetrics, PathPerformanceClass, PathRecommendation};
 use crate::net::atp::protocol::outcome::{AtpOutcome, TransportError};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
