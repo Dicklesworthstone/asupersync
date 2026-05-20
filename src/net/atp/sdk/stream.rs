@@ -2,6 +2,8 @@
 
 use crate::cx::Cx;
 use crate::net::atp::protocol::{AtpOutcome, AtpError, PlatformError};
+use crate::obligation::graded::{GradedObligation, Resolution};
+use crate::record::ObligationKind;
 use super::{AtpSession, TransferId, TransferProgress};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -21,6 +23,8 @@ pub struct AtpWriter {
     progress_rx: mpsc::Receiver<TransferProgress>,
     /// Cancellation signal for background task.
     cancel_tx: Option<mpsc::Sender<()>>,
+    /// Region quiescence obligation for this stream.
+    obligation: Option<GradedObligation>,
     /// Stream configuration.
     config: StreamConfig,
     /// Current write state.
@@ -38,6 +42,8 @@ pub struct AtpReader {
     progress_rx: mpsc::Receiver<TransferProgress>,
     /// Cancellation signal for background task.
     cancel_tx: Option<mpsc::Sender<()>>,
+    /// Region quiescence obligation for this stream.
+    obligation: Option<GradedObligation>,
     /// Stream configuration.
     config: StreamConfig,
     /// Current read state.
@@ -173,6 +179,10 @@ impl AtpSession {
             data_tx,
             progress_rx,
             cancel_tx: Some(cancel_tx),
+            obligation: Some(GradedObligation::reserve(
+                ObligationKind::IoOp,
+                format!("ATP stream writer {}", transfer_id.as_str())
+            )),
             config,
             state: WriterState::Ready,
         })
@@ -219,6 +229,10 @@ impl AtpSession {
             data_rx,
             progress_rx,
             cancel_tx: Some(cancel_tx),
+            obligation: Some(GradedObligation::reserve(
+                ObligationKind::IoOp,
+                format!("ATP stream reader {}", transfer_id.as_str())
+            )),
             config,
             state: ReaderState::Ready,
         })
@@ -370,6 +384,11 @@ impl AtpWriter {
             let _ = cancel_tx.send(()).await; // Ignore send errors (task may have already finished)
         }
 
+        // Resolve the region quiescence obligation
+        if let Some(obligation) = self.obligation.take() {
+            let _ = obligation.resolve(Resolution::Commit);
+        }
+
         self.state = WriterState::Closed;
         Ok(())
     }
@@ -484,6 +503,11 @@ impl AtpReader {
             let _ = cancel_tx.send(()).await; // Ignore send errors (task may have already finished)
         }
 
+        // Resolve the region quiescence obligation
+        if let Some(obligation) = self.obligation.take() {
+            let _ = obligation.resolve(Resolution::Commit);
+        }
+
         self.state = ReaderState::Closed;
         Ok(())
     }
@@ -496,6 +520,11 @@ impl Drop for AtpWriter {
             // Use try_send since we're in a synchronous context
             let _ = cancel_tx.try_send(());
         }
+
+        // Resolve obligation on drop if not already resolved (abort since it's unexpected)
+        if let Some(obligation) = self.obligation.take() {
+            let _ = obligation.resolve(Resolution::Abort);
+        }
     }
 }
 
@@ -505,6 +534,11 @@ impl Drop for AtpReader {
         if let Some(cancel_tx) = self.cancel_tx.take() {
             // Use try_send since we're in a synchronous context
             let _ = cancel_tx.try_send(());
+        }
+
+        // Resolve obligation on drop if not already resolved (abort since it's unexpected)
+        if let Some(obligation) = self.obligation.take() {
+            let _ = obligation.resolve(Resolution::Abort);
         }
     }
 }
