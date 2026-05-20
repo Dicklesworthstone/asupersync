@@ -4,6 +4,7 @@
 //! checksum validation, and state reconstruction after process kill.
 
 use super::{AppendJournal, ChunkBitmap, ChunkState, JournalConfig, JournalRecord};
+use crate::security::AuthKey;
 use crate::types::outcome::Outcome;
 
 /// Identifier for a transfer chunk.
@@ -44,6 +45,8 @@ pub enum RecoveryError {
     Io(#[from] io::Error),
     #[error("Bitmap recovery failed: {0}")]
     BitmapRecovery(String),
+    #[error("Record signature verification failed: invalid cryptographic signature")]
+    InvalidSignature,
 }
 
 /// Recovery context for tracking state during crash recovery.
@@ -101,8 +104,13 @@ impl RecoveryContext {
     }
 
     /// Process a journal record during recovery.
-    pub fn process_record(&mut self, record: &JournalRecord) -> Result<bool, RecoveryError> {
+    pub fn process_record(&mut self, record: &JournalRecord, auth_key: &AuthKey) -> Result<bool, RecoveryError> {
         self.stats.total_records += 1;
+
+        // Verify cryptographic signature BEFORE any processing
+        if !record.verify_signature(auth_key) {
+            return Err(RecoveryError::InvalidSignature);
+        }
 
         // Check for duplicates
         let fingerprint = self.create_fingerprint(record);
@@ -337,12 +345,13 @@ pub async fn recover_journal_and_bitmap(
     cx: &Cx,
     journal_path: &Path,
     bitmap_dir: &Path,
+    auth_key: &AuthKey,
 ) -> Result<(AppendJournal, HashMap<String, ChunkBitmap>), RecoveryError> {
     let config = JournalConfig {
         base_dir: journal_path.parent().unwrap_or(journal_path).to_path_buf(),
         ..Default::default()
     };
-    let journal = match AppendJournal::new(config) {
+    let journal = match AppendJournal::new(config, auth_key.clone()) {
         Outcome::Ok(j) => j,
         Outcome::Err(e) => {
             return Err(RecoveryError::JournalCorrupted(format!(
@@ -386,7 +395,7 @@ pub async fn recover_journal_and_bitmap(
     };
 
     for entry in entries {
-        match context.process_record(&entry) {
+        match context.process_record(&entry, auth_key) {
             Ok(_) => {}
             Err(RecoveryError::InvalidStateTransition { .. }) => {
                 // Log but continue - invalid transitions might be from corrupted records
@@ -445,6 +454,57 @@ mod tests {
         let mut hash = [0; 32];
         hash[0] = seed;
         MerkleRoot::new(hash)
+    }
+
+    #[tokio::test]
+    async fn test_cryptographic_integrity_validation() {
+        use crate::security::{AuthKey, AuthenticationTag};
+        use crate::atp::manifest::MerkleRoot;
+        use crate::atp::object::ObjectId;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let mut ctx = RecoveryContext::new();
+        let auth_key = AuthKey::from_seed(42);
+
+        // Create a valid record with correct signature
+        let valid_record = JournalRecord::Offer {
+            transfer_id: "test123".to_string(),
+            object_id: ObjectId::Content(Default::default()),
+            manifest_root: MerkleRoot::new([0u8; 32]),
+            total_size: 1024,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            auth_tag: AuthenticationTag::zero(),
+        }.with_signature(&auth_key);
+
+        // Should process successfully
+        let result = ctx.process_record(&valid_record, &auth_key);
+        assert!(result.is_ok(), "Valid record should be processed");
+
+        // Create an invalid record with wrong signature
+        let invalid_record = JournalRecord::Offer {
+            transfer_id: "test456".to_string(),
+            object_id: ObjectId::Content(Default::default()),
+            manifest_root: MerkleRoot::new([0u8; 32]),
+            total_size: 2048,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            auth_tag: AuthenticationTag::zero(), // Wrong signature (all zeros)
+        };
+
+        // Should fail with InvalidSignature error
+        let result = ctx.process_record(&invalid_record, &auth_key);
+        assert!(result.is_err(), "Invalid record should be rejected");
+        match result.unwrap_err() {
+            RecoveryError::InvalidSignature => {
+                // This is the expected error
+            }
+            other => panic!("Expected InvalidSignature error, got: {:?}", other),
+        }
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
 use crate::atp::manifest::MerkleRoot;
 use crate::atp::object::{ContentId, ManifestId, ObjectId};
 use crate::cx::Cx;
+use crate::security::{AuthenticationTag, AuthKey};
 use crate::types::outcome::Outcome;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -19,12 +20,14 @@ pub enum JournalRecord {
         manifest_root: MerkleRoot,
         total_size: u64,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Transfer offer accepted
     Accept {
         transfer_id: String,
         peer_id: String,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Chunk received from network
     ChunkReceived {
@@ -33,6 +36,7 @@ pub enum JournalRecord {
         chunk_size: u64,
         chunk_hash: [u8; 32],
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Chunk hash verified successfully
     ChunkVerified {
@@ -41,6 +45,7 @@ pub enum JournalRecord {
         chunk_size: u64,
         verified_hash: [u8; 32],
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Chunk written to disk
     ChunkWritten {
@@ -49,6 +54,7 @@ pub enum JournalRecord {
         chunk_size: u64,
         file_path: String,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Chunk derived from repair decode
     RepairDecode {
@@ -57,12 +63,14 @@ pub enum JournalRecord {
         chunk_size: u64,
         source_chunks: Vec<u64>,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Intent to commit transfer
     CommitIntent {
         transfer_id: String,
         final_manifest_root: MerkleRoot,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Transfer commit completed
     CommitComplete {
@@ -70,12 +78,14 @@ pub enum JournalRecord {
         final_path: String,
         committed_size: u64,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Transfer cancellation
     Cancellation {
         transfer_id: String,
         reason: String,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Transfer rollback due to error
     Rollback {
@@ -83,12 +93,14 @@ pub enum JournalRecord {
         rollback_reason: String,
         checkpoint_sequence: u64,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Journal compaction boundary
     CompactionBoundary {
         generation: u64,
         compacted_up_to_sequence: u64,
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
     /// Proof digest for verification
     ProofDigest {
@@ -96,6 +108,7 @@ pub enum JournalRecord {
         proof_type: String,
         digest: [u8; 32],
         timestamp: u64,
+        auth_tag: AuthenticationTag,
     },
 }
 
@@ -154,7 +167,82 @@ impl JournalRecord {
         }
     }
 
-    fn encode_payload(&self) -> Vec<u8> {
+    /// Get the authentication tag for this record
+    pub fn auth_tag(&self) -> &AuthenticationTag {
+        match self {
+            Self::Offer { auth_tag, .. }
+            | Self::Accept { auth_tag, .. }
+            | Self::ChunkReceived { auth_tag, .. }
+            | Self::ChunkVerified { auth_tag, .. }
+            | Self::ChunkWritten { auth_tag, .. }
+            | Self::RepairDecode { auth_tag, .. }
+            | Self::CommitIntent { auth_tag, .. }
+            | Self::CommitComplete { auth_tag, .. }
+            | Self::Cancellation { auth_tag, .. }
+            | Self::Rollback { auth_tag, .. }
+            | Self::CompactionBoundary { auth_tag, .. }
+            | Self::ProofDigest { auth_tag, .. } => auth_tag,
+        }
+    }
+
+    /// Verify the authentication tag for this record using the provided key
+    pub fn verify_signature(&self, key: &crate::security::AuthKey) -> bool {
+        use crate::security::tag::AuthenticationTag;
+        let expected_tag = AuthenticationTag::compute_for_journal_record(key, self);
+        // Constant-time comparison
+        expected_tag == *self.auth_tag()
+    }
+
+    /// Create a signed version of this record with auth_tag computed
+    pub fn with_signature(self, key: &AuthKey) -> Self {
+        use crate::security::tag::AuthenticationTag;
+
+        // Compute the auth_tag based on the record variant
+        let auth_tag = AuthenticationTag::compute_for_journal_record(key, &self);
+
+        // Return a new record with the computed auth_tag
+        match self {
+            Self::Offer { transfer_id, object_id, manifest_root, total_size, timestamp, .. } => {
+                Self::Offer { transfer_id, object_id, manifest_root, total_size, timestamp, auth_tag }
+            }
+            Self::Accept { transfer_id, peer_id, timestamp, .. } => {
+                Self::Accept { transfer_id, peer_id, timestamp, auth_tag }
+            }
+            Self::ChunkReceived { transfer_id, chunk_offset, chunk_size, chunk_hash, timestamp, .. } => {
+                Self::ChunkReceived { transfer_id, chunk_offset, chunk_size, chunk_hash, timestamp, auth_tag }
+            }
+            Self::ChunkVerified { transfer_id, chunk_offset, chunk_size, verified_hash, timestamp, .. } => {
+                Self::ChunkVerified { transfer_id, chunk_offset, chunk_size, verified_hash, timestamp, auth_tag }
+            }
+            Self::ChunkWritten { transfer_id, chunk_offset, chunk_size, file_path, timestamp, .. } => {
+                Self::ChunkWritten { transfer_id, chunk_offset, chunk_size, file_path, timestamp, auth_tag }
+            }
+            Self::RepairDecode { transfer_id, chunk_offset, chunk_size, source_chunks, timestamp, .. } => {
+                Self::RepairDecode { transfer_id, chunk_offset, chunk_size, source_chunks, timestamp, auth_tag }
+            }
+            Self::CommitIntent { transfer_id, final_manifest_root, timestamp, .. } => {
+                Self::CommitIntent { transfer_id, final_manifest_root, timestamp, auth_tag }
+            }
+            Self::CommitComplete { transfer_id, final_path, committed_size, timestamp, .. } => {
+                Self::CommitComplete { transfer_id, final_path, committed_size, timestamp, auth_tag }
+            }
+            Self::Cancellation { transfer_id, reason, timestamp, .. } => {
+                Self::Cancellation { transfer_id, reason, timestamp, auth_tag }
+            }
+            Self::Rollback { transfer_id, rollback_reason, checkpoint_sequence, timestamp, .. } => {
+                Self::Rollback { transfer_id, rollback_reason, checkpoint_sequence, timestamp, auth_tag }
+            }
+            Self::CompactionBoundary { generation, compacted_up_to_sequence, timestamp, .. } => {
+                Self::CompactionBoundary { generation, compacted_up_to_sequence, timestamp, auth_tag }
+            }
+            Self::ProofDigest { transfer_id, proof_type, digest, timestamp, .. } => {
+                Self::ProofDigest { transfer_id, proof_type, digest, timestamp, auth_tag }
+            }
+        }
+    }
+
+    /// Encode the record payload without the auth_tag (for signature computation)
+    pub fn encode_payload_without_auth_tag(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
             Self::Offer {
@@ -163,6 +251,7 @@ impl JournalRecord {
                 manifest_root,
                 total_size,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 0);
                 put_string(&mut out, transfer_id);
@@ -175,6 +264,7 @@ impl JournalRecord {
                 transfer_id,
                 peer_id,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 1);
                 put_string(&mut out, transfer_id);
@@ -187,6 +277,7 @@ impl JournalRecord {
                 chunk_size,
                 chunk_hash,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 2);
                 put_string(&mut out, transfer_id);
@@ -201,6 +292,7 @@ impl JournalRecord {
                 chunk_size,
                 verified_hash,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 3);
                 put_string(&mut out, transfer_id);
@@ -215,6 +307,7 @@ impl JournalRecord {
                 chunk_size,
                 file_path,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 4);
                 put_string(&mut out, transfer_id);
@@ -229,6 +322,7 @@ impl JournalRecord {
                 chunk_size,
                 source_chunks,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 5);
                 put_string(&mut out, transfer_id);
@@ -244,6 +338,7 @@ impl JournalRecord {
                 transfer_id,
                 final_manifest_root,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 6);
                 put_string(&mut out, transfer_id);
@@ -255,6 +350,7 @@ impl JournalRecord {
                 final_path,
                 committed_size,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 7);
                 put_string(&mut out, transfer_id);
@@ -266,6 +362,7 @@ impl JournalRecord {
                 transfer_id,
                 reason,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 8);
                 put_string(&mut out, transfer_id);
@@ -277,6 +374,7 @@ impl JournalRecord {
                 rollback_reason,
                 checkpoint_sequence,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 9);
                 put_string(&mut out, transfer_id);
@@ -288,6 +386,7 @@ impl JournalRecord {
                 generation,
                 compacted_up_to_sequence,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 10);
                 put_u64(&mut out, *generation);
@@ -299,12 +398,193 @@ impl JournalRecord {
                 proof_type,
                 digest,
                 timestamp,
+                ..
             } => {
                 put_u8(&mut out, 11);
                 put_string(&mut out, transfer_id);
                 put_string(&mut out, proof_type);
                 out.extend_from_slice(digest);
                 put_u64(&mut out, *timestamp);
+            }
+        }
+        out
+    }
+
+    fn encode_payload(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            Self::Offer {
+                transfer_id,
+                object_id,
+                manifest_root,
+                total_size,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 0);
+                put_string(&mut out, transfer_id);
+                put_object_id(&mut out, object_id);
+                put_merkle_root(&mut out, manifest_root);
+                put_u64(&mut out, *total_size);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::Accept {
+                transfer_id,
+                peer_id,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 1);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, peer_id);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::ChunkReceived {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                chunk_hash,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 2);
+                put_string(&mut out, transfer_id);
+                put_u64(&mut out, *chunk_offset);
+                put_u64(&mut out, *chunk_size);
+                out.extend_from_slice(chunk_hash);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::ChunkVerified {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                verified_hash,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 3);
+                put_string(&mut out, transfer_id);
+                put_u64(&mut out, *chunk_offset);
+                put_u64(&mut out, *chunk_size);
+                out.extend_from_slice(verified_hash);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::ChunkWritten {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                file_path,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 4);
+                put_string(&mut out, transfer_id);
+                put_u64(&mut out, *chunk_offset);
+                put_u64(&mut out, *chunk_size);
+                put_string(&mut out, file_path);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::RepairDecode {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                source_chunks,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 5);
+                put_string(&mut out, transfer_id);
+                put_u64(&mut out, *chunk_offset);
+                put_u64(&mut out, *chunk_size);
+                put_len(&mut out, source_chunks.len());
+                for source in source_chunks {
+                    put_u64(&mut out, *source);
+                }
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::CommitIntent {
+                transfer_id,
+                final_manifest_root,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 6);
+                put_string(&mut out, transfer_id);
+                put_merkle_root(&mut out, final_manifest_root);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::CommitComplete {
+                transfer_id,
+                final_path,
+                committed_size,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 7);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, final_path);
+                put_u64(&mut out, *committed_size);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::Cancellation {
+                transfer_id,
+                reason,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 8);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, reason);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::Rollback {
+                transfer_id,
+                rollback_reason,
+                checkpoint_sequence,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 9);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, rollback_reason);
+                put_u64(&mut out, *checkpoint_sequence);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::CompactionBoundary {
+                generation,
+                compacted_up_to_sequence,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 10);
+                put_u64(&mut out, *generation);
+                put_u64(&mut out, *compacted_up_to_sequence);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
+            }
+            Self::ProofDigest {
+                transfer_id,
+                proof_type,
+                digest,
+                timestamp,
+                auth_tag,
+            } => {
+                put_u8(&mut out, 11);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, proof_type);
+                out.extend_from_slice(digest);
+                put_u64(&mut out, *timestamp);
+                out.extend_from_slice(auth_tag.as_bytes());
             }
         }
         out
@@ -320,11 +600,13 @@ impl JournalRecord {
                 manifest_root: cursor.read_merkle_root()?,
                 total_size: cursor.read_u64()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             1 => Ok(Self::Accept {
                 transfer_id: cursor.read_string()?,
                 peer_id: cursor.read_string()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             2 => Ok(Self::ChunkReceived {
                 transfer_id: cursor.read_string()?,
@@ -332,6 +614,7 @@ impl JournalRecord {
                 chunk_size: cursor.read_u64()?,
                 chunk_hash: cursor.read_hash()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             3 => Ok(Self::ChunkVerified {
                 transfer_id: cursor.read_string()?,
@@ -339,6 +622,7 @@ impl JournalRecord {
                 chunk_size: cursor.read_u64()?,
                 verified_hash: cursor.read_hash()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             4 => Ok(Self::ChunkWritten {
                 transfer_id: cursor.read_string()?,
@@ -346,6 +630,7 @@ impl JournalRecord {
                 chunk_size: cursor.read_u64()?,
                 file_path: cursor.read_string()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             5 => {
                 let transfer_id = cursor.read_string()?;
@@ -362,40 +647,47 @@ impl JournalRecord {
                     chunk_size,
                     source_chunks,
                     timestamp: cursor.read_u64()?,
+                    auth_tag: cursor.read_auth_tag()?,
                 })
             }
             6 => Ok(Self::CommitIntent {
                 transfer_id: cursor.read_string()?,
                 final_manifest_root: cursor.read_merkle_root()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             7 => Ok(Self::CommitComplete {
                 transfer_id: cursor.read_string()?,
                 final_path: cursor.read_string()?,
                 committed_size: cursor.read_u64()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             8 => Ok(Self::Cancellation {
                 transfer_id: cursor.read_string()?,
                 reason: cursor.read_string()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             9 => Ok(Self::Rollback {
                 transfer_id: cursor.read_string()?,
                 rollback_reason: cursor.read_string()?,
                 checkpoint_sequence: cursor.read_u64()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             10 => Ok(Self::CompactionBoundary {
                 generation: cursor.read_u64()?,
                 compacted_up_to_sequence: cursor.read_u64()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             11 => Ok(Self::ProofDigest {
                 transfer_id: cursor.read_string()?,
                 proof_type: cursor.read_string()?,
                 digest: cursor.read_hash()?,
                 timestamp: cursor.read_u64()?,
+                auth_tag: cursor.read_auth_tag()?,
             }),
             other => Err(JournalError::Deserialization(format!(
                 "unknown journal record tag {other}"
@@ -492,6 +784,12 @@ impl<'a> DecodeCursor<'a> {
         let mut hash = [0; 32];
         hash.copy_from_slice(self.read_exact(32)?);
         Ok(hash)
+    }
+
+    fn read_auth_tag(&mut self) -> Result<AuthenticationTag, JournalError> {
+        let mut bytes = [0; 32];
+        bytes.copy_from_slice(self.read_exact(32)?);
+        Ok(AuthenticationTag::from_bytes(bytes))
     }
 
     fn read_object_id(&mut self) -> Result<ObjectId, JournalError> {
@@ -632,11 +930,13 @@ pub struct AppendJournal {
     recent_entries: std::collections::VecDeque<JournalEntry>,
     /// Cache size limit
     cache_limit: usize,
+    /// Authentication key for record signing
+    auth_key: AuthKey,
 }
 
 impl AppendJournal {
     /// Create a new append-only journal
-    pub fn new(config: JournalConfig) -> Outcome<Self, JournalError> {
+    pub fn new(config: JournalConfig, auth_key: AuthKey) -> Outcome<Self, JournalError> {
         // Ensure base directory exists
         if let Err(e) = std::fs::create_dir_all(&config.base_dir) {
             return Outcome::Err(JournalError::DirectoryCreation(e.to_string()));
@@ -650,6 +950,7 @@ impl AppendJournal {
             current_file: None,
             recent_entries: std::collections::VecDeque::new(),
             cache_limit: 1000,
+            auth_key,
         };
 
         // Try to recover from existing journal
@@ -883,7 +1184,8 @@ impl AppendJournal {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-        };
+            auth_tag: AuthenticationTag::zero(), // Temporary placeholder
+        }.with_signature(&self.auth_key);
 
         // Write the boundary record
         match self.append(boundary_record) {

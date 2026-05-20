@@ -122,6 +122,47 @@ impl AuthenticationTag {
     pub const fn as_bytes(&self) -> &[u8; TAG_SIZE] {
         &self.bytes
     }
+
+    /// Computes an authentication tag for a journal record using the given key.
+    ///
+    /// Construction:
+    /// `HMAC-SHA256(key, journal_domain || record_type || record_payload_bytes)`.
+    #[must_use]
+    pub fn compute_for_journal_record(key: &AuthKey, record: &crate::atp::journal::JournalRecord) -> Self {
+        use crate::atp::journal::JournalRecord;
+
+        const JOURNAL_DOMAIN: &[u8] = b"asupersync::security::AuthenticationTag::journal::v1";
+
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+
+        // Add domain separator
+        mac.update(JOURNAL_DOMAIN);
+
+        // Add record type as a byte
+        let record_type_byte = match record {
+            JournalRecord::Offer { .. } => 0u8,
+            JournalRecord::Accept { .. } => 1u8,
+            JournalRecord::ChunkReceived { .. } => 2u8,
+            JournalRecord::ChunkVerified { .. } => 3u8,
+            JournalRecord::ChunkWritten { .. } => 4u8,
+            JournalRecord::RepairDecode { .. } => 5u8,
+            JournalRecord::CommitIntent { .. } => 6u8,
+            JournalRecord::CommitComplete { .. } => 7u8,
+            JournalRecord::Cancellation { .. } => 8u8,
+            JournalRecord::Rollback { .. } => 9u8,
+            JournalRecord::CompactionBoundary { .. } => 10u8,
+            JournalRecord::ProofDigest { .. } => 11u8,
+        };
+        mac.update(&[record_type_byte]);
+
+        // Add the record payload (everything except auth_tag)
+        let payload = record.encode_payload_without_auth_tag();
+        mac.update(&payload);
+
+        let bytes: [u8; TAG_SIZE] = mac.finalize().into_bytes().into();
+        Self { bytes }
+    }
 }
 
 impl PartialEq for AuthenticationTag {
