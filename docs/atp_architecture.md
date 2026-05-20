@@ -98,6 +98,7 @@ happens on `main`.
 | Native QUIC packet protection and TLS provider boundary | `ATP-A3`, `asupersync-e8hst6` | `src/net/quic_native/tls.rs` | `tests/atp_quic_packet_protection.rs`, `scripts/run_atp_quic_packet_protection_e2e.sh` | QUIC owns state transitions; crypto providers own primitive operations without becoming external QUIC stacks. |
 | Native QUIC connection, transport, streams, and forensic log | `ATP-A4`, `ATP-A6`, `ATP-A7`, `ATP-A10` | `src/net/quic_native/connection.rs`, `src/net/quic_native/transport.rs`, `src/net/quic_native/streams.rs`, `src/net/quic_native/forensic_log.rs` | QUIC transport/stream/loss tests, qlog-style replay artifacts | ATP needs flow control, ACK/loss, migration, key update, close/drain, and replay evidence as reusable transport assets. |
 | Rendezvous and endpoint observation | `ATP-F3`, `asupersync-uh6u63` | `src/net/atp/rendezvous/mod.rs`, `src/net/atp/stun/mod.rs` | NAT classifier, signed-candidate, replay, quota, and cancellation tests | Peers behind routers need privacy-preserving candidate exchange before path racing can be honest. |
+| Optional Tailscale path candidates | `ATP-F6`, `asupersync-92vqmc` | `src/net/atp/path/mod.rs`, `tailscale-path-provider` Cargo feature | fake-provider unit tests for prefer, disabled, provider failure, metrics, and proof summary | Tailnet reachability is an optional candidate source; it must not add a hard Tailscale dependency or block direct/relay/mailbox paths. |
 
 ### Planned module families and write boundaries
 
@@ -200,6 +201,14 @@ before exposing committed ATP data once those stages are part of `main`.
 Each candidate carries `PathSecurity`, `PathBudget`, evidence, and a terminal
 `PathOutcome`. Direct, relay, and mailbox paths are comparable through the same
 candidate/race model instead of ad hoc branch logic.
+
+The Tailscale candidate provider is feature-discoverable through the
+dependency-free `tailscale-path-provider` Cargo feature. `--prefer tailscale`
+selects the preference that ranks Tailscale candidates ahead of other non-relay
+paths when provider output exists. `--no-tailscale` maps to the disabled policy
+and ignores provider output. Both modes still use the same candidate metrics and
+proof-summary surface as other paths; provider failure records a non-fatal
+caveat instead of suppressing direct, NAT, relay, or mailbox candidates.
 
 ### Binary Protocol
 

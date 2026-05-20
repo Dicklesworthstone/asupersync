@@ -99,6 +99,10 @@ mysql = []
 # These expose Tokio-free native paths for inventory/build/test contracts.
 quic = []
 http3 = ["quic"]
+# Enable ATP Tailscale candidate-provider integration points. This intentionally
+# carries no Tailscale crate dependency; callers feed provider output into the
+# ATP path model and ATP still runs native QUIC over the selected address.
+tailscale-path-provider = []
 # Legacy Tokio-backed compatibility wrappers live in the separate
 # `asupersync-tokio-compat` crate, not in the core feature graph.
 # Enable Kafka client integration via rdkafka.

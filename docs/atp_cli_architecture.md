@@ -66,6 +66,7 @@ encryption = true
 repair_overhead = 0.15
 interface = "eth0"
 relay_server = "relay.example.com"
+tailscale = "auto" # "auto", "prefer", or "disabled"
 verbose = false
 ```
 
@@ -176,7 +177,29 @@ asupersync atp doctor --platform
 
 # Network path analysis
 asupersync atp doctor --path --target=peer123
+
+# Prefer a Tailscale candidate when the optional provider yields one
+asupersync atp doctor --path --target=peer123 --prefer tailscale
+
+# Disable Tailscale candidate use without disabling direct, NAT, relay, or mailbox paths
+asupersync atp doctor --path --target=peer123 --no-tailscale
 ```
+
+### Tailscale Candidate Policy
+
+Tailscale is an optional ATP path-candidate source, not an ATP dependency. The
+`tailscale-path-provider` Cargo feature reserves the integration surface without
+pulling in a Tailscale crate or requiring `tailscaled` at build time. Runtime
+provider output is converted into ordinary path candidates by
+`src/net/atp/path/mod.rs`; ATP still runs native ATP/QUIC over the selected
+Tailscale IP or MagicDNS address.
+
+`--prefer tailscale` maps to the provider preference that ranks Tailscale ahead
+of other non-relay candidates when provider output is available. `--no-tailscale`
+maps to the disabled policy and ignores provider output while leaving direct
+UDP, public IPv6, NAT traversal, relay, and mailbox candidates in the normal
+path race. Provider failures are non-fatal path caveats and must not block other
+candidate sources.
 
 ### Configuration Examples
 

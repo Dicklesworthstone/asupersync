@@ -37,6 +37,7 @@ the listed files, and run or extend the listed proof lane.
 | Native QUIC packet protection and TLS provider boundary | `ATP-A3`, `asupersync-e8hst6` | `src/net/quic_native/tls.rs` | `tests/atp_quic_packet_protection.rs`, `scripts/run_atp_quic_packet_protection_e2e.sh` |
 | Native QUIC connection, transport, streams, and forensic log | `ATP-A4`, `ATP-A6`, `ATP-A7`, `ATP-A10` | `src/net/quic_native/connection.rs`, `src/net/quic_native/transport.rs`, `src/net/quic_native/streams.rs`, `src/net/quic_native/forensic_log.rs` | QUIC transport/stream/loss tests, replay/qlog-style artifact checks |
 | Rendezvous and endpoint observation | `ATP-F3`, `asupersync-uh6u63` | `src/net/atp/rendezvous/mod.rs`, `src/net/atp/stun/mod.rs` | NAT classifier, signed-candidate, quota, replay, and cancellation tests |
+| Optional Tailscale path candidates | `ATP-F6`, `asupersync-92vqmc` | `src/net/atp/path/mod.rs`, `tailscale-path-provider` Cargo feature | fake-provider unit tests for prefer, disabled, provider failure, metrics, and proof summary |
 | Platform policy and doctor | `ATP-D1`, `asupersync-1tgbxe` | `src/atp/platform/mod.rs`, `src/atp/doctor/mod.rs`, `src/bin/asupersync.rs` | `atp doctor --platform` tests |
 | Transfer actor and ownership topology | `ATP-E1`, `asupersync-9yjgrz` | planned `src/atp/actor/`, `src/atp/transfer/` | actor state-machine tests and `scripts/run_atp_transfer_actor_e2e.sh` once committed |
 | Chunking profiles | `ATP-C3`, `asupersync-9jgb8r` | planned `src/net/atp/chunk/` | bulk, sync-tree, media, sparse-image, artifact, and stream profile tests |
@@ -46,7 +47,7 @@ the listed files, and run or extend the listed proof lane.
 | SDK facade | `ATP-B4`, `asupersync-sbk7th` | planned `src/net/atp/sdk/` or stable `src/atp/sdk/` facade | Cx-first send/receive/sync/stream tests, diagnostics, cancellation and resume e2e |
 | Daemon, identity, peer directory, receive preflight | `ATP-H1`, `ATP-H2`, `ATP-H5`, `ATP-H6`, `ATP-H7` | planned `src/atp/daemon/`, `src/atp/identity/` | AppSpec lifecycle, PeerId/TransferId, key-store, quota, consent, quarantine tests |
 | CLI, share/pairing, first-run packaging | `ATP-B5`, `ATP-I5`, `ATP-I6` | `src/bin/asupersync.rs`, packaging scripts | deterministic CLI output, share-code, service-integration, shell-completion, upgrade smoke tests |
-| Mailbox, relay, Tailscale candidate, path doctor | `ATP-F5`, `ATP-F10`, `ATP-J4` | planned relay/mailbox/path-provider modules | encrypted store-and-forward, relay opacity, TCP/TLS 443 fallback, Tailscale detection, path-doctor e2e |
+| Mailbox, relay, path doctor | `ATP-F5`, `ATP-F10`, `ATP-J4` | planned relay/mailbox/path-provider modules | encrypted store-and-forward, relay opacity, TCP/TLS 443 fallback, path-doctor e2e |
 | Lab, replay, crashpacks, benchmark cartel | `ATP-L`, `ATP-N` | planned `src/atp/lab/`, replay/minimizer modules, benchmark adapters | deterministic NAT/network/disk/adversary models, transfer oracles, replay minimization, comparator scripts |
 | Governance, dependency gates, Definition of Done | `ATP-M`, `ATP-N`, `asupersync-jaghjr`, `asupersync-xvaftm` | docs, artifacts, dependency-audit tests | module-map contract, no-external-QUIC checks, proof-lane manifest, unit/e2e/logging DoD |
 
