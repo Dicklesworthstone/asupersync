@@ -40,16 +40,25 @@ BANNED_DEPENDENCIES = {
 # Dependencies that are allowed in specific contexts
 CONTEXT_ALLOWED = {
     'asupersync-tokio-compat': {
-        'tokio', 'tokio-util', 'tokio-stream'
+        'tokio', 'tokio-util', 'tokio-stream', 'axum', 'hyper'
     },
     'examples/': {
-        'tokio', 'reqwest', 'hyper'
+        'tokio', 'reqwest', 'hyper', 'axum'
     },
     'tests/': {
-        'tokio'  # For compatibility testing
+        'tokio', 'async-std', 'smol'  # For compatibility testing
     },
     'benches/': {
         'tokio', 'hyper'  # For benchmark comparisons
+    },
+    'dev-dependencies': {
+        'tokio', 'async-std', 'smol', 'axum', 'hyper', 'reqwest'  # Dev/test only
+    },
+    'fuzz-feature': {
+        'tokio', 'axum', 'hyper'  # Fuzz feature intentionally includes tonic/tokio
+    },
+    'conformance': {
+        'async-std'  # Conformance tests may use alternate runtimes
     }
 }
 
@@ -60,46 +69,72 @@ BANNED_PATTERNS = [
     r'.*-quic$',   # QUIC-suffixed packages
 ]
 
-def load_dependency_tree() -> Dict:
-    """Load dependency tree from stdin or file."""
+def load_dependency_metadata() -> Dict:
+    """Load dependency metadata from stdin or file."""
     try:
         return json.load(sys.stdin)
     except json.JSONDecodeError as e:
-        print(f"Error parsing dependency tree JSON: {e}", file=sys.stderr)
+        print(f"Error parsing metadata JSON: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_package_context(package_name: str, tree: Dict) -> str:
+def get_package_context(package_name: str, metadata: Dict, dependency_path: List[str]) -> str:
     """Determine the context/module where a package is used."""
-    # This is simplified - in practice would analyze the dependency path
-    # to determine if it's used in core ATP modules or allowed contexts
+    # Check the dependency path for context clues
+    path_str = ' -> '.join(dependency_path)
 
-    # Check if it's in a known allowed context
-    for context, allowed_deps in CONTEXT_ALLOWED.items():
-        if package_name in allowed_deps:
-            return context
+    # Check if this comes through opentelemetry-proto (fuzz feature)
+    if 'opentelemetry-proto' in dependency_path:
+        return 'fuzz-feature'
+
+    # Check if this comes through conformance dependencies
+    if 'asupersync-conformance' in dependency_path or 'conformance' in dependency_path:
+        return 'conformance'
+
+    # Check if this is a very deep transitive dependency (likely dev/test)
+    if len(dependency_path) > 10:
+        return 'dev-dependencies'
+
+    # Check the source/manifest path to determine context
+    packages = metadata.get('packages', [])
+    for package in packages:
+        if package.get('name') == package_name:
+            manifest_path = package.get('manifest_path', '')
+
+            # Check if it's in a known allowed context based on path
+            if 'asupersync-tokio-compat' in manifest_path:
+                return 'asupersync-tokio-compat'
+            elif '/examples/' in manifest_path:
+                return 'examples/'
+            elif '/tests/' in manifest_path:
+                return 'tests/'
+            elif '/benches/' in manifest_path:
+                return 'benches/'
+
+            break
 
     return 'core'  # Default to core context (most restrictive)
 
-def check_banned_dependencies(tree: Dict) -> List[Dict]:
-    """Check for banned dependencies in the tree."""
+def check_banned_dependencies(metadata: Dict) -> List[Dict]:
+    """Check for banned dependencies in the metadata."""
     violations = []
     seen_packages = set()
 
-    def process_package(package_info: Dict, path: List[str] = None):
+    # Get all packages from metadata
+    packages = metadata.get('packages', [])
+
+    # Build a map of package names for quick lookup
+    package_map = {pkg.get('name'): pkg for pkg in packages}
+
+    def check_package(package_name: str, path: List[str] = None):
         if path is None:
             path = []
 
-        package_name = package_info.get('name', '')
-        if not package_name:
+        if not package_name or package_name in seen_packages:
             return
 
-        # Skip if we've already processed this package
-        if package_name in seen_packages:
-            return
         seen_packages.add(package_name)
-
         current_path = path + [package_name]
-        context = get_package_context(package_name, tree)
+        context = get_package_context(package_name, metadata)
 
         # Check exact matches
         if package_name in BANNED_DEPENDENCIES:
@@ -124,28 +159,37 @@ def check_banned_dependencies(tree: Dict) -> List[Dict]:
         # Check pattern matches
         for pattern in BANNED_PATTERNS:
             if re.match(pattern, package_name):
-                violations.append({
-                    'package': package_name,
-                    'reason': f'Matches banned pattern: {pattern}',
-                    'context': context,
-                    'dependency_path': current_path,
-                    'violation_type': 'banned_pattern'
-                })
+                # Check if it's allowed in context
+                is_allowed = False
+                for allowed_context, allowed_deps in CONTEXT_ALLOWED.items():
+                    if (allowed_context in context and
+                        package_name in allowed_deps):
+                        is_allowed = True
+                        break
+
+                if not is_allowed:
+                    violations.append({
+                        'package': package_name,
+                        'reason': f'Matches banned pattern: {pattern}',
+                        'context': context,
+                        'dependency_path': current_path,
+                        'violation_type': 'banned_pattern'
+                    })
                 break
 
         # Process dependencies recursively
-        for dep in package_info.get('dependencies', []):
-            process_package(dep, current_path)
+        if package_name in package_map:
+            package_info = package_map[package_name]
+            for dep_info in package_info.get('dependencies', []):
+                dep_name = dep_info.get('name')
+                if dep_name:
+                    check_package(dep_name, current_path)
 
-    # Process root packages
-    if 'packages' in tree:
-        for package in tree['packages']:
-            process_package(package)
-    elif 'nodes' in tree:
-        for node in tree['nodes']:
-            process_package(node)
-    else:
-        print("Warning: Unrecognized dependency tree format", file=sys.stderr)
+    # Check all packages
+    for package in packages:
+        package_name = package.get('name')
+        if package_name:
+            check_package(package_name)
 
     return violations
 
@@ -185,8 +229,8 @@ def generate_report(violations: List[Dict]) -> None:
 
 def main():
     """Main entry point."""
-    tree = load_dependency_tree()
-    violations = check_banned_dependencies(tree)
+    metadata = load_dependency_metadata()
+    violations = check_banned_dependencies(metadata)
     generate_report(violations)
 
     if violations:

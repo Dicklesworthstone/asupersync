@@ -25,9 +25,13 @@ fi
 echo "Checking for outdated dependencies..."
 cargo update --dry-run > artifacts/audit/outdated-deps.txt 2>&1 || true
 
-# Generate dependency tree
+# Generate dependency metadata
+echo "Generating dependency metadata..."
+cargo metadata --format-version 1 > artifacts/audit/dependency-metadata.json
+
+# Generate dependency tree (human readable)
 echo "Generating dependency tree..."
-cargo tree --format json > artifacts/audit/dependency-tree.json
+cargo tree > artifacts/audit/dependency-tree.txt
 
 # Check for duplicate dependencies
 echo "Checking for duplicate dependencies..."
@@ -52,32 +56,27 @@ import sys
 from collections import defaultdict, Counter
 
 try:
-    with open('artifacts/audit/dependency-tree.json', 'r') as f:
-        tree_data = json.load(f)
+    with open('artifacts/audit/dependency-metadata.json', 'r') as f:
+        metadata = json.load(f)
 
-    # Analyze dependency tree
+    # Analyze dependency metadata
+    packages = metadata.get('packages', [])
     stats = {
-        'total_packages': 0,
-        'direct_deps': 0,
-        'transitive_deps': 0,
+        'total_packages': len(packages),
+        'workspace_members': len(metadata.get('workspace_members', [])),
+        'resolve_deps': len(metadata.get('resolve', {}).get('nodes', [])),
         'by_license': defaultdict(int),
         'largest_deps': [],
     }
 
-    def process_node(node, depth=0):
-        stats['total_packages'] += 1
-        if depth == 1:
-            stats['direct_deps'] += 1
-        elif depth > 1:
-            stats['transitive_deps'] += 1
+    # Count license types
+    for package in packages:
+        license_type = package.get('license', 'unknown')
+        stats['by_license'][license_type] += 1
 
-        # Process dependencies
-        for dep in node.get('dependencies', []):
-            process_node(dep, depth + 1)
-
-    if 'packages' in tree_data:
-        for package in tree_data['packages']:
-            stats['total_packages'] += 1
+    # Find largest dependencies by manifest path length (crude size approximation)
+    largest = sorted(packages, key=lambda p: len(p.get('manifest_path', '')), reverse=True)[:10]
+    stats['largest_deps'] = [{'name': p.get('name'), 'version': p.get('version')} for p in largest]
 
     # Write report
     with open('artifacts/audit/dependency-report.json', 'w') as f:

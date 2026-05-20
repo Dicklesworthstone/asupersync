@@ -202,7 +202,7 @@ case "$LANE_ID" in
         timeout "$TIMEOUT" scripts/ci/audit_dependencies.sh 2>&1 | tee -a "$LANE_LOG" || true
 
         # Check for banned dependencies
-        cargo tree --format json | python3 scripts/ci/check_banned_deps.py 2>&1 | tee -a "$LANE_LOG"
+        cargo metadata --format-version 1 | python3 scripts/ci/check_banned_deps.py 2>&1 | tee -a "$LANE_LOG"
         ;;
 
     "platform_caps")
