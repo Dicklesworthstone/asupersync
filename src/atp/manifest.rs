@@ -252,7 +252,11 @@ pub struct MerkleRoot {
     hash: [u8; 32],
 }
 
-fn deterministic_f32_be_bytes(value: f32) -> [u8; 4] {
+/// Deterministic big-endian byte serialization for f32.
+///
+/// Converts NaN to canonical form (0x7fc0_0000) and normalizes signed zero.
+/// This ensures consistent byte representation across platforms.
+pub fn deterministic_f32_be_bytes(value: f32) -> [u8; 4] {
     const CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
 
     let bits = if value.is_nan() {
@@ -264,6 +268,60 @@ fn deterministic_f32_be_bytes(value: f32) -> [u8; 4] {
     };
 
     bits.to_be_bytes()
+}
+
+/// Deterministic big-endian byte serialization for f64.
+///
+/// Converts NaN to canonical form (0x7ff8_0000_0000_0000) and normalizes signed zero.
+/// This ensures consistent byte representation across platforms.
+pub fn deterministic_f64_be_bytes(value: f64) -> [u8; 8] {
+    const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+
+    let bits = if value.is_nan() {
+        CANONICAL_NAN_BITS
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    };
+
+    bits.to_be_bytes()
+}
+
+/// Deterministic little-endian byte serialization for f32.
+///
+/// Converts NaN to canonical form (0x7fc0_0000) and normalizes signed zero.
+/// This ensures consistent byte representation across platforms.
+pub fn deterministic_f32_le_bytes(value: f32) -> [u8; 4] {
+    const CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
+
+    let bits = if value.is_nan() {
+        CANONICAL_NAN_BITS
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    };
+
+    bits.to_le_bytes()
+}
+
+/// Deterministic little-endian byte serialization for f64.
+///
+/// Converts NaN to canonical form (0x7ff8_0000_0000_0000) and normalizes signed zero.
+/// This ensures consistent byte representation across platforms.
+pub fn deterministic_f64_le_bytes(value: f64) -> [u8; 8] {
+    const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+
+    let bits = if value.is_nan() {
+        CANONICAL_NAN_BITS
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    };
+
+    bits.to_le_bytes()
 }
 
 impl MerkleRoot {
@@ -2288,6 +2346,87 @@ mod tests {
             deterministic_f32_be_bytes(-0.0),
             deterministic_f32_be_bytes(0.0)
         );
+    }
+
+    #[test]
+    fn deterministic_f32_be_bytes_canonical_nan() {
+        // Any NaN should map to canonical NaN
+        let nan1 = f32::from_bits(0x7fc0_0001);  // Signaling NaN
+        let nan2 = f32::from_bits(0x7ff0_1234);  // Quiet NaN with payload
+        let nan3 = f32::NAN;                     // Standard NaN
+
+        let expected = [0x7f, 0xc0, 0x00, 0x00]; // Canonical NaN in big-endian
+        assert_eq!(deterministic_f32_be_bytes(nan1), expected);
+        assert_eq!(deterministic_f32_be_bytes(nan2), expected);
+        assert_eq!(deterministic_f32_be_bytes(nan3), expected);
+    }
+
+    #[test]
+    fn deterministic_f32_le_bytes_canonical_nan() {
+        // Any NaN should map to canonical NaN in little-endian
+        let nan = f32::from_bits(0x7fc0_0001);
+        let expected = [0x00, 0x00, 0xc0, 0x7f]; // Canonical NaN in little-endian
+        assert_eq!(deterministic_f32_le_bytes(nan), expected);
+    }
+
+    #[test]
+    fn deterministic_f32_signed_zero_normalization() {
+        // Both +0.0 and -0.0 should normalize to +0.0
+        assert_eq!(deterministic_f32_be_bytes(0.0), deterministic_f32_be_bytes(-0.0));
+        assert_eq!(deterministic_f32_le_bytes(0.0), deterministic_f32_le_bytes(-0.0));
+        assert_eq!(deterministic_f32_be_bytes(0.0), [0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(deterministic_f32_le_bytes(0.0), [0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn deterministic_f64_be_bytes_canonical_nan() {
+        // Any NaN should map to canonical NaN
+        let nan1 = f64::from_bits(0x7ff8_0000_0000_0001);  // Signaling NaN
+        let nan2 = f64::from_bits(0x7ff0_1234_5678_9abc);  // Quiet NaN with payload
+        let nan3 = f64::NAN;                               // Standard NaN
+
+        let expected = [0x7f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // Canonical NaN in big-endian
+        assert_eq!(deterministic_f64_be_bytes(nan1), expected);
+        assert_eq!(deterministic_f64_be_bytes(nan2), expected);
+        assert_eq!(deterministic_f64_be_bytes(nan3), expected);
+    }
+
+    #[test]
+    fn deterministic_f64_le_bytes_canonical_nan() {
+        // Any NaN should map to canonical NaN in little-endian
+        let nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let expected = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f]; // Canonical NaN in little-endian
+        assert_eq!(deterministic_f64_le_bytes(nan), expected);
+    }
+
+    #[test]
+    fn deterministic_f64_signed_zero_normalization() {
+        // Both +0.0 and -0.0 should normalize to +0.0
+        assert_eq!(deterministic_f64_be_bytes(0.0), deterministic_f64_be_bytes(-0.0));
+        assert_eq!(deterministic_f64_le_bytes(0.0), deterministic_f64_le_bytes(-0.0));
+        assert_eq!(deterministic_f64_be_bytes(0.0), [0x00; 8]);
+        assert_eq!(deterministic_f64_le_bytes(0.0), [0x00; 8]);
+    }
+
+    #[test]
+    fn deterministic_float_normal_values() {
+        // Normal values should be unchanged
+        let f32_val = 3.14159f32;
+        let f64_val = 3.14159265358979323846f64;
+
+        assert_eq!(deterministic_f32_be_bytes(f32_val), f32_val.to_bits().to_be_bytes());
+        assert_eq!(deterministic_f32_le_bytes(f32_val), f32_val.to_bits().to_le_bytes());
+        assert_eq!(deterministic_f64_be_bytes(f64_val), f64_val.to_bits().to_be_bytes());
+        assert_eq!(deterministic_f64_le_bytes(f64_val), f64_val.to_bits().to_le_bytes());
+    }
+
+    #[test]
+    fn deterministic_float_infinities() {
+        // Infinities should be unchanged
+        assert_eq!(deterministic_f32_be_bytes(f32::INFINITY), f32::INFINITY.to_bits().to_be_bytes());
+        assert_eq!(deterministic_f32_be_bytes(f32::NEG_INFINITY), f32::NEG_INFINITY.to_bits().to_be_bytes());
+        assert_eq!(deterministic_f64_be_bytes(f64::INFINITY), f64::INFINITY.to_bits().to_be_bytes());
+        assert_eq!(deterministic_f64_be_bytes(f64::NEG_INFINITY), f64::NEG_INFINITY.to_bits().to_be_bytes());
     }
 
     #[test]

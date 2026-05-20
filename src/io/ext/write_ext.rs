@@ -1,5 +1,9 @@
 //! AsyncWrite extension methods.
 
+use crate::atp::manifest::{
+    deterministic_f32_be_bytes, deterministic_f32_le_bytes,
+    deterministic_f64_be_bytes, deterministic_f64_le_bytes,
+};
 use crate::io::AsyncWrite;
 use std::future::Future;
 use std::io::{self, IoSlice};
@@ -191,24 +195,65 @@ pub trait AsyncWriteExt: AsyncWrite {
         "little-endian",
         to_le_bytes
     );
-    write_int_trait_method!(write_f32, WriteF32, f32, 4, "big-endian", to_be_bytes);
-    write_int_trait_method!(
-        write_f32_le,
-        WriteF32Le,
-        f32,
-        4,
-        "little-endian",
-        to_le_bytes
-    );
-    write_int_trait_method!(write_f64, WriteF64, f64, 8, "big-endian", to_be_bytes);
-    write_int_trait_method!(
-        write_f64_le,
-        WriteF64Le,
-        f64,
-        8,
-        "little-endian",
-        to_le_bytes
-    );
+    /// Write a `f32` in big-endian byte order using deterministic float encoding.
+    ///
+    /// Not cancel-safe: partial writes may have occurred.
+    fn write_f32(&mut self, n: f32) -> WriteF32<'_, Self>
+    where
+        Self: Unpin,
+    {
+        WriteF32 {
+            writer: self,
+            buf: deterministic_f32_be_bytes(n),
+            pos: 0,
+            completed: false,
+        }
+    }
+
+    /// Write a `f32` in little-endian byte order using deterministic float encoding.
+    ///
+    /// Not cancel-safe: partial writes may have occurred.
+    fn write_f32_le(&mut self, n: f32) -> WriteF32Le<'_, Self>
+    where
+        Self: Unpin,
+    {
+        WriteF32Le {
+            writer: self,
+            buf: deterministic_f32_le_bytes(n),
+            pos: 0,
+            completed: false,
+        }
+    }
+
+    /// Write a `f64` in big-endian byte order using deterministic float encoding.
+    ///
+    /// Not cancel-safe: partial writes may have occurred.
+    fn write_f64(&mut self, n: f64) -> WriteF64<'_, Self>
+    where
+        Self: Unpin,
+    {
+        WriteF64 {
+            writer: self,
+            buf: deterministic_f64_be_bytes(n),
+            pos: 0,
+            completed: false,
+        }
+    }
+
+    /// Write a `f64` in little-endian byte order using deterministic float encoding.
+    ///
+    /// Not cancel-safe: partial writes may have occurred.
+    fn write_f64_le(&mut self, n: f64) -> WriteF64Le<'_, Self>
+    where
+        Self: Unpin,
+    {
+        WriteF64Le {
+            writer: self,
+            buf: deterministic_f64_le_bytes(n),
+            pos: 0,
+            completed: false,
+        }
+    }
 
     /// Flush buffered data.
     fn flush(&mut self) -> Flush<'_, Self>
