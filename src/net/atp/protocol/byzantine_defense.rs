@@ -3,9 +3,12 @@
 //! This module demonstrates how the ResourceManager should be integrated
 //! into ATP protocol processing to defend against Byzantine peer attacks.
 
+use crate::atp::manifest::ManifestVersion;
+use crate::bytes::BytesMut;
 use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::protocol::resource_manager::{ResourceError, ResourceManager};
 use crate::net::atp::protocol::session::PeerId;
+use crate::net::atp::protocol::varint::VarInt;
 use std::time::Duration;
 
 /// Result type for Byzantine-defended operations.
@@ -97,12 +100,243 @@ impl DefendedFrameProcessor {
             _ => {}
         }
 
-        // TODO: Process frame with actual protocol logic
-        // process_frame_implementation(frame)?;
+        // Process frame with actual protocol logic
+        match self.process_frame_implementation(&peer_id, frame) {
+            Ok(()) => {
+                // Mark frame as successfully processed
+                self.resource_manager.frame_processed(&peer_id);
+                Ok(())
+            }
+            Err(e) => {
+                // Clean up resources on processing failure
+                self.cleanup_frame_processing(&peer_id, memory_needed);
+                Err(e)
+            }
+        }
+    }
 
-        // Mark frame as successfully processed
-        self.resource_manager.frame_processed(&peer_id);
+    /// Implement actual frame processing logic with proper protocol handling.
+    fn process_frame_implementation(&mut self, peer_id: &PeerId, frame: &Frame) -> DefenseResult<()> {
+        // Validate frame basic structure
+        if frame.payload().is_empty() && frame.frame_type() != FrameType::KeepAlive {
+            return Err(ByzantineDefenseError::RequestRejected { peer_id: *peer_id });
+        }
 
+        match frame.frame_type() {
+            FrameType::Handshake => {
+                self.handle_handshake_frame(peer_id, frame)
+            }
+            FrameType::HandshakeAck => {
+                self.handle_handshake_ack_frame(peer_id, frame)
+            }
+            FrameType::Capabilities => {
+                self.handle_capabilities_frame(peer_id, frame)
+            }
+            FrameType::CapabilitiesAck => {
+                self.handle_capabilities_ack_frame(peer_id, frame)
+            }
+            FrameType::ObjectManifest => {
+                self.handle_object_manifest_frame(peer_id, frame)
+            }
+            FrameType::ObjectRequest => {
+                self.handle_object_request_frame(peer_id, frame)
+            }
+            FrameType::ObjectData => {
+                self.handle_object_data_frame(peer_id, frame)
+            }
+            FrameType::ObjectComplete => {
+                self.handle_object_complete_frame(peer_id, frame)
+            }
+            FrameType::ObjectError => {
+                self.handle_object_error_frame(peer_id, frame)
+            }
+            FrameType::PathUpdate => {
+                self.handle_path_update_frame(peer_id, frame)
+            }
+            FrameType::PathChallenge => {
+                self.handle_path_challenge_frame(peer_id, frame)
+            }
+            FrameType::PathResponse => {
+                self.handle_path_response_frame(peer_id, frame)
+            }
+            FrameType::KeepAlive => {
+                // KeepAlive frames require no processing
+                Ok(())
+            }
+            FrameType::Cancel => {
+                self.handle_cancel_frame(peer_id, frame)
+            }
+            FrameType::Error => {
+                self.handle_error_frame(peer_id, frame)
+            }
+            FrameType::Close => {
+                self.handle_close_frame(peer_id, frame)
+            }
+            FrameType::Control => {
+                self.handle_control_frame(peer_id, frame)
+            }
+            FrameType::Data => {
+                self.handle_data_frame(peer_id, frame)
+            }
+            FrameType::Proof => {
+                self.handle_proof_frame(peer_id, frame)
+            }
+            FrameType::Repair => {
+                self.handle_repair_frame(peer_id, frame)
+            }
+            FrameType::Session => {
+                self.handle_session_frame(peer_id, frame)
+            }
+            FrameType::Notification => {
+                self.handle_notification_frame(peer_id, frame)
+            }
+        }
+    }
+
+    /// Handle handshake frame processing.
+    fn handle_handshake_frame(&mut self, _peer_id: &PeerId, frame: &Frame) -> DefenseResult<()> {
+        // Validate handshake frame structure
+        if frame.payload().len() < 8 {
+            return Err(ByzantineDefenseError::RequestRejected { peer_id: *_peer_id });
+        }
+        // TODO: Implement handshake validation logic
+        Ok(())
+    }
+
+    /// Handle handshake acknowledgment frame processing.
+    fn handle_handshake_ack_frame(&mut self, _peer_id: &PeerId, frame: &Frame) -> DefenseResult<()> {
+        // Validate handshake ack frame structure
+        if frame.payload().len() < 4 {
+            return Err(ByzantineDefenseError::RequestRejected { peer_id: *_peer_id });
+        }
+        // TODO: Implement handshake ack validation logic
+        Ok(())
+    }
+
+    /// Handle capabilities frame processing.
+    fn handle_capabilities_frame(&mut self, _peer_id: &PeerId, frame: &Frame) -> DefenseResult<()> {
+        // Validate capabilities frame structure
+        if frame.payload().is_empty() {
+            return Err(ByzantineDefenseError::RequestRejected { peer_id: *_peer_id });
+        }
+        // TODO: Implement capabilities validation logic
+        Ok(())
+    }
+
+    /// Handle capabilities acknowledgment frame processing.
+    fn handle_capabilities_ack_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement capabilities ack validation logic
+        Ok(())
+    }
+
+    /// Handle object manifest frame processing.
+    fn handle_object_manifest_frame(&mut self, peer_id: &PeerId, frame: &Frame) -> DefenseResult<()> {
+        // Parse and validate manifest structure
+        let manifest_size = self.extract_manifest_size(frame)
+            .ok_or_else(|| ByzantineDefenseError::RequestRejected { peer_id: *peer_id })?;
+
+        // Additional manifest validation
+        if manifest_size == 0 {
+            return Err(ByzantineDefenseError::RequestRejected { peer_id: *peer_id });
+        }
+
+        // TODO: Parse and validate full manifest structure
+        Ok(())
+    }
+
+    /// Handle object request frame processing.
+    fn handle_object_request_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement object request validation logic
+        Ok(())
+    }
+
+    /// Handle object data frame processing.
+    fn handle_object_data_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement object data validation logic
+        Ok(())
+    }
+
+    /// Handle object complete frame processing.
+    fn handle_object_complete_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement object complete validation logic
+        Ok(())
+    }
+
+    /// Handle object error frame processing.
+    fn handle_object_error_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement object error validation logic
+        Ok(())
+    }
+
+    /// Handle path update frame processing.
+    fn handle_path_update_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement path update validation logic
+        Ok(())
+    }
+
+    /// Handle path challenge frame processing.
+    fn handle_path_challenge_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement path challenge validation logic
+        Ok(())
+    }
+
+    /// Handle path response frame processing.
+    fn handle_path_response_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement path response validation logic
+        Ok(())
+    }
+
+    /// Handle cancel frame processing.
+    fn handle_cancel_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement cancel frame validation logic
+        Ok(())
+    }
+
+    /// Handle error frame processing.
+    fn handle_error_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement error frame validation logic
+        Ok(())
+    }
+
+    /// Handle close frame processing.
+    fn handle_close_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement close frame validation logic
+        Ok(())
+    }
+
+    /// Handle control frame processing.
+    fn handle_control_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement control frame validation logic
+        Ok(())
+    }
+
+    /// Handle data frame processing.
+    fn handle_data_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement data frame validation logic
+        Ok(())
+    }
+
+    /// Handle proof frame processing.
+    fn handle_proof_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement proof frame validation logic
+        Ok(())
+    }
+
+    /// Handle repair frame processing.
+    fn handle_repair_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement repair frame validation logic
+        Ok(())
+    }
+
+    /// Handle session frame processing.
+    fn handle_session_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement session frame validation logic
+        Ok(())
+    }
+
+    /// Handle notification frame processing.
+    fn handle_notification_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement notification frame validation logic
         Ok(())
     }
 
@@ -139,12 +373,48 @@ impl DefendedFrameProcessor {
     /// Extract manifest size from an ObjectManifest frame.
     #[must_use]
     fn extract_manifest_size(&self, frame: &Frame) -> Option<u64> {
-        if frame.frame_type() == FrameType::ObjectManifest {
-            // TODO: Parse actual manifest size from frame payload
-            Some(frame.payload().len() as u64)
-        } else {
-            None
+        if frame.frame_type() != FrameType::ObjectManifest {
+            return None;
         }
+
+        let payload = frame.payload();
+        if payload.is_empty() {
+            return None;
+        }
+
+        // Parse manifest structure to extract declared size
+        // Format: [version: varint][size: u64][manifest_data]
+        let mut offset = 0;
+
+        // Parse version first
+        let mut buf = BytesMut::from(&payload[offset..]);
+        let version_varint = VarInt::decode(&mut buf).ok().flatten()?;
+        if !ManifestVersion(version_varint.value() as u32).is_supported() {
+            return None;
+        }
+        offset += version_varint.encoded_len();
+
+        // Check we have enough bytes for size field
+        if payload.len() < offset + 8 {
+            return None;
+        }
+
+        // Parse declared manifest size (u64 big-endian)
+        let size_bytes: [u8; 8] = payload[offset..offset + 8].try_into().ok()?;
+        let declared_size = u64::from_be_bytes(size_bytes);
+
+        // Validate declared size is reasonable (overflow protection)
+        if declared_size > u64::MAX / 2 {
+            return None;
+        }
+
+        // Validate declared size matches actual payload structure
+        let expected_payload_len = offset + 8 + declared_size as usize;
+        if payload.len() != expected_payload_len {
+            return None;
+        }
+
+        Some(declared_size)
     }
 
     /// Handle session termination.
@@ -210,13 +480,11 @@ pub struct ResourceStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::atp::protocol::frames::{Frame, FrameType};
+    use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 
     fn create_test_frame(frame_type: FrameType, payload_size: usize) -> Frame {
         let payload = vec![0u8; payload_size];
-        // TODO: Use actual Frame constructor when available
-        // Frame::new(frame_type, payload)
-        Frame::test_frame(frame_type, payload) // Placeholder
+        Frame::new(ProtocolVersion::CURRENT, frame_type, payload).expect("valid test frame")
     }
 
     #[test]
@@ -308,24 +576,5 @@ mod tests {
         // Resource stats should reflect cleanup
         let stats = processor.resource_stats();
         assert_eq!(stats.peer_count, 0);
-    }
-}
-
-// TODO: Remove this placeholder when Frame::new is available
-impl Frame {
-    #[cfg(test)]
-    fn test_frame(frame_type: FrameType, payload: Vec<u8>) -> Self {
-        // Placeholder implementation for testing
-        unimplemented!("Frame::new not yet available - this is a placeholder")
-    }
-
-    #[cfg(test)]
-    fn frame_type(&self) -> FrameType {
-        unimplemented!("Frame::frame_type not yet available - this is a placeholder")
-    }
-
-    #[cfg(test)]
-    fn payload(&self) -> &[u8] {
-        unimplemented!("Frame::payload not yet available - this is a placeholder")
     }
 }
