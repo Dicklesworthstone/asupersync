@@ -217,13 +217,8 @@ sha2 = "0.11"
 hmac = "0.13"
 # CRC32 for Kafka RecordBatch v2 format validation (KIP-98)
 crc32fast = "1.4"
-# QUIC/HTTP3 deps remain disabled: current upstream stacks pull Tokio transitively.
-# We will replace this surface with native asupersync implementations.
-# quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }
-# h3 = { version = "0.0.8", optional = true }
-# h3-quinn = { version = "0.0.10", optional = true }
-# http = { version = "1.1", optional = true }
-# bytes = { version = "1.11", optional = true }
+# QUIC/HTTP3 is intentionally native-only for ATP and the runtime core.
+# Do not add an external QUIC/H3 stack dependency here.
 # Kafka client integration via rdkafka (optional, requires librdkafka on the system).
 rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)

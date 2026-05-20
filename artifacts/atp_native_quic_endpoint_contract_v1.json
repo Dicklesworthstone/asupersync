@@ -1,0 +1,1003 @@
+{
+  "schema_id": "atp-native-quic-endpoint-contract.v1",
+  "contract_version": 1,
+  "bead_id": "asupersync-l6f1ja",
+  "title": "ATP-A1 native QUIC RFC gap matrix and ATP minimum endpoint contract",
+  "north_star": "ATP must deliver the Carmack-style write(really_big_buffer) experience through a self-contained Asupersync data movement layer: native QUIC endpoint machinery, verified object transfer, deterministic replay, path establishment, and adaptive repair without relying on an external QUIC crate.",
+  "scope_statement": "This artifact is the stable handoff from plan space into implementation space for ATP-A. It does not claim that native QUIC is complete today. It records the exact RFC features ATP needs, what the current code already provides, the gaps that remain, the implementation beads that own those gaps, and the validation expectations future maintainers should preserve.",
+  "non_negotiables": [
+    "ATP/native QUIC must remain Tokio-free in the production runtime graph.",
+    "ATP/native QUIC must not depend on external QUIC endpoint stacks such as quinn, quiche, s2n-quic, msquic, or h3-quinn.",
+    "All endpoint work must preserve Asupersync structured concurrency: packet I/O, timers, stream tasks, repair tasks, and close/drain work live under Cx-owned regions.",
+    "Every transport side effect needs deterministic lab coverage or a deterministic artifact path before it graduates from state-machine code to socket-level endpoint code.",
+    "RaptorQ repair is a policy substrate above ATP object transfer; it must not be used as a substitute for implementing correct QUIC reliability, loss recovery, congestion control, or flow control.",
+    "Security and packet protection must be internally integrated through an Asupersync-owned provider boundary. The boundary may use small crypto/TLS primitives already permitted by the runtime, but it must not outsource QUIC behavior."
+  ],
+  "rfc_scope": [
+    {
+      "rfc": "RFC 9000",
+      "name": "QUIC: A UDP-Based Multiplexed and Secure Transport",
+      "atp_relevance": "Connection IDs, packet number spaces, transport parameters, stream semantics, flow control, path validation, migration, connection close, and anti-amplification are all required for ATP's deployable native endpoint."
+    },
+    {
+      "rfc": "RFC 9001",
+      "name": "Using TLS to Secure QUIC",
+      "atp_relevance": "Packet protection, crypto levels, key phases, handshake progression, Retry interaction, and key update are required before ATP can safely expose internet transfer endpoints."
+    },
+    {
+      "rfc": "RFC 9002",
+      "name": "QUIC Loss Detection and Congestion Control",
+      "atp_relevance": "ATP's data scheduler needs accurate RTT, ACK, loss, PTO, congestion, and bytes-in-flight signals so it can choose stream priority, repair ROI, path racing, and relay fallback without fighting the transport."
+    },
+    {
+      "rfc": "RFC 9221",
+      "name": "An Unreliable Datagram Extension to QUIC",
+      "atp_relevance": "DATAGRAM is useful for path probes, non-critical telemetry, path-quality beacons, and later repair-plane experiments. It is not required for reliable ATP object transfer v0."
+    }
+  ],
+  "source_inventory": [
+    {
+      "path": "src/net/quic_core/mod.rs",
+      "role": "Runtime-agnostic QUIC core codecs: varints, connection IDs, packet headers, packet-number reconstruction, and transport-parameter TLV parsing."
+    },
+    {
+      "path": "src/net/quic_native/connection.rs",
+      "role": "Cx-integrated native connection state machine composing TLS progression, transport/loss state, stream tables, packet-number spaces, anti-amplification accounting, and migration hooks."
+    },
+    {
+      "path": "src/net/quic_native/transport.rs",
+      "role": "Runtime-agnostic transport lifecycle, ACK ranges, RTT estimator, loss detection, PTO deadlines, and congestion-window accounting."
+    },
+    {
+      "path": "src/net/quic_native/streams.rs",
+      "role": "QUIC stream ID, stream table, per-stream and connection-level flow control, reassembly, STOP_SENDING, RESET_STREAM, final-size, and scheduling model."
+    },
+    {
+      "path": "src/net/quic_native/tls.rs",
+      "role": "QUIC crypto-level and key-phase state machine, intentionally decoupled from any concrete packet-protection provider."
+    },
+    {
+      "path": "src/net/quic_native/forensic_log.rs",
+      "role": "Structured QUIC/H3 forensic event and manifest surface that ATP should generalize into qlog-ish transfer crashpacks."
+    },
+    {
+      "path": "src/net/udp.rs",
+      "role": "Existing async UDP socket primitive. ATP-A2/A11 must lift this into a cross-platform endpoint, batching, buffer tuning, and capability-reporting layer under Cx."
+    },
+    {
+      "path": "src/lab/runtime.rs",
+      "role": "Deterministic LabRuntime that ATP-A/N must use for packet, timer, path, crash, and replay tests."
+    },
+    {
+      "path": "tests/conformance/quic_rfc9000/mod.rs",
+      "role": "Existing RFC 9000 conformance harness surface that ATP-N2 should expand to native endpoint and packet-level conformance."
+    },
+    {
+      "path": "tests/quic_h3_e2e.rs",
+      "role": "Existing native QUIC/H3 deterministic e2e proof surface; useful as precedent, not sufficient by itself for ATP endpoint deployment."
+    }
+  ],
+  "status_legend": {
+    "implemented_core": "Runtime-agnostic protocol primitive exists and has tests, but may still need endpoint integration.",
+    "implemented_state_machine": "Native state-machine behavior exists in Rust code and can be driven deterministically, but may not yet perform socket-level I/O.",
+    "partial_state_machine": "A useful native model exists, but missing protocol cases, packet integration, provider boundary, or endpoint behavior remain.",
+    "missing_followup": "Feature is required for ATP but is intentionally owned by a later bead.",
+    "policy_gate": "Requirement is a project policy that must be enforced by tests, dependency audit, and review.",
+    "explicit_v0_exclusion": "Not required for ATP v0. The exclusion is intentional and should not be mistaken for an accidental gap."
+  },
+  "required_feature_ids": [
+    "quic_varint_and_header_codecs",
+    "connection_id_and_packet_number_spaces",
+    "packet_number_encoding_and_reconstruction",
+    "transport_parameter_codec_and_validation",
+    "quic_frame_codec_and_packet_assembly",
+    "version_negotiation_retry_and_initial_handshake",
+    "packet_protection_tls_provider_boundary",
+    "crypto_levels_key_phase_and_key_update",
+    "ack_ranges_rtt_loss_pto_and_congestion",
+    "anti_amplification_and_address_validation",
+    "stream_id_flow_control_reset_stop_and_reassembly",
+    "socket_endpoint_packet_io_under_cx",
+    "connection_id_lifecycle_path_validation_and_migration",
+    "quic_datagram_extension",
+    "connection_close_draining_and_error_surfaces",
+    "qlog_forensics_deterministic_replay_and_lab_adapter",
+    "external_quic_dependency_policy"
+  ],
+  "minimum_endpoint_contract": [
+    {
+      "id": "quic_varint_and_header_codecs",
+      "requirement": "Encode and decode QUIC varints, long headers, Retry headers, short headers, CIDs, token fields, packet-number lengths, and reserved/fixed-bit validation without Tokio or external QUIC stacks.",
+      "why_atp_needs_it": "ATP's native endpoint cannot safely send or receive any QUIC packet until packet envelopes and integer formats are deterministic, fuzzable, and owned by Asupersync.",
+      "rfc_refs": [
+        "RFC 9000 Sections 16, 17.2, 17.3, 17.4"
+      ],
+      "current_status": "implemented_core",
+      "source_files": [
+        "src/net/quic_core/mod.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub const QUIC_VARINT_MAX"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub enum PacketHeader"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub struct LongHeader"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub struct ShortHeader"
+        }
+      ],
+      "gap": "Core header primitives exist, but full frame packet assembly and protected packet I/O are intentionally separate ATP-A5/A3 work.",
+      "atp_dependency_impact": "ATP-B frame negotiation and ATP-A socket I/O can depend on stable packet/header codecs, but cannot treat them as a complete endpoint.",
+      "followup_beads": [
+        "asupersync-kwvb2g",
+        "asupersync-e8hst6",
+        "asupersync-rvryit"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Property tests for varint width boundaries and EOF behavior.",
+        "Round-trip vectors for Initial, Handshake, Retry, 0-RTT, and short-header packets.",
+        "Negative tests for reserved bits, invalid CID length, invalid packet-number width, and malformed Retry integrity tag length."
+      ]
+    },
+    {
+      "id": "connection_id_and_packet_number_spaces",
+      "requirement": "Represent destination/source connection IDs, enforce the 20-byte CID limit, keep independent Initial/Handshake/ApplicationData packet number spaces, and expose lifecycle hooks for CID rotation and rebinding.",
+      "why_atp_needs_it": "ATP path racing, NAT rebinding, relay fallback, and migration diagnostics depend on stable connection identity without exposing transfer sessions to 5-tuple churn.",
+      "rfc_refs": [
+        "RFC 9000 Sections 5.1, 7.2, 9, 12.3, 17"
+      ],
+      "current_status": "partial_state_machine",
+      "source_files": [
+        "src/net/quic_core/mod.rs",
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub struct ConnectionId"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub const MAX_LEN"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "next_packet_numbers: [u64; 3]"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn active_path_id"
+        }
+      ],
+      "gap": "CID representation and packet-number spaces exist, but NEW_CONNECTION_ID/RETIRE_CONNECTION_ID, path validation, stateless reset token handling, and connection-ID routing tables are not yet endpoint-complete.",
+      "atp_dependency_impact": "ATP-E path graph and ATP-A10 migration work cannot be correct until CID lifecycle is explicit and observable.",
+      "followup_beads": [
+        "asupersync-xq4dvp",
+        "asupersync-rvryit",
+        "asupersync-crscmn"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Unit tests for CID length boundaries and zero-length CID behavior.",
+        "Endpoint tests proving packet numbers advance independently per packet-number space.",
+        "Deterministic migration tests where NAT rebinding changes address but preserves transfer session identity."
+      ]
+    },
+    {
+      "id": "packet_number_encoding_and_reconstruction",
+      "requirement": "Encode truncated packet numbers at legal widths and reconstruct full packet numbers from largest-acknowledged context exactly as RFC 9000 specifies.",
+      "why_atp_needs_it": "Loss recovery, ACK processing, replay forensics, and tamper diagnostics all depend on packet-number reconstruction being deterministic and RFC-correct.",
+      "rfc_refs": [
+        "RFC 9000 Sections 12.3, 17.1, Appendix A.3"
+      ],
+      "current_status": "implemented_core",
+      "source_files": [
+        "src/net/quic_core/mod.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "PacketNumberTooLarge"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub fn decode_packet_number_reconstruct"
+        }
+      ],
+      "gap": "Core reconstruction exists; endpoint packet protection still needs to wire header protection removal and packet-number reconstruction into received-packet decode.",
+      "atp_dependency_impact": "ATP-A3/A5 must consume this primitive inside protected packet decode instead of duplicating packet-number logic.",
+      "followup_beads": [
+        "asupersync-e8hst6",
+        "asupersync-kwvb2g"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "RFC appendix vectors for reconstruction.",
+        "Boundary tests near 2^62-1.",
+        "Fuzz tests ensuring invalid widths and overlarge reconstructed values fail closed."
+      ]
+    },
+    {
+      "id": "transport_parameter_codec_and_validation",
+      "requirement": "Encode/decode known and unknown transport parameters, reject duplicates, validate parameter bodies, preserve unknown values, and surface effective idle timeout semantics.",
+      "why_atp_needs_it": "ATP has to negotiate flow-control limits, stream limits, ACK-delay behavior, migration policy, DATAGRAM support, and endpoint capabilities without ambient configuration.",
+      "rfc_refs": [
+        "RFC 9000 Sections 10.1, 18.1, 18.2",
+        "RFC 9221 Section 3"
+      ],
+      "current_status": "implemented_core",
+      "source_files": [
+        "src/net/quic_core/mod.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub struct TransportParameters"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "DuplicateTransportParameter"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "TP_INITIAL_MAX_DATA"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "effective_max_idle_timeout"
+        }
+      ],
+      "gap": "Core parameter codec exists, but endpoint validation must include the full ATP minimum set, DATAGRAM max frame size, active migration policy, original destination CID, retry source CID, and TLS transcript integration.",
+      "atp_dependency_impact": "ATP-A4/A5 must be able to fail connection setup early when peer parameters would make verified object transfer unsafe or non-resumable.",
+      "followup_beads": [
+        "asupersync-kwvb2g",
+        "asupersync-ny1gr9",
+        "asupersync-vls4za"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Unit tests for duplicate, malformed, unknown, and boundary transport parameters.",
+        "Handshake tests proving negotiated stream/data limits feed NativeQuicConnectionConfig.",
+        "Negative e2e tests for invalid Retry/transport-parameter transcript combinations."
+      ]
+    },
+    {
+      "id": "quic_frame_codec_and_packet_assembly",
+      "requirement": "Implement ATP-required QUIC frame encode/decode and packet assembly: PADDING, PING, ACK, RESET_STREAM, STOP_SENDING, CRYPTO, NEW_TOKEN, STREAM, MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED, NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, PATH_CHALLENGE, PATH_RESPONSE, CONNECTION_CLOSE, HANDSHAKE_DONE, and DATAGRAM when enabled.",
+      "why_atp_needs_it": "State machines are not deployable until their transitions are driven by actual wire frames, and ATP cannot debug or replay transfers without frame-level artifacts.",
+      "rfc_refs": [
+        "RFC 9000 Sections 12.4, 13, 19",
+        "RFC 9221 Section 4"
+      ],
+      "current_status": "missing_followup",
+      "source_files": [
+        "src/net/quic_core/mod.rs",
+        "src/net/quic_native/mod.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub enum PacketHeader"
+        },
+        {
+          "file": "src/net/quic_native/mod.rs",
+          "marker": "pub mod transport;"
+        }
+      ],
+      "gap": "Packet headers and transport state exist, but ATP-required frame codecs and packet assembly are not yet implemented.",
+      "atp_dependency_impact": "ATP-B object transfer cannot move over native QUIC until STREAM and control frames are encoded, decoded, prioritized, and traced.",
+      "followup_beads": [
+        "asupersync-kwvb2g",
+        "asupersync-vls4za",
+        "asupersync-rsr2wm"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Golden frame vectors for every required frame type.",
+        "Fuzz tests for malformed varint lengths, illegal frame/packet-number-space combinations, and truncated payloads.",
+        "E2E packet assembly tests that drive native state machines from bytes rather than direct method calls."
+      ]
+    },
+    {
+      "id": "version_negotiation_retry_and_initial_handshake",
+      "requirement": "Implement version negotiation, server Retry token validation, Initial packet handling, TLS handshake flight progression, handshake confirmation, and correct packet-number-space discard.",
+      "why_atp_needs_it": "ATP peers must connect across the public internet without relying on test-only direct state-machine construction.",
+      "rfc_refs": [
+        "RFC 9000 Sections 6, 7, 8, 17.2.1, 17.2.2, 17.2.5",
+        "RFC 9001 Sections 4, 5, 8"
+      ],
+      "current_status": "partial_state_machine",
+      "source_files": [
+        "src/net/quic_core/mod.rs",
+        "src/net/quic_native/connection.rs",
+        "src/net/quic_native/tls.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub struct RetryHeader"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn begin_handshake"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn on_handshake_confirmed"
+        },
+        {
+          "file": "src/net/quic_native/tls.rs",
+          "marker": "pub fn on_handshake_keys_available"
+        }
+      ],
+      "gap": "Handshake state methods exist, but socket-level version negotiation, Retry validation, crypto frame exchange, packet protection install, and transcript binding remain follow-up work.",
+      "atp_dependency_impact": "ATP CLI/daemon cannot accept arbitrary peer connections until this is endpoint-complete.",
+      "followup_beads": [
+        "asupersync-ny1gr9",
+        "asupersync-e8hst6",
+        "asupersync-rvryit"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Client/server deterministic handshake e2e through UDP endpoint loops.",
+        "Retry token replay and wrong-original-destination-CID negative tests.",
+        "Version negotiation tests that fail closed for unsupported versions and preserve deterministic trace artifacts."
+      ]
+    },
+    {
+      "id": "packet_protection_tls_provider_boundary",
+      "requirement": "Define and implement an internal packet-protection provider boundary for Initial, Handshake, 0-RTT, and 1-RTT packet protection, header protection, key derivation, key discard, and key update.",
+      "why_atp_needs_it": "The project explicitly rejects external QUIC stacks, but ATP still needs QUIC's security properties. The boundary lets Asupersync own QUIC behavior while keeping crypto implementation isolated and testable.",
+      "rfc_refs": [
+        "RFC 9001 Sections 5, 6, 7"
+      ],
+      "current_status": "missing_followup",
+      "source_files": [
+        "src/net/quic_native/tls.rs",
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/tls.rs",
+          "marker": "pub struct QuicTlsMachine"
+        },
+        {
+          "file": "src/net/quic_native/tls.rs",
+          "marker": "pub enum CryptoLevel"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn request_local_key_update"
+        }
+      ],
+      "gap": "TLS/key-phase state exists, but no packet-protection provider trait, protected packet codec, crypto frame integration, or key material lifecycle has been implemented.",
+      "atp_dependency_impact": "No internet ATP endpoint may be exposed until packet protection is complete and covered by deterministic and RFC-vector tests.",
+      "followup_beads": [
+        "asupersync-e8hst6",
+        "asupersync-ny1gr9"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Known-vector tests for Initial secrets and header protection.",
+        "Round-trip protected packet tests at every crypto level.",
+        "Negative tests for stale keys, wrong key phase, and packet tampering."
+      ]
+    },
+    {
+      "id": "crypto_levels_key_phase_and_key_update",
+      "requirement": "Model monotonic crypto-level progression, 0-RTT eligibility, handshake confirmation, local key-update scheduling/commit, and peer key-phase acceptance or rejection.",
+      "why_atp_needs_it": "ATP transfers are long-lived enough that key update and precise 1-RTT gating matter; resuming huge transfers cannot depend on ambiguous security state.",
+      "rfc_refs": [
+        "RFC 9001 Sections 4, 5, 6"
+      ],
+      "current_status": "implemented_state_machine",
+      "source_files": [
+        "src/net/quic_native/tls.rs",
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/tls.rs",
+          "marker": "pub enum KeyUpdateEvent"
+        },
+        {
+          "file": "src/net/quic_native/tls.rs",
+          "marker": "pub fn can_send_1rtt"
+        },
+        {
+          "file": "src/net/quic_native/tls.rs",
+          "marker": "pub fn on_peer_key_phase"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn commit_local_key_update"
+        }
+      ],
+      "gap": "State-machine behavior exists; ATP-A3/A4 must connect it to actual packet protection, TLS transcript, and endpoint handshake flow.",
+      "atp_dependency_impact": "ATP stream scheduling can rely on can_send_1rtt only after endpoint handshake tests prove it tracks real protected packet state.",
+      "followup_beads": [
+        "asupersync-e8hst6",
+        "asupersync-ny1gr9",
+        "asupersync-xq4dvp"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Unit tests for monotonic level transitions and forbidden key updates before confirmation.",
+        "E2E tests where key update occurs during a multi-stream ATP transfer without corrupting stream data.",
+        "Forensic trace entries for key generation changes."
+      ]
+    },
+    {
+      "id": "ack_ranges_rtt_loss_pto_and_congestion",
+      "requirement": "Track sent packet metadata, ACK ranges, RTT samples, ACK delay, packet-threshold and time-threshold loss, PTO deadlines/backoff, bytes in flight, congestion window, slow start, recovery epochs, and congestion-limited sends.",
+      "why_atp_needs_it": "ATP's transfer brain must see real transport pressure. Without correct loss/congestion signals it cannot decide between retransmit, RaptorQ tail repair, hedged reads, relay fallback, path migration, or reduced in-flight bytes.",
+      "rfc_refs": [
+        "RFC 9002 Sections 5, 6, 7",
+        "RFC 9000 Section 13.2"
+      ],
+      "current_status": "partial_state_machine",
+      "source_files": [
+        "src/net/quic_native/transport.rs",
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/transport.rs",
+          "marker": "pub struct AckRange"
+        },
+        {
+          "file": "src/net/quic_native/transport.rs",
+          "marker": "pub struct RttEstimator"
+        },
+        {
+          "file": "src/net/quic_native/transport.rs",
+          "marker": "pub fn pto_deadline_micros"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "CongestionLimited"
+        }
+      ],
+      "gap": "Loss/congestion state exists, but endpoint ACK frame generation, ACK delay policy, PTO probe packet emission, ECN, persistent congestion, and scheduler-facing metrics require completion.",
+      "atp_dependency_impact": "ATP-D adaptive scheduling and ATP-F repair economics should treat this as the authoritative transport signal source once A6 is complete.",
+      "followup_beads": [
+        "asupersync-51uf70",
+        "asupersync-33lyim"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Unit tests for ACK range normalization and duplicate ACK behavior.",
+        "Deterministic lab scenarios for loss, reordering, ACK loss, PTO storms, and congestion recovery.",
+        "Trace assertions that every scheduler-visible congestion/loss metric has a source event."
+      ]
+    },
+    {
+      "id": "anti_amplification_and_address_validation",
+      "requirement": "Enforce server anti-amplification before address validation, account datagrams received/sent, validate peer address via Retry or PATH_RESPONSE, and expose state for diagnostics.",
+      "why_atp_needs_it": "ATP rendezvous and public internet receive mode must resist spoofed-source amplification while still supporting NAT traversal and path racing.",
+      "rfc_refs": [
+        "RFC 9000 Sections 8, 8.1, 8.2"
+      ],
+      "current_status": "partial_state_machine",
+      "source_files": [
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "AmplificationLimited"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn on_datagram_received"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn validate_peer_address"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "fn ensure_anti_amplification_limit"
+        }
+      ],
+      "gap": "Accounting exists in the state machine, but address validation still needs real token/PATH_CHALLENGE/PATH_RESPONSE endpoint wiring and path-graph observability.",
+      "atp_dependency_impact": "ATP-E NAT traversal and relay fallback must integrate this guard so connectivity features do not create a network abuse primitive.",
+      "followup_beads": [
+        "asupersync-51uf70",
+        "asupersync-xq4dvp",
+        "asupersync-rvryit"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Unit tests proving server sends are capped at 3x received bytes before validation.",
+        "E2E tests where validation lifts the limit only after token or path proof.",
+        "Path doctor logs that explain anti-amplification stalls distinctly from congestion stalls."
+      ]
+    },
+    {
+      "id": "stream_id_flow_control_reset_stop_and_reassembly",
+      "requirement": "Implement bidirectional/unidirectional stream IDs, local and remote stream limits, per-stream and connection-level flow control, reassembly of out-of-order stream ranges, final-size validation, RESET_STREAM, STOP_SENDING, and fair stream selection.",
+      "why_atp_needs_it": "ATP object, control, repair, progress, and proof traffic must share a single QUIC connection without head-of-line blocking at the transfer layer.",
+      "rfc_refs": [
+        "RFC 9000 Sections 2, 3, 4, 19.8, 19.9, 19.10, 19.11, 19.12, 19.13, 19.14, 19.15"
+      ],
+      "current_status": "implemented_state_machine",
+      "source_files": [
+        "src/net/quic_native/streams.rs",
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/streams.rs",
+          "marker": "pub struct StreamTable"
+        },
+        {
+          "file": "src/net/quic_native/streams.rs",
+          "marker": "pub fn increase_connection_send_limit"
+        },
+        {
+          "file": "src/net/quic_native/streams.rs",
+          "marker": "pub fn next_writable_stream"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn reset_stream_send"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn on_stop_sending"
+        }
+      ],
+      "gap": "Stream state exists; ATP-A7 must wire it to STREAM/MAX_DATA/MAX_STREAM_DATA/MAX_STREAMS frames, reliable delivery, stream prioritization, and close/drain semantics.",
+      "atp_dependency_impact": "ATP-B/Binary frames and ATP-D scheduler should map control/data/repair/proof streams to this stream table once frame I/O exists.",
+      "followup_beads": [
+        "asupersync-rsr2wm",
+        "asupersync-kwvb2g",
+        "asupersync-ovjee1"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Unit tests for stream ID parity, role ownership, stream limit exhaustion, flow-control rollback, and final-size mismatch.",
+        "E2E tests with concurrent ATP control, data, repair, and progress streams.",
+        "Deterministic cancellation tests proving stream reset and receive-stop do not leak obligations or orphan packet tasks."
+      ]
+    },
+    {
+      "id": "socket_endpoint_packet_io_under_cx",
+      "requirement": "Build native client/server UDP endpoint loops under Cx: bind, receive, classify connection IDs, route packets, batch sends/receives where supported, apply buffer tuning, schedule timers, handle cancellation, and close to quiescence.",
+      "why_atp_needs_it": "The current native QUIC work is mostly state-machine shaped. ATP needs deployable endpoint machinery that can run in the CLI, daemon, lab, and path manager.",
+      "rfc_refs": [
+        "RFC 9000 Sections 5, 8, 9, 10, 12, 14"
+      ],
+      "current_status": "missing_followup",
+      "source_files": [
+        "src/net/udp.rs",
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/udp.rs",
+          "marker": "pub struct UdpSocket"
+        },
+        {
+          "file": "src/net/udp.rs",
+          "marker": "pub async fn send_to"
+        },
+        {
+          "file": "src/net/udp.rs",
+          "marker": "pub fn poll_recv_from"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub struct NativeQuicConnection"
+        }
+      ],
+      "gap": "UDP primitives exist, but no native QUIC endpoint owns packet loops, connection tables, timers, path state, batching, qlog, or Cx region shutdown yet.",
+      "atp_dependency_impact": "ATP CLI/daemon implementation should not begin real network transfer until A2/A11 produce an endpoint API that enforces structured concurrency.",
+      "followup_beads": [
+        "asupersync-rvryit",
+        "asupersync-crscmn",
+        "asupersync-prl0wp"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Unit tests for packet classification and connection-table routing.",
+        "Localhost e2e tests with detailed logs for handshake, data stream, close, cancellation, and endpoint drop.",
+        "Lab endpoint adapter tests that replay packet loss, reordering, duplication, truncation, and delayed timers deterministically."
+      ]
+    },
+    {
+      "id": "connection_id_lifecycle_path_validation_and_migration",
+      "requirement": "Implement NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, active-connection-ID-limit handling, PATH_CHALLENGE/PATH_RESPONSE, NAT rebinding, migration policy, address validation, and migration trace events.",
+      "why_atp_needs_it": "ATP's Path Graph Engine depends on QUIC migration so transfers survive Wi-Fi changes, NAT rebinding, path racing, direct-to-relay fallback, and optional Tailscale/private-route candidates.",
+      "rfc_refs": [
+        "RFC 9000 Sections 5.1, 8.2, 9, 19.15, 19.16, 19.17, 19.18"
+      ],
+      "current_status": "missing_followup",
+      "source_files": [
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn set_active_migration_disabled"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn request_path_migration"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn migration_events"
+        }
+      ],
+      "gap": "Migration counters and policy hooks exist, but frame-level path validation, CID issuance/retirement, routing, and NAT rebinding behavior remain open.",
+      "atp_dependency_impact": "ATP-E can design path candidates now, but should treat actual migration as blocked on A10.",
+      "followup_beads": [
+        "asupersync-xq4dvp",
+        "asupersync-45o54v",
+        "asupersync-gf993q"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Deterministic rebinding tests with old and new 5-tuples.",
+        "Negative tests for migration when active migration is disabled.",
+        "Path trace artifacts that show candidate, validation, promotion, and fallback decisions."
+      ]
+    },
+    {
+      "id": "quic_datagram_extension",
+      "requirement": "Implement RFC 9221 DATAGRAM negotiation and frame encode/decode as an optional extension for probes, path beacons, non-critical telemetry, and later repair-plane experiments.",
+      "why_atp_needs_it": "DATAGRAM can make path quality and relay/direct comparison cheaper, but reliable ATP object transfer must remain correct without it.",
+      "rfc_refs": [
+        "RFC 9221 Sections 3, 4"
+      ],
+      "current_status": "explicit_v0_exclusion",
+      "source_files": [
+        "src/net/quic_native/mod.rs",
+        "src/net/quic_core/mod.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/mod.rs",
+          "marker": "pub mod connection;"
+        },
+        {
+          "file": "src/net/quic_core/mod.rs",
+          "marker": "pub struct TransportParameters"
+        }
+      ],
+      "gap": "No DATAGRAM transport parameter or frame support exists yet.",
+      "atp_dependency_impact": "ATP v0 can ship reliable object transfer over streams without DATAGRAM, but ATP-E/N diagnostics should keep the extension slot explicit.",
+      "followup_beads": [
+        "asupersync-vls4za"
+      ],
+      "v0_exclusion": "DATAGRAM is not required for reliable object transfer v0. It is explicitly deferred to probes/telemetry/repair experiments so it cannot block ATP-B/C/D.",
+      "test_expectations": [
+        "Negotiation tests that reject DATAGRAM frames when the peer did not advertise support.",
+        "Frame round-trip tests once ATP-A8 implements the extension.",
+        "Path beacons must be treated as advisory and never as proof of reliable delivery."
+      ]
+    },
+    {
+      "id": "connection_close_draining_and_error_surfaces",
+      "requirement": "Implement transport and application CONNECTION_CLOSE behavior, graceful draining, immediate terminal close, error-code propagation, stateless reset policy, and structured cancellation mapping.",
+      "why_atp_needs_it": "ATP needs precise failure reasons for resume, proof bundles, path doctor, relay/mailbox recovery, and deterministic replay. Ambiguous close behavior turns huge transfer failures into unreproducible reports.",
+      "rfc_refs": [
+        "RFC 9000 Sections 10.2, 10.3, 11, 19.19, 20"
+      ],
+      "current_status": "partial_state_machine",
+      "source_files": [
+        "src/net/quic_native/transport.rs",
+        "src/net/quic_native/connection.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn begin_close"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn close_immediately"
+        },
+        {
+          "file": "src/net/quic_native/transport.rs",
+          "marker": "QuicConnectionState::Draining"
+        },
+        {
+          "file": "src/net/quic_native/transport.rs",
+          "marker": "pub fn on_pto_expired"
+        }
+      ],
+      "gap": "Close/drain state exists, but CONNECTION_CLOSE frame emission/parse, stateless reset, endpoint task shutdown, and ATP error classification remain follow-up work.",
+      "atp_dependency_impact": "ATP-C resumability and ATP-N replay need close reasons and drain outcomes before transfer failures can be audited reliably.",
+      "followup_beads": [
+        "asupersync-rsr2wm",
+        "asupersync-kwvb2g",
+        "asupersync-prl0wp",
+        "asupersync-nod48i"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Unit tests for idempotent drain, deadline close, and immediate close from every state.",
+        "E2E tests for peer transport close, peer application close, local cancellation, and dropped endpoint.",
+        "Crashpack assertions that close reason, stream state, packet state, and region quiescence are recorded together."
+      ]
+    },
+    {
+      "id": "qlog_forensics_deterministic_replay_and_lab_adapter",
+      "requirement": "Emit qlog-ish QUIC/ATP traces, deterministic packet lab artifacts, crashpacks, minimized replay cases, and human-readable path/transport explanations.",
+      "why_atp_needs_it": "ATP's differentiator is not just speed; failures must be reproducible. Native QUIC, path traversal, RaptorQ repair, sparse disk writes, and resume journals must share one evidence surface.",
+      "rfc_refs": [
+        "RFC 9000 Appendix A",
+        "RFC 9002 Section 6"
+      ],
+      "current_status": "partial_state_machine",
+      "source_files": [
+        "src/net/quic_native/forensic_log.rs",
+        "src/lab/runtime.rs",
+        "tests/conformance/quic_rfc9000/mod.rs",
+        "tests/quic_h3_e2e.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "src/net/quic_native/forensic_log.rs",
+          "marker": "pub struct QuicH3ForensicLogger"
+        },
+        {
+          "file": "src/net/quic_native/forensic_log.rs",
+          "marker": "pub struct QuicH3ScenarioManifest"
+        },
+        {
+          "file": "src/lab/runtime.rs",
+          "marker": "pub struct LabRuntime"
+        },
+        {
+          "file": "tests/conformance/quic_rfc9000/mod.rs",
+          "marker": "pub struct QuicRfc9000ConformanceHarness"
+        }
+      ],
+      "gap": "QUIC/H3 forensic helpers and LabRuntime exist, but ATP needs a generalized transfer trace schema, deterministic network/NAT/disk/crash lab, replay minimizer, and proof bundle integration.",
+      "atp_dependency_impact": "ATP-N2/N3/L2/L3 should make every hard transport failure replayable before broad performance claims are made.",
+      "followup_beads": [
+        "asupersync-prl0wp",
+        "asupersync-33lyim",
+        "asupersync-nod48i",
+        "asupersync-cbc7xi"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Contract tests for trace schema stability.",
+        "Lab tests for packet loss, reordering, duplication, truncation, delayed ACKs, PTO storms, endpoint cancellation, and crash during close.",
+        "E2E scripts that emit verbose logs and a replay command for every failure artifact."
+      ]
+    },
+    {
+      "id": "external_quic_dependency_policy",
+      "requirement": "Forbid external QUIC endpoint crates in ATP and the runtime core. The project may use small crypto/TLS primitives behind an internal provider boundary, but QUIC state, packet I/O, loss recovery, stream scheduling, path migration, and endpoint behavior must be native Asupersync code.",
+      "why_atp_needs_it": "The user explicitly requires ATP to be internally self-contained. Depending on a six-figure-LoC external QUIC stack would undermine ATP's purpose as Asupersync's canonical runtime/data-plane proof.",
+      "rfc_refs": [
+        "Project policy",
+        "ATP design constraint"
+      ],
+      "current_status": "policy_gate",
+      "source_files": [
+        "Cargo.toml",
+        "src/net/quic_native/mod.rs",
+        "src/net/quic_core/mod.rs"
+      ],
+      "source_markers": [
+        {
+          "file": "Cargo.toml",
+          "marker": "quic = []"
+        },
+        {
+          "file": "Cargo.toml",
+          "marker": "http3 = [\"quic\"]"
+        },
+        {
+          "file": "src/net/quic_native/mod.rs",
+          "marker": "Native QUIC transport state machines (Tokio-free)."
+        }
+      ],
+      "gap": "Policy is now represented here and in Cargo comments, but ATP-M5 must add persistent dependency-audit gates for external QUIC stacks and Tokio runtime paths.",
+      "atp_dependency_impact": "All ATP-A implementation beads must treat this as a hard constraint when choosing dependencies and tests.",
+      "followup_beads": [
+        "asupersync-jaghjr"
+      ],
+      "v0_exclusion": null,
+      "test_expectations": [
+        "Contract tests asserting forbidden external QUIC crates are not active dependencies.",
+        "Cargo tree proof lanes for default, metrics, quic, http3, atp, and ATP CLI/daemon profiles.",
+        "Review gate that rejects reintroducing external endpoint-stack comments as implementation suggestions."
+      ]
+    }
+  ],
+  "external_dependency_policy": {
+    "allowed_external_quic_stack_crates": [],
+    "forbidden_external_quic_stack_crates": [
+      "quinn",
+      "quiche",
+      "s2n-quic",
+      "msquic",
+      "h3-quinn"
+    ],
+    "allowed_crypto_boundary": "Small TLS/crypto primitives are allowed only behind an internal Asupersync packet-protection provider boundary. They must not own QUIC connection behavior, endpoint I/O, stream scheduling, path migration, or loss recovery.",
+    "cargo_policy": "Cargo.toml may expose native quic/http3 features, but those features must expand to Asupersync-owned modules rather than an external QUIC stack."
+  },
+  "v0_exclusions": [
+    {
+      "id": "multipath_quic",
+      "reason": "ATP needs path racing and migration, but full multipath QUIC is not required for v0 verified object transfer.",
+      "future_hook": "ATP-E path graph and ATP-A10 migration hooks should leave room for future multipath experiments without blocking the first production endpoint."
+    },
+    {
+      "id": "browser_webtransport_parity",
+      "reason": "Browser/WebTransport compatibility is strategic later, but native ATP over native QUIC is the foundation.",
+      "future_hook": "ATP-K should implement an adapter subset after the native object graph, scheduler, proof, and path layers are stable."
+    },
+    {
+      "id": "masque_primary_transport",
+      "reason": "MASQUE/CONNECT-UDP is useful for hostile enterprise networks and relay compatibility, but it should not be the primary ATP path.",
+      "future_hook": "ATP-K2 can adapt the relay layer without changing the object-transfer core."
+    },
+    {
+      "id": "datagram_required_for_reliable_transfer",
+      "reason": "DATAGRAM is optional for probes and telemetry. ATP reliable data movement must work over QUIC streams alone.",
+      "future_hook": "ATP-A8 can add DATAGRAM after frame negotiation and endpoint packet I/O are correct."
+    },
+    {
+      "id": "external_quic_stack",
+      "reason": "Explicitly forbidden by project direction; ATP's value is owning the data movement layer end to end inside Asupersync.",
+      "future_hook": "No future hook. If a small external primitive is needed, it belongs behind internal traits and must not own QUIC protocol behavior."
+    }
+  ],
+  "followup_dependency_overlay": [
+    {
+      "bead_id": "asupersync-rvryit",
+      "title": "ATP-A2 native UDP endpoint and packet I/O loops under Cx",
+      "depends_on_contract_features": [
+        "socket_endpoint_packet_io_under_cx",
+        "version_negotiation_retry_and_initial_handshake",
+        "anti_amplification_and_address_validation"
+      ],
+      "implementation_comment": "This should be the first implementation bead after A1 because the endpoint loop is the bridge between state machines and real ATP transfer."
+    },
+    {
+      "bead_id": "asupersync-e8hst6",
+      "title": "ATP-A3 packet protection and TLS provider boundary",
+      "depends_on_contract_features": [
+        "packet_protection_tls_provider_boundary",
+        "crypto_levels_key_phase_and_key_update",
+        "packet_number_encoding_and_reconstruction"
+      ],
+      "implementation_comment": "A3 must remain native and provider-boundary oriented, not a stealth external QUIC stack integration."
+    },
+    {
+      "bead_id": "asupersync-ny1gr9",
+      "title": "ATP-A4 handshake, version negotiation, Retry, and key-phase progression",
+      "depends_on_contract_features": [
+        "version_negotiation_retry_and_initial_handshake",
+        "transport_parameter_codec_and_validation",
+        "packet_protection_tls_provider_boundary"
+      ],
+      "implementation_comment": "A4 turns connect/accept from direct state-method calls into real peer establishment."
+    },
+    {
+      "bead_id": "asupersync-kwvb2g",
+      "title": "ATP-A5 QUIC frame codecs, packet assembly, and transport parameter validation",
+      "depends_on_contract_features": [
+        "quic_frame_codec_and_packet_assembly",
+        "transport_parameter_codec_and_validation",
+        "connection_close_draining_and_error_surfaces"
+      ],
+      "implementation_comment": "A5 is where direct method-call tests become frame-driven protocol tests."
+    },
+    {
+      "bead_id": "asupersync-51uf70",
+      "title": "ATP-A6 ACK, RTT, loss detection, PTO, congestion, and anti-amplification integration",
+      "depends_on_contract_features": [
+        "ack_ranges_rtt_loss_pto_and_congestion",
+        "anti_amplification_and_address_validation"
+      ],
+      "implementation_comment": "A6 must expose scheduler-facing signals rather than burying transport pressure in private state."
+    },
+    {
+      "bead_id": "asupersync-rsr2wm",
+      "title": "ATP-A7 reliable stream scheduler, flow control, reassembly, reset, stop-sending, and close/drain",
+      "depends_on_contract_features": [
+        "stream_id_flow_control_reset_stop_and_reassembly",
+        "connection_close_draining_and_error_surfaces"
+      ],
+      "implementation_comment": "A7 provides the stream substrate ATP-B/D/F consume for control, data, repair, progress, and proof channels."
+    },
+    {
+      "bead_id": "asupersync-vls4za",
+      "title": "ATP-A8 QUIC DATAGRAM extension for probes and telemetry",
+      "depends_on_contract_features": [
+        "quic_datagram_extension"
+      ],
+      "implementation_comment": "A8 must remain optional for v0 object transfer correctness."
+    },
+    {
+      "bead_id": "asupersync-prl0wp",
+      "title": "ATP-A9 qlog-ish trace export, forensic logs, deterministic lab adapter, and replay fixtures",
+      "depends_on_contract_features": [
+        "qlog_forensics_deterministic_replay_and_lab_adapter",
+        "connection_close_draining_and_error_surfaces",
+        "socket_endpoint_packet_io_under_cx"
+      ],
+      "implementation_comment": "A9 is the bridge from 'test passed' to 'failure can be replayed and explained'."
+    },
+    {
+      "bead_id": "asupersync-xq4dvp",
+      "title": "ATP-A10 connection IDs, NAT rebinding, path validation, migration hooks, and key update",
+      "depends_on_contract_features": [
+        "connection_id_lifecycle_path_validation_and_migration",
+        "connection_id_and_packet_number_spaces",
+        "crypto_levels_key_phase_and_key_update"
+      ],
+      "implementation_comment": "A10 is what lets ATP-E path graph decisions survive real network churn."
+    },
+    {
+      "bead_id": "asupersync-crscmn",
+      "title": "ATP-A11 cross-platform UDP abstraction, batching, buffer tuning, and capability reporting",
+      "depends_on_contract_features": [
+        "socket_endpoint_packet_io_under_cx",
+        "connection_id_and_packet_number_spaces"
+      ],
+      "implementation_comment": "A11 keeps ATP honest across Linux, macOS, Windows, and wasm-unavailable surfaces."
+    },
+    {
+      "bead_id": "asupersync-jaghjr",
+      "title": "ATP-M5 dependency audit gates forbidding external QUIC stacks and Tokio runtime paths",
+      "depends_on_contract_features": [
+        "external_quic_dependency_policy"
+      ],
+      "implementation_comment": "M5 should turn this artifact's policy into automated CI/proof-lane enforcement."
+    },
+    {
+      "bead_id": "asupersync-33lyim",
+      "title": "ATP-N2 native QUIC protocol conformance, fuzz, and deterministic packet e2e harness",
+      "depends_on_contract_features": [
+        "ack_ranges_rtt_loss_pto_and_congestion",
+        "qlog_forensics_deterministic_replay_and_lab_adapter"
+      ],
+      "implementation_comment": "N2 must provide broad protocol proof, not just happy-path localhost examples."
+    }
+  ],
+  "validation_commands": [
+    {
+      "purpose": "Validate that this artifact is syntactically valid JSON.",
+      "command": "python3 -m json.tool artifacts/atp_native_quic_endpoint_contract_v1.json >/dev/null"
+    },
+    {
+      "purpose": "Run the self-documenting contract test that checks matrix completeness, source markers, follow-up ownership, validation-command policy, and external-QUIC dependency policy.",
+      "command": "rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_atp_native_quic_contract\" cargo test -p asupersync --test atp_native_quic_endpoint_contract --features test-internals,quic -- --nocapture"
+    },
+    {
+      "purpose": "Compile the native QUIC feature surface with the same feature set used by the contract test.",
+      "command": "rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_atp_native_quic_check\" cargo check -p asupersync --lib --features test-internals,quic"
+    },
+    {
+      "purpose": "Keep formatting deterministic after future edits to the contract test.",
+      "command": "rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_atp_native_quic_fmt\" cargo fmt --check"
+    }
+  ],
+  "future_self_notes": [
+    "This matrix intentionally distinguishes state-machine support from deployable endpoint support. Do not close ATP-A as a whole merely because direct method-call tests pass.",
+    "Use this artifact as the acceptance checklist before starting ATP-B object transfer over native QUIC. Object-transfer protocol work can proceed on an in-memory/lab transport, but public internet transfer should wait for endpoint, protection, handshake, frame I/O, loss/congestion, close, and forensic proofs.",
+    "RaptorQ belongs above this layer. It can reduce tail latency, sparse-missing repair, relay expense, and swarm decode cost, but it does not replace QUIC retransmission, congestion control, or stream reliability.",
+    "The first user-facing ATP milestone should expose excellent diagnostics even before it is the fastest possible transfer path. A slow but explainable native path is more accretive than a fast opaque path.",
+    "Every new ATP-A proof should log enough structured detail to answer: which peer, which path, which packet number space, which stream, which frame, which timer, which cancellation boundary, and which region owned the work."
+  ]
+}
