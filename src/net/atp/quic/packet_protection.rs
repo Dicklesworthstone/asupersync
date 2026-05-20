@@ -349,8 +349,7 @@ impl AtpPacketProtection {
         match error {
             QuicTlsError::HandshakeNotConfirmed
             | QuicTlsError::InvalidTransition { .. }
-            | QuicTlsError::StalePeerKeyPhase(_)
-            | QuicTlsError::SessionStateMismatch => {
+            | QuicTlsError::StalePeerKeyPhase(_) => {
                 AtpError::Protocol(ProtocolError::SessionStateMismatch)
             }
             QuicTlsError::MissingKeys { .. } | QuicTlsError::KeyDiscarded { .. } => {
