@@ -23,6 +23,7 @@ pub mod policy;
 pub mod proof;
 pub mod quota;
 pub mod repair_receiver;
+#[path = "sdk.rs"]
 pub mod sdk;
 pub mod stream_object;
 pub mod sync;

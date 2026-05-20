@@ -1,6 +1,7 @@
-//! NAT classification for ATP path discovery.
+//! NAT classification and migration state for ATP path discovery.
 
 use crate::net::atp::stun::{EndpointFamily, EndpointObservation, ObservedEndpoint};
+use std::collections::BTreeMap;
 
 /// Coarse NAT profile inferred from endpoint observations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -278,6 +279,441 @@ pub enum TailscaleCandidateError {
     /// Provider failure reason was empty.
     #[error("tailscale provider failure reason is empty")]
     EmptyFailureReason,
+}
+
+/// Stable identifier for an ATP transport path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AtpPathId(u64);
+
+impl AtpPathId {
+    /// The initial path used by a new connection.
+    pub const INITIAL: Self = Self(0);
+
+    /// Construct a path identifier from a deterministic numeric value.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the numeric path identifier.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// Local and remote endpoint pair that defines one ATP path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtpPathEndpoints {
+    local: ObservedEndpoint,
+    remote: ObservedEndpoint,
+}
+
+impl AtpPathEndpoints {
+    /// Construct a path endpoint pair.
+    #[must_use]
+    pub const fn new(local: ObservedEndpoint, remote: ObservedEndpoint) -> Self {
+        Self { local, remote }
+    }
+
+    /// Local UDP endpoint.
+    #[must_use]
+    pub const fn local(&self) -> &ObservedEndpoint {
+        &self.local
+    }
+
+    /// Remote UDP endpoint.
+    #[must_use]
+    pub const fn remote(&self) -> &ObservedEndpoint {
+        &self.remote
+    }
+
+    /// Whether the remote endpoint changed while the local endpoint stayed stable.
+    #[must_use]
+    pub fn is_nat_rebinding_from(&self, previous: &Self) -> bool {
+        self.local == previous.local && self.remote != previous.remote
+    }
+}
+
+/// Candidate path offered to the ATP path manager.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtpPathCandidate {
+    id: AtpPathId,
+    endpoints: AtpPathEndpoints,
+    preference_rank: u8,
+    observed_at_micros: u64,
+    explanation: String,
+    verifier_context: String,
+}
+
+impl AtpPathCandidate {
+    /// Build a candidate path with a user-visible explanation and verifier handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PathMigrationError::EmptyExplanation`] or
+    /// [`PathMigrationError::EmptyVerifierContext`] when diagnostic text is blank.
+    pub fn new(
+        id: AtpPathId,
+        endpoints: AtpPathEndpoints,
+        preference_rank: u8,
+        observed_at_micros: u64,
+        explanation: impl Into<String>,
+        verifier_context: impl Into<String>,
+    ) -> Result<Self, PathMigrationError> {
+        let explanation = explanation.into();
+        if explanation.trim().is_empty() {
+            return Err(PathMigrationError::EmptyExplanation);
+        }
+
+        let verifier_context = verifier_context.into();
+        if verifier_context.trim().is_empty() {
+            return Err(PathMigrationError::EmptyVerifierContext);
+        }
+
+        Ok(Self {
+            id,
+            endpoints,
+            preference_rank,
+            observed_at_micros,
+            explanation,
+            verifier_context,
+        })
+    }
+
+    /// Candidate path identifier.
+    #[must_use]
+    pub const fn id(&self) -> AtpPathId {
+        self.id
+    }
+
+    /// Endpoint pair for this path.
+    #[must_use]
+    pub const fn endpoints(&self) -> &AtpPathEndpoints {
+        &self.endpoints
+    }
+
+    /// Lower rank wins path races.
+    #[must_use]
+    pub const fn preference_rank(&self) -> u8 {
+        self.preference_rank
+    }
+
+    /// Deterministic observation timestamp.
+    #[must_use]
+    pub const fn observed_at_micros(&self) -> u64 {
+        self.observed_at_micros
+    }
+
+    /// User-visible path explanation.
+    #[must_use]
+    pub fn explanation(&self) -> &str {
+        &self.explanation
+    }
+
+    /// Verifier continuity context for replay artifacts.
+    #[must_use]
+    pub fn verifier_context(&self) -> &str {
+        &self.verifier_context
+    }
+}
+
+/// Reason a path migration was requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMigrationReason {
+    /// Endpoint intentionally requested migration to a better path.
+    ActiveMigration,
+    /// Remote endpoint changed without a user-visible path switch.
+    NatRebinding,
+    /// Peer supplied a preferred address.
+    PreferredAddress,
+    /// Direct path degraded and relay fallback was selected.
+    RelayFallback,
+    /// Tailscale-like provider replaced the active path.
+    TailscaleReplacement,
+    /// Mobile network churn produced a new viable path.
+    MobileChurn,
+}
+
+/// Path migration lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMigrationStatus {
+    /// Migration request was recorded.
+    Requested,
+    /// QUIC PATH_CHALLENGE is outstanding.
+    Validating,
+    /// PATH_RESPONSE matched the outstanding challenge.
+    Validated,
+    /// Migration was rejected.
+    Rejected,
+    /// Migration became the active path.
+    Committed,
+    /// Validation timed out.
+    TimedOut,
+}
+
+/// Continuity guarantees preserved across migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathContinuity {
+    /// Stream data offsets and flow-control windows remain bound to the connection.
+    pub stream_flow_control: bool,
+    /// Congestion and loss accounting remain attached to the connection.
+    pub congestion_loss: bool,
+    /// Packet protection and key phase remain continuous.
+    pub packet_protection: bool,
+    /// ATP object verifier context remains continuous.
+    pub verifier: bool,
+}
+
+impl PathContinuity {
+    /// Continuity required for an ATP migration commit.
+    pub const VERIFIED: Self = Self {
+        stream_flow_control: true,
+        congestion_loss: true,
+        packet_protection: true,
+        verifier: true,
+    };
+
+    /// Whether every continuity invariant is preserved.
+    #[must_use]
+    pub const fn is_verified(self) -> bool {
+        self.stream_flow_control && self.congestion_loss && self.packet_protection && self.verifier
+    }
+}
+
+/// Immutable record of one path migration attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathMigrationRecord {
+    sequence: u64,
+    old_path_id: AtpPathId,
+    candidate: AtpPathCandidate,
+    reason: PathMigrationReason,
+    status: PathMigrationStatus,
+    requested_at_micros: u64,
+    updated_at_micros: u64,
+    continuity: PathContinuity,
+}
+
+impl PathMigrationRecord {
+    /// Monotonic migration attempt sequence.
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Path active when the migration was requested.
+    #[must_use]
+    pub const fn old_path_id(&self) -> AtpPathId {
+        self.old_path_id
+    }
+
+    /// Candidate path.
+    #[must_use]
+    pub const fn candidate(&self) -> &AtpPathCandidate {
+        &self.candidate
+    }
+
+    /// Migration reason.
+    #[must_use]
+    pub const fn reason(&self) -> PathMigrationReason {
+        self.reason
+    }
+
+    /// Current record status.
+    #[must_use]
+    pub const fn status(&self) -> PathMigrationStatus {
+        self.status
+    }
+
+    /// Request timestamp.
+    #[must_use]
+    pub const fn requested_at_micros(&self) -> u64 {
+        self.requested_at_micros
+    }
+
+    /// Last update timestamp.
+    #[must_use]
+    pub const fn updated_at_micros(&self) -> u64 {
+        self.updated_at_micros
+    }
+
+    /// Continuity guarantees.
+    #[must_use]
+    pub const fn continuity(&self) -> PathContinuity {
+        self.continuity
+    }
+
+    fn with_status(mut self, status: PathMigrationStatus, now_micros: u64) -> Self {
+        self.status = status;
+        self.updated_at_micros = now_micros;
+        self
+    }
+}
+
+/// Errors returned by ATP path migration state.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PathMigrationError {
+    /// Candidate explanation was blank.
+    #[error("path explanation is empty")]
+    EmptyExplanation,
+    /// Candidate verifier context was blank.
+    #[error("path verifier context is empty")]
+    EmptyVerifierContext,
+    /// Candidate path is already active.
+    #[error("path is already active")]
+    AlreadyActive,
+    /// Candidate path already has an outstanding migration attempt.
+    #[error("path migration is already pending")]
+    AlreadyPending,
+    /// No pending migration exists for the path.
+    #[error("path migration is not pending")]
+    NotPending,
+    /// Commit was attempted before path validation completed.
+    #[error("path migration is not validated")]
+    NotValidated,
+    /// Continuity invariants were not preserved.
+    #[error("path migration continuity invariant failed")]
+    ContinuityFailed,
+}
+
+/// ATP path manager for request/observe/race/reject migration hooks.
+#[derive(Debug, Clone)]
+pub struct AtpPathManager {
+    active_path: AtpPathCandidate,
+    pending: BTreeMap<AtpPathId, PathMigrationRecord>,
+    history: Vec<PathMigrationRecord>,
+    next_sequence: u64,
+}
+
+impl AtpPathManager {
+    /// Construct a path manager around the initial path.
+    #[must_use]
+    pub fn new(active_path: AtpPathCandidate) -> Self {
+        Self {
+            active_path,
+            pending: BTreeMap::new(),
+            history: Vec::new(),
+            next_sequence: 1,
+        }
+    }
+
+    /// Active path candidate.
+    #[must_use]
+    pub const fn active_path(&self) -> &AtpPathCandidate {
+        &self.active_path
+    }
+
+    /// Active path identifier.
+    #[must_use]
+    pub const fn active_path_id(&self) -> AtpPathId {
+        self.active_path.id()
+    }
+
+    /// Pending migration attempts.
+    #[must_use]
+    pub fn pending(&self) -> &BTreeMap<AtpPathId, PathMigrationRecord> {
+        &self.pending
+    }
+
+    /// Completed or rejected migration records.
+    #[must_use]
+    pub fn history(&self) -> &[PathMigrationRecord] {
+        &self.history
+    }
+
+    /// Record a migration request and mark it as awaiting validation.
+    pub fn request_migration(
+        &mut self,
+        candidate: AtpPathCandidate,
+        reason: PathMigrationReason,
+        now_micros: u64,
+    ) -> Result<PathMigrationRecord, PathMigrationError> {
+        if candidate.id() == self.active_path.id() {
+            return Err(PathMigrationError::AlreadyActive);
+        }
+        if self.pending.contains_key(&candidate.id()) {
+            return Err(PathMigrationError::AlreadyPending);
+        }
+
+        let record = PathMigrationRecord {
+            sequence: self.next_sequence,
+            old_path_id: self.active_path.id(),
+            candidate,
+            reason,
+            status: PathMigrationStatus::Validating,
+            requested_at_micros: now_micros,
+            updated_at_micros: now_micros,
+            continuity: PathContinuity::VERIFIED,
+        };
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.pending.insert(record.candidate.id(), record.clone());
+        Ok(record)
+    }
+
+    /// Mark a pending path as validation-confirmed.
+    pub fn observe_validation(
+        &mut self,
+        path_id: AtpPathId,
+        now_micros: u64,
+    ) -> Result<PathMigrationRecord, PathMigrationError> {
+        let Some(record) = self.pending.get_mut(&path_id) else {
+            return Err(PathMigrationError::NotPending);
+        };
+        *record = record
+            .clone()
+            .with_status(PathMigrationStatus::Validated, now_micros);
+        Ok(record.clone())
+    }
+
+    /// Commit a validated migration as the active path.
+    pub fn commit_migration(
+        &mut self,
+        path_id: AtpPathId,
+        now_micros: u64,
+    ) -> Result<PathMigrationRecord, PathMigrationError> {
+        let Some(record) = self.pending.remove(&path_id) else {
+            return Err(PathMigrationError::NotPending);
+        };
+        if record.status != PathMigrationStatus::Validated {
+            self.pending.insert(path_id, record);
+            return Err(PathMigrationError::NotValidated);
+        }
+        if !record.continuity.is_verified() {
+            self.pending.insert(path_id, record);
+            return Err(PathMigrationError::ContinuityFailed);
+        }
+
+        let committed = record.with_status(PathMigrationStatus::Committed, now_micros);
+        self.active_path = committed.candidate.clone();
+        self.history.push(committed.clone());
+        Ok(committed)
+    }
+
+    /// Reject and archive a pending migration.
+    pub fn reject_migration(
+        &mut self,
+        path_id: AtpPathId,
+        status: PathMigrationStatus,
+        now_micros: u64,
+    ) -> Result<PathMigrationRecord, PathMigrationError> {
+        let Some(record) = self.pending.remove(&path_id) else {
+            return Err(PathMigrationError::NotPending);
+        };
+        let rejected = record.with_status(status, now_micros);
+        self.history.push(rejected.clone());
+        Ok(rejected)
+    }
+
+    /// Pick the best candidate by preference rank, then observation time.
+    #[must_use]
+    pub fn race_candidates<I>(&self, candidates: I) -> Option<AtpPathCandidate>
+    where
+        I: IntoIterator<Item = AtpPathCandidate>,
+    {
+        candidates
+            .into_iter()
+            .min_by_key(|candidate| (candidate.preference_rank(), candidate.observed_at_micros()))
+    }
 }
 
 /// Evidence used by the deterministic NAT classifier.

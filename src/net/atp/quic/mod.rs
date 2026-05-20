@@ -6,11 +6,13 @@
 //! - Implements anti-amplification protection
 //! - Handles ATP-specific recovery and cancellation semantics
 
+pub mod connection;
 pub mod metrics;
 pub mod packet_protection;
 pub mod recovery;
 pub mod transfer_brain;
 
+pub use connection::*;
 pub use metrics::*;
 pub use packet_protection::*;
 pub use recovery::*;
