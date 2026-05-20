@@ -19,6 +19,8 @@ pub struct AtpWriter {
     data_tx: mpsc::Sender<StreamChunk>,
     /// Progress receiver for monitoring.
     progress_rx: mpsc::Receiver<TransferProgress>,
+    /// Cancellation signal for background task.
+    cancel_tx: Option<mpsc::Sender<()>>,
     /// Stream configuration.
     config: StreamConfig,
     /// Current write state.
@@ -34,6 +36,8 @@ pub struct AtpReader {
     data_rx: mpsc::Receiver<StreamChunk>,
     /// Progress receiver for monitoring.
     progress_rx: mpsc::Receiver<TransferProgress>,
+    /// Cancellation signal for background task.
+    cancel_tx: Option<mpsc::Sender<()>>,
     /// Stream configuration.
     config: StreamConfig,
     /// Current read state.
@@ -137,6 +141,7 @@ impl AtpSession {
         let transfer_id = TransferId::generate();
         let (data_tx, data_rx) = mpsc::channel(config.backpressure_threshold / config.chunk_size);
         let (progress_tx, progress_rx) = mpsc::channel(100);
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
 
         // Start background transfer task in a detached future
         let session = self.clone();
@@ -157,6 +162,7 @@ impl AtpSession {
                     transfer_id_clone,
                     data_rx,
                     progress_tx,
+                    cancel_rx,
                     config_clone,
                 ).await;
             });
@@ -166,6 +172,7 @@ impl AtpSession {
             transfer_id,
             data_tx,
             progress_rx,
+            cancel_tx: Some(cancel_tx),
             config,
             state: WriterState::Ready,
         })
@@ -180,6 +187,7 @@ impl AtpSession {
         let transfer_id = TransferId::generate();
         let (data_tx, data_rx) = mpsc::channel(config.backpressure_threshold / config.chunk_size);
         let (progress_tx, progress_rx) = mpsc::channel(100);
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
 
         // Start background transfer task in a detached future
         let session = self.clone();
@@ -200,6 +208,7 @@ impl AtpSession {
                     transfer_id_clone,
                     data_tx,
                     progress_tx,
+                    cancel_rx,
                     config_clone,
                 ).await;
             });
@@ -209,6 +218,7 @@ impl AtpSession {
             transfer_id,
             data_rx,
             progress_rx,
+            cancel_tx: Some(cancel_tx),
             config,
             state: ReaderState::Ready,
         })
@@ -220,12 +230,18 @@ impl AtpSession {
         transfer_id: TransferId,
         mut data_rx: mpsc::Receiver<StreamChunk>,
         progress_tx: mpsc::Sender<TransferProgress>,
+        mut cancel_rx: mpsc::Receiver<()>,
         _config: StreamConfig,
     ) -> AtpOutcome<()> {
         let mut bytes_transferred = 0u64;
         let mut sequence = 0u64;
 
         while let Some(chunk) = data_rx.recv().await {
+            // Check for cancellation before processing
+            if cancel_rx.try_recv().is_ok() {
+                break; // Cancellation signal received
+            }
+
             // Simulate processing chunk
             bytes_transferred += chunk.size() as u64;
             sequence += 1;
@@ -246,6 +262,11 @@ impl AtpSession {
                 break; // Progress receiver dropped
             }
 
+            // Check for cancellation before delay
+            if cancel_rx.try_recv().is_ok() {
+                break; // Cancellation signal received
+            }
+
             // Simulate network transfer delay
             crate::time::sleep(std::time::Duration::from_millis(1)).await;
 
@@ -263,6 +284,7 @@ impl AtpSession {
         transfer_id: TransferId,
         data_tx: mpsc::Sender<StreamChunk>,
         progress_tx: mpsc::Sender<TransferProgress>,
+        mut cancel_rx: mpsc::Receiver<()>,
         config: StreamConfig,
     ) -> AtpOutcome<()> {
         // Simulate receiving data chunks from the network
@@ -270,6 +292,11 @@ impl AtpSession {
         let chunk_size = config.chunk_size;
 
         for i in 0..total_chunks {
+            // Check for cancellation at start of iteration
+            if cancel_rx.try_recv().is_ok() {
+                break; // Cancellation signal received
+            }
+
             let data = vec![i as u8; chunk_size];
             let is_final = i == total_chunks - 1;
             let chunk = StreamChunk::new(data, i as u64, is_final);
@@ -292,6 +319,11 @@ impl AtpSession {
 
             if progress_tx.send(progress).await.is_err() {
                 break; // Progress receiver dropped
+            }
+
+            // Check for cancellation before delay
+            if cancel_rx.try_recv().is_ok() {
+                break; // Cancellation signal received
             }
 
             // Simulate network delay
@@ -332,6 +364,11 @@ impl AtpWriter {
         let final_chunk = StreamChunk::new(Vec::new(), 0, true);
         self.data_tx.send(final_chunk).await
             .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+
+        // Cancel the background task
+        if let Some(cancel_tx) = self.cancel_tx.take() {
+            let _ = cancel_tx.send(()).await; // Ignore send errors (task may have already finished)
+        }
 
         self.state = WriterState::Closed;
         Ok(())
@@ -434,6 +471,41 @@ impl AtpReader {
         }
 
         Ok(bytes_read)
+    }
+
+    /// Close the reader and cancel the background task.
+    pub async fn close(&mut self) -> AtpOutcome<()> {
+        if matches!(self.state, ReaderState::Closed) {
+            return Ok(());
+        }
+
+        // Cancel the background task
+        if let Some(cancel_tx) = self.cancel_tx.take() {
+            let _ = cancel_tx.send(()).await; // Ignore send errors (task may have already finished)
+        }
+
+        self.state = ReaderState::Closed;
+        Ok(())
+    }
+}
+
+impl Drop for AtpWriter {
+    fn drop(&mut self) {
+        // Cancel the background task on drop to prevent race conditions
+        if let Some(cancel_tx) = self.cancel_tx.take() {
+            // Use try_send since we're in a synchronous context
+            let _ = cancel_tx.try_send(());
+        }
+    }
+}
+
+impl Drop for AtpReader {
+    fn drop(&mut self) {
+        // Cancel the background task on drop to prevent race conditions
+        if let Some(cancel_tx) = self.cancel_tx.take() {
+            // Use try_send since we're in a synchronous context
+            let _ = cancel_tx.try_send(());
+        }
     }
 }
 
