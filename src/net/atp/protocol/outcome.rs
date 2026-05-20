@@ -4,13 +4,12 @@
 //! stable error codes, and idempotency semantics for transfer operations.
 
 use crate::types::cancel::CancelReason;
-use crate::types::outcome::{Outcome, PanicPayload, Severity};
+use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // For IdempotencyKey generation - use a simple approach without external deps
 mod rand_simple {
-    use std::cell::RefCell;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -821,15 +820,17 @@ impl AtpCancelReason {
     #[must_use]
     pub fn to_base_reason(&self) -> CancelReason {
         match self {
-            Self::UserCancel(msg) => CancelReason::user(msg),
+            Self::UserCancel(_) => CancelReason::user("user cancel"),
             Self::Timeout => CancelReason::timeout(),
             Self::Shutdown => CancelReason::shutdown(),
-            Self::FailFast(msg) => CancelReason::user(format!("fail-fast: {msg}")),
+            Self::FailFast(_) => CancelReason::fail_fast().with_message("fail-fast"),
             Self::ParentCancel => CancelReason::linked_exit(),
             Self::PathRaceLost => CancelReason::user("path race lost"),
             Self::RepairDecodeAbandoned => CancelReason::user("repair decode abandoned"),
             Self::DaemonRestart => CancelReason::user("daemon restart"),
-            Self::ResourceBudgetExhausted(msg) => CancelReason::timeout().with_message(msg),
+            Self::ResourceBudgetExhausted(_) => {
+                CancelReason::timeout().with_message("resource budget exhausted")
+            }
         }
     }
 }
@@ -1088,8 +1089,10 @@ impl TransferTranscript {
 
         if let Outcome::Cancelled(reason) = outcome {
             // Try to extract ATP-specific cancel reason
-            if let Some(atp_reason) = Self::parse_atp_cancel_reason(reason.message()) {
-                self.cancellation_source = Some(atp_reason);
+            if let Some(message) = reason.message() {
+                if let Some(atp_reason) = Self::parse_atp_cancel_reason(message) {
+                    self.cancellation_source = Some(atp_reason);
+                }
             }
         }
     }
@@ -1236,7 +1239,7 @@ impl fmt::Display for OutcomeClass {
 }
 
 /// Retry semantics and bounds for ATP operations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetryPolicy {
     /// Maximum number of retry attempts.
     pub max_attempts: u32,
