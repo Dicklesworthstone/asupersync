@@ -1364,6 +1364,30 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_stable_identity_blocks_rename_candidate() {
+        let source = manifest(vec![file("new/name.txt", "same")]);
+        let destination = manifest(vec![
+            file("old/one.txt", "same"),
+            file("old/two.txt", "same"),
+        ]);
+        let plan = plan_directory_sync(&source, &destination, DirectorySyncPolicy::default());
+
+        assert!(
+            !plan
+                .decisions
+                .iter()
+                .any(|decision| decision.action == DirectorySyncAction::Rename)
+        );
+        assert_eq!(
+            plan.decisions
+                .iter()
+                .filter(|decision| decision.reason == "stable_identity_conflict")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn symlink_policy_skips_by_default() {
         let mut metadata = DirectoryEntryMetadata::default();
         metadata.symlink_target = Some("target.txt".to_string());
