@@ -38,7 +38,7 @@ impl VersionNegotiationPacket {
 
         // Destination Connection ID
         if self.dest_cid.len() > 255 {
-            return Err(HandshakeError::ConnectionIdError {
+            return Outcome::err(HandshakeError::ConnectionIdError {
                 reason: "destination CID too long".to_string(),
             });
         }
@@ -47,7 +47,7 @@ impl VersionNegotiationPacket {
 
         // Source Connection ID
         if self.source_cid.len() > 255 {
-            return Err(HandshakeError::ConnectionIdError {
+            return Outcome::err(HandshakeError::ConnectionIdError {
                 reason: "source CID too long".to_string(),
             });
         }
@@ -59,13 +59,13 @@ impl VersionNegotiationPacket {
             buf.put_u32(version);
         }
 
-        Ok(buf.freeze())
+        Outcome::ok(buf.freeze())
     }
 
     /// Decode packet from wire format
     pub fn decode(data: &[u8]) -> Outcome<Self, HandshakeError> {
         if data.len() < 7 {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "version negotiation packet too short".to_string(),
             });
         }
@@ -191,7 +191,7 @@ impl VersionNegotiation {
 
         // Source CID must match original destination CID
         if packet.source_cid.as_ref() != original_dest_cid {
-            return Err(HandshakeError::InvalidPacket {
+            return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "version negotiation source CID mismatch".to_string(),
             });
         }

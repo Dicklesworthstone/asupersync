@@ -64,7 +64,7 @@ impl RetryPacket {
 
         // Source Connection ID
         if self.source_cid.len() > 255 {
-            return Err(HandshakeError::ConnectionIdError {
+            return Outcome::err(HandshakeError::ConnectionIdError {
                 reason: "source CID too long".to_string(),
             });
         }
@@ -76,10 +76,15 @@ impl RetryPacket {
 
         // Calculate and append integrity tag
         let pseudo_packet = self.create_pseudo_retry_packet();
-        let tag = Self::calculate_integrity_tag(&buf, &pseudo_packet, retry_key)?;
+        let tag = match Self::calculate_integrity_tag(&buf, &pseudo_packet, retry_key) {
+            Outcome::Ok(tag) => tag,
+            Outcome::Err(e) => return Outcome::err(e),
+            Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::panicked(payload),
+        };
         buf.put_slice(&tag);
 
-        Ok(buf.freeze())
+        Outcome::ok(buf.freeze())
     }
 
     /// Decode packet from wire format

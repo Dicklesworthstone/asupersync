@@ -241,7 +241,7 @@ impl QuicHandshakeMachine {
                 error: error.clone(),
                 elapsed: self.start_time.elapsed()
             });
-            return Err(error);
+            return Outcome::err(error);
         }
 
         self.state = HandshakeState::Initial { crypto_offset: 0 };
@@ -253,7 +253,7 @@ impl QuicHandshakeMachine {
             region_id,
         });
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Process received packet
@@ -271,17 +271,17 @@ impl QuicHandshakeMachine {
                 error: error.clone(),
                 elapsed: self.start_time.elapsed()
             });
-            return Err(error);
+            return Outcome::err(error);
         }
 
         // Basic packet validation
         if packet_data.is_empty() {
             let error = HandshakeError::InvalidPacket { reason: "empty packet".to_string() };
-            return Err(error);
+            return Outcome::err(error);
         }
 
         // For now, return empty response - will be filled in with actual packet processing
-        Ok(Vec::new())
+        Outcome::ok(Vec::new())
     }
 
     /// Check if handshake is complete
