@@ -217,7 +217,6 @@ impl ArtifactProfile {
             if is_boundary {
                 boundaries.push(current_pos);
                 last_boundary = current_pos;
-                rolling_hash.reset();
             }
         }
 
@@ -699,13 +698,6 @@ impl DeterministicRollingHash {
         self.hash
     }
 
-    /// Reset hash state.
-    fn reset(&mut self) {
-        self.hash = 0;
-        self.window.fill(0);
-        self.position = 0;
-    }
-
     /// Get current hash value.
     fn current_hash(&self) -> u64 {
         self.hash
@@ -836,6 +828,17 @@ mod tests {
 
         assert_eq!(last_hash, hash1.current_hash());
         assert_ne!(last_hash, 0);
+    }
+
+    #[test]
+    fn deterministic_boundaries_keep_rolling_hash_state_after_boundary() {
+        let data = [1, 2, 3, 1, 71, 5, 6, 7, 8];
+        let boundaries =
+            ArtifactProfile::find_deterministic_boundaries(&data, 2, 256, 1, 4).unwrap();
+
+        // Resetting the hash at each boundary produces [4, 8, 9] here. A CDC
+        // rolling hash must continue across boundaries so position 5 is found.
+        assert_eq!(boundaries, vec![4, 5, 9]);
     }
 
     #[test]
