@@ -4,12 +4,12 @@
 //! allows consumers to start processing verified prefix ranges before the
 //! entire stream is complete, while maintaining safety guarantees.
 
-use crate::atp::object::{ObjectId, ManifestId, ContentId};
-use crate::atp::manifest::{ChunkBoundary, ChunkMetadata};
-use crate::net::atp::protocol::outcome::{AtpOutcome, AtpError};
+use crate::atp::manifest::ChunkBoundary;
+use crate::atp::object::ObjectId;
+use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome};
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use sha2::{Digest, Sha256};
 use std::time::SystemTime;
 
 /// Rolling manifest epoch representing a verified prefix of a stream.
@@ -43,7 +43,8 @@ impl StreamEpoch {
         state: EpochState,
         chunk_boundaries: Vec<ChunkBoundary>,
     ) -> Self {
-        let epoch_manifest_hash = Self::compute_epoch_hash(&object_id, epoch_sequence, &byte_range, &chunk_boundaries);
+        let epoch_manifest_hash =
+            Self::compute_epoch_hash(&object_id, epoch_sequence, &byte_range, &chunk_boundaries);
 
         Self {
             epoch_sequence,
@@ -64,32 +65,23 @@ impl StreamEpoch {
         byte_range: &ByteRange,
         chunk_boundaries: &[ChunkBoundary],
     ) -> [u8; 32] {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        let mut hasher = Sha256::new();
 
-        let mut hasher = DefaultHasher::new();
-
-        // Hash object ID
-        object_id.hash_bytes().hash(&mut hasher);
-
-        // Hash epoch sequence
-        epoch_sequence.hash(&mut hasher);
-
-        // Hash byte range
-        byte_range.start.hash(&mut hasher);
-        byte_range.end.hash(&mut hasher);
-
-        // Hash chunk boundaries
+        hasher.update(b"asupersync.stream_epoch.v1");
+        hasher.update(object_id.hash_bytes());
+        hasher.update(epoch_sequence.to_be_bytes());
+        hasher.update(byte_range.start.to_be_bytes());
+        hasher.update(byte_range.end.to_be_bytes());
+        hasher.update((chunk_boundaries.len() as u64).to_be_bytes());
         for boundary in chunk_boundaries {
-            boundary.index.hash(&mut hasher);
-            boundary.byte_offset.hash(&mut hasher);
-            boundary.size_bytes.hash(&mut hasher);
-            boundary.content_hash.hash(&mut hasher);
+            hasher.update(boundary.index.to_be_bytes());
+            hasher.update(boundary.byte_offset.to_be_bytes());
+            hasher.update(boundary.size_bytes.to_be_bytes());
+            hasher.update(boundary.content_hash);
         }
 
-        let hash_val = hasher.finish();
         let mut hash = [0u8; 32];
-        hash[..8].copy_from_slice(&hash_val.to_be_bytes());
+        hash.copy_from_slice(&hasher.finalize());
         hash
     }
 
@@ -168,8 +160,16 @@ impl ByteRange {
     pub const fn merge(&self, other: &Self) -> Option<Self> {
         if self.overlaps(other) || self.end == other.start || other.end == self.start {
             Some(Self {
-                start: if self.start < other.start { self.start } else { other.start },
-                end: if self.end > other.end { self.end } else { other.end },
+                start: if self.start < other.start {
+                    self.start
+                } else {
+                    other.start
+                },
+                end: if self.end > other.end {
+                    self.end
+                } else {
+                    other.end
+                },
             })
         } else {
             None
@@ -242,7 +242,7 @@ impl StreamManifest {
         if let Some(last_epoch) = self.epochs.last() {
             if epoch.epoch_sequence <= last_epoch.epoch_sequence {
                 return Outcome::err(AtpError::Protocol(
-                    crate::net::atp::protocol::outcome::ProtocolError::UnexpectedFrame
+                    crate::net::atp::protocol::outcome::ProtocolError::UnexpectedFrame,
                 ));
             }
         }
@@ -251,13 +251,13 @@ impl StreamManifest {
         if let Some(last_epoch) = self.epochs.last() {
             if epoch.byte_range.start != last_epoch.byte_range.end {
                 return Outcome::err(AtpError::Protocol(
-                    crate::net::atp::protocol::outcome::ProtocolError::UnexpectedFrame
+                    crate::net::atp::protocol::outcome::ProtocolError::UnexpectedFrame,
                 ));
             }
         } else if epoch.byte_range.start != 0 {
             // First epoch must start at byte 0
             return Outcome::err(AtpError::Protocol(
-                crate::net::atp::protocol::outcome::ProtocolError::UnexpectedFrame
+                crate::net::atp::protocol::outcome::ProtocolError::UnexpectedFrame,
             ));
         }
 
@@ -288,7 +288,11 @@ impl StreamManifest {
 
     /// Promote a provisional epoch to verified state.
     pub fn verify_epoch(&mut self, epoch_sequence: u64) -> AtpOutcome<()> {
-        if let Some(epoch) = self.epochs.iter_mut().find(|e| e.epoch_sequence == epoch_sequence) {
+        if let Some(epoch) = self
+            .epochs
+            .iter_mut()
+            .find(|e| e.epoch_sequence == epoch_sequence)
+        {
             if epoch.state == EpochState::Provisional {
                 epoch.state = EpochState::Verified;
 
@@ -303,13 +307,17 @@ impl StreamManifest {
         }
 
         Outcome::err(AtpError::Protocol(
-            crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch
+            crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch,
         ))
     }
 
     /// Invalidate an epoch due to error or cancellation.
     pub fn invalidate_epoch(&mut self, epoch_sequence: u64) -> AtpOutcome<()> {
-        if let Some(epoch) = self.epochs.iter_mut().find(|e| e.epoch_sequence == epoch_sequence) {
+        if let Some(epoch) = self
+            .epochs
+            .iter_mut()
+            .find(|e| e.epoch_sequence == epoch_sequence)
+        {
             let size = epoch.byte_range.size();
 
             // Update totals based on previous state
@@ -318,7 +326,8 @@ impl StreamManifest {
                     self.total_verified_bytes = self.total_verified_bytes.saturating_sub(size);
                 }
                 EpochState::Provisional => {
-                    self.total_provisional_bytes = self.total_provisional_bytes.saturating_sub(size);
+                    self.total_provisional_bytes =
+                        self.total_provisional_bytes.saturating_sub(size);
                 }
                 EpochState::Invalidated => {
                     // Already invalidated
@@ -333,7 +342,7 @@ impl StreamManifest {
         }
 
         Outcome::err(AtpError::Protocol(
-            crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch
+            crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch,
         ))
     }
 
@@ -386,24 +395,19 @@ impl StreamManifest {
 
     /// Compute final manifest hash for completed streams.
     fn compute_final_hash(&self) -> [u8; 32] {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        let mut hasher = Sha256::new();
 
-        let mut hasher = DefaultHasher::new();
-
-        // Hash object ID
-        self.object_id.hash_bytes().hash(&mut hasher);
-
-        // Hash all verified epochs in order
+        hasher.update(b"asupersync.stream_manifest.v1");
+        hasher.update(self.object_id.hash_bytes());
         for epoch in &self.epochs {
             if epoch.is_verified() {
-                epoch.epoch_manifest_hash.hash(&mut hasher);
+                hasher.update(epoch.epoch_sequence.to_be_bytes());
+                hasher.update(epoch.epoch_manifest_hash);
             }
         }
 
-        let hash_val = hasher.finish();
         let mut hash = [0u8; 32];
-        hash[..8].copy_from_slice(&hash_val.to_be_bytes());
+        hash.copy_from_slice(&hasher.finalize());
         hash
     }
 }
@@ -462,7 +466,8 @@ impl PrefixConsumer {
                 self.consumption_offset < self.manifest.latest_verified_offset()
             }
             ConsumptionPolicy::AllowProvisional => {
-                self.consumption_offset < (self.manifest.total_verified_bytes + self.manifest.total_provisional_bytes)
+                self.consumption_offset
+                    < (self.manifest.total_verified_bytes + self.manifest.total_provisional_bytes)
             }
         }
     }
@@ -480,7 +485,8 @@ impl PrefixConsumer {
                 }
             }
             ConsumptionPolicy::AllowProvisional => {
-                let max_offset = self.manifest.total_verified_bytes + self.manifest.total_provisional_bytes;
+                let max_offset =
+                    self.manifest.total_verified_bytes + self.manifest.total_provisional_bytes;
                 if self.consumption_offset < max_offset {
                     Some(ByteRange::new(self.consumption_offset, max_offset))
                 } else {
@@ -574,6 +580,8 @@ impl StreamProofRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::manifest::ChunkStrategy;
+    use crate::atp::object::ContentId;
 
     fn test_object_id() -> ObjectId {
         ObjectId::content(ContentId::new([1u8; 32]))
@@ -621,6 +629,42 @@ mod tests {
         assert!(!epoch.is_final());
         assert!(!epoch.is_provisional());
         assert_eq!(epoch.verified_size(), 1024);
+    }
+
+    #[test]
+    fn epoch_hash_uses_full_deterministic_sha256() {
+        let object_id = test_object_id();
+        let boundary = ChunkBoundary {
+            index: 7,
+            byte_offset: 128,
+            size_bytes: 256,
+            content_hash: [0x5a; 32],
+            strategy: ChunkStrategy::ContentDefined,
+            metadata: None,
+        };
+
+        let hash_a = StreamEpoch::compute_epoch_hash(
+            &object_id,
+            3,
+            &ByteRange::new(128, 384),
+            std::slice::from_ref(&boundary),
+        );
+        let hash_b = StreamEpoch::compute_epoch_hash(
+            &object_id,
+            3,
+            &ByteRange::new(128, 384),
+            std::slice::from_ref(&boundary),
+        );
+        let hash_c = StreamEpoch::compute_epoch_hash(
+            &object_id,
+            4,
+            &ByteRange::new(128, 384),
+            std::slice::from_ref(&boundary),
+        );
+
+        assert_eq!(hash_a, hash_b);
+        assert_ne!(hash_a, hash_c);
+        assert!(hash_a[8..].iter().any(|&byte| byte != 0));
     }
 
     #[test]
@@ -713,7 +757,7 @@ mod tests {
         assert_eq!(consumer.consumption_progress(), 50.0);
 
         // Test provisional-allowing consumer
-        let mut consumer_prov = PrefixConsumer::new(manifest, ConsumptionPolicy::AllowProvisional);
+        let consumer_prov = PrefixConsumer::new(manifest, ConsumptionPolicy::AllowProvisional);
         let safe_range_prov = consumer_prov.next_safe_range().unwrap();
         assert_eq!(safe_range_prov, ByteRange::new(0, 2048));
     }
