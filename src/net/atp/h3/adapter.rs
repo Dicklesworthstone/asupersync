@@ -2,7 +2,7 @@
 
 use super::{AtpH3Error, AtpH3Result, H3FrameCodec, H3Session};
 use crate::net::atp::protocol::{AtpFrame, FrameType};
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 
 /// ATP-over-H3 adapter configuration.
 #[derive(Debug, Clone)]
@@ -111,8 +111,13 @@ impl AtpH3Adapter {
         }
 
         let session = H3Session::new(session_id.clone(), &self.config)?;
-        self.sessions.insert(session_id.clone(), session);
-        Ok(self.sessions.get_mut(&session_id).unwrap())
+        match self.sessions.entry(session_id) {
+            Entry::Vacant(entry) => Ok(entry.insert(session)),
+            Entry::Occupied(mut entry) => {
+                entry.insert(session);
+                Ok(entry.into_mut())
+            }
+        }
     }
 
     /// Get an existing H3 session.
@@ -266,5 +271,16 @@ mod tests {
         // Close session
         assert!(adapter.close_session(&session_id).is_ok());
         assert_eq!(adapter.sessions.len(), 0);
+    }
+
+    #[test]
+    fn test_create_session_returns_inserted_session() {
+        let mut adapter = AtpH3Adapter::new(AdapterConfig::default());
+        let session_id = "test-session-entry".to_string();
+
+        let session = adapter.create_session(session_id.clone()).unwrap();
+
+        assert_eq!(session.session_id(), session_id);
+        assert!(adapter.get_session("test-session-entry").is_some());
     }
 }
