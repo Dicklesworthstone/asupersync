@@ -5,6 +5,8 @@
 
 #![allow(clippy::unused_async)]
 
+/// ATP (Asupersync Transfer Protocol) - Self-contained data movement layer.
+pub mod atp;
 /// DNS resolution with caching and Happy Eyeballs support.
 pub mod dns;
 /// Happy Eyeballs v2 (RFC 8305) concurrent dual-stack connection racing.
@@ -47,6 +49,10 @@ pub mod websocket;
 /// MessagePort-based coordination utilities for browser worker runtimes.
 pub mod worker_channel;
 
+pub use atp::{
+    AtpFrameCodec, Frame as AtpFrame, FrameError, FrameHeader, FrameType, ProtocolVersion,
+    SessionTranscript, TranscriptHash, TranscriptHasher, VarInt, VarIntError,
+};
 pub use happy_eyeballs::{HappyEyeballsConfig, connect as happy_eyeballs_connect};
 #[cfg(feature = "quic")]
 pub use quic::{
