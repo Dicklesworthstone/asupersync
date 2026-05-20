@@ -6,7 +6,7 @@
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Maximum theoretical UDP payload size
 pub const MAX_UDP_PAYLOAD: usize = 65535;
@@ -205,8 +205,10 @@ impl PrioritizedFrame {
 /// Packet assembler that coalesces frames within constraints
 #[derive(Debug)]
 pub struct PacketAssembler {
-    /// Pending frames to be assembled
-    pending_frames: VecDeque<PrioritizedFrame>,
+    /// Pending frames keyed by assembly priority.
+    pending_frames: BTreeMap<u8, VecDeque<PrioritizedFrame>>,
+    /// Number of queued frames across all priority buckets.
+    pending_frame_count: usize,
     /// Current constraints
     constraints: PacketConstraints,
 }
@@ -215,21 +217,19 @@ impl PacketAssembler {
     /// Create new packet assembler
     pub fn new(constraints: PacketConstraints) -> Self {
         Self {
-            pending_frames: VecDeque::new(),
+            pending_frames: BTreeMap::new(),
+            pending_frame_count: 0,
             constraints,
         }
     }
 
     /// Add frame for assembly
     pub fn add_frame(&mut self, frame: PrioritizedFrame) {
-        // Insert in priority order (highest priority first)
-        let pos = self
-            .pending_frames
-            .iter()
-            .position(|f| f.priority < frame.priority)
-            .unwrap_or(self.pending_frames.len());
-
-        self.pending_frames.insert(pos, frame);
+        self.pending_frames
+            .entry(frame.priority)
+            .or_default()
+            .push_back(frame);
+        self.pending_frame_count += 1;
     }
 
     /// Add frame with automatic prioritization
@@ -244,12 +244,12 @@ impl PacketAssembler {
 
     /// Check if any frames are pending
     pub fn has_pending_frames(&self) -> bool {
-        !self.pending_frames.is_empty()
+        self.pending_frame_count > 0
     }
 
     /// Assemble packet from pending frames
     pub fn assemble_packet(&mut self) -> Result<Option<AssembledPacket>, PacketAssemblyError> {
-        if self.pending_frames.is_empty() {
+        if !self.has_pending_frames() {
             return Ok(None);
         }
 
@@ -264,7 +264,7 @@ impl PacketAssembler {
         let mut frames_added = 0;
 
         // Try to fit frames in priority order
-        while let Some(frame) = self.pending_frames.front() {
+        while let Some(frame) = self.highest_priority_frame() {
             let estimated_size = frame.estimated_size();
 
             // Check if frame fits in remaining budget
@@ -275,12 +275,15 @@ impl PacketAssembler {
             // Check packet number space compatibility
             if !is_frame_allowed_in_space(&frame.frame, self.constraints.packet_number_space) {
                 // Remove incompatible frame and continue
-                self.pending_frames.pop_front();
+                self.pop_highest_priority_frame();
                 continue;
             }
 
             // Add frame to packet
-            let frame = self.pending_frames.pop_front().unwrap();
+            let frame = match self.pop_highest_priority_frame() {
+                Some(frame) => frame,
+                None => break, // No more frames available
+            };
             used_budget += estimated_size;
 
             if frame.ack_eliciting {
@@ -322,11 +325,29 @@ impl PacketAssembler {
     /// Clear all pending frames
     pub fn clear_pending_frames(&mut self) {
         self.pending_frames.clear();
+        self.pending_frame_count = 0;
     }
 
     /// Get count of pending frames
     pub fn pending_frame_count(&self) -> usize {
-        self.pending_frames.len()
+        self.pending_frame_count
+    }
+
+    fn highest_priority_frame(&self) -> Option<&PrioritizedFrame> {
+        self.pending_frames
+            .last_key_value()
+            .and_then(|(_priority, frames)| frames.front())
+    }
+
+    fn pop_highest_priority_frame(&mut self) -> Option<PrioritizedFrame> {
+        let priority = *self.pending_frames.last_key_value()?.0;
+        let frames = self.pending_frames.get_mut(&priority)?;
+        let frame = frames.pop_front()?;
+        self.pending_frame_count -= 1;
+        if frames.is_empty() {
+            self.pending_frames.remove(&priority);
+        }
+        Some(frame)
     }
 }
 
@@ -487,6 +508,42 @@ mod tests {
         let packet = assembler.assemble_packet().unwrap().unwrap();
         assert_eq!(packet.frames.len(), 2);
         assert!(packet.ack_eliciting);
+    }
+
+    #[test]
+    fn test_packet_assembly_priority_buckets_preserve_order() {
+        let mut assembler = PacketAssembler::new(
+            PacketConstraints::new()
+                .with_packet_number_space(PacketNumberSpace::ApplicationData)
+                .without_anti_amplification(),
+        );
+
+        assembler.add_frame(PrioritizedFrame::new(QuicFrame::Ping).with_priority(10));
+        assembler.add_frame(
+            PrioritizedFrame::new(QuicFrame::MaxData {
+                maximum_data: VarInt::new(1024).unwrap(),
+            })
+            .with_priority(10),
+        );
+        assembler.add_frame(
+            PrioritizedFrame::new(QuicFrame::ConnectionClose {
+                error_code: VarInt::new(0).unwrap(),
+                frame_type: None,
+                reason_phrase: Bytes::from_static(b"test"),
+            })
+            .with_priority(20),
+        );
+
+        assert_eq!(assembler.pending_frame_count(), 3);
+
+        let packet = assembler.assemble_packet().unwrap().unwrap();
+        assert!(matches!(
+            packet.frames[0],
+            QuicFrame::ConnectionClose { .. }
+        ));
+        assert!(matches!(packet.frames[1], QuicFrame::Ping));
+        assert!(matches!(packet.frames[2], QuicFrame::MaxData { .. }));
+        assert_eq!(assembler.pending_frame_count(), 0);
     }
 
     #[test]
