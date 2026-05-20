@@ -5,7 +5,7 @@
 //! All APIs are Cx-first and support native Asupersync semantics.
 
 use crate::types::outcome::Outcome;
-use crate::net::atp::protocol::outcome::{AtpOutcome, AtpError};
+use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome};
 use crate::atp::transfer::{TransferId, TransferState, TransferActor, TransferCommand, TransferCommandKind, IdempotencyKey};
 use crate::atp::object::{ObjectId, ContentId};
 use crate::atp::stream_object::{StreamManifest, StreamEpoch, EpochState, ByteRange, PrefixConsumer, ConsumptionPolicy};
@@ -86,7 +86,7 @@ impl AtpSession {
 
         // Cancel all active transfers
         let transfers = self.active_transfers.lock().unwrap().clone();
-        for (transfer_id, actor) in transfers {
+        for (_transfer_id, actor) in transfers {
             let mut actor = actor.lock().unwrap();
             let cancel_cmd = TransferCommand::new(
                 IdempotencyKey::new(0), // TODO: Generate proper key
@@ -240,9 +240,12 @@ impl AtpSession {
                 vec![], // Chunk boundaries would be computed here
             );
 
-            manifest.add_epoch(epoch).map_err(|_| AtpError::Protocol(
-                crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch
-            ))?;
+            match manifest.add_epoch(epoch) {
+                Outcome::Ok(_) => {},
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
 
             offset = end_offset;
             epoch_seq += 1;
@@ -279,7 +282,7 @@ impl AtpSession {
         // 4. Check signature if available
 
         let result = VerificationResult {
-            object_id,
+            object_id: object_id.clone(),
             verified: true,
             computed_hash: [0u8; 32], // TODO: Compute actual hash
             signature_valid: false,
@@ -336,9 +339,7 @@ impl AtpSession {
                     phase: crate::atp::transfer::TransferCancelPhase::Requested,
                 },
             );
-            actor.apply(cancel_cmd).map_err(|_| AtpError::Protocol(
-                crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch
-            ))?;
+            let _ = actor.apply(cancel_cmd); // Ignore result for cancellation
         }
 
         if self.config.enable_diagnostics {
@@ -703,6 +704,46 @@ mod tests {
 
             // Cancel transfer (should not error even if transfer doesn't exist)
             session.cancel_transfer(cx, transfer_id).await.unwrap();
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_streaming_with_manifest_integration() {
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let data = b"Hello, ATP streaming world!".repeat(100); // ~2800 bytes
+            let remote_peer = [2u8; 32];
+
+            // Stream the buffer
+            let stream_handle = session.stream_large_buffer(cx, &data, remote_peer).await.unwrap();
+
+            // Verify stream manifest integration
+            assert!(stream_handle.manifest().is_some());
+            assert_eq!(stream_handle.total_bytes, data.len() as u64);
+            assert!(stream_handle.verified_epochs_count() > 0);
+            assert!(!stream_handle.is_finalized()); // Since we didn't mark as final
+
+            // Test consumption policy creation
+            let manifest = stream_handle.manifest().unwrap().clone();
+            let consumer = session.create_stream_consumer(manifest, ConsumptionPolicy::VerifiedOnly).await.unwrap();
+
+            // Consumer should be ready to consume verified data
+            assert!(consumer.data_available());
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stream_epochs_retrieval() {
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let object_id = ObjectId::content(ContentId::new([1u8; 32]));
+
+            let epochs = session.get_stream_epochs(cx, object_id).await.unwrap();
+            assert_eq!(epochs.len(), 1);
+            assert_eq!(epochs[0].sequence, 1);
+            assert_eq!(epochs[0].state, EpochState::Verified);
         }).await.unwrap();
     }
 }
