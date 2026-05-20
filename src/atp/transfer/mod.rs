@@ -10,7 +10,7 @@ use super::actor::{
     TransferRegionId, TransferTopologyError,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use smallvec::SmallVec;
 use std::fmt;
 
 /// Deterministic transfer id bound to peers, nonce, and manifest root.
@@ -417,10 +417,10 @@ pub struct TransferActor {
     pub progress: TransferProgress,
     state: TransferState,
     next_journal_seq: u64,
-    applied_keys: BTreeSet<IdempotencyKey>,
-    open_obligations: BTreeMap<TransferObligationId, IdempotencyKey>,
-    settled_obligations: Vec<(TransferObligationId, ObligationOutcome)>,
-    journal: Vec<TransferJournalEntry>,
+    applied_keys: SmallVec<[IdempotencyKey; 8]>,
+    open_obligations: SmallVec<[(TransferObligationId, IdempotencyKey); 8]>,
+    settled_obligations: SmallVec<[(TransferObligationId, ObligationOutcome); 8]>,
+    journal: SmallVec<[TransferJournalEntry; 8]>,
 }
 
 impl TransferActor {
@@ -445,10 +445,10 @@ impl TransferActor {
             progress: TransferProgress::default(),
             state: TransferState::Offered,
             next_journal_seq: 0,
-            applied_keys: BTreeSet::new(),
-            open_obligations: BTreeMap::new(),
-            settled_obligations: Vec::new(),
-            journal: Vec::new(),
+            applied_keys: SmallVec::new(),
+            open_obligations: SmallVec::new(),
+            settled_obligations: SmallVec::new(),
+            journal: SmallVec::new(),
         })
     }
 
@@ -461,13 +461,13 @@ impl TransferActor {
     /// Durable journal entries.
     #[must_use]
     pub fn journal(&self) -> &[TransferJournalEntry] {
-        &self.journal
+        self.journal.as_slice()
     }
 
     /// Settled obligations.
     #[must_use]
     pub fn settled_obligations(&self) -> &[(TransferObligationId, ObligationOutcome)] {
-        &self.settled_obligations
+        self.settled_obligations.as_slice()
     }
 
     /// Number of open obligations.
@@ -496,7 +496,7 @@ impl TransferActor {
                 }
                 self.apply_side_effects(&command.kind);
                 self.state = next;
-                self.applied_keys.insert(command.key);
+                self.applied_keys.push(command.key);
                 self.push_journal(
                     command.key,
                     previous,
@@ -551,7 +551,9 @@ impl TransferActor {
         let mut actor = Self::new(actor_id, transfer_id, manifest, peer_capabilities, topology)?;
         for entry in journal {
             actor.state = entry.next;
-            actor.applied_keys.insert(entry.key);
+            if !actor.applied_keys.contains(&entry.key) {
+                actor.applied_keys.push(entry.key);
+            }
             actor.next_journal_seq = actor.next_journal_seq.max(entry.seq + 1);
             if let Some((id, outcome)) = entry.obligation {
                 actor.settled_obligations.push((id, outcome));
@@ -581,12 +583,26 @@ impl TransferActor {
                 limit: self.peer_capabilities.max_inflight_obligations,
             });
         }
-        self.open_obligations.insert(obligation, key);
+        if let Some((_, existing_key)) = self
+            .open_obligations
+            .iter_mut()
+            .find(|(open_id, _)| *open_id == obligation)
+        {
+            *existing_key = key;
+        } else {
+            self.open_obligations.push((obligation, key));
+        }
         Ok(())
     }
 
     fn settle_obligation(&mut self, id: TransferObligationId, outcome: ObligationOutcome) {
-        self.open_obligations.remove(&id);
+        if let Some(index) = self
+            .open_obligations
+            .iter()
+            .position(|(open_id, _)| *open_id == id)
+        {
+            self.open_obligations.swap_remove(index);
+        }
         self.settled_obligations.push((id, outcome));
     }
 
@@ -778,6 +794,16 @@ mod tests {
             topology(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn actor_construction_uses_inline_empty_collections() {
+        let actor = actor();
+
+        assert!(!actor.applied_keys.spilled());
+        assert!(!actor.open_obligations.spilled());
+        assert!(!actor.settled_obligations.spilled());
+        assert!(!actor.journal.spilled());
     }
 
     #[test]
