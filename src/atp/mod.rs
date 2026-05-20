@@ -23,3 +23,5 @@ pub mod transfer;
 pub mod verifier;
 pub mod verify;
 pub mod writer;
+
+pub use identity::{DurablePeerIdentity, IdentityError};
