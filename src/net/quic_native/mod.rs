@@ -6,6 +6,7 @@
 //! - stream + flow-control model
 
 pub mod connection;
+pub mod endpoint;
 pub mod forensic_log;
 pub mod streams;
 pub mod tls;
@@ -18,6 +19,10 @@ pub mod transport_conformance_tests;
 pub mod tls_conformance_harness;
 
 pub use connection::{NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError};
+pub use endpoint::{
+    BatchResult, EndpointMetrics, OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig,
+    QuicUdpEndpointError, ReceivedPacket,
+};
 pub use streams::{
     FlowControlError, FlowCredit, QuicStream, QuicStreamError, StreamDirection, StreamId,
     StreamRole, StreamTable, StreamTableError,
