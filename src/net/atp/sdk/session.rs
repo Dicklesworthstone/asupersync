@@ -1,15 +1,14 @@
 //! ATP session management and lifecycle.
 
+use super::{AtpSdk, SdkMode, SessionConfig, TransferId};
 use crate::cx::Cx;
 use crate::net::atp::protocol::{
-    AtpOutcome, AtpError, SessionId, PeerId, TransferNonce, SessionTraceId,
-    SessionNegotiator, ClientHello, SessionPolicy, NegotiatedSession,
-    SessionProofArtifact, SessionContextKind, AtpFeature, CapabilityAction,
-    CapabilityGrant, CapabilityGrantId, CapabilityScope
+    AtpError, AtpFeature, AtpOutcome, CapabilityAction, CapabilityGrant, CapabilityGrantId,
+    CapabilityScope, ClientHello, NegotiatedSession, PeerId, SessionContextKind, SessionId,
+    SessionNegotiator, SessionPolicy, SessionProofArtifact, SessionTraceId, TransferNonce,
 };
-use super::{AtpSdk, SessionConfig, SdkMode, TransferId};
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// High-level session handle for ATP transfers.
 #[derive(Debug, Clone)]
@@ -137,14 +136,12 @@ impl SessionOptions {
 
 impl AtpSdk {
     /// Open a new ATP session with the specified peer.
-    pub async fn open_session(
-        &self,
-        cx: &Cx,
-        options: SessionOptions,
-    ) -> AtpOutcome<AtpSession> {
+    pub async fn open_session(&self, cx: &Cx, options: SessionOptions) -> AtpOutcome<AtpSession> {
         match &self.mode {
             SdkMode::InProcess => self.open_session_in_process(cx, options).await,
-            SdkMode::DaemonDelegated { .. } => self.open_session_daemon_delegated(cx, options).await,
+            SdkMode::DaemonDelegated { .. } => {
+                self.open_session_daemon_delegated(cx, options).await
+            }
         }
     }
 
@@ -228,14 +225,13 @@ impl AtpSdk {
         _options: SessionOptions,
     ) -> AtpOutcome<AtpSession> {
         // TODO: Implement daemon delegation via RPC/IPC
-        AtpOutcome::Err(AtpError::Daemon(crate::net::atp::protocol::DaemonError::ServiceUnavailable))
+        AtpOutcome::Err(AtpError::Daemon(
+            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
+        ))
     }
 
     fn get_supported_features(&self) -> Vec<AtpFeature> {
-        let mut features = vec![
-            AtpFeature::EncryptionPolicy,
-            AtpFeature::ProofBundles,
-        ];
+        let mut features = vec![AtpFeature::EncryptionPolicy, AtpFeature::ProofBundles];
 
         if self.default_config.enable_compression {
             features.push(AtpFeature::Compression);
@@ -264,7 +260,10 @@ impl AtpSdk {
         SessionId(*hasher.finalize().as_ref())
     }
 
-    fn select_compatible_features(&self, _hello: &ClientHello) -> crate::net::atp::protocol::FeatureSet {
+    fn select_compatible_features(
+        &self,
+        _hello: &ClientHello,
+    ) -> crate::net::atp::protocol::FeatureSet {
         use crate::net::atp::protocol::FeatureSet;
         FeatureSet::from_slice(&self.get_supported_features())
     }
@@ -330,18 +329,17 @@ impl AtpSession {
     }
 }
 
-/// Generate a secure transfer nonce using the context's entropy.
+/// Generate a transfer nonce from the context's CSPRNG-backed byte source.
 fn generate_transfer_nonce(cx: &Cx) -> TransferNonce {
-    // Use the context's entropy source for secure nonce generation
-    let entropy = cx.entropy();
-    let mut nonce_bytes = [0u8; 32];
+    loop {
+        let mut nonce_bytes = [0u8; 32];
+        cx.random_bytes(&mut nonce_bytes);
 
-    // Fill nonce with entropy
-    for (i, byte) in nonce_bytes.iter_mut().enumerate() {
-        *byte = entropy.wrapping_add(i as u64) as u8;
+        let nonce = TransferNonce::new(nonce_bytes);
+        if !nonce.is_zero() {
+            return nonce;
+        }
     }
-
-    TransferNonce::new(nonce_bytes)
 }
 
 #[cfg(test)]
@@ -355,19 +353,35 @@ mod tests {
 
         let direct = SessionOptions::direct(peer);
         assert_eq!(direct.context, SessionContextKind::Direct);
-        assert!(direct.required_capabilities.contains(&CapabilityAction::Write));
+        assert!(
+            direct
+                .required_capabilities
+                .contains(&CapabilityAction::Write)
+        );
 
         let relay = SessionOptions::relay(peer);
         assert_eq!(relay.context, SessionContextKind::Relay);
-        assert!(relay.required_capabilities.contains(&CapabilityAction::Relay));
+        assert!(
+            relay
+                .required_capabilities
+                .contains(&CapabilityAction::Relay)
+        );
 
         let mailbox = SessionOptions::mailbox(peer);
         assert_eq!(mailbox.context, SessionContextKind::Mailbox);
-        assert!(mailbox.required_capabilities.contains(&CapabilityAction::Mailbox));
+        assert!(
+            mailbox
+                .required_capabilities
+                .contains(&CapabilityAction::Mailbox)
+        );
 
         let swarm = SessionOptions::swarm(peer);
         assert_eq!(swarm.context, SessionContextKind::Swarm);
-        assert!(swarm.required_capabilities.contains(&CapabilityAction::Seed));
+        assert!(
+            swarm
+                .required_capabilities
+                .contains(&CapabilityAction::Seed)
+        );
     }
 
     #[tokio::test]
@@ -377,6 +391,22 @@ mod tests {
 
         let options = SessionOptions::direct(peer).with_manifest_root(manifest_root);
         assert_eq!(options.manifest_root, Some(manifest_root));
+    }
+
+    #[tokio::test]
+    async fn transfer_nonce_uses_full_context_entropy() {
+        let cx = Cx::root();
+        let nonce = generate_transfer_nonce(&cx);
+
+        let mut weak_expansion = [0u8; 32];
+        let weak_seed = cx.random_u64();
+        for (i, byte) in weak_expansion.iter_mut().enumerate() {
+            *byte = weak_seed.wrapping_add(i as u64) as u8;
+        }
+
+        assert!(!nonce.is_zero());
+        assert_ne!(nonce.as_bytes(), &weak_expansion);
+        assert_ne!(nonce, generate_transfer_nonce(&cx));
     }
 
     #[tokio::test]
