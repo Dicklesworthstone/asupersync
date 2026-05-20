@@ -82,7 +82,7 @@ impl ChunkingProfileTrait for SyncTreeProfile {
                 ));
             }
 
-            if !matches!(boundary.metadata, Some(ChunkMetadata::SyncTree { .. }) {
+            if !matches!(boundary.metadata, Some(ChunkMetadata::SyncTree { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
                     "sync tree profile requires SyncTree metadata".to_string()
                 ));
@@ -411,7 +411,7 @@ impl SyncTreeProfile {
         let mut unique_chunks = std::collections::HashSet::new();
 
         for boundary in boundaries {
-            if let Some(ChunkMetadata::SyncTree { similarity_score, .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::SyncTree { similarity_score, .. }) = &boundary.metadata {
                 total_similarity += similarity_score;
                 unique_chunks.insert(boundary.content_hash);
             }
@@ -487,7 +487,7 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::ContentDefined));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::SyncTree { .. }));
+            assert!(matches!(boundary.metadata, Some(ChunkMetadata::SyncTree { .. })));
         }
 
         // Validate coverage

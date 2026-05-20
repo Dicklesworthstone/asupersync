@@ -73,7 +73,7 @@ impl ChunkingProfileTrait for StreamProfile {
                 ));
             }
 
-            if !matches!(boundary.metadata, Some(ChunkMetadata::Stream { .. }) {
+            if !matches!(boundary.metadata, Some(ChunkMetadata::Stream { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
                     "stream profile requires Stream metadata".to_string()
                 ));
@@ -264,7 +264,7 @@ impl StreamProfile {
         // Check sequence ordering
         let mut last_sequence = 0u64;
         for boundary in boundaries {
-            if let Some(ChunkMetadata::Stream { sequence, .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::Stream { sequence, .. }) = &boundary.metadata {
                 if *sequence < last_sequence {
                     return Err(ChunkingProfileError::StreamSequencingError(
                         "sequence numbers must be monotonically increasing".to_string()
@@ -277,7 +277,7 @@ impl StreamProfile {
         // Check that at least some chunks are early-consumption safe
         let safe_chunks = boundaries.iter()
             .filter(|b| {
-                if let Some(ChunkMetadata::Stream { early_consumption_safe, .. } = &b.metadata {
+                if let Some(ChunkMetadata::Stream { early_consumption_safe, .. }) = &b.metadata {
                     *early_consumption_safe
                 } else {
                     false
@@ -301,13 +301,13 @@ impl StreamProfile {
 
         // Sort by sequence number (should already be ordered)
         indexed_boundaries.sort_by(|(_, a), (_, b)| {
-            let a_seq = if let Some(ChunkMetadata::Stream { sequence, .. } = &a.metadata {
+            let a_seq = if let Some(ChunkMetadata::Stream { sequence, .. }) = &a.metadata {
                 *sequence
             } else {
                 0
             };
 
-            let b_seq = if let Some(ChunkMetadata::Stream { sequence, .. } = &b.metadata {
+            let b_seq = if let Some(ChunkMetadata::Stream { sequence, .. }) = &b.metadata {
                 *sequence
             } else {
                 0
@@ -324,7 +324,7 @@ impl StreamProfile {
         boundaries.iter()
             .enumerate()
             .filter_map(|(idx, boundary)| {
-                if let Some(ChunkMetadata::Stream { early_consumption_safe, .. } = &boundary.metadata {
+                if let Some(ChunkMetadata::Stream { early_consumption_safe, .. }) = &boundary.metadata {
                     if *early_consumption_safe {
                         Some(idx)
                     } else {
@@ -342,7 +342,7 @@ impl StreamProfile {
         boundary: &ChunkBoundary,
         total_expected_size: Option<u64>,
     ) -> RollingManifestUpdate {
-        let (sequence, early_consumption_safe) = if let Some(ChunkMetadata::Stream { sequence, early_consumption_safe } = &boundary.metadata {
+        let (sequence, early_consumption_safe) = if let Some(ChunkMetadata::Stream { sequence, early_consumption_safe }) = &boundary.metadata {
             (*sequence, *early_consumption_safe)
         } else {
             (0, false)
@@ -552,13 +552,13 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::FixedSize));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Stream { .. }));
+            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Stream { .. })));
         }
 
         // Validate sequence ordering
         let mut last_sequence = 0u64;
         for boundary in &boundaries {
-            if let Some(ChunkMetadata::Stream { sequence, .. } = &boundary.metadata {
+            if let Some(ChunkMetadata::Stream { sequence, .. }) = &boundary.metadata {
                 assert!(*sequence >= last_sequence);
                 last_sequence = *sequence;
             }

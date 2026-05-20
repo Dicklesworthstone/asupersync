@@ -884,7 +884,7 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::ContentDefined));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Artifact { .. }));
+            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Artifact { .. })));
 
             // Check build context
             if let Some(ChunkMetadata::Artifact { build_context, .. }) = &boundary.metadata {
