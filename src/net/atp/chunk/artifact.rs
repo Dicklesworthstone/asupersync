@@ -11,13 +11,13 @@
 //! - Content-defined chunking for deduplication benefits
 //! - Optimized for software artifacts and packages
 
-use crate::atp::manifest::{
-    CdcParams, ChunkPlan, ChunkStrategy, ChunkBoundary, ChunkMetadata,
-    ArtifactBuildContext, ProofStrength,
-};
 use super::{
     ChunkingProfileError,
-    profiles::{utils, ChunkingProfile as ChunkingProfileTrait},
+    profiles::{ChunkingProfile as ChunkingProfileTrait, utils},
+};
+use crate::atp::manifest::{
+    ArtifactBuildContext, CdcParams, ChunkBoundary, ChunkMetadata, ChunkPlan, ChunkStrategy,
+    ProofStrength,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -44,10 +44,11 @@ impl ChunkingProfileTrait for ArtifactProfile {
         }
 
         let chunk_plan = Self::chunk_plan(data.len() as u64);
-        let cdc_params = chunk_plan.cdc_params.as_ref()
-            .ok_or_else(|| ChunkingProfileError::InvalidChunkParameters(
-                "artifact profile requires deterministic CDC parameters".to_string()
-            ))?;
+        let cdc_params = chunk_plan.cdc_params.as_ref().ok_or_else(|| {
+            ChunkingProfileError::InvalidChunkParameters(
+                "artifact profile requires deterministic CDC parameters".to_string(),
+            )
+        })?;
 
         // Use deterministic boundary detection
         let positions = Self::find_deterministic_boundaries(
@@ -84,28 +85,30 @@ impl ChunkingProfileTrait for ArtifactProfile {
         for boundary in boundaries {
             if !matches!(boundary.strategy, ChunkStrategy::ContentDefined) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "artifact profile requires content-defined chunking".to_string()
+                    "artifact profile requires content-defined chunking".to_string(),
                 ));
             }
 
             if !matches!(boundary.metadata, Some(ChunkMetadata::Artifact { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "artifact profile requires Artifact metadata".to_string()
+                    "artifact profile requires Artifact metadata".to_string(),
                 ));
             }
 
             if boundary.size_bytes < Self::min_chunking_threshold() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} below minimum {}",
-                           boundary.size_bytes, Self::min_chunking_threshold())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} below minimum {}",
+                    boundary.size_bytes,
+                    Self::min_chunking_threshold()
+                )));
             }
 
             if boundary.size_bytes > Self::max_chunk_size() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} above maximum {}",
-                           boundary.size_bytes, Self::max_chunk_size())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} above maximum {}",
+                    boundary.size_bytes,
+                    Self::max_chunk_size()
+                )));
             }
 
             // Validate build context
@@ -266,28 +269,33 @@ impl ArtifactProfile {
             return false;
         }
 
-        let context = &data[position.saturating_sub(10)..position.saturating_add(10).min(data.len())];
+        let context =
+            &data[position.saturating_sub(10)..position.saturating_add(10).min(data.len())];
 
         // Look for common artifact boundaries
-        Self::has_elf_section_boundary(context) ||
-        Self::has_zip_entry_boundary(context) ||
-        Self::has_tar_header_boundary(context) ||
-        Self::has_pe_section_boundary(context)
+        Self::has_elf_section_boundary(context)
+            || Self::has_zip_entry_boundary(context)
+            || Self::has_tar_header_boundary(context)
+            || Self::has_pe_section_boundary(context)
     }
 
     /// Check for ELF section boundaries.
     fn has_elf_section_boundary(context: &[u8]) -> bool {
         // ELF magic number or section headers
-        context.windows(4).any(|w| w == b"\x7fELF") ||
-        context.windows(8).any(|w| w.starts_with(b".text\0\0\0") ||
-                                    w.starts_with(b".data\0\0\0") ||
-                                    w.starts_with(b".rodata\0"))
+        context.windows(4).any(|w| w == b"\x7fELF")
+            || context.windows(8).any(|w| {
+                w.starts_with(b".text\0\0\0")
+                    || w.starts_with(b".data\0\0\0")
+                    || w.starts_with(b".rodata\0")
+            })
     }
 
     /// Check for ZIP entry boundaries.
     fn has_zip_entry_boundary(context: &[u8]) -> bool {
         // ZIP local file header or central directory
-        context.windows(4).any(|w| w == b"PK\x03\x04" || w == b"PK\x01\x02")
+        context
+            .windows(4)
+            .any(|w| w == b"PK\x03\x04" || w == b"PK\x01\x02")
     }
 
     /// Check for TAR header boundaries.
@@ -295,9 +303,12 @@ impl ArtifactProfile {
         // TAR files have 512-byte headers with specific patterns
         if context.len() >= 8 {
             // Look for null-terminated filename patterns or ustar magic
-            context.windows(5).any(|w| w == b"ustar") ||
-            (context.iter().take(8).all(|&b| b.is_ascii_graphic() || b == 0) &&
-             context[7] == 0)
+            context.windows(5).any(|w| w == b"ustar")
+                || (context
+                    .iter()
+                    .take(8)
+                    .all(|&b| b.is_ascii_graphic() || b == 0)
+                    && context[7] == 0)
         } else {
             false
         }
@@ -306,10 +317,11 @@ impl ArtifactProfile {
     /// Check for PE (Windows executable) section boundaries.
     fn has_pe_section_boundary(context: &[u8]) -> bool {
         // PE/COFF magic numbers or section names
-        context.windows(2).any(|w| w == b"MZ") ||
-        context.windows(4).any(|w| w == b"PE\0\0") ||
-        context.windows(8).any(|w| w.starts_with(b".text\0\0\0") ||
-                                    w.starts_with(b".rdata\0\0"))
+        context.windows(2).any(|w| w == b"MZ")
+            || context.windows(4).any(|w| w == b"PE\0\0")
+            || context
+                .windows(8)
+                .any(|w| w.starts_with(b".text\0\0\0") || w.starts_with(b".rdata\0\0"))
     }
 
     /// Compute deterministic mask for boundary detection.
@@ -521,11 +533,11 @@ impl ArtifactProfile {
     fn has_code_patterns(data: &[u8]) -> bool {
         if let Ok(text) = std::str::from_utf8(&data[..1000.min(data.len())]) {
             // Look for code-like patterns
-            text.contains("main") ||
-            text.contains("function") ||
-            text.contains("class") ||
-            text.contains("import") ||
-            text.contains("include")
+            text.contains("main")
+                || text.contains("function")
+                || text.contains("class")
+                || text.contains("import")
+                || text.contains("include")
         } else {
             false
         }
@@ -588,20 +600,20 @@ impl ArtifactProfile {
     fn validate_build_context(context: &ArtifactBuildContext) -> Result<(), ChunkingProfileError> {
         if context.build_system.is_empty() {
             return Err(ChunkingProfileError::BuildContextValidationFailed(
-                "build system cannot be empty".to_string()
+                "build system cannot be empty".to_string(),
             ));
         }
 
         if context.toolchain_version.is_empty() {
             return Err(ChunkingProfileError::BuildContextValidationFailed(
-                "toolchain version cannot be empty".to_string()
+                "toolchain version cannot be empty".to_string(),
             ));
         }
 
         // Environment hash should not be all zeros
         if context.environment_hash == [0u8; 32] {
             return Err(ChunkingProfileError::BuildContextValidationFailed(
-                "environment hash cannot be all zeros".to_string()
+                "environment hash cannot be all zeros".to_string(),
             ));
         }
 
@@ -628,7 +640,9 @@ impl ArtifactProfile {
             unique_hashes.insert(boundary.content_hash);
 
             if let Some(ChunkMetadata::Artifact { proof_strength, .. }) = &boundary.metadata {
-                *proof_strength_distribution.entry(*proof_strength).or_insert(0) += 1;
+                *proof_strength_distribution
+                    .entry(*proof_strength)
+                    .or_insert(0) += 1;
             }
         }
 
@@ -652,17 +666,20 @@ struct DeterministicRollingHash {
     window: Vec<u8>,
     position: usize,
     polynomial: u64,
+    window_polynomial: u64,
 }
 
 impl DeterministicRollingHash {
     /// Create new deterministic rolling hash.
     fn new(window_size: usize) -> Self {
+        let polynomial: u64 = 0x9e3779b9; // Well-known constant for determinism
         Self {
             window_size,
             hash: 0,
             window: vec![0; window_size],
             position: 0,
-            polynomial: 0x9e3779b9, // Well-known constant for determinism
+            polynomial,
+            window_polynomial: polynomial.wrapping_pow(window_size as u32),
         }
     }
 
@@ -672,13 +689,10 @@ impl DeterministicRollingHash {
         self.window[self.position % self.window_size] = byte;
 
         // Deterministic polynomial rolling hash
-        self.hash = self.hash
+        self.hash = self
+            .hash
             .wrapping_mul(self.polynomial)
-            .wrapping_sub(
-                (old_byte as u64).wrapping_mul(
-                    self.polynomial.pow(self.window_size as u32)
-                )
-            )
+            .wrapping_sub((old_byte as u64).wrapping_mul(self.window_polynomial))
             .wrapping_add(byte as u64);
 
         self.position += 1;
@@ -722,14 +736,20 @@ mod regex {
     impl Regex {
         pub fn new(pattern: &str) -> Result<Self, ()> {
             // Simplified regex for version patterns
-            Ok(Self { pattern: pattern.to_string() })
+            Ok(Self {
+                pattern: pattern.to_string(),
+            })
         }
 
         pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
             // Simple version number detection
             for (i, part) in text.split_whitespace().enumerate() {
                 if Self::is_version_like(part) {
-                    return Some(Match { text: part, start: 0, end: part.len() });
+                    return Some(Match {
+                        text: part,
+                        start: 0,
+                        end: part.len(),
+                    });
                 }
             }
             None
@@ -738,9 +758,10 @@ mod regex {
         fn is_version_like(s: &str) -> bool {
             // Check if string looks like a version number
             let parts: Vec<&str> = s.split('.').collect();
-            parts.len() >= 2 && parts.iter().all(|p| {
-                p.chars().next().map_or(false, |c| c.is_ascii_digit())
-            })
+            parts.len() >= 2
+                && parts
+                    .iter()
+                    .all(|p| p.chars().next().map_or(false, |c| c.is_ascii_digit()))
         }
     }
 
@@ -802,6 +823,22 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_rolling_hash_default_window_does_not_overflow() {
+        let data: Vec<u8> = (0..128).map(|value| value as u8).collect();
+        let mut hash1 = DeterministicRollingHash::new(32);
+        let mut hash2 = DeterministicRollingHash::new(32);
+
+        let mut last_hash = 0;
+        for &byte in &data {
+            last_hash = hash1.update(byte);
+            assert_eq!(last_hash, hash2.update(byte));
+        }
+
+        assert_eq!(last_hash, hash1.current_hash());
+        assert_ne!(last_hash, 0);
+    }
+
+    #[test]
     fn build_system_detection() {
         let rust_data = b"rustc 1.70.0 (90c541806 2023-05-31)";
         assert_eq!(ArtifactProfile::detect_build_system(rust_data), "cargo");
@@ -824,13 +861,20 @@ mod tests {
     #[test]
     fn structural_boundary_detection() {
         let elf_data = b"some data before\x7fELF\x02\x01\x01\x00and after";
-        assert!(ArtifactProfile::is_artifact_structural_boundary(elf_data, 16));
+        assert!(ArtifactProfile::is_artifact_structural_boundary(
+            elf_data, 16
+        ));
 
         let zip_data = b"prefix dataPK\x03\x04local file header";
-        assert!(ArtifactProfile::is_artifact_structural_boundary(zip_data, 11));
+        assert!(ArtifactProfile::is_artifact_structural_boundary(
+            zip_data, 11
+        ));
 
         let normal_data = b"just normal data without structure";
-        assert!(!ArtifactProfile::is_artifact_structural_boundary(normal_data, 10));
+        assert!(!ArtifactProfile::is_artifact_structural_boundary(
+            normal_data,
+            10
+        ));
     }
 
     #[test]
@@ -884,7 +928,10 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::ContentDefined));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Artifact { .. })));
+            assert!(matches!(
+                boundary.metadata,
+                Some(ChunkMetadata::Artifact { .. })
+            ));
 
             // Check build context
             if let Some(ChunkMetadata::Artifact { build_context, .. }) = &boundary.metadata {
