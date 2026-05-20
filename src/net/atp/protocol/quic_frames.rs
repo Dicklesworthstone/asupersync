@@ -382,7 +382,10 @@ impl QuicFrame {
             QuicFrame::Crypto { offset, data } => {
                 QuicFrameType::Crypto.to_varint().encode_to_buf(buf)?;
                 offset.encode_to_buf(buf)?;
-                VarInt::new(data.len() as u64)?.encode_to_buf(buf)?;
+                match VarInt::new(data.len() as u64) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => return Err(QuicFrameError::InvalidFormat("Invalid crypto data length".to_string())),
+                }
                 buf.put_slice(data);
             }
 
@@ -521,7 +524,10 @@ impl QuicFrame {
                     ft.encode_to_buf(buf)?;
                 }
 
-                VarInt::new(reason_phrase.len() as u64)?.encode_to_buf(buf)?;
+                match VarInt::new(reason_phrase.len() as u64) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => return Err(QuicFrameError::InvalidFormat("Invalid reason phrase length".to_string())),
+                }
                 buf.put_slice(reason_phrase);
             }
 

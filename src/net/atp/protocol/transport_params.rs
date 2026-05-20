@@ -169,21 +169,69 @@ impl TransportParameterValue {
                 let mut temp = BytesMut::new();
                 match v.encode(&mut temp) {
                     Outcome::Ok(()) => {}
-                    _ => return Err(TransportParameterError::EncodingFailed("VarInt encode failed".to_string())),
+                    _ => return Err(TransportParameterError::InvalidParameterValue {
+                        parameter: TransportParameterId::InitialMaxData, // placeholder
+                        value: 0,
+                        reason: "VarInt encode failed".to_string(),
+                    }),
                 }
                 let len_varint = match VarInt::new(temp.len() as u64) {
                     Outcome::Ok(varint) => varint,
-                    _ => return Err(TransportParameterError::EncodingFailed("Invalid length".to_string())),
+                    _ => return Err(TransportParameterError::InvalidParameterValue {
+                        parameter: TransportParameterId::InitialMaxData, // placeholder
+                        value: temp.len() as u64,
+                        reason: "Invalid length".to_string(),
+                    }),
                 };
-                len_varint.encode_to_buf(buf)?;
+                let mut len_buf = BytesMut::new();
+                match len_varint.encode(&mut len_buf) {
+                    Outcome::Ok(()) => buf.put_slice(&len_buf),
+                    _ => return Err(TransportParameterError::InvalidParameterValue {
+                        parameter: TransportParameterId::InitialMaxData,
+                        value: 0,
+                        reason: "Length varint encode failed".to_string(),
+                    }),
+                }
                 buf.put_slice(&temp);
             }
             TransportParameterValue::Bytes(bytes) => {
-                VarInt::new(bytes.len() as u64)?.encode_to_buf(buf)?;
+                let len_varint = match VarInt::new(bytes.len() as u64) {
+                    Outcome::Ok(varint) => varint,
+                    _ => return Err(TransportParameterError::InvalidParameterValue {
+                        parameter: TransportParameterId::InitialMaxData,
+                        value: bytes.len() as u64,
+                        reason: "Bytes length too large".to_string(),
+                    }),
+                };
+                let mut len_buf = BytesMut::new();
+                match len_varint.encode(&mut len_buf) {
+                    Outcome::Ok(()) => buf.put_slice(&len_buf),
+                    _ => return Err(TransportParameterError::InvalidParameterValue {
+                        parameter: TransportParameterId::InitialMaxData,
+                        value: 0,
+                        reason: "Length varint encode failed".to_string(),
+                    }),
+                }
                 buf.put_slice(bytes);
             }
             TransportParameterValue::Empty => {
-                VarInt::new(0)?.encode_to_buf(buf)?;
+                let zero_varint = match VarInt::new(0) {
+                    Outcome::Ok(varint) => varint,
+                    _ => return Err(TransportParameterError::InvalidParameterValue {
+                        parameter: TransportParameterId::InitialMaxData,
+                        value: 0,
+                        reason: "Zero varint creation failed".to_string(),
+                    }),
+                };
+                let mut zero_buf = BytesMut::new();
+                match zero_varint.encode(&mut zero_buf) {
+                    Outcome::Ok(()) => buf.put_slice(&zero_buf),
+                    _ => return Err(TransportParameterError::InvalidParameterValue {
+                        parameter: TransportParameterId::InitialMaxData,
+                        value: 0,
+                        reason: "Zero varint encode failed".to_string(),
+                    }),
+                }
             }
         }
         Ok(())
