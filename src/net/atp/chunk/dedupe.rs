@@ -122,10 +122,16 @@ impl CdcEngine {
 
     /// Compute mask bits from normalization constant.
     fn compute_mask_bits_from_constant(constant: u64) -> u32 {
-        // Use the normalization constant to determine mask bits
-        // This provides deterministic chunking based on the constant
-        let bits = (constant % 16) + 8; // Range: 8-23 bits (256B to 8MB average)
-        bits as u32
+        // Use hash-based mapping to ensure deterministic chunking
+        // Each unique constant maps to a unique mask bit value
+        let mut hasher = Sha256::new();
+        hasher.update(constant.to_be_bytes());
+        let hash = hasher.finalize();
+
+        // Extract first 4 bytes as u32 and map to range 8-23
+        let hash_u32 = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
+        let bits = (hash_u32 % 16) + 8; // Range: 8-23 bits (256B to 8MB average)
+        bits
     }
 
     /// Compute SHA-256 hash of chunk data.
