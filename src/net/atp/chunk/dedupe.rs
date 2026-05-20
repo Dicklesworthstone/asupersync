@@ -446,7 +446,7 @@ impl ChunkReuseManager {
         // Check if chunk can be reused given capability scope
         if !self
             .cache
-            .can_reuse_chunk(chunk_identity, requesting_context)
+            .can_reuse_chunk(chunk_identity, transfer_id)
         {
             return None;
         }
@@ -466,7 +466,7 @@ impl ChunkReuseManager {
         for similar_identity in similar_chunks {
             if self
                 .cache
-                .can_reuse_chunk(&similar_identity, requesting_context)
+                .can_reuse_chunk(&similar_identity, transfer_id)
             {
                 if let Some(data) = self.cache.lookup_chunk(&similar_identity) {
                     return Some(data);
@@ -485,8 +485,7 @@ impl ChunkReuseManager {
         transfer_id: &str,
         source_object: Option<String>,
     ) -> Result<ChunkIdentity, ChunkingProfileError> {
-        let context_hash = self.active_contexts.get(transfer_id).copied();
-        let identity = ChunkIdentity::from_data(chunk_data, chunking_profile, context_hash);
+        let identity = ChunkIdentity::from_data(chunk_data, chunking_profile, transfer_id);
 
         self.cache.store_chunk(
             identity.clone(),
