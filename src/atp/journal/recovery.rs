@@ -251,21 +251,20 @@ impl RecoveryContext {
     }
 
     fn is_valid_transition(from: ChunkState, to: ChunkState) -> bool {
-        use ChunkState::*;
         match (from, to) {
             // Initial transitions from Wanted
-            (Wanted, Received) => true,
-            (Wanted, RepairDerived) => true,
+            (ChunkState::Wanted, ChunkState::Received) => true,
+            (ChunkState::Wanted, ChunkState::RepairDerived) => true,
 
             // Forward progression
-            (Received, Verified) => true,
-            (Verified, Written) => true,
-            (Written, Committed) => true,
-            (RepairDerived, Verified) => true,
+            (ChunkState::Received, ChunkState::Verified) => true,
+            (ChunkState::Verified, ChunkState::Written) => true,
+            (ChunkState::Written, ChunkState::Committed) => true,
+            (ChunkState::RepairDerived, ChunkState::Verified) => true,
 
             // Error states
-            (_, Quarantined) => true,
-            (_, Invalidated) => true,
+            (_, ChunkState::Quarantined) => true,
+            (_, ChunkState::Invalidated) => true,
 
             // Stay in same state (idempotent)
             (a, b) if a == b => true,
@@ -276,7 +275,7 @@ impl RecoveryContext {
     }
 
     fn commit_all_chunks(transfer: &mut TransferRecoveryState) {
-        for (_, state) in transfer.chunk_states.iter_mut() {
+        for state in transfer.chunk_states.values_mut() {
             if *state == ChunkState::Written {
                 *state = ChunkState::Committed;
             }
@@ -400,7 +399,7 @@ pub async fn recover_journal_and_bitmap(
     let (bitmaps, stats) = context.finalize();
 
     // Export recovered bitmaps to disk
-    for (transfer_id, bitmap) in &bitmaps {
+    for transfer_id in bitmaps.keys() {
         let bitmap_path = bitmap_dir.join(format!("transfer_{}.bitmap", transfer_id));
         let exported = vec![]; // TODO: implement proper serialization
         fs::write(&bitmap_path, exported).await?;
@@ -651,5 +650,361 @@ mod tests {
 
         let (bitmaps, _) = ctx.finalize();
         assert!(!bitmaps.contains_key(&transfer_id));
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DiskFaultPhase {
+        JournalAppend,
+        BitmapUpdate,
+        ChunkWrite,
+        Fsync,
+        RepairDecode,
+        ManifestWrite,
+        TempFileRename,
+        DirectoryFsync,
+        Cleanup,
+        ProofEmission,
+        JournalCompaction,
+    }
+
+    impl DiskFaultPhase {
+        const ALL: [Self; 11] = [
+            Self::JournalAppend,
+            Self::BitmapUpdate,
+            Self::ChunkWrite,
+            Self::Fsync,
+            Self::RepairDecode,
+            Self::ManifestWrite,
+            Self::TempFileRename,
+            Self::DirectoryFsync,
+            Self::Cleanup,
+            Self::ProofEmission,
+            Self::JournalCompaction,
+        ];
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CrashCut {
+        Before,
+        After,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RecoveryDisposition {
+        Resume,
+        Quarantine,
+        Finalized,
+    }
+
+    struct DiskFaultModel {
+        records: Vec<JournalRecord>,
+        bitmap: ChunkBitmap,
+        final_file_visible: bool,
+        final_file_verified: bool,
+        temp_renamed: bool,
+        directory_synced: bool,
+        cleanup_done: bool,
+        proof_emitted: bool,
+        compaction_seen: bool,
+        live_children: usize,
+        pending_obligations: usize,
+    }
+
+    struct RecoveredFault {
+        disposition: RecoveryDisposition,
+        chunk_state: Option<ChunkState>,
+        repair_state: Option<ChunkState>,
+        final_file_exposed: bool,
+        proof_emitted: bool,
+        compaction_seen: bool,
+        live_children: usize,
+        pending_obligations: usize,
+        stats: RecoveryStats,
+    }
+
+    const MATRIX_TRANSFER: &str = "transfer-d5";
+    const DATA_OFFSET: u64 = 0;
+    const REPAIR_OFFSET: u64 = 4096;
+    const CHUNK_SIZE: u64 = 4096;
+
+    impl DiskFaultModel {
+        fn new() -> Self {
+            let mut bitmap = ChunkBitmap::new(
+                MATRIX_TRANSFER.to_string(),
+                CHUNK_SIZE * 2,
+                CHUNK_SIZE,
+                1,
+            );
+            bitmap.initialize_wanted_chunks(1);
+
+            Self {
+                records: Vec::new(),
+                bitmap,
+                final_file_visible: false,
+                final_file_verified: false,
+                temp_renamed: false,
+                directory_synced: false,
+                cleanup_done: false,
+                proof_emitted: false,
+                compaction_seen: false,
+                live_children: 0,
+                pending_obligations: 0,
+            }
+        }
+
+        fn run_until(crash_phase: DiskFaultPhase, cut: CrashCut) -> Self {
+            let mut model = Self::new();
+            for phase in DiskFaultPhase::ALL {
+                if phase == crash_phase && cut == CrashCut::Before {
+                    break;
+                }
+
+                model.apply_phase(phase);
+
+                if phase == crash_phase && cut == CrashCut::After {
+                    break;
+                }
+            }
+            model
+        }
+
+        fn apply_phase(&mut self, phase: DiskFaultPhase) {
+            match phase {
+                DiskFaultPhase::JournalAppend => {
+                    self.records.push(JournalRecord::Offer {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        object_id: test_object_id(b"fault-matrix-object"),
+                        manifest_root: test_root(1),
+                        total_size: CHUNK_SIZE * 2,
+                        timestamp: 10,
+                    });
+                }
+                DiskFaultPhase::BitmapUpdate => {
+                    self.bitmap.update_chunk_state(
+                        DATA_OFFSET,
+                        ChunkState::Received,
+                        20,
+                        Some([1; 32]),
+                    );
+                    self.records.push(JournalRecord::ChunkReceived {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        chunk_offset: DATA_OFFSET,
+                        chunk_size: CHUNK_SIZE,
+                        chunk_hash: [1; 32],
+                        timestamp: 20,
+                    });
+                }
+                DiskFaultPhase::ChunkWrite => {
+                    self.pending_obligations += 1;
+                    self.bitmap.update_chunk_state(
+                        DATA_OFFSET,
+                        ChunkState::Verified,
+                        30,
+                        Some([2; 32]),
+                    );
+                    self.records.push(JournalRecord::ChunkVerified {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        chunk_offset: DATA_OFFSET,
+                        chunk_size: CHUNK_SIZE,
+                        verified_hash: [2; 32],
+                        timestamp: 30,
+                    });
+                    self.bitmap
+                        .update_chunk_state(DATA_OFFSET, ChunkState::Written, 40, Some([2; 32]));
+                    self.records.push(JournalRecord::ChunkWritten {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        chunk_offset: DATA_OFFSET,
+                        chunk_size: CHUNK_SIZE,
+                        file_path: "object.tmp".to_string(),
+                        timestamp: 40,
+                    });
+                    self.pending_obligations -= 1;
+                }
+                DiskFaultPhase::Fsync => {}
+                DiskFaultPhase::RepairDecode => {
+                    self.pending_obligations += 1;
+                    self.bitmap.update_chunk_state(
+                        REPAIR_OFFSET,
+                        ChunkState::RepairDerived,
+                        50,
+                        Some([3; 32]),
+                    );
+                    self.records.push(JournalRecord::RepairDecode {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        chunk_offset: REPAIR_OFFSET,
+                        chunk_size: CHUNK_SIZE,
+                        source_chunks: vec![DATA_OFFSET],
+                        timestamp: 50,
+                    });
+                    self.bitmap.update_chunk_state(
+                        REPAIR_OFFSET,
+                        ChunkState::Verified,
+                        60,
+                        Some([4; 32]),
+                    );
+                    self.records.push(JournalRecord::ChunkVerified {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        chunk_offset: REPAIR_OFFSET,
+                        chunk_size: CHUNK_SIZE,
+                        verified_hash: [4; 32],
+                        timestamp: 60,
+                    });
+                    self.pending_obligations -= 1;
+                }
+                DiskFaultPhase::ManifestWrite => {
+                    self.records.push(JournalRecord::CommitIntent {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        final_manifest_root: test_root(2),
+                        timestamp: 70,
+                    });
+                }
+                DiskFaultPhase::TempFileRename => {
+                    self.temp_renamed = true;
+                    self.final_file_visible = true;
+                }
+                DiskFaultPhase::DirectoryFsync => {
+                    self.directory_synced = true;
+                }
+                DiskFaultPhase::Cleanup => {
+                    self.cleanup_done = true;
+                    self.final_file_verified = true;
+                    self.records.push(JournalRecord::CommitComplete {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        final_path: "object.final".to_string(),
+                        committed_size: CHUNK_SIZE * 2,
+                        timestamp: 80,
+                    });
+                }
+                DiskFaultPhase::ProofEmission => {
+                    self.proof_emitted = true;
+                    self.records.push(JournalRecord::ProofDigest {
+                        transfer_id: MATRIX_TRANSFER.to_string(),
+                        proof_type: "receiver-finalizer".to_string(),
+                        digest: [9; 32],
+                        timestamp: 90,
+                    });
+                }
+                DiskFaultPhase::JournalCompaction => {
+                    self.compaction_seen = true;
+                    self.records.push(JournalRecord::CompactionBoundary {
+                        generation: 1,
+                        compacted_up_to_sequence: self.records.len() as u64,
+                        timestamp: 100,
+                    });
+                }
+            }
+        }
+
+        fn recover(&self) -> RecoveredFault {
+            let mut ctx = RecoveryContext::new();
+            let mut invalid_record = false;
+            for record in &self.records {
+                if ctx.process_record(record).is_err() {
+                    invalid_record = true;
+                }
+            }
+
+            let (bitmaps, stats) = ctx.finalize();
+            let bitmap = bitmaps.get(MATRIX_TRANSFER);
+            let chunk_state = bitmap.and_then(|bitmap| bitmap.get_chunk_state(DATA_OFFSET));
+            let repair_state = bitmap.and_then(|bitmap| bitmap.get_chunk_state(REPAIR_OFFSET));
+            let commit_boundary_reached = self.cleanup_done;
+            let unverified_final_file =
+                (self.temp_renamed || self.directory_synced) && !commit_boundary_reached;
+            let final_file_exposed =
+                self.final_file_visible && self.final_file_verified && commit_boundary_reached;
+            let disposition = if invalid_record || unverified_final_file {
+                RecoveryDisposition::Quarantine
+            } else if final_file_exposed && self.proof_emitted {
+                RecoveryDisposition::Finalized
+            } else {
+                RecoveryDisposition::Resume
+            };
+
+            RecoveredFault {
+                disposition,
+                chunk_state,
+                repair_state,
+                final_file_exposed,
+                proof_emitted: self.proof_emitted,
+                compaction_seen: self.compaction_seen,
+                live_children: self.live_children,
+                pending_obligations: self.pending_obligations,
+                stats,
+            }
+        }
+    }
+
+    #[test]
+    fn disk_fault_matrix_recovers_to_resume_quarantine_or_finalized() {
+        let mut before_cases = 0;
+        let mut after_cases = 0;
+
+        for phase in DiskFaultPhase::ALL {
+            for cut in [CrashCut::Before, CrashCut::After] {
+                let model = DiskFaultModel::run_until(phase, cut);
+                let recovered = model.recover();
+
+                match cut {
+                    CrashCut::Before => before_cases += 1,
+                    CrashCut::After => after_cases += 1,
+                }
+
+                assert_eq!(
+                    recovered.live_children, 0,
+                    "{phase:?} {cut:?} left live children"
+                );
+                assert_eq!(
+                    recovered.pending_obligations, 0,
+                    "{phase:?} {cut:?} leaked obligations"
+                );
+                if matches!(
+                    phase,
+                    DiskFaultPhase::TempFileRename | DiskFaultPhase::DirectoryFsync
+                ) && cut == CrashCut::After
+                {
+                    assert_eq!(recovered.disposition, RecoveryDisposition::Quarantine);
+                    assert!(
+                        !recovered.final_file_exposed,
+                        "{phase:?} {cut:?} exposed an unverified final file"
+                    );
+                }
+
+                if phase == DiskFaultPhase::Cleanup && cut == CrashCut::After {
+                    assert_eq!(recovered.disposition, RecoveryDisposition::Resume);
+                    assert_eq!(recovered.chunk_state, Some(ChunkState::Committed));
+                    assert!(recovered.final_file_exposed);
+                    assert!(!recovered.proof_emitted);
+                }
+
+                if phase == DiskFaultPhase::ProofEmission && cut == CrashCut::After {
+                    assert_eq!(recovered.disposition, RecoveryDisposition::Finalized);
+                    assert!(recovered.proof_emitted);
+                }
+
+                if phase == DiskFaultPhase::JournalCompaction && cut == CrashCut::After {
+                    assert_eq!(recovered.disposition, RecoveryDisposition::Finalized);
+                    assert!(recovered.compaction_seen);
+                    assert!(recovered.proof_emitted);
+                }
+            }
+        }
+
+        assert_eq!(before_cases, DiskFaultPhase::ALL.len());
+        assert_eq!(after_cases, DiskFaultPhase::ALL.len());
+    }
+
+    #[test]
+    fn disk_fault_matrix_preserves_repair_decode_and_compaction_records() {
+        let recovered =
+            DiskFaultModel::run_until(DiskFaultPhase::JournalCompaction, CrashCut::After)
+                .recover();
+
+        assert_eq!(recovered.disposition, RecoveryDisposition::Finalized);
+        assert_eq!(recovered.chunk_state, Some(ChunkState::Committed));
+        assert_eq!(recovered.repair_state, Some(ChunkState::Verified));
+        assert!(recovered.proof_emitted);
+        assert!(recovered.compaction_seen);
+        assert_eq!(recovered.stats.corrupted_skipped, 0);
     }
 }

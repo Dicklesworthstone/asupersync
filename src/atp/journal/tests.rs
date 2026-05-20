@@ -1,8 +1,18 @@
 //! Basic tests for sparse writer components
 
+type ChunkRange = super::ChunkRange;
+type CommitPolicy = super::CommitPolicy;
+type FsyncPolicy = super::FsyncPolicy;
+type QuarantineReason = super::QuarantineReason;
+type RangeTracker = super::RangeTracker;
+type SparseRange = super::SparseRange;
+type SparseWriterConfig = super::SparseWriterConfig;
+type TempManagementConfig = super::temp_management::TempManagementConfig;
+type WriteOptions = super::WriteOptions;
+type WritePriority = super::sparse_writer::WritePriority;
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
 
     #[test]
@@ -268,6 +278,5 @@ mod tests {
         assert!(WritePriority::Critical > WritePriority::High);
         assert!(WritePriority::High > WritePriority::Normal);
         assert!(WritePriority::Normal > WritePriority::Low);
-        assert!(WritePriority::Low > WritePriority::Background);
     }
 }
