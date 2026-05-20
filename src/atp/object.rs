@@ -7,8 +7,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+
+use sha2::{Digest, Sha256};
+
+const CONTENT_ID_DOMAIN: &[u8] = b"asupersync.atp.content-id.v1\0";
+const MANIFEST_ID_DOMAIN: &[u8] = b"asupersync.atp.manifest-id.v1\0";
+
+fn domain_separated_sha256(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(payload);
+    hasher.finalize().into()
+}
 
 /// Content-addressed object identifier using cryptographic hash.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -33,15 +44,9 @@ impl ContentId {
     /// Compute content id from canonical bytes.
     #[must_use]
     pub fn from_bytes(content: &[u8]) -> Self {
-        use std::collections::hash_map::DefaultHasher;
-        let mut hasher = DefaultHasher::new();
-        content.hash(&mut hasher);
-        // For now, use a simplified hash computation
-        // TODO: Replace with proper SHA-256 when crypto dep is added
-        let hash_val = hasher.finish();
-        let mut hash = [0u8; 32];
-        hash[..8].copy_from_slice(&hash_val.to_be_bytes());
-        Self { hash }
+        Self {
+            hash: domain_separated_sha256(CONTENT_ID_DOMAIN, content),
+        }
     }
 
     /// Format as hex string for debugging.
@@ -80,7 +85,9 @@ impl ManifestId {
     /// Compute manifest id from canonical manifest bytes.
     #[must_use]
     pub fn from_manifest_bytes(manifest: &[u8]) -> Self {
-        ContentId::from_bytes(manifest).into()
+        Self {
+            hash: domain_separated_sha256(MANIFEST_ID_DOMAIN, manifest),
+        }
     }
 
     /// Format as hex string for debugging.
@@ -705,7 +712,7 @@ impl ObjectGraph {
     }
 }
 
-/// Convenience function to compute SHA-256 hash from content bytes.
+/// Convenience function to compute ATP content ID hash from content bytes.
 pub fn compute_hash(content: &[u8]) -> [u8; 32] {
     ContentId::from_bytes(content).hash
 }
@@ -727,6 +734,33 @@ mod tests {
         let id1 = ContentId::from_bytes(content);
         let id2 = ContentId::from_bytes(content);
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn content_id_uses_full_sha256_digest() {
+        let id = ContentId::from_bytes(b"hello world");
+        let mut hasher = Sha256::new();
+        hasher.update(CONTENT_ID_DOMAIN);
+        hasher.update(b"hello world");
+        let expected: [u8; 32] = hasher.finalize().into();
+
+        assert_eq!(id.hash(), &expected);
+        assert!(id.hash()[8..].iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn manifest_id_is_domain_separated_from_content_id() {
+        let canonical_bytes = b"{\"object\":\"same canonical bytes\"}";
+        let content_id = ContentId::from_bytes(canonical_bytes);
+        let manifest_id = ManifestId::from_manifest_bytes(canonical_bytes);
+
+        assert_ne!(manifest_id.hash(), content_id.hash());
+
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_ID_DOMAIN);
+        hasher.update(canonical_bytes);
+        let expected: [u8; 32] = hasher.finalize().into();
+        assert_eq!(manifest_id.hash(), &expected);
     }
 
     #[test]
