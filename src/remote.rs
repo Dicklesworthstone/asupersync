@@ -30,6 +30,7 @@ use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
+use crate::types::outcome::Outcome;
 use crate::util::det_hash::DetHashMap;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -844,9 +845,9 @@ impl RemoteHandle {
     /// caller cancellation so runtime bookkeeping is always finalized before
     /// returning. If the terminal result was already consumed, it returns
     /// `PolledAfterCompletion`.
-    pub async fn close(&mut self, cx: &Cx) -> Result<RemoteOutcome, RemoteError> {
+    pub async fn close(&mut self, cx: &Cx) -> Outcome<RemoteOutcome, RemoteError> {
         if self.completed {
-            return Err(RemoteError::PolledAfterCompletion);
+            return Outcome::err(RemoteError::PolledAfterCompletion);
         }
 
         if self.should_request_cancel() {
@@ -860,14 +861,17 @@ impl RemoteHandle {
         match self.receiver.recv_uninterruptible().await {
             Ok(result) => {
                 cx.trace(trace_events::RESULT_DELIVERED);
-                self.finish_result(result)
+                match self.finish_result(result) {
+                    Ok(outcome) => Outcome::ok(outcome),
+                    Err(e) => Outcome::err(e),
+                }
             }
             Err(oneshot::RecvError::Closed) => {
                 let err = self.finish_closed();
                 if err == RemoteError::LeaseExpired {
                     cx.trace(trace_events::LEASE_EXPIRED);
                 }
-                Err(err)
+                Outcome::err(err)
             }
             Err(oneshot::RecvError::Cancelled) => {
                 unreachable!("RecvUninterruptibleFuture cannot return Cancelled")
@@ -887,28 +891,31 @@ impl RemoteHandle {
     ///
     /// Returns `RemoteError` if the remote task failed, was cancelled,
     /// the lease expired, or a terminal result was already consumed.
-    pub async fn join(&mut self, cx: &Cx) -> Result<RemoteOutcome, RemoteError> {
+    pub async fn join(&mut self, cx: &Cx) -> Outcome<RemoteOutcome, RemoteError> {
         if self.completed {
-            return Err(RemoteError::PolledAfterCompletion);
+            return Outcome::err(RemoteError::PolledAfterCompletion);
         }
 
         match self.receiver.recv(cx).await {
             Ok(result) => {
                 cx.trace(trace_events::RESULT_DELIVERED);
-                self.finish_result(result)
+                match self.finish_result(result) {
+                    Ok(outcome) => Outcome::ok(outcome),
+                    Err(e) => Outcome::err(e),
+                }
             }
             Err(oneshot::RecvError::Closed) => {
                 let err = self.finish_closed();
                 if err == RemoteError::LeaseExpired {
                     cx.trace(trace_events::LEASE_EXPIRED);
                 }
-                Err(err)
+                Outcome::err(err)
             }
             Err(oneshot::RecvError::Cancelled) => {
                 let reason = cx
                     .cancel_reason()
                     .unwrap_or_else(CancelReason::parent_cancelled);
-                Err(RemoteError::Cancelled(reason))
+                Outcome::err(RemoteError::Cancelled(reason))
             }
             Err(oneshot::RecvError::PolledAfterCompletion) => {
                 unreachable!("RemoteHandle::join awaits a fresh oneshot recv future")
