@@ -27,10 +27,10 @@
 //! permit.commit(data)?;
 //! ```
 
-pub mod send_permit;
-pub mod network;
 pub mod atp_stream_example;
+pub mod network;
+pub mod send_permit;
 
-pub use send_permit::SendPermit;
-pub use network::{TwoPhaseNetworkSend, DirectSend};
 pub use atp_stream_example::TwoPhasedAtpStream;
+pub use network::{DirectSend, TwoPhaseNetworkSend};
+pub use send_permit::SendPermit;

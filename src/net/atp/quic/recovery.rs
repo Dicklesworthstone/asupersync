@@ -6,13 +6,12 @@
 //! - ATP-specific congestion control adaptations
 
 use crate::cx::Cx;
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, TransportError};
-use crate::net::quic_native::{
-    AckEvent, PacketNumberSpace, QuicTransportMachine, RttEstimator, SentPacketMeta,
-};
+use crate::net::atp::protocol::outcome::{AtpOutcome, TransportError};
+use crate::net::quic_native::{AckEvent, PacketNumberSpace, QuicTransportMachine, SentPacketMeta};
 use crate::types::cancel::CancelReason;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use crate::types::outcome::Outcome;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// ATP Recovery Manager
@@ -30,6 +29,10 @@ pub struct AtpRecoveryManager {
     congestion_strategy: CongestionStrategy,
     /// Anti-amplification state.
     anti_amplification: AntiAmplificationTracker,
+    /// ATP-owned recovery telemetry mirror for proof logs.
+    telemetry: RecoveryTelemetry,
+    /// PTO count mirrored for diagnostics and snapshots.
+    pto_count: u32,
     /// Connection identifier for logging.
     connection_id: String,
     /// Last update timestamp.
@@ -39,8 +42,6 @@ pub struct AtpRecoveryManager {
 /// Structured recovery event logging.
 #[derive(Debug, Clone)]
 pub struct RecoveryLogger {
-    /// Connection identifier.
-    connection_id: String,
     /// Recent events for replay.
     events: Vec<RecoveryEvent>,
     /// Event sequence number.
@@ -59,6 +60,12 @@ pub struct RecoveryEvent {
     /// Connection identifier.
     pub connection_id: String,
     /// Packet number space if applicable.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "packet_number_space_serde::serialize_option",
+        deserialize_with = "packet_number_space_serde::deserialize_option"
+    )]
     pub space: Option<PacketNumberSpace>,
     /// Current transport state snapshot.
     pub transport_state: TransportStateSnapshot,
@@ -175,8 +182,6 @@ pub struct RttSnapshot {
 /// Recovery timer for cancellation-aware PTO handling.
 #[derive(Debug)]
 struct RecoveryTimer {
-    /// Timer identifier.
-    id: String,
     /// Timer deadline.
     deadline: Instant,
     /// Associated packet number space.
@@ -223,6 +228,8 @@ impl AtpRecoveryManager {
             timers: HashMap::new(),
             congestion_strategy: CongestionStrategy::AtpAdaptive,
             anti_amplification: AntiAmplificationTracker::new(),
+            telemetry: RecoveryTelemetry::new(),
+            pto_count: 0,
             connection_id,
             last_update: Instant::now(),
         }
@@ -273,14 +280,18 @@ impl AtpRecoveryManager {
         }
 
         self.transport.on_packet_sent(packet.clone());
+        self.telemetry.on_packet_sent(packet.clone());
         self.anti_amplification.on_packet_sent(packet.bytes);
 
-        self.log_event(RecoveryEventType::PacketSent {
-            packet_number: packet.packet_number,
-            bytes: packet.bytes,
-            ack_eliciting: packet.ack_eliciting,
-            in_flight: packet.in_flight,
-        });
+        self.log_event_for_space(
+            Some(packet.space),
+            RecoveryEventType::PacketSent {
+                packet_number: packet.packet_number,
+                bytes: packet.bytes,
+                ack_eliciting: packet.ack_eliciting,
+                in_flight: packet.in_flight,
+            },
+        );
 
         // Schedule PTO timer if needed
         self.update_pto_timer(packet.space);
@@ -300,25 +311,39 @@ impl AtpRecoveryManager {
         let event =
             self.transport
                 .on_ack_received(space, acked_packets, ack_delay_micros, now_micros);
+        if event.acked_packets > 0 {
+            self.pto_count = 0;
+        }
+        let loss_delay_micros = self.loss_delay_micros();
+        let loss_telemetry =
+            self.telemetry
+                .on_ack_received(space, acked_packets, now_micros, loss_delay_micros);
+        let telemetry_lost_bytes = loss_telemetry.as_ref().map_or(0, |loss| loss.lost_bytes);
 
         self.anti_amplification.on_ack_received();
 
         // Log ACK processing
-        self.log_event(RecoveryEventType::AckReceived {
-            acked_packets: acked_packets.to_vec(),
-            ack_delay_micros,
-            newly_acked_bytes: event.acked_bytes,
-            newly_lost_bytes: event.lost_bytes,
-            largest_acked: acked_packets.iter().copied().max().unwrap_or(0),
-        });
+        self.log_event_for_space(
+            Some(space),
+            RecoveryEventType::AckReceived {
+                acked_packets: acked_packets.to_vec(),
+                ack_delay_micros,
+                newly_acked_bytes: event.acked_bytes,
+                newly_lost_bytes: event.lost_bytes.max(telemetry_lost_bytes),
+                largest_acked: acked_packets.iter().copied().max().unwrap_or(0),
+            },
+        );
 
         // Log loss detection if any
-        if event.lost_packets > 0 {
-            self.log_event(RecoveryEventType::LossDetected {
-                lost_packets: Vec::new(), // TODO: Track specific lost packets
-                detection_method: LossDetectionMethod::PacketThreshold, // TODO: Determine actual method
-                loss_delay_micros: 0, // TODO: Calculate loss delay
-            });
+        if let Some(loss) = loss_telemetry {
+            self.log_event_for_space(
+                Some(space),
+                RecoveryEventType::LossDetected {
+                    lost_packets: loss.lost_packets,
+                    detection_method: loss.detection_method,
+                    loss_delay_micros: loss.loss_delay_micros,
+                },
+            );
         }
 
         // Log congestion window changes
@@ -330,12 +355,15 @@ impl AtpRecoveryManager {
                 CongestionUpdateReason::AckReceived
             };
 
-            self.log_event(RecoveryEventType::CongestionWindowUpdated {
-                old_cwnd,
-                new_cwnd,
-                ssthresh: self.transport.ssthresh_bytes(),
-                reason,
-            });
+            self.log_event_for_space(
+                Some(space),
+                RecoveryEventType::CongestionWindowUpdated {
+                    old_cwnd,
+                    new_cwnd,
+                    ssthresh: self.transport.ssthresh_bytes(),
+                    reason,
+                },
+            );
         }
 
         // Log RTT sample if available
@@ -345,12 +373,15 @@ impl AtpRecoveryManager {
             rtt.latest_rtt_micros(),
             rtt.rttvar_micros(),
         ) {
-            self.log_event(RecoveryEventType::RttSample {
-                sample_micros: latest,
-                ack_delay_micros,
-                smoothed_rtt_micros: smoothed,
-                rttvar_micros: rttvar,
-            });
+            self.log_event_for_space(
+                Some(space),
+                RecoveryEventType::RttSample {
+                    sample_micros: latest,
+                    ack_delay_micros,
+                    smoothed_rtt_micros: smoothed,
+                    rttvar_micros: rttvar,
+                },
+            );
         }
 
         // Cancel PTO timer if needed
@@ -363,13 +394,16 @@ impl AtpRecoveryManager {
 
     /// Handle PTO timer expiration.
     pub fn on_pto_expired(&mut self, space: PacketNumberSpace) -> AtpOutcome<()> {
-        let old_pto_count = 0; // TODO: Get from transport
         self.transport.on_pto_expired();
+        self.pto_count = self.pto_count.saturating_add(1);
 
-        self.log_event(RecoveryEventType::PtoExpired {
-            pto_count: old_pto_count + 1,
-            backoff_level: std::cmp::min(old_pto_count, 10), // Capped at 10
-        });
+        self.log_event_for_space(
+            Some(space),
+            RecoveryEventType::PtoExpired {
+                pto_count: self.pto_count,
+                backoff_level: self.pto_count.min(10),
+            },
+        );
 
         // Schedule next PTO timer
         self.update_pto_timer(space);
@@ -382,8 +416,8 @@ impl AtpRecoveryManager {
         let mut actions = Vec::new();
 
         // Check for cancelled operations
-        if cx.is_cancelled() {
-            return self.handle_cancellation(cx.cancel_reason());
+        if let Some(reason) = cx.cancel_reason() {
+            return self.handle_cancellation(reason);
         }
 
         // Poll transport machine
@@ -399,7 +433,12 @@ impl AtpRecoveryManager {
             .collect();
 
         for (timer_id, space) in expired_timers {
-            self.on_pto_expired(space).ok();
+            match self.on_pto_expired(space) {
+                Outcome::Ok(()) => {}
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
             actions.push(RecoveryAction::SendProbePackets { space, count: 2 });
             self.timers.remove(&timer_id);
         }
@@ -440,12 +479,20 @@ impl AtpRecoveryManager {
     // Private helper methods
 
     fn log_event(&mut self, event_type: RecoveryEventType) {
+        self.log_event_for_space(None, event_type);
+    }
+
+    fn log_event_for_space(
+        &mut self,
+        space: Option<PacketNumberSpace>,
+        event_type: RecoveryEventType,
+    ) {
         let event = RecoveryEvent {
             sequence: self.logger.sequence,
             timestamp_micros: self.last_update.elapsed().as_micros() as u64,
             event_type,
             connection_id: self.connection_id.clone(),
-            space: None, // TODO: Extract from event type
+            space,
             transport_state: self.create_transport_snapshot(),
         };
 
@@ -465,13 +512,20 @@ impl AtpRecoveryManager {
             bytes_in_flight: self.transport.bytes_in_flight(),
             congestion_window: self.transport.congestion_window_bytes(),
             ssthresh: self.transport.ssthresh_bytes(),
-            pto_count: 0, // TODO: Get from transport
+            pto_count: self.pto_count,
             rtt_estimates: RttSnapshot {
                 smoothed_rtt_micros: rtt.smoothed_rtt_micros(),
                 latest_rtt_micros: rtt.latest_rtt_micros(),
                 rttvar_micros: rtt.rttvar_micros(),
             },
         }
+    }
+
+    fn loss_delay_micros(&self) -> u64 {
+        let rtt = self.transport.rtt();
+        let latest = rtt.latest_rtt_micros().unwrap_or(333_000);
+        let smoothed = rtt.smoothed_rtt_micros().unwrap_or(333_000);
+        (9u64.saturating_mul(latest.max(smoothed)) / 8).max(1_000)
     }
 
     fn update_pto_timer(&mut self, space: PacketNumberSpace) {
@@ -481,7 +535,6 @@ impl AtpRecoveryManager {
             let deadline = Instant::now() + Duration::from_micros(deadline_micros);
 
             let timer = RecoveryTimer {
-                id: timer_id.clone(),
                 deadline,
                 space,
                 _cancel_reason: None, // TODO: Integrate with Cx cancellation
@@ -518,11 +571,180 @@ impl AtpRecoveryManager {
 }
 
 impl RecoveryLogger {
-    fn new(connection_id: String) -> Self {
+    fn new(_connection_id: String) -> Self {
         Self {
-            connection_id,
             events: Vec::new(),
             sequence: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryTelemetry {
+    spaces: [RecoverySpaceTelemetry; 3],
+}
+
+#[derive(Debug, Clone)]
+struct RecoverySpaceTelemetry {
+    sent_packets: VecDeque<SentPacketMeta>,
+    largest_acked: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryLossTelemetry {
+    lost_packets: Vec<u64>,
+    lost_bytes: u64,
+    detection_method: LossDetectionMethod,
+    loss_delay_micros: u64,
+}
+
+impl RecoveryTelemetry {
+    fn new() -> Self {
+        Self {
+            spaces: std::array::from_fn(|_| RecoverySpaceTelemetry::new()),
+        }
+    }
+
+    fn on_packet_sent(&mut self, packet: SentPacketMeta) {
+        let space = &mut self.spaces[packet.space as usize];
+        space.sent_packets.push_back(packet);
+        if space.sent_packets.len() > 10_000 {
+            space.sent_packets.pop_front();
+        }
+    }
+
+    fn on_ack_received(
+        &mut self,
+        space: PacketNumberSpace,
+        acked_packets: &[u64],
+        now_micros: u64,
+        loss_delay_micros: u64,
+    ) -> Option<RecoveryLossTelemetry> {
+        if acked_packets.is_empty() {
+            return None;
+        }
+
+        let space = &mut self.spaces[space as usize];
+        let mut acked = acked_packets.to_vec();
+        acked.sort_unstable();
+        acked.dedup();
+
+        let mut largest_newly_acked = None;
+        let mut unacked = VecDeque::with_capacity(space.sent_packets.len());
+        while let Some(packet) = space.sent_packets.pop_front() {
+            if acked.binary_search(&packet.packet_number).is_ok() {
+                largest_newly_acked = Some(
+                    largest_newly_acked.map_or(packet.packet_number, |largest: u64| {
+                        largest.max(packet.packet_number)
+                    }),
+                );
+            } else {
+                unacked.push_back(packet);
+            }
+        }
+        space.sent_packets = unacked;
+
+        if let Some(largest) = largest_newly_acked {
+            space.largest_acked = Some(
+                space
+                    .largest_acked
+                    .map_or(largest, |seen| seen.max(largest)),
+            );
+        }
+
+        let largest_acked = space.largest_acked?;
+        let time_threshold_micros = now_micros.saturating_sub(loss_delay_micros);
+        let mut lost_packets = Vec::new();
+        let mut lost_bytes = 0u64;
+        let mut packet_threshold_lost = false;
+        let mut time_threshold_lost = false;
+        let mut survivors = VecDeque::with_capacity(space.sent_packets.len());
+
+        while let Some(packet) = space.sent_packets.pop_front() {
+            let lost_by_packet_threshold = packet.packet_number.saturating_add(3) <= largest_acked;
+            let lost_by_time_threshold = packet.packet_number <= largest_acked
+                && packet.time_sent_micros <= time_threshold_micros;
+
+            if lost_by_packet_threshold || lost_by_time_threshold {
+                packet_threshold_lost |= lost_by_packet_threshold;
+                time_threshold_lost |= lost_by_time_threshold;
+                lost_bytes = lost_bytes.saturating_add(packet.bytes);
+                lost_packets.push(packet.packet_number);
+            } else {
+                survivors.push_back(packet);
+            }
+        }
+        space.sent_packets = survivors;
+
+        if lost_packets.is_empty() {
+            return None;
+        }
+
+        let detection_method = match (packet_threshold_lost, time_threshold_lost) {
+            (true, true) => LossDetectionMethod::BothThresholds,
+            (true, false) => LossDetectionMethod::PacketThreshold,
+            (false, true) => LossDetectionMethod::TimeThreshold,
+            (false, false) => unreachable!("lost packet must have a threshold"),
+        };
+
+        Some(RecoveryLossTelemetry {
+            lost_packets,
+            lost_bytes,
+            detection_method,
+            loss_delay_micros,
+        })
+    }
+}
+
+impl RecoverySpaceTelemetry {
+    fn new() -> Self {
+        Self {
+            sent_packets: VecDeque::new(),
+            largest_acked: None,
+        }
+    }
+}
+
+mod packet_number_space_serde {
+    use super::*;
+    use serde::de;
+
+    pub(super) fn serialize_option<S>(
+        value: &Option<PacketNumberSpace>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.map(packet_number_space_name).serialize(serializer)
+    }
+
+    pub(super) fn deserialize_option<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<PacketNumberSpace>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(value) = Option::<String>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+
+        match value.as_str() {
+            "initial" => Ok(Some(PacketNumberSpace::Initial)),
+            "handshake" => Ok(Some(PacketNumberSpace::Handshake)),
+            "application_data" => Ok(Some(PacketNumberSpace::ApplicationData)),
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["initial", "handshake", "application_data"],
+            )),
+        }
+    }
+
+    const fn packet_number_space_name(space: PacketNumberSpace) -> &'static str {
+        match space {
+            PacketNumberSpace::Initial => "initial",
+            PacketNumberSpace::Handshake => "handshake",
+            PacketNumberSpace::ApplicationData => "application_data",
         }
     }
 }
@@ -583,6 +805,21 @@ pub enum RecoveryAction {
 mod tests {
     use super::*;
     use crate::cx::Cx;
+
+    fn sent_packet(
+        space: PacketNumberSpace,
+        packet_number: u64,
+        time_sent_micros: u64,
+    ) -> SentPacketMeta {
+        SentPacketMeta {
+            space,
+            packet_number,
+            bytes: 1200,
+            ack_eliciting: true,
+            in_flight: true,
+            time_sent_micros,
+        }
+    }
 
     #[test]
     fn recovery_manager_lifecycle() {
@@ -662,5 +899,120 @@ mod tests {
 
         // Should have created a PTO timer
         assert!(!manager.timers.is_empty());
+    }
+
+    #[test]
+    fn ack_loss_logs_concrete_packets_method_delay_and_space() {
+        let mut manager = AtpRecoveryManager::new("test_conn".to_string());
+        manager.anti_amplification.address_validated = true;
+
+        for packet_number in 0..6 {
+            let packet = sent_packet(
+                PacketNumberSpace::ApplicationData,
+                packet_number,
+                10_000 + packet_number,
+            );
+            assert!(manager.on_packet_sent(packet).is_ok());
+        }
+
+        let ack = manager.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 20_000);
+        assert!(ack.is_ok());
+
+        let loss_event = manager
+            .recovery_log()
+            .iter()
+            .find_map(|event| match &event.event_type {
+                RecoveryEventType::LossDetected {
+                    lost_packets,
+                    detection_method,
+                    loss_delay_micros,
+                } => Some((
+                    event.space,
+                    lost_packets,
+                    detection_method,
+                    loss_delay_micros,
+                )),
+                _ => None,
+            })
+            .expect("loss event");
+
+        assert_eq!(loss_event.0, Some(PacketNumberSpace::ApplicationData));
+        assert_eq!(loss_event.1, &vec![0, 1, 2]);
+        assert!(matches!(loss_event.2, LossDetectionMethod::PacketThreshold));
+        assert!(*loss_event.3 > 0);
+    }
+
+    #[test]
+    fn pto_expiry_logs_incrementing_count_backoff_and_snapshot() {
+        let mut manager = AtpRecoveryManager::new("test_conn".to_string());
+
+        assert!(
+            manager
+                .on_pto_expired(PacketNumberSpace::ApplicationData)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .on_pto_expired(PacketNumberSpace::ApplicationData)
+                .is_ok()
+        );
+
+        let pto_events: Vec<_> = manager
+            .recovery_log()
+            .iter()
+            .filter_map(|event| match event.event_type {
+                RecoveryEventType::PtoExpired {
+                    pto_count,
+                    backoff_level,
+                } => Some((
+                    event.space,
+                    pto_count,
+                    backoff_level,
+                    event.transport_state.pto_count,
+                )),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            pto_events,
+            vec![
+                (Some(PacketNumberSpace::ApplicationData), 1, 1, 1),
+                (Some(PacketNumberSpace::ApplicationData), 2, 2, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn ack_resets_pto_count_before_snapshot_logging() {
+        let mut manager = AtpRecoveryManager::new("test_conn".to_string());
+        manager.anti_amplification.address_validated = true;
+        assert!(
+            manager
+                .on_packet_sent(sent_packet(PacketNumberSpace::ApplicationData, 7, 10_000))
+                .is_ok()
+        );
+        assert!(
+            manager
+                .on_pto_expired(PacketNumberSpace::ApplicationData)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .on_pto_expired(PacketNumberSpace::ApplicationData)
+                .is_ok()
+        );
+
+        let ack = manager.on_ack_received(PacketNumberSpace::ApplicationData, &[7], 0, 20_000);
+        assert!(ack.is_ok());
+
+        let ack_event = manager
+            .recovery_log()
+            .iter()
+            .find(|event| matches!(event.event_type, RecoveryEventType::AckReceived { .. }))
+            .expect("ack event");
+
+        assert_eq!(ack_event.space, Some(PacketNumberSpace::ApplicationData));
+        assert_eq!(ack_event.transport_state.pto_count, 0);
     }
 }

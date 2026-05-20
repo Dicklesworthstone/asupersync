@@ -4,8 +4,8 @@
 //! as specified in RFC 9000.
 
 use crate::bytes::{Buf, Bytes, BytesMut};
-use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::handshake::state_machine::HandshakeError;
+use crate::net::atp::protocol::varint::VarInt;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -183,12 +183,14 @@ impl TransportParameters {
 
     /// Set integer parameter
     pub fn set_integer(&mut self, id: TransportParamId, value: u64) {
-        self.params.insert(id as u64, TransportParamValue::Integer(value));
+        self.params
+            .insert(id as u64, TransportParamValue::Integer(value));
     }
 
     /// Set bytes parameter
     pub fn set_bytes(&mut self, id: TransportParamId, value: Bytes) {
-        self.params.insert(id as u64, TransportParamValue::Bytes(value));
+        self.params
+            .insert(id as u64, TransportParamValue::Bytes(value));
     }
 
     /// Set flag parameter (empty value)
@@ -222,12 +224,13 @@ impl TransportParameters {
 
         for (&param_id, param_value) in &self.params {
             // Parameter ID
-            let id_varint = VarInt::new(param_id)
-                .map_err(|_| HandshakeError::InvalidTransportParam {
+            let id_varint =
+                VarInt::new(param_id).map_err(|_| HandshakeError::InvalidTransportParam {
                     param_id,
                     reason: "parameter ID too large".to_string(),
                 })?;
-            id_varint.encode(&mut buf)
+            id_varint
+                .encode(&mut buf)
                 .map_err(|_| HandshakeError::InvalidTransportParam {
                     param_id,
                     reason: "failed to encode parameter ID".to_string(),
@@ -235,12 +238,14 @@ impl TransportParameters {
 
             // Parameter value
             let value_bytes = param_value.encode();
-            let length_varint = VarInt::new(value_bytes.len() as u64)
-                .map_err(|_| HandshakeError::InvalidTransportParam {
+            let length_varint = VarInt::new(value_bytes.len() as u64).map_err(|_| {
+                HandshakeError::InvalidTransportParam {
                     param_id,
                     reason: "parameter value too large".to_string(),
-                })?;
-            length_varint.encode(&mut buf)
+                }
+            })?;
+            length_varint
+                .encode(&mut buf)
                 .map_err(|_| HandshakeError::InvalidTransportParam {
                     param_id,
                     reason: "failed to encode parameter length".to_string(),
@@ -303,7 +308,8 @@ impl TransportParameters {
 
                 // For known parameters that should be integers, decode as integer
                 if let Some(param_type) = TransportParamId::from_varint(id_varint) {
-                    if param_type.requires_value() && param_type != TransportParamId::StatelessResetToken
+                    if param_type.requires_value()
+                        && param_type != TransportParamId::StatelessResetToken
                         && param_type != TransportParamId::OriginalDestinationConnectionId
                         && param_type != TransportParamId::InitialSourceConnectionId
                         && param_type != TransportParamId::RetrySourceConnectionId
@@ -408,13 +414,22 @@ mod tests {
         params.set_integer(TransportParamId::MaxIdleTimeout, 30000);
         params.set_integer(TransportParamId::InitialMaxData, 1048576);
         params.set_flag(TransportParamId::DisableActiveMigration);
-        params.set_bytes(TransportParamId::StatelessResetToken, Bytes::from_static(b"0123456789abcdef"));
+        params.set_bytes(
+            TransportParamId::StatelessResetToken,
+            Bytes::from_static(b"0123456789abcdef"),
+        );
 
         let encoded = params.encode().unwrap();
         let decoded = TransportParameters::decode(&encoded).unwrap();
 
-        assert_eq!(decoded.get_integer(TransportParamId::MaxIdleTimeout), Some(30000));
-        assert_eq!(decoded.get_integer(TransportParamId::InitialMaxData), Some(1048576));
+        assert_eq!(
+            decoded.get_integer(TransportParamId::MaxIdleTimeout),
+            Some(30000)
+        );
+        assert_eq!(
+            decoded.get_integer(TransportParamId::InitialMaxData),
+            Some(1048576)
+        );
         assert!(decoded.has_flag(TransportParamId::DisableActiveMigration));
         assert_eq!(
             decoded.get_bytes(TransportParamId::StatelessResetToken),
@@ -426,8 +441,16 @@ mod tests {
     fn test_client_defaults() {
         let params = TransportParameters::client_defaults();
 
-        assert!(params.get_integer(TransportParamId::MaxIdleTimeout).is_some());
-        assert!(params.get_integer(TransportParamId::InitialMaxData).is_some());
+        assert!(
+            params
+                .get_integer(TransportParamId::MaxIdleTimeout)
+                .is_some()
+        );
+        assert!(
+            params
+                .get_integer(TransportParamId::InitialMaxData)
+                .is_some()
+        );
         assert!(!params.has_flag(TransportParamId::DisableActiveMigration));
     }
 
@@ -456,7 +479,10 @@ mod tests {
         buf.put_u16(60000);
 
         let result = TransportParameters::decode(&buf);
-        assert!(matches!(result, Err(HandshakeError::DuplicateTransportParam { .. })));
+        assert!(matches!(
+            result,
+            Err(HandshakeError::DuplicateTransportParam { .. })
+        ));
     }
 
     #[test]

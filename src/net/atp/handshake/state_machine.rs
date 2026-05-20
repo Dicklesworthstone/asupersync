@@ -3,12 +3,12 @@
 //! Implements the core QUIC handshake state machine with deterministic
 //! transitions and comprehensive trace generation for replay.
 
+use crate::bytes::Bytes;
 use crate::cx::Cx;
 use crate::net::atp::quic::packet_protection::AtpPacketProtectionConfig;
 use crate::types::outcome::Outcome;
-use crate::bytes::Bytes;
-use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// QUIC protocol version constants
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -158,15 +158,10 @@ pub enum HandshakeEvent {
     },
 
     /// Transport parameters exchanged
-    TransportParams {
-        params: HashMap<u64, Bytes>,
-    },
+    TransportParams { params: HashMap<u64, Bytes> },
 
     /// Key phase transition
-    KeyPhaseTransition {
-        space: PacketSpace,
-        phase: u8,
-    },
+    KeyPhaseTransition { space: PacketSpace, phase: u8 },
 
     /// Handshake completion
     Completed {
@@ -235,11 +230,16 @@ impl QuicHandshakeMachine {
     /// Start the handshake process
     pub fn start(&mut self, cx: &Cx, initial_version: u32) -> Outcome<(), HandshakeError> {
         if !QuicVersion::is_supported(initial_version) {
-            let error = HandshakeError::UnsupportedVersion { version: initial_version };
-            self.state = HandshakeState::Failed { error: error.clone(), retry_allowed: false };
+            let error = HandshakeError::UnsupportedVersion {
+                version: initial_version,
+            };
+            self.state = HandshakeState::Failed {
+                error: error.clone(),
+                retry_allowed: false,
+            };
             self.emit_event(HandshakeEvent::Failed {
                 error: error.clone(),
-                elapsed: self.start_time.elapsed()
+                elapsed: self.start_time.elapsed(),
             });
             return Outcome::err(error);
         }
@@ -265,18 +265,25 @@ impl QuicHandshakeMachine {
     ) -> Outcome<Vec<u8>, HandshakeError> {
         // Check for timeout
         if self.start_time.elapsed() > self.timeout {
-            let error = HandshakeError::Timeout { elapsed: self.start_time.elapsed() };
-            self.state = HandshakeState::Failed { error: error.clone(), retry_allowed: false };
+            let error = HandshakeError::Timeout {
+                elapsed: self.start_time.elapsed(),
+            };
+            self.state = HandshakeState::Failed {
+                error: error.clone(),
+                retry_allowed: false,
+            };
             self.emit_event(HandshakeEvent::Failed {
                 error: error.clone(),
-                elapsed: self.start_time.elapsed()
+                elapsed: self.start_time.elapsed(),
             });
             return Outcome::err(error);
         }
 
         // Basic packet validation
         if packet_data.is_empty() {
-            let error = HandshakeError::InvalidPacket { reason: "empty packet".to_string() };
+            let error = HandshakeError::InvalidPacket {
+                reason: "empty packet".to_string(),
+            };
             return Outcome::err(error);
         }
 

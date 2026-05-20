@@ -54,8 +54,8 @@ impl ConfigPaths {
         #[cfg(unix)]
         {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let config_dir = std::env::var("XDG_CONFIG_HOME")
-                .unwrap_or_else(|_| format!("{}/.config", home));
+            let config_dir =
+                std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", home));
 
             Self {
                 daemon_policy: PathBuf::from("/etc/asupersync/atp.toml"),
@@ -82,7 +82,10 @@ impl ConfigPaths {
 
             Self {
                 daemon_policy: PathBuf::from("/Library/Application Support/Asupersync/atp.toml"),
-                user_config: PathBuf::from(format!("{}/Library/Application Support/Asupersync/atp.toml", home)),
+                user_config: PathBuf::from(format!(
+                    "{}/Library/Application Support/Asupersync/atp.toml",
+                    home
+                )),
                 local_config: PathBuf::from(".atp.toml"),
             }
         }
@@ -98,7 +101,9 @@ impl AtpConfigManager {
         };
 
         // Load default configuration
-        manager.layers.insert(ConfigSource::Defaults, AtpConfig::default());
+        manager
+            .layers
+            .insert(ConfigSource::Defaults, AtpConfig::default());
 
         manager
     }
@@ -110,7 +115,9 @@ impl AtpConfigManager {
             config_paths,
         };
 
-        manager.layers.insert(ConfigSource::Defaults, AtpConfig::default());
+        manager
+            .layers
+            .insert(ConfigSource::Defaults, AtpConfig::default());
         manager
     }
 
@@ -177,11 +184,11 @@ impl AtpConfigManager {
 
     /// Load configuration from TOML file.
     fn load_config_file(&self, path: &Path) -> Result<AtpConfig, ConfigError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
+        let content =
+            fs::read_to_string(path).map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
 
-        let config: AtpConfig = toml::from_str(&content)
-            .map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
+        let config: AtpConfig =
+            toml::from_str(&content).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
 
         Ok(config)
     }
@@ -197,8 +204,7 @@ impl AtpConfigManager {
         let content = toml::to_string_pretty(config)
             .map_err(|e| ConfigError::Serialize(path.to_path_buf(), e))?;
 
-        fs::write(path, content)
-            .map_err(|e| ConfigError::FileWrite(path.to_path_buf(), e))?;
+        fs::write(path, content).map_err(|e| ConfigError::FileWrite(path.to_path_buf(), e))?;
 
         Ok(())
     }
@@ -210,7 +216,8 @@ impl AtpConfigManager {
             (ConfigSource::LocalConfig, &self.config_paths.local_config),
         ];
 
-        all_paths.iter()
+        all_paths
+            .iter()
             .map(|(source, path)| ConfigSourceInfo {
                 source: *source,
                 path: path.to_path_buf(),
@@ -365,17 +372,30 @@ fn merge_configs(mut base: AtpConfig, overlay: AtpConfig) -> AtpConfig {
 fn get_config_value(config: &AtpConfig, key: &str) -> Option<serde_json::Value> {
     match key {
         "profile" => config.profile.map(|p| serde_json::to_value(p).unwrap()),
-        "chunk_size" => config.chunk_size.map(|v| serde_json::Value::Number(v.into())),
-        "max_concurrent" => config.max_concurrent.map(|v| serde_json::Value::Number(v.into())),
+        "chunk_size" => config
+            .chunk_size
+            .map(|v| serde_json::Value::Number(v.into())),
+        "max_concurrent" => config
+            .max_concurrent
+            .map(|v| serde_json::Value::Number(v.into())),
         "timeout" => config.timeout.map(|v| serde_json::Value::Number(v.into())),
         "compression" => config.compression.map(serde_json::Value::Bool),
         "encryption" => config.encryption.map(serde_json::Value::Bool),
-        "repair_overhead" => config.repair_overhead.map(|v| {
-            serde_json::Value::Number(serde_json::Number::from_f64(v as f64).unwrap())
-        }),
-        "interface" => config.interface.as_ref().map(|v| serde_json::Value::String(v.clone())),
-        "relay_server" => config.relay_server.as_ref().map(|v| serde_json::Value::String(v.clone())),
-        "daemon_socket" => config.daemon_socket.as_ref().map(|v| serde_json::Value::String(v.to_string_lossy().to_string())),
+        "repair_overhead" => config
+            .repair_overhead
+            .map(|v| serde_json::Value::Number(serde_json::Number::from_f64(v as f64).unwrap())),
+        "interface" => config
+            .interface
+            .as_ref()
+            .map(|v| serde_json::Value::String(v.clone())),
+        "relay_server" => config
+            .relay_server
+            .as_ref()
+            .map(|v| serde_json::Value::String(v.clone())),
+        "daemon_socket" => config
+            .daemon_socket
+            .as_ref()
+            .map(|v| serde_json::Value::String(v.to_string_lossy().to_string())),
         "verbose" => config.verbose.map(serde_json::Value::Bool),
         _ => None,
     }
@@ -408,7 +428,10 @@ impl<'de> Deserialize<'de> for ConfigSource {
             "daemon-policy" => Ok(Self::DaemonPolicy),
             "local-config" => Ok(Self::LocalConfig),
             "cli-flags" => Ok(Self::CliFlags),
-            _ => Err(serde::de::Error::unknown_variant(&s, &["defaults", "daemon-policy", "local-config", "cli-flags"])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &s,
+                &["defaults", "daemon-policy", "local-config", "cli-flags"],
+            )),
         }
     }
 }
@@ -428,7 +451,9 @@ mod tests {
             compression: Some(false),
             ..Default::default()
         };
-        manager.layers.insert(ConfigSource::DaemonPolicy, daemon_config);
+        manager
+            .layers
+            .insert(ConfigSource::DaemonPolicy, daemon_config);
 
         // Set local config
         let local_config = AtpConfig {
@@ -436,7 +461,9 @@ mod tests {
             timeout: Some(600),
             ..Default::default()
         };
-        manager.layers.insert(ConfigSource::LocalConfig, local_config);
+        manager
+            .layers
+            .insert(ConfigSource::LocalConfig, local_config);
 
         // Set CLI flags
         let cli_config = AtpConfig {
@@ -470,7 +497,9 @@ mod tests {
             profile: Some(AtpProfile::Artifact),
             ..Default::default()
         };
-        manager.layers.insert(ConfigSource::LocalConfig, local_config);
+        manager
+            .layers
+            .insert(ConfigSource::LocalConfig, local_config);
 
         let (profile, source) = manager.get_profile_with_source();
         assert_eq!(profile, AtpProfile::Artifact);
@@ -492,7 +521,9 @@ mod tests {
         let manager = AtpConfigManager::new();
 
         // Save config
-        manager.save_config_file(&config_path, &original_config).unwrap();
+        manager
+            .save_config_file(&config_path, &original_config)
+            .unwrap();
 
         // Load config
         let loaded_config = manager.load_config_file(&config_path).unwrap();
@@ -511,17 +542,24 @@ mod tests {
             timeout: Some(300),
             ..Default::default()
         };
-        manager.layers.insert(ConfigSource::DaemonPolicy, daemon_config);
+        manager
+            .layers
+            .insert(ConfigSource::DaemonPolicy, daemon_config);
 
         let local_config = AtpConfig {
             timeout: Some(600),
             ..Default::default()
         };
-        manager.layers.insert(ConfigSource::LocalConfig, local_config);
+        manager
+            .layers
+            .insert(ConfigSource::LocalConfig, local_config);
 
         let resolution = manager.explain_resolution("timeout");
 
         assert_eq!(resolution.sources.len(), 3); // defaults + daemon + local
-        assert_eq!(resolution.final_value, Some(serde_json::Value::Number(600.into())));
+        assert_eq!(
+            resolution.final_value,
+            Some(serde_json::Value::Number(600.into()))
+        );
     }
 }

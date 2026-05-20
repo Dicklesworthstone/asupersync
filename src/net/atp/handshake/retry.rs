@@ -4,11 +4,11 @@
 //! protection as specified in RFC 9000.
 
 use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
-use crate::net::atp::handshake::state_machine::{QuicVersion, HandshakeError};
+use crate::net::atp::handshake::state_machine::{HandshakeError, QuicVersion};
 use crate::types::outcome::Outcome;
-use std::time::{SystemTime, UNIX_EPOCH};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -29,12 +29,7 @@ pub struct RetryPacket {
 
 impl RetryPacket {
     /// Create a new retry packet
-    pub fn new(
-        version: u32,
-        source_cid: Bytes,
-        dest_cid: Bytes,
-        retry_token: Bytes,
-    ) -> Self {
+    pub fn new(version: u32, source_cid: Bytes, dest_cid: Bytes, retry_token: Bytes) -> Self {
         Self {
             version,
             source_cid,
@@ -57,7 +52,8 @@ impl RetryPacket {
         if self.dest_cid.len() > 255 {
             return Err(HandshakeError::ConnectionIdError {
                 reason: "destination CID too long".to_string(),
-            }).into();
+            })
+            .into();
         }
         buf.put_u8(self.dest_cid.len() as u8);
         buf.put_slice(&self.dest_cid);
@@ -89,7 +85,8 @@ impl RetryPacket {
 
     /// Decode packet from wire format
     pub fn decode(data: &[u8], retry_key: &[u8; 32]) -> Outcome<Self, HandshakeError> {
-        if data.len() < 23 { // Minimum: header(1) + version(4) + dcid_len(1) + scid_len(1) + tag(16)
+        if data.len() < 23 {
+            // Minimum: header(1) + version(4) + dcid_len(1) + scid_len(1) + tag(16)
             return Err(HandshakeError::InvalidPacket {
                 reason: "retry packet too short".to_string(),
             });
@@ -160,7 +157,8 @@ impl RetryPacket {
         // Verify integrity tag
         let packet_without_tag = &data[..data.len() - 16];
         let pseudo_packet = packet.create_pseudo_retry_packet();
-        let expected_tag = Self::calculate_integrity_tag(packet_without_tag, &pseudo_packet, retry_key)?;
+        let expected_tag =
+            Self::calculate_integrity_tag(packet_without_tag, &pseudo_packet, retry_key)?;
 
         if integrity_tag != expected_tag {
             return Err(HandshakeError::InvalidRetryToken);
@@ -183,8 +181,8 @@ impl RetryPacket {
         pseudo_packet: &[u8],
         key: &[u8; 32],
     ) -> Outcome<[u8; 16], HandshakeError> {
-        let mut mac = HmacSha256::new_from_slice(key)
-            .map_err(|_| HandshakeError::ProtectionError {
+        let mut mac =
+            HmacSha256::new_from_slice(key).map_err(|_| HandshakeError::ProtectionError {
                 reason: "invalid retry key".to_string(),
             })?;
 
@@ -252,10 +250,11 @@ impl RetryTokenHandler {
         token.put_slice(original_dest_cid);
 
         // Calculate HMAC
-        let mut mac = HmacSha256::new_from_slice(&self.secret_key)
-            .map_err(|_| HandshakeError::ProtectionError {
+        let mut mac = HmacSha256::new_from_slice(&self.secret_key).map_err(|_| {
+            HandshakeError::ProtectionError {
                 reason: "invalid token key".to_string(),
-            })?;
+            }
+        })?;
         mac.update(&token);
         let hmac_result = mac.finalize();
 
@@ -272,7 +271,8 @@ impl RetryTokenHandler {
         client_addr: std::net::SocketAddr,
         original_dest_cid: &[u8],
     ) -> Outcome<(), HandshakeError> {
-        if token.len() < 32 { // Minimum size: timestamp(8) + addr(6+) + cid_len(1) + hmac(32)
+        if token.len() < 32 {
+            // Minimum size: timestamp(8) + addr(6+) + cid_len(1) + hmac(32)
             return Err(HandshakeError::InvalidRetryToken);
         }
 
@@ -280,10 +280,11 @@ impl RetryTokenHandler {
         let (token_data, hmac_bytes) = token.split_at(token.len() - 32);
 
         // Verify HMAC
-        let mut mac = HmacSha256::new_from_slice(&self.secret_key)
-            .map_err(|_| HandshakeError::ProtectionError {
+        let mut mac = HmacSha256::new_from_slice(&self.secret_key).map_err(|_| {
+            HandshakeError::ProtectionError {
                 reason: "invalid token key".to_string(),
-            })?;
+            }
+        })?;
         mac.update(token_data);
 
         if mac.verify_slice(hmac_bytes).is_err() {
@@ -389,7 +390,9 @@ mod tests {
         let client_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 12345);
         let original_dest_cid = b"original_cid";
 
-        let token = handler.generate_token(client_addr, original_dest_cid).unwrap();
+        let token = handler
+            .generate_token(client_addr, original_dest_cid)
+            .unwrap();
         let result = handler.validate_token(&token, client_addr, original_dest_cid);
 
         assert!(result.is_ok());
@@ -404,7 +407,9 @@ mod tests {
         let client_addr2 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 12345);
         let original_dest_cid = b"original_cid";
 
-        let token = handler.generate_token(client_addr1, original_dest_cid).unwrap();
+        let token = handler
+            .generate_token(client_addr1, original_dest_cid)
+            .unwrap();
         let result = handler.validate_token(&token, client_addr2, original_dest_cid);
 
         assert!(result.is_err());
@@ -419,7 +424,9 @@ mod tests {
         let original_dest_cid1 = b"original_cid1";
         let original_dest_cid2 = b"original_cid2";
 
-        let token = handler.generate_token(client_addr, original_dest_cid1).unwrap();
+        let token = handler
+            .generate_token(client_addr, original_dest_cid1)
+            .unwrap();
         let result = handler.validate_token(&token, client_addr, original_dest_cid2);
 
         assert!(result.is_err());

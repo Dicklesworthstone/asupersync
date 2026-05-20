@@ -3,7 +3,7 @@
 //! Implements QUIC version negotiation packet handling as specified in RFC 9000.
 
 use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
-use crate::net::atp::handshake::state_machine::{QuicVersion, HandshakeError};
+use crate::net::atp::handshake::state_machine::{HandshakeError, QuicVersion};
 use crate::types::outcome::Outcome;
 
 /// Version negotiation packet
@@ -135,7 +135,8 @@ impl VersionNegotiationPacket {
             source_cid,
             dest_cid,
             supported_versions,
-        }).into()
+        })
+        .into()
     }
 
     /// Check if a version is supported
@@ -186,7 +187,8 @@ impl VersionNegotiation {
         if packet.dest_cid.as_ref() != original_source_cid {
             return Err(HandshakeError::InvalidPacket {
                 reason: "version negotiation destination CID mismatch".to_string(),
-            }).into();
+            })
+            .into();
         }
 
         // Source CID must match original destination CID
@@ -197,7 +199,8 @@ impl VersionNegotiation {
         }
 
         // Must contain at least one supported version
-        let has_supported = packet.supported_versions
+        let has_supported = packet
+            .supported_versions
             .iter()
             .any(|&v| QuicVersion::is_supported(v));
 
@@ -267,8 +270,14 @@ mod tests {
     fn test_negotiation_needed() {
         let server_versions = vec![0x00000001, 0x12345678];
 
-        assert!(!VersionNegotiation::is_negotiation_needed(0x00000001, &server_versions));
-        assert!(VersionNegotiation::is_negotiation_needed(0xabcdef00, &server_versions));
+        assert!(!VersionNegotiation::is_negotiation_needed(
+            0x00000001,
+            &server_versions
+        ));
+        assert!(VersionNegotiation::is_negotiation_needed(
+            0xabcdef00,
+            &server_versions
+        ));
     }
 
     #[test]

@@ -3,9 +3,9 @@
 //! Handles out-of-order stream data reception and reassembly for QUIC streams.
 //! Maintains proper ordering and detects final size violations.
 
-use super::{StreamId, StreamError};
-use crate::types::outcome::Outcome;
+use super::{StreamError, StreamId};
 use crate::bytes::Bytes;
+use crate::types::outcome::Outcome;
 use std::collections::BTreeMap;
 
 /// A segment of stream data with offset
@@ -76,10 +76,7 @@ impl ReassemblyBuffer {
     }
 
     /// Insert a data segment into the buffer
-    pub fn insert_segment(
-        &mut self,
-        segment: DataSegment,
-    ) -> Outcome<Vec<Bytes>, StreamError> {
+    pub fn insert_segment(&mut self, segment: DataSegment) -> Outcome<Vec<Bytes>, StreamError> {
         // Check for final size consistency
         if segment.is_final {
             let segment_final_size = segment.end_offset();
@@ -151,9 +148,11 @@ impl ReassemblyBuffer {
 
     /// Check if the stream is complete (all data received and delivered)
     pub fn is_complete(&self) -> bool {
-        self.received_final &&
-        self.segments.is_empty() &&
-        self.final_size.map_or(false, |size| self.next_offset >= size)
+        self.received_final
+            && self.segments.is_empty()
+            && self
+                .final_size
+                .map_or(false, |size| self.next_offset >= size)
     }
 
     /// Get the current next expected offset

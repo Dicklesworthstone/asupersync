@@ -4,15 +4,15 @@
 //! implementation, providing the crypto boundary that keeps ATP protocol state separate
 //! from cryptographic primitive operations.
 
+use crate::cx::Cx;
+use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, ProtocolError};
 use crate::net::quic_native::tls::{
-    QuicPacketProtectionProvider, RustlsQuicCryptoProvider, RustlsQuicProviderSide,
-    DeterministicQuicCryptoProvider, QuicTlsError, PacketProtectionSpace, ProtectedPacket,
-    UnprotectedPacket, PacketProtectionRequest, ProtectionProof, HeaderProtectionMask,
-    QuicHandshakeTranscript, TranscriptHash, ProtectionKeySnapshot, KeyUpdateEvent,
+    DeterministicQuicCryptoProvider, HeaderProtectionMask, KeyUpdateEvent, PacketProtectionRequest,
+    PacketProtectionSpace, ProtectedPacket, ProtectionKeySnapshot, ProtectionProof,
+    QuicHandshakeTranscript, QuicPacketProtectionProvider, QuicTlsError, RustlsQuicCryptoProvider,
+    RustlsQuicProviderSide, TranscriptHash, UnprotectedPacket,
 };
 use crate::types::outcome::Outcome;
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, ProtocolError};
-use crate::cx::Cx;
 use std::sync::Arc;
 
 /// ATP packet protection configuration.
@@ -89,42 +89,44 @@ pub struct AtpPacketProtection {
 impl AtpPacketProtection {
     /// Create a new ATP packet protection instance.
     pub fn new(config: AtpPacketProtectionConfig) -> AtpOutcome<Self> {
-        let (provider, provider_kind): (Box<dyn QuicPacketProtectionProvider + Send + Sync>, &'static str) =
-            if config.use_deterministic {
-                match &config.provider_options {
-                    ProviderOptions::Deterministic { scenario } => {
-                        let provider = DeterministicQuicCryptoProvider::new(scenario.clone());
-                        (Box::new(provider), "deterministic")
-                    }
-                    #[cfg(feature = "tls")]
-                    ProviderOptions::Rustls { .. } => {
-                        let provider = DeterministicQuicCryptoProvider::new("test".to_string());
-                        (Box::new(provider), "deterministic")
-                    }
+        let (provider, provider_kind): (
+            Box<dyn QuicPacketProtectionProvider + Send + Sync>,
+            &'static str,
+        ) = if config.use_deterministic {
+            match &config.provider_options {
+                ProviderOptions::Deterministic { scenario } => {
+                    let provider = DeterministicQuicCryptoProvider::new(scenario.clone());
+                    (Box::new(provider), "deterministic")
                 }
-            } else {
                 #[cfg(feature = "tls")]
+                ProviderOptions::Rustls { .. } => {
+                    let provider = DeterministicQuicCryptoProvider::new("test".to_string());
+                    (Box::new(provider), "deterministic")
+                }
+            }
+        } else {
+            #[cfg(feature = "tls")]
+            match &config.provider_options {
+                ProviderOptions::Rustls { side } => {
+                    let provider = RustlsQuicCryptoProvider::new_v1(*side)
+                        .map_err(|e| AtpError::Protocol(ProtocolError::SessionStateMismatch))?;
+                    (Box::new(provider), "rustls-quic-ring")
+                }
+                ProviderOptions::Deterministic { scenario } => {
+                    let provider = DeterministicQuicCryptoProvider::new(scenario.clone());
+                    (Box::new(provider), "deterministic")
+                }
+            }
+            #[cfg(not(feature = "tls"))]
+            {
                 match &config.provider_options {
-                    ProviderOptions::Rustls { side } => {
-                        let provider = RustlsQuicCryptoProvider::new_v1(*side)
-                            .map_err(|e| AtpError::Protocol(ProtocolError::SessionStateMismatch))?;
-                        (Box::new(provider), "rustls-quic-ring")
-                    }
                     ProviderOptions::Deterministic { scenario } => {
                         let provider = DeterministicQuicCryptoProvider::new(scenario.clone());
                         (Box::new(provider), "deterministic")
                     }
                 }
-                #[cfg(not(feature = "tls"))]
-                {
-                    match &config.provider_options {
-                        ProviderOptions::Deterministic { scenario } => {
-                            let provider = DeterministicQuicCryptoProvider::new(scenario.clone());
-                            (Box::new(provider), "deterministic")
-                        }
-                    }
-                }
-            };
+            }
+        };
 
         Ok(Self {
             provider,
@@ -148,7 +150,8 @@ impl AtpPacketProtection {
     ) -> AtpOutcome<ProtectionKeySnapshot> {
         cx.trace(&format!("atp_packet_protection_derive_keys {:?}", space));
 
-        let result = self.provider
+        let result = self
+            .provider
             .derive_keys(space, transcript, secret_seed)
             .map_err(|e| self.map_tls_error(e));
 
@@ -161,7 +164,10 @@ impl AtpPacketProtection {
                     ));
                 }
                 Err(err) => {
-                    cx.trace(&format!("packet protection key derivation failed: {:?}", err));
+                    cx.trace(&format!(
+                        "packet protection key derivation failed: {:?}",
+                        err
+                    ));
                 }
             }
         }
@@ -170,11 +176,7 @@ impl AtpPacketProtection {
     }
 
     /// Verify transcript with ATP error handling.
-    pub async fn verify_transcript(
-        &self,
-        cx: &Cx,
-        expected: TranscriptHash,
-    ) -> AtpOutcome<()> {
+    pub async fn verify_transcript(&self, cx: &Cx, expected: TranscriptHash) -> AtpOutcome<()> {
         if !self.config.enable_transcript_verification {
             return Ok(());
         }
@@ -193,14 +195,18 @@ impl AtpPacketProtection {
         request: PacketProtectionRequest<'_>,
     ) -> AtpOutcome<ProtectedPacket> {
         if cx.trace_buffer().is_some() {
-            cx.trace_with_fields("atp_packet_protection_protect", &[
-                ("space", &format!("{:?}", request.space)),
-                ("pn", &request.packet_number.to_string()),
-                ("phase", &request.key_phase.to_string()),
-            ]);
+            cx.trace_with_fields(
+                "atp_packet_protection_protect",
+                &[
+                    ("space", &format!("{:?}", request.space)),
+                    ("pn", &request.packet_number.to_string()),
+                    ("phase", &request.key_phase.to_string()),
+                ],
+            );
         }
 
-        let result = self.provider
+        let result = self
+            .provider
             .protect_packet(request)
             .map_err(|e| self.map_tls_error(e));
 
@@ -209,7 +215,9 @@ impl AtpPacketProtection {
                 Ok(packet) => {
                     cx.trace(&format!(
                         "packet protected: space={:?} pn={} ciphertext_len={}",
-                        packet.space, packet.packet_number, packet.ciphertext.len()
+                        packet.space,
+                        packet.packet_number,
+                        packet.ciphertext.len()
                     ));
                 }
                 Err(err) => {
@@ -229,14 +237,18 @@ impl AtpPacketProtection {
         associated_data: &[u8],
     ) -> AtpOutcome<UnprotectedPacket> {
         if cx.trace_buffer().is_some() {
-            cx.trace_with_fields("atp_packet_protection_unprotect", &[
-                ("space", &format!("{:?}", packet.space)),
-                ("pn", &packet.packet_number.to_string()),
-                ("phase", &packet.key_phase.to_string()),
-            ]);
+            cx.trace_with_fields(
+                "atp_packet_protection_unprotect",
+                &[
+                    ("space", &format!("{:?}", packet.space)),
+                    ("pn", &packet.packet_number.to_string()),
+                    ("phase", &packet.key_phase.to_string()),
+                ],
+            );
         }
 
-        let result = self.provider
+        let result = self
+            .provider
             .unprotect_packet(packet, associated_data)
             .map_err(|e| self.map_tls_error(e));
 
@@ -245,7 +257,9 @@ impl AtpPacketProtection {
                 Ok(unprotected) => {
                     cx.trace(&format!(
                         "packet unprotected: space={:?} pn={} payload_len={}",
-                        packet.space, packet.packet_number, unprotected.payload.len()
+                        packet.space,
+                        packet.packet_number,
+                        unprotected.payload.len()
                     ));
                 }
                 Err(err) => {
@@ -265,10 +279,13 @@ impl AtpPacketProtection {
         sample: &[u8],
     ) -> AtpOutcome<HeaderProtectionMask> {
         if cx.trace_buffer().is_some() {
-            cx.trace_with_fields("atp_packet_protection_header_mask", &[
-                ("space", &format!("{:?}", space)),
-                ("sample_len", &sample.len().to_string()),
-            ]);
+            cx.trace_with_fields(
+                "atp_packet_protection_header_mask",
+                &[
+                    ("space", &format!("{:?}", space)),
+                    ("sample_len", &sample.len().to_string()),
+                ],
+            );
         }
 
         self.provider
@@ -284,13 +301,17 @@ impl AtpPacketProtection {
         next_phase: bool,
     ) -> AtpOutcome<ProtectionKeySnapshot> {
         if cx.trace_buffer().is_some() {
-            cx.trace_with_fields("atp_packet_protection_update_key", &[
-                ("space", &format!("{:?}", space)),
-                ("phase", &next_phase.to_string()),
-            ]);
+            cx.trace_with_fields(
+                "atp_packet_protection_update_key",
+                &[
+                    ("space", &format!("{:?}", space)),
+                    ("phase", &next_phase.to_string()),
+                ],
+            );
         }
 
-        let result = self.provider
+        let result = self
+            .provider
             .update_key(space, next_phase)
             .map_err(|e| self.map_tls_error(e));
 
@@ -312,12 +333,11 @@ impl AtpPacketProtection {
     }
 
     /// Discard keys for a packet space with ATP error handling.
-    pub async fn discard_keys(
-        &mut self,
-        cx: &Cx,
-        space: PacketProtectionSpace,
-    ) -> AtpOutcome<()> {
-        cx.trace(&format!("atp_packet_protection_discard_keys space={:?}", space));
+    pub async fn discard_keys(&mut self, cx: &Cx, space: PacketProtectionSpace) -> AtpOutcome<()> {
+        cx.trace(&format!(
+            "atp_packet_protection_discard_keys space={:?}",
+            space
+        ));
 
         self.provider
             .discard_keys(space)
@@ -333,12 +353,10 @@ impl AtpPacketProtection {
             | QuicTlsError::SessionStateMismatch => {
                 AtpError::Protocol(ProtocolError::SessionStateMismatch)
             }
-            QuicTlsError::MissingKeys { .. }
-            | QuicTlsError::KeyDiscarded { .. } => {
+            QuicTlsError::MissingKeys { .. } | QuicTlsError::KeyDiscarded { .. } => {
                 AtpError::Protocol(ProtocolError::UnexpectedFrame)
             }
-            QuicTlsError::BadPacketTag { .. }
-            | QuicTlsError::WrongKeyPhase { .. } => {
+            QuicTlsError::BadPacketTag { .. } | QuicTlsError::WrongKeyPhase { .. } => {
                 AtpError::Protocol(ProtocolError::InvalidFrameType)
             }
             QuicTlsError::TranscriptMismatch { .. } => {
@@ -431,16 +449,20 @@ mod tests {
     async fn test_deterministic_protection_lifecycle() {
         let lab = LabRuntime::new();
         scope!(lab.cx(), |cx, _scope| async move {
-            let mut protection = AtpPacketProtection::new_client(true)
-                .expect("deterministic protection");
+            let mut protection =
+                AtpPacketProtection::new_client(true).expect("deterministic protection");
 
             assert_eq!(protection.provider_kind(), "deterministic");
 
             // Test transcript verification
             let transcript = QuicHandshakeTranscript::new();
-            protection.verify_transcript(cx, transcript.digest()).await
+            protection
+                .verify_transcript(cx, transcript.digest())
+                .await
                 .expect("transcript verification");
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[cfg(feature = "tls")]
@@ -448,29 +470,35 @@ mod tests {
     async fn test_rustls_protection_creation() {
         let lab = LabRuntime::new();
         scope!(lab.cx(), |cx, _scope| async move {
-            let mut client = AtpPacketProtection::new_client(false)
-                .expect("rustls client protection");
-            let mut server = AtpPacketProtection::new_server(false)
-                .expect("rustls server protection");
+            let mut client =
+                AtpPacketProtection::new_client(false).expect("rustls client protection");
+            let mut server =
+                AtpPacketProtection::new_server(false).expect("rustls server protection");
 
             assert_eq!(client.provider_kind(), "rustls-quic-ring");
             assert_eq!(server.provider_kind(), "rustls-quic-ring");
 
             // Test basic operations don't panic
             let transcript = QuicHandshakeTranscript::new();
-            client.verify_transcript(cx, transcript.digest()).await
+            client
+                .verify_transcript(cx, transcript.digest())
+                .await
                 .expect("client transcript verification");
-            server.verify_transcript(cx, transcript.digest()).await
+            server
+                .verify_transcript(cx, transcript.digest())
+                .await
                 .expect("server transcript verification");
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn test_error_mapping() {
         let lab = LabRuntime::new();
         scope!(lab.cx(), |cx, _scope| async move {
-            let protection = AtpPacketProtection::new_client(true)
-                .expect("deterministic protection");
+            let protection =
+                AtpPacketProtection::new_client(true).expect("deterministic protection");
 
             // Test error mapping
             let tls_error = QuicTlsError::HandshakeNotConfirmed;
@@ -482,6 +510,8 @@ mod tests {
                 }
                 _ => panic!("Unexpected error mapping: {:?}", atp_error),
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

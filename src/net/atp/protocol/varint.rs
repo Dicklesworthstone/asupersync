@@ -235,9 +235,11 @@ mod tests {
 
         // Try decoding with partial data
         let mut partial = buf.split_to(2); // Only first 2 bytes
-        assert!(VarInt::decode(&mut partial)
-            .expect("partial decode should not error")
-            .is_none());
+        assert!(
+            VarInt::decode(&mut partial)
+                .expect("partial decode should not error")
+                .is_none()
+        );
 
         // Complete with remaining bytes
         partial.put_slice(&buf);
@@ -259,14 +261,20 @@ mod tests {
             (VarInt::new(0).expect("test value should be valid"), 1),
             (VarInt::new(64).expect("test value should be valid"), 2),
             (VarInt::new(16384).expect("test value should be valid"), 4),
-            (VarInt::new(1073741824).expect("test value should be valid"), 8),
+            (
+                VarInt::new(1073741824).expect("test value should be valid"),
+                8,
+            ),
         ];
 
         for (varint, expected_len) in test_cases {
             let mut buf = BytesMut::new();
             varint.encode(&mut buf).expect("encoding should succeed");
 
-            assert_eq!(VarInt::peek_len(&buf).expect("buffer should have varint"), expected_len);
+            assert_eq!(
+                VarInt::peek_len(&buf).expect("buffer should have varint"),
+                expected_len
+            );
         }
     }
 }

@@ -3,7 +3,7 @@
 //! Implements QUIC stream-level and connection-level flow control with
 //! credit-based windows and backpressure handling.
 
-use super::{StreamId, StreamError};
+use super::{StreamError, StreamId};
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 
@@ -175,10 +175,7 @@ pub struct ConnectionFlowControl {
 
 impl ConnectionFlowControl {
     /// Create a new connection flow control manager
-    pub fn new(
-        initial_connection_window: u64,
-        initial_stream_window: u64,
-    ) -> Self {
+    pub fn new(initial_connection_window: u64, initial_stream_window: u64) -> Self {
         Self {
             stream_windows: HashMap::new(),
             connection_send_window: initial_connection_window,
@@ -192,10 +189,7 @@ impl ConnectionFlowControl {
 
     /// Initialize flow control for a new stream
     pub fn init_stream(&mut self, stream_id: StreamId) {
-        let window = FlowControlWindow::new(
-            self.default_stream_window,
-            self.default_stream_window,
-        );
+        let window = FlowControlWindow::new(self.default_stream_window, self.default_stream_window);
         self.stream_windows.insert(stream_id, window);
     }
 
@@ -237,7 +231,11 @@ impl ConnectionFlowControl {
                 }
                 Outcome::Err(mut error) => {
                     // Fill in the stream ID
-                    if let StreamError::FlowControlViolation { stream_id: ref mut sid, .. } = error {
+                    if let StreamError::FlowControlViolation {
+                        stream_id: ref mut sid,
+                        ..
+                    } = error
+                    {
                         *sid = stream_id;
                     }
                     Outcome::err(error)
@@ -270,7 +268,11 @@ impl ConnectionFlowControl {
                 }
                 Outcome::Err(mut error) => {
                     // Fill in the stream ID
-                    if let StreamError::FlowControlViolation { stream_id: ref mut sid, .. } = error {
+                    if let StreamError::FlowControlViolation {
+                        stream_id: ref mut sid,
+                        ..
+                    } = error
+                    {
                         *sid = stream_id;
                     }
                     Outcome::err(error)

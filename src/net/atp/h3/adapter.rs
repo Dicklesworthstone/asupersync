@@ -2,7 +2,7 @@
 
 use super::{AtpH3Error, AtpH3Result, H3FrameCodec, H3Session};
 use crate::net::atp::protocol::{AtpFrame, FrameType};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 
 /// ATP-over-H3 adapter configuration.
 #[derive(Debug, Clone)]

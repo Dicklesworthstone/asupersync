@@ -53,9 +53,9 @@
 //! - Request amplification attacks (many pending object requests)
 
 use crate::net::atp::protocol::session::PeerId;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
 
 /// Resource limits configuration for Byzantine peer protection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,13 +79,13 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_memory_per_peer: 64 * 1024 * 1024,  // 64 MB
+            max_memory_per_peer: 64 * 1024 * 1024, // 64 MB
             max_frames_per_peer: 1000,
-            max_frame_rate: 100,                     // 100 fps
+            max_frame_rate: 100, // 100 fps
             max_sessions_per_peer: 4,
-            rate_limit_window: 60,                   // 1 minute
+            rate_limit_window: 60, // 1 minute
             max_pending_requests: 50,
-            max_manifest_size: 16 * 1024 * 1024,     // 16 MB
+            max_manifest_size: 16 * 1024 * 1024, // 16 MB
         }
     }
 }
@@ -350,7 +350,9 @@ impl ResourceManager {
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ResourceError {
     /// Memory allocation would exceed per-peer limit.
-    #[error("Memory allocation would exceed limit for peer {peer_id:?}: requested {requested}, limit {limit}")]
+    #[error(
+        "Memory allocation would exceed limit for peer {peer_id:?}: requested {requested}, limit {limit}"
+    )]
     MemoryLimitExceeded {
         peer_id: PeerId,
         requested: u64,
@@ -386,10 +388,7 @@ pub enum ResourceError {
     },
     /// Manifest size exceeds limit.
     #[error("Manifest size exceeds limit: {size} > {limit}")]
-    ManifestSizeExceeded {
-        size: u64,
-        limit: u64,
-    },
+    ManifestSizeExceeded { size: u64, limit: u64 },
 }
 
 #[cfg(test)]

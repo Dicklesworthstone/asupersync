@@ -94,8 +94,16 @@ impl AtpProfile {
     /// Get all available profile names for CLI help.
     pub const fn all_names() -> &'static [&'static str] {
         &[
-            "bulk-file", "sync-tree", "media", "sparse-image", "artifact",
-            "stream", "clean-lan", "lossy-wifi", "relay-only", "auto"
+            "bulk-file",
+            "sync-tree",
+            "media",
+            "sparse-image",
+            "artifact",
+            "stream",
+            "clean-lan",
+            "lossy-wifi",
+            "relay-only",
+            "auto",
         ]
     }
 
@@ -153,8 +161,8 @@ impl Default for AtpConfig {
             compression: Some(true),
             encryption: Some(true),
             repair_overhead: Some(0.2),
-            interface: None, // Auto-detect
-            relay_server: None, // Use default
+            interface: None,     // Auto-detect
+            relay_server: None,  // Use default
             daemon_socket: None, // Use default
             verbose: Some(false),
         }
@@ -458,7 +466,7 @@ pub struct AtpConfigArgs {
 }
 
 /// Re-export ATP command args from the args module
-pub use super::args::{AtpDoctorArgs, AtpVerifyArgs, AtpProofArgs};
+pub use super::args::{AtpDoctorArgs, AtpProofArgs, AtpVerifyArgs};
 
 /// JSON output schema for ATP status command.
 #[derive(Debug, Serialize, Deserialize)]
