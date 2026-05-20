@@ -122,6 +122,7 @@ pub mod blocking_pool;
 pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
+pub mod effects;
 pub mod env_config;
 pub mod epoch_gc;
 pub mod epoch_gc_integration;

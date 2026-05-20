@@ -101,7 +101,7 @@ fn quic_stream_open_bi() {
 
             // Write response
             send.write_all(&cx, b"world").await.expect("write failed");
-            send.finish().await.expect("finish failed");
+            send.finish(&cx).await.expect("finish failed");
 
             // Wait for client to close the connection
             conn.closed().await;
@@ -126,7 +126,7 @@ fn quic_stream_open_bi() {
 
         // Write data
         send.write_all(&cx, b"hello").await.expect("write failed");
-        send.finish().await.expect("finish failed");
+        send.finish(&cx).await.expect("finish failed");
 
         // Read response
         let response = recv.read_to_end(&cx, 32).await.expect("read failed");
@@ -181,7 +181,7 @@ fn quic_stream_open_uni() {
         send.write_all(&cx, b"one-way-message")
             .await
             .expect("write failed");
-        send.finish().await.expect("finish failed");
+        send.finish(&cx).await.expect("finish failed");
 
         // Give server time to receive the data before closing
         // (unidirectional streams have no return path for confirmation)
@@ -222,7 +222,7 @@ fn quic_stream_large_data() {
 
             // Echo it back
             send.write_all(&cx, &received).await.expect("write failed");
-            send.finish().await.expect("finish failed");
+            send.finish(&cx).await.expect("finish failed");
 
             // Wait for client to close the connection
             conn.closed().await;
@@ -244,7 +244,7 @@ fn quic_stream_large_data() {
 
         // Send large data
         send.write_all(&cx, &test_data).await.expect("write failed");
-        send.finish().await.expect("finish failed");
+        send.finish(&cx).await.expect("finish failed");
 
         // Receive echo
         let received = recv
@@ -289,7 +289,7 @@ fn quic_stream_finish() {
 
             // Write response and finish
             send.write_all(&cx, b"ack").await.expect("write failed");
-            send.finish().await.expect("finish failed");
+            send.finish(&cx).await.expect("finish failed");
 
             // Wait for client to close the connection
             conn.closed().await;
@@ -313,7 +313,7 @@ fn quic_stream_finish() {
         send.write_all(&cx, b"1234567890")
             .await
             .expect("write failed");
-        send.finish().await.expect("finish failed");
+        send.finish(&cx).await.expect("finish failed");
 
         // Should still be able to read response
         let response = recv.read_to_end(&cx, 64).await.expect("read failed");

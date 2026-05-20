@@ -73,22 +73,14 @@ impl SendStream {
     ///
     /// Returns the number of bytes written.
     pub async fn write(&mut self, cx: &Cx, data: &[u8]) -> Result<usize, QuicError> {
-        cx.checkpoint()?;
-
-        if self.tracker.is_closing() {
-            return Err(QuicError::StreamClosed);
-        }
+        check_stream_operation(cx, &self.tracker)?;
 
         wait_result_with_cx(cx, self.inner.write(data)).await
     }
 
     /// Write all data to the stream.
     pub async fn write_all(&mut self, cx: &Cx, data: &[u8]) -> Result<(), QuicError> {
-        cx.checkpoint()?;
-
-        if self.tracker.is_closing() {
-            return Err(QuicError::StreamClosed);
-        }
+        check_stream_operation(cx, &self.tracker)?;
 
         wait_result_with_cx(cx, self.inner.write_all(data)).await
     }
@@ -96,7 +88,8 @@ impl SendStream {
     /// Finish sending on this stream (half-close).
     ///
     /// This signals to the peer that no more data will be sent.
-    pub async fn finish(&mut self) -> Result<(), QuicError> {
+    pub async fn finish(&mut self, cx: &Cx) -> Result<(), QuicError> {
+        check_stream_operation(cx, &self.tracker)?;
         self.inner.finish().map_err(QuicError::from)
     }
 
@@ -164,33 +157,21 @@ impl RecvStream {
     ///
     /// Returns `None` if the stream has been fully received.
     pub async fn read(&mut self, cx: &Cx, buf: &mut [u8]) -> Result<Option<usize>, QuicError> {
-        cx.checkpoint()?;
-
-        if self.tracker.is_closing() {
-            return Err(QuicError::StreamClosed);
-        }
+        check_stream_operation(cx, &self.tracker)?;
 
         wait_result_with_cx(cx, self.inner.read(buf)).await
     }
 
     /// Read exactly the requested number of bytes.
     pub async fn read_exact(&mut self, cx: &Cx, buf: &mut [u8]) -> Result<(), QuicError> {
-        cx.checkpoint()?;
-
-        if self.tracker.is_closing() {
-            return Err(QuicError::StreamClosed);
-        }
+        check_stream_operation(cx, &self.tracker)?;
 
         wait_result_with_cx(cx, self.inner.read_exact(buf)).await
     }
 
     /// Read all remaining data up to a limit.
     pub async fn read_to_end(&mut self, cx: &Cx, limit: usize) -> Result<Vec<u8>, QuicError> {
-        cx.checkpoint()?;
-
-        if self.tracker.is_closing() {
-            return Err(QuicError::StreamClosed);
-        }
+        check_stream_operation(cx, &self.tracker)?;
 
         wait_result_with_cx(cx, self.inner.read_to_end(limit)).await
     }
@@ -221,6 +202,16 @@ impl Drop for RecvStream {
             self.inner.stop(self.stop_code.into()).ok();
         }
     }
+}
+
+fn check_stream_operation(cx: &Cx, tracker: &StreamTracker) -> Result<(), QuicError> {
+    cx.checkpoint()?;
+
+    if tracker.is_closing() {
+        return Err(QuicError::StreamClosed);
+    }
+
+    Ok(())
 }
 
 async fn wait_result_with_cx<T, E, F>(cx: &Cx, future: F) -> Result<T, QuicError>
@@ -338,5 +329,25 @@ mod tests {
             cancelled,
             "future should return cancelled after Cx cancellation"
         );
+    }
+
+    #[test]
+    fn stream_operation_guard_observes_cancellation_before_quinn_call() {
+        let cx = Cx::for_testing();
+        let tracker = StreamTracker::new();
+        cx.set_cancel_requested(true);
+
+        let err = check_stream_operation(&cx, &tracker).expect_err("cancelled Cx must fail");
+        assert!(matches!(err, QuicError::Cancelled));
+    }
+
+    #[test]
+    fn stream_operation_guard_rejects_closing_tracker() {
+        let cx = Cx::for_testing();
+        let tracker = StreamTracker::new();
+        tracker.mark_closing();
+
+        let err = check_stream_operation(&cx, &tracker).expect_err("closing tracker must fail");
+        assert!(matches!(err, QuicError::StreamClosed));
     }
 }
