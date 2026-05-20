@@ -448,7 +448,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | Database clients | `tokio-postgres`, `mysql_async`, `sqlx` | `src/database/{postgres,mysql,sqlite}.rs` | Feature-gated | Active | Mixed | Medium |
 | Messaging clients | async Redis/NATS/Kafka crates | `src/messaging/{redis,nats,kafka}.rs` | In progress | Early | Mixed | Medium |
 | Service/middleware stack | `tower`, `tower-layer`, `tower-service` | `src/service/` + optional `tower` adapter feature | Built-in | Active | Lab-strong | Low |
-| Filesystem APIs | `tokio::fs` | `src/fs/` | In progress | Early | Mixed | Medium |
+| Filesystem APIs | `tokio::fs` | `src/fs/` | Partial blocking-backed facade; not full `tokio::fs` parity | Early | Mixed | Medium |
 | Process management | `tokio::process` | `src/process.rs` | Built-in | Active | Mixed | Medium |
 | Signals | `tokio::signal` | `src/signal/` | Built-in | Active | Mixed | Medium |
 | Streams and adapters | `tokio-stream`, `futures-util::stream` | `src/stream/` | Built-in | Active | Lab-strong | Low |
@@ -457,6 +457,18 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | Tokio-locked third-party crates | crates that require Tokio runtime traits directly | boundary adapters via service/runtime integration points | Adapter needed | N/A | N/A | High |
 
 This map is about capability coverage, not API compatibility. Asupersync intentionally uses a different model centered on `Cx`, regions, explicit cancellation, and deterministic replay.
+
+Filesystem status is deliberately conservative. `src/fs/` currently exposes
+`File`, buffered readers/writers, metadata, directory/path helpers,
+`try_exists`, `write_atomic`, `UnixVfs`, and platform capability reports that
+ATP consumes through `src/atp/platform/`. Most operations are async facades over
+`spawn_blocking_io`; poll-based `File` traits still use direct blocking I/O,
+recursive directory removal and large copy operations inherit standard-library
+partial-state semantics, and Linux `io_uring` support is limited to
+feature-gated helper paths. Treat this as an early blocking-backed filesystem
+layer, not comprehensive `tokio::fs` parity or a fully region-native filesystem
+driver. The crash-safe ATP disk writer, platform doctor, sparse-write, journal,
+resume, and verifier work remains tracked by the ATP-D beads.
 
 If you do need Tokio-locked dependencies at the boundary, use the migration
 playbook in [`docs/integration.md`](./docs/integration.md#tokio-migration-playbook).
