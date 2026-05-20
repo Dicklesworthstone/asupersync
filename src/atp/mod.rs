@@ -30,8 +30,16 @@ pub mod verifier;
 pub mod verify;
 pub mod writer;
 
+pub use cache::{
+    CacheDiagnostics, CacheEntry, CacheEntryState, CacheError, CacheGrant, CacheMutation,
+    CacheSeedRequest, ObjectCache, PrivacyClass, SeedReceipt,
+};
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};
+pub use inbox::{
+    AllowAction, DaemonDiagnostics, GrantQuota, GrantScope, InboxDiagnostics, InboxError,
+    InboxItem, InboxJsonRow, InboxOffer, InboxState, LocalInbox, ObjectDigest, ReceiveGrant,
+};
 pub use policy::{
     Capability, CapabilityAction, PolicyDecision, PolicyEnforcer, ResourceScope, TemporalScope,
 };
