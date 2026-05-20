@@ -1452,11 +1452,10 @@ applications via `wasm-bindgen`.
 
 ### What works today
 
-- **JS/TS consumers on the browser main thread or in a dedicated worker**:
-  install `@asupersync/browser` for direct Browser Edition runtime access.
-  The shipped direct-runtime lane today supports a real browser
-  `window` + `document` + `WebAssembly` environment and dedicated workers when
-  the required worker Web APIs are present.
+- **JS/TS consumers (GA)**: `@asupersync/browser` provides production-ready
+  browser main thread and dedicated worker support. The shipped direct-runtime
+  lane supports a real browser `window` + `document` + `WebAssembly` environment
+  and dedicated workers when the required worker Web APIs are present.
 - **Capability-gated browser transports**: shipped browser networking uses
   `fetch`, `WebSocket`, and an explicit WebTransport datagram lane when the
   host exposes `globalThis.WebTransport` over HTTPS.
@@ -1582,7 +1581,7 @@ and known limitations.
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; virtual/lab baseline plus production TCP loopback RemoteRuntime lifecycle proof shipped; deployment discovery, TLS/authentication, WAN retry policy, and stable production wire format remain adapter-scoped |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
-| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
+| Browser Edition (WASM, JS/TS consumers) | ✅ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust browser API preview-only |
 | Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported |
 | Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded coordinator attach/detach/fallback supported |
 | Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |
