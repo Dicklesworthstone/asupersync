@@ -591,6 +591,21 @@ mod tests {
     }
 
     #[test]
+    fn classifies_unknown_when_udp_probe_has_no_observations() {
+        let evidence = NatEvidence::new(
+            endpoint("10.0.0.2", 40_000),
+            Vec::new(),
+            UdpProbe::NotMeasured,
+            HairpinBehavior::Unknown,
+        );
+
+        let classification = classify_nat(&evidence);
+        assert_eq!(classification.profile, NatProfile::Unknown);
+        assert_eq!(classification.confidence, NatConfidence::Low);
+        assert_eq!(classification.caveat, "no_observations");
+    }
+
+    #[test]
     fn tailscale_disabled_ignores_provider_output() {
         let set = select_tailscale_candidates(
             TailscalePreference::Disabled,

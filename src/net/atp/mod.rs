@@ -23,7 +23,7 @@ pub mod path;
 #[path = "protocol/mod.rs"]
 pub mod protocol;
 pub mod quic;
-// pub mod rendezvous;
+pub mod rendezvous;
 // TODO: Fix compilation issues in ATP SDK
 // pub mod sdk;
 pub mod stun;
