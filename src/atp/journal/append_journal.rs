@@ -509,6 +509,16 @@ impl<'a> DecodeCursor<'a> {
     fn read_merkle_root(&mut self) -> Result<MerkleRoot, JournalError> {
         Ok(MerkleRoot::new(self.read_hash()?))
     }
+
+    fn finish(&self) -> Result<(), JournalError> {
+        if self.offset == self.data.len() {
+            Ok(())
+        } else {
+            Err(JournalError::Deserialization(
+                "trailing bytes in journal entry".to_string(),
+            ))
+        }
+    }
 }
 
 /// Journal entry with metadata
@@ -566,6 +576,7 @@ impl JournalEntry {
         let entry_size = cursor.read_len()? as u32;
         let record_payload = cursor.read_exact(entry_size as usize)?;
         let record = JournalRecord::decode_payload(record_payload)?;
+        cursor.finish()?;
         Ok(Self {
             sequence,
             record,

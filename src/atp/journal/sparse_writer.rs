@@ -239,7 +239,7 @@ impl SparseWriter {
         // Ensure temp file is open
         match self.ensure_temp_file_open().await {
             Ok(_) => {}
-            Err(e) => return Outcome::err(e),
+            Err(e) => return Outcome::Err(e),
         }
 
         // Check for overlapping writes
@@ -249,7 +249,7 @@ impl SparseWriter {
                 start: offset,
                 end: offset + chunk_size,
             }) {
-                return Outcome::err(SparseWriterError::OverlappingWrite {
+                return Outcome::Err(SparseWriterError::OverlappingWrite {
                     offset,
                     size: chunk_size,
                 });
@@ -259,7 +259,7 @@ impl SparseWriter {
         // Perform the write
         let hash = match self.write_chunk_internal(offset, data, &options).await {
             Ok(hash) => hash,
-            Err(e) => return Outcome::err(e),
+            Err(e) => return Outcome::Err(e),
         };
 
         // Update state
@@ -322,21 +322,21 @@ impl SparseWriter {
     pub async fn commit(&self, _cx: &Cx) -> Outcome<PathBuf, SparseWriterError> {
         // Verify completion
         if !self.is_complete() {
-            return Outcome::err(SparseWriterError::IncompleteData);
+            return Outcome::Err(SparseWriterError::IncompleteData);
         }
 
         // Verify data integrity
         {
             let state = self.state.lock().unwrap();
             if !matches!(state.verification_state, VerificationState::Verified { .. }) {
-                return Outcome::err(SparseWriterError::NotVerified);
+                return Outcome::Err(SparseWriterError::NotVerified);
             }
         }
 
         // Apply fsync policy before commit
         match self.apply_fsync_policy().await {
             Outcome::Ok(()) => {}
-            Outcome::Err(e) => return Outcome::err(e),
+            Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::panicked(payload),
         }
@@ -344,7 +344,7 @@ impl SparseWriter {
         // Perform atomic commit based on policy
         let final_path = match self.atomic_commit().await {
             Outcome::Ok(path) => path,
-            Outcome::Err(e) => return Outcome::err(e),
+            Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::panicked(payload),
         };
@@ -352,7 +352,7 @@ impl SparseWriter {
         // Clean up temp file
         match self.cleanup_temp_file().await {
             Ok(()) => {}
-            Err(e) => return Outcome::err(e),
+            Err(e) => return Outcome::Err(e),
         }
 
         Outcome::ok(final_path)
@@ -364,12 +364,12 @@ impl SparseWriter {
         if self.config.enable_quarantine {
             match self.quarantine_temp_file("cancelled").await {
                 Ok(_) => {}
-                Err(e) => return Outcome::err(e),
+                Err(e) => return Outcome::Err(e),
             }
         } else {
             match self.cleanup_temp_file().await {
                 Ok(_) => {}
-                Err(e) => return Outcome::err(e),
+                Err(e) => return Outcome::Err(e),
             }
         }
 
@@ -546,14 +546,14 @@ impl SparseWriter {
                         match file.sync_data() {
                             Ok(_) => {}
                             Err(e) => {
-                                return Outcome::err(SparseWriterError::SyncFailed(e.to_string()));
+                                return Outcome::Err(SparseWriterError::SyncFailed(e.to_string()));
                             }
                         }
                     }
                 }
                 super::FsyncPolicy::BeforeCommit => match file.sync_data() {
                     Ok(_) => {}
-                    Err(e) => return Outcome::err(SparseWriterError::SyncFailed(e.to_string())),
+                    Err(e) => return Outcome::Err(SparseWriterError::SyncFailed(e.to_string())),
                 },
             }
         }
@@ -565,19 +565,19 @@ impl SparseWriter {
         let state = self.state.lock().unwrap();
         let temp_path = match state.temp_path.as_ref() {
             Some(path) => path,
-            None => return Outcome::err(SparseWriterError::NoTempFile),
+            None => return Outcome::Err(SparseWriterError::NoTempFile),
         };
         let final_path = &state.final_path;
 
         match self.config.commit_policy {
             CommitPolicy::AtomicRename => match std::fs::rename(temp_path, final_path) {
                 Ok(_) => {}
-                Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                Err(e) => return Outcome::Err(SparseWriterError::CommitFailed(e.to_string())),
             },
             CommitPolicy::CopyAndVerify => {
                 match std::fs::copy(temp_path, final_path) {
                     Ok(_) => {}
-                    Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                    Err(e) => return Outcome::Err(SparseWriterError::CommitFailed(e.to_string())),
                 }
                 // TODO: Add verification step
             }
@@ -587,13 +587,13 @@ impl SparseWriter {
                     match std::fs::hard_link(temp_path, final_path) {
                         Ok(_) => {}
                         Err(e) => {
-                            return Outcome::err(SparseWriterError::CommitFailed(e.to_string()));
+                            return Outcome::Err(SparseWriterError::CommitFailed(e.to_string()));
                         }
                     }
                     match std::fs::remove_file(temp_path) {
                         Ok(_) => {}
                         Err(e) => {
-                            return Outcome::err(SparseWriterError::CommitFailed(e.to_string()));
+                            return Outcome::Err(SparseWriterError::CommitFailed(e.to_string()));
                         }
                     }
                 }
@@ -603,7 +603,7 @@ impl SparseWriter {
                     match std::fs::copy(temp_path, final_path) {
                         Ok(_) => {}
                         Err(e) => {
-                            return Outcome::err(SparseWriterError::CommitFailed(e.to_string()));
+                            return Outcome::Err(SparseWriterError::CommitFailed(e.to_string()));
                         }
                     }
                 }
