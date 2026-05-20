@@ -92,6 +92,7 @@ pub struct Candidate {
     endpoint: ObservedEndpoint,
     transport: CandidateTransport,
     expires_at_micros: u64,
+    relay_authorization: Option<RelayAuthorization>,
 }
 
 impl Candidate {
@@ -106,6 +107,7 @@ impl Candidate {
             endpoint,
             transport,
             expires_at_micros,
+            relay_authorization: None,
         }
     }
 
@@ -125,6 +127,19 @@ impl Candidate {
     #[must_use]
     pub const fn expires_at_micros(&self) -> u64 {
         self.expires_at_micros
+    }
+
+    /// Attach relay authorization to a relay candidate.
+    #[must_use]
+    pub fn with_relay_authorization(mut self, authorization: RelayAuthorization) -> Self {
+        self.relay_authorization = Some(authorization);
+        self
+    }
+
+    /// Relay authorization bound to this candidate, if any.
+    #[must_use]
+    pub fn relay_authorization(&self) -> Option<&RelayAuthorization> {
+        self.relay_authorization.as_ref()
     }
 }
 
@@ -149,6 +164,66 @@ impl CandidateSignature {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// Relay-issued authorization binding a relay identity to one transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayAuthorization {
+    relay_peer_id: PeerId,
+    subject_peer_id: PeerId,
+    transfer_nonce: TransferNonce,
+    expires_at_micros: u64,
+    signature: CandidateSignature,
+}
+
+impl RelayAuthorization {
+    /// Build relay authorization.
+    #[must_use]
+    pub fn new(
+        relay_peer_id: PeerId,
+        subject_peer_id: PeerId,
+        transfer_nonce: TransferNonce,
+        expires_at_micros: u64,
+        signature: CandidateSignature,
+    ) -> Self {
+        Self {
+            relay_peer_id,
+            subject_peer_id,
+            transfer_nonce,
+            expires_at_micros,
+            signature,
+        }
+    }
+
+    /// Relay peer that issued this authorization.
+    #[must_use]
+    pub const fn relay_peer_id(&self) -> PeerId {
+        self.relay_peer_id
+    }
+
+    /// Peer allowed to advertise the relay candidate.
+    #[must_use]
+    pub const fn subject_peer_id(&self) -> PeerId {
+        self.subject_peer_id
+    }
+
+    /// Transfer nonce this authorization is scoped to.
+    #[must_use]
+    pub const fn transfer_nonce(&self) -> TransferNonce {
+        self.transfer_nonce
+    }
+
+    /// Authorization expiry timestamp.
+    #[must_use]
+    pub const fn expires_at_micros(&self) -> u64 {
+        self.expires_at_micros
+    }
+
+    /// Relay authorization signature.
+    #[must_use]
+    pub const fn signature(&self) -> &CandidateSignature {
+        &self.signature
     }
 }
 
@@ -216,6 +291,16 @@ impl SignedCandidate {
 pub trait CandidateSignatureVerifier {
     /// Return true when the candidate signature is accepted.
     fn verify(&self, candidate: &SignedCandidate) -> bool;
+
+    /// Return true when relay authorization is accepted.
+    fn verify_relay_authorization(
+        &self,
+        candidate: &SignedCandidate,
+        authorization: &RelayAuthorization,
+    ) -> bool {
+        let _ = (candidate, authorization);
+        false
+    }
 }
 
 impl<F> CandidateSignatureVerifier for F
@@ -251,6 +336,7 @@ pub struct Session {
     nonce: TransferNonce,
     expires_at_micros: u64,
     quotas: Quotas,
+    trusted_relays: BTreeSet<PeerId>,
     candidates: Vec<SignedCandidate>,
     seen_candidate_nonces: BTreeSet<(PeerId, CandidateNonce)>,
 }
@@ -263,9 +349,17 @@ impl Session {
             nonce,
             expires_at_micros,
             quotas,
+            trusted_relays: BTreeSet::new(),
             candidates: Vec::new(),
             seen_candidate_nonces: BTreeSet::new(),
         }
+    }
+
+    /// Trust relay peers for relay candidate authorization.
+    #[must_use]
+    pub fn with_trusted_relays(mut self, relays: &[PeerId]) -> Self {
+        self.trusted_relays = relays.iter().copied().collect();
+        self
     }
 
     /// Transfer nonce for this session.
@@ -354,6 +448,7 @@ impl Service {
         if !verifier.verify(&signed) {
             return Err(Error::InvalidSignature);
         }
+        validate_relay_candidate(now_micros, &signed, session, verifier)?;
         if session
             .seen_candidate_nonces
             .contains(&(signed.peer_id, signed.candidate_nonce))
@@ -373,6 +468,48 @@ impl Service {
         session.candidates.push(signed);
         Ok(())
     }
+}
+
+fn validate_relay_candidate<V>(
+    now_micros: u64,
+    signed: &SignedCandidate,
+    session: &Session,
+    verifier: &V,
+) -> Result<(), Error>
+where
+    V: CandidateSignatureVerifier,
+{
+    if !matches!(signed.candidate.transport, CandidateTransport::Relay) {
+        if signed.candidate.relay_authorization.is_some() {
+            return Err(Error::UnexpectedRelayAuthorization);
+        }
+        return Ok(());
+    }
+
+    let authorization = signed
+        .candidate
+        .relay_authorization
+        .as_ref()
+        .ok_or(Error::MissingRelayAuthorization)?;
+    if authorization.subject_peer_id != signed.peer_id
+        || authorization.transfer_nonce != session.nonce
+        || authorization.relay_peer_id == signed.peer_id
+    {
+        return Err(Error::RelayAuthorizationMismatch);
+    }
+    if now_micros >= authorization.expires_at_micros {
+        return Err(Error::ExpiredRelayAuthorization);
+    }
+    if !session
+        .trusted_relays
+        .contains(&authorization.relay_peer_id)
+    {
+        return Err(Error::UntrustedRelay);
+    }
+    if !verifier.verify_relay_authorization(signed, authorization) {
+        return Err(Error::InvalidRelayAuthorization);
+    }
+    Ok(())
 }
 
 /// Rendezvous validation errors.
@@ -399,6 +536,24 @@ pub enum Error {
     /// Candidate nonce was replayed by the same peer.
     #[error("candidate nonce replay")]
     NonceReplay,
+    /// Non-relay candidate carried relay authorization.
+    #[error("unexpected relay authorization")]
+    UnexpectedRelayAuthorization,
+    /// Relay candidate did not carry relay authorization.
+    #[error("missing relay authorization")]
+    MissingRelayAuthorization,
+    /// Relay authorization fields did not bind to the advertised candidate.
+    #[error("relay authorization mismatch")]
+    RelayAuthorizationMismatch,
+    /// Relay authorization has expired.
+    #[error("relay authorization expired")]
+    ExpiredRelayAuthorization,
+    /// Relay identity is not trusted by this session.
+    #[error("untrusted relay")]
+    UntrustedRelay,
+    /// Relay authorization signature was invalid.
+    #[error("invalid relay authorization")]
+    InvalidRelayAuthorization,
     /// Session or peer quota would be exceeded.
     #[error("rendezvous quota exceeded")]
     QuotaExceeded,
@@ -437,6 +592,57 @@ mod tests {
             Candidate::new(endpoint(50_000), CandidateTransport::Udp, 1_000),
             CandidateSignature::new(vec![1, 2, 3]).expect("signature"),
         )
+    }
+
+    fn relay_authorization(
+        relay_peer_id: PeerId,
+        subject_peer_id: PeerId,
+        transfer_nonce: TransferNonce,
+    ) -> RelayAuthorization {
+        RelayAuthorization::new(
+            relay_peer_id,
+            subject_peer_id,
+            transfer_nonce,
+            1_000,
+            CandidateSignature::new(vec![9, 9]).expect("relay signature"),
+        )
+    }
+
+    fn signed_relay_candidate(
+        peer_id: PeerId,
+        transfer_nonce: TransferNonce,
+        candidate_nonce: CandidateNonce,
+        authorization: Option<RelayAuthorization>,
+    ) -> SignedCandidate {
+        let mut candidate = Candidate::new(endpoint(50_010), CandidateTransport::Relay, 1_000);
+        if let Some(authorization) = authorization {
+            candidate = candidate.with_relay_authorization(authorization);
+        }
+        SignedCandidate::new(
+            peer_id,
+            transfer_nonce,
+            candidate_nonce,
+            candidate,
+            CandidateSignature::new(vec![1, 2, 3]).expect("signature"),
+        )
+    }
+
+    struct RelayVerifier {
+        relay_authorization_valid: bool,
+    }
+
+    impl CandidateSignatureVerifier for RelayVerifier {
+        fn verify(&self, candidate: &SignedCandidate) -> bool {
+            candidate.signature().bytes() == [1, 2, 3]
+        }
+
+        fn verify_relay_authorization(
+            &self,
+            _candidate: &SignedCandidate,
+            authorization: &RelayAuthorization,
+        ) -> bool {
+            self.relay_authorization_valid && authorization.signature().bytes() == [9, 9]
+        }
     }
 
     #[test]
@@ -581,6 +787,131 @@ mod tests {
                 )
                 .expect_err("total quota"),
             Error::QuotaExceeded
+        );
+    }
+
+    #[test]
+    fn relay_candidates_require_authorization_and_trusted_relay_identity() {
+        let mut service = Service::new();
+        let transfer_nonce = nonce(7);
+        service.open_session(Session::new(transfer_nonce, 1_000, Quotas::default()));
+
+        let missing_auth =
+            signed_relay_candidate(peer(1), transfer_nonce, candidate_nonce(9), None);
+        assert_eq!(
+            service
+                .register_candidate(
+                    10,
+                    missing_auth,
+                    &RelayVerifier {
+                        relay_authorization_valid: true,
+                    },
+                )
+                .expect_err("missing relay auth"),
+            Error::MissingRelayAuthorization
+        );
+
+        let untrusted_auth = relay_authorization(peer(9), peer(1), transfer_nonce);
+        let untrusted = signed_relay_candidate(
+            peer(1),
+            transfer_nonce,
+            candidate_nonce(10),
+            Some(untrusted_auth),
+        );
+        assert_eq!(
+            service
+                .register_candidate(
+                    10,
+                    untrusted,
+                    &RelayVerifier {
+                        relay_authorization_valid: true,
+                    },
+                )
+                .expect_err("untrusted relay"),
+            Error::UntrustedRelay
+        );
+    }
+
+    #[test]
+    fn accepts_relay_candidate_only_with_bound_relay_authorization() {
+        let mut service = Service::new();
+        let transfer_nonce = nonce(7);
+        let relay = peer(9);
+        service.open_session(
+            Session::new(transfer_nonce, 1_000, Quotas::default()).with_trusted_relays(&[relay]),
+        );
+
+        let signed = signed_relay_candidate(
+            peer(1),
+            transfer_nonce,
+            candidate_nonce(9),
+            Some(relay_authorization(relay, peer(1), transfer_nonce)),
+        );
+        service
+            .register_candidate(
+                10,
+                signed,
+                &RelayVerifier {
+                    relay_authorization_valid: true,
+                },
+            )
+            .expect("relay accepted");
+
+        assert_eq!(
+            service
+                .session(transfer_nonce)
+                .expect("session")
+                .candidates()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rejects_relay_authorization_confusion_and_bad_signature() {
+        let mut service = Service::new();
+        let transfer_nonce = nonce(7);
+        let relay = peer(9);
+        service.open_session(
+            Session::new(transfer_nonce, 1_000, Quotas::default()).with_trusted_relays(&[relay]),
+        );
+
+        let wrong_subject = signed_relay_candidate(
+            peer(1),
+            transfer_nonce,
+            candidate_nonce(9),
+            Some(relay_authorization(relay, peer(2), transfer_nonce)),
+        );
+        assert_eq!(
+            service
+                .register_candidate(
+                    10,
+                    wrong_subject,
+                    &RelayVerifier {
+                        relay_authorization_valid: true,
+                    },
+                )
+                .expect_err("wrong relay subject"),
+            Error::RelayAuthorizationMismatch
+        );
+
+        let bad_signature = signed_relay_candidate(
+            peer(1),
+            transfer_nonce,
+            candidate_nonce(10),
+            Some(relay_authorization(relay, peer(1), transfer_nonce)),
+        );
+        assert_eq!(
+            service
+                .register_candidate(
+                    10,
+                    bad_signature,
+                    &RelayVerifier {
+                        relay_authorization_valid: false,
+                    },
+                )
+                .expect_err("bad relay signature"),
+            Error::InvalidRelayAuthorization
         );
     }
 }
