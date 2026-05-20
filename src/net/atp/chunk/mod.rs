@@ -120,7 +120,7 @@ impl ChunkingProfile {
     /// Whether this profile handles sparse data efficiently.
     #[must_use]
     pub const fn supports_sparse_data(self) -> bool {
-        false // TODO: Enable when SparseImage profile is available
+        matches!(self, Self::Artifact | Self::Stream)
     }
 
     /// Whether this profile provides reproducible chunking for proof strength.
