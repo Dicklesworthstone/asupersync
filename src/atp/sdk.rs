@@ -9,6 +9,7 @@ use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome};
 use crate::atp::transfer::{TransferId, TransferState, TransferActor, TransferCommand, TransferCommandKind, IdempotencyKey};
 use crate::atp::object::{ObjectId, ContentId};
 use crate::atp::stream_object::{StreamManifest, StreamEpoch, EpochState, ByteRange, PrefixConsumer, ConsumptionPolicy};
+use crate::atp::writer::{AtpWriter, AtpSink, WriterConfig, WriterProgress, WriterState, TransferProof, ResumeToken, ProofMode};
 use crate::cx::Cx;
 use std::path::Path;
 use std::collections::HashMap;
@@ -418,6 +419,177 @@ impl AtpSession {
 
         Outcome::ok(epochs)
     }
+
+    /// Create a writer for large buffer streaming with ergonomic API.
+    ///
+    /// This is the primary "write(really_big_buffer)" API that provides
+    /// ATP correctness with maximum ergonomics for large data transfers.
+    pub fn create_writer(
+        &self,
+        remote_peer: [u8; 32],
+        writer_config: Option<WriterConfig>,
+    ) -> AtpOutcome<AtpWriter> {
+        let config = writer_config.unwrap_or_else(|| {
+            let mut config = WriterConfig::default();
+            // Apply session-level defaults
+            config.chunk_size = self.config.target_chunk_size;
+            config.max_concurrent_chunks = self.config.max_concurrent_transfers;
+            config.enable_progress = self.config.enable_diagnostics;
+            config
+        });
+
+        // Generate object ID for the stream
+        let content_hash = [0u8; 32]; // Will be computed as data is written
+        let object_id = ObjectId::content(ContentId::new(content_hash));
+
+        let writer = AtpWriter::new(object_id, remote_peer, config);
+
+        Outcome::ok(writer)
+    }
+
+    /// Create a writer from a resume token for interrupted transfers.
+    pub fn resume_writer(
+        &self,
+        resume_token: ResumeToken,
+        remote_peer: [u8; 32],
+        writer_config: Option<WriterConfig>,
+    ) -> AtpOutcome<AtpWriter> {
+        let config = writer_config.unwrap_or_else(|| {
+            let mut config = WriterConfig::default();
+            config.chunk_size = self.config.target_chunk_size;
+            config.max_concurrent_chunks = self.config.max_concurrent_transfers;
+            config.enable_progress = self.config.enable_diagnostics;
+            config
+        });
+
+        AtpWriter::from_resume_token(resume_token, remote_peer, config)
+    }
+
+    /// Create a sink for streaming data with backpressure.
+    pub fn create_sink(
+        &self,
+        remote_peer: [u8; 32],
+        writer_config: Option<WriterConfig>,
+    ) -> AtpOutcome<AtpSink> {
+        let config = writer_config.unwrap_or_else(|| {
+            let mut config = WriterConfig::default();
+            config.chunk_size = self.config.target_chunk_size;
+            config.max_concurrent_chunks = self.config.max_concurrent_transfers;
+            config.enable_progress = self.config.enable_diagnostics;
+            config
+        });
+
+        // Generate object ID for the stream
+        let content_hash = [0u8; 32]; // Will be computed as data is written
+        let object_id = ObjectId::content(ContentId::new(content_hash));
+
+        let sink = AtpSink::new(object_id, remote_peer, config);
+
+        Outcome::ok(sink)
+    }
+
+    /// Write a complete buffer in one ergonomic operation.
+    ///
+    /// This is the ultimate ergonomic API: hand ATP a buffer and get verified
+    /// delivery with full proof bundle, progress tracking, and resume capability.
+    pub async fn write_buffer(
+        &self,
+        cx: &Cx,
+        data: &[u8],
+        remote_peer: [u8; 32],
+        config: Option<WriterConfig>,
+    ) -> AtpOutcome<TransferProof> {
+        cx.trace(&format!("atp_session_write_buffer {} bytes to peer", data.len()));
+
+        let mut writer = self.create_writer(remote_peer, config)?;
+
+        // Enable progress reporting if session diagnostics are enabled
+        if self.config.enable_diagnostics {
+            writer.set_progress_callback(|progress| {
+                // TODO: Emit structured logs for progress
+                eprintln!("ATP transfer progress: {:.1}% ({} bytes written)",
+                    progress.bytes_written as f64 / data.len() as f64 * 100.0,
+                    progress.bytes_written
+                );
+            });
+        }
+
+        writer.write_buffer(cx, data).await
+    }
+
+    /// Write a file in one ergonomic operation.
+    pub async fn write_file<P: AsRef<Path>>(
+        &self,
+        cx: &Cx,
+        path: P,
+        remote_peer: [u8; 32],
+        config: Option<WriterConfig>,
+    ) -> AtpOutcome<TransferProof> {
+        let path = path.as_ref();
+        cx.trace(&format!("atp_session_write_file {:?} to peer", path));
+
+        let mut writer = self.create_writer(remote_peer, config)?;
+
+        // Enable progress reporting if session diagnostics are enabled
+        if self.config.enable_diagnostics {
+            let path_display = path.display().to_string();
+            writer.set_progress_callback(move |progress| {
+                eprintln!("ATP file transfer progress for {}: {:.1}% ({} bytes written)",
+                    path_display,
+                    progress.bytes_written as f64 * 100.0 / progress.total_bytes.unwrap_or(1) as f64,
+                    progress.bytes_written
+                );
+            });
+        }
+
+        writer.write_file(cx, path).await
+    }
+
+    /// Create a streaming writer for unknown-size data.
+    pub async fn create_stream_writer(
+        &self,
+        cx: &Cx,
+        remote_peer: [u8; 32],
+        config: Option<WriterConfig>,
+    ) -> AtpOutcome<AtpWriter> {
+        cx.trace("atp_session_create_stream_writer");
+
+        let mut writer = self.create_writer(remote_peer, config)?;
+
+        // Set up for streaming with unknown final size
+        if self.config.enable_diagnostics {
+            writer.set_progress_callback(|progress| {
+                eprintln!("ATP stream progress: {} bytes written, {} chunks",
+                    progress.bytes_written, progress.chunks_completed);
+            });
+        }
+
+        Outcome::ok(writer)
+    }
+
+    /// Send an object graph (directory, application-defined objects).
+    pub async fn send_object_graph(
+        &self,
+        cx: &Cx,
+        root_object: ObjectId,
+        remote_peer: [u8; 32],
+        config: Option<WriterConfig>,
+    ) -> AtpOutcome<TransferProof> {
+        cx.trace(&format!("atp_session_send_object_graph {:?} to peer", root_object));
+
+        // TODO: Implement object graph traversal and chunking
+        // 1. Walk object graph from root
+        // 2. Build manifest with all referenced objects
+        // 3. Stream objects in dependency order
+        // 4. Generate final proof for complete graph
+
+        let writer_config = config.unwrap_or_default();
+        let mut writer = self.create_writer(remote_peer, Some(writer_config))?;
+
+        // For now, write a placeholder representing the object graph
+        let placeholder_data = format!("object-graph:{}", root_object.as_hex()).into_bytes();
+        writer.write_buffer(cx, &placeholder_data).await
+    }
 }
 
 /// Handle for an active transfer operation.
@@ -744,6 +916,139 @@ mod tests {
             assert_eq!(epochs.len(), 1);
             assert_eq!(epochs[0].sequence, 1);
             assert_eq!(epochs[0].state, EpochState::Verified);
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_write_buffer_ergonomic_api() {
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let remote_peer = [3u8; 32];
+            let data = b"This is the write(really_big_buffer) test!".repeat(1000);
+
+            // This is the primary ergonomic API
+            let proof = session.write_buffer(cx, &data, remote_peer, None).await.unwrap();
+
+            // Verify the proof represents the complete transfer
+            assert_eq!(proof.total_bytes, data.len() as u64);
+            assert_eq!(proof.proof_mode, ProofMode::Full);
+            assert!(!proof.signatures.is_empty() || proof.proof_mode != ProofMode::Full); // Allow empty sigs in mock
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_writer_with_progress() {
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let remote_peer = [4u8; 32];
+
+            // Create writer with custom config
+            let mut writer_config = WriterConfig::default();
+            writer_config.enable_progress = true;
+            writer_config.chunk_size = 1024;
+
+            let mut writer = session.create_writer(remote_peer, Some(writer_config)).await.unwrap();
+
+            // Set up progress tracking
+            let mut progress_updates = 0;
+            writer.set_progress_callback(|_progress| {
+                // In real test, we'd capture these
+            });
+
+            // Write data in chunks
+            let chunk1 = b"First chunk of data";
+            let chunk2 = b"Second chunk of data";
+
+            writer.write_all(cx, chunk1).await.unwrap();
+            writer.write_all(cx, chunk2).await.unwrap();
+
+            let proof = writer.finalize(cx).await.unwrap();
+            assert_eq!(proof.total_bytes, (chunk1.len() + chunk2.len()) as u64);
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sink_api() {
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let remote_peer = [5u8; 32];
+
+            let mut sink = session.create_sink(remote_peer, None).await.unwrap();
+
+            // Send data through sink
+            sink.send(cx, b"Sink data 1").await.unwrap();
+            sink.send(cx, b"Sink data 2").await.unwrap();
+
+            let proof = sink.close(cx).await.unwrap();
+            assert!(proof.total_bytes >= 22); // "Sink data 1Sink data 2"
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resume_functionality() {
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let remote_peer = [6u8; 32];
+
+            // Create writer with resume enabled
+            let mut config = WriterConfig::default();
+            config.enable_resume = true;
+
+            let mut writer = session.create_writer(remote_peer, Some(config.clone())).await.unwrap();
+            writer.write_all(cx, b"Partial transfer").await.unwrap();
+
+            // Get resume token
+            let resume_token = writer.resume_token().unwrap();
+            assert!(resume_token.is_valid());
+
+            // Cancel and resume
+            let cancel_token = writer.cancel(cx).await.unwrap();
+            assert_eq!(cancel_token.verified_bytes, resume_token.verified_bytes);
+
+            // Resume with new writer
+            let mut resumed_writer = session.resume_writer(resume_token, remote_peer, Some(config)).await.unwrap();
+            resumed_writer.write_all(cx, b" completed").await.unwrap();
+
+            let proof = resumed_writer.finalize(cx).await.unwrap();
+            assert!(proof.total_bytes >= 26); // "Partial transfer completed"
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stream_writer_unknown_size() {
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let remote_peer = [7u8; 32];
+
+            let mut writer = session.create_stream_writer(cx, remote_peer, None).await.unwrap();
+
+            // Simulate streaming data of unknown final size
+            for i in 0..10 {
+                let data = format!("Stream chunk {}", i);
+                writer.write_all(cx, data.as_bytes()).await.unwrap();
+            }
+
+            let proof = writer.finalize(cx).await.unwrap();
+            assert!(proof.total_bytes > 0);
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_object_graph_sending() {
+        let lab = LabRuntime::new();
+        scope!(lab.cx(), |cx, scope| async move {
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let remote_peer = [8u8; 32];
+
+            let root_object = ObjectId::content(ContentId::new([42u8; 32]));
+
+            let proof = session.send_object_graph(cx, root_object, remote_peer, None).await.unwrap();
+            assert!(proof.total_bytes > 0);
         }).await.unwrap();
     }
 }

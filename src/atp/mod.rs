@@ -16,9 +16,9 @@ pub mod repair_receiver;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod platform;
 pub mod proof;
-// TODO: Fix compilation issues in ATP SDK
-// pub mod sdk;
-// pub mod stream_object;
+pub mod sdk;
+pub mod stream_object;
+pub mod writer;
 pub mod transfer;
 pub mod verifier;
 pub mod verify;

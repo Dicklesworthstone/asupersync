@@ -265,6 +265,12 @@ impl MerkleRoot {
         &self.hash
     }
 
+    /// Create a zero/empty Merkle root.
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self { hash: [0u8; 32] }
+    }
+
     /// Compute Merkle root from an object graph.
     #[must_use]
     pub fn from_graph(graph: &ObjectGraph) -> Self {
