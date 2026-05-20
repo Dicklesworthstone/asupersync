@@ -22,6 +22,7 @@ pub mod proof;
 pub mod repair_receiver;
 pub mod sdk;
 pub mod stream_object;
+pub mod sync;
 pub mod transfer;
 pub mod verifier;
 pub mod verify;
