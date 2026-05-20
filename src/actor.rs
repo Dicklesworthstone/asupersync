@@ -938,7 +938,9 @@ async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Outcome<(), 
         if cx.checkpoint().is_err() {
             return std::task::Poll::Ready(Outcome::err(actor_cancel_join_error(cx)));
         }
-        Pin::new(&mut sleeper).poll(task_cx).map(|()| Outcome::ok(()))
+        Pin::new(&mut sleeper)
+            .poll(task_cx)
+            .map(|()| Outcome::ok(()))
     })
     .await
 }
@@ -1264,7 +1266,9 @@ where
                                 Outcome::Ok(()) => {}
                                 Outcome::Err(err) => return Err(err),
                                 Outcome::Cancelled(_) => return Err(actor_cancel_join_error(&cx)),
-                                Outcome::Panicked(payload) => return Err(JoinError::Panicked(payload)),
+                                Outcome::Panicked(payload) => {
+                                    return Err(JoinError::Panicked(payload));
+                                }
                             }
                         }
 

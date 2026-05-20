@@ -773,7 +773,7 @@ pub struct ArtifactBuildContext {
 }
 
 /// Proof strength indicator for verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProofStrength {
     /// Basic content verification.
     Basic,

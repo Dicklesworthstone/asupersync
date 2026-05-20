@@ -5,11 +5,11 @@
 //! boundary detection, chunk identity management, and secure cache lookup that doesn't
 //! leak unauthorized object graph membership.
 
-use crate::atp::manifest::{ChunkBoundary, ChunkStrategy, ChunkMetadata};
 use super::{ChunkingProfileError, profiles::ChunkingProfile};
-use std::collections::{HashMap, BTreeMap, BTreeSet};
-use sha2::{Digest, Sha256};
+use crate::atp::manifest::{ChunkBoundary, ChunkMetadata, ChunkStrategy};
 use crate::bytes::Bytes;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Content-defined chunking engine with rolling hash boundary detection.
 pub struct CdcEngine;
@@ -111,8 +111,14 @@ impl RollingHash {
     /// Roll the hash by removing old_byte and adding new_byte.
     pub fn roll(&mut self, old_byte: u8, new_byte: u8) {
         // Update hash values using Adler-style rolling hash
-        self.hash_a = self.hash_a.wrapping_sub(old_byte as u64).wrapping_add(new_byte as u64);
-        self.hash_b = self.hash_b.wrapping_sub(self.window_size as u64 * old_byte as u64).wrapping_add(self.hash_a);
+        self.hash_a = self
+            .hash_a
+            .wrapping_sub(old_byte as u64)
+            .wrapping_add(new_byte as u64);
+        self.hash_b = self
+            .hash_b
+            .wrapping_sub(self.window_size as u64 * old_byte as u64)
+            .wrapping_add(self.hash_a);
 
         // Update window
         let idx = self.position % self.window_size;
@@ -155,11 +161,7 @@ impl ChunkIdentity {
     }
 
     /// Create chunk identity directly from data.
-    pub fn from_data(
-        data: &[u8],
-        chunking_profile: &str,
-        context_hash: Option<[u8; 32]>,
-    ) -> Self {
+    pub fn from_data(data: &[u8], chunking_profile: &str, context_hash: Option<[u8; 32]>) -> Self {
         let content_hash = Self::compute_content_hash(data);
         Self {
             content_hash,
@@ -179,10 +181,14 @@ impl ChunkIdentity {
     /// Get identity string for deduplication keys.
     pub fn identity_string(&self) -> String {
         let hash_hex = hex::encode(self.content_hash);
-        let context_hex = self.context_hash
+        let context_hex = self
+            .context_hash
             .map(|h| hex::encode(h))
             .unwrap_or_else(|| "none".to_string());
-        format!("{}:{}:{}:{}", hash_hex, self.size, self.chunking_profile, context_hex)
+        format!(
+            "{}:{}:{}:{}",
+            hash_hex, self.size, self.chunking_profile, context_hex
+        )
     }
 }
 
@@ -223,7 +229,12 @@ impl ChunkCache {
     }
 
     /// Store chunk in cache.
-    pub fn store_chunk(&mut self, identity: ChunkIdentity, data: Bytes, source_object: Option<String>) -> Result<(), ChunkingProfileError> {
+    pub fn store_chunk(
+        &mut self,
+        identity: ChunkIdentity,
+        data: Bytes,
+        source_object: Option<String>,
+    ) -> Result<(), ChunkingProfileError> {
         // Validate chunk data matches identity
         if data.len() != identity.size as usize {
             return Err(ChunkingProfileError::InvalidChunkParameters(
@@ -300,7 +311,8 @@ impl ChunkCache {
 
     /// Evict least recently used chunk.
     fn evict_least_recently_used(&mut self) {
-        let oldest_identity = self.chunks
+        let oldest_identity = self
+            .chunks
             .iter()
             .min_by_key(|(_, chunk)| chunk.last_accessed)
             .map(|(identity, _)| identity.clone());
@@ -373,7 +385,8 @@ impl ChunkReuseManager {
 
     /// Register deduplication context for a transfer.
     pub fn register_context(&mut self, transfer_id: &str, context_hash: [u8; 32]) {
-        self.active_contexts.insert(transfer_id.to_string(), context_hash);
+        self.active_contexts
+            .insert(transfer_id.to_string(), context_hash);
     }
 
     /// Unregister deduplication context.
@@ -390,7 +403,10 @@ impl ChunkReuseManager {
         let requesting_context = self.active_contexts.get(transfer_id).copied();
 
         // Check if chunk can be reused given capability scope
-        if !self.cache.can_reuse_chunk(chunk_identity, requesting_context) {
+        if !self
+            .cache
+            .can_reuse_chunk(chunk_identity, requesting_context)
+        {
             return None;
         }
 
@@ -400,10 +416,18 @@ impl ChunkReuseManager {
         }
 
         // Try finding similar chunks with different context
-        let similar_chunks = self.cache.find_similar_chunks(chunk_identity.content_hash);
+        let similar_chunks: Vec<ChunkIdentity> = self
+            .cache
+            .find_similar_chunks(chunk_identity.content_hash)
+            .into_iter()
+            .cloned()
+            .collect();
         for similar_identity in similar_chunks {
-            if self.cache.can_reuse_chunk(similar_identity, requesting_context) {
-                if let Some(data) = self.cache.lookup_chunk(similar_identity) {
+            if self
+                .cache
+                .can_reuse_chunk(&similar_identity, requesting_context)
+            {
+                if let Some(data) = self.cache.lookup_chunk(&similar_identity) {
                     return Some(data);
                 }
             }
@@ -423,7 +447,11 @@ impl ChunkReuseManager {
         let context_hash = self.active_contexts.get(transfer_id).copied();
         let identity = ChunkIdentity::from_data(chunk_data, chunking_profile, context_hash);
 
-        self.cache.store_chunk(identity.clone(), Bytes::copy_from_slice(chunk_data), source_object)?;
+        self.cache.store_chunk(
+            identity.clone(),
+            Bytes::copy_from_slice(chunk_data),
+            source_object,
+        )?;
 
         Ok(identity)
     }
@@ -480,12 +508,12 @@ mod tests {
     fn test_cdc_boundaries() {
         let data = vec![0u8; 10000]; // 10KB of zeros
         let boundaries = CdcEngine::compute_cdc_boundaries(
-            &data,
-            32,    // window_size
-            1024,  // target_chunk_size
-            512,   // min_chunk_size
-            2048,  // max_chunk_size
-        ).unwrap();
+            &data, 32,   // window_size
+            1024, // target_chunk_size
+            512,  // min_chunk_size
+            2048, // max_chunk_size
+        )
+        .unwrap();
 
         assert!(!boundaries.is_empty());
         assert_eq!(boundaries.last(), Some(&(data.len() as u64)));
@@ -528,15 +556,21 @@ mod tests {
         let identity3 = ChunkIdentity::from_data(&data3, "test", None);
 
         // Store first two chunks
-        cache.store_chunk(identity1.clone(), Bytes::copy_from_slice(&data1), None).unwrap();
-        cache.store_chunk(identity2.clone(), Bytes::copy_from_slice(&data2), None).unwrap();
+        cache
+            .store_chunk(identity1.clone(), Bytes::copy_from_slice(&data1), None)
+            .unwrap();
+        cache
+            .store_chunk(identity2.clone(), Bytes::copy_from_slice(&data2), None)
+            .unwrap();
 
         // Both should be present
         assert!(cache.lookup_chunk(&identity1).is_some());
         assert!(cache.lookup_chunk(&identity2).is_some());
 
         // Store third chunk (should evict oldest)
-        cache.store_chunk(identity3.clone(), Bytes::copy_from_slice(&data3), None).unwrap();
+        cache
+            .store_chunk(identity3.clone(), Bytes::copy_from_slice(&data3), None)
+            .unwrap();
 
         // First chunk should be evicted
         assert!(cache.lookup_chunk(&identity1).is_none());
@@ -553,7 +587,9 @@ mod tests {
         manager.register_context(transfer_id, context_hash);
 
         let data = b"test chunk data";
-        let identity = manager.store_chunk_for_reuse(data, "test-profile", transfer_id, None).unwrap();
+        let identity = manager
+            .store_chunk_for_reuse(data, "test-profile", transfer_id, None)
+            .unwrap();
 
         // Should be able to reuse from same context
         let reused_data = manager.try_reuse_chunk(&identity, transfer_id);
@@ -576,7 +612,9 @@ mod tests {
         let identity_a = ChunkIdentity::from_data(&data, "test", context_a);
         let identity_b = ChunkIdentity::from_data(&data, "test", context_b);
 
-        cache.store_chunk(identity_a.clone(), data.clone(), None).unwrap();
+        cache
+            .store_chunk(identity_a.clone(), data.clone(), None)
+            .unwrap();
 
         // Same context should allow reuse
         assert!(cache.can_reuse_chunk(&identity_a, context_a));
@@ -586,7 +624,9 @@ mod tests {
 
         // No context (global) should allow reuse
         let identity_global = ChunkIdentity::from_data(&data, "test", None);
-        cache.store_chunk(identity_global.clone(), data.clone(), None).unwrap();
+        cache
+            .store_chunk(identity_global.clone(), data.clone(), None)
+            .unwrap();
         assert!(cache.can_reuse_chunk(&identity_global, context_a));
         assert!(cache.can_reuse_chunk(&identity_global, context_b));
     }

@@ -168,7 +168,7 @@ mod tests {
             // Non-trivial random-looking binary.
             (0u16..1024)
                 .flat_map(|i| {
-                    let n = (i.wrapping_mul(0x9E37) ^ i) as u8;
+                    let n = (i.wrapping_mul(0x9E37u16) ^ i) as u8;
                     std::iter::repeat_n(n, ((n % 7) + 1) as usize)
                 })
                 .collect::<Vec<_>>(),

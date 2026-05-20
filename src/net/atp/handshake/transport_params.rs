@@ -238,7 +238,7 @@ impl TransportParameters {
                     return Outcome::err(HandshakeError::InvalidTransportParam {
                         param_id,
                         reason: "parameter ID too large".to_string(),
-                    })
+                    });
                 }
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -249,7 +249,7 @@ impl TransportParameters {
                     return Outcome::err(HandshakeError::InvalidTransportParam {
                         param_id,
                         reason: "failed to encode parameter ID".to_string(),
-                    })
+                    });
                 }
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -263,7 +263,7 @@ impl TransportParameters {
                     return Outcome::err(HandshakeError::InvalidTransportParam {
                         param_id,
                         reason: "parameter value too large".to_string(),
-                    })
+                    });
                 }
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -274,7 +274,7 @@ impl TransportParameters {
                     return Outcome::err(HandshakeError::InvalidTransportParam {
                         param_id,
                         reason: "failed to encode parameter length".to_string(),
-                    })
+                    });
                 }
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -298,13 +298,13 @@ impl TransportParameters {
                     return Outcome::err(HandshakeError::InvalidTransportParam {
                         param_id: 0,
                         reason: "truncated parameter ID".to_string(),
-                    })
+                    });
                 }
                 Outcome::Err(_) => {
                     return Outcome::err(HandshakeError::InvalidTransportParam {
                         param_id: 0,
                         reason: "failed to decode parameter ID".to_string(),
-                    })
+                    });
                 }
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -324,13 +324,13 @@ impl TransportParameters {
                     return Outcome::err(HandshakeError::InvalidTransportParam {
                         param_id,
                         reason: "truncated parameter length".to_string(),
-                    })
+                    });
                 }
                 Outcome::Err(_) => {
                     return Outcome::err(HandshakeError::InvalidTransportParam {
                         param_id,
                         reason: "failed to decode parameter length".to_string(),
-                    })
+                    });
                 }
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -485,12 +485,16 @@ mod tests {
     fn test_client_defaults() {
         let params = TransportParameters::client_defaults();
 
-        assert!(params
-            .get_integer(TransportParamId::MaxIdleTimeout)
-            .is_some());
-        assert!(params
-            .get_integer(TransportParamId::InitialMaxData)
-            .is_some());
+        assert!(
+            params
+                .get_integer(TransportParamId::MaxIdleTimeout)
+                .is_some()
+        );
+        assert!(
+            params
+                .get_integer(TransportParamId::InitialMaxData)
+                .is_some()
+        );
         assert!(!params.has_flag(TransportParamId::DisableActiveMigration));
     }
 

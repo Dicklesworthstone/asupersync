@@ -19,7 +19,7 @@ use crate::atp::manifest::{
     ArtifactBuildContext, CdcParams, ChunkBoundary, ChunkMetadata, ChunkPlan, ChunkStrategy,
     ProofStrength,
 };
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Artifact chunking profile implementation.
 pub struct ArtifactProfile;
@@ -201,9 +201,12 @@ impl ArtifactProfile {
 
         for (i, &byte) in data.iter().enumerate() {
             let hash = rolling_hash.update(byte);
-            let current_pos = i.checked_add(1)
+            let current_pos = i
+                .checked_add(1)
                 .and_then(|v| u64::try_from(v).ok())
-                .unwrap_or_else(|| panic!("Position overflow in boundary detection at index {}", i));
+                .unwrap_or_else(|| {
+                    panic!("Position overflow in boundary detection at index {}", i)
+                });
             let chunk_size_since_last = current_pos - last_boundary;
 
             let is_boundary = if chunk_size_since_last < min_chunk_size {
@@ -331,7 +334,10 @@ impl ArtifactProfile {
         let mask_bits = bits.min(20).max(8);
 
         // Use checked_shl to prevent overflow/undefined behavior
-        assert!(mask_bits < 64, "mask_bits must be less than 64 to avoid shift overflow");
+        assert!(
+            mask_bits < 64,
+            "mask_bits must be less than 64 to avoid shift overflow"
+        );
         match 1u64.checked_shl(mask_bits) {
             Some(shifted) => shifted - 1,
             None => u64::MAX, // Fallback for impossible overflow case
@@ -562,8 +568,8 @@ impl ArtifactProfile {
         }
 
         // Check for significant variation in entropy
-        let max_entropy = entropies.iter().fold(0.0f32, |a: f32, &b| a.max(b));
-        let min_entropy = entropies.iter().fold(8.0f32, |a: f32, &b| a.min(b));
+        let max_entropy = entropies.iter().fold(0.0f64, |a: f64, &b| a.max(b));
+        let min_entropy = entropies.iter().fold(8.0f64, |a: f64, &b| a.min(b));
 
         (max_entropy - min_entropy) > 2.0 // Significant variation
     }
@@ -706,6 +712,7 @@ impl DeterministicRollingHash {
     }
 
     /// Get current hash value.
+    #[allow(dead_code)]
     fn current_hash(&self) -> u64 {
         self.hash
     }
@@ -713,7 +720,7 @@ impl DeterministicRollingHash {
     fn precompute_powers(polynomial: u64, window_size: usize) -> Vec<u64> {
         let mut powers = vec![1; window_size];
         for index in 1..window_size {
-            powers[index] = powers[index - 1].wrapping_mul(polynomial);
+            powers[index] = (powers[index - 1] as u64).wrapping_mul(polynomial);
         }
         powers
     }
@@ -737,6 +744,7 @@ pub struct DeduplicationMetrics {
 // Temporary regex module for version extraction
 mod regex {
     pub struct Regex {
+        #[allow(dead_code)]
         pattern: String,
     }
 
@@ -774,7 +782,9 @@ mod regex {
 
     pub struct Match<'t> {
         text: &'t str,
+        #[allow(dead_code)]
         start: usize,
+        #[allow(dead_code)]
         end: usize,
     }
 

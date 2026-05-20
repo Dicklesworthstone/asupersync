@@ -16,8 +16,8 @@
 //! - Cx-first APIs with explicit capability boundaries
 
 pub mod handshake;
-// TODO: Fix compilation issues in ATP network modules
-// pub mod chunk;
+pub mod chunk;
+// TODO: Fix compilation issues in ATP loss module
 // pub mod loss;
 pub mod datagram;
 pub mod discovery;
@@ -36,6 +36,7 @@ pub mod stun;
 // Re-export key types for H3 adapter
 pub use protocol::{AtpFrame, FrameType};
 
+pub use chunk::*;
 pub use datagram::*;
 pub use discovery::*;
 pub use handshake::*;

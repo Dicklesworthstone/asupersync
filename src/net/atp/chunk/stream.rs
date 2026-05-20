@@ -11,11 +11,11 @@
 //! - Rolling manifest updates
 //! - Optimized for real-time data streams
 
-use crate::atp::manifest::{ChunkPlan, ChunkStrategy};
 use super::{
     ChunkBoundary, ChunkMetadata, ChunkingProfileError,
-    profiles::{utils, ChunkingProfile as ChunkingProfileTrait},
+    profiles::{ChunkingProfile as ChunkingProfileTrait, utils},
 };
+use crate::atp::manifest::{ChunkPlan, ChunkStrategy};
 
 /// Stream chunking profile implementation.
 pub struct StreamProfile;
@@ -47,9 +47,8 @@ impl ChunkingProfileTrait for StreamProfile {
             ChunkStrategy::FixedSize,
             |index, offset, size, chunk_data| {
                 let sequence = Self::compute_sequence_number(index, offset);
-                let early_consumption_safe = Self::is_early_consumption_safe(
-                    chunk_data, index, positions.len()
-                );
+                let early_consumption_safe =
+                    Self::is_early_consumption_safe(chunk_data, index, positions.len());
 
                 ChunkMetadata::Stream {
                     sequence,
@@ -69,28 +68,30 @@ impl ChunkingProfileTrait for StreamProfile {
         for boundary in boundaries {
             if !matches!(boundary.strategy, ChunkStrategy::FixedSize) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "stream profile requires fixed-size chunking".to_string()
+                    "stream profile requires fixed-size chunking".to_string(),
                 ));
             }
 
             if !matches!(boundary.metadata, Some(ChunkMetadata::Stream { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "stream profile requires Stream metadata".to_string()
+                    "stream profile requires Stream metadata".to_string(),
                 ));
             }
 
             if boundary.size_bytes < Self::min_chunking_threshold() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} below minimum {}",
-                           boundary.size_bytes, Self::min_chunking_threshold())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} below minimum {}",
+                    boundary.size_bytes,
+                    Self::min_chunking_threshold()
+                )));
             }
 
             if boundary.size_bytes > Self::max_chunk_size() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} above maximum {}",
-                           boundary.size_bytes, Self::max_chunk_size())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} above maximum {}",
+                    boundary.size_bytes,
+                    Self::max_chunk_size()
+                )));
             }
         }
 
@@ -180,11 +181,7 @@ impl StreamProfile {
     }
 
     /// Determine if chunk can be safely consumed before all chunks arrive.
-    fn is_early_consumption_safe(
-        chunk_data: &[u8],
-        chunk_index: u32,
-        total_chunks: usize,
-    ) -> bool {
+    fn is_early_consumption_safe(chunk_data: &[u8], chunk_index: u32, total_chunks: usize) -> bool {
         // Early chunks are generally safe for early consumption
         if chunk_index < 3 {
             return true;
@@ -229,9 +226,10 @@ impl StreamProfile {
         }
 
         // Binary metadata headers
-        if chunk_data.starts_with(b"META") ||
-           chunk_data.starts_with(b"HEAD") ||
-           chunk_data.starts_with(b"INFO") {
+        if chunk_data.starts_with(b"META")
+            || chunk_data.starts_with(b"HEAD")
+            || chunk_data.starts_with(b"INFO")
+        {
             return true;
         }
 
@@ -248,26 +246,31 @@ impl StreamProfile {
         let data_str = String::from_utf8_lossy(&chunk_data[..128.min(chunk_data.len())]);
 
         // References to other chunks
-        if data_str.contains("ref:") ||
-           data_str.contains("chunk:") ||
-           data_str.contains("depends:") ||
-           data_str.contains("requires:") {
+        if data_str.contains("ref:")
+            || data_str.contains("chunk:")
+            || data_str.contains("depends:")
+            || data_str.contains("requires:")
+        {
             return true;
         }
 
         // Binary reference patterns (simplified)
-        chunk_data.windows(4).any(|w| w == b"REF\x00" || w == b"\x00REF")
+        chunk_data
+            .windows(4)
+            .any(|w| w == b"REF\x00" || w == b"\x00REF")
     }
 
     /// Validate stream-specific properties.
-    fn validate_stream_properties(boundaries: &[ChunkBoundary]) -> Result<(), ChunkingProfileError> {
+    fn validate_stream_properties(
+        boundaries: &[ChunkBoundary],
+    ) -> Result<(), ChunkingProfileError> {
         // Check sequence ordering
         let mut last_sequence = 0u64;
         for boundary in boundaries {
             if let Some(ChunkMetadata::Stream { sequence, .. }) = &boundary.metadata {
                 if *sequence < last_sequence {
                     return Err(ChunkingProfileError::StreamSequencingError(
-                        "sequence numbers must be monotonically increasing".to_string()
+                        "sequence numbers must be monotonically increasing".to_string(),
                     ));
                 }
                 last_sequence = *sequence;
@@ -275,9 +278,14 @@ impl StreamProfile {
         }
 
         // Check that at least some chunks are early-consumption safe
-        let safe_chunks = boundaries.iter()
+        let safe_chunks = boundaries
+            .iter()
             .filter(|b| {
-                if let Some(ChunkMetadata::Stream { early_consumption_safe, .. }) = &b.metadata {
+                if let Some(ChunkMetadata::Stream {
+                    early_consumption_safe,
+                    ..
+                }) = &b.metadata
+                {
                     *early_consumption_safe
                 } else {
                     false
@@ -287,7 +295,7 @@ impl StreamProfile {
 
         if safe_chunks == 0 && boundaries.len() > 1 {
             return Err(ChunkingProfileError::StreamSequencingError(
-                "at least some chunks should be early-consumption safe".to_string()
+                "at least some chunks should be early-consumption safe".to_string(),
             ));
         }
 
@@ -321,10 +329,15 @@ impl StreamProfile {
 
     /// Get chunks that can be consumed early (before stream completion).
     pub fn get_early_consumption_chunks(boundaries: &[ChunkBoundary]) -> Vec<usize> {
-        boundaries.iter()
+        boundaries
+            .iter()
             .enumerate()
             .filter_map(|(idx, boundary)| {
-                if let Some(ChunkMetadata::Stream { early_consumption_safe, .. }) = &boundary.metadata {
+                if let Some(ChunkMetadata::Stream {
+                    early_consumption_safe,
+                    ..
+                }) = &boundary.metadata
+                {
                     if *early_consumption_safe {
                         Some(idx)
                     } else {
@@ -342,7 +355,11 @@ impl StreamProfile {
         boundary: &ChunkBoundary,
         total_expected_size: Option<u64>,
     ) -> RollingManifestUpdate {
-        let (sequence, early_consumption_safe) = if let Some(ChunkMetadata::Stream { sequence, early_consumption_safe }) = &boundary.metadata {
+        let (sequence, early_consumption_safe) = if let Some(ChunkMetadata::Stream {
+            sequence,
+            early_consumption_safe,
+        }) = &boundary.metadata
+        {
             (*sequence, *early_consumption_safe)
         } else {
             (0, false)
@@ -385,29 +402,31 @@ impl StreamProfile {
         }
 
         // First chunk latency
-        let first_chunk_size = boundaries[0].size;
-        let first_chunk_transfer_ms = (first_chunk_size as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
-        let first_chunk_latency = std::time::Duration::from_millis(
-            (first_chunk_transfer_ms + latency_ms as f64) as u64
-        );
+        let first_chunk_size = boundaries[0].size_bytes;
+        let first_chunk_transfer_ms =
+            (first_chunk_size as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
+        let first_chunk_latency =
+            std::time::Duration::from_millis((first_chunk_transfer_ms + latency_ms as f64) as u64);
 
         // Full stream latency
-        let total_size: u64 = boundaries.iter().map(|b| b.size).sum();
+        let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
         let total_transfer_ms = (total_size as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
         let total_latency_overhead_ms = boundaries.len() as f64 * latency_ms as f64;
         let full_stream_latency = std::time::Duration::from_millis(
-            (total_transfer_ms + total_latency_overhead_ms) as u64
+            (total_transfer_ms + total_latency_overhead_ms) as u64,
         );
 
         // Early consumption latency (chunks available for early consumption)
         let early_chunks = Self::get_early_consumption_chunks(boundaries);
-        let early_consumption_size: u64 = early_chunks.iter()
-            .map(|&idx| boundaries[idx].size)
+        let early_consumption_size: u64 = early_chunks
+            .iter()
+            .map(|&idx| boundaries[idx].size_bytes)
             .sum();
-        let early_transfer_ms = (early_consumption_size as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
+        let early_transfer_ms =
+            (early_consumption_size as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
         let early_latency_overhead_ms = early_chunks.len() as f64 * latency_ms as f64;
         let early_consumption_latency = std::time::Duration::from_millis(
-            (early_transfer_ms + early_latency_overhead_ms) as u64
+            (early_transfer_ms + early_latency_overhead_ms) as u64,
         );
 
         StreamingLatencyEstimate {
@@ -426,14 +445,16 @@ impl StreamProfile {
     }
 
     /// Validate that stream chunks can be processed incrementally.
-    pub fn validate_incremental_processing(boundaries: &[ChunkBoundary]) -> Result<(), ChunkingProfileError> {
+    pub fn validate_incremental_processing(
+        boundaries: &[ChunkBoundary],
+    ) -> Result<(), ChunkingProfileError> {
         // Check that chunk sizes are reasonable for incremental processing
         for boundary in boundaries {
             if boundary.size_bytes > Self::max_chunk_size() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} too large for incremental processing",
-                           boundary.size_bytes)
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} too large for incremental processing",
+                    boundary.size_bytes
+                )));
             }
         }
 
@@ -441,7 +462,7 @@ impl StreamProfile {
         let early_chunks = Self::get_early_consumption_chunks(boundaries);
         if early_chunks.is_empty() && boundaries.len() > 3 {
             return Err(ChunkingProfileError::StreamSequencingError(
-                "no chunks available for early consumption in large stream".to_string()
+                "no chunks available for early consumption in large stream".to_string(),
             ));
         }
 
@@ -450,7 +471,7 @@ impl StreamProfile {
 }
 
 /// Rolling manifest update for streaming scenarios.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RollingManifestUpdate {
     /// Chunk index in the stream.
     pub chunk_index: u32,
@@ -517,31 +538,61 @@ mod tests {
     fn early_consumption_safety() {
         // Early chunks should be safe
         let early_chunk_data = b"regular data content";
-        assert!(StreamProfile::is_early_consumption_safe(early_chunk_data, 0, 10));
-        assert!(StreamProfile::is_early_consumption_safe(early_chunk_data, 2, 10));
+        assert!(StreamProfile::is_early_consumption_safe(
+            early_chunk_data,
+            0,
+            10
+        ));
+        assert!(StreamProfile::is_early_consumption_safe(
+            early_chunk_data,
+            2,
+            10
+        ));
 
         // Last chunk should not be safe
-        assert!(!StreamProfile::is_early_consumption_safe(early_chunk_data, 9, 10));
+        assert!(!StreamProfile::is_early_consumption_safe(
+            early_chunk_data,
+            9,
+            10
+        ));
 
         // Metadata chunks should not be safe
         let metadata_chunk = b"{\"metadata\": {\"type\": \"header\"}}";
-        assert!(!StreamProfile::is_early_consumption_safe(metadata_chunk, 5, 10));
+        assert!(!StreamProfile::is_early_consumption_safe(
+            metadata_chunk,
+            5,
+            10
+        ));
     }
 
     #[test]
     fn stream_metadata_detection() {
-        assert!(StreamProfile::contains_stream_metadata(b"{\"metadata\": true}"));
-        assert!(StreamProfile::contains_stream_metadata(b"<metadata><info>test</info></metadata>"));
-        assert!(StreamProfile::contains_stream_metadata(b"META\x00\x00\x00\x04"));
-        assert!(!StreamProfile::contains_stream_metadata(b"just regular data content"));
+        assert!(StreamProfile::contains_stream_metadata(
+            b"{\"metadata\": true}"
+        ));
+        assert!(StreamProfile::contains_stream_metadata(
+            b"<metadata><info>test</info></metadata>"
+        ));
+        assert!(StreamProfile::contains_stream_metadata(
+            b"META\x00\x00\x00\x04"
+        ));
+        assert!(!StreamProfile::contains_stream_metadata(
+            b"just regular data content"
+        ));
     }
 
     #[test]
     fn chunk_dependency_detection() {
-        assert!(StreamProfile::has_chunk_dependencies(b"data with ref:chunk-123 reference"));
+        assert!(StreamProfile::has_chunk_dependencies(
+            b"data with ref:chunk-123 reference"
+        ));
         assert!(StreamProfile::has_chunk_dependencies(b"depends: chunk-456"));
-        assert!(StreamProfile::has_chunk_dependencies(b"REF\x00binary reference"));
-        assert!(!StreamProfile::has_chunk_dependencies(b"independent chunk data"));
+        assert!(StreamProfile::has_chunk_dependencies(
+            b"REF\x00binary reference"
+        ));
+        assert!(!StreamProfile::has_chunk_dependencies(
+            b"independent chunk data"
+        ));
     }
 
     #[test]
@@ -552,7 +603,10 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::FixedSize));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::Stream { .. })));
+            assert!(matches!(
+                boundary.metadata,
+                Some(ChunkMetadata::Stream { .. })
+            ));
         }
 
         // Validate sequence ordering
@@ -565,7 +619,7 @@ mod tests {
         }
 
         // Validate total coverage
-        let total_size: u64 = boundaries.iter().map(|b| b.size).sum();
+        let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
         assert_eq!(total_size, stream_data.len() as u64);
     }
 
@@ -787,35 +841,31 @@ mod tests {
 
     #[test]
     fn incremental_processing_validation() {
-        let valid_boundaries = vec![
-            ChunkBoundary {
-                index: 0,
-                offset: 0,
-                size: 100_000, // Reasonable size
-                hash: [1; 32],
-                strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
-                    sequence: 0,
-                    early_consumption_safe: true,
-                },
+        let valid_boundaries = vec![ChunkBoundary {
+            index: 0,
+            offset: 0,
+            size: 100_000, // Reasonable size
+            hash: [1; 32],
+            strategy: ChunkStrategy::FixedSize,
+            metadata: ChunkMetadata::Stream {
+                sequence: 0,
+                early_consumption_safe: true,
             },
-        ];
+        }];
 
         assert!(StreamProfile::validate_incremental_processing(&valid_boundaries).is_ok());
 
-        let invalid_boundaries = vec![
-            ChunkBoundary {
-                index: 0,
-                offset: 0,
-                size: 10_000_000, // Too large!
-                hash: [1; 32],
-                strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
-                    sequence: 0,
-                    early_consumption_safe: true,
-                },
+        let invalid_boundaries = vec![ChunkBoundary {
+            index: 0,
+            offset: 0,
+            size: 10_000_000, // Too large!
+            hash: [1; 32],
+            strategy: ChunkStrategy::FixedSize,
+            metadata: ChunkMetadata::Stream {
+                sequence: 0,
+                early_consumption_safe: true,
             },
-        ];
+        }];
 
         assert!(StreamProfile::validate_incremental_processing(&invalid_boundaries).is_err());
     }
@@ -851,9 +901,18 @@ mod tests {
         assert!(boundaries.is_empty());
 
         let estimate = StreamProfile::estimate_streaming_latency(&[], 100, 50);
-        assert_eq!(estimate.first_chunk_latency, std::time::Duration::from_millis(0));
-        assert_eq!(estimate.full_stream_latency, std::time::Duration::from_millis(0));
-        assert_eq!(estimate.early_consumption_latency, std::time::Duration::from_millis(0));
+        assert_eq!(
+            estimate.first_chunk_latency,
+            std::time::Duration::from_millis(0)
+        );
+        assert_eq!(
+            estimate.full_stream_latency,
+            std::time::Duration::from_millis(0)
+        );
+        assert_eq!(
+            estimate.early_consumption_latency,
+            std::time::Duration::from_millis(0)
+        );
     }
 
     #[test]
@@ -865,7 +924,11 @@ mod tests {
 
         // Should merge tiny remainder into last chunk
         for boundary in &boundaries {
-            assert!(boundary.size_bytes >= 4096, "Chunk too small: {}", boundary.size_bytes);
+            assert!(
+                boundary.size_bytes >= 4096,
+                "Chunk too small: {}",
+                boundary.size_bytes
+            );
         }
     }
 }

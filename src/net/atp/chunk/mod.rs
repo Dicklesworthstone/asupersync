@@ -15,6 +15,7 @@ use crate::atp::manifest::{
     CdcParams, ChunkPlan, ChunkStrategy, ChunkBoundary, ChunkMetadata,
     ThroughputTier, SparseHoleMetadata, ArtifactBuildContext, ProofStrength,
 };
+use profiles::ChunkingProfile as ChunkingProfileTrait;
 use std::collections::BTreeMap;
 
 pub mod profiles;

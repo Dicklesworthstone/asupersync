@@ -603,9 +603,11 @@ mod tests {
         let local_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
         let remote_keys = KeyMaterial::new(vec![4u8; 32], vec![5u8; 12], vec![6u8; 32]);
 
-        assert!(schedule
-            .install_initial_keys(local_keys, remote_keys)
-            .is_ok());
+        assert!(
+            schedule
+                .install_initial_keys(local_keys, remote_keys)
+                .is_ok()
+        );
         assert!(schedule.keys_established(PacketSpace::Initial));
         assert!(schedule.local_keys(PacketSpace::Initial).is_some());
         assert!(schedule.remote_keys(PacketSpace::Initial).is_some());
@@ -619,9 +621,11 @@ mod tests {
         let zero_keys = KeyMaterial::zero(32, 12);
         let non_zero_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
 
-        assert!(schedule
-            .install_initial_keys(zero_keys, non_zero_keys)
-            .is_err());
+        assert!(
+            schedule
+                .install_initial_keys(zero_keys, non_zero_keys)
+                .is_err()
+        );
     }
 
     #[test]
@@ -641,9 +645,11 @@ mod tests {
         // Initiate key update with traffic secrets
         let local_traffic_secret = vec![0x10u8; 32];
         let remote_traffic_secret = vec![0x20u8; 32];
-        assert!(schedule
-            .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
-            .is_ok());
+        assert!(
+            schedule
+                .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
+                .is_ok()
+        );
         assert!(schedule.key_update_pending());
 
         // Commit key update
@@ -853,13 +859,17 @@ mod tests {
         let remote_traffic_secret = vec![0x20u8; 32];
 
         // First update should succeed
-        assert!(schedule
-            .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
-            .is_ok());
+        assert!(
+            schedule
+                .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
+                .is_ok()
+        );
 
         // Second update while first is pending should fail
-        assert!(schedule
-            .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
-            .is_err());
+        assert!(
+            schedule
+                .initiate_key_update(&local_traffic_secret, &remote_traffic_secret)
+                .is_err()
+        );
     }
 }

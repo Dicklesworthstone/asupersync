@@ -258,7 +258,7 @@ mod tests {
         }
 
         // Validate total coverage
-        let total_size: u64 = boundaries.iter().map(|b| b.size).sum();
+        let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
         assert_eq!(total_size, data.len() as u64);
     }
 
@@ -320,13 +320,13 @@ mod tests {
         // Invalid strategy
         let invalid_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 1024,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 1024,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::ContentDefined, // Wrong strategy!
-            metadata: ChunkMetadata::BulkFile {
+            metadata: Some(ChunkMetadata::BulkFile {
                 throughput_tier: ThroughputTier::Standard,
-            },
+            }),
         };
 
         let result = BulkFileProfile::validate_boundaries(&[invalid_boundary]);
@@ -335,13 +335,13 @@ mod tests {
         // Chunk too small
         let too_small_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 1024, // Too small
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 1024, // Too small
+            content_hash: [1; 32],
             strategy: ChunkStrategy::FixedSize,
-            metadata: ChunkMetadata::BulkFile {
+            metadata: Some(ChunkMetadata::BulkFile {
                 throughput_tier: ThroughputTier::Standard,
-            },
+            }),
         };
 
         let result = BulkFileProfile::validate_boundaries(&[too_small_boundary]);
@@ -382,7 +382,7 @@ mod tests {
         let boundaries = BulkFileProfile::compute_boundaries(&data).unwrap();
 
         assert_eq!(boundaries.len(), 1);
-        assert_eq!(boundaries[0].size, data.len() as u64);
+        assert_eq!(boundaries[0].size_bytes, data.len() as u64);
         assert_eq!(boundaries[0].offset, 0);
         assert_eq!(boundaries[0].index, 0);
     }

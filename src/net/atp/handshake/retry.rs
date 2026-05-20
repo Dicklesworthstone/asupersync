@@ -190,7 +190,7 @@ impl RetryPacket {
             Err(_) => {
                 return Outcome::err(HandshakeError::ProtectionError {
                     reason: "invalid retry key".to_string(),
-                })
+                });
             }
         };
 
@@ -232,7 +232,7 @@ impl RetryTokenHandler {
             Err(_) => {
                 return Outcome::err(HandshakeError::ProtectionError {
                     reason: "system time error".to_string(),
-                })
+                });
             }
         };
 
@@ -265,7 +265,7 @@ impl RetryTokenHandler {
             Err(_) => {
                 return Outcome::err(HandshakeError::ProtectionError {
                     reason: "invalid token key".to_string(),
-                })
+                });
             }
         };
         mac.update(&token);
@@ -298,7 +298,7 @@ impl RetryTokenHandler {
             Err(_) => {
                 return Outcome::err(HandshakeError::ProtectionError {
                     reason: "invalid token key".to_string(),
-                })
+                });
             }
         };
         mac.update(token_data);
@@ -319,7 +319,7 @@ impl RetryTokenHandler {
             Err(_) => {
                 return Outcome::err(HandshakeError::ProtectionError {
                     reason: "system time error".to_string(),
-                })
+                });
             }
         };
 

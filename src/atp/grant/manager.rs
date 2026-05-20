@@ -546,9 +546,11 @@ mod tests {
             .create_from_template("read-once", crate::net::atp::protocol::PeerId::test(1))
             .expect("create from template");
 
-        assert!(grant_info
-            .capability
-            .grants_action(&CapabilityAction::ReadOnce));
+        assert!(
+            grant_info
+                .capability
+                .grants_action(&CapabilityAction::ReadOnce)
+        );
         assert_eq!(grant_info.capability.temporal.max_uses, Some(1));
     }
 
