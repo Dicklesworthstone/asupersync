@@ -3,15 +3,15 @@
 //! Provides ergonomic APIs for writing large buffers, files, directories, and streams
 //! to ATP with proper backpressure, cancellation, progress reporting, and proof handling.
 
-pub mod writer;
-pub mod stream_sink;
-pub mod object_sink;
 pub mod buffer_sink;
+pub mod object_sink;
+pub mod stream_sink;
+pub mod writer;
 
-use crate::atp::object::{ObjectId, ObjectKind};
-use crate::atp::proof::{TransferProof, ProofBundle};
+use crate::atp::object::{ContentId, ObjectId, ObjectKind};
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
+use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -171,7 +171,7 @@ impl Default for StreamOptions {
     fn default() -> Self {
         Self {
             expected_size: None,
-            max_chunk_size: 64 * 1024, // 64KB
+            max_chunk_size: 64 * 1024,  // 64KB
             backpressure_threshold: 10, // 10 chunks
             write_options: WriteOptions::default(),
         }
@@ -201,6 +201,90 @@ pub struct WriteResult {
     pub verification_status: VerificationStatus,
     /// Transfer performance metrics
     pub metrics: TransferMetrics,
+}
+
+/// Per-chunk transfer evidence bound into the final proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkTransferProof {
+    /// Zero-based chunk index in transfer order.
+    pub chunk_index: u64,
+    /// Byte offset in the logical object stream.
+    pub byte_offset: u64,
+    /// Chunk size in bytes.
+    pub size_bytes: u64,
+    /// Domain-separated SHA-256 digest of the chunk bytes and position.
+    pub content_hash: [u8; 32],
+}
+
+/// Final proof bundle for a completed ATP sink transfer.
+#[derive(Debug, Clone)]
+pub struct TransferProof {
+    /// Transfer that generated this proof.
+    pub transfer_id: TransferId,
+    /// Content-addressed object id derived from all transferred chunks.
+    pub object_id: ObjectId,
+    /// Domain-separated hash of the complete chunk transcript.
+    pub content_hash: [u8; 32],
+    /// Domain-separated Merkle-like root over chunk proofs.
+    pub manifest_root: [u8; 32],
+    /// Total transferred bytes covered by this proof.
+    pub total_bytes: u64,
+    /// Number of chunks covered by this proof.
+    pub chunk_count: u64,
+    /// Chunk-level evidence included in transfer order.
+    pub chunks: Vec<ChunkTransferProof>,
+    /// Proof creation time.
+    pub completed_at: SystemTime,
+}
+
+impl TransferProof {
+    /// Build a transfer proof from verified chunk records.
+    #[must_use]
+    pub fn from_chunk_proofs(
+        transfer_id: TransferId,
+        mut chunks: Vec<ChunkTransferProof>,
+        completed_at: SystemTime,
+    ) -> Self {
+        chunks.sort_by_key(|chunk| chunk.chunk_index);
+
+        let mut content_hasher = Sha256::new();
+        content_hasher.update(b"asupersync.atp.sink.transfer.content.v1\0");
+        content_hasher.update(transfer_id.0);
+
+        let mut manifest_hasher = Sha256::new();
+        manifest_hasher.update(b"asupersync.atp.sink.transfer.manifest.v1\0");
+        manifest_hasher.update(transfer_id.0);
+
+        let mut total_bytes = 0_u64;
+        for chunk in &chunks {
+            content_hasher.update(chunk.chunk_index.to_be_bytes());
+            content_hasher.update(chunk.byte_offset.to_be_bytes());
+            content_hasher.update(chunk.size_bytes.to_be_bytes());
+            content_hasher.update(chunk.content_hash);
+
+            manifest_hasher.update(chunk.chunk_index.to_be_bytes());
+            manifest_hasher.update(chunk.byte_offset.to_be_bytes());
+            manifest_hasher.update(chunk.size_bytes.to_be_bytes());
+            manifest_hasher.update(chunk.content_hash);
+
+            total_bytes = total_bytes.saturating_add(chunk.size_bytes);
+        }
+
+        let content_hash: [u8; 32] = content_hasher.finalize().into();
+        let manifest_root: [u8; 32] = manifest_hasher.finalize().into();
+        let chunk_count = chunks.len() as u64;
+
+        Self {
+            transfer_id,
+            object_id: ObjectId::content(ContentId::new(content_hash)),
+            content_hash,
+            manifest_root,
+            total_bytes,
+            chunk_count,
+            chunks,
+            completed_at,
+        }
+    }
 }
 
 /// Transfer progress information
@@ -488,7 +572,9 @@ pub enum WriteError {
     PermissionDenied { reason: String },
 
     #[error("Network error: {source}")]
-    NetworkError { source: Box<dyn std::error::Error + Send + Sync> },
+    NetworkError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[error("Verification failed: {reason}")]
     VerificationFailed { reason: String },
@@ -497,7 +583,10 @@ pub enum WriteError {
     ResumeFailed { reason: String },
 
     #[error("Backpressure exceeded: {current_depth}/{max_depth}")]
-    BackpressureExceeded { current_depth: usize, max_depth: usize },
+    BackpressureExceeded {
+        current_depth: usize,
+        max_depth: usize,
+    },
 
     #[error("Invalid transfer ID: {transfer_id:?}")]
     InvalidTransferId { transfer_id: TransferId },
