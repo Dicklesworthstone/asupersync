@@ -824,9 +824,14 @@ mod tests {
         )
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn fully_supported_provider_selects_fast_policy() {
-        crate::test_logging::init_test("fully_supported_provider_selects_fast_policy");
+        init_test("fully_supported_provider_selects_fast_policy");
         let provider = FakePlatformCapabilityProvider::fully_supported();
         let report = build_platform_capability_report(&provider);
 
@@ -854,7 +859,7 @@ mod tests {
 
     #[test]
     fn failed_probes_select_conservative_degradation() {
-        crate::test_logging::init_test("failed_probes_select_conservative_degradation");
+        init_test("failed_probes_select_conservative_degradation");
         let mut provider = FakePlatformCapabilityProvider::fully_supported();
         provider.sparse_files = CapabilityProbe::new(
             "sparse_files",
@@ -906,7 +911,7 @@ mod tests {
 
     #[test]
     fn native_report_has_stable_sections() {
-        crate::test_logging::init_test("native_report_has_stable_sections");
+        init_test("native_report_has_stable_sections");
         let report = detect_platform_capabilities();
 
         assert_eq!(report.schema_version, PLATFORM_CAPABILITY_REPORT_SCHEMA);
