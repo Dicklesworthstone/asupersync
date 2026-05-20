@@ -1,7 +1,7 @@
 //! QUIC DATAGRAM Frame Implementation (RFC 9221)
 
 use crate::bytes::{Bytes, BytesMut};
-use crate::net::atp::protocol::varint::{VarInt, VARINT_MAX};
+use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt};
 use crate::types::outcome::Outcome;
 use std::fmt;
 
