@@ -11,9 +11,99 @@ use crate::atp::object::{ObjectId, ContentId};
 use crate::atp::stream_object::{StreamManifest, StreamEpoch, EpochState, ByteRange, PrefixConsumer, ConsumptionPolicy};
 use crate::atp::writer::{AtpWriter, AtpSink, WriterConfig, WriterProgress, WriterState, TransferProof, ResumeToken, ProofMode};
 use crate::cx::Cx;
+use crate::sync::ContendedMutex;
 use std::path::Path;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
+
+const TRANSFER_REGISTRY_SHARDS: usize = 64;
+
+type TransferActorHandle = Arc<ContendedMutex<TransferActor>>;
+
+/// Sharded active-transfer registry for ATP sessions.
+#[derive(Debug)]
+struct TransferRegistry {
+    shards: Box<[ContendedMutex<HashMap<TransferId, TransferActorHandle>>]>,
+}
+
+impl TransferRegistry {
+    fn new(shard_count: usize) -> Self {
+        let shard_count = shard_count.max(1);
+        let mut shards = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            shards.push(ContendedMutex::new("atp_transfer_registry", HashMap::new()));
+        }
+        Self {
+            shards: shards.into_boxed_slice(),
+        }
+    }
+
+    #[cfg(test)]
+    fn insert(&self, transfer_id: TransferId, actor: TransferActorHandle) {
+        let shard = self.shard_for(transfer_id);
+        let mut transfers = self.shards[shard]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        transfers.insert(transfer_id, actor);
+    }
+
+    fn remove(&self, transfer_id: TransferId) -> Option<TransferActorHandle> {
+        let shard = self.shard_for(transfer_id);
+        let mut transfers = self.shards[shard]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        transfers.remove(&transfer_id)
+    }
+
+    fn drain(&self) -> Vec<TransferActorHandle> {
+        let mut drained = Vec::new();
+        for shard in self.shards.iter() {
+            let mut transfers = shard.lock().unwrap_or_else(PoisonError::into_inner);
+            drained.extend(transfers.drain().map(|(_transfer_id, actor)| actor));
+        }
+        drained
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.lock().unwrap_or_else(PoisonError::into_inner).len())
+            .sum()
+    }
+
+    fn shard_for(&self, transfer_id: TransferId) -> usize {
+        transfer_shard_index(transfer_id, self.shards.len())
+    }
+}
+
+impl Default for TransferRegistry {
+    fn default() -> Self {
+        Self::new(TRANSFER_REGISTRY_SHARDS)
+    }
+}
+
+fn transfer_shard_index(transfer_id: TransferId, shard_count: usize) -> usize {
+    let shard_count = shard_count.max(1);
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&transfer_id.as_bytes()[..8]);
+    let hash = u64::from_le_bytes(prefix);
+    match u64::try_from(shard_count) {
+        Ok(shards) => usize::try_from(hash % shards).unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+fn request_transfer_cancel(actor: &TransferActorHandle) {
+    let mut actor = actor.lock().unwrap_or_else(PoisonError::into_inner);
+    let cancel_cmd = TransferCommand::new(
+        IdempotencyKey::new(0), // TODO: Generate proper key
+        TransferCommandKind::Cancel {
+            phase: crate::atp::transfer::TransferCancelPhase::Requested,
+        },
+    );
+    let _ = actor.apply(cancel_cmd);
+}
 
 /// Configuration for ATP SDK operations.
 #[derive(Debug, Clone)]
@@ -55,7 +145,7 @@ pub struct AtpSession {
     /// Configuration.
     config: AtpConfig,
     /// Active transfers.
-    active_transfers: Arc<std::sync::Mutex<HashMap<TransferId, Arc<std::sync::Mutex<TransferActor>>>>>,
+    active_transfers: Arc<TransferRegistry>,
 }
 
 impl AtpSession {
@@ -71,7 +161,7 @@ impl AtpSession {
             session_id,
             local_peer_id,
             config,
-            active_transfers: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            active_transfers: Arc::new(TransferRegistry::default()),
         };
 
         if session.config.enable_diagnostics {
@@ -85,20 +175,9 @@ impl AtpSession {
     pub async fn close(&self, cx: &Cx) -> AtpOutcome<()> {
         cx.trace("atp_sdk");
 
-        // Cancel all active transfers
-        let transfers = self.active_transfers.lock().unwrap().clone();
-        for (_transfer_id, actor) in transfers {
-            let mut actor = actor.lock().unwrap();
-            let cancel_cmd = TransferCommand::new(
-                IdempotencyKey::new(0), // TODO: Generate proper key
-                TransferCommandKind::Cancel {
-                    phase: crate::atp::transfer::TransferCancelPhase::Requested,
-                },
-            );
-            let _ = actor.apply(cancel_cmd);
+        for actor in self.active_transfers.drain() {
+            request_transfer_cancel(&actor);
         }
-
-        self.active_transfers.lock().unwrap().clear();
 
         if self.config.enable_diagnostics {
             cx.trace(&format!("closed session {}", self.session_id));
@@ -331,16 +410,8 @@ impl AtpSession {
     ) -> AtpOutcome<()> {
         cx.trace(&format!("cancelling transfer {:?}", transfer_id));
 
-        let transfers = self.active_transfers.lock().unwrap();
-        if let Some(actor) = transfers.get(&transfer_id) {
-            let mut actor = actor.lock().unwrap();
-            let cancel_cmd = TransferCommand::new(
-                IdempotencyKey::new(0), // TODO: Generate proper key
-                TransferCommandKind::Cancel {
-                    phase: crate::atp::transfer::TransferCancelPhase::Requested,
-                },
-            );
-            let _ = actor.apply(cancel_cmd); // Ignore result for cancellation
+        if let Some(actor) = self.active_transfers.remove(transfer_id) {
+            request_transfer_cancel(&actor);
         }
 
         if self.config.enable_diagnostics {
@@ -791,8 +862,29 @@ pub enum PathType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::actor::{TransferActorId, TransferActorTopology, TransferRegionId};
+    use crate::atp::transfer::{PeerCapabilities, TransferManifestRef};
     use crate::cx::scope;
     use crate::lab::LabRuntime;
+    use std::collections::BTreeSet;
+
+    fn registry_actor(transfer_id: TransferId) -> TransferActorHandle {
+        Arc::new(ContendedMutex::new(
+            "atp_transfer_actor",
+            TransferActor::new(
+                TransferActorId::new(1),
+                transfer_id,
+                TransferManifestRef {
+                    schema_version: 1,
+                    merkle_root: [9; 32],
+                    object_count: 1,
+                },
+                PeerCapabilities::default(),
+                TransferActorTopology::new(TransferRegionId::new(10), TransferRegionId::new(20)),
+            )
+            .unwrap(),
+        ))
+    }
 
     #[test]
     fn test_atp_config_defaults() {
@@ -816,6 +908,60 @@ mod tests {
         assert_eq!(handle.session_id, "test-session");
         assert_eq!(handle.direction, TransferDirection::Send);
         assert_eq!(handle.state(), TransferState::Offered);
+    }
+
+    #[test]
+    fn transfer_registry_shards_distinct_transfer_ids() {
+        let registry = TransferRegistry::new(4);
+        let shard_indexes: BTreeSet<_> = (0_u8..4)
+            .map(|prefix| {
+                let mut bytes = [0_u8; 32];
+                bytes[0] = prefix;
+                registry.shard_for(TransferId::new(bytes))
+            })
+            .collect();
+
+        assert_eq!(shard_indexes.len(), 4);
+    }
+
+    #[test]
+    fn transfer_cancel_removes_actor_before_taking_actor_lock() {
+        let registry = TransferRegistry::new(4);
+        let transfer_id = TransferId::new([7; 32]);
+        let actor = registry_actor(transfer_id);
+
+        registry.insert(transfer_id, actor.clone());
+        assert_eq!(registry.len(), 1);
+
+        let removed = registry.remove(transfer_id).unwrap();
+        assert_eq!(registry.len(), 0);
+
+        request_transfer_cancel(&removed);
+        let actor = actor.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(actor.state(), TransferState::Cancelling);
+    }
+
+    #[test]
+    fn transfer_close_drains_all_shards_before_cancelling_actors() {
+        let registry = TransferRegistry::new(8);
+        for prefix in 0_u8..8 {
+            let mut bytes = [0_u8; 32];
+            bytes[0] = prefix;
+            let transfer_id = TransferId::new(bytes);
+            registry.insert(transfer_id, registry_actor(transfer_id));
+        }
+
+        let drained = registry.drain();
+        assert_eq!(drained.len(), 8);
+        assert_eq!(registry.len(), 0);
+
+        for actor in &drained {
+            request_transfer_cancel(actor);
+        }
+        for actor in drained {
+            let actor = actor.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(actor.state(), TransferState::Cancelling);
+        }
     }
 
     #[test]
