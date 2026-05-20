@@ -26,6 +26,19 @@ impl TransferId {
         Self(bytes)
     }
 
+    /// Construct a transfer id from a small deterministic integer.
+    #[must_use]
+    pub const fn from_u128(value: u128) -> Self {
+        let mut bytes = [0_u8; 32];
+        let value_bytes = value.to_be_bytes();
+        let mut index = 0;
+        while index < value_bytes.len() {
+            bytes[16 + index] = value_bytes[index];
+            index += 1;
+        }
+        Self(bytes)
+    }
+
     /// Derive a stable transfer id for tests and transcripts.
     #[must_use]
     pub fn derive(
