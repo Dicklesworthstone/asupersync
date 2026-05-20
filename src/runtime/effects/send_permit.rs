@@ -20,6 +20,7 @@ use std::marker::PhantomData;
 /// let permit = stream.reserve_send().await?;
 /// permit.commit(data)?; // Or permit.abort() to cancel
 /// ```
+#[must_use = "SendPermit must be consumed via commit() or abort()"]
 pub struct SendPermit<T> {
     /// Callback to commit the send operation
     commit_fn: Option<Box<dyn FnOnce(&[u8]) -> Result<(), T> + Send + Sync>>,
@@ -54,9 +55,18 @@ impl<T> SendPermit<T> {
     /// properties of the underlying transport (typically not cancel-safe).
     pub fn commit(mut self, data: &[u8]) -> Result<(), T> {
         if let Some(commit_fn) = self.commit_fn.take() {
-            // Clear abort function since we're committing
-            self.abort_fn = None;
-            commit_fn(data)
+            match commit_fn(data) {
+                Ok(()) => {
+                    self.abort_fn = None;
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Some(abort_fn) = self.abort_fn.take() {
+                        abort_fn();
+                    }
+                    Err(error)
+                }
+            }
         } else {
             // Permit was already used or aborted
             panic!("SendPermit already consumed")
@@ -94,6 +104,7 @@ mod tests {
         let committed = Arc::new(Mutex::new(Vec::new()));
         let committed_clone = Arc::clone(&committed);
         let aborted = Arc::new(Mutex::new(false));
+        let aborted_clone = Arc::clone(&aborted);
 
         let permit = SendPermit::new(
             move |data: &[u8]| {
@@ -101,7 +112,7 @@ mod tests {
                 Ok::<(), ()>(())
             },
             move || {
-                *aborted.lock().unwrap() = true;
+                *aborted_clone.lock().unwrap() = true;
             },
         );
 
@@ -113,12 +124,13 @@ mod tests {
     #[test]
     fn test_permit_abort() {
         let committed = Arc::new(Mutex::new(Vec::new()));
+        let committed_clone = Arc::clone(&committed);
         let aborted = Arc::new(Mutex::new(false));
         let aborted_clone = Arc::clone(&aborted);
 
         let permit = SendPermit::new(
             move |data: &[u8]| {
-                committed.lock().unwrap().extend_from_slice(data);
+                committed_clone.lock().unwrap().extend_from_slice(data);
                 Ok::<(), ()>(())
             },
             move || {
@@ -132,15 +144,38 @@ mod tests {
     }
 
     #[test]
+    fn test_permit_commit_error_aborts_reservation() {
+        let abort_count = Arc::new(Mutex::new(0usize));
+        let abort_count_clone = Arc::clone(&abort_count);
+
+        let permit = SendPermit::new(
+            move |data: &[u8]| {
+                assert_eq!(data, b"too large");
+                Err::<(), &'static str>("send queue rejected commit")
+            },
+            move || {
+                *abort_count_clone.lock().unwrap() += 1;
+            },
+        );
+
+        assert_eq!(
+            permit.commit(b"too large"),
+            Err("send queue rejected commit")
+        );
+        assert_eq!(*abort_count.lock().unwrap(), 1);
+    }
+
+    #[test]
     fn test_permit_drop_aborts() {
         let committed = Arc::new(Mutex::new(Vec::new()));
+        let committed_clone = Arc::clone(&committed);
         let aborted = Arc::new(Mutex::new(false));
         let aborted_clone = Arc::clone(&aborted);
 
         {
             let _permit = SendPermit::new(
                 move |data: &[u8]| {
-                    committed.lock().unwrap().extend_from_slice(data);
+                    committed_clone.lock().unwrap().extend_from_slice(data);
                     Ok::<(), ()>(())
                 },
                 move || {
@@ -150,6 +185,7 @@ mod tests {
             // permit dropped here
         }
 
+        assert!(committed.lock().unwrap().is_empty());
         assert!(*aborted.lock().unwrap());
     }
 }
