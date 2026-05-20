@@ -154,27 +154,33 @@ impl PlatformCapabilities {
 
         // Detect filesystem features
         let filesystem = match Self::detect_filesystem_features(path).await {
-            Ok(fs) => fs,
-            Err(e) => return Err(e),
+            Outcome::Ok(fs) => fs,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
         // Detect I/O capabilities
         let io_capabilities = match Self::detect_io_capabilities(&os_type, &filesystem).await {
-            Ok(io) => io,
-            Err(e) => return Err(e),
+            Outcome::Ok(io) => io,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
         // Detect atomic operation support
         let atomic_operations = match Self::detect_atomic_support(path, &os_type).await {
-            Ok(atomic) => atomic,
-            Err(e) => return Err(e),
+            Outcome::Ok(atomic) => atomic,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
         // Generate performance hints
         let performance_hints =
             Self::generate_performance_hints(&os_type, &filesystem, &io_capabilities);
 
-        Ok(Self {
+        Outcome::Ok(Self {
             os_type,
             filesystem,
             io_capabilities,
@@ -212,12 +218,16 @@ impl PlatformCapabilities {
     ) -> Outcome<FilesystemFeatures, CapabilityError> {
         // Get filesystem statistics
         let fs_type = match Self::detect_filesystem_type(path) {
-            Ok(fs_type) => fs_type,
-            Err(e) => return Err(e),
+            Outcome::Ok(fs_type) => fs_type,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
         let block_size = match Self::detect_block_size(path) {
-            Ok(block_size) => block_size,
-            Err(e) => return Err(e),
+            Outcome::Ok(block_size) => block_size,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
         // Test capabilities by attempting operations
@@ -231,7 +241,7 @@ impl PlatformCapabilities {
 
         let max_file_size = Self::detect_max_file_size(&fs_type);
 
-        Ok(FilesystemFeatures {
+        Outcome::Ok(FilesystemFeatures {
             fs_type,
             supports_preallocation,
             supports_atomic_rename,

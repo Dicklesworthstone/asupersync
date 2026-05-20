@@ -208,7 +208,7 @@ impl SparseWriter {
             self.preallocate_internal(&mut state, size)?;
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Write a chunk at the specified offset
@@ -230,7 +230,10 @@ impl SparseWriter {
         };
 
         // Ensure temp file is open
-        self.ensure_temp_file_open().await?;
+        match self.ensure_temp_file_open().await {
+            Ok(_) => {},
+            Err(e) => return Outcome::err(e),
+        }
 
         // Check for overlapping writes
         {
@@ -302,7 +305,7 @@ impl SparseWriter {
             manifest_root: expected_manifest.root_hash.clone(),
         };
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Commit the written data atomically to final destination
@@ -333,15 +336,21 @@ impl SparseWriter {
     }
 
     /// Cancel the write operation and clean up
-    pub async fn cancel(&self, cx: &Cx) -> Result<(), SparseWriterError> {
+    pub async fn cancel(&self, cx: &Cx) -> Outcome<(), SparseWriterError> {
         // Move temp file to quarantine if configured
         if self.config.enable_quarantine {
-            self.quarantine_temp_file("cancelled").await?;
+            match self.quarantine_temp_file("cancelled").await {
+                Ok(_) => {},
+                Err(e) => return Outcome::err(e),
+            }
         } else {
-            self.cleanup_temp_file().await?;
+            match self.cleanup_temp_file().await {
+                Ok(_) => {},
+                Err(e) => return Outcome::err(e),
+            }
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Get current write statistics
@@ -374,7 +383,7 @@ impl SparseWriter {
         let mut state = self.state.lock().unwrap();
 
         if state.temp_file.is_some() {
-            return Ok(());
+            return Outcome::ok(());
         }
 
         // Generate temp path
@@ -399,7 +408,7 @@ impl SparseWriter {
         if let Some(size) = state.expected_size {
             if self.config.enable_preallocation {
                 match self.preallocate_internal(&mut state, size) {
-                    Ok(()) => (),
+                    Outcome::ok(()) => (),
                     Err(e) => return Err(e),
                 }
             }
@@ -448,7 +457,7 @@ impl SparseWriter {
                 }
             }
         }
-        Ok(())
+        Outcome::ok(())
     }
 
     async fn write_chunk_internal(
@@ -494,7 +503,7 @@ impl SparseWriter {
         Ok(hash)
     }
 
-    async fn apply_fsync_policy(&self) -> Result<(), SparseWriterError> {
+    async fn apply_fsync_policy(&self) -> Outcome<(), SparseWriterError> {
         let mut state = self.state.lock().unwrap();
 
         if let Some(ref mut file) = state.temp_file {
@@ -519,10 +528,10 @@ impl SparseWriter {
             }
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
-    async fn atomic_commit(&self) -> Result<PathBuf, SparseWriterError> {
+    async fn atomic_commit(&self) -> Outcome<PathBuf, SparseWriterError> {
         let state = self.state.lock().unwrap();
         let temp_path = state
             .temp_path

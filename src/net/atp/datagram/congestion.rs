@@ -4,7 +4,9 @@
 //! the network while prioritizing critical frames. Uses priority queuing, rate limiting,
 //! and adaptive backoff to maintain fairness with reliable streams.
 
-use crate::net::atp::datagram::frame::{DatagramFrame, DatagramMetadata, DatagramPriority, DatagramError};
+use crate::net::atp::datagram::frame::{
+    DatagramError, DatagramFrame, DatagramMetadata, DatagramPriority,
+};
 use crate::types::outcome::Outcome;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -118,8 +120,14 @@ impl CongestionState {
             return None;
         }
 
-        let total_micros: u64 = self.rtt_samples.iter().map(|rtt| rtt.as_micros() as u64).sum();
-        Some(Duration::from_micros(total_micros / self.rtt_samples.len() as u64))
+        let total_micros: u64 = self
+            .rtt_samples
+            .iter()
+            .map(|rtt| rtt.as_micros() as u64)
+            .sum();
+        Some(Duration::from_micros(
+            total_micros / self.rtt_samples.len() as u64,
+        ))
     }
 
     /// Calculate recent loss ratio
@@ -203,7 +211,9 @@ impl CongestionController {
         }
 
         // Add to appropriate priority queue
-        let queue = self.priority_queues.get_mut(&metadata.priority)
+        let queue = self
+            .priority_queues
+            .get_mut(&metadata.priority)
             .expect("priority queue should exist");
 
         queue.push_back(QueuedDatagram {
@@ -217,7 +227,9 @@ impl CongestionController {
     }
 
     /// Try to send next datagram if congestion allows
-    pub fn try_send_next(&mut self) -> Outcome<Option<(DatagramFrame, DatagramMetadata)>, DatagramError> {
+    pub fn try_send_next(
+        &mut self,
+    ) -> Outcome<Option<(DatagramFrame, DatagramMetadata)>, DatagramError> {
         let now = Instant::now();
 
         // Update tokens and congestion state
@@ -237,7 +249,9 @@ impl CongestionController {
         ];
 
         for priority in &priorities {
-            let queue = self.priority_queues.get_mut(priority)
+            let queue = self
+                .priority_queues
+                .get_mut(priority)
                 .expect("priority queue should exist");
 
             // Remove expired datagrams
@@ -345,11 +359,11 @@ impl CongestionController {
     /// Refill token bucket
     fn refill_tokens(&mut self, now: Instant) {
         let elapsed = now.duration_since(self.state.last_refill);
-        let tokens_to_add = (elapsed.as_secs_f64() * self.config.max_rate_per_sec as f64).min(
-            self.config.max_burst_size as f64
-        );
+        let tokens_to_add = (elapsed.as_secs_f64() * self.config.max_rate_per_sec as f64)
+            .min(self.config.max_burst_size as f64);
 
-        self.state.tokens = (self.state.tokens + tokens_to_add).min(self.config.max_burst_size as f64);
+        self.state.tokens =
+            (self.state.tokens + tokens_to_add).min(self.config.max_burst_size as f64);
         self.state.last_refill = now;
     }
 
@@ -385,15 +399,13 @@ impl CongestionController {
                 now.duration_since(self.state.last_send) >= self.config.min_send_interval
             }
             CongestionAlgorithm::Aimd => {
-                self.state.congestion_window >= 1.0 &&
-                now.duration_since(self.state.last_send) >= self.config.min_send_interval
+                self.state.congestion_window >= 1.0
+                    && now.duration_since(self.state.last_send) >= self.config.min_send_interval
             }
-            CongestionAlgorithm::TokenBucket => {
-                self.state.tokens >= 1.0
-            }
+            CongestionAlgorithm::TokenBucket => self.state.tokens >= 1.0,
             CongestionAlgorithm::Adaptive => {
-                self.state.congestion_window >= 1.0 &&
-                now.duration_since(self.state.last_send) >= self.config.min_send_interval
+                self.state.congestion_window >= 1.0
+                    && now.duration_since(self.state.last_send) >= self.config.min_send_interval
             }
         }
     }
@@ -428,7 +440,9 @@ impl CongestionController {
                 break;
             }
 
-            let queue = self.priority_queues.get_mut(priority)
+            let queue = self
+                .priority_queues
+                .get_mut(priority)
                 .expect("priority queue should exist");
 
             if !queue.is_empty() {
@@ -453,7 +467,8 @@ impl CongestionController {
 
     /// Get queue depth by priority
     pub fn queue_depth(&self, priority: DatagramPriority) -> usize {
-        self.priority_queues.get(&priority)
+        self.priority_queues
+            .get(&priority)
             .map(|queue| queue.len())
             .unwrap_or(0)
     }
@@ -516,15 +531,15 @@ impl CongestionStats {
     /// Check if congestion control is performing well
     pub fn is_performing_well(&self) -> bool {
         self.drop_ratio() < 0.1 && // Less than 10% drops
-        self.send_ratio() > 0.8   // More than 80% sent
+        self.send_ratio() > 0.8 // More than 80% sent
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::atp::datagram::frame::DatagramFrame;
     use crate::bytes::Bytes;
+    use crate::net::atp::datagram::frame::DatagramFrame;
 
     fn create_test_datagram(priority: DatagramPriority) -> (DatagramFrame, DatagramMetadata) {
         let frame = DatagramFrame::with_length(Bytes::from_static(b"test"));

@@ -283,8 +283,10 @@ impl GrantManager {
 
     /// Evaluate an access request against current grants.
     pub fn evaluate_access(&mut self, request: &AccessRequest) -> GrantResult<PolicyDecision> {
-        let mut enforcer = self.enforcer.lock()
-            .map_err(|e| GrantError::Storage(format!("enforcer lock error: {e}")))?;
+        let mut enforcer = match self.enforcer.lock() {
+            Ok(guard) => guard,
+            Err(e) => return Outcome::err(GrantError::Storage(format!("enforcer lock error: {e}"))),
+        };
 
         let decision = enforcer.evaluate_access(request);
 
@@ -322,7 +324,7 @@ impl GrantManager {
             }
         }
 
-        Ok(decision)
+        Outcome::ok(decision)
     }
 
     /// Add a trusted peer for grant verification.

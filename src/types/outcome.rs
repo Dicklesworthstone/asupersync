@@ -631,6 +631,7 @@ impl<T, E> From<Result<T, E>> for Outcome<T, E> {
     }
 }
 
+
 /// Error type for converting Outcome to Result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OutcomeError<E> {

@@ -4,13 +4,15 @@
 //! Probes are used to discover alternative paths, measure RTT/bandwidth, and detect
 //! path failures without affecting critical data flows.
 
-use crate::net::atp::datagram::frame::{DatagramFrame, DatagramMetadata, DatagramPriority, DatagramError};
-use crate::net::atp::datagram::transport::DatagramTransport;
 use crate::bytes::Bytes;
+use crate::net::atp::datagram::frame::{
+    DatagramError, DatagramFrame, DatagramMetadata, DatagramPriority,
+};
+use crate::net::atp::datagram::transport::DatagramTransport;
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 /// Path probe types for different discovery scenarios
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -83,12 +85,7 @@ pub struct PathProbe {
 
 impl PathProbe {
     /// Create new probe request
-    pub fn new_request(
-        probe_id: u64,
-        probe_type: ProbeType,
-        path_id: u64,
-        sequence: u32,
-    ) -> Self {
+    pub fn new_request(probe_id: u64, probe_type: ProbeType, path_id: u64, sequence: u32) -> Self {
         Self {
             probe_id,
             probe_type,
@@ -323,10 +320,14 @@ impl ProbeManager {
         self.transport.validate_size(probe_data.len())?;
 
         // Track pending probe
-        self.pending_probes.insert(probe_id, (probe.clone(), Instant::now()));
+        self.pending_probes
+            .insert(probe_id, (probe.clone(), Instant::now()));
 
         // Update statistics
-        self.path_stats.entry(path_id).or_default().update_probe_sent();
+        self.path_stats
+            .entry(path_id)
+            .or_default()
+            .update_probe_sent();
 
         // Create datagram frame
         let metadata = DatagramMetadata::new("path_probe")
@@ -352,7 +353,10 @@ impl ProbeManager {
     }
 
     /// Handle probe response
-    fn handle_probe_response(&mut self, response: PathProbe) -> Outcome<Option<DatagramFrame>, DatagramError> {
+    fn handle_probe_response(
+        &mut self,
+        response: PathProbe,
+    ) -> Outcome<Option<DatagramFrame>, DatagramError> {
         if let Some((request, _sent_at)) = self.pending_probes.remove(&response.probe_id) {
             // Calculate RTT
             if let Some(rtt) = request.calculate_rtt(&response) {
@@ -372,7 +376,10 @@ impl ProbeManager {
     }
 
     /// Handle probe request - generate response
-    fn handle_probe_request(&mut self, request: PathProbe) -> Outcome<Option<DatagramFrame>, DatagramError> {
+    fn handle_probe_request(
+        &mut self,
+        request: PathProbe,
+    ) -> Outcome<Option<DatagramFrame>, DatagramError> {
         let response = request.new_response();
         let response_data = response.encode()?;
 
@@ -391,9 +398,8 @@ impl ProbeManager {
     pub fn cleanup_expired_probes(&mut self, now: Instant) {
         let timeout = Duration::from_secs(30); // Global timeout for pending probes
 
-        self.pending_probes.retain(|_probe_id, (_probe, sent_at)| {
-            now.duration_since(*sent_at) < timeout
-        });
+        self.pending_probes
+            .retain(|_probe_id, (_probe, sent_at)| now.duration_since(*sent_at) < timeout);
     }
 
     /// Get statistics for a path

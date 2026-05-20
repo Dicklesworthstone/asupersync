@@ -311,22 +311,28 @@ impl GrantStorage {
 
     /// Load a single grant file.
     fn load_grant_file(&mut self, path: &Path) -> GrantResult<()> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| GrantError::Storage(format!("failed to read grant file: {e}")))?;
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to read grant file: {e}"))),
+        };
 
-        let record: GrantRecord = serde_json::from_str(&content)
-            .map_err(|e| GrantError::Storage(format!("failed to parse grant file: {e}")))?;
+        let record: GrantRecord = match serde_json::from_str(&content) {
+            Ok(r) => r,
+            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to parse grant file: {e}"))),
+        };
 
         let grant_id = record.grant_info.capability.grant_id.clone();
         self.grants_cache.insert(grant_id, record);
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Load audit log file.
     fn load_audit_file(&mut self, path: &Path) -> GrantResult<()> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| GrantError::Storage(format!("failed to read audit file: {e}")))?;
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to read audit file: {e}"))),
+        };
 
         for line in content.lines() {
             if let Ok(record) = serde_json::from_str::<GrantAuditRecord>(line) {
@@ -334,7 +340,7 @@ impl GrantStorage {
             }
         }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Persist a single grant to disk.
@@ -352,13 +358,17 @@ impl GrantStorage {
 
         // Write grant file
         let file_path = self.grant_file_path(grant_id);
-        let content = serde_json::to_string_pretty(record)
-            .map_err(|e| GrantError::Storage(format!("failed to serialize grant: {e}")))?;
+        let content = match serde_json::to_string_pretty(record) {
+            Ok(c) => c,
+            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to serialize grant: {e}"))),
+        };
 
-        fs::write(&file_path, content)
-            .map_err(|e| GrantError::Storage(format!("failed to write grant file: {e}")))?;
+        match fs::write(&file_path, content) {
+            Ok(_) => {},
+            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to write grant file: {e}"))),
+        }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Persist audit log to disk.
@@ -373,10 +383,12 @@ impl GrantStorage {
             }
         }
 
-        fs::write(&audit_file, content)
-            .map_err(|e| GrantError::Storage(format!("failed to write audit log: {e}")))?;
+        match fs::write(&audit_file, content) {
+            Ok(_) => {},
+            Err(e) => return Outcome::err(GrantError::Storage(format!("failed to write audit log: {e}"))),
+        }
 
-        Ok(())
+        Outcome::ok(())
     }
 
     /// Get file path for a grant.

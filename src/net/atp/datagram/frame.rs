@@ -88,10 +88,12 @@ impl DatagramFrame {
         if self.has_length_field() {
             let length = match VarInt::new(self.data.len() as u64) {
                 Ok(len) => len,
-                Err(_) => return Err(DatagramError::PayloadTooLarge {
-                    size: self.data.len(),
-                    max: VarInt::max_value() as usize,
-                }),
+                Err(_) => {
+                    return Err(DatagramError::PayloadTooLarge {
+                        size: self.data.len(),
+                        max: VarInt::max_value() as usize,
+                    });
+                }
             };
             if let Err(_) = length.encode(buf) {
                 return Err(DatagramError::EncodingFailed("length".to_string()));
@@ -113,13 +115,21 @@ impl DatagramFrame {
         // Parse frame type
         let frame_type_varint = match VarInt::decode(buf) {
             Ok(Some(varint)) => varint,
-            Ok(None) => return Err(DatagramError::InvalidFrame("truncated frame type".to_string())),
+            Ok(None) => {
+                return Err(DatagramError::InvalidFrame(
+                    "truncated frame type".to_string(),
+                ));
+            }
             Err(_) => return Err(DatagramError::InvalidFrame("frame type".to_string())),
         };
 
         let frame_type = match DatagramFrameType::from_varint(frame_type_varint) {
             Some(ft) => ft,
-            None => return Err(DatagramError::InvalidFrame("unknown frame type".to_string())),
+            None => {
+                return Err(DatagramError::InvalidFrame(
+                    "unknown frame type".to_string(),
+                ));
+            }
         };
 
         let data = match frame_type {
@@ -138,7 +148,9 @@ impl DatagramFrame {
                 // Parse length field
                 let length_varint = match VarInt::decode(buf) {
                     Ok(Some(varint)) => varint,
-                    Ok(None) => return Err(DatagramError::InvalidFrame("truncated length".to_string())),
+                    Ok(None) => {
+                        return Err(DatagramError::InvalidFrame("truncated length".to_string()));
+                    }
                     Err(_) => return Err(DatagramError::InvalidFrame("length field".to_string())),
                 };
 
@@ -296,7 +308,8 @@ impl DatagramMetadata {
 
     /// Check if datagram has expired
     pub fn is_expired(&self) -> bool {
-        self.expires_at.map_or(false, |expires| std::time::Instant::now() > expires)
+        self.expires_at
+            .map_or(false, |expires| std::time::Instant::now() > expires)
     }
 }
 
@@ -377,7 +390,8 @@ mod tests {
         // Test expiration
         assert!(!metadata.is_expired());
 
-        metadata = metadata.with_expiration(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        metadata =
+            metadata.with_expiration(std::time::Instant::now() - std::time::Duration::from_secs(1));
         assert!(metadata.is_expired());
     }
 
@@ -409,13 +423,19 @@ mod tests {
 
         // Unknown frame type
         let mut bad_type_buf = BytesMut::new();
-        VarInt::new(0x99).unwrap().encode(&mut bad_type_buf).unwrap();
+        VarInt::new(0x99)
+            .unwrap()
+            .encode(&mut bad_type_buf)
+            .unwrap();
         let result = DatagramFrame::decode(&mut bad_type_buf, 1024);
         assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
 
         // Truncated length field
         let mut truncated_buf = BytesMut::new();
-        VarInt::new(0x31).unwrap().encode(&mut truncated_buf).unwrap(); // DatagramWithLength
+        VarInt::new(0x31)
+            .unwrap()
+            .encode(&mut truncated_buf)
+            .unwrap(); // DatagramWithLength
         let result = DatagramFrame::decode(&mut truncated_buf, 1024);
         assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
     }

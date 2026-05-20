@@ -743,6 +743,7 @@ pub fn plan_directory_sync(
     policy: DirectorySyncPolicy,
 ) -> DirectorySyncPlan {
     let mut decisions = Vec::new();
+    let mut renamed_from_paths = BTreeSet::new();
     let destination_by_identity = identity_index(destination);
     let source_paths = source.entries.keys().cloned().collect::<BTreeSet<_>>();
 
@@ -785,6 +786,7 @@ pub fn plan_directory_sync(
                     &source_paths,
                     policy,
                 ) {
+                    renamed_from_paths.insert(from_path.clone());
                     decisions.push(decision(
                         path.clone(),
                         Some(from_path),
@@ -808,7 +810,7 @@ pub fn plan_directory_sync(
     }
 
     for (path, destination_entry) in &destination.entries {
-        if source.entries.contains_key(path) {
+        if source.entries.contains_key(path) || renamed_from_paths.contains(path) {
             continue;
         }
         decisions.push(delete_or_preserve_decision(path, destination_entry, policy));
@@ -1289,6 +1291,30 @@ mod tests {
             .expect("rename");
         assert_eq!(
             rename.from_path.as_ref().map(DirectoryPath::as_str),
+            Some("old/name.txt")
+        );
+    }
+
+    #[test]
+    fn rename_detection_does_not_plan_old_path_delete() {
+        let source = manifest(vec![file("new/name.txt", "same")]);
+        let destination = manifest(vec![file("old/name.txt", "same")]);
+        let plan = plan_directory_sync(
+            &source,
+            &destination,
+            DirectorySyncPolicy::mirror_with_authorization(
+                DestructiveAuthorization::explicit_mirror_apply(),
+            ),
+        );
+
+        assert_eq!(plan.decisions.len(), 1);
+        assert_eq!(plan.decisions[0].action, DirectorySyncAction::Rename);
+        assert_eq!(plan.decisions[0].path.as_str(), "new/name.txt");
+        assert_eq!(
+            plan.decisions[0]
+                .from_path
+                .as_ref()
+                .map(DirectoryPath::as_str),
             Some("old/name.txt")
         );
     }

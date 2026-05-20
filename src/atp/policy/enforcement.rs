@@ -1,10 +1,8 @@
 //! Policy enforcement for ATP capability-based access control.
 
-use super::{Capability, CapabilityAction, CapabilityDecision, CapabilityError, CapabilityResult, DenialReason, ResourceScope};
-use crate::atp::object::ObjectId;
-use crate::atp::path::AtpPath;
+use super::{Capability, CapabilityAction, CapabilityDecision, DenialReason, ResourceScope};
+use super::scope::{ObjectId, AtpPath};
 use crate::net::atp::protocol::PeerId;
-use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::SystemTime;
@@ -244,14 +242,19 @@ impl PolicyEnforcer {
             };
         }
 
+        // Extract needed data before mutating self to avoid borrow conflicts
+        let grant_id = best_capability.grant_id.clone();
+        let max_uses = best_capability.temporal.max_uses;
+        let capability_clone = best_capability.clone();
+
         // Increment usage count
-        self.increment_usage(&best_capability.grant_id);
+        self.increment_usage(&grant_id);
 
         // Calculate remaining uses
-        let remaining_uses = best_capability.temporal.max_uses.map(|max| max.saturating_sub(usage_count + 1));
+        let remaining_uses = max_uses.map(|max| max.saturating_sub(usage_count + 1));
 
         CapabilityDecision::Granted {
-            capability: best_capability.clone(),
+            capability: capability_clone,
             remaining_uses,
         }
     }

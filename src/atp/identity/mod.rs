@@ -11,6 +11,16 @@ use crate::net::atp::protocol::{
 };
 use crate::security::keys::{IdentityKeyStore, KeyFingerprint, KeyStoreError, PublicIdentityKey};
 
+#[path = "../directory/mod.rs"]
+pub mod directory;
+
+pub use directory::{
+    DeviceRecord, DirectoryAuditRecord, DirectoryEntryView, DirectoryError, DirectoryGrant,
+    DirectoryGroupSummary, DirectoryIoError, DirectoryList, DirectoryOperation,
+    DirectoryPeerSummary, DirectorySubject, GroupRecord, PathHint, PeerDirectory, PeerRecord,
+    ResolvedDirectoryGrant, StalePathHint, TrustScope,
+};
+
 /// Durable ATP identity derived from a persisted public key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurablePeerIdentity {

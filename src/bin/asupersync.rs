@@ -15,6 +15,9 @@ use asupersync::Time;
 use asupersync::atp::doctor::{
     AtpPlatformDoctorDocument, detect_platform_doctor_document, render_platform_doctor_human,
 };
+use asupersync::atp::identity::directory::{
+    DirectorySubject, PeerDirectory, peer_id_from_hex, peer_id_to_hex,
+};
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
     AdvancedRemediationDelta, AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
@@ -54,6 +57,7 @@ use asupersync::lab::{
     RegionCloseRecord, ResourceSurfaceRecord, TerminalOutcome, capture_cancellation,
     capture_loser_drain, capture_obligation_balance, capture_region_close, run_live_adapter,
 };
+use asupersync::net::atp::protocol::PeerId;
 use asupersync::observability::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskSummaryWire,
 };
@@ -155,10 +159,56 @@ struct AtpArgs {
 enum AtpCommand {
     /// ATP diagnostics
     Doctor(AtpDoctorArgs),
+    /// Peer directory operations
+    Directory(AtpDirectoryArgs),
     /// Verify ATP proof bundle offline
     Verify(AtpVerifyArgs),
     /// Display ATP proof bundle information
     Proof(AtpProofArgs),
+}
+
+#[derive(Args, Debug)]
+struct AtpDirectoryArgs {
+    /// Directory JSON file
+    #[arg(long, value_name = "PATH", default_value = "atp-peer-directory.json")]
+    file: PathBuf,
+    #[command(subcommand)]
+    command: AtpDirectoryCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum AtpDirectoryCommand {
+    /// List active peers and groups
+    List,
+    /// Inspect one peer, device, or group by name or full peer-id hex
+    Inspect {
+        /// Human name, device name, group name, or full peer-id hex
+        name: String,
+    },
+    /// Rename a peer display name
+    RenamePeer {
+        /// Human name or full peer-id hex
+        name: String,
+        /// New display name
+        display_name: String,
+    },
+    /// Rename a device under a peer
+    RenameDevice {
+        /// Peer name or full peer-id hex
+        peer: String,
+        /// Stable device id
+        device_id: String,
+        /// New device name
+        device_name: String,
+    },
+    /// Revoke a peer and all of its devices
+    Revoke {
+        /// Human name or full peer-id hex
+        name: String,
+        /// Audit-log reason
+        #[arg(long, default_value = "revoked by operator")]
+        reason: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -960,6 +1010,7 @@ fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
 fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         AtpCommand::Doctor(args) => atp_doctor(&args, output),
+        AtpCommand::Directory(args) => atp_directory(&args, output),
         AtpCommand::Verify(args) => atp_verify(&args, output),
         AtpCommand::Proof(args) => atp_proof(&args, output),
     }
@@ -980,6 +1031,144 @@ fn atp_doctor(args: &AtpDoctorArgs, output: &mut Output) -> Result<(), CliError>
         .write(&payload)
         .map_err(output_write_error("ATP platform capability report"))?;
     Ok(())
+}
+
+fn atp_directory(args: &AtpDirectoryArgs, output: &mut Output) -> Result<(), CliError> {
+    let mut directory = load_peer_directory(&args.file)?;
+    match &args.command {
+        AtpDirectoryCommand::List => {
+            output
+                .write(&JsonOutputValue::new(directory.list_entries()))
+                .map_err(output_write_error("ATP peer directory list"))?;
+        }
+        AtpDirectoryCommand::Inspect { name } => {
+            let subject = resolve_directory_subject(&directory, name)?;
+            let view = directory.inspect(&subject).map_err(directory_model_error)?;
+            output
+                .write(&JsonOutputValue::new(view))
+                .map_err(output_write_error("ATP peer directory inspect"))?;
+        }
+        AtpDirectoryCommand::RenamePeer { name, display_name } => {
+            let subject = resolve_directory_subject(&directory, name)?;
+            directory
+                .rename_peer(subject.clone(), display_name, None)
+                .map_err(directory_model_error)?;
+            save_peer_directory(&directory, &args.file)?;
+            write_directory_mutation(output, &args.file, "rename_peer", subject, &directory)?;
+        }
+        AtpDirectoryCommand::RenameDevice {
+            peer,
+            device_id,
+            device_name,
+        } => {
+            let peer_id = resolve_directory_peer_id(&directory, peer)?;
+            directory
+                .rename_device(peer_id, device_id, device_name, None)
+                .map_err(directory_model_error)?;
+            save_peer_directory(&directory, &args.file)?;
+            write_directory_mutation(
+                output,
+                &args.file,
+                "rename_device",
+                DirectorySubject::Device {
+                    peer_id,
+                    device_id: device_id.clone(),
+                },
+                &directory,
+            )?;
+        }
+        AtpDirectoryCommand::Revoke { name, reason } => {
+            let subject = resolve_directory_subject(&directory, name)?;
+            directory
+                .revoke_peer(subject.clone(), reason, None)
+                .map_err(directory_model_error)?;
+            save_peer_directory(&directory, &args.file)?;
+            write_directory_mutation(output, &args.file, "revoke", subject, &directory)?;
+        }
+    }
+    Ok(())
+}
+
+fn load_peer_directory(path: &Path) -> Result<PeerDirectory, CliError> {
+    if path.exists() {
+        PeerDirectory::load_json(path).map_err(directory_io_error)
+    } else {
+        Ok(PeerDirectory::new())
+    }
+}
+
+fn save_peer_directory(directory: &PeerDirectory, path: &Path) -> Result<(), CliError> {
+    directory.save_json(path).map_err(directory_io_error)
+}
+
+fn resolve_directory_subject(
+    directory: &PeerDirectory,
+    name: &str,
+) -> Result<DirectorySubject, CliError> {
+    if let Ok(peer_id) = peer_id_from_hex(name) {
+        Ok(DirectorySubject::Peer(peer_id))
+    } else {
+        directory.resolve_name(name).map_err(directory_model_error)
+    }
+}
+
+fn resolve_directory_peer_id(directory: &PeerDirectory, name: &str) -> Result<PeerId, CliError> {
+    match resolve_directory_subject(directory, name)? {
+        DirectorySubject::Peer(peer_id) | DirectorySubject::Device { peer_id, .. } => Ok(peer_id),
+        DirectorySubject::Group(group) => Err(CliError::new(
+            "atp_directory_invalid_subject",
+            "ATP peer directory command requires a peer or device",
+        )
+        .context("group", group)
+        .exit_code(ExitCode::USER_ERROR)),
+        DirectorySubject::Relay(relay) => Err(CliError::new(
+            "atp_directory_invalid_subject",
+            "ATP peer directory command requires a peer or device",
+        )
+        .context("relay", relay)
+        .exit_code(ExitCode::USER_ERROR)),
+    }
+}
+
+fn write_directory_mutation(
+    output: &mut Output,
+    path: &Path,
+    operation: &str,
+    subject: DirectorySubject,
+    directory: &PeerDirectory,
+) -> Result<(), CliError> {
+    let audit_sequence = directory
+        .audit_log
+        .last()
+        .map_or(0, |record| record.sequence);
+    let peer_id_hex = match &subject {
+        DirectorySubject::Peer(peer_id) | DirectorySubject::Device { peer_id, .. } => {
+            Some(peer_id_to_hex(*peer_id))
+        }
+        DirectorySubject::Group(_) | DirectorySubject::Relay(_) => None,
+    };
+    let payload = serde_json::json!({
+        "operation": operation,
+        "directory_file": path.display().to_string(),
+        "subject": subject,
+        "peer_id_hex": peer_id_hex,
+        "audit_sequence": audit_sequence,
+    });
+    output
+        .write(&JsonOutputValue::new(payload))
+        .map_err(output_write_error("ATP peer directory mutation"))
+}
+
+fn directory_model_error(err: impl std::error::Error) -> CliError {
+    CliError::new("atp_directory_error", "ATP peer directory operation failed")
+        .detail(err.to_string())
+        .exit_code(ExitCode::USER_ERROR)
+}
+
+fn directory_io_error(err: impl std::error::Error) -> CliError {
+    CliError::new("atp_directory_io_error", "ATP peer directory I/O failed")
+        .detail(err.to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
 }
 
 fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError> {

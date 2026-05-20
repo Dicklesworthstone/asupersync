@@ -3,17 +3,17 @@
 //! Implements unreliable DATAGRAM frames for ATP path probes, beacons,
 //! and non-critical telemetry. Never used for correctness-critical transfers.
 
-pub mod frame;
-pub mod transport;
 pub mod beacons;
-pub mod probes;
 pub mod congestion;
+pub mod frame;
+pub mod probes;
+pub mod transport;
 
 #[cfg(test)]
 mod tests;
 
-pub use frame::*;
-pub use transport::*;
 pub use beacons::*;
-pub use probes::*;
 pub use congestion::*;
+pub use frame::*;
+pub use probes::*;
+pub use transport::*;

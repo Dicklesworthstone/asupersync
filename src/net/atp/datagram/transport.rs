@@ -3,9 +3,9 @@
 //! Implements max_datagram_frame_size transport parameter negotiation
 //! and DATAGRAM capability detection.
 
-use crate::net::atp::handshake::transport_params::{TransportParameters, TransportParamId};
-use crate::net::atp::datagram::frame::DatagramError;
 use crate::bytes::Bytes;
+use crate::net::atp::datagram::frame::DatagramError;
+use crate::net::atp::handshake::transport_params::{TransportParamId, TransportParameters};
 use crate::types::outcome::Outcome;
 
 /// DATAGRAM transport parameter ID (RFC 9221)
@@ -36,7 +36,9 @@ pub struct DatagramTransport {
 impl DatagramTransport {
     /// Create new DATAGRAM transport handler
     pub fn new(local_enabled: bool, local_max_size: u64) -> Outcome<Self, DatagramError> {
-        if local_enabled && (local_max_size < MIN_DATAGRAM_SIZE || local_max_size > MAX_DATAGRAM_SIZE) {
+        if local_enabled
+            && (local_max_size < MIN_DATAGRAM_SIZE || local_max_size > MAX_DATAGRAM_SIZE)
+        {
             return Err(DatagramError::InvalidFrame(format!(
                 "invalid max datagram size: {} (must be {}-{})",
                 local_max_size, MIN_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE
@@ -81,7 +83,10 @@ impl DatagramTransport {
     }
 
     /// Process peer transport parameters for DATAGRAM support
-    pub fn process_peer_params(&mut self, params: &TransportParameters) -> Outcome<(), DatagramError> {
+    pub fn process_peer_params(
+        &mut self,
+        params: &TransportParameters,
+    ) -> Outcome<(), DatagramError> {
         // Look for max_datagram_frame_size parameter
         // TODO: Implement custom parameter lookup in TransportParameters
 
@@ -274,10 +279,7 @@ pub struct DatagramNegotiation {
 
 impl DatagramNegotiation {
     /// Create negotiation result
-    pub fn new(
-        local_config: DatagramConfig,
-        transport: &DatagramTransport,
-    ) -> Self {
+    pub fn new(local_config: DatagramConfig, transport: &DatagramTransport) -> Self {
         Self {
             enabled: transport.is_enabled(),
             max_frame_size: transport.max_frame_size(),
@@ -357,14 +359,12 @@ mod tests {
 
     #[test]
     fn test_datagram_config_validation() {
-        let invalid_config = DatagramConfig::new()
-            .with_max_frame_size(MAX_DATAGRAM_SIZE + 1);
+        let invalid_config = DatagramConfig::new().with_max_frame_size(MAX_DATAGRAM_SIZE + 1);
 
         // Validation should clamp the size
         assert_eq!(invalid_config.max_frame_size, MAX_DATAGRAM_SIZE);
 
-        let too_small = DatagramConfig::new()
-            .with_max_frame_size(MIN_DATAGRAM_SIZE - 1);
+        let too_small = DatagramConfig::new().with_max_frame_size(MIN_DATAGRAM_SIZE - 1);
 
         // Validation should clamp the size
         assert_eq!(too_small.max_frame_size, MIN_DATAGRAM_SIZE);

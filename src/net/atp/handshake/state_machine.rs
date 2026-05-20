@@ -75,7 +75,7 @@ pub enum HandshakeState {
 }
 
 /// Handshake error types
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HandshakeError {
     /// Version negotiation failed
     #[error("unsupported QUIC version: {version:08x}")]

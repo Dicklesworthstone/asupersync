@@ -2,12 +2,12 @@
 //!
 //! Implements periodic path quality measurement using DATAGRAM frames.
 
-use crate::net::atp::datagram::frame::{DatagramFrame, DatagramMetadata, DatagramPriority};
 use crate::bytes::Bytes;
+use crate::net::atp::datagram::frame::{DatagramFrame, DatagramMetadata, DatagramPriority};
 use crate::types::outcome::Outcome;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use serde::{Serialize, Deserialize};
 
 /// Path quality beacon payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,7 +116,12 @@ impl PathBeacon {
 
     /// Create periodic beacon
     pub fn periodic(sequence: u64, path_id: u64) -> Self {
-        Self::new(sequence, path_id, BeaconType::Periodic, BeaconMeasurement::empty())
+        Self::new(
+            sequence,
+            path_id,
+            BeaconType::Periodic,
+            BeaconMeasurement::empty(),
+        )
     }
 
     /// Create response beacon
@@ -126,25 +131,41 @@ impl PathBeacon {
 
     /// Create keepalive beacon
     pub fn keepalive(sequence: u64, path_id: u64) -> Self {
-        Self::new(sequence, path_id, BeaconType::Keepalive, BeaconMeasurement::empty())
+        Self::new(
+            sequence,
+            path_id,
+            BeaconType::Keepalive,
+            BeaconMeasurement::empty(),
+        )
     }
 
     /// Encode beacon to bytes
     pub fn encode(&self) -> Outcome<Bytes, Box<dyn std::error::Error>> {
-        let json = serde_json::to_vec(self)?;
-        Ok(Bytes::from(json))
+        let json = match serde_json::to_vec(self) {
+            Ok(data) => data,
+            Err(e) => return Outcome::err(Box::new(e) as Box<dyn std::error::Error>),
+        };
+        Outcome::ok(Bytes::from(json))
     }
 
     /// Decode beacon from bytes
     pub fn decode(data: &[u8]) -> Outcome<Self, Box<dyn std::error::Error>> {
-        let beacon: Self = serde_json::from_slice(data)?;
-        Ok(beacon)
+        let beacon: Self = match serde_json::from_slice(data) {
+            Ok(b) => b,
+            Err(e) => return Outcome::err(Box::new(e) as Box<dyn std::error::Error>),
+        };
+        Outcome::ok(beacon)
     }
 
     /// Create DATAGRAM frame for this beacon
     pub fn to_datagram_frame(&self) -> Outcome<DatagramFrame, Box<dyn std::error::Error>> {
-        let payload = self.encode()?;
-        Ok(DatagramFrame::with_length(payload))
+        let payload = match self.encode() {
+            Outcome::Ok(p) => p,
+            Outcome::Err(e) => return Outcome::err(e),
+            Outcome::Cancelled(r) => return Outcome::cancelled(r),
+            Outcome::Panicked(p) => return Outcome::panicked(p),
+        };
+        Outcome::ok(DatagramFrame::with_length(payload))
     }
 
     /// Get beacon age since creation
@@ -314,7 +335,10 @@ impl BeaconManager {
 
     /// Check if beacon type is enabled
     pub fn is_beacon_type_enabled(&self, beacon_type: BeaconType) -> bool {
-        self.enabled_types.get(&beacon_type).copied().unwrap_or(false)
+        self.enabled_types
+            .get(&beacon_type)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Check if it's time to send a beacon on a path
@@ -337,7 +361,10 @@ impl BeaconManager {
         let beacon = PathBeacon::new(sequence, path_id, BeaconType::Periodic, measurement);
 
         // Update stats
-        let stats = self.path_stats.entry(path_id).or_insert_with(|| BeaconStats::new(path_id));
+        let stats = self
+            .path_stats
+            .entry(path_id)
+            .or_insert_with(|| BeaconStats::new(path_id));
         stats.record_sent(sequence);
 
         // Update last beacon time
@@ -362,7 +389,10 @@ impl BeaconManager {
         let beacon = PathBeacon::new(sequence, path_id, BeaconType::Response, measurement);
 
         // Update stats
-        let stats = self.path_stats.entry(path_id).or_insert_with(|| BeaconStats::new(path_id));
+        let stats = self
+            .path_stats
+            .entry(path_id)
+            .or_insert_with(|| BeaconStats::new(path_id));
         stats.record_sent(sequence);
 
         Some(beacon)
@@ -373,7 +403,10 @@ impl BeaconManager {
         let path_id = beacon.path_id;
 
         // Update receive stats
-        let stats = self.path_stats.entry(path_id).or_insert_with(|| BeaconStats::new(path_id));
+        let stats = self
+            .path_stats
+            .entry(path_id)
+            .or_insert_with(|| BeaconStats::new(path_id));
         stats.record_received(beacon.sequence);
 
         match beacon.beacon_type {
@@ -408,8 +441,10 @@ impl BeaconManager {
     /// Clean up old statistics
     pub fn cleanup_old_stats(&mut self, max_age: Duration) {
         let now = Instant::now();
-        self.path_stats.retain(|_, stats| now.duration_since(stats.last_update) < max_age);
-        self.last_beacon_time.retain(|path_id, _| self.path_stats.contains_key(path_id));
+        self.path_stats
+            .retain(|_, stats| now.duration_since(stats.last_update) < max_age);
+        self.last_beacon_time
+            .retain(|path_id, _| self.path_stats.contains_key(path_id));
     }
 
     /// Get summary statistics
@@ -438,7 +473,8 @@ impl BeaconManager {
         }
 
         if !summary.loss_rate_samples.is_empty() {
-            summary.overall_loss_rate = summary.loss_rate_samples.iter().sum::<f64>() / summary.loss_rate_samples.len() as f64;
+            summary.overall_loss_rate = summary.loss_rate_samples.iter().sum::<f64>()
+                / summary.loss_rate_samples.len() as f64;
         }
 
         summary
@@ -543,7 +579,8 @@ mod tests {
         assert!(!manager.should_send_beacon(1));
 
         // Simulate beacon response
-        let response_beacon = PathBeacon::response(beacon.sequence, beacon.path_id, BeaconMeasurement::empty());
+        let response_beacon =
+            PathBeacon::response(beacon.sequence, beacon.path_id, BeaconMeasurement::empty());
         let response = manager.process_received_beacon(response_beacon);
         assert!(response.is_none()); // Response beacons don't generate responses
 

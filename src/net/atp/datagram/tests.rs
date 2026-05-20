@@ -7,8 +7,8 @@
 //! - Path beacon functionality
 //! - Malformed frame handling
 
-use crate::net::atp::datagram::*;
 use crate::bytes::{Bytes, BytesMut};
+use crate::net::atp::datagram::*;
 use std::time::{Duration, Instant};
 
 /// Test DATAGRAM frame encoding/decoding with various payload sizes
@@ -51,7 +51,13 @@ fn test_oversized_datagram_rejection() {
     let mut decode_buf = buf;
     let result = DatagramFrame::decode(&mut decode_buf, 1024);
 
-    assert!(matches!(result, Err(DatagramError::PayloadTooLarge { size: 2048, max: 1024 })));
+    assert!(matches!(
+        result,
+        Err(DatagramError::PayloadTooLarge {
+            size: 2048,
+            max: 1024
+        })
+    ));
 }
 
 /// Test transport parameter negotiation
@@ -90,8 +96,7 @@ fn test_datagram_config_validation() {
     assert!(valid_config.validate().is_ok());
 
     // Configuration with clamped size
-    let clamped_config = DatagramConfig::new()
-        .with_max_frame_size(100000); // Will be clamped to MAX_DATAGRAM_SIZE
+    let clamped_config = DatagramConfig::new().with_max_frame_size(100000); // Will be clamped to MAX_DATAGRAM_SIZE
     assert_eq!(clamped_config.max_frame_size, MAX_DATAGRAM_SIZE);
 
     // Create transport from config
@@ -256,8 +261,8 @@ fn test_malformed_frame_handling() {
 #[test]
 fn test_probe_encoding_edge_cases() {
     // Probe with challenge
-    let probe = PathProbe::new_request(1, ProbeType::Validation, 1, 1)
-        .with_challenge(vec![1, 2, 3, 4]);
+    let probe =
+        PathProbe::new_request(1, ProbeType::Validation, 1, 1).with_challenge(vec![1, 2, 3, 4]);
 
     let encoded = probe.encode().unwrap();
     let decoded = PathProbe::decode(&encoded).unwrap();
@@ -265,8 +270,7 @@ fn test_probe_encoding_edge_cases() {
     assert_eq!(decoded.challenge, Some(vec![1, 2, 3, 4]));
 
     // Probe with payload
-    let probe = PathProbe::new_request(2, ProbeType::Bandwidth, 1, 2)
-        .with_payload(vec![0xFF; 64]);
+    let probe = PathProbe::new_request(2, ProbeType::Bandwidth, 1, 2).with_payload(vec![0xFF; 64]);
 
     let encoded = probe.encode().unwrap();
     let decoded = PathProbe::decode(&encoded).unwrap();
@@ -365,7 +369,9 @@ fn test_full_datagram_workflow() {
     let probe_frame = probe_manager.create_probe(ProbeType::Discovery, 1).unwrap();
     let probe_metadata = DatagramMetadata::new("probe").with_priority(DatagramPriority::High);
 
-    congestion_controller.enqueue_datagram(probe_frame, probe_metadata).unwrap();
+    congestion_controller
+        .enqueue_datagram(probe_frame, probe_metadata)
+        .unwrap();
 
     // Send probe
     let (sent_frame, sent_metadata) = congestion_controller.try_send_next().unwrap().unwrap();
@@ -376,7 +382,9 @@ fn test_full_datagram_workflow() {
     let beacon_frame = DatagramFrame::with_length(beacon_data);
     let beacon_metadata = DatagramMetadata::new("beacon").with_priority(DatagramPriority::Normal);
 
-    congestion_controller.enqueue_datagram(beacon_frame, beacon_metadata).unwrap();
+    congestion_controller
+        .enqueue_datagram(beacon_frame, beacon_metadata)
+        .unwrap();
 
     // Send beacon
     let (sent_frame, sent_metadata) = congestion_controller.try_send_next().unwrap().unwrap();
@@ -466,7 +474,13 @@ mod transport_tests {
 
         // Size over limit should fail
         let result = transport.validate_size(101);
-        assert!(matches!(result, Err(DatagramError::PayloadTooLarge { size: 101, max: 100 })));
+        assert!(matches!(
+            result,
+            Err(DatagramError::PayloadTooLarge {
+                size: 101,
+                max: 100
+            })
+        ));
     }
 
     #[test]
