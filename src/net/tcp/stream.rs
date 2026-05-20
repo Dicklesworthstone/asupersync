@@ -245,6 +245,36 @@ impl TcpStream {
             Err(err) => return Err(err),
         };
 
+        // #35: on Windows, a non-blocking `connect()` can return Ok while
+        // the kernel-side connection setup is still pending (especially on
+        // loopback paths and async LSP shims). The userland socket then
+        // looks connected from our side, but the first send / recv hits
+        // WSAENOTCONN (os error 10057) — visible to callers as
+        // "TLS connect failed: I/O error: A request to send or receive
+        // data was disallowed because the socket is not connected".
+        //
+        // Defensively probe `peer_addr()` after Ok. If the socket isn't
+        // actually connected yet, treat it as "connect in progress" and
+        // route through wait_for_connect so the IO reactor can wait for
+        // the writable readiness that signals connect completion. Same
+        // behaviour applies on the WouldBlock/EINPROGRESS branch above,
+        // which already takes that path.
+        //
+        // peer_addr() is cheap on connected sockets across platforms and
+        // is also a no-op for already-validated paths, so this stays a
+        // strict subset of the prior behaviour for non-Windows targets.
+        let registration = if registration.is_none() {
+            match socket.peer_addr() {
+                Ok(_) => None,
+                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                    wait_for_connect(&socket).await?
+                }
+                Err(err) => return Err(err),
+            }
+        } else {
+            registration
+        };
+
         // socket.into() preserves the nonblocking flag set above; no need to set again.
         let stream: net::TcpStream = socket.into();
         Ok(Self::from_parts(Arc::new(stream), registration))
