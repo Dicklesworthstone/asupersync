@@ -141,10 +141,8 @@ impl ConnectionIdRegistry {
 
     /// Active connection ID.
     #[must_use]
-    pub fn active(&self) -> &QuicConnectionId {
-        self.active
-            .get(&self.active_sequence)
-            .expect("active connection ID is always present")
+    pub fn active(&self) -> Option<&QuicConnectionId> {
+        self.active.get(&self.active_sequence)
     }
 
     /// Active connection ID sequence.
@@ -793,6 +791,7 @@ mod tests {
 
         assert_eq!(first.sequence(), 1);
         assert_eq!(second.sequence(), 2);
+        assert_eq!(registry.active().map(QuicConnectionId::sequence), Some(0));
         assert!(registry.retired_ids().contains(&1));
         assert!(registry.active_ids().contains_key(&0));
         assert!(registry.active_ids().contains_key(&2));
@@ -804,6 +803,16 @@ mod tests {
             err,
             AtpQuicConnectionError::CannotRetireActiveConnectionId { sequence: 0 }
         );
+    }
+
+    #[test]
+    fn active_connection_id_absence_returns_none_instead_of_panicking() {
+        let initial = QuicConnectionId::new(0, vec![1, 2, 3, 4], [1; 16], 0).expect("cid");
+        let mut registry = ConnectionIdRegistry::new(initial, 2).expect("registry");
+
+        registry.active_sequence = 42;
+
+        assert_eq!(registry.active(), None);
     }
 
     #[test]
