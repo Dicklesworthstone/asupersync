@@ -9,6 +9,9 @@
 //! - **Progress reporting**: Streaming progress with cancellation support
 //! - **Signal handling**: Graceful shutdown with cancellation tokens
 //! - **Shell completions**: Generation for bash, zsh, fish, PowerShell, elvish
+//! - **First-run setup**: Interactive and automatic ATP configuration
+//! - **Service integration**: Platform daemon/service management
+//! - **Upgrade/rollback**: Version management with state preservation
 //!
 //! # Quick Start
 //!
@@ -62,9 +65,11 @@ pub mod completion;
 pub mod doctor;
 pub mod error;
 pub mod exit;
+pub mod first_run;
 pub mod output;
 pub mod progress;
 pub mod signal;
+pub mod upgrade;
 
 // Re-export commonly used types
 pub use args::{
