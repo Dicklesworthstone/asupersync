@@ -78,7 +78,9 @@ impl AtpFrameCodec {
         let Some(version_varint) = try_parse_varint(buf, &mut cursor) else {
             return Ok(None); // Need more data
         };
-        let version = ProtocolVersion(version_varint.value() as u32);
+        let version_value = u32::try_from(version_varint.value())
+            .map_err(|_| FrameError::UnsupportedVersion(version_varint.value() as u32))?;
+        let version = ProtocolVersion(version_value);
         if version != ProtocolVersion::V0 {
             return Err(FrameError::UnsupportedVersion(version.0));
         }
@@ -116,7 +118,8 @@ impl AtpFrameCodec {
             let Some(ext_id_varint) = try_parse_varint(buf, &mut cursor) else {
                 return Ok(None); // Need more data
             };
-            let ext_id = ext_id_varint.value() as u16;
+            let ext_id = u16::try_from(ext_id_varint.value())
+                .map_err(|_| FrameError::InvalidFormat("Extension ID too large for u16".to_string()))?;
 
             let Some(ext_len) = try_parse_varint(buf, &mut cursor) else {
                 return Ok(None); // Need more data
@@ -128,14 +131,19 @@ impl AtpFrameCodec {
                 });
             }
 
-            // Check extension data availability
-            if cursor + ext_len.value() as usize > buf.len() {
+            // Check extension data availability with safe arithmetic
+            let ext_len_usize = usize::try_from(ext_len.value())
+                .map_err(|_| FrameError::InvalidFormat("Extension length too large".to_string()))?;
+            let end_pos = cursor.checked_add(ext_len_usize)
+                .ok_or_else(|| FrameError::InvalidFormat("Extension bounds overflow".to_string()))?;
+
+            if end_pos > buf.len() {
                 return Ok(None); // Need more data
             }
 
-            let ext_data = buf[cursor..cursor + ext_len.value() as usize].to_vec();
+            let ext_data = buf[cursor..end_pos].to_vec();
             extensions.insert(ext_id, ext_data);
-            cursor += ext_len.value() as usize;
+            cursor = end_pos;
 
             // Check total header size
             if cursor > MAX_HEADER_SIZE as usize {
@@ -200,14 +208,16 @@ impl Decoder for AtpFrameCodec {
                 }
                 DecodeState::Payload { header, remaining } => {
                     let payload_len = *remaining;
+                    let payload_len_usize = usize::try_from(payload_len)
+                        .map_err(|_| FrameError::InvalidFormat("Payload length too large for platform".to_string()))?;
 
-                    if src.len() < payload_len as usize {
+                    if src.len() < payload_len_usize {
                         // Need more data for payload
                         return Ok(None);
                     }
 
                     // Read payload
-                    let payload = src.split_to(payload_len as usize).to_vec();
+                    let payload = src.split_to(payload_len_usize).to_vec();
 
                     let frame = Frame {
                         header: header.clone(),
@@ -417,5 +427,47 @@ mod tests {
         let result = codec.decode(&mut buf);
 
         assert!(matches!(result, Err(FrameError::UnknownFrameType(9999))));
+    }
+
+    #[test]
+    fn test_malformed_frame_validation_bypass_prevention() {
+        let mut buf = BytesMut::new();
+
+        // Test 1: Extension ID that would overflow u16 (DoS vulnerability)
+        VarInt::new(0).unwrap().encode(&mut buf).unwrap(); // Valid version
+        VarInt::new(FrameType::Handshake as u64).unwrap().encode(&mut buf).unwrap(); // Valid frame type
+        VarInt::new(0).unwrap().encode(&mut buf).unwrap(); // payload length
+        VarInt::new(1).unwrap().encode(&mut buf).unwrap(); // 1 extension
+        VarInt::new(0x10000).unwrap().encode(&mut buf).unwrap(); // Extension ID > u16::MAX
+        VarInt::new(4).unwrap().encode(&mut buf).unwrap(); // Extension length
+        buf.put_slice(b"data"); // Extension data
+
+        let mut codec = AtpFrameCodec::new();
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(FrameError::InvalidFormat(_))));
+
+        // Test 2: Extension length that would cause overflow (DoS vulnerability)
+        let mut buf2 = BytesMut::new();
+        VarInt::new(0).unwrap().encode(&mut buf2).unwrap(); // Valid version
+        VarInt::new(FrameType::Handshake as u64).unwrap().encode(&mut buf2).unwrap(); // Valid frame type
+        VarInt::new(0).unwrap().encode(&mut buf2).unwrap(); // payload length
+        VarInt::new(1).unwrap().encode(&mut buf2).unwrap(); // 1 extension
+        VarInt::new(1).unwrap().encode(&mut buf2).unwrap(); // Valid extension ID
+        VarInt::new(usize::MAX as u64).unwrap().encode(&mut buf2).unwrap(); // Extension length = usize::MAX
+
+        let mut codec2 = AtpFrameCodec::new();
+        let result2 = codec2.decode(&mut buf2);
+        assert!(matches!(result2, Err(FrameError::ExtensionTooLarge { .. }) | Err(FrameError::InvalidFormat(_))));
+
+        // Test 3: Version that would truncate (DoS vulnerability)
+        let mut buf3 = BytesMut::new();
+        VarInt::new(0x100000000u64).unwrap().encode(&mut buf3).unwrap(); // Version > u32::MAX
+        VarInt::new(FrameType::Handshake as u64).unwrap().encode(&mut buf3).unwrap(); // Valid frame type
+        VarInt::new(0).unwrap().encode(&mut buf3).unwrap(); // payload length
+        VarInt::new(0).unwrap().encode(&mut buf3).unwrap(); // extension count
+
+        let mut codec3 = AtpFrameCodec::new();
+        let result3 = codec3.decode(&mut buf3);
+        assert!(matches!(result3, Err(FrameError::UnsupportedVersion(_))));
     }
 }
