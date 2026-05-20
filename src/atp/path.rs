@@ -5,11 +5,12 @@
 //! outcome. Later NAT traversal, Tailscale, relay, mailbox, and path-racing
 //! code should consume these types instead of inventing local enums.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
 /// Stable identifier for one path candidate inside a path race.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PathCandidateId(u64);
 
 impl PathCandidateId {

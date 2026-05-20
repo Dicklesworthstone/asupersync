@@ -9,6 +9,7 @@ use super::actor::{
     TransferActorId, TransferActorTopology, TransferChildRegion, TransferObligationId,
     TransferRegionId, TransferTopologyError,
 };
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -17,6 +18,8 @@ use std::fmt;
 pub struct TransferId([u8; 32]);
 
 impl TransferId {
+    const DERIVATION_DOMAIN: &'static [u8] = b"ATP-TRANSFER-ID-V1\0";
+
     /// Construct a transfer id from canonical bytes.
     #[must_use]
     pub const fn new(bytes: [u8; 32]) -> Self {
@@ -31,21 +34,31 @@ impl TransferId {
         nonce: [u8; 32],
         root: [u8; 32],
     ) -> Self {
-        let mut out = [0u8; 32];
-        for (index, byte) in local_peer
-            .iter()
-            .chain(remote_peer.iter())
-            .chain(nonce.iter())
-            .chain(root.iter())
-            .enumerate()
-        {
-            let slot = index % 32;
-            out[slot] = out[slot]
-                .wrapping_add(*byte)
-                .rotate_left((index % 8) as u32)
-                ^ (index as u8).wrapping_mul(17);
-        }
-        Self(out)
+        Self::derive_with_policy(local_peer, remote_peer, nonce, root, [0; 32])
+    }
+
+    /// Derive a transfer id from all H2 identity-binding inputs.
+    #[must_use]
+    pub fn derive_with_policy(
+        local_peer: [u8; 32],
+        remote_peer: [u8; 32],
+        nonce: [u8; 32],
+        manifest_root: [u8; 32],
+        policy_digest: [u8; 32],
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(Self::DERIVATION_DOMAIN);
+        hasher.update(b"local-peer");
+        hasher.update(local_peer);
+        hasher.update(b"remote-peer");
+        hasher.update(remote_peer);
+        hasher.update(b"nonce");
+        hasher.update(nonce);
+        hasher.update(b"manifest-root");
+        hasher.update(manifest_root);
+        hasher.update(b"policy-digest");
+        hasher.update(policy_digest);
+        Self(hasher.finalize().into())
     }
 
     /// Borrow canonical transfer-id bytes.
@@ -743,6 +756,32 @@ mod tests {
             topology(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn transfer_id_binds_peers_nonce_manifest_and_policy() {
+        let baseline = TransferId::derive_with_policy([1; 32], [2; 32], [3; 32], [4; 32], [5; 32]);
+
+        assert_eq!(
+            baseline,
+            TransferId::derive_with_policy([1; 32], [2; 32], [3; 32], [4; 32], [5; 32])
+        );
+        assert_ne!(
+            baseline,
+            TransferId::derive_with_policy([2; 32], [1; 32], [3; 32], [4; 32], [5; 32])
+        );
+        assert_ne!(
+            baseline,
+            TransferId::derive_with_policy([1; 32], [2; 32], [9; 32], [4; 32], [5; 32])
+        );
+        assert_ne!(
+            baseline,
+            TransferId::derive_with_policy([1; 32], [2; 32], [3; 32], [9; 32], [5; 32])
+        );
+        assert_ne!(
+            baseline,
+            TransferId::derive_with_policy([1; 32], [2; 32], [3; 32], [4; 32], [9; 32])
+        );
     }
 
     fn cmd(key: u128, kind: TransferCommandKind) -> TransferCommand {

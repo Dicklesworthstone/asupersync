@@ -9,19 +9,38 @@
 use crate::atp::path::PathCandidateId;
 use crate::net::atp::protocol::frames::{Frame, FrameError, FrameType, ProtocolVersion};
 use crate::net::atp::protocol::transcript::{SessionTranscript, TranscriptHash};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
 
 /// Stable ATP peer identity, normally `sha256(public_key)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PeerId([u8; 32]);
 
 impl PeerId {
+    const PUBLIC_KEY_DOMAIN: &'static [u8] = b"ATP-PEER-PUBLIC-KEY-V1\0";
+
     /// Construct a peer id from an already-hashed public identity.
     #[must_use]
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Derive the canonical peer id from public key material.
+    pub fn from_public_key(public_key: &[u8]) -> Result<Self, PeerIdentityError> {
+        if public_key.is_empty() {
+            return Err(PeerIdentityError::EmptyPublicKey);
+        }
+        if public_key.iter().all(|byte| *byte == 0) {
+            return Err(PeerIdentityError::AllZeroPublicKey);
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(Self::PUBLIC_KEY_DOMAIN);
+        hasher.update((public_key.len() as u64).to_be_bytes());
+        hasher.update(public_key);
+        Ok(Self(hasher.finalize().into()))
     }
 
     /// Deterministically derive a test/local peer id from a label.
@@ -46,8 +65,28 @@ impl PeerId {
     }
 }
 
+/// Invalid public key material for ATP peer identity derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerIdentityError {
+    /// Public key material was empty.
+    EmptyPublicKey,
+    /// Public key material was all zero bytes.
+    AllZeroPublicKey,
+}
+
+impl fmt::Display for PeerIdentityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyPublicKey => f.write_str("empty public key material"),
+            Self::AllZeroPublicKey => f.write_str("all-zero public key material"),
+        }
+    }
+}
+
+impl std::error::Error for PeerIdentityError {}
+
 /// Per-transfer nonce bound into the transcript and replay cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TransferNonce([u8; 32]);
 
 impl TransferNonce {
@@ -80,7 +119,7 @@ impl TransferNonce {
 }
 
 /// Deterministic ATP session identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId([u8; 32]);
 
 impl SessionId {
@@ -98,7 +137,7 @@ impl SessionId {
 }
 
 /// ATP trace id carried in logs and proof artifacts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionTraceId(u64);
 
 impl SessionTraceId {
@@ -1547,6 +1586,24 @@ mod tests {
 
     fn peers() -> (PeerId, PeerId) {
         (PeerId::from_label("alice"), PeerId::from_label("bob"))
+    }
+
+    #[test]
+    fn peer_id_from_public_key_is_canonical_and_rejects_bad_material() {
+        let public_key = b"ed25519:alice-device-public-key";
+        let first = PeerId::from_public_key(public_key).unwrap();
+        let second = PeerId::from_public_key(public_key).unwrap();
+
+        assert_eq!(first, second);
+        assert_ne!(first, PeerId::from_label("ed25519:alice-device-public-key"));
+        assert_eq!(
+            PeerId::from_public_key(&[]),
+            Err(PeerIdentityError::EmptyPublicKey)
+        );
+        assert_eq!(
+            PeerId::from_public_key(&[0; 32]),
+            Err(PeerIdentityError::AllZeroPublicKey)
+        );
     }
 
     fn manifest_root(byte: u8) -> [u8; 32] {
