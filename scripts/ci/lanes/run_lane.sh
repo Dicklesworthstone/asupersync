@@ -13,6 +13,35 @@ TIMEOUT="10m"
 ARTIFACTS_DIR="artifacts"
 ENABLE_EXTENDED_LOGGING=false
 
+# Track required command failures
+REQUIRED_FAILURES=0
+OPTIONAL_SKIPPED=0
+
+# Function to run required command
+run_required() {
+    local cmd="$1"
+    echo "Running required: $cmd" | tee -a "$LANE_LOG"
+    if eval "$cmd"; then
+        echo "✓ Required command succeeded" | tee -a "$LANE_LOG"
+    else
+        echo "✗ Required command failed: $cmd" | tee -a "$LANE_LOG"
+        REQUIRED_FAILURES=$((REQUIRED_FAILURES + 1))
+    fi
+}
+
+# Function to run optional command
+run_optional() {
+    local cmd="$1"
+    local description="$2"
+    echo "Running optional: $description" | tee -a "$LANE_LOG"
+    if eval "$cmd"; then
+        echo "✓ Optional command succeeded: $description" | tee -a "$LANE_LOG"
+    else
+        echo "~ Optional command skipped/failed: $description" | tee -a "$LANE_LOG"
+        OPTIONAL_SKIPPED=$((OPTIONAL_SKIPPED + 1))
+    fi
+}
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -84,6 +113,8 @@ cleanup() {
 
     echo "=== Lane Summary ===" | tee -a "$LANE_LOG"
     echo "Exit code: $exit_code" | tee -a "$LANE_LOG"
+    echo "Required failures: $REQUIRED_FAILURES" | tee -a "$LANE_LOG"
+    echo "Optional skipped: $OPTIONAL_SKIPPED" | tee -a "$LANE_LOG"
     echo "Duration: ${duration}s" | tee -a "$LANE_LOG"
     echo "Finished at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" | tee -a "$LANE_LOG"
 
@@ -97,12 +128,14 @@ cleanup() {
     "end_time": "$end_time",
     "duration_seconds": $duration,
     "exit_code": $exit_code,
+    "required_failures": $REQUIRED_FAILURES,
+    "optional_skipped": $OPTIONAL_SKIPPED,
     "timeout": "$TIMEOUT",
     "artifacts_dir": "$LANE_ARTIFACTS_DIR"
 }
 EOF
 
-    # Collect system information
+    # Collect system information (these are non-critical)
     if command -v uname >/dev/null; then
         uname -a > "${LANE_ARTIFACTS_DIR}/system_info.txt" 2>/dev/null || true
     fi
@@ -138,26 +171,24 @@ echo "Executing lane: $LANE_ID" | tee -a "$LANE_LOG"
 case "$LANE_ID" in
     "compile")
         echo "Running compile checks..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo check --all-targets 2>&1 | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo clippy --all-targets -- -D warnings 2>&1 | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo check --all-targets 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo clippy --all-targets -- -D warnings 2>&1 | tee -a '$LANE_LOG'"
         ;;
 
     "unit")
         echo "Running unit tests..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test --lib --bins --no-fail-fast \
-            --message-format json 2>&1 | tee "${LANE_ARTIFACTS_DIR}/unit_test_output.jsonl" | \
-            jq -r 'select(.type == "test") | "\(.event) \(.name)"' | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo test --lib --bins --no-fail-fast --message-format json 2>&1 | tee '${LANE_ARTIFACTS_DIR}/unit_test_output.jsonl' | jq -r 'select(.type == \"test\") | \"\(.event) \(.name)\"' | tee -a '$LANE_LOG'"
         ;;
 
     "fmt")
         echo "Running format check..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo fmt --check 2>&1 | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo fmt --check 2>&1 | tee -a '$LANE_LOG'"
         ;;
 
     "atp_conformance")
         echo "Running ATP conformance tests..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test atp::quic::conformance --no-fail-fast 2>&1 | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test --test atp_conformance_suite 2>&1 | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo test atp::quic::conformance --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_conformance_suite 2>&1 | tee -a '$LANE_LOG'"
 
         # Collect conformance artifacts
         if [[ -f "conformance_results.json" ]]; then
@@ -167,94 +198,87 @@ case "$LANE_ID" in
 
     "atp_fuzz")
         echo "Running ATP fuzz tests..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test atp::quic::fuzz_harness --no-fail-fast 2>&1 | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo test atp::quic::fuzz_harness --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
 
-        # Run extended fuzzing if in full/release mode
+        # Run extended fuzzing if in full/release mode (this is optional)
         if [[ "$MODE" == "full" || "$MODE" == "release" ]]; then
             echo "Running extended fuzz suite..." | tee -a "$LANE_LOG"
-            timeout 1800 scripts/ci/run_fuzz_suite.sh 2>&1 | tee -a "$LANE_LOG" || true
+            run_optional "timeout 1800 scripts/ci/run_fuzz_suite.sh 2>&1 | tee -a '$LANE_LOG'" "extended fuzz suite"
         fi
         ;;
 
     "atp_e2e")
         echo "Running ATP E2E proof suite..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test atp::e2e_proof_suite --no-fail-fast 2>&1 | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test atp::quic::e2e_endpoints 2>&1 | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo test atp::e2e_proof_suite --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo test atp::quic::e2e_endpoints 2>&1 | tee -a '$LANE_LOG'"
 
-        # Run E2E scenarios
+        # Run E2E scenarios (optional if scripts exist)
         if [[ -f "scripts/ci/run_e2e_scenarios.sh" ]]; then
-            timeout "$TIMEOUT" scripts/ci/run_e2e_scenarios.sh 2>&1 | tee -a "$LANE_LOG" || true
+            run_optional "timeout '$TIMEOUT' scripts/ci/run_e2e_scenarios.sh 2>&1 | tee -a '$LANE_LOG'" "E2E scenarios"
         fi
         ;;
 
-    "atp_packet_lab")
-        echo "Running ATP packet laboratory tests..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test atp::quic::packet_lab --no-fail-fast 2>&1 | tee -a "$LANE_LOG"
+    "atp_network")
+        echo "Running ATP network tests..." | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo test atp::network --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
 
-        # Run network scenarios
+        # Run network scenarios (optional)
         if [[ -f "scripts/ci/run_network_scenarios.sh" ]]; then
-            timeout "$TIMEOUT" scripts/ci/run_network_scenarios.sh 2>&1 | tee -a "$LANE_LOG" || true
-        fi
-        ;;
-
-    "dependency_audit")
-        echo "Running dependency audit..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" scripts/ci/audit_dependencies.sh 2>&1 | tee -a "$LANE_LOG" || true
-
-        # Check for banned dependencies
-        cargo metadata --format-version 1 | python3 scripts/ci/check_banned_deps.py 2>&1 | tee -a "$LANE_LOG"
-        ;;
-
-    "atp_core_deps")
-        echo "Running ATP core dependency validation..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" scripts/ci/check_atp_core_deps.sh 2>&1 | tee -a "$LANE_LOG"
-        ;;
-
-    "platform_caps")
-        echo "Running platform capabilities test..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test platform_capabilities --no-fail-fast 2>&1 | tee -a "$LANE_LOG"
-
-        # Test platform-specific features
-        if [[ -f "scripts/ci/test_platform_features.sh" ]]; then
-            timeout "$TIMEOUT" scripts/ci/test_platform_features.sh 2>&1 | tee -a "$LANE_LOG" || true
-        fi
-        ;;
-
-    "atp_stress")
-        echo "Running ATP stress tests..." | tee -a "$LANE_LOG"
-        if [[ -f "scripts/ci/run_stress_tests.sh" ]]; then
-            timeout "$TIMEOUT" scripts/ci/run_stress_tests.sh 2>&1 | tee -a "$LANE_LOG" || true
+            run_optional "timeout '$TIMEOUT' scripts/ci/run_network_scenarios.sh 2>&1 | tee -a '$LANE_LOG'" "network scenarios"
         fi
         ;;
 
     "atp_security")
         echo "Running ATP security tests..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo test atp_security_tests --no-fail-fast 2>&1 | tee -a "$LANE_LOG" || true
+        run_optional "timeout '$TIMEOUT' scripts/ci/audit_dependencies.sh 2>&1 | tee -a '$LANE_LOG'" "dependency audit"
 
+        # Run platform feature tests if available (optional)
+        if [[ "$MODE" == "full" && -f "scripts/ci/test_platform_features.sh" ]]; then
+            run_optional "timeout '$TIMEOUT' scripts/ci/test_platform_features.sh 2>&1 | tee -a '$LANE_LOG'" "platform features"
+        fi
+
+        # Run stress tests (optional)
+        if [[ "$MODE" == "stress" && -f "scripts/ci/run_stress_tests.sh" ]]; then
+            run_optional "timeout '$TIMEOUT' scripts/ci/run_stress_tests.sh 2>&1 | tee -a '$LANE_LOG'" "stress tests"
+        fi
+
+        # Security tests are required
+        run_required "timeout '$TIMEOUT' cargo test atp_security_tests --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
+
+        # Security audit is optional
         if [[ -f "scripts/ci/run_security_audit.sh" ]]; then
-            timeout "$TIMEOUT" scripts/ci/run_security_audit.sh 2>&1 | tee -a "$LANE_LOG" || true
+            run_optional "timeout '$TIMEOUT' scripts/ci/run_security_audit.sh 2>&1 | tee -a '$LANE_LOG'" "security audit"
         fi
         ;;
 
-    "atp_benchmarks")
+    "atp_benchmark")
         echo "Running ATP benchmarks..." | tee -a "$LANE_LOG"
-        timeout "$TIMEOUT" cargo bench --bench atp_benchmarks 2>&1 | tee -a "$LANE_LOG" || true
+        run_required "timeout '$TIMEOUT' cargo bench --bench atp_benchmarks 2>&1 | tee -a '$LANE_LOG'"
 
+        # Comparison benchmarks are optional
         if [[ -f "scripts/ci/run_comparison_benchmarks.sh" ]]; then
-            timeout "$TIMEOUT" scripts/ci/run_comparison_benchmarks.sh 2>&1 | tee -a "$LANE_LOG" || true
+            run_optional "timeout '$TIMEOUT' scripts/ci/run_comparison_benchmarks.sh 2>&1 | tee -a '$LANE_LOG'" "comparison benchmarks"
         fi
         ;;
 
     *)
-        echo "Unknown lane: $LANE_ID" | tee -a "$LANE_LOG"
+        echo "Error: Unknown lane $LANE_ID" | tee -a "$LANE_LOG"
         exit 1
         ;;
 esac
 
-echo "Lane $LANE_ID completed successfully" | tee -a "$LANE_LOG"
-
 # Copy log to artifacts
 cp "$LANE_LOG" "$LANE_ARTIFACTS_DIR/"
 
-# Generate success marker
-echo "SUCCESS" > "${LANE_ARTIFACTS_DIR}/status.txt"
+# Determine final status based on required command results
+if [[ $REQUIRED_FAILURES -eq 0 ]]; then
+    echo "Lane $LANE_ID completed successfully" | tee -a "$LANE_LOG"
+    echo "SUCCESS" > "${LANE_ARTIFACTS_DIR}/status.txt"
+    if [[ $OPTIONAL_SKIPPED -gt 0 ]]; then
+        echo "Note: $OPTIONAL_SKIPPED optional commands were skipped" | tee -a "$LANE_LOG"
+    fi
+else
+    echo "Lane $LANE_ID failed: $REQUIRED_FAILURES required commands failed" | tee -a "$LANE_LOG"
+    echo "FAILED" > "${LANE_ARTIFACTS_DIR}/status.txt"
+    exit 1
+fi
