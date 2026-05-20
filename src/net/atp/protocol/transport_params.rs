@@ -242,7 +242,11 @@ impl TransportParameterValue {
         buf: &mut BytesMut,
         expected_type: TransportParameterValueType,
     ) -> Result<Self, TransportParameterError> {
-        let length = VarInt::decode(buf)?.ok_or(TransportParameterError::UnexpectedEof)?;
+        let length = match VarInt::decode(buf) {
+            Outcome::Ok(Some(varint)) => varint,
+            Outcome::Ok(None) => return Err(TransportParameterError::UnexpectedEof),
+            _ => return Err(TransportParameterError::VarInt(VarIntError::InvalidEncoding)),
+        };
 
         if buf.len() < length.value() as usize {
             return Err(TransportParameterError::UnexpectedEof);
@@ -258,8 +262,11 @@ impl TransportParameterValue {
                     });
                 }
                 let mut param_buf = buf.split_to(length.value() as usize);
-                let varint = VarInt::decode(&mut param_buf)?
-                    .ok_or(TransportParameterError::UnexpectedEof)?;
+                let varint = match VarInt::decode(&mut param_buf) {
+                    Outcome::Ok(Some(varint)) => varint,
+                    Outcome::Ok(None) => return Err(TransportParameterError::UnexpectedEof),
+                    _ => return Err(TransportParameterError::VarInt(VarIntError::InvalidEncoding)),
+                };
                 Ok(TransportParameterValue::VarInt(varint))
             }
             TransportParameterValueType::Bytes => {
@@ -320,7 +327,14 @@ impl TransportParameters {
         id: TransportParameterId,
         value: u64,
     ) -> Result<(), TransportParameterError> {
-        let varint = VarInt::new(value)?;
+        let varint = match VarInt::new(value) {
+            Outcome::Ok(varint) => varint,
+            _ => return Err(TransportParameterError::InvalidParameterValue {
+                parameter: id,
+                value,
+                reason: "Invalid varint value".to_string(),
+            }),
+        };
         self.set_parameter(id, TransportParameterValue::VarInt(varint));
         Ok(())
     }
@@ -501,8 +515,25 @@ impl TransportParameters {
         sorted_unknown.sort_by_key(|(id, _)| **id);
 
         for (&id, value) in sorted_unknown {
-            VarInt::new(id)?.encode_to_buf(&mut buf)?;
-            VarInt::new(value.len() as u64)?.encode_to_buf(&mut buf)?;
+            let id_varint = match VarInt::new(id) {
+                Outcome::Ok(varint) => varint,
+                _ => return Err(TransportParameterError::InvalidParameterValue {
+                    parameter: TransportParameterId::InitialMaxData, // placeholder
+                    value: id,
+                    reason: "Invalid parameter ID".to_string(),
+                }),
+            };
+            id_varint.encode_to_buf(&mut buf)?;
+
+            let len_varint = match VarInt::new(value.len() as u64) {
+                Outcome::Ok(varint) => varint,
+                _ => return Err(TransportParameterError::InvalidParameterValue {
+                    parameter: TransportParameterId::InitialMaxData, // placeholder
+                    value: value.len() as u64,
+                    reason: "Invalid parameter length".to_string(),
+                }),
+            };
+            len_varint.encode_to_buf(&mut buf)?;
             buf.put_slice(value);
         }
 
@@ -641,7 +672,14 @@ trait VarIntTransportExt {
 impl VarIntTransportExt for VarInt {
     fn encode_to_buf<B: BufMut>(&self, buf: &mut B) -> Result<(), TransportParameterError> {
         let mut temp = BytesMut::new();
-        self.encode(&mut temp)?;
+        match self.encode(&mut temp) {
+            Outcome::Ok(()) => {}
+            _ => return Err(TransportParameterError::InvalidParameterValue {
+                parameter: TransportParameterId::InitialMaxData, // placeholder
+                value: 0,
+                reason: "VarInt encode failed".to_string(),
+            }),
+        }
         buf.put_slice(&temp);
         Ok(())
     }
