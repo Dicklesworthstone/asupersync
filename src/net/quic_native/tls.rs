@@ -5,7 +5,7 @@
 //! a specific cryptographic backend.
 
 use sha2::{Digest, Sha256};
-#[cfg(any(test, feature = "test-internals", feature = "tls"))]
+#[cfg(any(test, feature = "tls"))]
 use std::collections::BTreeMap;
 use std::fmt;
 #[cfg(feature = "tls")]
@@ -47,7 +47,7 @@ impl PacketProtectionSpace {
         }
     }
 
-    #[cfg(any(test, feature = "test-internals", feature = "tls"))]
+    #[cfg(any(test, feature = "tls"))]
     const fn code(self) -> u8 {
         match self {
             Self::Initial => 0,
@@ -395,7 +395,7 @@ pub struct ProtectionProof {
 }
 
 impl ProtectionProof {
-    #[cfg(any(test, feature = "test-internals", feature = "tls"))]
+    #[cfg(any(test, feature = "tls"))]
     fn success(provider_kind: &'static str, key: &ProtectionKeySnapshot) -> Self {
         Self {
             provider_kind,
@@ -929,7 +929,7 @@ fn rustls_version_code(version: rustls::quic::Version) -> u8 {
     }
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct DeterministicKeySlot {
     snapshot: ProtectionKeySnapshot,
@@ -943,14 +943,14 @@ struct DeterministicKeySlot {
 /// state machine can prove provider lifecycle, transcript binding, key update,
 /// header protection, and fail-closed behavior without importing an external
 /// QUIC implementation.
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct DeterministicQuicCryptoProvider {
     transcript_hash: TranscriptHash,
     keys: BTreeMap<(PacketProtectionSpace, bool), DeterministicKeySlot>,
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 impl Default for DeterministicQuicCryptoProvider {
     fn default() -> Self {
         Self {
@@ -960,7 +960,7 @@ impl Default for DeterministicQuicCryptoProvider {
     }
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 impl DeterministicQuicCryptoProvider {
     /// Construct an empty deterministic provider.
     #[must_use]
@@ -1022,7 +1022,7 @@ impl DeterministicQuicCryptoProvider {
     }
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 impl QuicPacketProtectionProvider for DeterministicQuicCryptoProvider {
     fn provider_kind(&self) -> &'static str {
         "deterministic-lab"
@@ -1220,7 +1220,7 @@ impl QuicPacketProtectionProvider for DeterministicQuicCryptoProvider {
     }
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 fn derive_secret(
     space: PacketProtectionSpace,
     key_phase: bool,
@@ -1239,7 +1239,7 @@ fn derive_secret(
     hasher.finalize().into()
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 fn derive_key_id(secret: &[u8; 32]) -> [u8; 16] {
     let mut hasher = Sha256::new();
     hasher.update(b"asupersync/quic-protection-key-id/v1");
@@ -1250,7 +1250,7 @@ fn derive_key_id(secret: &[u8; 32]) -> [u8; 16] {
     out
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 fn apply_keystream(secret: &[u8; 32], packet_number: u64, aad: &[u8], input: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(input.len());
     let mut counter = 0u64;
@@ -1275,7 +1275,7 @@ fn apply_keystream(secret: &[u8; 32], packet_number: u64, aad: &[u8], input: &[u
     output
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 fn compute_tag(
     secret: &[u8; 32],
     space: PacketProtectionSpace,

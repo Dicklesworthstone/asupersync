@@ -266,7 +266,7 @@ impl MediaProfile {
         }
 
         // Ensure final boundary
-        if boundaries.is_empty() || *boundaries.last().unwrap() < data.len() as u64 {
+        if boundaries.last().copied().unwrap_or(0) < data.len() as u64 {
             boundaries.push(data.len() as u64);
         }
 
@@ -294,7 +294,7 @@ impl MediaProfile {
             }
         }
 
-        if boundaries.is_empty() || *boundaries.last().unwrap() < data.len() as u64 {
+        if boundaries.last().copied().unwrap_or(0) < data.len() as u64 {
             boundaries.push(data.len() as u64);
         }
 
@@ -630,7 +630,8 @@ mod tests {
     #[test]
     fn chunking_creates_media_boundaries() {
         let video_data = b"\x00\x00\x00\x18ftypmp4\x00".repeat(1000);
-        let boundaries = MediaProfile::compute_boundaries(&video_data).unwrap();
+        let boundaries =
+            MediaProfile::compute_boundaries(&video_data).expect("media chunking should succeed");
 
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {

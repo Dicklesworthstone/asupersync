@@ -12,7 +12,7 @@ use crate::net::quic_native::tls::{
     TranscriptHash, UnprotectedPacket,
 };
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(test)]
 use crate::net::quic_native::tls::DeterministicQuicCryptoProvider;
 
 #[cfg(feature = "tls")]
@@ -97,7 +97,7 @@ impl AtpPacketProtection {
             Box<dyn QuicPacketProtectionProvider + Send + Sync>,
             &'static str,
         ) = if config.use_deterministic {
-            #[cfg(any(test, feature = "test-internals"))]
+            #[cfg(test)]
             match &config.provider_options {
                 ProviderOptions::Deterministic { .. } => {
                     let provider = DeterministicQuicCryptoProvider::new();
@@ -109,9 +109,10 @@ impl AtpPacketProtection {
                     (Box::new(provider), "deterministic")
                 }
             }
-            #[cfg(not(any(test, feature = "test-internals")))]
+            #[cfg(not(test))]
             {
-                return Outcome::err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
+                // SECURITY: Deterministic crypto must never be used in production builds
+                panic!("Deterministic crypto provider requested in production build - this is a security vulnerability");
             }
         } else {
             #[cfg(feature = "tls")]
@@ -124,19 +125,17 @@ impl AtpPacketProtection {
                         ));
                     }
                 },
-                #[cfg(any(test, feature = "test-internals"))]
+                #[cfg(test)]
                 ProviderOptions::Deterministic { .. } => {
                     let provider = DeterministicQuicCryptoProvider::new();
                     (Box::new(provider), "deterministic")
                 }
-                #[cfg(not(any(test, feature = "test-internals")))]
+                #[cfg(not(test))]
                 ProviderOptions::Deterministic { .. } => {
-                    return Outcome::err(AtpError::Protocol(
-                        ProtocolError::SessionStateMismatch,
-                    ));
+                    return Outcome::err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
                 }
             }
-            #[cfg(all(not(feature = "tls"), any(test, feature = "test-internals")))]
+            #[cfg(all(not(feature = "tls"), test))]
             {
                 match &config.provider_options {
                     ProviderOptions::Deterministic { .. } => {
@@ -145,9 +144,10 @@ impl AtpPacketProtection {
                     }
                 }
             }
-            #[cfg(all(not(feature = "tls"), not(any(test, feature = "test-internals"))))]
+            #[cfg(all(not(feature = "tls"), not(test)))]
             {
-                return Outcome::err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
+                // SECURITY: Deterministic crypto must never be used in production builds
+                panic!("Deterministic crypto provider requested in production build - this is a security vulnerability");
             }
         };
 
@@ -467,8 +467,16 @@ impl AtpPacketProtection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cx::scope;
-    use crate::lab::LabRuntime;
+    use crate::cx::Cx;
+    use crate::types::{Budget, RegionId, TaskId};
+
+    fn test_cx() -> Cx {
+        Cx::new(
+            RegionId::testing_default(),
+            TaskId::testing_default(),
+            Budget::INFINITE,
+        )
+    }
 
     #[test]
     fn test_packet_protection_config_defaults() {
@@ -478,11 +486,11 @@ mod tests {
         assert!(config.enable_proof_logging);
     }
 
-    #[tokio::test]
-    async fn test_deterministic_protection_lifecycle() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, _scope| async move {
-            let mut protection =
+    #[test]
+    fn test_deterministic_protection_lifecycle() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let protection =
                 AtpPacketProtection::new_client(true).expect("deterministic protection");
 
             assert_eq!(protection.provider_kind(), "deterministic");
@@ -490,23 +498,19 @@ mod tests {
             // Test transcript verification
             let transcript = QuicHandshakeTranscript::new();
             protection
-                .verify_transcript(cx, transcript.digest())
+                .verify_transcript(&cx, transcript.digest())
                 .await
                 .expect("transcript verification");
-        })
-        .await
-        .unwrap();
+        });
     }
 
     #[cfg(feature = "tls")]
-    #[tokio::test]
-    async fn test_rustls_protection_creation() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, _scope| async move {
-            let mut client =
-                AtpPacketProtection::new_client(false).expect("rustls client protection");
-            let mut server =
-                AtpPacketProtection::new_server(false).expect("rustls server protection");
+    #[test]
+    fn test_rustls_protection_creation() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let client = AtpPacketProtection::new_client(false).expect("rustls client protection");
+            let server = AtpPacketProtection::new_server(false).expect("rustls server protection");
 
             assert_eq!(client.provider_kind(), "rustls-quic-ring");
             assert_eq!(server.provider_kind(), "rustls-quic-ring");
@@ -514,22 +518,20 @@ mod tests {
             // Test basic operations don't panic
             let transcript = QuicHandshakeTranscript::new();
             client
-                .verify_transcript(cx, transcript.digest())
+                .verify_transcript(&cx, transcript.digest())
                 .await
                 .expect("client transcript verification");
             server
-                .verify_transcript(cx, transcript.digest())
+                .verify_transcript(&cx, transcript.digest())
                 .await
                 .expect("server transcript verification");
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_error_mapping() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, _scope| async move {
+    #[test]
+    fn test_error_mapping() {
+        futures_lite::future::block_on(async {
+            let _cx = test_cx();
             let protection =
                 AtpPacketProtection::new_client(true).expect("deterministic protection");
 
@@ -543,8 +545,6 @@ mod tests {
                 }
                 _ => panic!("Unexpected error mapping: {:?}", atp_error),
             }
-        })
-        .await
-        .unwrap();
+        });
     }
 }

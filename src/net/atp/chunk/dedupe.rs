@@ -583,7 +583,7 @@ mod tests {
             512,  // min_chunk_size
             2048, // max_chunk_size
         )
-        .unwrap();
+        .expect("cdc boundary computation should succeed for test data");
 
         assert!(!boundaries.is_empty());
         assert_eq!(boundaries.last(), Some(&(data.len() as u64)));
@@ -629,10 +629,10 @@ mod tests {
         // Store first two chunks
         cache
             .store_chunk(identity1.clone(), Bytes::copy_from_slice(&data1), None)
-            .unwrap();
+            .expect("first cache store should succeed");
         cache
             .store_chunk(identity2.clone(), Bytes::copy_from_slice(&data2), None)
-            .unwrap();
+            .expect("second cache store should succeed");
 
         // Both should be present
         assert!(cache.lookup_chunk(&identity1).is_some());
@@ -641,7 +641,7 @@ mod tests {
         // Store third chunk (should evict oldest)
         cache
             .store_chunk(identity3.clone(), Bytes::copy_from_slice(&data3), None)
-            .unwrap();
+            .expect("third cache store should evict and succeed");
 
         // First chunk should be evicted
         assert!(cache.lookup_chunk(&identity1).is_none());
@@ -660,7 +660,7 @@ mod tests {
         let data = b"test chunk data";
         let identity = manager
             .store_chunk_for_reuse(data, "test-profile", transfer_id, None)
-            .unwrap();
+            .expect("chunk reuse manager should store matching chunk data");
 
         // Should be able to reuse from same context
         let reused_data = manager.try_reuse_chunk(&identity, transfer_id);
@@ -690,7 +690,7 @@ mod tests {
 
         cache
             .store_chunk(identity_a.clone(), Bytes::copy_from_slice(&data), None)
-            .unwrap();
+            .expect("scoped cache store should succeed");
 
         // Same context should allow reuse
         assert!(cache.can_reuse_chunk(&identity_a, context_a));
@@ -702,7 +702,7 @@ mod tests {
         let identity_global = ChunkIdentity::from_data(&data, "test", "");
         cache
             .store_chunk(identity_global.clone(), Bytes::copy_from_slice(&data), None)
-            .unwrap();
+            .expect("global cache store should succeed");
         assert!(cache.can_reuse_chunk(&identity_global, context_a));
         assert!(cache.can_reuse_chunk(&identity_global, context_b));
     }
