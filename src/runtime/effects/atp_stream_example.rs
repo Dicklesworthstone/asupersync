@@ -204,6 +204,7 @@ impl TwoPhasedAtpStream {
 /// In a real implementation, this would hold a reference or channel
 /// back to the stream to perform the actual commit/abort operations.
 pub struct TwoPhaseStreamPermit {
+    #[allow(dead_code)] // Used for debugging/logging in real implementation
     stream_id: u64,
     max_buffer_size: usize,
     committed: bool,
