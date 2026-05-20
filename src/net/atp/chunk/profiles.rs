@@ -30,19 +30,13 @@ pub trait ChunkingProfile {
 /// Shared utilities for chunk computation across profiles.
 pub mod utils {
     use super::*;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Sha256, Digest};
 
     /// Compute SHA-256 hash of chunk data.
-    /// TODO: Replace with proper crypto library when available.
     pub fn compute_chunk_hash(data: &[u8]) -> [u8; 32] {
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        let hash_val = hasher.finish();
-
-        let mut result = [0u8; 32];
-        result[..8].copy_from_slice(&hash_val.to_be_bytes());
-        result
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hasher.finalize().into()
     }
 
     /// Rolling hash implementation for content-defined chunking.
