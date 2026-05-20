@@ -21,6 +21,207 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+/// Smallest UDP socket buffer requested by the tuning helper.
+pub const UDP_MIN_SOCKET_BUFFER_BYTES: usize = 8 * 1024;
+/// Largest UDP socket buffer requested by the tuning helper.
+pub const UDP_MAX_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
+/// Platform family backing the UDP socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpPlatform {
+    /// Linux socket backend.
+    Linux,
+    /// macOS or other Darwin socket backend.
+    Darwin,
+    /// Windows socket backend.
+    Windows,
+    /// Browser wasm profile; raw UDP is unavailable.
+    Wasm,
+    /// Any other target family.
+    Other,
+}
+
+impl UdpPlatform {
+    /// Return the compile-time platform family for this build.
+    #[inline]
+    #[must_use]
+    pub const fn current() -> Self {
+        if cfg!(target_arch = "wasm32") {
+            Self::Wasm
+        } else if cfg!(target_os = "linux") {
+            Self::Linux
+        } else if cfg!(target_vendor = "apple") {
+            Self::Darwin
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Tri-state socket capability report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpCapability {
+    /// Capability is available on this socket/profile.
+    Supported,
+    /// Capability is not available on this socket/profile.
+    Unsupported,
+    /// The portable std/socket2 layer cannot prove availability.
+    Unknown,
+}
+
+/// Socket address family observed for a bound socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpAddressFamily {
+    /// IPv4 socket.
+    Ipv4,
+    /// IPv6 socket.
+    Ipv6,
+    /// Address family is not observable.
+    Unknown,
+}
+
+impl From<SocketAddr> for UdpAddressFamily {
+    #[inline]
+    fn from(addr: SocketAddr) -> Self {
+        if addr.is_ipv4() {
+            Self::Ipv4
+        } else {
+            Self::Ipv6
+        }
+    }
+}
+
+/// UDP batching support exposed by this portable abstraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpBatchCapabilities {
+    /// OS-native multi-message send batching is exposed.
+    pub native_send_batch: bool,
+    /// OS-native multi-message receive batching is exposed.
+    pub native_recv_batch: bool,
+    /// Portable send batching falls back to a cancel-checked loop.
+    pub portable_send_batch: bool,
+    /// Portable receive batching drains the socket after one readiness wait.
+    pub portable_recv_batch: bool,
+    /// Maximum fallback batch used by default by ATP/QUIC callers.
+    pub default_fallback_batch: usize,
+}
+
+impl Default for UdpBatchCapabilities {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            native_send_batch: false,
+            native_recv_batch: false,
+            portable_send_batch: true,
+            portable_recv_batch: true,
+            default_fallback_batch: 32,
+        }
+    }
+}
+
+/// UDP socket capability and tuning report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpSocketCapabilities {
+    /// Compile-time platform family.
+    pub platform: UdpPlatform,
+    /// Bound socket address family.
+    pub address_family: UdpAddressFamily,
+    /// Dual-stack support for this socket.
+    pub dual_stack: UdpCapability,
+    /// ECN packet metadata availability.
+    pub ecn: UdpCapability,
+    /// Send/receive batching capabilities.
+    pub batching: UdpBatchCapabilities,
+    /// Observed receive buffer size, if the platform reports it.
+    pub observed_recv_buffer_bytes: Option<usize>,
+    /// Observed send buffer size, if the platform reports it.
+    pub observed_send_buffer_bytes: Option<usize>,
+}
+
+/// Requested UDP socket buffer sizes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UdpBufferConfig {
+    /// Desired receive buffer size.
+    pub recv_buffer_bytes: Option<usize>,
+    /// Desired send buffer size.
+    pub send_buffer_bytes: Option<usize>,
+}
+
+impl UdpBufferConfig {
+    /// Clamp requested buffer sizes to a bounded cross-platform range.
+    #[inline]
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        Self {
+            recv_buffer_bytes: self.recv_buffer_bytes.map(clamp_udp_buffer_size),
+            send_buffer_bytes: self.send_buffer_bytes.map(clamp_udp_buffer_size),
+        }
+    }
+}
+
+#[inline]
+#[must_use]
+fn clamp_udp_buffer_size(size: usize) -> usize {
+    size.clamp(UDP_MIN_SOCKET_BUFFER_BYTES, UDP_MAX_SOCKET_BUFFER_BYTES)
+}
+
+/// Result of applying UDP socket buffer tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpBufferTuneReport {
+    /// Requested receive buffer size after abstraction-level clamping.
+    pub requested_recv_buffer_bytes: Option<usize>,
+    /// Requested send buffer size after abstraction-level clamping.
+    pub requested_send_buffer_bytes: Option<usize>,
+    /// Platform-reported receive buffer size after tuning.
+    pub applied_recv_buffer_bytes: Option<usize>,
+    /// Platform-reported send buffer size after tuning.
+    pub applied_send_buffer_bytes: Option<usize>,
+}
+
+/// Datagram scheduled for portable UDP batch send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpOutboundDatagram<'a> {
+    /// Datagram destination.
+    pub dst_addr: SocketAddr,
+    /// Datagram payload.
+    pub payload: &'a [u8],
+}
+
+/// Datagram received by portable UDP batch receive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpInboundDatagram {
+    /// Datagram source.
+    pub src_addr: SocketAddr,
+    /// Datagram payload bytes copied from the socket.
+    pub payload: Vec<u8>,
+    /// True when the receive buffer may have truncated the datagram.
+    pub possibly_truncated: bool,
+}
+
+/// Result summary for portable UDP batch I/O.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UdpBatchIoReport {
+    /// Number of packets processed before completion or first error.
+    pub packets_processed: usize,
+    /// Total payload bytes processed.
+    pub bytes_processed: usize,
+    /// True when this operation used the portable loop fallback.
+    pub fallback_used: bool,
+    /// Stringified error that stopped a partial batch.
+    pub error: Option<String>,
+}
+
+/// Portable UDP receive batch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UdpRecvBatch {
+    /// Received datagrams.
+    pub packets: Vec<UdpInboundDatagram>,
+    /// Batch summary.
+    pub report: UdpBatchIoReport,
+}
+
 #[cfg(target_arch = "wasm32")]
 #[inline]
 fn browser_udp_unsupported(op: &str) -> io::Error {
@@ -442,6 +643,173 @@ impl UdpSocket {
         SendSink::new(self)
     }
 
+    /// Report socket capabilities visible through the portable UDP layer.
+    pub fn capabilities(&self) -> io::Result<UdpSocketCapabilities> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            browser_udp_unsupported_result("UdpSocket::capabilities")
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let local_addr = self.local_addr().ok();
+            let sock = socket2::SockRef::from(&*self.inner);
+            let observed_recv_buffer_bytes = sock.recv_buffer_size().ok();
+            let observed_send_buffer_bytes = sock.send_buffer_size().ok();
+            let address_family =
+                local_addr.map_or(UdpAddressFamily::Unknown, UdpAddressFamily::from);
+            let dual_stack = match address_family {
+                UdpAddressFamily::Ipv6 => UdpCapability::Unknown,
+                UdpAddressFamily::Ipv4 => UdpCapability::Unsupported,
+                UdpAddressFamily::Unknown => UdpCapability::Unknown,
+            };
+
+            Ok(UdpSocketCapabilities {
+                platform: UdpPlatform::current(),
+                address_family,
+                dual_stack,
+                ecn: UdpCapability::Unknown,
+                batching: UdpBatchCapabilities::default(),
+                observed_recv_buffer_bytes,
+                observed_send_buffer_bytes,
+            })
+        }
+    }
+
+    /// Apply bounded receive/send buffer tuning and report platform-applied sizes.
+    pub fn tune_buffers(&self, config: UdpBufferConfig) -> io::Result<UdpBufferTuneReport> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = config;
+            browser_udp_unsupported_result("UdpSocket::tune_buffers")
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let requested = config.clamped();
+            let sock = socket2::SockRef::from(&*self.inner);
+
+            if let Some(size) = requested.recv_buffer_bytes {
+                sock.set_recv_buffer_size(size)?;
+            }
+            if let Some(size) = requested.send_buffer_bytes {
+                sock.set_send_buffer_size(size)?;
+            }
+
+            Ok(UdpBufferTuneReport {
+                requested_recv_buffer_bytes: requested.recv_buffer_bytes,
+                requested_send_buffer_bytes: requested.send_buffer_bytes,
+                applied_recv_buffer_bytes: sock.recv_buffer_size().ok(),
+                applied_send_buffer_bytes: sock.send_buffer_size().ok(),
+            })
+        }
+    }
+
+    /// Send a portable batch of datagrams with a cancel checkpoint between packets.
+    pub async fn send_batch_to(
+        &mut self,
+        packets: &[UdpOutboundDatagram<'_>],
+    ) -> io::Result<UdpBatchIoReport> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = packets;
+            browser_udp_unsupported_result("UdpSocket::send_batch_to")
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut report = UdpBatchIoReport {
+                fallback_used: packets.len() > 1,
+                ..UdpBatchIoReport::default()
+            };
+
+            for packet in packets {
+                match self.send_to(packet.payload, packet.dst_addr).await {
+                    Ok(sent) => {
+                        report.packets_processed += 1;
+                        report.bytes_processed += sent;
+                    }
+                    Err(err) if report.packets_processed == 0 => return Err(err),
+                    Err(err) => {
+                        report.error = Some(err.to_string());
+                        break;
+                    }
+                }
+            }
+
+            Ok(report)
+        }
+    }
+
+    /// Receive one readiness-driven packet, then drain any immediately-ready packets.
+    pub async fn recv_batch_from(
+        &mut self,
+        max_packets: usize,
+        packet_size: usize,
+    ) -> io::Result<UdpRecvBatch> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (max_packets, packet_size);
+            browser_udp_unsupported_result("UdpSocket::recv_batch_from")
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if max_packets == 0 {
+                return Ok(UdpRecvBatch::default());
+            }
+            if packet_size == 0 {
+                return Err(empty_udp_receive_buffer_error("recv_batch_from"));
+            }
+
+            let mut first = vec![0u8; packet_size];
+            let (bytes_read, src_addr) = self.recv_from(&mut first).await?;
+            first.truncate(bytes_read);
+
+            let mut batch = UdpRecvBatch {
+                packets: vec![UdpInboundDatagram {
+                    src_addr,
+                    payload: first,
+                    possibly_truncated: bytes_read == packet_size,
+                }],
+                report: UdpBatchIoReport {
+                    packets_processed: 1,
+                    bytes_processed: bytes_read,
+                    fallback_used: max_packets > 1,
+                    error: None,
+                },
+            };
+
+            for _ in 1..max_packets {
+                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                    batch.report.error = Some("cancelled".to_string());
+                    break;
+                }
+
+                let mut buf = vec![0u8; packet_size];
+                match self.inner.recv_from(&mut buf) {
+                    Ok((n, addr)) => {
+                        buf.truncate(n);
+                        batch.report.packets_processed += 1;
+                        batch.report.bytes_processed += n;
+                        batch.packets.push(UdpInboundDatagram {
+                            src_addr: addr,
+                            payload: buf,
+                            possibly_truncated: n == packet_size,
+                        });
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(err) => {
+                        batch.report.error = Some(err.to_string());
+                        break;
+                    }
+                }
+            }
+
+            Ok(batch)
+        }
+    }
+
     /// Clone this socket via the underlying OS handle.
     ///
     /// The new socket gets its own reactor registration.
@@ -624,6 +992,86 @@ mod tests {
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
+    }
+
+    #[test]
+    fn udp_buffer_config_clamps_to_cross_platform_bounds() {
+        let config = UdpBufferConfig {
+            recv_buffer_bytes: Some(1),
+            send_buffer_bytes: Some(usize::MAX),
+        }
+        .clamped();
+
+        assert_eq!(config.recv_buffer_bytes, Some(UDP_MIN_SOCKET_BUFFER_BYTES));
+        assert_eq!(config.send_buffer_bytes, Some(UDP_MAX_SOCKET_BUFFER_BYTES));
+    }
+
+    #[test]
+    fn udp_capabilities_report_portable_batching() {
+        future::block_on(async {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let capabilities = socket.capabilities().unwrap();
+
+            assert_eq!(capabilities.platform, UdpPlatform::current());
+            assert_eq!(capabilities.address_family, UdpAddressFamily::Ipv4);
+            assert!(capabilities.batching.portable_send_batch);
+            assert!(capabilities.batching.portable_recv_batch);
+            assert!(!capabilities.batching.native_send_batch);
+            assert!(!capabilities.batching.native_recv_batch);
+        });
+    }
+
+    #[test]
+    fn udp_buffer_tuning_reports_observed_sizes() {
+        future::block_on(async {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let report = socket
+                .tune_buffers(UdpBufferConfig {
+                    recv_buffer_bytes: Some(16 * 1024),
+                    send_buffer_bytes: Some(16 * 1024),
+                })
+                .unwrap();
+
+            assert_eq!(report.requested_recv_buffer_bytes, Some(16 * 1024));
+            assert_eq!(report.requested_send_buffer_bytes, Some(16 * 1024));
+            assert!(report.applied_recv_buffer_bytes.is_some());
+            assert!(report.applied_send_buffer_bytes.is_some());
+        });
+    }
+
+    #[test]
+    fn udp_portable_batch_send_receive() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            let packets = [
+                UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload: b"one",
+                },
+                UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload: b"two",
+                },
+            ];
+            let sent = sender.send_batch_to(&packets).await.unwrap();
+            assert_eq!(sent.packets_processed, 2);
+            assert_eq!(sent.bytes_processed, 6);
+            assert!(sent.fallback_used);
+
+            let received = receiver.recv_batch_from(2, 16).await.unwrap();
+            assert_eq!(received.report.packets_processed, 2);
+            assert_eq!(
+                received
+                    .packets
+                    .iter()
+                    .map(|packet| packet.payload.as_slice())
+                    .collect::<Vec<_>>(),
+                vec![b"one".as_slice(), b"two".as_slice()]
+            );
+        });
     }
 
     #[test]

@@ -8,6 +8,10 @@
 /// ATP (Asupersync Transfer Protocol) - Self-contained data movement layer.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod atp;
+/// ATP UDP socket capability boundary.
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "atp/udp/mod.rs"]
+pub mod atp_udp;
 /// DNS resolution with caching and Happy Eyeballs support.
 pub mod dns;
 /// Happy Eyeballs v2 (RFC 8305) concurrent dual-stack connection racing.
@@ -56,6 +60,12 @@ pub use atp::protocol::{
     AtpFrameCodec, Frame as AtpFrame, FrameError, FrameHeader, FrameType, ProtocolVersion,
     SessionTranscript, TranscriptHash, TranscriptHasher, VarInt, VarIntError,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use atp_udp::{
+    ATP_UDP_DEFAULT_BATCH_SIZE, ATP_UDP_DEFAULT_MAX_PACKET_SIZE, AtpUdpPacket, AtpUdpPressure,
+    AtpUdpReceivedPacket, AtpUdpRecvBatch, AtpUdpSocket, AtpUdpSocketConfig, AtpUdpSocketProfile,
+    FakeAtpUdpSocket, FakeUdpEvent,
+};
 pub use happy_eyeballs::{HappyEyeballsConfig, connect as happy_eyeballs_connect};
 #[cfg(all(feature = "quic", not(target_arch = "wasm32")))]
 pub use quic::{
@@ -78,7 +88,11 @@ pub use tcp::socket::TcpSocket;
 pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, WriteHalf};
 pub use tcp::stream::TcpStream;
 pub use tcp::stream::TcpStreamBuilder;
-pub use udp::{RecvStream, SendSink, UdpSocket};
+pub use udp::{
+    RecvStream, SendSink, UdpAddressFamily, UdpBatchCapabilities, UdpBatchIoReport,
+    UdpBufferConfig, UdpBufferTuneReport, UdpCapability, UdpInboundDatagram, UdpOutboundDatagram,
+    UdpPlatform, UdpRecvBatch, UdpSocket, UdpSocketCapabilities,
+};
 #[cfg(unix)]
 pub use unix::{
     Incoming as UnixIncoming, OwnedReadHalf as UnixOwnedReadHalf,

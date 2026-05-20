@@ -12,7 +12,10 @@
 //! - No live workers, wakeups, socket registrations, or obligations after region close
 
 use crate::cx::Cx;
-use crate::net::udp::UdpSocket;
+use crate::net::{
+    UdpBufferConfig, UdpBufferTuneReport, UdpOutboundDatagram, UdpSocket, UdpSocketCapabilities,
+};
+use smallvec::SmallVec;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -91,6 +94,8 @@ pub struct QuicUdpEndpoint {
     socket: UdpSocket,
     config: QuicUdpEndpointConfig,
     local_addr: SocketAddr,
+    socket_capabilities: UdpSocketCapabilities,
+    buffer_report: UdpBufferTuneReport,
     endpoint_id: u64,
     metrics: Arc<EndpointMetrics>,
 }
@@ -184,30 +189,40 @@ impl QuicUdpEndpoint {
             ));
         }
 
-        // Create and configure the UDP socket
         let socket = UdpSocket::bind(addr).await?;
-
-        // Apply socket buffer sizes if specified
-        if let Some(recv_size) = config.socket_recv_buffer_size {
-            // Note: socket2-level buffer size configuration would go here
-            // For now, we use the defaults and log the intended size
-            cx.trace(&format!("endpoint: intended recv buffer size: {recv_size}"));
-        }
-        if let Some(send_size) = config.socket_send_buffer_size {
-            cx.trace(&format!("endpoint: intended send buffer size: {send_size}"));
-        }
+        let buffer_report = socket.tune_buffers(UdpBufferConfig {
+            recv_buffer_bytes: config.socket_recv_buffer_size,
+            send_buffer_bytes: config.socket_send_buffer_size,
+        })?;
+        let socket_capabilities = socket.capabilities()?;
 
         let local_addr = socket.local_addr()?;
         let endpoint_id = generate_endpoint_id();
 
-        cx.trace(&format!(
-            "endpoint: bound UDP endpoint {endpoint_id} to {local_addr}"
-        ));
+        let endpoint_id_text = endpoint_id.to_string();
+        let local_addr_text = local_addr.to_string();
+        let platform = format!("{:?}", socket_capabilities.platform);
+        let recv_requested = format!("{:?}", buffer_report.requested_recv_buffer_bytes);
+        let recv_applied = format!("{:?}", buffer_report.applied_recv_buffer_bytes);
+        let send_requested = format!("{:?}", buffer_report.requested_send_buffer_bytes);
+        let send_applied = format!("{:?}", buffer_report.applied_send_buffer_bytes);
+        let fields = [
+            ("endpoint_id", endpoint_id_text.as_str()),
+            ("local_addr", local_addr_text.as_str()),
+            ("platform", platform.as_str()),
+            ("recv_requested", recv_requested.as_str()),
+            ("recv_applied", recv_applied.as_str()),
+            ("send_requested", send_requested.as_str()),
+            ("send_applied", send_applied.as_str()),
+        ];
+        cx.trace_with_fields("quic_udp_endpoint.bind", &fields);
 
         Ok(Self {
             socket,
             config,
             local_addr,
+            socket_capabilities,
+            buffer_report,
             endpoint_id,
             metrics: Arc::new(EndpointMetrics::default()),
         })
@@ -230,6 +245,20 @@ impl QuicUdpEndpoint {
         self.metrics.clone()
     }
 
+    /// Report socket capabilities used by this endpoint.
+    #[inline]
+    #[must_use]
+    pub fn socket_capabilities(&self) -> &UdpSocketCapabilities {
+        &self.socket_capabilities
+    }
+
+    /// Report applied socket buffer tuning.
+    #[inline]
+    #[must_use]
+    pub fn buffer_report(&self) -> UdpBufferTuneReport {
+        self.buffer_report
+    }
+
     /// Receive a batch of packets with cancellation support.
     ///
     /// Receives up to `max_packets` datagrams, respecting Cx checkpoints.
@@ -240,59 +269,54 @@ impl QuicUdpEndpoint {
         max_packets: usize,
     ) -> Result<Vec<ReceivedPacket>, QuicUdpEndpointError> {
         let effective_max = std::cmp::min(max_packets, self.config.max_batch_size);
-        let mut packets = Vec::with_capacity(effective_max);
-        let mut buffer = vec![0u8; self.config.max_packet_size];
-
         let batch_start = Instant::now();
 
-        for _ in 0..effective_max {
-            if cx.checkpoint().is_err() {
+        if effective_max == 0 {
+            return Ok(Vec::new());
+        }
+        if cx.checkpoint().is_err() {
+            return Err(QuicUdpEndpointError::Cancelled);
+        }
+
+        let batch = match self
+            .socket
+            .recv_batch_from(effective_max, self.config.max_packet_size)
+            .await
+        {
+            Ok(batch) => batch,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 return Err(QuicUdpEndpointError::Cancelled);
             }
-
-            match self.socket.recv_from(&mut buffer).await {
-                Ok((bytes_read, src_addr)) => {
-                    let receive_time = Instant::now();
-
-                    if bytes_read > self.config.max_packet_size {
-                        return Err(QuicUdpEndpointError::PacketTooLarge {
-                            size: bytes_read,
-                            limit: self.config.max_packet_size,
-                        });
-                    }
-
-                    let packet = ReceivedPacket {
-                        src_addr,
-                        data: buffer[..bytes_read].to_vec(),
-                        receive_time,
-                        transmit_time: None, // TODO: Implement if timestamping available
-                    };
-
-                    packets.push(packet);
-
-                    // Update metrics
-                    self.metrics
-                        .packets_received
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.metrics
-                        .bytes_received
-                        .fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // No more packets available
-                    break;
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                    // Cancelled
-                    return Err(QuicUdpEndpointError::Cancelled);
-                }
-                Err(e) => {
-                    self.metrics
-                        .receive_errors
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Err(e.into());
-                }
+            Err(e) => {
+                self.metrics
+                    .receive_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(e.into());
             }
+        };
+
+        let mut packets = Vec::with_capacity(batch.packets.len());
+        for packet in batch.packets {
+            let bytes_read = packet.payload.len();
+            let received = ReceivedPacket {
+                src_addr: packet.src_addr,
+                data: packet.payload,
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+            packets.push(received);
+            self.metrics
+                .packets_received
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .bytes_received
+                .fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        if batch.report.error.is_some() {
+            self.metrics
+                .receive_errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         let batch_duration = batch_start.elapsed();
@@ -316,10 +340,11 @@ impl QuicUdpEndpoint {
         packets: &[OutgoingPacket],
     ) -> Result<BatchResult, QuicUdpEndpointError> {
         let batch_start = Instant::now();
-        let mut packets_sent = 0;
-        let mut bytes_sent = 0;
+        let effective_packets = std::cmp::min(packets.len(), self.config.max_batch_size);
+        let mut datagrams: SmallVec<[UdpOutboundDatagram<'_>; 32]> =
+            SmallVec::with_capacity(effective_packets);
 
-        for packet in packets.iter().take(self.config.max_batch_size) {
+        for packet in packets.iter().take(effective_packets) {
             if cx.checkpoint().is_err() {
                 return Err(QuicUdpEndpointError::Cancelled);
             }
@@ -331,49 +356,50 @@ impl QuicUdpEndpoint {
                 });
             }
 
-            match self.socket.send_to(&packet.data, packet.dst_addr).await {
-                Ok(sent_bytes) => {
-                    packets_sent += 1;
-                    bytes_sent += sent_bytes;
-
-                    // Update metrics
-                    self.metrics
-                        .packets_sent
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.metrics
-                        .bytes_sent
-                        .fetch_add(sent_bytes as u64, std::sync::atomic::Ordering::Relaxed);
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                    return Err(QuicUdpEndpointError::Cancelled);
-                }
-                Err(e) => {
-                    self.metrics
-                        .send_errors
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    let batch_duration = batch_start.elapsed();
-                    return Ok(BatchResult {
-                        packets_processed: packets_sent,
-                        bytes_processed: bytes_sent,
-                        duration: batch_duration,
-                        error: Some(e.to_string()),
-                    });
-                }
-            }
+            datagrams.push(UdpOutboundDatagram {
+                dst_addr: packet.dst_addr,
+                payload: &packet.data,
+            });
         }
+
+        let report = match self.socket.send_batch_to(&datagrams).await {
+            Ok(report) => report,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                return Err(QuicUdpEndpointError::Cancelled);
+            }
+            Err(e) => {
+                self.metrics
+                    .send_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(e.into());
+            }
+        };
+
+        if report.error.is_some() {
+            self.metrics
+                .send_errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.metrics.packets_sent.fetch_add(
+            report.packets_processed as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.metrics.bytes_sent.fetch_add(
+            report.bytes_processed as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         let batch_duration = batch_start.elapsed();
         cx.trace(&format!(
             "endpoint: {}: sent {} packets ({} bytes) in {:?}",
-            self.endpoint_id, packets_sent, bytes_sent, batch_duration
+            self.endpoint_id, report.packets_processed, report.bytes_processed, batch_duration
         ));
 
         Ok(BatchResult {
-            packets_processed: packets_sent,
-            bytes_processed: bytes_sent,
+            packets_processed: report.packets_processed,
+            bytes_processed: report.bytes_processed,
             duration: batch_duration,
-            error: None,
+            error: report.error,
         })
     }
 
@@ -421,6 +447,8 @@ mod tests {
 
             // Should have a unique endpoint ID
             assert_ne!(endpoint.endpoint_id(), 0);
+            assert!(endpoint.socket_capabilities().batching.portable_recv_batch);
+            assert!(endpoint.buffer_report().applied_recv_buffer_bytes.is_some());
         });
     }
 
