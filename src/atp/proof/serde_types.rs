@@ -8,7 +8,6 @@ use crate::atp::manifest::{GraphCommit, HashAlgorithm, MerkleRoot};
 use crate::atp::object::{ContentId, ObjectId};
 use crate::atp::verifier::{VerificationEvidence, VerificationStage};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Serializable wrapper for MerkleRoot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,13 +49,18 @@ impl From<SerializableContentId> for ContentId {
     }
 }
 
+impl std::fmt::Display for SerializableContentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(self.hash))
+    }
+}
+
 /// Serializable wrapper for ObjectId.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum SerializableObjectId {
     Content { hash: [u8; 32] },
-    Directory { hash: [u8; 32] },
-    Symlink { hash: [u8; 32] },
+    Manifest { hash: [u8; 32] },
 }
 
 impl From<&ObjectId> for SerializableObjectId {
@@ -65,11 +69,8 @@ impl From<&ObjectId> for SerializableObjectId {
             ObjectId::Content(content_id) => Self::Content {
                 hash: *content_id.hash(),
             },
-            ObjectId::Directory(content_id) => Self::Directory {
-                hash: *content_id.hash(),
-            },
-            ObjectId::Symlink(content_id) => Self::Symlink {
-                hash: *content_id.hash(),
+            ObjectId::Manifest(manifest_id) => Self::Manifest {
+                hash: *manifest_id.hash(),
             },
         }
     }
@@ -79,8 +80,7 @@ impl From<SerializableObjectId> for ObjectId {
     fn from(object_id: SerializableObjectId) -> Self {
         match object_id {
             SerializableObjectId::Content { hash } => Self::Content(ContentId::new(hash)),
-            SerializableObjectId::Directory { hash } => Self::Directory(ContentId::new(hash)),
-            SerializableObjectId::Symlink { hash } => Self::Symlink(ContentId::new(hash)),
+            SerializableObjectId::Manifest { hash } => Self::Manifest(crate::atp::object::ManifestId::new(hash)),
         }
     }
 }

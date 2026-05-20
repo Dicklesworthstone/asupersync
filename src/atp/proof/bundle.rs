@@ -6,7 +6,7 @@
 //! auditing of data movement operations.
 
 use crate::atp::manifest::{GraphCommit, HashAlgorithm, MerkleRoot};
-use crate::atp::object::{ContentId, ObjectId};
+use crate::atp::object::ObjectId;
 use crate::atp::proof::serde_types::{
     SerializableContentId, SerializableGraphCommit, SerializableHashAlgorithm,
     SerializableMerkleRoot, SerializableObjectId, SerializableVerificationEvidence,

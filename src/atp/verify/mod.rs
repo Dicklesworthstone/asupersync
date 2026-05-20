@@ -4,7 +4,7 @@
 //! enabling independent validation of transfer completeness and integrity without
 //! access to the original transfer infrastructure.
 
-use crate::atp::proof::{AtpProofBundle, AtpProofBundleError, ProofStrength};
+use crate::atp::proof::{AtpProofBundle, ProofStrength};
 use crate::atp::verifier::{AtpVerifier, VerificationError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

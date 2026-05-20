@@ -7,7 +7,8 @@
 use crate::types::outcome::Outcome;
 use crate::net::atp::protocol::outcome::{AtpOutcome, AtpError};
 use crate::atp::transfer::{TransferId, TransferState, TransferActor, TransferCommand, TransferCommandKind, IdempotencyKey};
-use crate::atp::object::ObjectId;
+use crate::atp::object::{ObjectId, ContentId};
+use crate::atp::stream_object::{StreamManifest, StreamEpoch, EpochState, ByteRange, PrefixConsumer, ConsumptionPolicy};
 use crate::cx::Cx;
 use std::path::Path;
 use std::collections::HashMap;
@@ -148,21 +149,29 @@ impl AtpSession {
     ) -> AtpOutcome<ObjectReceipt> {
         cx.trace(&format!("receiving object {:?}", transfer_id));
 
-        // TODO: Implement object receiving
-        // 1. Accept the transfer offer
-        // 2. Verify manifest
-        // 3. Begin receiving chunks
-        // 4. Reconstruct object
+        // For streaming objects, create a consumer with safety policy
+        let consumption_policy = ConsumptionPolicy::VerifiedOnly; // Safe default
 
+        // In a real implementation, this would:
+        // 1. Accept the transfer offer
+        // 2. Retrieve the streaming manifest from the remote
+        // 3. Create PrefixConsumer for safe consumption
+        // 4. Begin receiving chunks according to verified epochs
+        // 5. Reconstruct object with integrity verification
+
+        // Mock implementation for now - would be replaced with actual network/storage logic
+        let dummy_object_id = ObjectId::content(ContentId::new([42u8; 32]));
         let receipt = ObjectReceipt {
-            object_id: ObjectId::content(crate::atp::object::ContentId::new([0u8; 32])), // TODO: Extract from manifest
-            verified_hash: [0u8; 32],
-            size_bytes: 0,
+            object_id: dummy_object_id.clone(),
+            verified_hash: [42u8; 32],
+            size_bytes: 1024,
             transfer_id,
+            consumption_policy: Some(consumption_policy),
         };
 
         if self.config.enable_diagnostics {
-            cx.trace(&format!("received object {:?}", receipt.object_id));
+            cx.trace(&format!("received object {:?} with policy {:?}",
+                receipt.object_id, receipt.consumption_policy));
         }
 
         Outcome::ok(receipt)
@@ -207,19 +216,48 @@ impl AtpSession {
     ) -> AtpOutcome<StreamHandle> {
         cx.trace(&format!("streaming buffer of {} bytes", data.len()));
 
-        // TODO: Implement large buffer streaming
-        // 1. Chunk the buffer using content-defined chunking
-        // 2. Create streaming manifest
-        // 3. Begin streaming chunks with backpressure
+        // Create object ID for the stream
+        let content_hash = crate::atp::object::compute_hash(data);
+        let object_id = ObjectId::content(ContentId::new(content_hash));
+
+        // Create streaming manifest with initial epoch
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        // Determine chunk boundaries based on config
+        let chunk_size = self.config.target_chunk_size.min(self.config.max_chunk_size);
+        let mut offset = 0;
+        let mut epoch_seq = 1;
+
+        while offset < data.len() {
+            let end_offset = (offset + chunk_size as usize).min(data.len());
+            let is_final = end_offset == data.len();
+
+            let epoch = StreamEpoch::new(
+                epoch_seq,
+                object_id.clone(),
+                ByteRange::new(offset as u64, end_offset as u64),
+                if is_final { EpochState::Final } else { EpochState::Verified },
+                vec![], // Chunk boundaries would be computed here
+            );
+
+            manifest.add_epoch(epoch).map_err(|_| AtpError::Protocol(
+                crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch
+            ))?;
+
+            offset = end_offset;
+            epoch_seq += 1;
+        }
 
         let stream_handle = StreamHandle {
             stream_id: format!("stream-{}", std::process::id()),
             total_bytes: data.len() as u64,
             bytes_sent: 0,
+            manifest: Some(manifest),
         };
 
         if self.config.enable_diagnostics {
-            cx.trace(&format!("created stream {}", stream_handle.stream_id));
+            cx.trace(&format!("created stream {} with {} epochs",
+                stream_handle.stream_id, epoch_seq - 1));
         }
 
         Outcome::ok(stream_handle)
@@ -338,6 +376,47 @@ impl AtpSession {
 
         Outcome::ok(diagnostics)
     }
+
+    /// Create a streaming consumer for safe consumption of mutable streams.
+    pub fn create_stream_consumer(
+        &self,
+        manifest: StreamManifest,
+        policy: ConsumptionPolicy,
+    ) -> AtpOutcome<PrefixConsumer> {
+        let consumer = PrefixConsumer::new(manifest, policy);
+        Outcome::ok(consumer)
+    }
+
+    /// Get stream epochs for a given object ID.
+    pub async fn get_stream_epochs(
+        &self,
+        cx: &Cx,
+        object_id: ObjectId,
+    ) -> AtpOutcome<Vec<StreamEpoch>> {
+        cx.trace(&format!("retrieving stream epochs for {:?}", object_id));
+
+        // TODO: In a real implementation, this would:
+        // 1. Query the local manifest store
+        // 2. Fetch from remote peers if needed
+        // 3. Return verified epoch sequence
+
+        // Mock implementation
+        let epochs = vec![
+            StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 1024),
+                EpochState::Verified,
+                vec![],
+            ),
+        ];
+
+        if self.config.enable_diagnostics {
+            cx.trace(&format!("found {} epochs for object", epochs.len()));
+        }
+
+        Outcome::ok(epochs)
+    }
 }
 
 /// Handle for an active transfer operation.
@@ -388,6 +467,8 @@ pub struct ObjectReceipt {
     pub size_bytes: u64,
     /// Transfer that delivered this object.
     pub transfer_id: TransferId,
+    /// Consumption policy used for streaming objects.
+    pub consumption_policy: Option<ConsumptionPolicy>,
 }
 
 /// Result of tree synchronization.
@@ -412,6 +493,8 @@ pub struct StreamHandle {
     pub total_bytes: u64,
     /// Bytes sent so far.
     pub bytes_sent: u64,
+    /// Stream manifest for rolling epochs.
+    pub manifest: Option<StreamManifest>,
 }
 
 impl StreamHandle {
@@ -426,6 +509,32 @@ impl StreamHandle {
             return 100.0;
         }
         (self.bytes_sent as f64 / self.total_bytes as f64) * 100.0
+    }
+
+    /// Get the stream manifest if available.
+    pub fn manifest(&self) -> Option<&StreamManifest> {
+        self.manifest.as_ref()
+    }
+
+    /// Get the number of verified epochs in the stream.
+    pub fn verified_epochs_count(&self) -> usize {
+        self.manifest.as_ref()
+            .map(|m| m.verified_epochs().len())
+            .unwrap_or(0)
+    }
+
+    /// Get the latest verified offset in the stream.
+    pub fn latest_verified_offset(&self) -> u64 {
+        self.manifest.as_ref()
+            .map(|m| m.latest_verified_offset())
+            .unwrap_or(0)
+    }
+
+    /// Check if the stream has a final manifest.
+    pub fn is_finalized(&self) -> bool {
+        self.manifest.as_ref()
+            .map(|m| m.is_complete())
+            .unwrap_or(false)
     }
 }
 
@@ -521,6 +630,7 @@ mod tests {
             stream_id: "test-stream".to_string(),
             total_bytes: 1000,
             bytes_sent: 250,
+            manifest: None,
         };
 
         assert!(!handle.is_complete());
@@ -533,6 +643,7 @@ mod tests {
             stream_id: "test-stream".to_string(),
             total_bytes: 1000,
             bytes_sent: 1000,
+            manifest: None,
         };
 
         assert!(handle.is_complete());

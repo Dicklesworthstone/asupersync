@@ -699,6 +699,11 @@ impl ObjectGraph {
     }
 }
 
+/// Convenience function to compute SHA-256 hash from content bytes.
+pub fn compute_hash(content: &[u8]) -> [u8; 32] {
+    ContentId::from_bytes(content).hash
+}
+
 // Temporary hex module until we add a proper crypto dependency
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
