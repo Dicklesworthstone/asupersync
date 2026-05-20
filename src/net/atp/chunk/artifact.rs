@@ -201,7 +201,9 @@ impl ArtifactProfile {
 
         for (i, &byte) in data.iter().enumerate() {
             let hash = rolling_hash.update(byte);
-            let current_pos = i as u64 + 1;
+            let current_pos = i.checked_add(1)
+                .and_then(|v| u64::try_from(v).ok())
+                .unwrap_or_else(|| panic!("Position overflow in boundary detection at index {}", i));
             let chunk_size_since_last = current_pos - last_boundary;
 
             let is_boundary = if chunk_size_since_last < min_chunk_size {
@@ -327,7 +329,13 @@ impl ArtifactProfile {
         // Create mask that gives approximately the right average chunk size
         let bits = (avg_chunk_size as f64).log2() as u32;
         let mask_bits = bits.min(20).max(8);
-        (1u64 << mask_bits) - 1
+
+        // Use checked_shl to prevent overflow/undefined behavior
+        assert!(mask_bits < 64, "mask_bits must be less than 64 to avoid shift overflow");
+        match 1u64.checked_shl(mask_bits) {
+            Some(shifted) => shifted - 1,
+            None => u64::MAX, // Fallback for impossible overflow case
+        }
     }
 
     /// Derive build context from artifact data.
