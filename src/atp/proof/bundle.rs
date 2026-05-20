@@ -708,10 +708,7 @@ fn duration_micros_to_u64(
     field: &'static str,
 ) -> Result<u64, AtpProofBundleError> {
     let micros = duration.as_micros();
-    u64::try_from(micros).map_err(|_| AtpProofBundleError::TimestampOutOfRange {
-        field,
-        micros,
-    })
+    u64::try_from(micros).map_err(|_| AtpProofBundleError::TimestampOutOfRange { field, micros })
 }
 
 fn system_time_micros_since_unix_epoch(
