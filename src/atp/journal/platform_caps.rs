@@ -10,7 +10,6 @@ use std::mem::MaybeUninit;
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::Path;
 
 /// Detected platform capabilities for filesystem operations
@@ -144,7 +143,7 @@ impl PlatformCapabilities {
 
     /// Detect capabilities for a specific filesystem path
     pub async fn detect_for_path(
-        cx: &Cx,
+        _cx: &Cx,
         path: impl AsRef<Path>,
     ) -> Outcome<Self, CapabilityError> {
         let path = path.as_ref();
@@ -259,7 +258,7 @@ impl PlatformCapabilities {
     async fn detect_io_capabilities(
         os_type: &OsType,
         filesystem: &FilesystemFeatures,
-    ) -> Result<IoCapabilities, CapabilityError> {
+    ) -> Outcome<IoCapabilities, CapabilityError> {
         let supports_direct_io = match os_type {
             OsType::Linux => true,
             OsType::FreeBSD => true,
@@ -273,7 +272,7 @@ impl PlatformCapabilities {
         let io_alignment = filesystem.block_size as usize;
         let supports_vectored_io = true; // Most platforms support this
 
-        Ok(IoCapabilities {
+        Outcome::Ok(IoCapabilities {
             supports_direct_io,
             async_io_support,
             max_io_size,
@@ -284,9 +283,9 @@ impl PlatformCapabilities {
 
     /// Detect atomic operation support
     async fn detect_atomic_support(
-        path: &Path,
+        _path: &Path,
         os_type: &OsType,
-    ) -> Result<AtomicSupport, CapabilityError> {
+    ) -> Outcome<AtomicSupport, CapabilityError> {
         let atomic_rename_same_fs = true; // POSIX guarantee
         let atomic_rename_cross_fs = false; // Generally not atomic
 
@@ -305,7 +304,7 @@ impl PlatformCapabilities {
 
         let crash_consistent_rename = supports_dir_sync;
 
-        Ok(AtomicSupport {
+        Outcome::Ok(AtomicSupport {
             atomic_rename_same_fs,
             atomic_rename_cross_fs,
             atomic_link_unlink,
@@ -316,9 +315,9 @@ impl PlatformCapabilities {
 
     /// Generate performance hints based on detected capabilities
     fn generate_performance_hints(
-        os_type: &OsType,
+        _os_type: &OsType,
         filesystem: &FilesystemFeatures,
-        io_capabilities: &IoCapabilities,
+        _io_capabilities: &IoCapabilities,
     ) -> PerformanceHints {
         let recommended_prealloc_size = match filesystem.fs_type.as_str() {
             "ext4" | "xfs" => 64 * 1024 * 1024, // 64MB
@@ -364,32 +363,33 @@ impl PlatformCapabilities {
 
         #[cfg(target_os = "macos")]
         {
-            Ok("apfs".to_string()) // Assume APFS on modern macOS
+            Outcome::Ok("apfs".to_string()) // Assume APFS on modern macOS
         }
 
         #[cfg(target_os = "windows")]
         {
-            Ok("ntfs".to_string()) // Assume NTFS on Windows
+            Outcome::Ok("ntfs".to_string()) // Assume NTFS on Windows
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
-            Ok("unknown".to_string())
+            Outcome::Ok("unknown".to_string())
         }
     }
 
     #[cfg(target_os = "linux")]
     #[allow(unsafe_code)]
     fn detect_linux_filesystem_type(path: &Path) -> Outcome<String, CapabilityError> {
-
-        let path_cstr = CString::new(path.to_string_lossy().as_bytes())
-            .map_err(|_| CapabilityError::InvalidPath)?;
+        let path_cstr = match CString::new(path.to_string_lossy().as_bytes()) {
+            Ok(path) => path,
+            Err(_) => return Outcome::Err(CapabilityError::InvalidPath),
+        };
 
         let mut statfs_buf: MaybeUninit<libc::statfs> = MaybeUninit::uninit();
 
         unsafe {
             if libc::statfs(path_cstr.as_ptr(), statfs_buf.as_mut_ptr()) != 0 {
-                return Err(CapabilityError::SystemCall("statfs".to_string()));
+                return Outcome::Err(CapabilityError::SystemCall("statfs".to_string()));
             }
 
             let statfs = statfs_buf.assume_init();
@@ -405,7 +405,7 @@ impl PlatformCapabilities {
                 _ => "unknown",
             };
 
-            Ok(fs_type.to_string())
+            Outcome::Ok(fs_type.to_string())
         }
     }
 
@@ -413,14 +413,17 @@ impl PlatformCapabilities {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let metadata = std::fs::metadata(path).map_err(|_| CapabilityError::MetadataAccess)?;
-            Ok(metadata.blksize() as u32)
+            let metadata = match std::fs::metadata(path) {
+                Ok(metadata) => metadata,
+                Err(_) => return Outcome::Err(CapabilityError::MetadataAccess),
+            };
+            Outcome::Ok(metadata.blksize() as u32)
         }
 
         #[cfg(not(unix))]
         {
             // Default block size for non-Unix systems
-            Ok(4096)
+            Outcome::Ok(4096)
         }
     }
 
@@ -462,7 +465,7 @@ impl PlatformCapabilities {
         false
     }
 
-    async fn test_sparse_file_support(path: &Path) -> bool {
+    async fn test_sparse_file_support(_path: &Path) -> bool {
         // Most modern filesystems support sparse files
         // This could be enhanced with actual testing
         true

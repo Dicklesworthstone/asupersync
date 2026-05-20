@@ -1,6 +1,6 @@
 //! Chunk State Bitmap for Transfer Progress Tracking
 
-use crate::atp::journal::range_tracker::{SparseRange, ChunkRange};
+use crate::atp::journal::range_tracker::SparseRange;
 use std::collections::HashMap;
 
 /// Different states a chunk can be in during transfer
@@ -42,21 +42,21 @@ impl ChunkState {
 
     /// Check if this state implies the chunk data is available
     pub fn has_data(&self) -> bool {
-        matches!(self,
-            ChunkState::Received |
-            ChunkState::Verified |
-            ChunkState::Written |
-            ChunkState::RepairDerived |
-            ChunkState::Committed
+        matches!(
+            self,
+            ChunkState::Received
+                | ChunkState::Verified
+                | ChunkState::Written
+                | ChunkState::RepairDerived
+                | ChunkState::Committed
         )
     }
 
     /// Check if this state implies the chunk is verified
     pub fn is_verified(&self) -> bool {
-        matches!(self,
-            ChunkState::Verified |
-            ChunkState::Written |
-            ChunkState::Committed
+        matches!(
+            self,
+            ChunkState::Verified | ChunkState::Written | ChunkState::Committed
         )
     }
 
@@ -193,7 +193,8 @@ impl ChunkBitmap {
 
         for i in 0..num_chunks {
             let offset = i * self.chunk_size;
-            self.chunks.insert(offset, ChunkEntry::new(ChunkState::Wanted, timestamp));
+            self.chunks
+                .insert(offset, ChunkEntry::new(ChunkState::Wanted, timestamp));
         }
 
         self.updated_at = timestamp;
@@ -338,9 +339,9 @@ impl ChunkBitmap {
         }
 
         let total_chunks = self.chunks.len();
-        let verified_chunks = state_counts[&ChunkState::Verified] +
-                             state_counts[&ChunkState::Written] +
-                             state_counts[&ChunkState::Committed];
+        let verified_chunks = state_counts[&ChunkState::Verified]
+            + state_counts[&ChunkState::Written]
+            + state_counts[&ChunkState::Committed];
         let completed_chunks = state_counts[&ChunkState::Committed];
 
         ChunkBitmapStats {
@@ -368,15 +369,21 @@ impl ChunkBitmap {
 
     /// Check if transfer is complete (all chunks committed)
     pub fn is_complete(&self) -> bool {
-        !self.chunks.is_empty() &&
-        self.chunks.values().all(|entry| entry.state == ChunkState::Committed)
+        !self.chunks.is_empty()
+            && self
+                .chunks
+                .values()
+                .all(|entry| entry.state == ChunkState::Committed)
     }
 
     /// Check if transfer has any errors (quarantined or invalidated chunks)
     pub fn has_errors(&self) -> bool {
-        self.chunks.values().any(|entry|
-            matches!(entry.state, ChunkState::Quarantined | ChunkState::Invalidated)
-        )
+        self.chunks.values().any(|entry| {
+            matches!(
+                entry.state,
+                ChunkState::Quarantined | ChunkState::Invalidated
+            )
+        })
     }
 
     /// Get missing chunks (wanted but not received)
@@ -395,7 +402,11 @@ impl ChunkBitmap {
     }
 
     /// Mark all chunks with a specific state as invalidated
-    pub fn invalidate_chunks_in_state(&mut self, target_state: ChunkState, timestamp: u64) -> usize {
+    pub fn invalidate_chunks_in_state(
+        &mut self,
+        target_state: ChunkState,
+        timestamp: u64,
+    ) -> usize {
         let mut invalidated_count = 0;
 
         for entry in self.chunks.values_mut() {
@@ -418,7 +429,10 @@ impl ChunkBitmap {
         self.chunks
             .iter()
             .map(|(&offset, entry)| {
-                (offset, (entry.state, entry.state_timestamp, entry.chunk_hash))
+                (
+                    offset,
+                    (entry.state, entry.state_timestamp, entry.chunk_hash),
+                )
             })
             .collect()
     }
@@ -432,7 +446,9 @@ impl ChunkBitmap {
         }
 
         // Update timestamp to latest
-        self.updated_at = self.chunks.values()
+        self.updated_at = self
+            .chunks
+            .values()
             .map(|entry| entry.state_timestamp)
             .max()
             .unwrap_or(self.updated_at);
@@ -457,7 +473,8 @@ pub struct ChunkBitmapStats {
 
 impl std::fmt::Display for ChunkBitmapStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f,
+        write!(
+            f,
             "ChunkBitmap({}) - {} chunks, {:.1}% verified, {:.1}% complete",
             self.transfer_id,
             self.total_chunks,

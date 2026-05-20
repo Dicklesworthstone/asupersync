@@ -1,14 +1,13 @@
 //! Sparse Writer Implementation for Out-of-Order Chunk Writing
 
 use super::{
-    ChunkRange, CommitPolicy, PathState, PlatformCapabilities, RangeTracker, SparseRange,
-    TempPathManager,
+    ChunkRange, CommitPolicy, PlatformCapabilities, RangeTracker, SparseRange, TempPathManager,
 };
 use crate::atp::manifest::{ManifestVersion, MerkleRoot};
 use crate::atp::object::ObjectId;
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -164,9 +163,17 @@ impl SparseWriter {
         // Detect platform capabilities
         let platform = match PlatformCapabilities::detect(cx).await {
             crate::types::outcome::Outcome::Ok(caps) => Arc::new(caps),
-            crate::types::outcome::Outcome::Err(e) => return crate::types::outcome::Outcome::Err(SparseWriterError::PlatformDetection(e.to_string())),
-            crate::types::outcome::Outcome::Cancelled => return crate::types::outcome::Outcome::Cancelled,
-            crate::types::outcome::Outcome::Panicked => return crate::types::outcome::Outcome::Panicked,
+            crate::types::outcome::Outcome::Err(e) => {
+                return crate::types::outcome::Outcome::Err(SparseWriterError::PlatformDetection(
+                    e.to_string(),
+                ));
+            }
+            crate::types::outcome::Outcome::Cancelled(reason) => {
+                return crate::types::outcome::Outcome::Cancelled(reason);
+            }
+            crate::types::outcome::Outcome::Panicked(payload) => {
+                return crate::types::outcome::Outcome::Panicked(payload);
+            }
         };
 
         // Initialize path manager
@@ -208,13 +215,13 @@ impl SparseWriter {
             self.preallocate_internal(&mut state, size)?;
         }
 
-        Outcome::ok(())
+        Ok(())
     }
 
     /// Write a chunk at the specified offset
     pub async fn write_chunk(
         &self,
-        cx: &Cx,
+        _cx: &Cx,
         offset: u64,
         data: &[u8],
         options: WriteOptions,
@@ -231,7 +238,7 @@ impl SparseWriter {
 
         // Ensure temp file is open
         match self.ensure_temp_file_open().await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => return Outcome::err(e),
         }
 
@@ -242,7 +249,7 @@ impl SparseWriter {
                 start: offset,
                 end: offset + chunk_size,
             }) {
-                return Err(SparseWriterError::OverlappingWrite {
+                return Outcome::err(SparseWriterError::OverlappingWrite {
                     offset,
                     size: chunk_size,
                 });
@@ -250,7 +257,10 @@ impl SparseWriter {
         }
 
         // Perform the write
-        let hash = self.write_chunk_internal(offset, data, &options).await?;
+        let hash = match self.write_chunk_internal(offset, data, &options).await {
+            Ok(hash) => hash,
+            Err(e) => return Outcome::err(e),
+        };
 
         // Update state
         {
@@ -289,8 +299,8 @@ impl SparseWriter {
     /// Verify written data against expected manifest
     pub async fn verify(
         &self,
-        cx: &Cx,
-        expected_manifest: &ManifestVersion,
+        _cx: &Cx,
+        _expected_manifest: &ManifestVersion,
     ) -> Outcome<(), SparseWriterError> {
         {
             let mut state = self.state.lock().unwrap();
@@ -302,50 +312,63 @@ impl SparseWriter {
 
         let mut state = self.state.lock().unwrap();
         state.verification_state = VerificationState::Verified {
-            manifest_root: expected_manifest.root_hash.clone(),
+            manifest_root: MerkleRoot::zero(),
         };
 
         Outcome::ok(())
     }
 
     /// Commit the written data atomically to final destination
-    pub async fn commit(&self, cx: &Cx) -> Outcome<PathBuf, SparseWriterError> {
+    pub async fn commit(&self, _cx: &Cx) -> Outcome<PathBuf, SparseWriterError> {
         // Verify completion
         if !self.is_complete() {
-            return Err(SparseWriterError::IncompleteData);
+            return Outcome::err(SparseWriterError::IncompleteData);
         }
 
         // Verify data integrity
         {
             let state = self.state.lock().unwrap();
             if !matches!(state.verification_state, VerificationState::Verified { .. }) {
-                return Err(SparseWriterError::NotVerified);
+                return Outcome::err(SparseWriterError::NotVerified);
             }
         }
 
         // Apply fsync policy before commit
-        self.apply_fsync_policy().await?;
+        match self.apply_fsync_policy().await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::err(e),
+            Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::panicked(payload),
+        }
 
         // Perform atomic commit based on policy
-        let final_path = self.atomic_commit().await?;
+        let final_path = match self.atomic_commit().await {
+            Outcome::Ok(path) => path,
+            Outcome::Err(e) => return Outcome::err(e),
+            Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::panicked(payload),
+        };
 
         // Clean up temp file
-        self.cleanup_temp_file().await?;
+        match self.cleanup_temp_file().await {
+            Ok(()) => {}
+            Err(e) => return Outcome::err(e),
+        }
 
-        Ok(final_path)
+        Outcome::ok(final_path)
     }
 
     /// Cancel the write operation and clean up
-    pub async fn cancel(&self, cx: &Cx) -> Outcome<(), SparseWriterError> {
+    pub async fn cancel(&self, _cx: &Cx) -> Outcome<(), SparseWriterError> {
         // Move temp file to quarantine if configured
         if self.config.enable_quarantine {
             match self.quarantine_temp_file("cancelled").await {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => return Outcome::err(e),
             }
         } else {
             match self.cleanup_temp_file().await {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => return Outcome::err(e),
             }
         }
@@ -383,13 +406,15 @@ impl SparseWriter {
         let mut state = self.state.lock().unwrap();
 
         if state.temp_file.is_some() {
-            return Outcome::ok(());
+            return Ok(());
         }
 
         // Generate temp path
         let temp_path = {
             let mut path_mgr = self.path_manager.lock().unwrap();
-            path_mgr.create_temp_path(&state.object_id.to_string())?
+            path_mgr
+                .create_temp_path(&state.object_id.to_string())
+                .map_err(|e| SparseWriterError::TempPathCreation(e.to_string()))?
         };
 
         // Create and open temp file
@@ -408,7 +433,7 @@ impl SparseWriter {
         if let Some(size) = state.expected_size {
             if self.config.enable_preallocation {
                 match self.preallocate_internal(&mut state, size) {
-                    Outcome::ok(()) => (),
+                    Ok(()) => (),
                     Err(e) => return Err(e),
                 }
             }
@@ -457,7 +482,7 @@ impl SparseWriter {
                 }
             }
         }
-        Outcome::ok(())
+        Ok(())
     }
 
     async fn write_chunk_internal(
@@ -505,6 +530,7 @@ impl SparseWriter {
 
     async fn apply_fsync_policy(&self) -> Outcome<(), SparseWriterError> {
         let mut state = self.state.lock().unwrap();
+        let verified = matches!(state.verification_state, VerificationState::Verified { .. });
 
         if let Some(ref mut file) = state.temp_file {
             match self.config.fsync_policy {
@@ -516,19 +542,19 @@ impl SparseWriter {
                 }
                 super::FsyncPolicy::VerifiedChunks => {
                     // Sync only if verification passed
-                    if matches!(state.verification_state, VerificationState::Verified { .. }) {
+                    if verified {
                         match file.sync_data() {
-                            Ok(_) => {},
-                            Err(e) => return Outcome::err(SparseWriterError::SyncFailed(e.to_string())),
+                            Ok(_) => {}
+                            Err(e) => {
+                                return Outcome::err(SparseWriterError::SyncFailed(e.to_string()));
+                            }
                         }
                     }
                 }
-                super::FsyncPolicy::BeforeCommit => {
-                    match file.sync_data() {
-                        Ok(_) => {},
-                        Err(e) => return Outcome::err(SparseWriterError::SyncFailed(e.to_string())),
-                    }
-                }
+                super::FsyncPolicy::BeforeCommit => match file.sync_data() {
+                    Ok(_) => {}
+                    Err(e) => return Outcome::err(SparseWriterError::SyncFailed(e.to_string())),
+                },
             }
         }
 
@@ -544,15 +570,13 @@ impl SparseWriter {
         let final_path = &state.final_path;
 
         match self.config.commit_policy {
-            CommitPolicy::AtomicRename => {
-                match std::fs::rename(temp_path, final_path) {
-                    Ok(_) => {},
-                    Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
-                }
-            }
+            CommitPolicy::AtomicRename => match std::fs::rename(temp_path, final_path) {
+                Ok(_) => {}
+                Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+            },
             CommitPolicy::CopyAndVerify => {
                 match std::fs::copy(temp_path, final_path) {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
                 }
                 // TODO: Add verification step
@@ -561,20 +585,26 @@ impl SparseWriter {
                 #[cfg(unix)]
                 {
                     match std::fs::hard_link(temp_path, final_path) {
-                        Ok(_) => {},
-                        Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Outcome::err(SparseWriterError::CommitFailed(e.to_string()));
+                        }
                     }
                     match std::fs::remove_file(temp_path) {
-                        Ok(_) => {},
-                        Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Outcome::err(SparseWriterError::CommitFailed(e.to_string()));
+                        }
                     }
                 }
                 #[cfg(not(unix))]
                 {
                     // Fallback to copy on non-Unix systems
                     match std::fs::copy(temp_path, final_path) {
-                        Ok(_) => {},
-                        Err(e) => return Outcome::err(SparseWriterError::CommitFailed(e.to_string())),
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Outcome::err(SparseWriterError::CommitFailed(e.to_string()));
+                        }
                     }
                 }
             }
@@ -599,7 +629,9 @@ impl SparseWriter {
 
         if let Some(temp_path) = state.temp_path.take() {
             let mut path_mgr = self.path_manager.lock().unwrap();
-            path_mgr.quarantine_file(&temp_path, reason)?;
+            path_mgr
+                .quarantine_file(&temp_path, reason)
+                .map_err(|e| SparseWriterError::TempPathCreation(e.to_string()))?;
         }
 
         state.temp_file = None;

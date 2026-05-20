@@ -153,7 +153,7 @@ impl TempPathManager {
         let base_dir = base_dir.as_ref().to_path_buf();
         let quarantine_dir = base_dir.join(".quarantine");
 
-        let mut manager = Self {
+        let manager = Self {
             base_dir,
             quarantine_dir,
             counter: AtomicU64::new(1),
@@ -223,7 +223,7 @@ impl TempPathManager {
     pub fn mark_committed(
         &mut self,
         temp_path: &Path,
-        final_path: &Path,
+        _final_path: &Path,
     ) -> Result<(), TempManagementError> {
         if let Some(info) = self.active_temps.get_mut(temp_path) {
             info.committed = true;

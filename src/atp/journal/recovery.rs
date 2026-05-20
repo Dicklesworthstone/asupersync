@@ -3,8 +3,8 @@
 //! Handles crash recovery scenarios including torn appends, duplicate records,
 //! checksum validation, and state reconstruction after process kill.
 
-use super::{AppendJournal, ChunkBitmap, ChunkState, JournalRecord, JournalConfig};
-use crate::atp::transfer::TransferId;
+use super::{AppendJournal, ChunkBitmap, ChunkState, JournalConfig, JournalRecord};
+use crate::types::outcome::Outcome;
 
 /// Identifier for a transfer chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -20,20 +20,23 @@ impl ChunkId {
     }
 }
 use crate::cx::Cx;
+use crate::fs;
+use bincode;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use thiserror::Error;
-use crate::fs;
-use hex;
-use bincode;
 
 #[derive(Debug, Error)]
 pub enum RecoveryError {
     #[error("Journal file corrupted: {0}")]
     JournalCorrupted(String),
     #[error("Checksum mismatch at offset {offset}: expected {expected:x}, got {actual:x}")]
-    ChecksumMismatch { offset: u64, expected: u64, actual: u64 },
+    ChecksumMismatch {
+        offset: u64,
+        expected: u64,
+        actual: u64,
+    },
     #[error("Incomplete record at offset {0}: file truncated")]
     IncompleteRecord(u64),
     #[error("Invalid chunk state transition: {from:?} -> {to:?}")]
@@ -47,7 +50,7 @@ pub enum RecoveryError {
 /// Recovery context for tracking state during crash recovery.
 pub struct RecoveryContext {
     /// Current transfer states being recovered
-    transfers: HashMap<TransferId, TransferRecoveryState>,
+    transfers: HashMap<String, TransferRecoveryState>,
     /// Duplicate record detection
     seen_records: HashSet<RecordFingerprint>,
     /// Recovery statistics
@@ -68,9 +71,9 @@ struct TransferRecoveryState {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RecordFingerprint {
-    transfer_id: TransferId,
+    transfer_id: String,
     record_type: u8,
-    chunk_id: Option<ChunkId>,
+    chunk_offset: Option<u64>,
     timestamp: u64,
 }
 
@@ -112,54 +115,74 @@ impl RecoveryContext {
 
         match record {
             JournalRecord::Offer { transfer_id, .. } => {
-                self.ensure_transfer(*transfer_id);
+                self.ensure_transfer(transfer_id);
                 Ok(true)
             }
             JournalRecord::Accept { transfer_id, .. } => {
-                self.ensure_transfer(*transfer_id);
+                self.ensure_transfer(transfer_id);
                 Ok(true)
             }
-            JournalRecord::ChunkReceived { transfer_id, chunk_id, .. } => {
-                let transfer = self.ensure_transfer(*transfer_id);
-                self.update_chunk_state(transfer, *chunk_id, ChunkState::Received)?;
+            JournalRecord::ChunkReceived {
+                transfer_id,
+                chunk_offset,
+                ..
+            } => {
+                let transfer = self.ensure_transfer(transfer_id);
+                Self::update_chunk_state(transfer, *chunk_offset, ChunkState::Received)?;
                 Ok(true)
             }
-            JournalRecord::ChunkVerified { transfer_id, chunk_id, .. } => {
-                let transfer = self.ensure_transfer(*transfer_id);
-                self.update_chunk_state(transfer, *chunk_id, ChunkState::Verified)?;
+            JournalRecord::ChunkVerified {
+                transfer_id,
+                chunk_offset,
+                ..
+            } => {
+                let transfer = self.ensure_transfer(transfer_id);
+                Self::update_chunk_state(transfer, *chunk_offset, ChunkState::Verified)?;
                 Ok(true)
             }
-            JournalRecord::ChunkWritten { transfer_id, chunk_id, .. } => {
-                let transfer = self.ensure_transfer(*transfer_id);
-                self.update_chunk_state(transfer, *chunk_id, ChunkState::Written)?;
+            JournalRecord::ChunkWritten {
+                transfer_id,
+                chunk_offset,
+                ..
+            } => {
+                let transfer = self.ensure_transfer(transfer_id);
+                Self::update_chunk_state(transfer, *chunk_offset, ChunkState::Written)?;
                 Ok(true)
             }
-            JournalRecord::RepairDecode { transfer_id, chunk_id, .. } => {
-                let transfer = self.ensure_transfer(*transfer_id);
-                self.update_chunk_state(transfer, *chunk_id, ChunkState::RepairDerived)?;
+            JournalRecord::RepairDecode {
+                transfer_id,
+                chunk_offset,
+                ..
+            } => {
+                let transfer = self.ensure_transfer(transfer_id);
+                Self::update_chunk_state(transfer, *chunk_offset, ChunkState::RepairDerived)?;
                 Ok(true)
             }
-            JournalRecord::CommitIntent { transfer_id, timestamp, .. } => {
-                let transfer = self.ensure_transfer(*transfer_id);
+            JournalRecord::CommitIntent {
+                transfer_id,
+                timestamp,
+                ..
+            } => {
+                let transfer = self.ensure_transfer(transfer_id);
                 transfer.commit_intent_time = Some(*timestamp);
                 Ok(true)
             }
             JournalRecord::CommitComplete { transfer_id, .. } => {
-                let transfer = self.ensure_transfer(*transfer_id);
+                let transfer = self.ensure_transfer(transfer_id);
                 transfer.is_committed = true;
-                self.commit_all_chunks(transfer);
+                Self::commit_all_chunks(transfer);
                 Ok(true)
             }
             JournalRecord::Cancellation { transfer_id, .. } => {
-                let transfer = self.ensure_transfer(*transfer_id);
+                let transfer = self.ensure_transfer(transfer_id);
                 transfer.is_cancelled = true;
                 Ok(true)
             }
             JournalRecord::Rollback { transfer_id, .. } => {
-                let transfer = self.ensure_transfer(*transfer_id);
+                let transfer = self.ensure_transfer(transfer_id);
                 transfer.is_committed = false;
                 transfer.commit_intent_time = None;
-                self.rollback_uncommitted_chunks(transfer);
+                Self::rollback_uncommitted_chunks(transfer);
                 Ok(true)
             }
             JournalRecord::CompactionBoundary { .. } => {
@@ -167,22 +190,22 @@ impl RecoveryContext {
                 Ok(true)
             }
             JournalRecord::ProofDigest { transfer_id, .. } => {
-                self.ensure_transfer(*transfer_id);
+                self.ensure_transfer(transfer_id);
                 Ok(true)
             }
         }
     }
 
     /// Finalize recovery and return reconstructed state.
-    pub fn finalize(self) -> (HashMap<TransferId, ChunkBitmap>, RecoveryStats) {
+    pub fn finalize(self) -> (HashMap<String, ChunkBitmap>, RecoveryStats) {
         let mut bitmaps = HashMap::new();
         let mut stats = self.stats;
 
         for (transfer_id, transfer_state) in self.transfers {
             if !transfer_state.chunk_states.is_empty() {
-                let mut bitmap = ChunkBitmap::new(hex::encode(transfer_id.as_bytes()), 0, 4096, 0);
+                let mut bitmap = ChunkBitmap::new(transfer_id.clone(), 0, 4096, 0);
                 for (chunk_id, state) in transfer_state.chunk_states {
-                    let _ = bitmap.update_chunk_state(chunk_id, state);
+                    let _ = bitmap.update_chunk_state(chunk_id.as_u64(), state, 0, None);
                     stats.chunks_recovered += 1;
                 }
                 bitmaps.insert(transfer_id, bitmap);
@@ -193,25 +216,31 @@ impl RecoveryContext {
         (bitmaps, stats)
     }
 
-    fn ensure_transfer(&mut self, transfer_id: TransferId) -> &mut TransferRecoveryState {
-        self.transfers.entry(transfer_id).or_insert_with(|| TransferRecoveryState {
-            chunk_states: HashMap::new(),
-            commit_intent_time: None,
-            is_committed: false,
-            is_cancelled: false,
-        })
+    fn ensure_transfer(&mut self, transfer_id: &str) -> &mut TransferRecoveryState {
+        self.transfers
+            .entry(transfer_id.to_string())
+            .or_insert_with(|| TransferRecoveryState {
+                chunk_states: HashMap::new(),
+                commit_intent_time: None,
+                is_committed: false,
+                is_cancelled: false,
+            })
     }
 
     fn update_chunk_state(
-        &mut self,
         transfer: &mut TransferRecoveryState,
-        chunk_id: ChunkId,
+        chunk_offset: u64,
         new_state: ChunkState,
     ) -> Result<(), RecoveryError> {
-        let current_state = transfer.chunk_states.get(&chunk_id).copied().unwrap_or(ChunkState::Wanted);
+        let chunk_id = ChunkId::from_u64(chunk_offset);
+        let current_state = transfer
+            .chunk_states
+            .get(&chunk_id)
+            .copied()
+            .unwrap_or(ChunkState::Wanted);
 
         // Validate state transition
-        if !self.is_valid_transition(current_state, new_state) {
+        if !Self::is_valid_transition(current_state, new_state) {
             return Err(RecoveryError::InvalidStateTransition {
                 from: current_state,
                 to: new_state,
@@ -222,7 +251,7 @@ impl RecoveryContext {
         Ok(())
     }
 
-    fn is_valid_transition(&self, from: ChunkState, to: ChunkState) -> bool {
+    fn is_valid_transition(from: ChunkState, to: ChunkState) -> bool {
         use ChunkState::*;
         match (from, to) {
             // Initial transitions from Wanted
@@ -247,7 +276,7 @@ impl RecoveryContext {
         }
     }
 
-    fn commit_all_chunks(&mut self, transfer: &mut TransferRecoveryState) {
+    fn commit_all_chunks(transfer: &mut TransferRecoveryState) {
         for (_, state) in transfer.chunk_states.iter_mut() {
             if *state == ChunkState::Written {
                 *state = ChunkState::Committed;
@@ -255,67 +284,52 @@ impl RecoveryContext {
         }
     }
 
-    fn rollback_uncommitted_chunks(&mut self, transfer: &mut TransferRecoveryState) {
+    fn rollback_uncommitted_chunks(transfer: &mut TransferRecoveryState) {
         transfer.chunk_states.retain(|_, state| {
-            matches!(*state, ChunkState::Committed | ChunkState::Quarantined | ChunkState::Invalidated)
+            matches!(
+                *state,
+                ChunkState::Committed | ChunkState::Quarantined | ChunkState::Invalidated
+            )
         });
     }
 
     fn create_fingerprint(&self, record: &JournalRecord) -> RecordFingerprint {
-        let (record_type, chunk_id, timestamp) = match record {
-            JournalRecord::Offer { transfer_id, timestamp, .. } =>
-                (0, None, *timestamp),
-            JournalRecord::Accept { transfer_id, timestamp, .. } =>
-                (1, None, *timestamp),
-            JournalRecord::ChunkReceived { transfer_id, chunk_id, timestamp, .. } =>
-                (2, Some(*chunk_id), *timestamp),
-            JournalRecord::ChunkVerified { transfer_id, chunk_id, timestamp, .. } =>
-                (3, Some(*chunk_id), *timestamp),
-            JournalRecord::ChunkWritten { transfer_id, chunk_id, timestamp, .. } =>
-                (4, Some(*chunk_id), *timestamp),
-            JournalRecord::RepairDecode { transfer_id, chunk_id, timestamp, .. } =>
-                (5, Some(*chunk_id), *timestamp),
-            JournalRecord::CommitIntent { transfer_id, timestamp, .. } =>
-                (6, None, *timestamp),
-            JournalRecord::CommitComplete { transfer_id, timestamp, .. } =>
-                (7, None, *timestamp),
-            JournalRecord::Cancellation { transfer_id, timestamp, .. } =>
-                (8, None, *timestamp),
-            JournalRecord::Rollback { transfer_id, timestamp, .. } =>
-                (9, None, *timestamp),
-            JournalRecord::CompactionBoundary { timestamp, .. } =>
-                (10, None, *timestamp),
-            JournalRecord::ProofDigest { transfer_id, timestamp, .. } =>
-                (11, None, *timestamp),
+        let (record_type, chunk_offset, timestamp) = match record {
+            JournalRecord::Offer { timestamp, .. } => (0, None, *timestamp),
+            JournalRecord::Accept { timestamp, .. } => (1, None, *timestamp),
+            JournalRecord::ChunkReceived {
+                chunk_offset,
+                timestamp,
+                ..
+            } => (2, Some(*chunk_offset), *timestamp),
+            JournalRecord::ChunkVerified {
+                chunk_offset,
+                timestamp,
+                ..
+            } => (3, Some(*chunk_offset), *timestamp),
+            JournalRecord::ChunkWritten {
+                chunk_offset,
+                timestamp,
+                ..
+            } => (4, Some(*chunk_offset), *timestamp),
+            JournalRecord::RepairDecode {
+                chunk_offset,
+                timestamp,
+                ..
+            } => (5, Some(*chunk_offset), *timestamp),
+            JournalRecord::CommitIntent { timestamp, .. } => (6, None, *timestamp),
+            JournalRecord::CommitComplete { timestamp, .. } => (7, None, *timestamp),
+            JournalRecord::Cancellation { timestamp, .. } => (8, None, *timestamp),
+            JournalRecord::Rollback { timestamp, .. } => (9, None, *timestamp),
+            JournalRecord::CompactionBoundary { timestamp, .. } => (10, None, *timestamp),
+            JournalRecord::ProofDigest { timestamp, .. } => (11, None, *timestamp),
         };
 
         RecordFingerprint {
-            transfer_id: match record {
-                JournalRecord::CompactionBoundary { .. } => TransferId::from_u128(0), // Special case
-                _ => *record.transfer_id(),
-            },
+            transfer_id: record.transfer_id().unwrap_or("").to_string(),
             record_type,
-            chunk_id,
+            chunk_offset,
             timestamp,
-        }
-    }
-}
-
-impl JournalRecord {
-    fn transfer_id(&self) -> &TransferId {
-        match self {
-            JournalRecord::Offer { transfer_id, .. } => transfer_id,
-            JournalRecord::Accept { transfer_id, .. } => transfer_id,
-            JournalRecord::ChunkReceived { transfer_id, .. } => transfer_id,
-            JournalRecord::ChunkVerified { transfer_id, .. } => transfer_id,
-            JournalRecord::ChunkWritten { transfer_id, .. } => transfer_id,
-            JournalRecord::RepairDecode { transfer_id, .. } => transfer_id,
-            JournalRecord::CommitIntent { transfer_id, .. } => transfer_id,
-            JournalRecord::CommitComplete { transfer_id, .. } => transfer_id,
-            JournalRecord::Cancellation { transfer_id, .. } => transfer_id,
-            JournalRecord::Rollback { transfer_id, .. } => transfer_id,
-            JournalRecord::ProofDigest { transfer_id, .. } => transfer_id,
-            JournalRecord::CompactionBoundary { .. } => panic!("CompactionBoundary has no transfer_id"),
         }
     }
 }
@@ -325,24 +339,53 @@ pub async fn recover_journal_and_bitmap(
     cx: &Cx,
     journal_path: &Path,
     bitmap_dir: &Path,
-) -> Result<(AppendJournal, HashMap<TransferId, ChunkBitmap>), RecoveryError> {
+) -> Result<(AppendJournal, HashMap<String, ChunkBitmap>), RecoveryError> {
     let config = JournalConfig {
         base_dir: journal_path.parent().unwrap_or(journal_path).to_path_buf(),
         ..Default::default()
     };
     let journal = match AppendJournal::new(config) {
         Outcome::Ok(j) => j,
-        Outcome::Err(e) => return Err(RecoveryError::JournalCorrupted(format!("Failed to create journal: {:?}", e))),
-        Outcome::Cancelled(_) => return Err(RecoveryError::JournalCorrupted("Journal creation was cancelled".to_string())),
-        Outcome::Panicked(_) => return Err(RecoveryError::JournalCorrupted("Journal creation panicked".to_string())),
+        Outcome::Err(e) => {
+            return Err(RecoveryError::JournalCorrupted(format!(
+                "Failed to create journal: {:?}",
+                e
+            )));
+        }
+        Outcome::Cancelled(_) => {
+            return Err(RecoveryError::JournalCorrupted(
+                "Journal creation was cancelled".to_string(),
+            ));
+        }
+        Outcome::Panicked(_) => {
+            return Err(RecoveryError::JournalCorrupted(
+                "Journal creation panicked".to_string(),
+            ));
+        }
     };
 
     let mut context = RecoveryContext::new();
 
     // Process all journal entries
-    let entries = journal.get_all_entries(cx).await.map_err(|e| {
-        RecoveryError::JournalCorrupted(format!("Failed to read entries: {}", e))
-    })?;
+    let entries = match journal.get_all_entries(cx).await {
+        Outcome::Ok(entries) => entries,
+        Outcome::Err(e) => {
+            return Err(RecoveryError::JournalCorrupted(format!(
+                "Failed to read entries: {}",
+                e
+            )));
+        }
+        Outcome::Cancelled(_) => {
+            return Err(RecoveryError::JournalCorrupted(
+                "journal read cancelled".to_string(),
+            ));
+        }
+        Outcome::Panicked(_) => {
+            return Err(RecoveryError::JournalCorrupted(
+                "journal read panicked".to_string(),
+            ));
+        }
+    };
 
     for entry in entries {
         match context.process_record(&entry) {
@@ -359,8 +402,10 @@ pub async fn recover_journal_and_bitmap(
 
     // Export recovered bitmaps to disk
     for (transfer_id, bitmap) in &bitmaps {
-        let bitmap_path = bitmap_dir.join(format!("transfer_{}.bitmap", hex::encode(transfer_id.as_bytes())));
-        let exported = bincode::serde::encode_to_vec(&bitmap.export_state(), bincode::config::legacy()).unwrap();
+        let bitmap_path = bitmap_dir.join(format!("transfer_{}.bitmap", transfer_id));
+        let exported =
+            bincode::serde::encode_to_vec(&bitmap.export_state(), bincode::config::legacy())
+                .unwrap();
         fs::write(&bitmap_path, exported).await?;
     }
 
@@ -377,14 +422,15 @@ pub async fn recover_journal_and_bitmap(
 }
 
 /// Load existing bitmap from disk or create new one.
-pub async fn load_or_create_bitmap(
-    bitmap_path: &Path,
-) -> Result<ChunkBitmap, RecoveryError> {
+pub async fn load_or_create_bitmap(bitmap_path: &Path) -> Result<ChunkBitmap, RecoveryError> {
     match fs::read(bitmap_path).await {
         Ok(data) => {
             let state: std::collections::HashMap<u64, (ChunkState, u64, Option<[u8; 32]>)> =
                 bincode::serde::decode_from_slice(&data, bincode::config::legacy())
-                .map_err(|e| RecoveryError::BitmapRecovery(format!("Failed to decode bitmap: {}", e)))?.0;
+                    .map_err(|e| {
+                        RecoveryError::BitmapRecovery(format!("Failed to decode bitmap: {}", e))
+                    })?
+                    .0;
 
             let mut bitmap = ChunkBitmap::new("temp".to_string(), 0, 4096, 0);
             bitmap.import_state(state);
@@ -400,37 +446,58 @@ pub async fn load_or_create_bitmap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{TransferId, ChunkId};
-    use tempfile::TempDir;
+    use crate::atp::manifest::MerkleRoot;
+    use crate::atp::object::{ContentId, ObjectId};
+
+    fn test_object_id(name: &[u8]) -> ObjectId {
+        ObjectId::content(ContentId::from_bytes(name))
+    }
+
+    fn test_root(seed: u8) -> MerkleRoot {
+        let mut hash = [0; 32];
+        hash[0] = seed;
+        MerkleRoot::new(hash)
+    }
 
     #[tokio::test]
     async fn test_recovery_context_basic() {
         let mut ctx = RecoveryContext::new();
-        let transfer_id = TransferId::from_u128(1);
-        let chunk_id = ChunkId::from_u64(1);
+        let transfer_id = "transfer-1".to_string();
+        let chunk_offset = 4096;
 
         // Process chunk progression
-        assert!(ctx.process_record(&JournalRecord::Offer {
-            transfer_id,
-            timestamp: 1000,
-            peer_id: vec![1, 2, 3],
-            chunk_count: 10,
-        }).unwrap());
+        assert!(
+            ctx.process_record(&JournalRecord::Offer {
+                transfer_id: transfer_id.clone(),
+                object_id: test_object_id(b"obj-1"),
+                manifest_root: test_root(1),
+                total_size: 8192,
+                timestamp: 1000,
+            })
+            .unwrap()
+        );
 
-        assert!(ctx.process_record(&JournalRecord::ChunkReceived {
-            transfer_id,
-            chunk_id,
-            timestamp: 2000,
-            hash: vec![0; 32],
-            size: 1024,
-        }).unwrap());
+        assert!(
+            ctx.process_record(&JournalRecord::ChunkReceived {
+                transfer_id: transfer_id.clone(),
+                chunk_offset,
+                chunk_size: 1024,
+                chunk_hash: [0; 32],
+                timestamp: 2000,
+            })
+            .unwrap()
+        );
 
-        assert!(ctx.process_record(&JournalRecord::ChunkVerified {
-            transfer_id,
-            chunk_id,
-            timestamp: 3000,
-            proof_hash: vec![0; 32],
-        }).unwrap());
+        assert!(
+            ctx.process_record(&JournalRecord::ChunkVerified {
+                transfer_id: transfer_id.clone(),
+                chunk_offset,
+                chunk_size: 1024,
+                verified_hash: [0; 32],
+                timestamp: 3000,
+            })
+            .unwrap()
+        );
 
         let (bitmaps, stats) = ctx.finalize();
         assert_eq!(stats.total_records, 3);
@@ -438,21 +505,24 @@ mod tests {
         assert_eq!(stats.chunks_recovered, 1);
 
         let bitmap = &bitmaps[&transfer_id];
-        assert_eq!(bitmap.get_chunk_state(chunk_id), Some(ChunkState::Verified));
+        assert_eq!(
+            bitmap.get_chunk_state(chunk_offset),
+            Some(ChunkState::Verified)
+        );
     }
 
     #[tokio::test]
     async fn test_recovery_duplicate_detection() {
         let mut ctx = RecoveryContext::new();
-        let transfer_id = TransferId::from_u128(1);
-        let chunk_id = ChunkId::from_u64(1);
+        let transfer_id = "transfer-1".to_string();
+        let chunk_offset = 4096;
 
         let record = JournalRecord::ChunkReceived {
             transfer_id,
-            chunk_id,
+            chunk_offset,
+            chunk_size: 1024,
+            chunk_hash: [0; 32],
             timestamp: 2000,
-            hash: vec![0; 32],
-            size: 1024,
         };
 
         // First occurrence
@@ -468,67 +538,129 @@ mod tests {
     #[tokio::test]
     async fn test_recovery_invalid_state_transition() {
         let mut ctx = RecoveryContext::new();
-        let transfer_id = TransferId::from_u128(1);
-        let chunk_id = ChunkId::from_u64(1);
+        let transfer_id = "transfer-1".to_string();
+        let chunk_offset = 4096;
 
-        // Set chunk to Committed first
-        assert!(ctx.process_record(&JournalRecord::ChunkWritten {
-            transfer_id,
-            chunk_id,
-            timestamp: 2000,
-            path: "test".into(),
-            size: 1024,
-        }).unwrap());
+        assert!(
+            ctx.process_record(&JournalRecord::ChunkReceived {
+                transfer_id: transfer_id.clone(),
+                chunk_offset,
+                chunk_size: 1024,
+                chunk_hash: [0; 32],
+                timestamp: 1000,
+            })
+            .unwrap()
+        );
 
-        assert!(ctx.process_record(&JournalRecord::CommitComplete {
-            transfer_id,
-            timestamp: 3000,
-        }).unwrap());
+        assert!(
+            ctx.process_record(&JournalRecord::ChunkVerified {
+                transfer_id: transfer_id.clone(),
+                chunk_offset,
+                chunk_size: 1024,
+                verified_hash: [0; 32],
+                timestamp: 1500,
+            })
+            .unwrap()
+        );
+
+        assert!(
+            ctx.process_record(&JournalRecord::ChunkWritten {
+                transfer_id: transfer_id.clone(),
+                chunk_offset,
+                chunk_size: 1024,
+                file_path: "test".into(),
+                timestamp: 2000,
+            })
+            .unwrap()
+        );
+
+        assert!(
+            ctx.process_record(&JournalRecord::CommitComplete {
+                transfer_id: transfer_id.clone(),
+                final_path: "final".into(),
+                committed_size: 1024,
+                timestamp: 3000,
+            })
+            .unwrap()
+        );
 
         // Now try to go backwards to Received - should fail
         let result = ctx.process_record(&JournalRecord::ChunkReceived {
             transfer_id,
-            chunk_id,
+            chunk_offset,
+            chunk_size: 1024,
+            chunk_hash: [0; 32],
             timestamp: 4000,
-            hash: vec![0; 32],
-            size: 1024,
         });
 
-        assert!(matches!(result, Err(RecoveryError::InvalidStateTransition { .. })));
+        assert!(matches!(
+            result,
+            Err(RecoveryError::InvalidStateTransition { .. })
+        ));
     }
 
     #[tokio::test]
     async fn test_recovery_commit_rollback() {
         let mut ctx = RecoveryContext::new();
-        let transfer_id = TransferId::from_u128(1);
-        let chunk_id = ChunkId::from_u64(1);
+        let transfer_id = "transfer-1".to_string();
+        let chunk_offset = 4096;
+
+        assert!(
+            ctx.process_record(&JournalRecord::ChunkReceived {
+                transfer_id: transfer_id.clone(),
+                chunk_offset,
+                chunk_size: 1024,
+                chunk_hash: [0; 32],
+                timestamp: 1000,
+            })
+            .unwrap()
+        );
+
+        assert!(
+            ctx.process_record(&JournalRecord::ChunkVerified {
+                transfer_id: transfer_id.clone(),
+                chunk_offset,
+                chunk_size: 1024,
+                verified_hash: [0; 32],
+                timestamp: 1500,
+            })
+            .unwrap()
+        );
 
         // Write chunk
-        assert!(ctx.process_record(&JournalRecord::ChunkWritten {
-            transfer_id,
-            chunk_id,
-            timestamp: 2000,
-            path: "test".into(),
-            size: 1024,
-        }).unwrap());
+        assert!(
+            ctx.process_record(&JournalRecord::ChunkWritten {
+                transfer_id: transfer_id.clone(),
+                chunk_offset,
+                chunk_size: 1024,
+                file_path: "test".into(),
+                timestamp: 2000,
+            })
+            .unwrap()
+        );
 
         // Commit intent
-        assert!(ctx.process_record(&JournalRecord::CommitIntent {
-            transfer_id,
-            timestamp: 3000,
-        }).unwrap());
+        assert!(
+            ctx.process_record(&JournalRecord::CommitIntent {
+                transfer_id: transfer_id.clone(),
+                final_manifest_root: test_root(2),
+                timestamp: 3000,
+            })
+            .unwrap()
+        );
 
         // Rollback instead of commit
-        assert!(ctx.process_record(&JournalRecord::Rollback {
-            transfer_id,
-            timestamp: 4000,
-            reason: "timeout".into(),
-        }).unwrap());
+        assert!(
+            ctx.process_record(&JournalRecord::Rollback {
+                transfer_id: transfer_id.clone(),
+                rollback_reason: "timeout".into(),
+                checkpoint_sequence: 0,
+                timestamp: 4000,
+            })
+            .unwrap()
+        );
 
         let (bitmaps, _) = ctx.finalize();
-        let bitmap = &bitmaps[&transfer_id];
-
-        // Chunk should be removed by rollback
-        assert_eq!(bitmap.get_chunk_state(chunk_id), None);
+        assert!(!bitmaps.contains_key(&transfer_id));
     }
 }

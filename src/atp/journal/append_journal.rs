@@ -1,11 +1,11 @@
 //! Append-Only Journal for Crash-Safe Transfer Progress Tracking
 
-use crate::atp::object::ObjectId;
 use crate::atp::manifest::MerkleRoot;
-use crate::types::outcome::Outcome;
+use crate::atp::object::{ContentId, ManifestId, ObjectId};
 use crate::cx::Cx;
+use crate::types::outcome::Outcome;
 use std::fs::{File, OpenOptions};
-use std::io::{Write, Read, BufWriter, BufReader};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -100,22 +100,21 @@ pub enum JournalRecord {
 }
 
 impl JournalRecord {
-
     /// Get the timestamp for this record
     pub fn timestamp(&self) -> u64 {
         match self {
-            Self::Offer { timestamp, .. } |
-            Self::Accept { timestamp, .. } |
-            Self::ChunkReceived { timestamp, .. } |
-            Self::ChunkVerified { timestamp, .. } |
-            Self::ChunkWritten { timestamp, .. } |
-            Self::RepairDecode { timestamp, .. } |
-            Self::CommitIntent { timestamp, .. } |
-            Self::CommitComplete { timestamp, .. } |
-            Self::Cancellation { timestamp, .. } |
-            Self::Rollback { timestamp, .. } |
-            Self::CompactionBoundary { timestamp, .. } |
-            Self::ProofDigest { timestamp, .. } => *timestamp,
+            Self::Offer { timestamp, .. }
+            | Self::Accept { timestamp, .. }
+            | Self::ChunkReceived { timestamp, .. }
+            | Self::ChunkVerified { timestamp, .. }
+            | Self::ChunkWritten { timestamp, .. }
+            | Self::RepairDecode { timestamp, .. }
+            | Self::CommitIntent { timestamp, .. }
+            | Self::CommitComplete { timestamp, .. }
+            | Self::Cancellation { timestamp, .. }
+            | Self::Rollback { timestamp, .. }
+            | Self::CompactionBoundary { timestamp, .. }
+            | Self::ProofDigest { timestamp, .. } => *timestamp,
         }
     }
 
@@ -136,6 +135,380 @@ impl JournalRecord {
             Self::ProofDigest { .. } => "proof_digest",
         }
     }
+
+    /// Get the transfer id for records scoped to one transfer.
+    pub(crate) fn transfer_id(&self) -> Option<&str> {
+        match self {
+            Self::Offer { transfer_id, .. }
+            | Self::Accept { transfer_id, .. }
+            | Self::ChunkReceived { transfer_id, .. }
+            | Self::ChunkVerified { transfer_id, .. }
+            | Self::ChunkWritten { transfer_id, .. }
+            | Self::RepairDecode { transfer_id, .. }
+            | Self::CommitIntent { transfer_id, .. }
+            | Self::CommitComplete { transfer_id, .. }
+            | Self::Cancellation { transfer_id, .. }
+            | Self::Rollback { transfer_id, .. }
+            | Self::ProofDigest { transfer_id, .. } => Some(transfer_id),
+            Self::CompactionBoundary { .. } => None,
+        }
+    }
+
+    fn encode_payload(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            Self::Offer {
+                transfer_id,
+                object_id,
+                manifest_root,
+                total_size,
+                timestamp,
+            } => {
+                put_u8(&mut out, 0);
+                put_string(&mut out, transfer_id);
+                put_object_id(&mut out, object_id);
+                put_merkle_root(&mut out, manifest_root);
+                put_u64(&mut out, *total_size);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::Accept {
+                transfer_id,
+                peer_id,
+                timestamp,
+            } => {
+                put_u8(&mut out, 1);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, peer_id);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::ChunkReceived {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                chunk_hash,
+                timestamp,
+            } => {
+                put_u8(&mut out, 2);
+                put_string(&mut out, transfer_id);
+                put_u64(&mut out, *chunk_offset);
+                put_u64(&mut out, *chunk_size);
+                out.extend_from_slice(chunk_hash);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::ChunkVerified {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                verified_hash,
+                timestamp,
+            } => {
+                put_u8(&mut out, 3);
+                put_string(&mut out, transfer_id);
+                put_u64(&mut out, *chunk_offset);
+                put_u64(&mut out, *chunk_size);
+                out.extend_from_slice(verified_hash);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::ChunkWritten {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                file_path,
+                timestamp,
+            } => {
+                put_u8(&mut out, 4);
+                put_string(&mut out, transfer_id);
+                put_u64(&mut out, *chunk_offset);
+                put_u64(&mut out, *chunk_size);
+                put_string(&mut out, file_path);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::RepairDecode {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                source_chunks,
+                timestamp,
+            } => {
+                put_u8(&mut out, 5);
+                put_string(&mut out, transfer_id);
+                put_u64(&mut out, *chunk_offset);
+                put_u64(&mut out, *chunk_size);
+                put_len(&mut out, source_chunks.len());
+                for source in source_chunks {
+                    put_u64(&mut out, *source);
+                }
+                put_u64(&mut out, *timestamp);
+            }
+            Self::CommitIntent {
+                transfer_id,
+                final_manifest_root,
+                timestamp,
+            } => {
+                put_u8(&mut out, 6);
+                put_string(&mut out, transfer_id);
+                put_merkle_root(&mut out, final_manifest_root);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::CommitComplete {
+                transfer_id,
+                final_path,
+                committed_size,
+                timestamp,
+            } => {
+                put_u8(&mut out, 7);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, final_path);
+                put_u64(&mut out, *committed_size);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::Cancellation {
+                transfer_id,
+                reason,
+                timestamp,
+            } => {
+                put_u8(&mut out, 8);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, reason);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::Rollback {
+                transfer_id,
+                rollback_reason,
+                checkpoint_sequence,
+                timestamp,
+            } => {
+                put_u8(&mut out, 9);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, rollback_reason);
+                put_u64(&mut out, *checkpoint_sequence);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::CompactionBoundary {
+                generation,
+                compacted_up_to_sequence,
+                timestamp,
+            } => {
+                put_u8(&mut out, 10);
+                put_u64(&mut out, *generation);
+                put_u64(&mut out, *compacted_up_to_sequence);
+                put_u64(&mut out, *timestamp);
+            }
+            Self::ProofDigest {
+                transfer_id,
+                proof_type,
+                digest,
+                timestamp,
+            } => {
+                put_u8(&mut out, 11);
+                put_string(&mut out, transfer_id);
+                put_string(&mut out, proof_type);
+                out.extend_from_slice(digest);
+                put_u64(&mut out, *timestamp);
+            }
+        }
+        out
+    }
+
+    fn decode_payload(data: &[u8]) -> Result<Self, JournalError> {
+        let mut cursor = DecodeCursor::new(data);
+        let tag = cursor.read_u8()?;
+        match tag {
+            0 => Ok(Self::Offer {
+                transfer_id: cursor.read_string()?,
+                object_id: cursor.read_object_id()?,
+                manifest_root: cursor.read_merkle_root()?,
+                total_size: cursor.read_u64()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            1 => Ok(Self::Accept {
+                transfer_id: cursor.read_string()?,
+                peer_id: cursor.read_string()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            2 => Ok(Self::ChunkReceived {
+                transfer_id: cursor.read_string()?,
+                chunk_offset: cursor.read_u64()?,
+                chunk_size: cursor.read_u64()?,
+                chunk_hash: cursor.read_hash()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            3 => Ok(Self::ChunkVerified {
+                transfer_id: cursor.read_string()?,
+                chunk_offset: cursor.read_u64()?,
+                chunk_size: cursor.read_u64()?,
+                verified_hash: cursor.read_hash()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            4 => Ok(Self::ChunkWritten {
+                transfer_id: cursor.read_string()?,
+                chunk_offset: cursor.read_u64()?,
+                chunk_size: cursor.read_u64()?,
+                file_path: cursor.read_string()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            5 => {
+                let transfer_id = cursor.read_string()?;
+                let chunk_offset = cursor.read_u64()?;
+                let chunk_size = cursor.read_u64()?;
+                let source_count = cursor.read_len()?;
+                let mut source_chunks = Vec::with_capacity(source_count);
+                for _ in 0..source_count {
+                    source_chunks.push(cursor.read_u64()?);
+                }
+                Ok(Self::RepairDecode {
+                    transfer_id,
+                    chunk_offset,
+                    chunk_size,
+                    source_chunks,
+                    timestamp: cursor.read_u64()?,
+                })
+            }
+            6 => Ok(Self::CommitIntent {
+                transfer_id: cursor.read_string()?,
+                final_manifest_root: cursor.read_merkle_root()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            7 => Ok(Self::CommitComplete {
+                transfer_id: cursor.read_string()?,
+                final_path: cursor.read_string()?,
+                committed_size: cursor.read_u64()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            8 => Ok(Self::Cancellation {
+                transfer_id: cursor.read_string()?,
+                reason: cursor.read_string()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            9 => Ok(Self::Rollback {
+                transfer_id: cursor.read_string()?,
+                rollback_reason: cursor.read_string()?,
+                checkpoint_sequence: cursor.read_u64()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            10 => Ok(Self::CompactionBoundary {
+                generation: cursor.read_u64()?,
+                compacted_up_to_sequence: cursor.read_u64()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            11 => Ok(Self::ProofDigest {
+                transfer_id: cursor.read_string()?,
+                proof_type: cursor.read_string()?,
+                digest: cursor.read_hash()?,
+                timestamp: cursor.read_u64()?,
+            }),
+            other => Err(JournalError::Deserialization(format!(
+                "unknown journal record tag {other}"
+            ))),
+        }
+    }
+}
+
+fn put_u8(out: &mut Vec<u8>, value: u8) {
+    out.push(value);
+}
+
+fn put_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_len(out: &mut Vec<u8>, len: usize) {
+    let len = u32::try_from(len).expect("journal field exceeds u32 length");
+    out.extend_from_slice(&len.to_le_bytes());
+}
+
+fn put_string(out: &mut Vec<u8>, value: &str) {
+    put_len(out, value.len());
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn put_object_id(out: &mut Vec<u8>, object_id: &ObjectId) {
+    match object_id {
+        ObjectId::Content(content_id) => {
+            put_u8(out, 0);
+            out.extend_from_slice(content_id.hash());
+        }
+        ObjectId::Manifest(manifest_id) => {
+            put_u8(out, 1);
+            out.extend_from_slice(manifest_id.hash());
+        }
+    }
+}
+
+fn put_merkle_root(out: &mut Vec<u8>, root: &MerkleRoot) {
+    out.extend_from_slice(root.hash());
+}
+
+struct DecodeCursor<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> DecodeCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, offset: 0 }
+    }
+
+    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], JournalError> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| JournalError::Deserialization("entry length overflow".to_string()))?;
+        if end > self.data.len() {
+            return Err(JournalError::Deserialization(
+                "truncated journal entry".to_string(),
+            ));
+        }
+        let bytes = &self.data[self.offset..end];
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn read_u8(&mut self) -> Result<u8, JournalError> {
+        Ok(self.read_exact(1)?[0])
+    }
+
+    fn read_u64(&mut self) -> Result<u64, JournalError> {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(self.read_exact(8)?);
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn read_len(&mut self) -> Result<usize, JournalError> {
+        let mut bytes = [0; 4];
+        bytes.copy_from_slice(self.read_exact(4)?);
+        let len = u32::from_le_bytes(bytes);
+        usize::try_from(len)
+            .map_err(|_| JournalError::Deserialization("invalid length".to_string()))
+    }
+
+    fn read_string(&mut self) -> Result<String, JournalError> {
+        let len = self.read_len()?;
+        let bytes = self.read_exact(len)?;
+        String::from_utf8(bytes.to_vec()).map_err(|e| JournalError::Deserialization(e.to_string()))
+    }
+
+    fn read_hash(&mut self) -> Result<[u8; 32], JournalError> {
+        let mut hash = [0; 32];
+        hash.copy_from_slice(self.read_exact(32)?);
+        Ok(hash)
+    }
+
+    fn read_object_id(&mut self) -> Result<ObjectId, JournalError> {
+        let tag = self.read_u8()?;
+        let hash = self.read_hash()?;
+        match tag {
+            0 => Ok(ObjectId::Content(ContentId::new(hash))),
+            1 => Ok(ObjectId::Manifest(ManifestId::new(hash))),
+            other => Err(JournalError::Deserialization(format!(
+                "unknown object id tag {other}"
+            ))),
+        }
+    }
+
+    fn read_merkle_root(&mut self) -> Result<MerkleRoot, JournalError> {
+        Ok(MerkleRoot::new(self.read_hash()?))
+    }
 }
 
 /// Journal entry with metadata
@@ -154,9 +527,10 @@ pub struct JournalEntry {
 impl JournalEntry {
     /// Create a new journal entry
     pub fn new(sequence: u64, record: JournalRecord) -> Self {
-        let serialized = bincode::serde::encode_to_vec(&record, bincode::config::legacy()).expect("Failed to serialize record");
+        let serialized = record.encode_payload();
         let checksum = crc32fast::hash(&serialized);
-        let entry_size = serialized.len() as u32;
+        let entry_size =
+            u32::try_from(serialized.len()).expect("journal record exceeds u32 length");
 
         Self {
             sequence,
@@ -168,9 +542,36 @@ impl JournalEntry {
 
     /// Validate the entry's checksum
     pub fn validate_checksum(&self) -> bool {
-        let serialized = bincode::serde::encode_to_vec(&self.record, bincode::config::legacy()).expect("Failed to serialize record");
+        let serialized = self.record.encode_payload();
         let computed_checksum = crc32fast::hash(&serialized);
         computed_checksum == self.checksum
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let record = self.record.encode_payload();
+        let mut out = Vec::with_capacity(16 + record.len());
+        put_u64(&mut out, self.sequence);
+        out.extend_from_slice(&self.checksum.to_le_bytes());
+        out.extend_from_slice(&self.entry_size.to_le_bytes());
+        out.extend_from_slice(&record);
+        out
+    }
+
+    fn decode(data: &[u8]) -> Result<Self, JournalError> {
+        let mut cursor = DecodeCursor::new(data);
+        let sequence = cursor.read_u64()?;
+        let mut checksum_bytes = [0; 4];
+        checksum_bytes.copy_from_slice(cursor.read_exact(4)?);
+        let checksum = u32::from_le_bytes(checksum_bytes);
+        let entry_size = cursor.read_len()? as u32;
+        let record_payload = cursor.read_exact(entry_size as usize)?;
+        let record = JournalRecord::decode_payload(record_payload)?;
+        Ok(Self {
+            sequence,
+            record,
+            checksum,
+            entry_size,
+        })
     }
 }
 
@@ -241,13 +642,12 @@ impl AppendJournal {
         };
 
         // Try to recover from existing journal
-        if let Err(e) = journal.recover_from_disk() {
-            // If recovery fails, start fresh but log the error
-            if journal.config.enable_detailed_logs {
-                eprintln!("Journal recovery failed: {:?}, starting fresh", e);
+        match journal.recover_from_disk() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                journal.generation = 0;
+                journal.sequence = 0;
             }
-            journal.generation = 0;
-            journal.sequence = 0;
         }
 
         Outcome::Ok(journal)
@@ -256,15 +656,17 @@ impl AppendJournal {
     /// Append a new record to the journal
     pub fn append(&mut self, record: JournalRecord) -> Outcome<u64, JournalError> {
         // Ensure we have an active writer
-        self.ensure_writer()?;
+        match self.ensure_writer() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         let entry = JournalEntry::new(self.sequence, record);
 
         // Serialize the entry
-        let serialized = match bincode::serde::encode_to_vec(&entry, bincode::config::legacy()) {
-            Ok(data) => data,
-            Err(e) => return Outcome::Err(JournalError::Serialization(e.to_string())),
-        };
+        let serialized = entry.encode();
 
         // Write to disk
         if let Some(ref mut writer) = self.writer {
@@ -301,8 +703,17 @@ impl AppendJournal {
         }
 
         // Check if compaction is needed
-        if self.should_compact()? {
-            self.trigger_compaction()?;
+        match self.should_compact() {
+            Outcome::Ok(true) => match self.trigger_compaction() {
+                Outcome::Ok(()) => {}
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            },
+            Outcome::Ok(false) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         Outcome::Ok(current_sequence)
@@ -332,7 +743,10 @@ impl AppendJournal {
 
         // Read from all generations
         for generation_num in 0..=self.generation {
-            let file_path = self.config.base_dir.join(format!("journal_gen_{:06}.dat", generation_num));
+            let file_path = self
+                .config
+                .base_dir
+                .join(format!("journal_gen_{:06}.dat", generation_num));
             if file_path.exists() {
                 let entries = match self.read_entries_from_file(&file_path) {
                     Outcome::Ok(e) => e,
@@ -350,7 +764,10 @@ impl AppendJournal {
     }
 
     /// Read all entries for a specific transfer ID
-    pub fn get_transfer_entries(&self, transfer_id: &str) -> Outcome<Vec<JournalEntry>, JournalError> {
+    pub fn get_transfer_entries(
+        &self,
+        transfer_id: &str,
+    ) -> Outcome<Vec<JournalEntry>, JournalError> {
         let mut entries = Vec::new();
 
         // Check recent entries first
@@ -362,7 +779,12 @@ impl AppendJournal {
 
         // If we need more entries, read from disk
         // This is a simplified implementation - in practice you'd want to index by transfer_id
-        let disk_entries = self.read_all_entries_from_disk()?;
+        let disk_entries = match self.read_all_entries_from_disk() {
+            Outcome::Ok(entries) => entries,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
         for entry in disk_entries {
             if entry.record.transfer_id() == Some(transfer_id) {
                 // Only add if not already in recent entries
@@ -383,7 +805,9 @@ impl AppendJournal {
 
     /// Get journal statistics
     pub fn get_stats(&self) -> JournalStats {
-        let current_size = self.current_file.as_ref()
+        let current_size = self
+            .current_file
+            .as_ref()
             .and_then(|path| std::fs::metadata(path).ok())
             .map(|meta| meta.len())
             .unwrap_or(0);
@@ -404,7 +828,10 @@ impl AppendJournal {
             return Outcome::Ok(());
         }
 
-        let file_path = self.config.base_dir.join(format!("journal_gen_{:06}.dat", self.generation));
+        let file_path = self
+            .config
+            .base_dir
+            .join(format!("journal_gen_{:06}.dat", self.generation));
 
         let file = match OpenOptions::new()
             .create(true)
@@ -415,14 +842,19 @@ impl AppendJournal {
             Err(e) => return Outcome::Err(JournalError::FileOpen(e.to_string())),
         };
 
-        self.writer = Some(BufWriter::with_capacity(self.config.write_buffer_size, file));
+        self.writer = Some(BufWriter::with_capacity(
+            self.config.write_buffer_size,
+            file,
+        ));
         self.current_file = Some(file_path);
 
         Outcome::Ok(())
     }
 
     fn should_compact(&self) -> Outcome<bool, JournalError> {
-        let current_size = self.current_file.as_ref()
+        let current_size = self
+            .current_file
+            .as_ref()
             .and_then(|path| std::fs::metadata(path).ok())
             .map(|meta| meta.len())
             .unwrap_or(0);
@@ -432,7 +864,12 @@ impl AppendJournal {
 
     fn trigger_compaction(&mut self) -> Outcome<(), JournalError> {
         // Flush current writer
-        self.flush()?;
+        match self.flush() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         // Create compaction boundary record
         let boundary_record = JournalRecord::CompactionBoundary {
@@ -445,7 +882,12 @@ impl AppendJournal {
         };
 
         // Write the boundary record
-        self.append(boundary_record)?;
+        match self.append(boundary_record) {
+            Outcome::Ok(_) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         // Close current writer
         self.writer = None;
@@ -454,7 +896,12 @@ impl AppendJournal {
         self.generation += 1;
 
         // Clean up old generations
-        self.cleanup_old_generations()?;
+        match self.cleanup_old_generations() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         Outcome::Ok(())
     }
@@ -467,11 +914,17 @@ impl AppendJournal {
         let cutoff_generation = self.generation - self.config.max_generations as u64;
 
         for generation_num in 0..cutoff_generation {
-            let old_file = self.config.base_dir.join(format!("journal_gen_{:06}.dat", generation_num));
+            let old_file = self
+                .config
+                .base_dir
+                .join(format!("journal_gen_{:06}.dat", generation_num));
             if old_file.exists() {
                 if let Err(e) = std::fs::remove_file(&old_file) {
                     if self.config.enable_detailed_logs {
-                        eprintln!("Failed to remove old journal generation {}: {}", generation_num, e);
+                        eprintln!(
+                            "Failed to remove old journal generation {}: {}",
+                            generation_num, e
+                        );
                     }
                     // Continue cleanup despite errors
                 }
@@ -492,13 +945,16 @@ impl AppendJournal {
         };
 
         for entry in entries {
-            let entry = entry.map_err(|e| JournalError::DirectoryRead(e.to_string()))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => return Outcome::Err(JournalError::DirectoryRead(e.to_string())),
+            };
             let file_name = entry.file_name();
             let file_name_str = file_name.to_string_lossy();
 
             // Parse generation number from filename journal_gen_NNNNNN.dat
             if file_name_str.starts_with("journal_gen_") && file_name_str.ends_with(".dat") {
-                let gen_part = &file_name_str[12..file_name_str.len()-4]; // Extract between "journal_gen_" and ".dat"
+                let gen_part = &file_name_str[12..file_name_str.len() - 4]; // Extract between "journal_gen_" and ".dat"
                 if let Ok(generation_num) = gen_part.parse::<u64>() {
                     max_generation = max_generation.max(generation_num);
                 }
@@ -506,9 +962,17 @@ impl AppendJournal {
         }
 
         // Read the latest generation to find the maximum sequence
-        let latest_file = self.config.base_dir.join(format!("journal_gen_{:06}.dat", max_generation));
+        let latest_file = self
+            .config
+            .base_dir
+            .join(format!("journal_gen_{:06}.dat", max_generation));
         if latest_file.exists() {
-            let entries = self.read_entries_from_file(&latest_file)?;
+            let entries = match self.read_entries_from_file(&latest_file) {
+                Outcome::Ok(entries) => entries,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            };
             for entry in &entries {
                 max_sequence = max_sequence.max(entry.sequence);
             }
@@ -532,8 +996,10 @@ impl AppendJournal {
     }
 
     fn read_entries_from_file(&self, file_path: &Path) -> Outcome<Vec<JournalEntry>, JournalError> {
-        let file = File::open(file_path)
-            .map_err(|e| JournalError::FileOpen(e.to_string()))?;
+        let file = match File::open(file_path) {
+            Ok(file) => file,
+            Err(e) => return Outcome::Err(JournalError::FileOpen(e.to_string())),
+        };
         let mut reader = BufReader::new(file);
         let mut entries = Vec::new();
 
@@ -550,12 +1016,15 @@ impl AppendJournal {
 
             // Read entry data
             let mut entry_data = vec![0u8; length];
-            reader.read_exact(&mut entry_data)
-                .map_err(|e| JournalError::ReadFailure(e.to_string()))?;
+            if let Err(e) = reader.read_exact(&mut entry_data) {
+                return Outcome::Err(JournalError::ReadFailure(e.to_string()));
+            }
 
             // Deserialize entry
-            let (entry, _) = bincode::serde::decode_from_slice::<JournalEntry>(&entry_data, bincode::config::legacy())
-                .map_err(|e| JournalError::Deserialization(e.to_string()))?;
+            let entry = match JournalEntry::decode(&entry_data) {
+                Ok(entry) => entry,
+                Err(e) => return Outcome::Err(e),
+            };
 
             // Validate checksum
             if !entry.validate_checksum() {
@@ -573,9 +1042,17 @@ impl AppendJournal {
 
         // Read from all generations
         for generation_num in 0..=self.generation {
-            let file_path = self.config.base_dir.join(format!("journal_gen_{:06}.dat", generation_num));
+            let file_path = self
+                .config
+                .base_dir
+                .join(format!("journal_gen_{:06}.dat", generation_num));
             if file_path.exists() {
-                let entries = self.read_entries_from_file(&file_path)?;
+                let entries = match self.read_entries_from_file(&file_path) {
+                    Outcome::Ok(entries) => entries,
+                    Outcome::Err(e) => return Outcome::Err(e),
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+                };
                 all_entries.extend(entries);
             }
         }
@@ -633,12 +1110,22 @@ pub struct JournalStats {
 mod tests {
     use super::*;
 
+    fn test_object_id(name: &[u8]) -> ObjectId {
+        ObjectId::content(ContentId::from_bytes(name))
+    }
+
+    fn test_root(seed: u8) -> MerkleRoot {
+        let mut hash = [0; 32];
+        hash[0] = seed;
+        MerkleRoot::new(hash)
+    }
+
     #[test]
     fn test_journal_entry_creation() {
         let record = JournalRecord::Offer {
             transfer_id: "test_transfer".to_string(),
-            object_id: ObjectId::new("test_object"),
-            manifest_root: MerkleRoot::new(&[1, 2, 3, 4]),
+            object_id: test_object_id(b"test_object"),
+            manifest_root: test_root(1),
             total_size: 1024,
             timestamp: 1234567890,
         };
@@ -687,19 +1174,23 @@ mod tests {
         {
             let mut journal = AppendJournal::new(config.clone()).unwrap();
 
-            journal.append(JournalRecord::Offer {
-                transfer_id: "test1".to_string(),
-                object_id: ObjectId::new("obj1"),
-                manifest_root: MerkleRoot::new(&[1, 2, 3]),
-                total_size: 1024,
-                timestamp: 1000,
-            }).unwrap();
+            journal
+                .append(JournalRecord::Offer {
+                    transfer_id: "test1".to_string(),
+                    object_id: test_object_id(b"obj1"),
+                    manifest_root: test_root(1),
+                    total_size: 1024,
+                    timestamp: 1000,
+                })
+                .unwrap();
 
-            journal.append(JournalRecord::Accept {
-                transfer_id: "test1".to_string(),
-                peer_id: "peer1".to_string(),
-                timestamp: 1001,
-            }).unwrap();
+            journal
+                .append(JournalRecord::Accept {
+                    transfer_id: "test1".to_string(),
+                    peer_id: "peer1".to_string(),
+                    timestamp: 1001,
+                })
+                .unwrap();
 
             journal.flush().unwrap();
         }
@@ -727,27 +1218,33 @@ mod tests {
         let mut journal = AppendJournal::new(config).unwrap();
 
         // Add entries for different transfers
-        journal.append(JournalRecord::Offer {
-            transfer_id: "transfer_a".to_string(),
-            object_id: ObjectId::new("obj_a"),
-            manifest_root: MerkleRoot::new(&[1, 2, 3]),
-            total_size: 1024,
-            timestamp: 1000,
-        }).unwrap();
+        journal
+            .append(JournalRecord::Offer {
+                transfer_id: "transfer_a".to_string(),
+                object_id: test_object_id(b"obj_a"),
+                manifest_root: test_root(1),
+                total_size: 1024,
+                timestamp: 1000,
+            })
+            .unwrap();
 
-        journal.append(JournalRecord::Offer {
-            transfer_id: "transfer_b".to_string(),
-            object_id: ObjectId::new("obj_b"),
-            manifest_root: MerkleRoot::new(&[4, 5, 6]),
-            total_size: 2048,
-            timestamp: 1001,
-        }).unwrap();
+        journal
+            .append(JournalRecord::Offer {
+                transfer_id: "transfer_b".to_string(),
+                object_id: test_object_id(b"obj_b"),
+                manifest_root: test_root(4),
+                total_size: 2048,
+                timestamp: 1001,
+            })
+            .unwrap();
 
-        journal.append(JournalRecord::Accept {
-            transfer_id: "transfer_a".to_string(),
-            peer_id: "peer1".to_string(),
-            timestamp: 1002,
-        }).unwrap();
+        journal
+            .append(JournalRecord::Accept {
+                transfer_id: "transfer_a".to_string(),
+                peer_id: "peer1".to_string(),
+                timestamp: 1002,
+            })
+            .unwrap();
 
         // Get entries for specific transfer
         let transfer_a_entries = journal.get_transfer_entries("transfer_a").unwrap();
