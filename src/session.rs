@@ -252,9 +252,9 @@ where
         let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(value);
         if let Err(error) = tx.send(cx, boxed).await {
-            return Outcome::Error(map_send_error(&error));
+            return Outcome::Err(map_send_error(&error));
         }
-        Outcome::Success(Endpoint {
+        Outcome::Ok(Endpoint {
             _session: PhantomData,
             tx,
             rx,
@@ -274,7 +274,7 @@ where
         let Self { tx, mut rx, .. } = self;
         let boxed = match rx.recv(cx).await {
             Ok(b) => b,
-            Err(e) => return Outcome::Error(match e {
+            Err(e) => return Outcome::Err(match e {
                 crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
                 crate::channel::mpsc::RecvError::Disconnected
                 | crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
@@ -282,9 +282,9 @@ where
         };
         let value = match boxed.downcast::<T>() {
             Ok(v) => v,
-            Err(_) => return Outcome::Error(SessionError::TypeMismatch),
+            Err(_) => return Outcome::Err(SessionError::TypeMismatch),
         };
-        Outcome::Success((
+        Outcome::Ok((
             *value,
             Endpoint {
                 _session: PhantomData,
@@ -303,9 +303,9 @@ impl<A: Session, B: Session> Endpoint<Choose<A, B>> {
         let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(Branch::Left);
         if let Err(error) = tx.send(cx, boxed).await {
-            return Outcome::Error(map_send_error(&error));
+            return Outcome::Err(map_send_error(&error));
         }
-        Outcome::Success(Endpoint {
+        Outcome::Ok(Endpoint {
             _session: PhantomData,
             tx,
             rx,
@@ -319,9 +319,9 @@ impl<A: Session, B: Session> Endpoint<Choose<A, B>> {
         let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(Branch::Right);
         if let Err(error) = tx.send(cx, boxed).await {
-            return Outcome::Error(map_send_error(&error));
+            return Outcome::Err(map_send_error(&error));
         }
-        Outcome::Success(Endpoint {
+        Outcome::Ok(Endpoint {
             _session: PhantomData,
             tx,
             rx,
@@ -345,7 +345,7 @@ impl<A: Session, B: Session> Endpoint<Offer<A, B>> {
         let Self { tx, mut rx, .. } = self;
         let boxed = match rx.recv(cx).await {
             Ok(b) => b,
-            Err(e) => return Outcome::Error(match e {
+            Err(e) => return Outcome::Err(match e {
                 crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
                 crate::channel::mpsc::RecvError::Disconnected
                 | crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
@@ -353,15 +353,15 @@ impl<A: Session, B: Session> Endpoint<Offer<A, B>> {
         };
         let branch = match boxed.downcast::<Branch>() {
             Ok(b) => b,
-            Err(_) => return Outcome::Error(SessionError::TypeMismatch),
+            Err(_) => return Outcome::Err(SessionError::TypeMismatch),
         };
         match *branch {
-            Branch::Left => Outcome::Success(Offered::Left(Endpoint {
+            Branch::Left => Outcome::Ok(Offered::Left(Endpoint {
                 _session: PhantomData,
                 tx,
                 rx,
             })),
-            Branch::Right => Outcome::Success(Offered::Right(Endpoint {
+            Branch::Right => Outcome::Ok(Offered::Right(Endpoint {
                 _session: PhantomData,
                 tx,
                 rx,
