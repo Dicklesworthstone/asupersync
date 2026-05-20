@@ -223,9 +223,7 @@ impl ChunkIdentity {
 
     /// Get identity string for deduplication keys.
     pub fn identity_string(&self) -> String {
-        let hash_hex = self.content_hash.iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
+        let hash_hex = hex_hash(&self.content_hash);
         format!(
             "{}:{}:{}:{}",
             hash_hex, self.size_bytes, self.chunking_profile, self.capability_scope
@@ -341,13 +339,11 @@ impl ChunkCache {
     }
 
     /// Check if chunk can be reused given capability scope.
-    pub fn can_reuse_chunk(
-        &self,
-        chunk_identity: &ChunkIdentity,
-        requesting_scope: &str,
-    ) -> bool {
-        // Check if capability scopes match
-        chunk_identity.capability_scope == requesting_scope
+    pub fn can_reuse_chunk(&self, chunk_identity: &ChunkIdentity, requesting_scope: &str) -> bool {
+        // Empty scopes are explicit globally reusable cache entries. Non-empty
+        // scopes must match the requester's registered dedupe context.
+        chunk_identity.capability_scope.is_empty()
+            || chunk_identity.capability_scope == requesting_scope
     }
 
     /// Evict least recently used chunk.
@@ -435,18 +431,24 @@ impl ChunkReuseManager {
         self.active_contexts.remove(transfer_id);
     }
 
+    /// Resolve a transfer's registered context to the capability scope stored
+    /// in chunk identities.
+    fn capability_scope_for_transfer(&self, transfer_id: &str) -> Option<String> {
+        self.active_contexts.get(transfer_id).map(hex_hash)
+    }
+
     /// Attempt to reuse chunk from cache.
     pub fn try_reuse_chunk(
         &mut self,
         chunk_identity: &ChunkIdentity,
         transfer_id: &str,
     ) -> Option<Bytes> {
-        let requesting_context = self.active_contexts.get(transfer_id).copied();
+        let requesting_scope = self.capability_scope_for_transfer(transfer_id)?;
 
         // Check if chunk can be reused given capability scope
         if !self
             .cache
-            .can_reuse_chunk(chunk_identity, transfer_id)
+            .can_reuse_chunk(chunk_identity, &requesting_scope)
         {
             return None;
         }
@@ -466,7 +468,7 @@ impl ChunkReuseManager {
         for similar_identity in similar_chunks {
             if self
                 .cache
-                .can_reuse_chunk(&similar_identity, transfer_id)
+                .can_reuse_chunk(&similar_identity, &requesting_scope)
             {
                 if let Some(data) = self.cache.lookup_chunk(&similar_identity) {
                     return Some(data);
@@ -485,7 +487,14 @@ impl ChunkReuseManager {
         transfer_id: &str,
         source_object: Option<String>,
     ) -> Result<ChunkIdentity, ChunkingProfileError> {
-        let identity = ChunkIdentity::from_data(chunk_data, chunking_profile, transfer_id);
+        let capability_scope =
+            self.capability_scope_for_transfer(transfer_id)
+                .ok_or_else(|| {
+                    ChunkingProfileError::InvalidChunkParameters(format!(
+                        "transfer {transfer_id} has no registered dedupe context"
+                    ))
+                })?;
+        let identity = ChunkIdentity::from_data(chunk_data, chunking_profile, &capability_scope);
 
         self.cache.store_chunk(
             identity.clone(),
@@ -520,6 +529,10 @@ impl ChunkReuseManager {
         // Additional validation could include checking chunk strategy compatibility
         true
     }
+}
+
+fn hex_hash(hash: &[u8; 32]) -> String {
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -571,15 +584,16 @@ mod tests {
     #[test]
     fn test_chunk_identity() {
         let data = b"hello world";
-        let identity = ChunkIdentity::from_data(data, "test-profile", None);
+        let identity = ChunkIdentity::from_data(data, "test-profile", "scope-a");
 
-        assert_eq!(identity.size, data.len() as u64);
+        assert_eq!(identity.size_bytes, data.len() as u64);
         assert_eq!(identity.chunking_profile, "test-profile");
-        assert_eq!(identity.context_hash, None);
+        assert_eq!(identity.capability_scope, "scope-a");
 
         let identity_string = identity.identity_string();
         assert!(identity_string.contains("test-profile"));
-        assert!(identity_string.contains(&identity.size.to_string()));
+        assert!(identity_string.contains(&identity.size_bytes.to_string()));
+        assert!(identity_string.contains("scope-a"));
     }
 
     #[test]
@@ -587,13 +601,13 @@ mod tests {
         let mut cache = ChunkCache::new(1000); // 1KB cache
 
         let data1 = vec![1u8; 400];
-        let identity1 = ChunkIdentity::from_data(&data1, "test", None);
+        let identity1 = ChunkIdentity::from_data(&data1, "test", "scope-a");
 
         let data2 = vec![2u8; 400];
-        let identity2 = ChunkIdentity::from_data(&data2, "test", None);
+        let identity2 = ChunkIdentity::from_data(&data2, "test", "scope-a");
 
         let data3 = vec![3u8; 400];
-        let identity3 = ChunkIdentity::from_data(&data3, "test", None);
+        let identity3 = ChunkIdentity::from_data(&data3, "test", "scope-a");
 
         // Store first two chunks
         cache
@@ -635,6 +649,12 @@ mod tests {
         let reused_data = manager.try_reuse_chunk(&identity, transfer_id);
         assert_eq!(reused_data.as_deref(), Some(data.as_slice()));
 
+        // Another transfer with the same registered context may reuse too.
+        let sibling_transfer = "same-context-transfer";
+        manager.register_context(sibling_transfer, context_hash);
+        let sibling_reused = manager.try_reuse_chunk(&identity, sibling_transfer);
+        assert_eq!(sibling_reused.as_deref(), Some(data.as_slice()));
+
         // Different transfer without context should not be able to reuse
         let other_transfer = "other-transfer";
         let other_reused = manager.try_reuse_chunk(&identity, other_transfer);
@@ -646,14 +666,13 @@ mod tests {
         let mut cache = ChunkCache::new(1000);
 
         let data = vec![1u8; 100];
-        let context_a = Some([1u8; 32]);
-        let context_b = Some([2u8; 32]);
+        let context_a = "scope-a";
+        let context_b = "scope-b";
 
         let identity_a = ChunkIdentity::from_data(&data, "test", context_a);
-        let identity_b = ChunkIdentity::from_data(&data, "test", context_b);
 
         cache
-            .store_chunk(identity_a.clone(), data.clone(), None)
+            .store_chunk(identity_a.clone(), Bytes::copy_from_slice(&data), None)
             .unwrap();
 
         // Same context should allow reuse
@@ -663,9 +682,9 @@ mod tests {
         assert!(!cache.can_reuse_chunk(&identity_a, context_b));
 
         // No context (global) should allow reuse
-        let identity_global = ChunkIdentity::from_data(&data, "test", None);
+        let identity_global = ChunkIdentity::from_data(&data, "test", "");
         cache
-            .store_chunk(identity_global.clone(), data.clone(), None)
+            .store_chunk(identity_global.clone(), Bytes::copy_from_slice(&data), None)
             .unwrap();
         assert!(cache.can_reuse_chunk(&identity_global, context_a));
         assert!(cache.can_reuse_chunk(&identity_global, context_b));
