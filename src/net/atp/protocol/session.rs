@@ -405,6 +405,10 @@ pub struct CapabilityScope {
     pub allowed_path_ids: BTreeSet<PathCandidateId>,
     /// Human/path prefixes for CLI/daemon policy surfaces.
     pub allowed_path_prefixes: BTreeSet<String>,
+    /// Whether every trusted relay peer may satisfy a relay context.
+    pub allow_any_relay_peer: bool,
+    /// Explicit relay peers allowed by this grant.
+    pub allowed_relay_peers: BTreeSet<PeerId>,
     /// Whether every manifest/object root is allowed.
     pub allow_any_manifest_root: bool,
     /// Explicitly allowed manifest roots.
@@ -421,6 +425,8 @@ impl CapabilityScope {
             allow_any_path: true,
             allowed_path_ids: BTreeSet::new(),
             allowed_path_prefixes: BTreeSet::new(),
+            allow_any_relay_peer: true,
+            allowed_relay_peers: BTreeSet::new(),
             allow_any_manifest_root: true,
             allowed_manifest_roots: BTreeSet::new(),
             allowed_contexts: SessionContextKind::ALL.into_iter().collect(),
@@ -444,6 +450,14 @@ impl CapabilityScope {
         self
     }
 
+    /// Restrict to a single trusted relay peer.
+    #[must_use]
+    pub fn with_relay_peer(mut self, relay_peer: PeerId) -> Self {
+        self.allow_any_relay_peer = false;
+        self.allowed_relay_peers.insert(relay_peer);
+        self
+    }
+
     /// Restrict to a manifest root.
     #[must_use]
     pub fn with_manifest_root(mut self, manifest_root: [u8; 32]) -> Self {
@@ -464,6 +478,17 @@ impl CapabilityScope {
             if !self.allowed_path_ids.contains(&path_id) {
                 return Err(SessionError::PathScopeDenied {
                     path_id: Some(path_id),
+                });
+            }
+        }
+
+        if matches!(hello.context, SessionContextKind::Relay) && !self.allow_any_relay_peer {
+            let relay_peer = hello
+                .relay_peer
+                .ok_or(SessionError::RelayScopeDenied { relay_peer: None })?;
+            if !self.allowed_relay_peers.contains(&relay_peer) {
+                return Err(SessionError::RelayScopeDenied {
+                    relay_peer: Some(relay_peer),
                 });
             }
         }
@@ -614,6 +639,8 @@ pub struct SessionPolicy {
     pub accepted_contexts: BTreeSet<SessionContextKind>,
     /// Trusted grant issuers.
     pub trusted_grant_issuers: BTreeSet<PeerId>,
+    /// Relay peers whose identity may be used for relay sessions.
+    pub trusted_relays: BTreeSet<PeerId>,
     /// Replay cache for transfer nonces.
     pub seen_nonces: BTreeSet<TransferNonce>,
     /// Policy clock in microseconds.
@@ -638,6 +665,7 @@ impl SessionPolicy {
             required_actions: BTreeSet::new(),
             accepted_contexts: SessionContextKind::ALL.into_iter().collect(),
             trusted_grant_issuers: std::iter::once(local_peer).collect(),
+            trusted_relays: BTreeSet::new(),
             seen_nonces: BTreeSet::new(),
             now_micros,
             require_manifest_binding: false,
@@ -672,6 +700,13 @@ impl SessionPolicy {
         self
     }
 
+    /// Trust relay peers for relay-context negotiation.
+    #[must_use]
+    pub fn with_trusted_relays(mut self, relays: &[PeerId]) -> Self {
+        self.trusted_relays = relays.iter().copied().collect();
+        self
+    }
+
     /// Mark a nonce as already seen.
     #[must_use]
     pub fn with_seen_nonce(mut self, nonce: TransferNonce) -> Self {
@@ -702,6 +737,8 @@ pub struct ClientHello {
     pub manifest_root: Option<[u8; 32]>,
     /// Optional path candidate id.
     pub path_id: Option<PathCandidateId>,
+    /// Relay peer identity required for relay contexts.
+    pub relay_peer: Option<PeerId>,
     /// Negotiation context.
     pub context: SessionContextKind,
     /// Offered feature set.
@@ -731,6 +768,7 @@ impl ClientHello {
             version: ProtocolVersion::CURRENT,
             manifest_root: None,
             path_id: None,
+            relay_peer: None,
             context,
             offered_features: FeatureSet::from_slice(&[AtpFeature::EncryptionPolicy]),
             grants: Vec::new(),
@@ -757,6 +795,13 @@ impl ClientHello {
     #[must_use]
     pub const fn with_path_id(mut self, path_id: PathCandidateId) -> Self {
         self.path_id = Some(path_id);
+        self
+    }
+
+    /// Attach the relay peer identity for relay-context negotiation.
+    #[must_use]
+    pub const fn with_relay_peer(mut self, relay_peer: PeerId) -> Self {
+        self.relay_peer = Some(relay_peer);
         self
     }
 
@@ -792,6 +837,7 @@ impl ClientHello {
         bytes.extend_from_slice(&self.version.0.to_be_bytes());
         put_optional_hash(&mut bytes, self.manifest_root);
         put_optional_u64(&mut bytes, self.path_id.map(PathCandidateId::get));
+        put_optional_peer_id(&mut bytes, self.relay_peer);
         bytes.push(context_code(self.context));
         put_features(&mut bytes, &self.offered_features);
         put_actions(&mut bytes, &self.requested_actions);
@@ -1218,6 +1264,21 @@ pub enum SessionError {
         /// Rejected path id.
         path_id: Option<PathCandidateId>,
     },
+    /// Relay context did not name a relay peer.
+    #[error("relay identity required")]
+    MissingRelayIdentity,
+    /// Non-relay context carried a relay peer.
+    #[error("unexpected relay identity")]
+    UnexpectedRelayIdentity,
+    /// Relay peer is not trusted by policy.
+    #[error("untrusted relay identity: {0:?}")]
+    UntrustedRelayIdentity(PeerId),
+    /// Relay restrictions rejected the request.
+    #[error("relay scope denied")]
+    RelayScopeDenied {
+        /// Rejected relay peer.
+        relay_peer: Option<PeerId>,
+    },
     /// Object restrictions rejected the request.
     #[error("object scope denied")]
     ObjectScopeDenied {
@@ -1261,6 +1322,10 @@ impl SessionError {
             Self::DelegationDenied(_) => "delegation_denied",
             Self::InviteDenied(_) => "invite_denied",
             Self::PathScopeDenied { .. } => "path_scope_denied",
+            Self::MissingRelayIdentity => "missing_relay_identity",
+            Self::UnexpectedRelayIdentity => "unexpected_relay_identity",
+            Self::UntrustedRelayIdentity(_) => "untrusted_relay_identity",
+            Self::RelayScopeDenied { .. } => "relay_scope_denied",
             Self::ObjectScopeDenied { .. } => "object_scope_denied",
             Self::SessionIdMismatch => "session_id_mismatch",
             Self::WithProof { source, .. } => source.code(),
@@ -1319,10 +1384,32 @@ fn validate_client_hello(hello: &ClientHello, policy: &SessionPolicy) -> Result<
     if !policy.accepted_contexts.contains(&hello.context) {
         return Err(SessionError::ContextDenied(hello.context));
     }
+    validate_relay_identity(hello, policy)?;
     if policy.require_manifest_binding && hello.manifest_root.is_none() {
         return Err(SessionError::ManifestRootRequired);
     }
     Ok(())
+}
+
+fn validate_relay_identity(
+    hello: &ClientHello,
+    policy: &SessionPolicy,
+) -> Result<(), SessionError> {
+    match (hello.context, hello.relay_peer) {
+        (SessionContextKind::Relay, Some(relay_peer)) => {
+            if relay_peer == hello.initiator || relay_peer == hello.responder {
+                return Err(SessionError::PeerConfusion);
+            }
+            if policy.trusted_relays.contains(&relay_peer) {
+                Ok(())
+            } else {
+                Err(SessionError::UntrustedRelayIdentity(relay_peer))
+            }
+        }
+        (SessionContextKind::Relay, None) => Err(SessionError::MissingRelayIdentity),
+        (_, Some(_)) => Err(SessionError::UnexpectedRelayIdentity),
+        (_, None) => Ok(()),
+    }
 }
 
 fn reserve_client_nonce(
@@ -1412,6 +1499,7 @@ fn validate_server_hello(
     if server_hello.context != hello.context {
         return Err(SessionError::PeerConfusion);
     }
+    validate_relay_identity(hello, policy)?;
     if !policy.supported_versions.contains(&server_hello.version) {
         return Err(SessionError::UnsupportedVersion(server_hello.version.0));
     }
@@ -1448,6 +1536,12 @@ fn derive_session_id(hello: &ClientHello, selected_features: &FeatureSet) -> Ses
     if let Some(path_id) = hello.path_id {
         hasher.update([1]);
         hasher.update(path_id.get().to_be_bytes());
+    } else {
+        hasher.update([0]);
+    }
+    if let Some(relay_peer) = hello.relay_peer {
+        hasher.update([1]);
+        hasher.update(relay_peer.as_bytes());
     } else {
         hasher.update([0]);
     }
@@ -1526,6 +1620,11 @@ fn put_scope(bytes: &mut Vec<u8>, scope: &CapabilityScope) {
     for prefix in &scope.allowed_path_prefixes {
         put_str(bytes, prefix);
     }
+    bytes.push(u8::from(scope.allow_any_relay_peer));
+    put_u32(bytes, scope.allowed_relay_peers.len());
+    for relay_peer in &scope.allowed_relay_peers {
+        put_peer_id(bytes, *relay_peer);
+    }
     bytes.push(u8::from(scope.allow_any_manifest_root));
     put_u32(bytes, scope.allowed_manifest_roots.len());
     for root in &scope.allowed_manifest_roots {
@@ -1540,6 +1639,16 @@ fn put_scope(bytes: &mut Vec<u8>, scope: &CapabilityScope) {
 fn put_str(bytes: &mut Vec<u8>, value: &str) {
     put_u32(bytes, value.len());
     bytes.extend_from_slice(value.as_bytes());
+}
+
+fn put_optional_peer_id(bytes: &mut Vec<u8>, value: Option<PeerId>) {
+    match value {
+        Some(peer_id) => {
+            bytes.push(1);
+            put_peer_id(bytes, peer_id);
+        }
+        None => bytes.push(0),
+    }
 }
 
 fn put_u32(bytes: &mut Vec<u8>, value: usize) {
@@ -1600,6 +1709,14 @@ mod tests {
         (PeerId::from_label("alice"), PeerId::from_label("bob"))
     }
 
+    fn relay_peer() -> PeerId {
+        PeerId::from_label("relay-a")
+    }
+
+    fn alternate_relay_peer() -> PeerId {
+        PeerId::from_label("relay-b")
+    }
+
     #[test]
     fn peer_id_from_public_key_is_canonical_and_rejects_bad_material() {
         let public_key = b"ed25519:alice-device-public-key";
@@ -1633,13 +1750,17 @@ mod tests {
             issuer,
             subject,
             actions.iter().copied(),
-            CapabilityScope::for_context(context),
+            if matches!(context, SessionContextKind::Relay) {
+                CapabilityScope::for_context(context).with_relay_peer(relay_peer())
+            } else {
+                CapabilityScope::for_context(context)
+            },
         )
     }
 
     fn hello_for(context: SessionContextKind) -> ClientHello {
         let (alice, bob) = peers();
-        ClientHello::new(
+        let hello = ClientHello::new(
             alice,
             bob,
             TransferNonce::from_seed(context.code()),
@@ -1662,12 +1783,17 @@ mod tests {
             alice,
             &[CapabilityAction::Write],
             context,
-        )])
+        )]);
+        if matches!(context, SessionContextKind::Relay) {
+            hello.with_relay_peer(relay_peer())
+        } else {
+            hello
+        }
     }
 
     fn policy_for(context: SessionContextKind) -> SessionPolicy {
         let (_alice, bob) = peers();
-        SessionPolicy::new(bob, 100)
+        let policy = SessionPolicy::new(bob, 100)
             .with_supported_features(&[
                 AtpFeature::EncryptionPolicy,
                 AtpFeature::ProofBundles,
@@ -1680,7 +1806,12 @@ mod tests {
             ])
             .with_required_features(&[AtpFeature::EncryptionPolicy])
             .with_required_actions(&[CapabilityAction::Write])
-            .with_accepted_contexts(&[context])
+            .with_accepted_contexts(&[context]);
+        if matches!(context, SessionContextKind::Relay) {
+            policy.with_trusted_relays(&[relay_peer()])
+        } else {
+            policy
+        }
     }
 
     fn negotiate(
@@ -1756,16 +1887,118 @@ mod tests {
             .with_features(&[AtpFeature::EncryptionPolicy, feature])
             .with_requested_actions(&[action])
             .with_grants(vec![grant_for(bob, alice, &[action], context)]);
-            let mut policy = SessionPolicy::new(bob, 100)
+            let hello = if matches!(context, SessionContextKind::Relay) {
+                hello.with_relay_peer(relay_peer())
+            } else {
+                hello
+            };
+            let policy = SessionPolicy::new(bob, 100)
                 .with_supported_features(&[AtpFeature::EncryptionPolicy, feature])
                 .with_required_features(&[AtpFeature::EncryptionPolicy])
                 .with_required_actions(&[action])
                 .with_accepted_contexts(&[context]);
+            let mut policy = if matches!(context, SessionContextKind::Relay) {
+                policy.with_trusted_relays(&[relay_peer()])
+            } else {
+                policy
+            };
 
             let (session, _client_proof, _server_proof) = negotiate(&hello, &mut policy).unwrap();
             assert_eq!(session.context, context);
             assert!(session.selected_features.contains(feature));
         }
+    }
+
+    #[test]
+    fn relay_context_requires_trusted_relay_identity() {
+        let (alice, bob) = peers();
+        let relay_grant = grant_for(
+            bob,
+            alice,
+            &[CapabilityAction::Relay],
+            SessionContextKind::Relay,
+        );
+        let base = ClientHello::new(
+            alice,
+            bob,
+            TransferNonce::from_seed("relay-auth"),
+            SessionContextKind::Relay,
+            SessionTraceId::new(88),
+        )
+        .with_features(&[AtpFeature::EncryptionPolicy, AtpFeature::Relay])
+        .with_requested_actions(&[CapabilityAction::Relay])
+        .with_grants(vec![relay_grant]);
+
+        let mut missing_policy = SessionPolicy::new(bob, 100)
+            .with_supported_features(&[AtpFeature::EncryptionPolicy, AtpFeature::Relay])
+            .with_required_features(&[AtpFeature::EncryptionPolicy])
+            .with_required_actions(&[CapabilityAction::Relay])
+            .with_accepted_contexts(&[SessionContextKind::Relay])
+            .with_trusted_relays(&[relay_peer()]);
+        let mut server = SessionNegotiator::server(bob);
+        let error = server
+            .accept_client_hello(&base, &mut missing_policy)
+            .unwrap_err();
+        assert_eq!(error.code(), "missing_relay_identity");
+
+        let mut untrusted_policy = SessionPolicy::new(bob, 100)
+            .with_supported_features(&[AtpFeature::EncryptionPolicy, AtpFeature::Relay])
+            .with_required_features(&[AtpFeature::EncryptionPolicy])
+            .with_required_actions(&[CapabilityAction::Relay])
+            .with_accepted_contexts(&[SessionContextKind::Relay])
+            .with_trusted_relays(&[relay_peer()]);
+        let mut server = SessionNegotiator::server(bob);
+        let error = server
+            .accept_client_hello(
+                &base.clone().with_relay_peer(alternate_relay_peer()),
+                &mut untrusted_policy,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "untrusted_relay_identity");
+    }
+
+    #[test]
+    fn relay_grant_scope_and_session_id_bind_relay_identity() {
+        let (alice, bob) = peers();
+        let grant = grant_for(
+            bob,
+            alice,
+            &[CapabilityAction::Relay],
+            SessionContextKind::Relay,
+        );
+        let hello = ClientHello::new(
+            alice,
+            bob,
+            TransferNonce::from_seed("relay-scope"),
+            SessionContextKind::Relay,
+            SessionTraceId::new(89),
+        )
+        .with_features(&[AtpFeature::EncryptionPolicy, AtpFeature::Relay])
+        .with_requested_actions(&[CapabilityAction::Relay])
+        .with_relay_peer(alternate_relay_peer())
+        .with_grants(vec![grant.clone()]);
+        let policy = SessionPolicy::new(bob, 100)
+            .with_supported_features(&[AtpFeature::EncryptionPolicy, AtpFeature::Relay])
+            .with_required_features(&[AtpFeature::EncryptionPolicy])
+            .with_required_actions(&[CapabilityAction::Relay])
+            .with_accepted_contexts(&[SessionContextKind::Relay])
+            .with_trusted_relays(&[relay_peer(), alternate_relay_peer()]);
+
+        match grant
+            .validate_for(&hello, CapabilityAction::Relay, &policy)
+            .expect_err("relay grant scope")
+        {
+            SessionError::RelayScopeDenied {
+                relay_peer: Some(rejected),
+            } => assert_eq!(rejected, alternate_relay_peer()),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let selected = FeatureSet::from_slice(&[AtpFeature::EncryptionPolicy, AtpFeature::Relay]);
+        let relay_a_session =
+            derive_session_id(&hello.clone().with_relay_peer(relay_peer()), &selected);
+        let relay_b_session = derive_session_id(&hello, &selected);
+        assert_ne!(relay_a_session, relay_b_session);
     }
 
     #[test]

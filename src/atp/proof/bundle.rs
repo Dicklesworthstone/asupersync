@@ -176,7 +176,7 @@ impl TryFrom<SerializableAtpProofBundle> for AtpProofBundle {
             .into_iter()
             .map(VerificationEvidence::try_from)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AtpProofBundleError::InvalidVerificationEvidence(e))?;
+            .map_err(AtpProofBundleError::InvalidVerificationEvidence)?;
 
         Ok(Self {
             version: bundle.version,
@@ -588,10 +588,8 @@ impl AtpProofBundleBuilder {
             .journal
             .ok_or(AtpProofBundleError::MissingRequiredField("journal"))?;
 
-        let now_micros = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_micros() as u64;
+        let now_micros =
+            system_time_micros_since_unix_epoch(SystemTime::now(), "created_at_micros")?;
 
         Ok(AtpProofBundle {
             version: ProofBundleVersion::CURRENT,
@@ -641,6 +639,18 @@ pub enum AtpProofBundleError {
     InvalidJournal(String),
     /// Replay pointer validation failed.
     InvalidReplayPointer(String),
+    /// A wall-clock timestamp was before the UNIX epoch.
+    InvalidSystemTime {
+        /// Timestamp field being populated.
+        field: &'static str,
+    },
+    /// A wall-clock timestamp does not fit in the wire-format integer.
+    TimestampOutOfRange {
+        /// Timestamp field being populated.
+        field: &'static str,
+        /// Timestamp value in microseconds.
+        micros: u128,
+    },
     /// Self-hashed but semantically invalid bundle detected.
     SemanticValidationFailed(String),
 }
@@ -678,6 +688,12 @@ impl fmt::Display for AtpProofBundleError {
             Self::InvalidReplayPointer(msg) => {
                 write!(f, "invalid replay pointer: {msg}")
             }
+            Self::InvalidSystemTime { field } => {
+                write!(f, "invalid system time while populating {field}")
+            }
+            Self::TimestampOutOfRange { field, micros } => {
+                write!(f, "timestamp for {field} is out of range: {micros} micros")
+            }
             Self::SemanticValidationFailed(msg) => {
                 write!(f, "semantic validation failed: {msg}")
             }
@@ -686,6 +702,27 @@ impl fmt::Display for AtpProofBundleError {
 }
 
 impl std::error::Error for AtpProofBundleError {}
+
+fn duration_micros_to_u64(
+    duration: Duration,
+    field: &'static str,
+) -> Result<u64, AtpProofBundleError> {
+    let micros = duration.as_micros();
+    u64::try_from(micros).map_err(|_| AtpProofBundleError::TimestampOutOfRange {
+        field,
+        micros,
+    })
+}
+
+fn system_time_micros_since_unix_epoch(
+    time: SystemTime,
+    field: &'static str,
+) -> Result<u64, AtpProofBundleError> {
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AtpProofBundleError::InvalidSystemTime { field })?;
+    duration_micros_to_u64(duration, field)
+}
 
 impl AtpProofBundle {
     /// Serialize the proof bundle to JSON bytes.
@@ -894,10 +931,10 @@ impl AtpProofBundle {
             signer_id: signer_id.to_string(),
             key_fingerprint: key_fingerprint.to_string(),
             signature: signature_data,
-            signed_at_micros: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as u64,
+            signed_at_micros: system_time_micros_since_unix_epoch(
+                SystemTime::now(),
+                "signed_at_micros",
+            )?,
         };
 
         // Get or create signatures extension
@@ -1087,7 +1124,7 @@ impl AtpProofBundle {
         let has_repair_symbols = self
             .raptorq_metadata
             .as_ref()
-            .map_or(false, |m| m.repair_symbols_used > 0);
+            .is_some_and(|m| m.repair_symbols_used > 0);
 
         if repair_activated != has_repair_symbols {
             return Err(AtpProofBundleError::SemanticValidationFailed(
@@ -1103,6 +1140,36 @@ impl AtpProofBundle {
 mod tests {
     use super::*;
     use crate::atp::verifier::{VerificationEvidence, VerificationStage};
+
+    #[test]
+    fn proof_timestamp_rejects_clock_before_unix_epoch() {
+        let err = system_time_micros_since_unix_epoch(
+            UNIX_EPOCH - Duration::from_micros(1),
+            "created_at_micros",
+        )
+        .expect_err("pre-epoch system time must fail closed");
+
+        assert_eq!(
+            err,
+            AtpProofBundleError::InvalidSystemTime {
+                field: "created_at_micros",
+            }
+        );
+    }
+
+    #[test]
+    fn proof_timestamp_rejects_microsecond_overflow() {
+        let err = duration_micros_to_u64(Duration::from_secs(u64::MAX), "signed_at_micros")
+            .expect_err("oversized duration must not truncate");
+
+        assert!(matches!(
+            err,
+            AtpProofBundleError::TimestampOutOfRange {
+                field: "signed_at_micros",
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn chunk_bitmap_basic_operations() {
@@ -1292,7 +1359,9 @@ mod tests {
                 path_switches: 0,
             })
             .journal(TransferJournal {
-                digest: crate::atp::object::ContentId::from_bytes(b"journal"),
+                digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(
+                    b"journal",
+                )),
                 format_version: 1,
                 entry_count: 10,
                 size_bytes: 1024,
@@ -1362,7 +1431,9 @@ mod tests {
                 path_switches: 0,
             })
             .journal(TransferJournal {
-                digest: crate::atp::object::ContentId::from_bytes(b"journal"),
+                digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(
+                    b"journal",
+                )),
                 format_version: 1,
                 entry_count: 10,
                 size_bytes: 1024,
@@ -1418,14 +1489,19 @@ mod tests {
             fallback_protocols: vec![],
             rtt_millis: Some(50.0),
             bandwidth_bps: Some(1000000),
-            total_bytes: 1024,
-            connection_established_at_micros: 12000,
-            first_byte_received_at_micros: 12010,
-            last_byte_received_at_micros: 12500,
+            relay_used: false,
+            relay_nodes: vec![],
+            path_setup_duration_millis: 100,
+            path_switches: 0,
         };
 
         let journal = TransferJournal {
-            events: vec![],
+            digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(
+                b"journal",
+            )),
+            format_version: 1,
+            entry_count: 10,
+            size_bytes: 1024,
             is_complete: true,
             created_at_micros: 12000,
             finalized_at_micros: Some(12500),
@@ -1466,7 +1542,6 @@ mod tests {
 
     #[test]
     fn cryptographic_signature_validation_rejects_tampering() {
-        use crate::security::AuthKey;
         use crate::atp::object::ObjectId;
 
         let manifest_root = crate::atp::manifest::MerkleRoot::new([1; 32]);
@@ -1487,14 +1562,19 @@ mod tests {
             fallback_protocols: vec![],
             rtt_millis: Some(50.0),
             bandwidth_bps: Some(1000000),
-            total_bytes: 1024,
-            connection_established_at_micros: 12000,
-            first_byte_received_at_micros: 12010,
-            last_byte_received_at_micros: 12500,
+            relay_used: false,
+            relay_nodes: vec![],
+            path_setup_duration_millis: 100,
+            path_switches: 0,
         };
 
         let journal = TransferJournal {
-            events: vec![],
+            digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(
+                b"journal",
+            )),
+            format_version: 1,
+            entry_count: 10,
+            size_bytes: 1024,
             is_complete: true,
             created_at_micros: 12000,
             finalized_at_micros: Some(12500),
@@ -1554,14 +1634,19 @@ mod tests {
             fallback_protocols: vec![],
             rtt_millis: Some(50.0),
             bandwidth_bps: Some(1000000),
-            total_bytes: 1024,
-            connection_established_at_micros: 12000,
-            first_byte_received_at_micros: 12010,
-            last_byte_received_at_micros: 12500,
+            relay_used: false,
+            relay_nodes: vec![],
+            path_setup_duration_millis: 100,
+            path_switches: 0,
         };
 
         let journal = TransferJournal {
-            events: vec![],
+            digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(
+                b"journal",
+            )),
+            format_version: 1,
+            entry_count: 10,
+            size_bytes: 1024,
             is_complete: true,
             created_at_micros: 12000,
             finalized_at_micros: Some(12500),
