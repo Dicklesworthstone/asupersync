@@ -3,18 +3,18 @@
 //! Implements reliable QUIC streams with flow control, reassembly, reset handling,
 //! and ATP-specific priority classes for control, data, repair, proof, and diagnostics.
 
-pub mod scheduler;
 pub mod flow_control;
 pub mod reassembly;
+pub mod scheduler;
 pub mod stream;
 
-pub use scheduler::*;
 pub use flow_control::*;
 pub use reassembly::*;
+pub use scheduler::*;
 pub use stream::*;
 
-use crate::types::outcome::Outcome;
 use crate::cx::Cx;
+use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 
 /// Stream priority classes for ATP traffic
@@ -107,11 +107,22 @@ pub enum StreamError {
     /// Stream already exists
     StreamAlreadyExists { stream_id: StreamId },
     /// Stream is closed
-    StreamClosed { stream_id: StreamId, reset_code: Option<StreamResetCode> },
+    StreamClosed {
+        stream_id: StreamId,
+        reset_code: Option<StreamResetCode>,
+    },
     /// Flow control violation
-    FlowControlViolation { stream_id: StreamId, limit: u64, attempted: u64 },
+    FlowControlViolation {
+        stream_id: StreamId,
+        limit: u64,
+        attempted: u64,
+    },
     /// Final size mismatch
-    FinalSizeMismatch { stream_id: StreamId, expected: u64, actual: u64 },
+    FinalSizeMismatch {
+        stream_id: StreamId,
+        expected: u64,
+        actual: u64,
+    },
     /// Invalid stream state
     InvalidState { stream_id: StreamId, state: String },
     /// Connection error
@@ -180,7 +191,10 @@ impl StreamManager {
         self.streams.insert(stream_id, stream);
         self.scheduler.register_stream(stream_id, priority);
 
-        cx.trace(format!("stream_opened stream_id={:?} priority={:?}", stream_id, priority));
+        cx.trace(&format!(
+            "stream_opened stream_id={:?} priority={:?}",
+            stream_id, priority
+        ));
 
         Outcome::ok(stream_id)
     }
@@ -201,7 +215,10 @@ impl StreamManager {
         self.streams.insert(stream_id, stream);
         self.scheduler.register_stream(stream_id, priority);
 
-        cx.trace(format!("stream_accepted stream_id={:?} priority={:?}", stream_id, priority));
+        cx.trace(&format!(
+            "stream_accepted stream_id={:?} priority={:?}",
+            stream_id, priority
+        ));
 
         Outcome::ok(())
     }
@@ -221,7 +238,7 @@ impl StreamManager {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             stream.close();
             self.scheduler.unregister_stream(stream_id);
-            cx.trace(format!("stream_closed stream_id={:?}", stream_id));
+            cx.trace(&format!("stream_closed stream_id={:?}", stream_id));
             Outcome::ok(())
         } else {
             Outcome::err(StreamError::StreamNotFound { stream_id })
@@ -238,7 +255,10 @@ impl StreamManager {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             stream.reset(reset_code);
             self.scheduler.unregister_stream(stream_id);
-            cx.trace(format!("stream_reset stream_id={:?} code={:?}", stream_id, reset_code));
+            cx.trace(&format!(
+                "stream_reset stream_id={:?} code={:?}",
+                stream_id, reset_code
+            ));
             Outcome::ok(())
         } else {
             Outcome::err(StreamError::StreamNotFound { stream_id })
@@ -254,7 +274,10 @@ impl StreamManager {
     ) -> Outcome<(), StreamError> {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             stream.stop_sending(stop_code);
-            cx.trace(format!("stop_sending stream_id={:?} code={:?}", stream_id, stop_code));
+            cx.trace(&format!(
+                "stop_sending stream_id={:?} code={:?}",
+                stream_id, stop_code
+            ));
             Outcome::ok(())
         } else {
             Outcome::err(StreamError::StreamNotFound { stream_id })
@@ -264,6 +287,26 @@ impl StreamManager {
     /// Get the next stream to schedule for sending
     pub fn next_scheduled_stream(&mut self) -> Option<StreamId> {
         self.scheduler.next_stream()
+    }
+
+    /// Mark a stream eligible for scheduling after flow-control or drain progress.
+    pub fn mark_stream_ready(&mut self, stream_id: StreamId) -> Outcome<(), StreamError> {
+        if self.streams.contains_key(&stream_id) {
+            self.scheduler.mark_ready(stream_id);
+            Outcome::ok(())
+        } else {
+            Outcome::err(StreamError::StreamNotFound { stream_id })
+        }
+    }
+
+    /// Mark a stream ineligible for scheduling while blocked by flow control or drain state.
+    pub fn mark_stream_blocked(&mut self, stream_id: StreamId) -> Outcome<(), StreamError> {
+        if self.streams.contains_key(&stream_id) {
+            self.scheduler.mark_blocked(stream_id);
+            Outcome::ok(())
+        } else {
+            Outcome::err(StreamError::StreamNotFound { stream_id })
+        }
     }
 
     /// Remove closed streams

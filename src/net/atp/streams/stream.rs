@@ -4,12 +4,12 @@
 //! flow control integration, and proper state management.
 
 use super::{
-    StreamId, StreamPriority, StreamError, StreamResetCode, StopSendingCode,
-    FlowControlWindow, ReassemblyBuffer, DataSegment,
+    DataSegment, FlowControlWindow, ReassemblyBuffer, StopSendingCode, StreamError, StreamId,
+    StreamPriority, StreamResetCode,
 };
-use crate::types::outcome::Outcome;
 use crate::bytes::Bytes;
 use crate::cx::Cx;
+use crate::types::outcome::Outcome;
 use std::collections::VecDeque;
 
 /// Stream state
@@ -28,7 +28,10 @@ pub enum StreamState {
     /// Stream reset by remote
     ResetRemote { code: StreamResetCode },
     /// Stream reset by both
-    ResetBoth { local_code: StreamResetCode, remote_code: StreamResetCode },
+    ResetBoth {
+        local_code: StreamResetCode,
+        remote_code: StreamResetCode,
+    },
 }
 
 /// Send state for stream
@@ -117,7 +120,7 @@ impl AtpStream {
             send_state: SendState::Ready,
             receive_state: ReceiveState::Recv,
             flow_control: FlowControlWindow::new(65536, 65536), // Default 64KB windows
-            reassembly: ReassemblyBuffer::new(1048576), // 1MB reassembly buffer
+            reassembly: ReassemblyBuffer::new(1048576),         // 1MB reassembly buffer
             send_buffer: VecDeque::new(),
             next_send_offset: 0,
             bytes_in_flight: 0,
@@ -156,24 +159,35 @@ impl AtpStream {
 
     /// Check if stream is closed
     pub fn is_closed(&self) -> bool {
-        matches!(self.state,
-            StreamState::Closed |
-            StreamState::ResetLocal { .. } |
-            StreamState::ResetRemote { .. } |
-            StreamState::ResetBoth { .. }
+        matches!(
+            self.state,
+            StreamState::Closed
+                | StreamState::ResetLocal { .. }
+                | StreamState::ResetRemote { .. }
+                | StreamState::ResetBoth { .. }
         )
     }
 
     /// Check if stream can send data
     pub fn can_send(&self) -> bool {
-        matches!(self.send_state, SendState::Ready | SendState::Send | SendState::DataSent) &&
-        !matches!(self.state, StreamState::ResetLocal { .. } | StreamState::ResetBoth { .. })
+        matches!(
+            self.send_state,
+            SendState::Ready | SendState::Send | SendState::DataSent
+        ) && !matches!(
+            self.state,
+            StreamState::ResetLocal { .. } | StreamState::ResetBoth { .. }
+        )
     }
 
     /// Check if stream can receive data
     pub fn can_receive(&self) -> bool {
-        matches!(self.receive_state, ReceiveState::Recv | ReceiveState::SizeKnown) &&
-        !matches!(self.state, StreamState::ResetRemote { .. } | StreamState::ResetBoth { .. })
+        matches!(
+            self.receive_state,
+            ReceiveState::Recv | ReceiveState::SizeKnown
+        ) && !matches!(
+            self.state,
+            StreamState::ResetRemote { .. } | StreamState::ResetBoth { .. }
+        )
     }
 
     /// Queue data for sending
@@ -193,9 +207,12 @@ impl AtpStream {
             self.send_state = SendState::DataSent;
         }
 
-        cx.trace(format!(
+        cx.trace(&format!(
             "stream_send_queued stream_id={:?} bytes={} fin={} ready={}",
-            self.id, data.len(), fin, self.ready_to_send
+            self.id,
+            data.len(),
+            fin,
+            self.ready_to_send
         ));
 
         Outcome::ok(())
@@ -251,9 +268,12 @@ impl AtpStream {
 
         let segment = DataSegment::new(offset, data.clone(), fin);
 
-        cx.trace(format!(
+        cx.trace(&format!(
             "stream_data_received stream_id={:?} offset={} bytes={} fin={}",
-            self.id, offset, data.len(), fin
+            self.id,
+            offset,
+            data.len(),
+            fin
         ));
 
         match self.reassembly.insert_segment(segment) {
@@ -299,7 +319,10 @@ impl AtpStream {
                 self.send_state = SendState::ResetSent { code };
             }
             StreamState::ResetRemote { code: remote_code } => {
-                self.state = StreamState::ResetBoth { local_code: code, remote_code: *remote_code };
+                self.state = StreamState::ResetBoth {
+                    local_code: code,
+                    remote_code: *remote_code,
+                };
                 self.send_state = SendState::ResetSent { code };
             }
             _ => {
@@ -323,7 +346,10 @@ impl AtpStream {
                 self.receive_state = ReceiveState::ResetRecvd { code };
             }
             StreamState::ResetLocal { code: local_code } => {
-                self.state = StreamState::ResetBoth { local_code: *local_code, remote_code: code };
+                self.state = StreamState::ResetBoth {
+                    local_code: *local_code,
+                    remote_code: code,
+                };
                 self.receive_state = ReceiveState::ResetRecvd { code };
             }
             _ => {
@@ -451,12 +477,7 @@ mod tests {
     #[test]
     fn test_stream_send_receive() {
         let cx = test_cx();
-        let mut stream = AtpStream::new(
-            StreamId::new(0),
-            true,
-            StreamPriority::Data,
-            true,
-        );
+        let mut stream = AtpStream::new(StreamId::new(0), true, StreamPriority::Data, true);
 
         // Queue some data for sending
         let data = Bytes::from("hello world");
@@ -480,12 +501,7 @@ mod tests {
 
     #[test]
     fn test_stream_reset() {
-        let mut stream = AtpStream::new(
-            StreamId::new(4),
-            true,
-            StreamPriority::Control,
-            false,
-        );
+        let mut stream = AtpStream::new(StreamId::new(4), true, StreamPriority::Control, false);
 
         assert!(!stream.is_closed());
 
@@ -497,18 +513,17 @@ mod tests {
     #[test]
     fn test_stream_out_of_order_receive() {
         let cx = test_cx();
-        let mut stream = AtpStream::new(
-            StreamId::new(8),
-            true,
-            StreamPriority::Data,
-            false,
-        );
+        let mut stream = AtpStream::new(StreamId::new(8), true, StreamPriority::Data, false);
 
         // Receive data out of order
-        let data1 = stream.receive_data(&cx, 5, Bytes::from("world"), false).unwrap();
+        let data1 = stream
+            .receive_data(&cx, 5, Bytes::from("world"), false)
+            .unwrap();
         assert_eq!(data1.len(), 0); // Buffered, not delivered
 
-        let data2 = stream.receive_data(&cx, 0, Bytes::from("hello"), false).unwrap();
+        let data2 = stream
+            .receive_data(&cx, 0, Bytes::from("hello"), false)
+            .unwrap();
         assert_eq!(data2.len(), 2); // Both segments delivered
         assert_eq!(data2[0], Bytes::from("hello"));
         assert_eq!(data2[1], Bytes::from("world"));
@@ -517,12 +532,7 @@ mod tests {
     #[test]
     fn test_stream_fin_handling() {
         let cx = test_cx();
-        let mut stream = AtpStream::new(
-            StreamId::new(12),
-            true,
-            StreamPriority::Data,
-            true,
-        );
+        let mut stream = AtpStream::new(StreamId::new(12), true, StreamPriority::Data, true);
 
         // Send with FIN
         let data = Bytes::from("final data");
