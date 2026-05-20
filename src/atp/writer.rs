@@ -404,7 +404,7 @@ impl AtpWriter {
 
         self.state = WriterState::Cancelled;
 
-        // Generate resume token if resume is enabled
+        // Generate and store resume token if resume is enabled
         if self.config.enable_resume {
             let resume_token = ResumeToken {
                 transfer_id: self.transfer_id.unwrap_or_else(|| {
@@ -418,6 +418,8 @@ impl AtpWriter {
                 expires_at: SystemTime::now() + Duration::from_secs(24 * 3600), // 24 hours
             };
 
+            // Store the token to ensure consistency
+            self.resume_token = Some(resume_token.clone());
             Outcome::ok(resume_token)
         } else {
             // Return empty resume token
@@ -438,13 +440,15 @@ impl AtpWriter {
     }
 
     /// Get the current resume token for this writer.
-    pub fn resume_token(&self) -> Option<ResumeToken> {
+    pub fn resume_token(&mut self) -> Option<ResumeToken> {
+        // Return existing token if available
         if let Some(resume_token) = &self.resume_token {
             return Some(resume_token.clone());
         }
 
+        // Create and store token if resume is enabled and transfer is active
         if self.config.enable_resume && self.transfer_id.is_some() {
-            Some(ResumeToken {
+            let resume_token = ResumeToken {
                 transfer_id: self.transfer_id.unwrap(),
                 object_id: self.object_id.clone(),
                 verified_bytes: self.bytes_written,
@@ -452,7 +456,11 @@ impl AtpWriter {
                 journal_position: self.bytes_written,
                 created_at: SystemTime::now(),
                 expires_at: SystemTime::now() + Duration::from_secs(24 * 3600), // 24 hours
-            })
+            };
+
+            // Store the token to ensure consistency on subsequent calls
+            self.resume_token = Some(resume_token.clone());
+            Some(resume_token)
         } else {
             None
         }
@@ -592,8 +600,7 @@ impl AtpSink {
 mod tests {
     use super::*;
     use crate::atp::object::ContentId;
-    use crate::lab::LabRuntime;
-    use crate::scope;
+    use crate::cx::Cx;
 
     #[test]
     fn test_writer_config_defaults() {
@@ -634,33 +641,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_writer_lifecycle() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
-            let object_id = ObjectId::content(ContentId::new([1; 32]));
-            let remote_peer = [2; 32];
-            let config = WriterConfig::default();
+        let cx = Cx::for_testing();
+        let object_id = ObjectId::content(ContentId::new([1; 32]));
+        let remote_peer = [2; 32];
+        let config = WriterConfig::default();
 
-            let mut writer = AtpWriter::new(object_id, remote_peer, config);
-            assert_eq!(writer.state(), WriterState::Ready);
+        let mut writer = AtpWriter::new(object_id, remote_peer, config);
+        assert_eq!(writer.state(), WriterState::Ready);
 
-            // Write some data
-            let data = b"Hello, ATP World!";
-            let bytes_written = writer.write_all(cx, data).await.unwrap();
-            assert_eq!(bytes_written, data.len());
-            assert_eq!(writer.state(), WriterState::Streaming);
+        // Write some data
+        let data = b"Hello, ATP World!";
+        let bytes_written = writer.write_all(&cx, data).await.unwrap();
+        assert_eq!(bytes_written, data.len());
+        assert_eq!(writer.state(), WriterState::Streaming);
 
-            // Check progress
-            let progress = writer.progress();
-            assert!(progress.bytes_written >= data.len() as u64);
+        // Check progress
+        let progress = writer.progress();
+        assert!(progress.bytes_written >= data.len() as u64);
 
-            // Finalize and get proof
-            let proof = writer.finalize(cx).await.unwrap();
-            assert_eq!(writer.state(), WriterState::Completed);
-            assert_eq!(proof.total_bytes, data.len() as u64);
-            assert_eq!(proof.proof_mode, ProofMode::Full);
-        })
-        .await
-        .unwrap();
+        // Finalize and get proof
+        let proof = writer.finalize(&cx).await.unwrap();
+        assert_eq!(writer.state(), WriterState::Completed);
+        assert_eq!(proof.total_bytes, data.len() as u64);
+        assert_eq!(proof.proof_mode, ProofMode::Full);
     }
 
     #[tokio::test]
@@ -670,126 +673,104 @@ mod tests {
         let payload = b"chunk-one/chunk-two/chunk-three";
         std::fs::write(&path, payload).unwrap();
 
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
-            let object_id = ObjectId::content(ContentId::new([1; 32]));
-            let remote_peer = [2; 32];
-            let mut config = WriterConfig::default();
-            config.chunk_size = 5;
-            config.min_chunk_size = 1;
-            config.max_chunk_size = 5;
-            config.backpressure_threshold = 8;
+        let cx = Cx::for_testing();
+        let object_id = ObjectId::content(ContentId::new([1; 32]));
+        let remote_peer = [2; 32];
+        let mut config = WriterConfig::default();
+        config.chunk_size = 5;
+        config.min_chunk_size = 1;
+        config.max_chunk_size = 5;
+        config.backpressure_threshold = 8;
 
-            let mut writer = AtpWriter::new(object_id, remote_peer, config);
-            let proof = writer.write_file(cx, &path).await.unwrap();
+        let mut writer = AtpWriter::new(object_id, remote_peer, config);
+        let proof = writer.write_file(&cx, &path).await.unwrap();
 
-            assert_eq!(writer.state(), WriterState::Completed);
-            assert_eq!(proof.total_bytes, payload.len() as u64);
-        })
-        .await
-        .unwrap();
+        assert_eq!(writer.state(), WriterState::Completed);
+        assert_eq!(proof.total_bytes, payload.len() as u64);
     }
 
     #[tokio::test]
     async fn test_writer_cancellation() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
-            let object_id = ObjectId::content(ContentId::new([1; 32]));
-            let remote_peer = [2; 32];
-            let mut config = WriterConfig::default();
-            config.enable_resume = true;
+        let cx = Cx::for_testing();
+        let object_id = ObjectId::content(ContentId::new([1; 32]));
+        let remote_peer = [2; 32];
+        let mut config = WriterConfig::default();
+        config.enable_resume = true;
 
-            let mut writer = AtpWriter::new(object_id, remote_peer, config);
+        let mut writer = AtpWriter::new(object_id, remote_peer, config);
 
-            // Write some data
-            let data = b"Partial data";
-            writer.write_all(cx, data).await.unwrap();
+        // Write some data
+        let data = b"Partial data";
+        writer.write_all(&cx, data).await.unwrap();
 
-            // Cancel and get resume token
-            let resume_token = writer.cancel(cx).await.unwrap();
-            assert_eq!(writer.state(), WriterState::Cancelled);
-            assert!(resume_token.is_valid());
-            assert_eq!(resume_token.verified_bytes, data.len() as u64);
-        })
-        .await
-        .unwrap();
+        // Cancel and get resume token
+        let resume_token = writer.cancel(&cx).await.unwrap();
+        assert_eq!(writer.state(), WriterState::Cancelled);
+        assert!(resume_token.is_valid());
+        assert_eq!(resume_token.verified_bytes, data.len() as u64);
     }
 
     #[tokio::test]
     async fn test_sink_operations() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
-            let object_id = ObjectId::content(ContentId::new([1; 32]));
-            let remote_peer = [2; 32];
-            let config = WriterConfig::default();
+        let cx = Cx::for_testing();
+        let object_id = ObjectId::content(ContentId::new([1; 32]));
+        let remote_peer = [2; 32];
+        let config = WriterConfig::default();
 
-            let mut sink = AtpSink::new(object_id, remote_peer, config);
+        let mut sink = AtpSink::new(object_id, remote_peer, config);
 
-            // Send data
-            let data = b"Sink data stream";
-            sink.send(cx, data).await.unwrap();
+        // Send data
+        let data = b"Sink data stream";
+        sink.send(&cx, data).await.unwrap();
 
-            // Check progress
-            let progress = sink.progress();
-            assert!(progress.bytes_written >= data.len() as u64);
+        // Check progress
+        let progress = sink.progress();
+        assert!(progress.bytes_written >= data.len() as u64);
 
-            // Close and get proof
-            let proof = sink.close(cx).await.unwrap();
-            assert_eq!(proof.total_bytes, data.len() as u64);
-        })
-        .await
-        .unwrap();
+        // Close and get proof
+        let proof = sink.close(&cx).await.unwrap();
+        assert_eq!(proof.total_bytes, data.len() as u64);
     }
 
     #[tokio::test]
     async fn test_resume_from_token() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
-            // Create initial writer
-            let object_id = ObjectId::content(ContentId::new([1; 32]));
-            let remote_peer = [2; 32];
-            let mut config = WriterConfig::default();
-            config.enable_resume = true;
+        let cx = Cx::for_testing();
+        // Create initial writer
+        let object_id = ObjectId::content(ContentId::new([1; 32]));
+        let remote_peer = [2; 32];
+        let mut config = WriterConfig::default();
+        config.enable_resume = true;
 
-            let mut writer1 = AtpWriter::new(object_id.clone(), remote_peer, config.clone());
-            writer1.write_all(cx, b"First part").await.unwrap();
-            let resume_token = writer1.cancel(cx).await.unwrap();
+        let mut writer1 = AtpWriter::new(object_id.clone(), remote_peer, config.clone());
+        writer1.write_all(&cx, b"First part").await.unwrap();
+        let resume_token = writer1.cancel(&cx).await.unwrap();
 
-            // Resume with new writer
-            let mut writer2 = AtpWriter::from_resume_token(resume_token, remote_peer, config)
-                .await
-                .unwrap();
-            writer2.write_all(cx, b" Second part").await.unwrap();
-            let proof = writer2.finalize(cx).await.unwrap();
+        // Resume with new writer
+        let mut writer2 = AtpWriter::from_resume_token(resume_token, remote_peer, config).unwrap();
+        writer2.write_all(&cx, b" Second part").await.unwrap();
+        let proof = writer2.finalize(&cx).await.unwrap();
 
-            assert!(proof.total_bytes >= 21); // "First part Second part"
-        })
-        .await
-        .unwrap();
+        assert!(proof.total_bytes >= 21); // "First part Second part"
     }
 
     #[tokio::test]
     async fn test_backpressure_handling() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
-            let object_id = ObjectId::content(ContentId::new([1; 32]));
-            let remote_peer = [2; 32];
-            let mut config = WriterConfig::default();
-            config.backpressure_threshold = 1024; // Small threshold for testing
+        let cx = Cx::for_testing();
+        let object_id = ObjectId::content(ContentId::new([1; 32]));
+        let remote_peer = [2; 32];
+        let mut config = WriterConfig::default();
+        config.backpressure_threshold = 1024; // Small threshold for testing
 
-            let mut writer = AtpWriter::new(object_id, remote_peer, config);
+        let mut writer = AtpWriter::new(object_id, remote_peer, config);
 
-            // Write data larger than backpressure threshold
-            let large_data = vec![42u8; 2048];
-            writer.write_all(cx, &large_data).await.unwrap();
+        // Write data larger than backpressure threshold
+        let large_data = vec![42u8; 2048];
+        writer.write_all(&cx, &large_data).await.unwrap();
 
-            // Writer should handle backpressure internally
-            assert_ne!(writer.state(), WriterState::Error);
+        // Writer should handle backpressure internally
+        assert_ne!(writer.state(), WriterState::Error);
 
-            let proof = writer.finalize(cx).await.unwrap();
-            assert_eq!(proof.total_bytes, large_data.len() as u64);
-        })
-        .await
-        .unwrap();
+        let proof = writer.finalize(&cx).await.unwrap();
+        assert_eq!(proof.total_bytes, large_data.len() as u64);
     }
 }
