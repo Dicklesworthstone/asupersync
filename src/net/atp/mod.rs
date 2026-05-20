@@ -15,13 +15,14 @@
 //! - Platform-agnostic with explicit capability detection
 //! - Cx-first APIs with explicit capability boundaries
 
+pub mod handshake;
 // TODO: Fix compilation issues in ATP network modules
 // pub mod chunk;
 // pub mod loss;
 pub mod path;
 #[path = "protocol/mod.rs"]
 pub mod protocol;
-// pub mod quic;
+pub mod quic;
 // pub mod rendezvous;
 // TODO: Fix compilation issues in ATP SDK
 // pub mod sdk;
@@ -30,10 +31,11 @@ pub mod stun;
 // Re-export key types for H3 adapter
 pub use protocol::{AtpFrame, FrameType};
 
+pub use handshake::*;
 // pub use loss::*;
 pub use path::*;
 pub use protocol::*;
-// pub use quic::*;
+pub use quic::*;
 // pub use sdk::*;
 
 // H3 adapter for WebTransport support
