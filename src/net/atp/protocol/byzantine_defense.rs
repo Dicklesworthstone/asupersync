@@ -187,8 +187,8 @@ impl DefendedFrameProcessor {
             FrameType::Session => {
                 self.handle_session_frame(peer_id, frame)
             }
-            FrameType::Notification => {
-                self.handle_notification_frame(peer_id, frame)
+            FrameType::Manifest => {
+                self.handle_manifest_frame(peer_id, frame)
             }
         }
     }
@@ -334,9 +334,9 @@ impl DefendedFrameProcessor {
         Ok(())
     }
 
-    /// Handle notification frame processing.
-    fn handle_notification_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
-        // TODO: Implement notification frame validation logic
+    /// Handle manifest frame processing.
+    fn handle_manifest_frame(&mut self, _peer_id: &PeerId, _frame: &Frame) -> DefenseResult<()> {
+        // TODO: Implement manifest frame validation logic
         Ok(())
     }
 
@@ -388,7 +388,7 @@ impl DefendedFrameProcessor {
 
         // Parse version first
         let mut buf = BytesMut::from(&payload[offset..]);
-        let version_varint = VarInt::decode(&mut buf).ok().flatten()?;
+        let version_varint = VarInt::decode(&mut buf).into_result().ok().flatten()?;
         if !ManifestVersion(version_varint.value() as u32).is_supported() {
             return None;
         }
