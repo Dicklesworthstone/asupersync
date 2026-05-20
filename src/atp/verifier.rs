@@ -186,6 +186,102 @@ pub struct FinalizerProof {
     pub final_output_exposed: bool,
 }
 
+/// Resume state that must survive verifier cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierResumeState {
+    /// Journal sequence from which verification can resume.
+    pub journal_sequence: u64,
+    /// Number of verifier stages already proven before cancellation.
+    pub verified_stage_count: usize,
+    /// Digest of the proof bundle being verified at cancellation time.
+    pub proof_bundle_digest: ContentId,
+}
+
+/// Finalizer outcome recorded in redaction-safe verifier logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierFinalizerOutcome {
+    /// Finalizer completed without cancellation.
+    Completed,
+    /// Cancellation was requested and cleanup drained before final exposure.
+    CancelledDrained,
+}
+
+impl VerifierFinalizerOutcome {
+    /// Returns the stable snake-case outcome label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::CancelledDrained => "cancelled_drained",
+        }
+    }
+}
+
+/// Redaction-safe verifier log entry for finalization decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierLogEntry {
+    /// Verifier stage that produced this entry.
+    pub stage: VerificationStage,
+    /// Transfer identifier, never payload bytes or peer secrets.
+    pub transfer_id: String,
+    /// Manifest root covered by this verification decision.
+    pub manifest_root: MerkleRoot,
+    /// Redaction-safe rejection reason when the stage failed.
+    pub rejection_reason: Option<String>,
+    /// Finalizer result observed by the verifier.
+    pub finalizer_outcome: VerifierFinalizerOutcome,
+    /// Digest identifying the verified proof bundle.
+    pub proof_bundle_id: ContentId,
+    /// Replay or crashpack pointer for deterministic reconstruction.
+    pub replay_crashpack_pointer: String,
+}
+
+/// Final verifier pipeline proof for deciding whether data may be committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierPipelineProof {
+    /// Transfer identifier.
+    pub transfer_id: String,
+    /// Manifest root covered by the final proof bundle.
+    pub manifest_root: MerkleRoot,
+    /// Ordered proof entries supplied to the proof-bundle verifier.
+    pub proof_entries: Vec<ProofBundleEntry>,
+    /// Expected digest for the complete proof bundle.
+    pub expected_proof_digest: ContentId,
+    /// Finalizer and cancellation proof.
+    pub finalizer: FinalizerProof,
+    /// Resume state preserved when cancellation interrupted verification.
+    pub resume_state: Option<VerifierResumeState>,
+    /// Number of verifier workers started.
+    pub workers_started: usize,
+    /// Number of verifier workers drained.
+    pub workers_drained: usize,
+    /// Number of verifier permits acquired.
+    pub permits_acquired: usize,
+    /// Number of verifier permits released.
+    pub permits_released: usize,
+    /// Number of finalizer obligations started.
+    pub finalizer_obligations_started: usize,
+    /// Number of finalizer obligations completed.
+    pub finalizer_obligations_completed: usize,
+    /// Whether final output was exposed before the verifier committed.
+    pub final_output_exposed: bool,
+    /// Replay or crashpack pointer used to reconstruct this decision.
+    pub replay_crashpack_pointer: String,
+}
+
+/// Successful final verifier pipeline report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierPipelineReport {
+    /// Evidence produced by final proof-bundle verification.
+    pub proof_bundle_evidence: VerificationEvidence,
+    /// Evidence produced by finalizer proof verification.
+    pub finalizer_evidence: VerificationEvidence,
+    /// Resume state preserved for cancellation, when cancellation occurred.
+    pub resume_state: Option<VerifierResumeState>,
+    /// Redaction-safe finalization log entry.
+    pub log_entry: VerifierLogEntry,
+}
+
 /// Deterministic verifier-owned finalizer state used to prove cleanup balance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierFinalizerLedger {
@@ -375,6 +471,34 @@ pub enum VerificationError {
         /// Stage that exposed output.
         stage: VerificationStage,
     },
+    /// Verifier workers were not fully drained before finalization.
+    WorkerDrainLeak {
+        /// Workers started.
+        started: usize,
+        /// Workers drained.
+        drained: usize,
+    },
+    /// Verifier permits were not fully released before finalization.
+    PermitLeak {
+        /// Permits acquired.
+        acquired: usize,
+        /// Permits released.
+        released: usize,
+    },
+    /// Finalizer obligations were not all completed.
+    FinalizerObligationLeak {
+        /// Finalizer obligations started.
+        started: usize,
+        /// Finalizer obligations completed.
+        completed: usize,
+    },
+    /// Cancellation was observed without durable resume state.
+    MissingResumeState {
+        /// Stage interrupted by cancellation.
+        stage: VerificationStage,
+    },
+    /// Replay/crashpack pointer was absent.
+    MissingReplayCrashpackPointer,
 }
 
 impl VerificationError {
@@ -404,6 +528,11 @@ impl VerificationError {
             Self::FinalizerLeaseLeak { .. } | Self::CancelledFinalExposure { .. } => {
                 VerificationStage::Finalizer
             }
+            Self::WorkerDrainLeak { .. }
+            | Self::PermitLeak { .. }
+            | Self::FinalizerObligationLeak { .. }
+            | Self::MissingResumeState { .. }
+            | Self::MissingReplayCrashpackPointer => VerificationStage::Finalizer,
         }
     }
 
@@ -454,6 +583,24 @@ impl VerificationError {
                     "cancelled verifier exposed final output at {}",
                     stage.as_str()
                 )
+            }
+            Self::WorkerDrainLeak { started, drained } => {
+                format!("verifier drained {drained} of {started} workers")
+            }
+            Self::PermitLeak { acquired, released } => {
+                format!("verifier released {released} of {acquired} permits")
+            }
+            Self::FinalizerObligationLeak { started, completed } => {
+                format!("finalizer completed {completed} of {started} obligations")
+            }
+            Self::MissingResumeState { stage } => {
+                format!(
+                    "cancelled verifier at {} without resume state",
+                    stage.as_str()
+                )
+            }
+            Self::MissingReplayCrashpackPointer => {
+                "verifier finalization missing replay/crashpack pointer".to_string()
             }
         }
     }
@@ -720,6 +867,72 @@ impl AtpVerifier {
         ledger: &VerifierFinalizerLedger,
     ) -> Result<VerificationEvidence, VerificationError> {
         self.verify_finalizer_proof(&ledger.to_proof())
+    }
+
+    /// Verifies the final ATP verifier pipeline before final output exposure.
+    pub fn verify_pipeline_finalization(
+        &self,
+        proof: &VerifierPipelineProof,
+    ) -> Result<VerifierPipelineReport, VerificationError> {
+        if proof.workers_started != proof.workers_drained {
+            return Err(VerificationError::WorkerDrainLeak {
+                started: proof.workers_started,
+                drained: proof.workers_drained,
+            });
+        }
+        if proof.permits_acquired != proof.permits_released {
+            return Err(VerificationError::PermitLeak {
+                acquired: proof.permits_acquired,
+                released: proof.permits_released,
+            });
+        }
+        if proof.finalizer_obligations_started != proof.finalizer_obligations_completed {
+            return Err(VerificationError::FinalizerObligationLeak {
+                started: proof.finalizer_obligations_started,
+                completed: proof.finalizer_obligations_completed,
+            });
+        }
+        if proof.replay_crashpack_pointer.trim().is_empty() {
+            return Err(VerificationError::MissingReplayCrashpackPointer);
+        }
+        if proof.finalizer.cancellation_requested && proof.resume_state.is_none() {
+            return Err(VerificationError::MissingResumeState {
+                stage: proof.finalizer.stage,
+            });
+        }
+
+        let bundle = ProofBundleVerification {
+            merkle_root: proof.manifest_root.clone(),
+            entries: proof.proof_entries.clone(),
+            expected_digest: proof.expected_proof_digest.clone(),
+        };
+        let proof_bundle_evidence = self.verify_final_proof_bundle(&bundle)?;
+
+        let mut finalizer = proof.finalizer.clone();
+        finalizer.final_output_exposed |= proof.final_output_exposed;
+        let finalizer_evidence = self.verify_finalizer_proof(&finalizer)?;
+
+        let finalizer_outcome = if finalizer.cancellation_requested {
+            VerifierFinalizerOutcome::CancelledDrained
+        } else {
+            VerifierFinalizerOutcome::Completed
+        };
+        let log_entry = VerifierLogEntry {
+            stage: VerificationStage::Finalizer,
+            transfer_id: proof.transfer_id.clone(),
+            manifest_root: proof.manifest_root.clone(),
+            rejection_reason: None,
+            finalizer_outcome,
+            proof_bundle_id: proof.expected_proof_digest.clone(),
+            replay_crashpack_pointer: proof.replay_crashpack_pointer.clone(),
+        };
+
+        Ok(VerifierPipelineReport {
+            proof_bundle_evidence,
+            finalizer_evidence,
+            resume_state: proof.resume_state.clone(),
+            log_entry,
+        })
     }
 
     fn verify_final_proof_stage_coverage(
@@ -1184,6 +1397,161 @@ mod tests {
         assert_eq!(
             err.redacted_reason(),
             "cancelled verifier exposed final output at commit"
+        );
+    }
+
+    fn complete_proof_entries() -> Vec<ProofBundleEntry> {
+        VerificationStage::required_final_proof_stages()
+            .iter()
+            .copied()
+            .map(|stage| ProofBundleEntry {
+                stage,
+                digest: ContentId::from_bytes(stage.as_str().as_bytes()),
+            })
+            .collect()
+    }
+
+    fn pipeline_proof(cancelled: bool) -> VerifierPipelineProof {
+        let manifest_root = MerkleRoot::new([42; 32]);
+        let proof_entries = complete_proof_entries();
+        let placeholder = ProofBundleVerification {
+            merkle_root: manifest_root.clone(),
+            entries: proof_entries.clone(),
+            expected_digest: ContentId::from_bytes(b"placeholder"),
+        };
+        let expected_proof_digest = proof_bundle_digest(&placeholder);
+
+        VerifierPipelineProof {
+            transfer_id: "transfer-42".to_string(),
+            manifest_root,
+            proof_entries,
+            expected_proof_digest: expected_proof_digest.clone(),
+            finalizer: FinalizerProof {
+                stage: VerificationStage::Finalizer,
+                leases_acquired: 2,
+                leases_released: 2,
+                cancellation_requested: cancelled,
+                final_output_exposed: false,
+            },
+            resume_state: cancelled.then_some(VerifierResumeState {
+                journal_sequence: 99,
+                verified_stage_count: 4,
+                proof_bundle_digest: expected_proof_digest,
+            }),
+            workers_started: 3,
+            workers_drained: 3,
+            permits_acquired: 5,
+            permits_released: 5,
+            finalizer_obligations_started: 1,
+            finalizer_obligations_completed: 1,
+            final_output_exposed: false,
+            replay_crashpack_pointer: "journal://transfer-42@99".to_string(),
+        }
+    }
+
+    #[test]
+    fn pipeline_finalization_proves_cancelled_resume_and_drained_cleanup() {
+        let verifier = AtpVerifier::default();
+        let proof = pipeline_proof(true);
+
+        let report = verifier
+            .verify_pipeline_finalization(&proof)
+            .expect("balanced cancelled verifier pipeline should commit proof only");
+
+        assert_eq!(
+            report.proof_bundle_evidence.stage,
+            VerificationStage::ProofBundle
+        );
+        assert_eq!(
+            report.finalizer_evidence.stage,
+            VerificationStage::Finalizer
+        );
+        assert_eq!(
+            report.log_entry.finalizer_outcome,
+            VerifierFinalizerOutcome::CancelledDrained
+        );
+        assert_eq!(
+            report
+                .resume_state
+                .expect("cancelled pipeline must preserve resume")
+                .journal_sequence,
+            99
+        );
+        assert_eq!(report.log_entry.rejection_reason, None);
+        assert_eq!(
+            report.log_entry.replay_crashpack_pointer,
+            "journal://transfer-42@99"
+        );
+    }
+
+    #[test]
+    fn pipeline_finalization_rejects_cancellation_without_resume_state() {
+        let verifier = AtpVerifier::default();
+        let mut proof = pipeline_proof(true);
+        proof.resume_state = None;
+
+        let err = verifier
+            .verify_pipeline_finalization(&proof)
+            .expect_err("cancelled verifier without resume state must fail closed");
+
+        assert_eq!(err.stage(), VerificationStage::Finalizer);
+        assert_eq!(
+            err.redacted_reason(),
+            "cancelled verifier at finalizer without resume state"
+        );
+    }
+
+    #[test]
+    fn pipeline_finalization_rejects_worker_permit_and_finalizer_leaks() {
+        let verifier = AtpVerifier::default();
+
+        let mut worker_leak = pipeline_proof(false);
+        worker_leak.workers_drained = 2;
+        let err = verifier
+            .verify_pipeline_finalization(&worker_leak)
+            .expect_err("undrained workers must fail closed");
+        assert_eq!(err.redacted_reason(), "verifier drained 2 of 3 workers");
+
+        let mut permit_leak = pipeline_proof(false);
+        permit_leak.permits_released = 4;
+        let err = verifier
+            .verify_pipeline_finalization(&permit_leak)
+            .expect_err("unreleased permits must fail closed");
+        assert_eq!(err.redacted_reason(), "verifier released 4 of 5 permits");
+
+        let mut finalizer_leak = pipeline_proof(false);
+        finalizer_leak.finalizer_obligations_completed = 0;
+        let err = verifier
+            .verify_pipeline_finalization(&finalizer_leak)
+            .expect_err("incomplete finalizer obligations must fail closed");
+        assert_eq!(
+            err.redacted_reason(),
+            "finalizer completed 0 of 1 obligations"
+        );
+    }
+
+    #[test]
+    fn pipeline_finalization_rejects_cancelled_final_exposure_and_missing_crashpack() {
+        let verifier = AtpVerifier::default();
+
+        let mut exposed = pipeline_proof(true);
+        exposed.final_output_exposed = true;
+        let err = verifier
+            .verify_pipeline_finalization(&exposed)
+            .expect_err("cancelled verifier must not expose final output");
+        assert_eq!(
+            err.redacted_reason(),
+            "cancelled verifier exposed final output at finalizer"
+        );
+
+        let mut missing_pointer = pipeline_proof(false);
+        missing_pointer.replay_crashpack_pointer.clear();
+        let err = verifier
+            .verify_pipeline_finalization(&missing_pointer)
+            .expect_err("final proof needs replay/crashpack pointer");
+        assert_eq!(
+            err.redacted_reason(),
+            "verifier finalization missing replay/crashpack pointer"
         );
     }
 }

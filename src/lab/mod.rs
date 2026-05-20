@@ -47,6 +47,8 @@
 //!
 //! See the [`chaos`] module for detailed documentation on chaos testing.
 
+#[path = "../atp/lab/mod.rs"]
+pub mod atp_lab;
 pub mod chaos;
 pub mod config;
 pub mod conformal;
@@ -72,6 +74,11 @@ pub mod virtual_time_wheel;
 
 pub use crate::util::{
     StrictEntropyGuard, disable_strict_entropy, enable_strict_entropy, strict_entropy_enabled,
+};
+pub use atp_lab::{
+    ATP_LAB_MODEL_SCHEMA_VERSION, AtpLabArtifact, AtpLabAttachment, AtpLabEvent, AtpLabFailure,
+    AtpLabFault, AtpLabOracleConfig, AtpLabRegime, AtpLabReplayMetadata, AtpLabScenario,
+    AtpLabTransferSpec, AtpTransferLabPlan,
 };
 pub use config::LabConfig;
 pub use conformal::{
