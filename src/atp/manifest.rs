@@ -13,6 +13,9 @@
 use crate::atp::object::{MetadataPolicy, ObjectGraph, ObjectId, ObjectKind};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+
+#[cfg(feature = "trace-compression")]
+use lz4_flex;
 use std::fmt;
 
 /// Manifest format version for backward compatibility.
@@ -2019,11 +2022,29 @@ impl Manifest {
 
         while offset < size {
             let chunk_end = std::cmp::min(offset + chunk_size, size);
+
+            // Compute real content hash from actual chunk data
+            let content_hash = if let Some(ref content) = object.content {
+                let chunk_start = offset as usize;
+                let chunk_end_usize = chunk_end as usize;
+                if chunk_end_usize <= content.len() {
+                    let chunk_data = &content[chunk_start..chunk_end_usize];
+                    let mut hasher = Sha256::new();
+                    hasher.update(chunk_data);
+                    let result = hasher.finalize();
+                    result.into()
+                } else {
+                    [0u8; 32] // Fallback if chunk exceeds content length
+                }
+            } else {
+                [0u8; 32] // Fallback if no content available
+            };
+
             boundaries.push(ChunkBoundary {
                 index,
                 byte_offset: offset,
                 size_bytes: chunk_end - offset,
-                content_hash: [0u8; 32], // Placeholder - would compute actual hash in real implementation
+                content_hash,
                 strategy: ChunkStrategy::FixedSize,
                 metadata: None,
             });
@@ -2056,14 +2077,31 @@ impl Manifest {
 
         let mut symbols = Vec::new();
         for i in 0..num_symbols {
+            // Compute real symbol hash from actual symbol data
+            let symbol_hash = if let Some(ref content) = object.content {
+                let symbol_start = (i as u64 * symbol_size) as usize;
+                let symbol_end = std::cmp::min(symbol_start + symbol_size as usize, content.len());
+                if symbol_end <= content.len() {
+                    let symbol_data = &content[symbol_start..symbol_end];
+                    let mut hasher = Sha256::new();
+                    hasher.update(symbol_data);
+                    let result = hasher.finalize();
+                    result.into()
+                } else {
+                    *content_hash // Fallback if symbol exceeds content
+                }
+            } else {
+                *content_hash // Fallback if no content available
+            };
+
             symbols.push(RaptorQSymbol {
                 index: i,
                 esi: i, // Encoding Symbol ID matches index for systematic symbols
                 size_bytes: symbol_size as u32,
-                content_hash: *content_hash, // Use object hash as symbol hash for now
+                content_hash: symbol_hash,
                 is_source: true,             // These are systematic source symbols
-                repair_group_id: None,       // No repair groups for basic implementation
-                auth_tag: None,              // No authentication for basic implementation
+                repair_group_id: Some(RepairGroupId::new(&object.id, 0, num_symbols)), // Default repair group
+                auth_tag: Some([0u8; 32]),   // Placeholder auth tag - would need proper HMAC computation
             });
         }
 
@@ -2087,45 +2125,53 @@ impl Manifest {
             return None;
         }
 
-        // Simulate compression metrics based on algorithm
-        let (compressed_size, compression_ratio) = match policy.algorithm {
-            CompressionAlgorithm::None => return None,
+        // Compute actual compression metrics if content is available
+        match policy.algorithm {
+            CompressionAlgorithm::None => None,
             CompressionAlgorithm::Lz4 => {
-                // LZ4 typically achieves ~2:1 compression on text, less on binary
-                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) {
-                    0.6
-                } else {
-                    0.8
-                };
-                ((size as f32 * ratio) as u64, ratio)
+                #[cfg(feature = "trace-compression")]
+                {
+                    if let Some(ref content) = object.content {
+                        // Perform actual LZ4 compression to get real metrics
+                        match lz4_flex::compress_prepend_size(content) {
+                            Ok(compressed) => {
+                                let compressed_size = compressed.len() as u64;
+                                let compression_ratio = compressed_size as f32 / size as f32;
+                                Some(CompressionMetadata {
+                                    algorithm: policy.algorithm,
+                                    level: policy.level,
+                                    original_size: size,
+                                    compressed_size,
+                                    compression_ratio,
+                                })
+                            }
+                            Err(_) => {
+                                // Compression failed, return None to indicate no compression metadata
+                                None
+                            }
+                        }
+                    } else {
+                        // No content available for compression, omit metadata until encoded
+                        None
+                    }
+                }
+                #[cfg(not(feature = "trace-compression"))]
+                {
+                    // LZ4 compression not available, omit metadata until feature is enabled
+                    None
+                }
             }
             CompressionAlgorithm::Gzip => {
-                // Gzip achieves better compression than LZ4 but slower
-                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) {
-                    0.4
-                } else {
-                    0.7
-                };
-                ((size as f32 * ratio) as u64, ratio)
+                // TODO: Implement actual gzip compression when needed
+                // For now, omit compression metadata for gzip until real implementation
+                None
             }
             CompressionAlgorithm::Brotli => {
-                // Brotli achieves best compression
-                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) {
-                    0.3
-                } else {
-                    0.6
-                };
-                ((size as f32 * ratio) as u64, ratio)
+                // TODO: Implement actual brotli compression when needed
+                // For now, omit compression metadata for brotli until real implementation
+                None
             }
-        };
-
-        Some(CompressionMetadata {
-            algorithm: policy.algorithm,
-            level: policy.level,
-            original_size: size,
-            compressed_size,
-            compression_ratio,
-        })
+        }
     }
 
     /// Compute encryption metadata for an object based on encryption policy.
@@ -2733,6 +2779,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
 
         assert!(matches!(result, Err(ManifestError::InvalidFormat(_))));
@@ -2762,6 +2810,8 @@ mod tests {
             policy,
             vec![HashAlgorithm::Sha256],
             Some(chunk_plan.clone()),
+            None,
+            None,
             None,
             None,
             None,
@@ -2805,6 +2855,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -2830,7 +2882,7 @@ mod tests {
             algorithm: CompressionAlgorithm::Lz4,
             level: 6,
             min_size_threshold: 1024,
-            apply_to_kinds: vec![ObjectKind::FileObjectObject, ObjectKind::DatasetObject],
+            apply_to_kinds: vec![ObjectKind::FileObject, ObjectKind::DatasetObject],
         };
 
         let policy = MetadataPolicy::default();
@@ -2841,6 +2893,8 @@ mod tests {
             None,
             None,
             Some(compression_policy.clone()),
+            None,
+            None,
             None,
             None,
         )
@@ -2867,7 +2921,7 @@ mod tests {
                 salt: b"random_salt_32_bytes_long_example".to_vec(),
                 iterations: Some(100_000),
             },
-            apply_to_kinds: vec![ObjectKind::FileObjectObject],
+            apply_to_kinds: vec![ObjectKind::FileObject],
             encrypt_metadata: false,
         };
 
@@ -2880,6 +2934,8 @@ mod tests {
             None,
             None,
             Some(encryption_policy.clone()),
+            None,
+            None,
             None,
         )
         .unwrap();
@@ -2920,6 +2976,8 @@ mod tests {
             None,
             None,
             Some(capability_policy.clone()),
+            None,
+            None,
         )
         .unwrap();
 
@@ -2959,6 +3017,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -2981,6 +3041,8 @@ mod tests {
             policy,
             vec![HashAlgorithm::Sha256],
             Some(bad_chunk_plan2),
+            None,
+            None,
             None,
             None,
             None,
@@ -3017,6 +3079,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -3040,6 +3104,8 @@ mod tests {
             vec![HashAlgorithm::Sha256],
             None,
             Some(bad_layout2),
+            None,
+            None,
             None,
             None,
             None,
@@ -3096,6 +3162,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -3103,6 +3171,8 @@ mod tests {
             &graph,
             policy,
             vec![HashAlgorithm::Sha256, HashAlgorithm::Blake3],
+            None,
+            None,
             None,
             None,
             None,
@@ -3155,7 +3225,7 @@ mod tests {
             algorithm: CompressionAlgorithm::Lz4,
             level: 6,
             min_size_threshold: 1024,
-            apply_to_kinds: vec![ObjectKind::FileObjectObject],
+            apply_to_kinds: vec![ObjectKind::FileObject],
         };
 
         let encryption_policy = EncryptionPolicy {
@@ -3165,7 +3235,7 @@ mod tests {
                 salt: b"test_salt_32_bytes_long_example!".to_vec(),
                 iterations: Some(100_000),
             },
-            apply_to_kinds: vec![ObjectKind::FileObjectObject],
+            apply_to_kinds: vec![ObjectKind::FileObject],
             encrypt_metadata: false,
         };
 
@@ -3268,7 +3338,7 @@ mod tests {
 
     mod atp_g2_tests {
         use super::*;
-        use crate::atp::object::{ContentId, Object, ObjectGraph, ObjectKind};
+        use crate::atp::object::{ContentId, Object, ObjectGraph};
         use std::collections::BTreeMap;
 
         /// Create a test repair group for validation testing.
@@ -3317,30 +3387,22 @@ mod tests {
                     session_binding: true,
                 },
                 capability_policy: None,
-                manifest_root: MerkleRoot::from_hash([0u8; 32]),
+                manifest_root: MerkleRoot::new([0u8; 32]),
             }
         }
 
         /// Create a test manifest with repair groups.
         fn create_test_manifest_with_repair_groups() -> Manifest {
-            let content_id = ContentId::from_hash([1u8; 32]);
-            let object_id = ObjectId::content(content_id);
-
             let mut graph = ObjectGraph::new();
-            let object = Object {
-                id: object_id.clone(),
-                kind: ObjectKind::Blob,
-                size_bytes: Some(10240),
-                content: Some(vec![0u8; 10240]),
-                children: BTreeMap::new(),
-            };
+            let object = Object::file(vec![0u8; 10240]);
+            let object_id = object.id.clone();
             graph.add_object(object).unwrap();
 
             // Create manifest with repair group
-            let repair_group = create_test_repair_group(object_id.clone());
+            let mut manifest = Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap();
+            let mut repair_group = create_test_repair_group(object_id.clone());
+            repair_group.manifest_root = manifest.merkle_root.clone();
             let group_id = repair_group.group_id.clone();
-
-            let mut manifest = Manifest::from_graph(&graph, MetadataPolicy::Portable).unwrap();
             manifest
                 .repair_groups
                 .insert(group_id.clone(), repair_group);
@@ -3349,7 +3411,7 @@ mod tests {
             if let Some(manifest_obj) = manifest.objects.get_mut(&object_id) {
                 manifest_obj.raptorq_symbols = vec![
                     RaptorQSymbol {
-                        source_block: 0,
+                        index: 0,
                         esi: 0,
                         size_bytes: 1024,
                         content_hash: [1u8; 32],
@@ -3358,7 +3420,7 @@ mod tests {
                         auth_tag: Some([2u8; 32]),
                     },
                     RaptorQSymbol {
-                        source_block: 0,
+                        index: 1,
                         esi: 1000,
                         size_bytes: 1024,
                         content_hash: [3u8; 32],
@@ -3374,7 +3436,7 @@ mod tests {
 
         #[test]
         fn test_repair_group_id_generation() {
-            let object_id = ObjectId::content(ContentId::from_hash([1u8; 32]));
+            let object_id = ObjectId::content(ContentId::new([1u8; 32]));
             let group_id1 = RepairGroupId::new(&object_id, 0, 1024);
             let group_id2 = RepairGroupId::new(&object_id, 0, 1024);
             let group_id3 = RepairGroupId::new(&object_id, 1, 1024);
@@ -3403,7 +3465,7 @@ mod tests {
             let mut manifest = create_test_manifest_with_repair_groups();
 
             // Corrupt the group ID in the repair group
-            let wrong_object_id = ObjectId::content(ContentId::from_hash([99u8; 32]));
+            let wrong_object_id = ObjectId::content(ContentId::new([99u8; 32]));
             let correct_group_id = RepairGroupId::new(&wrong_object_id, 0, 1024);
 
             if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
@@ -3438,15 +3500,12 @@ mod tests {
             let mut manifest = create_test_manifest_with_repair_groups();
 
             // Add a symbol that references a non-existent repair group
-            let fake_group_id = RepairGroupId::new(
-                &ObjectId::content(ContentId::from_hash([99u8; 32])),
-                99,
-                999,
-            );
+            let fake_group_id =
+                RepairGroupId::new(&ObjectId::content(ContentId::new([99u8; 32])), 99, 999);
 
             if let Some(manifest_obj) = manifest.objects.values_mut().next() {
                 manifest_obj.raptorq_symbols.push(RaptorQSymbol {
-                    source_block: 0,
+                    index: 99,
                     esi: 1001,
                     size_bytes: 1024,
                     content_hash: [5u8; 32],
@@ -3562,7 +3621,7 @@ mod tests {
 
             // Manifest root mismatch
             if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
-                repair_group.manifest_root = MerkleRoot::from_hash([99u8; 32]);
+                repair_group.manifest_root = MerkleRoot::new([99u8; 32]);
             }
 
             let result = manifest.validate();
@@ -3624,7 +3683,7 @@ mod tests {
 
         #[test]
         fn test_repair_group_interleaving_pattern_hashing() {
-            let object_id = ObjectId::content(ContentId::from_hash([1u8; 32]));
+            let object_id = ObjectId::content(ContentId::new([1u8; 32]));
 
             // Test different interleaving patterns produce different hashes
             let mut repair_group1 = create_test_repair_group(object_id.clone());
