@@ -57,7 +57,7 @@ impl RetryPacket {
         if self.dest_cid.len() > 255 {
             return Err(HandshakeError::ConnectionIdError {
                 reason: "destination CID too long".to_string(),
-            });
+            }).into();
         }
         buf.put_u8(self.dest_cid.len() as u8);
         buf.put_slice(&self.dest_cid);

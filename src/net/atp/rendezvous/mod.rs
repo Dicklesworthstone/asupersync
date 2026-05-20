@@ -1113,10 +1113,7 @@ where
     Ok(())
 }
 
-fn validate_capability_context(
-    now_micros: u64,
-    signed: &SignedCandidate,
-) -> Result<(), Error> {
+fn validate_capability_context(now_micros: u64, signed: &SignedCandidate) -> Result<(), Error> {
     let context = signed.capability_context();
     if context.label().trim().is_empty() || context.max_candidate_ttl_micros() == 0 {
         return Err(Error::InvalidCapabilityContext);
@@ -1132,7 +1129,10 @@ fn validate_capability_context(
         CandidateTransport::Udp | CandidateTransport::Relay | CandidateTransport::Ipv6 => {}
     }
 
-    let candidate_ttl = signed.candidate.expires_at_micros.saturating_sub(now_micros);
+    let candidate_ttl = signed
+        .candidate
+        .expires_at_micros
+        .saturating_sub(now_micros);
     if candidate_ttl > context.max_candidate_ttl_micros() {
         return Err(Error::CandidateTtlExceeded);
     }
@@ -1355,7 +1355,10 @@ mod tests {
         assert_eq!(exchange.observed_public_endpoints()[0].port(), 50_001);
         assert_eq!(exchange.peer_candidates().len(), 1);
         assert_eq!(exchange.peer_candidates()[0].peer_id(), peer_b);
-        assert_eq!(exchange.remaining_attempts(), Quotas::default().max_attempts_per_peer);
+        assert_eq!(
+            exchange.remaining_attempts(),
+            Quotas::default().max_attempts_per_peer
+        );
         assert_eq!(exchange.session_expires_at_micros(), 1_000);
         assert_eq!(
             service
@@ -1369,6 +1372,38 @@ mod tests {
                 ServiceEventKind::CandidateAccepted,
             ]
         );
+    }
+
+    #[test]
+    fn exchange_filters_own_and_expired_candidates() {
+        let mut service = Service::new();
+        let transfer_nonce = nonce(7);
+        let peer_a = peer(1);
+        let peer_b = peer(2);
+        service.open_session(Session::new(transfer_nonce, 1_000, Quotas::default()));
+
+        service
+            .register_candidate(
+                10,
+                signed_candidate(peer_a, transfer_nonce, candidate_nonce(9)),
+                &|_: &SignedCandidate| true,
+            )
+            .expect("own candidate accepted");
+        let short_lived_peer_candidate = SignedCandidate::new(
+            peer_b,
+            transfer_nonce,
+            candidate_nonce(10),
+            Candidate::new(endpoint(50_020), CandidateTransport::Udp, 20),
+            CandidateSignature::new(vec![1, 2, 3]).expect("signature"),
+        );
+        service
+            .register_candidate(10, short_lived_peer_candidate, &|_: &SignedCandidate| true)
+            .expect("short-lived peer candidate accepted");
+
+        let exchange = service
+            .exchange_for_peer(30, transfer_nonce, peer_a)
+            .expect("exchange");
+        assert!(exchange.peer_candidates().is_empty());
     }
 
     #[test]
@@ -1575,8 +1610,8 @@ mod tests {
             Session::new(transfer_nonce, 1_000, Quotas::default()).with_trusted_relays(&[relay]),
         );
 
-        let no_relay = CapabilityContext::new("direct-only", 1_000, false, true)
-            .expect("capability context");
+        let no_relay =
+            CapabilityContext::new("direct-only", 1_000, false, true).expect("capability context");
         let relay_candidate = signed_relay_candidate(
             peer(1),
             transfer_nonce,
@@ -1597,11 +1632,10 @@ mod tests {
             Error::CapabilityMismatch
         );
 
-        let short_ttl = CapabilityContext::new("short-ttl", 5, true, true)
-            .expect("capability context");
-        let long_ttl_candidate =
-            signed_candidate(peer(1), transfer_nonce, candidate_nonce(10))
-                .with_capability_context(short_ttl);
+        let short_ttl =
+            CapabilityContext::new("short-ttl", 5, true, true).expect("capability context");
+        let long_ttl_candidate = signed_candidate(peer(1), transfer_nonce, candidate_nonce(10))
+            .with_capability_context(short_ttl);
         assert_eq!(
             service
                 .register_candidate(10, long_ttl_candidate, &|_: &SignedCandidate| true)
@@ -1787,7 +1821,12 @@ mod tests {
             .expect("observation");
 
         assert_eq!(service.config().service_id(), "rv-a");
-        assert!(service.events().iter().all(|event| event.peer_id().is_none()));
+        assert!(
+            service
+                .events()
+                .iter()
+                .all(|event| event.peer_id().is_none())
+        );
 
         let restored = Service::restore(service.snapshot());
         assert!(restored.session(transfer_nonce).is_none());

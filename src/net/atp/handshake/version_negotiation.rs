@@ -135,7 +135,7 @@ impl VersionNegotiationPacket {
             source_cid,
             dest_cid,
             supported_versions,
-        })
+        }).into()
     }
 
     /// Check if a version is supported
@@ -183,14 +183,14 @@ impl VersionNegotiation {
         original_source_cid: &[u8],
     ) -> Outcome<(), HandshakeError> {
         // Destination CID must match original source CID
-        if packet.dest_cid != original_source_cid {
+        if packet.dest_cid.as_ref() != original_source_cid {
             return Err(HandshakeError::InvalidPacket {
                 reason: "version negotiation destination CID mismatch".to_string(),
-            });
+            }).into();
         }
 
         // Source CID must match original destination CID
-        if packet.source_cid != original_dest_cid {
+        if packet.source_cid.as_ref() != original_dest_cid {
             return Err(HandshakeError::InvalidPacket {
                 reason: "version negotiation source CID mismatch".to_string(),
             });
@@ -207,7 +207,7 @@ impl VersionNegotiation {
             });
         }
 
-        Ok(())
+        Ok(()).into()
     }
 }
 
