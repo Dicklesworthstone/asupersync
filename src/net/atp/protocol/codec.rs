@@ -6,7 +6,8 @@
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
 use crate::net::atp::protocol::frames::{
-    Frame, FrameError, FrameHeader, FrameType, MAX_EXTENSION_SIZE, MAX_FRAME_SIZE, ProtocolVersion,
+    Frame, FrameError, FrameHeader, FrameType, MAX_EXTENSION_COUNT, MAX_EXTENSION_SIZE,
+    MAX_FRAME_SIZE, MAX_HEADER_SIZE, ProtocolVersion,
 };
 use crate::net::atp::protocol::varint::VarInt;
 use std::collections::HashMap;
@@ -102,8 +103,16 @@ impl AtpFrameCodec {
             Err(e) => return Err(e.into()),
         };
 
+        // Bounds check extension count to prevent DoS
+        if extension_count.value() > MAX_EXTENSION_COUNT {
+            return Err(FrameError::ExtensionTooLarge {
+                size: extension_count.value(),
+            });
+        }
+
         // Extensions
         let mut extensions = HashMap::new();
+
         for _ in 0..extension_count.value() {
             // Extension ID (varint)
             let ext_id = match VarInt::decode(&mut temp_buf) {
@@ -132,6 +141,15 @@ impl AtpFrameCodec {
 
             let ext_data = temp_buf.split_to(ext_len.value() as usize).to_vec();
             extensions.insert(ext_id, ext_data);
+
+            // Check total header size to prevent DoS
+            let total_header_consumed = buf.len() - temp_buf.len();
+            if total_header_consumed > MAX_HEADER_SIZE as usize {
+                return Err(FrameError::FrameTooLarge {
+                    size: total_header_consumed as u64,
+                    max: MAX_HEADER_SIZE,
+                });
+            }
         }
 
         // Success - consume from original buffer

@@ -3,6 +3,9 @@
 //! Defines the ATP frame format and frame types for the protocol.
 //! All frames are length-bounded, versioned, and designed for deterministic replay.
 
+use crate::bytes::BytesMut;
+use crate::codec::Encoder;
+use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::varint::{VarInt, VarIntError};
 use std::collections::HashMap;
 use std::fmt;
@@ -173,8 +176,10 @@ impl FrameHeader {
             .encoded_len();
 
         // Extensions (extension_id:varint + length:varint + data)
-        for data in self.extensions.values() {
-            len += VarInt::new(0).unwrap().encoded_len(); // extension_id as varint
+        for (extension_id, data) in &self.extensions {
+            len += VarInt::new(*extension_id as u64)
+                .expect("u16 extension id fits in varint")
+                .encoded_len();
             len += VarInt::new(data.len() as u64).unwrap().encoded_len(); // data length
             len += data.len(); // data
         }
@@ -223,18 +228,17 @@ impl Frame {
         &self.payload
     }
 
-    /// Create an adapter-level placeholder frame for incomplete protocol surfaces.
-    pub fn new_placeholder(frame_type: FrameType) -> Result<Self, FrameError> {
-        let payload = match frame_type {
-            FrameType::Control => b"ATP-CONTROL-PLACEHOLDER".to_vec(),
-            FrameType::Data => b"ATP-DATA-PLACEHOLDER".to_vec(),
-            FrameType::Proof => b"ATP-PROOF-PLACEHOLDER".to_vec(),
-            FrameType::Repair => b"ATP-REPAIR-PLACEHOLDER".to_vec(),
-            FrameType::Session => b"ATP-SESSION-PLACEHOLDER".to_vec(),
-            FrameType::Manifest => b"ATP-MANIFEST-PLACEHOLDER".to_vec(),
-            other => format!("ATP-{other:?}-PLACEHOLDER").into_bytes(),
-        };
-        Self::new(ProtocolVersion::CURRENT, frame_type, payload)
+    /// Create an empty frame for adapter-level control paths.
+    pub fn empty(frame_type: FrameType) -> Result<Self, FrameError> {
+        Self::new(ProtocolVersion::CURRENT, frame_type, Vec::new())
+    }
+
+    /// Encode this frame with the canonical ATP binary frame codec.
+    pub fn to_wire_bytes(&self) -> Result<Vec<u8>, FrameError> {
+        let mut codec = AtpFrameCodec::new();
+        let mut encoded = BytesMut::with_capacity(self.encoded_len());
+        codec.encode(self.clone(), &mut encoded)?;
+        Ok(encoded.to_vec())
     }
 }
 
@@ -283,6 +287,12 @@ pub const MAX_FRAME_SIZE: u64 = 1024 * 1024;
 
 /// Maximum extension data size
 pub const MAX_EXTENSION_SIZE: u64 = 4096;
+
+/// Maximum number of frame header extensions (prevent DoS)
+pub const MAX_EXTENSION_COUNT: u64 = 64;
+
+/// Maximum total header size including all extensions (prevent DoS)
+pub const MAX_HEADER_SIZE: u64 = 32 * 1024;
 
 impl From<std::io::Error> for FrameError {
     fn from(err: std::io::Error) -> Self {
@@ -335,6 +345,18 @@ mod tests {
         assert_eq!(header.extensions.len(), 2);
         assert_eq!(header.extensions[&1], b"ext1");
         assert_eq!(header.extensions[&2], b"extension2");
+    }
+
+    #[test]
+    fn frame_empty_uses_protocol_wire_bytes_not_marker_payloads() {
+        let frame = Frame::empty(FrameType::Control).unwrap();
+
+        assert_eq!(frame.payload(), b"");
+
+        assert_eq!(
+            frame.to_wire_bytes().unwrap(),
+            vec![0x00, 0x44, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
