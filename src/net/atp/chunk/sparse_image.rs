@@ -190,7 +190,7 @@ impl SparseImageProfile {
     /// Detect sparse regions in the data.
     fn detect_sparse_regions(data: &[u8]) -> Vec<SparseRegion> {
         let mut regions = Vec::new();
-        let min_hole_size = 4096; // Minimum 4KB hole to be worth detecting
+        let min_hole_size = 4096usize; // Minimum 4KB hole to be worth detecting
 
         let mut i = 0;
         while i < data.len() {
@@ -202,7 +202,7 @@ impl SparseImageProfile {
 
             // Only create regions for significant sparse areas
             if region.region_type != SparseRegionType::DataFilled
-                && (region.end - region.start) >= min_hole_size
+                && (region.end - region.start) >= min_hole_size as u64
             {
                 regions.push(region.clone());
             }
@@ -495,18 +495,18 @@ impl SparseImageProfile {
         // Sort data chunks first, then holes
         indexed_boundaries.sort_by(|(a_idx, a), (b_idx, b)| {
             let a_is_sparse = matches!(
-                a.metadata,
-                ChunkMetadata::SparseImage {
+                &a.metadata,
+                Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: true,
                     ..
-                }
+                })
             );
             let b_is_sparse = matches!(
-                b.metadata,
-                ChunkMetadata::SparseImage {
+                &b.metadata,
+                Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: true,
                     ..
-                }
+                })
             );
 
             match (a_is_sparse, b_is_sparse) {
@@ -526,7 +526,7 @@ impl SparseImageProfile {
         for boundary in boundaries {
             if let Some(ChunkMetadata::SparseImage {
                 is_sparse_hole: true,
-                hole_metadata: Some(ref metadata),
+                hole_metadata: Some(metadata),
                 ..
             }) = &boundary.metadata
             {

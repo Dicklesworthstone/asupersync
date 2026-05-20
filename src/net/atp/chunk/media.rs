@@ -399,7 +399,7 @@ impl MediaProfile {
             MediaContentType::Model => {
                 // Model metadata and early layers most important
                 if chunk_index < 5 {
-                    90 - chunk_index * 10
+                    90u8 - (chunk_index as u8 * 10)
                 } else {
                     50
                 }
@@ -466,7 +466,7 @@ impl MediaProfile {
         let startup_chunks = Self::get_startup_chunk_set(boundaries);
 
         let startup_bytes: u64 = startup_chunks.iter()
-            .map(|&idx| boundaries[idx].size)
+            .map(|&idx| boundaries[idx].size_bytes)
             .sum();
 
         let transfer_time_ms = (startup_bytes as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
@@ -487,7 +487,7 @@ impl MediaProfile {
 
         for &chunk_idx in &streaming_order {
             startup_chunks.push(chunk_idx);
-            accumulated_size += boundaries[chunk_idx].size;
+            accumulated_size += boundaries[chunk_idx].size_bytes;
 
             // Check if we have enough for startup
             if accumulated_size >= STARTUP_THRESHOLD || startup_chunks.len() >= 3 {

@@ -5,14 +5,14 @@
 //! boundary detection, chunk identity management, and secure cache lookup that doesn't
 //! leak unauthorized object graph membership.
 
-use super::{ChunkingProfileError, profiles::ChunkingProfile};
+use super::ChunkingProfileError;
 use crate::atp::manifest::{ChunkBoundary, ChunkMetadata, ChunkStrategy};
 use crate::bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Parameters for content-defined chunking.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CdcParameters {
     pub window_size: usize,
     pub target_chunk_size: u64,
@@ -21,7 +21,7 @@ pub struct CdcParameters {
 }
 
 /// Criteria for chunk reuse in deduplication.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkReuseCriteria {
     pub content_hash_match: bool,
     pub size_match: bool,
@@ -29,7 +29,7 @@ pub struct ChunkReuseCriteria {
 }
 
 /// Verification data for chunk integrity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkVerification {
     pub content_hash: [u8; 32],
     pub size_bytes: u64,
@@ -182,24 +182,35 @@ impl ChunkIdentity {
     pub fn from_boundary_and_data(
         boundary: &ChunkBoundary,
         chunking_profile: &str,
-        context_hash: Option<[u8; 32]>,
+        capability_scope: &str,
     ) -> Self {
         Self {
             content_hash: boundary.content_hash,
-            size: boundary.size_bytes,
+            size_bytes: boundary.size_bytes,
             chunking_profile: chunking_profile.to_string(),
-            context_hash,
+            capability_scope: capability_scope.to_string(),
+            verification: ChunkVerification {
+                content_hash: boundary.content_hash,
+                size_bytes: boundary.size_bytes,
+                verification_method: "sha256".to_string(),
+            },
         }
     }
 
     /// Create chunk identity directly from data.
-    pub fn from_data(data: &[u8], chunking_profile: &str, context_hash: Option<[u8; 32]>) -> Self {
+    pub fn from_data(data: &[u8], chunking_profile: &str, capability_scope: &str) -> Self {
         let content_hash = Self::compute_content_hash(data);
+        let size_bytes = data.len() as u64;
         Self {
             content_hash,
-            size: data.len() as u64,
+            size_bytes,
             chunking_profile: chunking_profile.to_string(),
-            context_hash,
+            capability_scope: capability_scope.to_string(),
+            verification: ChunkVerification {
+                content_hash,
+                size_bytes,
+                verification_method: "sha256".to_string(),
+            },
         }
     }
 
@@ -212,14 +223,12 @@ impl ChunkIdentity {
 
     /// Get identity string for deduplication keys.
     pub fn identity_string(&self) -> String {
-        let hash_hex = hex::encode(self.content_hash);
-        let context_hex = self
-            .context_hash
-            .map(|h| hex::encode(h))
-            .unwrap_or_else(|| "none".to_string());
+        let hash_hex = self.content_hash.iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
         format!(
             "{}:{}:{}:{}",
-            hash_hex, self.size, self.chunking_profile, context_hex
+            hash_hex, self.size_bytes, self.chunking_profile, self.capability_scope
         )
     }
 }
@@ -268,7 +277,7 @@ impl ChunkCache {
         source_object: Option<String>,
     ) -> Result<(), ChunkingProfileError> {
         // Validate chunk data matches identity
-        if data.len() != identity.size as usize {
+        if data.len() != identity.size_bytes as usize {
             return Err(ChunkingProfileError::InvalidChunkParameters(
                 "chunk data size doesn't match identity".to_string(),
             ));
@@ -294,7 +303,7 @@ impl ChunkCache {
             source_object,
         };
 
-        self.current_size += identity.size;
+        self.current_size += identity.size_bytes;
 
         // Update content hash index
         self.content_hash_index
@@ -318,6 +327,11 @@ impl ChunkCache {
         }
     }
 
+    /// Retrieve chunk by identity (alias for lookup_chunk).
+    pub fn retrieve_chunk(&mut self, identity: &ChunkIdentity) -> Option<Bytes> {
+        self.lookup_chunk(identity)
+    }
+
     /// Find chunks with same content hash but different context.
     pub fn find_similar_chunks(&self, content_hash: [u8; 32]) -> Vec<&ChunkIdentity> {
         self.content_hash_index
@@ -330,15 +344,10 @@ impl ChunkCache {
     pub fn can_reuse_chunk(
         &self,
         chunk_identity: &ChunkIdentity,
-        requesting_context: Option<[u8; 32]>,
+        requesting_scope: &str,
     ) -> bool {
-        // If chunk has no context hash, it's globally reusable
-        if chunk_identity.context_hash.is_none() {
-            return true;
-        }
-
-        // If requesting context matches chunk context, allow reuse
-        chunk_identity.context_hash == requesting_context
+        // Check if capability scopes match
+        chunk_identity.capability_scope == requesting_scope
     }
 
     /// Evict least recently used chunk.
@@ -357,7 +366,7 @@ impl ChunkCache {
     /// Remove chunk from cache.
     fn remove_chunk(&mut self, identity: &ChunkIdentity) {
         if let Some(chunk) = self.chunks.remove(identity) {
-            self.current_size = self.current_size.saturating_sub(identity.size);
+            self.current_size = self.current_size.saturating_sub(identity.size_bytes);
 
             // Update content hash index
             if let Some(identities) = self.content_hash_index.get_mut(&identity.content_hash) {
