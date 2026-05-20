@@ -53,7 +53,7 @@ impl ChunkingProfileTrait for MediaProfile {
             data,
             &positions,
             ChunkStrategy::ObjectSpecific,
-            |index, offset, size, chunk_data| {
+            |index, _offset, _size, chunk_data| {
                 let is_keyframe_boundary =
                     Self::is_keyframe_boundary(chunk_data, &content_type, index);
                 let decoding_priority = Self::compute_decoding_priority(

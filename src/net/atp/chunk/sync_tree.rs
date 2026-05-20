@@ -57,7 +57,7 @@ impl ChunkingProfileTrait for SyncTreeProfile {
             data,
             &positions,
             ChunkStrategy::ContentDefined,
-            |index, offset, size, chunk_data| {
+            |index, offset, _size, chunk_data| {
                 let boundary_hash = Self::compute_boundary_hash(chunk_data, offset);
                 let similarity_score = Self::compute_similarity_score(chunk_data);
 
@@ -222,7 +222,7 @@ impl SyncTreeProfile {
         chunk_size: u64,
     ) -> bool {
         // Basic rolling hash boundary
-        let hash_boundary = (hash & base_mask) == 0;
+        let _hash_boundary = (hash & base_mask) == 0;
 
         // Line-based bonus for source code
         let line_boundary_bonus = if position > 0 && position < data.len() - 1 {

@@ -48,7 +48,7 @@ impl ChunkingProfileTrait for SparseImageProfile {
             data,
             &positions,
             ChunkStrategy::ObjectSpecific,
-            |index, offset, _size, chunk_data| {
+            |_index, offset, _size, chunk_data| {
                 let (is_sparse_hole, hole_metadata) =
                     Self::analyze_chunk_sparsity(chunk_data, offset, &sparse_regions);
 
