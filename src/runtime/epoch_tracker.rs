@@ -854,8 +854,18 @@ impl EpochConsistencyTracker {
                     .map(|(module, epoch)| format!("{module}@{epoch}"))
                     .collect();
 
-                // Log epoch consistency violation with affected_modules, epoch_skew, consistency_level
-                error!(
+                // ModuleDesync is a *heuristic* skew observation, not a true
+                // runtime invariant violation. Subsystems can legitimately
+                // diverge — e.g., the reporter's repro for #42 only spawns
+                // tasks, so TaskTable advances past RegionTable@Genesis
+                // even though nothing is broken. The actual ordering
+                // invariant (a dependent module ahead of its dependency)
+                // is checked separately as AdvancementOrderViolation and
+                // still logs at error! below. Emit module_desync at debug!
+                // so it stays available for diagnostic queries
+                // (`tracker.violations()` keeps the record) without
+                // spamming the default-level log on routine workloads.
+                debug!(
                     violation_type = "module_desync",
                     affected_modules = ?affected_modules,
                     epoch_skew = max_skew,
@@ -1183,6 +1193,120 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    /// Regression for #42: ModuleDesync is a heuristic skew
+    /// observation, not a runtime invariant violation. The event is
+    /// kept (so callers can query `all_violations()`) but its tracing
+    /// emit level must be DEBUG, not ERROR — otherwise the routine
+    /// pattern of TaskTable advancing past unused RegionTable spams
+    /// the default-level log with `epoch_consistency_violation
+    /// violation_type="module_desync"`.
+    ///
+    /// AdvancementOrderViolation, the *real* invariant violation
+    /// (dependent module ahead of its dependency), still emits at
+    /// ERROR — sibling test below.
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn module_desync_emits_at_debug_not_error() {
+        use parking_lot::Mutex;
+        use std::sync::Arc;
+        use tracing::Subscriber;
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::registry::LookupSpan;
+
+        init_test("module_desync_emits_at_debug_not_error");
+
+        #[derive(Clone)]
+        struct Captured {
+            level: tracing::Level,
+            violation_type: Option<String>,
+        }
+        struct Recorder {
+            events: Arc<Mutex<Vec<Captured>>>,
+        }
+        struct VisitField {
+            violation_type: Option<String>,
+        }
+        impl tracing::field::Visit for VisitField {
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "violation_type" {
+                    self.violation_type = Some(value.to_string());
+                }
+            }
+        }
+        impl<S> Layer<S> for Recorder
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                // Only care about epoch_consistency_violation events.
+                if event.metadata().name() != "epoch_consistency_violation" {
+                    return;
+                }
+                let mut v = VisitField { violation_type: None };
+                event.record(&mut v);
+                self.events.lock().push(Captured {
+                    level: *event.metadata().level(),
+                    violation_type: v.violation_type,
+                });
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Recorder {
+            events: events.clone(),
+        };
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(recorder);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+            // Reproduce the #42 repro shape: TaskTable advances past
+            // RegionTable@Genesis (skew > max_epoch_skew).
+            let now = Time::from_nanos(1000);
+            tracker.notify_epoch_transition(ModuleId::Scheduler, EpochId::GENESIS, EpochId::new(1), now);
+            tracker.notify_epoch_transition(ModuleId::TaskTable, EpochId::GENESIS, EpochId::new(1), now);
+            for to in 2u64..=5 {
+                tracker.notify_epoch_transition(
+                    ModuleId::TaskTable,
+                    EpochId::new(to - 1),
+                    EpochId::new(to),
+                    Time::from_nanos(1000 + (to as u64) * 100),
+                );
+            }
+            tracker.notify_epoch_transition(ModuleId::RegionTable, EpochId::GENESIS, EpochId::new(1), now);
+        });
+
+        let captured = events.lock();
+        let desync_events: Vec<&Captured> = captured
+            .iter()
+            .filter(|c| c.violation_type.as_deref() == Some("module_desync"))
+            .collect();
+        crate::assert_with_log!(
+            !desync_events.is_empty(),
+            "module_desync events must still be emitted (just at debug level)",
+            true,
+            !desync_events.is_empty()
+        );
+        for ev in &desync_events {
+            crate::assert_with_log!(
+                ev.level == tracing::Level::DEBUG,
+                "module_desync events must emit at DEBUG (regression #42)",
+                tracing::Level::DEBUG,
+                ev.level
+            );
+            crate::assert_with_log!(
+                ev.level != tracing::Level::ERROR,
+                "module_desync events must NOT emit at ERROR — that was the #42 noise",
+                "not ERROR",
+                ev.level
+            );
+        }
+        crate::test_complete!("module_desync_emits_at_debug_not_error");
     }
 
     #[test]
