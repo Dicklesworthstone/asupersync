@@ -271,7 +271,7 @@ impl MerkleRoot {
         let mut hasher = Sha256::new();
 
         // Add graph structure in deterministic order
-        let mut object_ids: Vec<_> = graph.objects().map(|(id, obj)| (id, obj)).collect();
+        let mut object_ids: Vec<_> = graph.objects().collect();
         object_ids.sort_by_key(|(id, _)| (*id).clone());
 
         // Hash all object data in canonical order
@@ -280,11 +280,11 @@ impl MerkleRoot {
             hasher.update(id.hash_bytes());
 
             // Object kind
-            hasher.update(&[object.metadata.kind as u8]);
+            hasher.update([object.metadata.kind as u8]);
 
             // Object size
             if let Some(size) = object.metadata.size_bytes {
-                hasher.update(&size.to_be_bytes());
+                hasher.update(size.to_be_bytes());
             }
 
             // Children in sorted order
@@ -294,7 +294,7 @@ impl MerkleRoot {
             for edge in edges {
                 hasher.update(edge.name.as_bytes());
                 hasher.update(edge.child_id.hash_bytes());
-                hasher.update(&[u8::from(edge.is_symlink)]);
+                hasher.update([u8::from(edge.is_symlink)]);
                 if let Some(target) = &edge.symlink_target {
                     hasher.update(target.as_os_str().as_encoded_bytes());
                 }
@@ -303,7 +303,7 @@ impl MerkleRoot {
             // Content hash for leaf objects
             if let Some(content) = &object.content {
                 let content_hash = Sha256::digest(content);
-                hasher.update(&content_hash);
+                hasher.update(content_hash);
             }
         }
 
@@ -327,10 +327,10 @@ impl MerkleRoot {
         // Hash all objects in deterministic order
         for (id, obj) in objects {
             hasher.update(id.hash_bytes());
-            hasher.update(&[obj.kind as u8]);
+            hasher.update([obj.kind as u8]);
 
             if let Some(size) = obj.size_bytes {
-                hasher.update(&size.to_be_bytes());
+                hasher.update(size.to_be_bytes());
             }
 
             // Hash children
@@ -346,48 +346,48 @@ impl MerkleRoot {
 
         // Hash chunk plan
         if let Some(plan) = chunk_plan {
-            hasher.update(&[plan.strategy as u8]);
-            hasher.update(&plan.target_chunk_size.to_be_bytes());
-            hasher.update(&plan.min_chunk_size.to_be_bytes());
-            hasher.update(&plan.max_chunk_size.to_be_bytes());
+            hasher.update([plan.strategy as u8]);
+            hasher.update(plan.target_chunk_size.to_be_bytes());
+            hasher.update(plan.min_chunk_size.to_be_bytes());
+            hasher.update(plan.max_chunk_size.to_be_bytes());
 
             if let Some(cdc) = &plan.cdc_params {
-                hasher.update(&cdc.window_size.to_be_bytes());
-                hasher.update(&cdc.average_chunk_size.to_be_bytes());
-                hasher.update(&cdc.normalization.to_be_bytes());
+                hasher.update(cdc.window_size.to_be_bytes());
+                hasher.update(cdc.average_chunk_size.to_be_bytes());
+                hasher.update(cdc.normalization.to_be_bytes());
             }
         }
 
         // Hash RaptorQ layout
         if let Some(layout) = raptorq_layout {
-            hasher.update(&layout.source_symbols.to_be_bytes());
-            hasher.update(&layout.total_symbols.to_be_bytes());
-            hasher.update(&layout.symbol_size.to_be_bytes());
-            hasher.update(&layout.overhead_ratio.to_be_bytes());
+            hasher.update(layout.source_symbols.to_be_bytes());
+            hasher.update(layout.total_symbols.to_be_bytes());
+            hasher.update(layout.symbol_size.to_be_bytes());
+            hasher.update(layout.overhead_ratio.to_be_bytes());
 
             for sub_block in &layout.sub_blocks {
-                hasher.update(&sub_block.index.to_be_bytes());
-                hasher.update(&sub_block.source_symbols.to_be_bytes());
-                hasher.update(&sub_block.esi_range.0.to_be_bytes());
-                hasher.update(&sub_block.esi_range.1.to_be_bytes());
+                hasher.update(sub_block.index.to_be_bytes());
+                hasher.update(sub_block.source_symbols.to_be_bytes());
+                hasher.update(sub_block.esi_range.0.to_be_bytes());
+                hasher.update(sub_block.esi_range.1.to_be_bytes());
             }
         }
 
         // Hash policies
         if let Some(comp) = compression_policy {
-            hasher.update(&[comp.algorithm as u8]);
-            hasher.update(&[comp.level]);
-            hasher.update(&comp.min_size_threshold.to_be_bytes());
+            hasher.update([comp.algorithm as u8]);
+            hasher.update([comp.level]);
+            hasher.update(comp.min_size_threshold.to_be_bytes());
             for kind in &comp.apply_to_kinds {
-                hasher.update(&[*kind as u8]);
+                hasher.update([*kind as u8]);
             }
         }
 
         if let Some(enc) = encryption_policy {
-            hasher.update(&[enc.algorithm as u8]);
-            hasher.update(&[enc.key_derivation.kdf as u8]);
+            hasher.update([enc.algorithm as u8]);
+            hasher.update([enc.key_derivation.kdf as u8]);
             hasher.update(&enc.key_derivation.salt);
-            hasher.update(&[u8::from(enc.encrypt_metadata)]);
+            hasher.update([u8::from(enc.encrypt_metadata)]);
         }
 
         if let Some(cap) = capability_policy {
@@ -491,6 +491,99 @@ pub struct ChunkBoundary {
     pub content_hash: [u8; 32],
     /// Chunk strategy used.
     pub strategy: ChunkStrategy,
+    /// Profile-specific metadata for this chunk.
+    pub metadata: Option<ChunkMetadata>,
+}
+
+/// Profile-specific chunk metadata for different chunking strategies.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ChunkMetadata {
+    /// Bulk file chunking metadata.
+    BulkFile {
+        /// Expected throughput tier for this chunk.
+        throughput_tier: ThroughputTier,
+    },
+    /// Sync tree chunking metadata.
+    SyncTree {
+        /// Rolling hash value at boundary.
+        boundary_hash: u64,
+        /// Content similarity score.
+        similarity_score: u32,
+    },
+    /// Media chunking metadata.
+    Media {
+        /// Keyframe hint for media chunks.
+        is_keyframe_boundary: bool,
+        /// Progressive decoding priority.
+        decoding_priority: u8,
+    },
+    /// Sparse image chunking metadata.
+    SparseImage {
+        /// Whether this chunk represents a hole.
+        is_sparse_hole: bool,
+        /// Platform-specific hole metadata.
+        hole_metadata: Option<SparseHoleMetadata>,
+    },
+    /// Artifact chunking metadata.
+    Artifact {
+        /// Build reproducibility context.
+        build_context: ArtifactBuildContext,
+        /// Proof strength indicator.
+        proof_strength: ProofStrength,
+    },
+    /// Stream chunking metadata.
+    Stream {
+        /// Sequence number for ordering.
+        sequence: u64,
+        /// Whether this chunk can be consumed early.
+        early_consumption_safe: bool,
+    },
+}
+
+/// Throughput tier for bulk file transfers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ThroughputTier {
+    /// Small chunks for tail optimization.
+    Tail,
+    /// Standard chunks for normal throughput.
+    Standard,
+    /// Large chunks for maximum throughput.
+    Bulk,
+}
+
+/// Sparse hole metadata for platform support.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SparseHoleMetadata {
+    /// Hole size in bytes.
+    pub hole_size: u64,
+    /// Platform-specific hole type.
+    pub hole_type: String,
+    /// Extended attributes for the hole.
+    pub attributes: BTreeMap<String, Vec<u8>>,
+}
+
+/// Build context for artifact reproducibility.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArtifactBuildContext {
+    /// Build system identifier.
+    pub build_system: String,
+    /// Build timestamp (if deterministic).
+    pub build_timestamp: Option<u64>,
+    /// Build environment hash.
+    pub environment_hash: [u8; 32],
+    /// Compiler/toolchain version.
+    pub toolchain_version: String,
+}
+
+/// Proof strength indicator for verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProofStrength {
+    /// Basic content verification.
+    Basic,
+    /// Enhanced verification with build context.
+    Enhanced,
+    /// Cryptographic proof with zero-knowledge elements.
+    Cryptographic,
 }
 
 /// RaptorQ symbol information.
@@ -616,9 +709,7 @@ impl Manifest {
 
         let created_timestamp_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| {
-                ManifestError::InvalidFormat("invalid system time".to_string())
-            })?
+            .map_err(|_| ManifestError::InvalidFormat("invalid system time".to_string()))?
             .as_nanos() as u64;
 
         Ok(Self {
@@ -1004,7 +1095,10 @@ impl fmt::Display for ManifestError {
                 )
             }
             Self::UnknownCriticalField(field) => {
-                write!(f, "unknown critical field: {field} (validation fails closed)")
+                write!(
+                    f,
+                    "unknown critical field: {field} (validation fails closed)"
+                )
             }
             Self::CapabilityPolicyViolation(msg) => {
                 write!(f, "capability policy violation: {msg}")
@@ -1069,7 +1163,7 @@ impl CommitId {
         hasher.update(&manifest_bytes);
 
         // Include commit metadata
-        hasher.update(&metadata.timestamp_nanos.to_be_bytes());
+        hasher.update(metadata.timestamp_nanos.to_be_bytes());
         hasher.update(metadata.author.as_bytes());
         hasher.update(metadata.message.as_bytes());
 
@@ -1130,7 +1224,6 @@ impl GraphCommit {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1373,7 +1466,10 @@ mod tests {
         .unwrap();
 
         assert!(manifest.chunk_plan.is_some());
-        assert_eq!(manifest.chunk_plan.as_ref().unwrap().strategy, ChunkStrategy::ContentDefined);
+        assert_eq!(
+            manifest.chunk_plan.as_ref().unwrap().strategy,
+            ChunkStrategy::ContentDefined
+        );
         assert!(manifest.validate().is_ok());
     }
 
@@ -1409,8 +1505,14 @@ mod tests {
         .unwrap();
 
         assert!(manifest.raptorq_layout.is_some());
-        assert_eq!(manifest.raptorq_layout.as_ref().unwrap().source_symbols, 1000);
-        assert_eq!(manifest.raptorq_layout.as_ref().unwrap().total_symbols, 1200);
+        assert_eq!(
+            manifest.raptorq_layout.as_ref().unwrap().source_symbols,
+            1000
+        );
+        assert_eq!(
+            manifest.raptorq_layout.as_ref().unwrap().total_symbols,
+            1200
+        );
         assert!(manifest.validate().is_ok());
     }
 
@@ -1441,7 +1543,10 @@ mod tests {
         .unwrap();
 
         assert!(manifest.compression_policy.is_some());
-        assert_eq!(manifest.compression_policy.as_ref().unwrap().algorithm, CompressionAlgorithm::Lz4);
+        assert_eq!(
+            manifest.compression_policy.as_ref().unwrap().algorithm,
+            CompressionAlgorithm::Lz4
+        );
         assert!(manifest.validate().is_ok());
     }
 
@@ -1515,7 +1620,15 @@ mod tests {
         .unwrap();
 
         assert!(manifest.capability_policy.is_some());
-        assert_eq!(manifest.capability_policy.as_ref().unwrap().read_capabilities.len(), 2);
+        assert_eq!(
+            manifest
+                .capability_policy
+                .as_ref()
+                .unwrap()
+                .read_capabilities
+                .len(),
+            2
+        );
         assert!(manifest.validate().is_ok());
     }
 
@@ -1545,7 +1658,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(manifest.validate(), Err(ManifestError::InvalidFormat(_))));
+        assert!(matches!(
+            manifest.validate(),
+            Err(ManifestError::InvalidFormat(_))
+        ));
 
         // Content-defined without CDC params
         let bad_chunk_plan2 = ChunkPlan {
@@ -1568,7 +1684,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(manifest2.validate(), Err(ManifestError::InvalidFormat(_))));
+        assert!(matches!(
+            manifest2.validate(),
+            Err(ManifestError::InvalidFormat(_))
+        ));
     }
 
     #[test]
@@ -1597,7 +1716,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(manifest.validate(), Err(ManifestError::InvalidFormat(_))));
+        assert!(matches!(
+            manifest.validate(),
+            Err(ManifestError::InvalidFormat(_))
+        ));
 
         // Invalid overhead ratio
         let bad_layout2 = RaptorQRepairLayout {
@@ -1620,7 +1742,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(manifest2.validate(), Err(ManifestError::InvalidFormat(_))));
+        assert!(matches!(
+            manifest2.validate(),
+            Err(ManifestError::InvalidFormat(_))
+        ));
     }
 
     #[test]

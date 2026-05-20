@@ -3,8 +3,8 @@
 //! This module extends the base Outcome type with ATP-specific error classification,
 //! stable error codes, and idempotency semantics for transfer operations.
 
-use crate::types::outcome::{Outcome, PanicPayload, Severity};
 use crate::types::cancel::CancelReason;
+use crate::types::outcome::{Outcome, PanicPayload, Severity};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -423,10 +423,10 @@ impl RepairError {
     const fn is_retryable(&self) -> bool {
         match self {
             Self::InsufficientSymbols => true, // More symbols may arrive
-            Self::DecodeFailure => true, // May be transient
+            Self::DecodeFailure => true,       // May be transient
             Self::InvalidSourceBlock => false,
             Self::MissingRepairSymbol => true, // Symbol may be retrieved
-            Self::CorruptedSymbol => true, // Symbol may be re-fetched
+            Self::CorruptedSymbol => true,     // Symbol may be re-fetched
             Self::UnsupportedCodec => false,
         }
     }
@@ -959,8 +959,19 @@ impl IdempotencyKey {
 
     /// Create an idempotency key for a relay reservation operation.
     #[must_use]
-    pub fn relay_reservation(relay_id: &str, client_id: &str, bandwidth: u64, duration: u64) -> Self {
-        Self::generate(("relay_reservation", relay_id, client_id, bandwidth, duration))
+    pub fn relay_reservation(
+        relay_id: &str,
+        client_id: &str,
+        bandwidth: u64,
+        duration: u64,
+    ) -> Self {
+        Self::generate((
+            "relay_reservation",
+            relay_id,
+            client_id,
+            bandwidth,
+            duration,
+        ))
     }
 
     /// Create an idempotency key for a resume journal entry.
@@ -1125,7 +1136,8 @@ impl TransferTranscript {
     /// Get transfer duration in nanoseconds.
     #[must_use]
     pub fn duration_nanos(&self) -> Option<u64> {
-        self.end_time_nanos.map(|end| end.saturating_sub(self.start_time_nanos))
+        self.end_time_nanos
+            .map(|end| end.saturating_sub(self.start_time_nanos))
     }
 
     /// Check if transfer is complete.
@@ -1156,7 +1168,9 @@ impl TransferTranscript {
         } else if message.contains("parent") {
             Some(AtpCancelReason::ParentCancel)
         } else if message.contains("resource budget") {
-            Some(AtpCancelReason::ResourceBudgetExhausted(message.to_string()))
+            Some(AtpCancelReason::ResourceBudgetExhausted(
+                message.to_string(),
+            ))
         } else {
             None
         }
@@ -1269,7 +1283,11 @@ impl RetryPolicy {
             jitter_percent: 20,
             retry_on_cancel: true,
             retry_conditions: vec![
-                RetryCondition::ErrorClass(vec!["transport".to_string(), "path".to_string(), "repair".to_string()]),
+                RetryCondition::ErrorClass(vec![
+                    "transport".to_string(),
+                    "path".to_string(),
+                    "repair".to_string(),
+                ]),
                 RetryCondition::AlwaysRetry,
             ],
         }
@@ -1285,9 +1303,7 @@ impl RetryPolicy {
             backoff_multiplier: 3.0,
             jitter_percent: 5,
             retry_on_cancel: false,
-            retry_conditions: vec![
-                RetryCondition::ErrorClass(vec!["transport".to_string()]),
-            ],
+            retry_conditions: vec![RetryCondition::ErrorClass(vec!["transport".to_string()])],
         }
     }
 
@@ -1307,9 +1323,9 @@ impl RetryPolicy {
                     return false;
                 }
 
-                self.retry_conditions.iter().any(|condition| {
-                    condition.matches(error)
-                })
+                self.retry_conditions
+                    .iter()
+                    .any(|condition| condition.matches(error))
             }
         }
     }
@@ -1318,7 +1334,9 @@ impl RetryPolicy {
     #[must_use]
     pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
         let base_delay = self.base_delay_ms as f64;
-        let multiplier = self.backoff_multiplier.powi(attempt.saturating_sub(1) as i32);
+        let multiplier = self
+            .backoff_multiplier
+            .powi(attempt.saturating_sub(1) as i32);
         let delay = base_delay * multiplier;
         let delay = delay.min(self.max_delay_ms as f64) as u64;
 
@@ -1368,9 +1386,15 @@ mod tests {
 
     #[test]
     fn error_codes_are_stable() {
-        assert_eq!(TransportError::ConnectionTimeout.code(), "transport_connection_timeout");
+        assert_eq!(
+            TransportError::ConnectionTimeout.code(),
+            "transport_connection_timeout"
+        );
         assert_eq!(AuthError::GrantExpired.code(), "auth_grant_expired");
-        assert_eq!(RepairError::InsufficientSymbols.code(), "repair_insufficient_symbols");
+        assert_eq!(
+            RepairError::InsufficientSymbols.code(),
+            "repair_insufficient_symbols"
+        );
     }
 
     #[test]
@@ -1393,7 +1417,8 @@ mod tests {
 
     #[test]
     fn atp_outcome_constructors() {
-        let outcome: AtpOutcome<()> = AtpOutcome::transport_error(TransportError::ConnectionTimeout);
+        let outcome: AtpOutcome<()> =
+            AtpOutcome::transport_error(TransportError::ConnectionTimeout);
         assert!(outcome.is_err());
 
         let outcome: AtpOutcome<()> = AtpOutcome::atp_cancelled(AtpCancelReason::Timeout);
@@ -1482,7 +1507,10 @@ mod tests {
         transcript.complete(&error_outcome, 1000);
 
         assert_eq!(transcript.outcome_class, OutcomeClass::Error);
-        assert_eq!(transcript.error_code, Some("transport_connection_timeout".to_string()));
+        assert_eq!(
+            transcript.error_code,
+            Some("transport_connection_timeout".to_string())
+        );
     }
 
     #[test]
@@ -1534,7 +1562,8 @@ mod tests {
         let transport_error = AtpError::Transport(TransportError::ConnectionTimeout);
         let auth_error = AtpError::Auth(AuthError::InvalidSignature);
 
-        let code_condition = RetryCondition::ErrorCode(vec!["transport_connection_timeout".to_string()]);
+        let code_condition =
+            RetryCondition::ErrorCode(vec!["transport_connection_timeout".to_string()]);
         assert!(code_condition.matches(&transport_error));
         assert!(!code_condition.matches(&auth_error));
 
@@ -1564,7 +1593,10 @@ mod tests {
         assert_eq!(OutcomeClass::from_outcome(&error), OutcomeClass::Error);
 
         let cancelled = AtpOutcome::atp_cancelled(AtpCancelReason::Timeout);
-        assert_eq!(OutcomeClass::from_outcome(&cancelled), OutcomeClass::Cancelled);
+        assert_eq!(
+            OutcomeClass::from_outcome(&cancelled),
+            OutcomeClass::Cancelled
+        );
 
         // Test retryable classification
         assert!(OutcomeClass::Error.is_retryable());
@@ -1593,8 +1625,16 @@ mod tests {
 
         // All keys should be unique
         let keys = vec![
-            offer_key, accept_key, chunk_key, repair_key, commit_key,
-            mailbox_key, grant_key, relay_key, journal_key, proof_key
+            offer_key,
+            accept_key,
+            chunk_key,
+            repair_key,
+            commit_key,
+            mailbox_key,
+            grant_key,
+            relay_key,
+            journal_key,
+            proof_key,
         ];
 
         for (i, key1) in keys.iter().enumerate() {

@@ -6,16 +6,25 @@
 //! - Content-addressed objects with manifests and Merkle proofs
 //! - Path discovery, NAT traversal, and relay coordination
 //! - Deterministic replay and structured logging
+//! - High-level SDK APIs for object, tree, stream, and buffer movement
 //!
 //! Key design principles:
 //! - No external QUIC crates - uses asupersync's native QUIC
 //! - Fail-closed error handling with typed protocol errors
 //! - Cancellation-correct with proper obligation tracking
 //! - Platform-agnostic with explicit capability detection
+//! - Cx-first APIs with explicit capability boundaries
 
+pub mod chunk;
+pub mod loss;
 pub mod path;
 pub mod protocol;
+pub mod quic;
 pub mod rendezvous;
+pub mod sdk;
 pub mod stun;
 
+pub use loss::*;
 pub use protocol::*;
+pub use quic::*;
+pub use sdk::*;

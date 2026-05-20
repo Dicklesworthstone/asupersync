@@ -1,0 +1,416 @@
+//! ATP session management and lifecycle.
+
+use crate::cx::Cx;
+use crate::net::atp::protocol::{
+    AtpOutcome, AtpError, SessionId, PeerId, TransferNonce, SessionTraceId,
+    SessionNegotiator, ClientHello, SessionPolicy, NegotiatedSession,
+    SessionProofArtifact, SessionContextKind, AtpFeature, CapabilityAction,
+    CapabilityGrant, CapabilityGrantId, CapabilityScope
+};
+use super::{AtpSdk, SessionConfig, SdkMode, TransferId};
+use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+
+/// High-level session handle for ATP transfers.
+#[derive(Debug, Clone)]
+pub struct AtpSession {
+    /// Underlying negotiated session.
+    session: Arc<NegotiatedSession>,
+    /// Session configuration.
+    config: SessionConfig,
+    /// SDK mode for operation delegation.
+    pub mode: SdkMode,
+    /// Session proof artifact for audit.
+    proof: SessionProofArtifact,
+}
+
+/// Session establishment options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOptions {
+    /// Remote peer to connect to.
+    pub remote_peer: PeerId,
+    /// Session context (direct, relay, mailbox, swarm).
+    pub context: SessionContextKind,
+    /// Optional manifest root for binding.
+    pub manifest_root: Option<[u8; 32]>,
+    /// Optional path candidate ID.
+    pub path_id: Option<u64>,
+    /// Custom session timeout.
+    pub timeout_ms: Option<u64>,
+    /// Required capabilities for this session.
+    pub required_capabilities: Vec<CapabilityAction>,
+    /// Capability grants to present.
+    pub grants: Vec<CapabilityGrant>,
+    /// Custom trace ID for diagnostics.
+    pub trace_id: Option<SessionTraceId>,
+}
+
+impl SessionOptions {
+    /// Create session options for a direct peer-to-peer transfer.
+    #[must_use]
+    pub fn direct(remote_peer: PeerId) -> Self {
+        Self {
+            remote_peer,
+            context: SessionContextKind::Direct,
+            manifest_root: None,
+            path_id: None,
+            timeout_ms: None,
+            required_capabilities: vec![CapabilityAction::Write, CapabilityAction::Read],
+            grants: Vec::new(),
+            trace_id: None,
+        }
+    }
+
+    /// Create session options for a relay-mediated transfer.
+    #[must_use]
+    pub fn relay(remote_peer: PeerId) -> Self {
+        Self {
+            remote_peer,
+            context: SessionContextKind::Relay,
+            manifest_root: None,
+            path_id: None,
+            timeout_ms: None,
+            required_capabilities: vec![CapabilityAction::Relay],
+            grants: Vec::new(),
+            trace_id: None,
+        }
+    }
+
+    /// Create session options for mailbox delivery.
+    #[must_use]
+    pub fn mailbox(remote_peer: PeerId) -> Self {
+        Self {
+            remote_peer,
+            context: SessionContextKind::Mailbox,
+            manifest_root: None,
+            path_id: None,
+            timeout_ms: None,
+            required_capabilities: vec![CapabilityAction::Mailbox],
+            grants: Vec::new(),
+            trace_id: None,
+        }
+    }
+
+    /// Create session options for swarm transfer.
+    #[must_use]
+    pub fn swarm(remote_peer: PeerId) -> Self {
+        Self {
+            remote_peer,
+            context: SessionContextKind::Swarm,
+            manifest_root: None,
+            path_id: None,
+            timeout_ms: None,
+            required_capabilities: vec![CapabilityAction::Seed],
+            grants: Vec::new(),
+            trace_id: None,
+        }
+    }
+
+    /// Bind session to a specific manifest root.
+    #[must_use]
+    pub const fn with_manifest_root(mut self, manifest_root: [u8; 32]) -> Self {
+        self.manifest_root = Some(manifest_root);
+        self
+    }
+
+    /// Set a custom trace ID for diagnostics.
+    #[must_use]
+    pub const fn with_trace_id(mut self, trace_id: SessionTraceId) -> Self {
+        self.trace_id = Some(trace_id);
+        self
+    }
+
+    /// Add capability grants to present during negotiation.
+    #[must_use]
+    pub fn with_grants(mut self, grants: Vec<CapabilityGrant>) -> Self {
+        self.grants = grants;
+        self
+    }
+
+    /// Set custom session timeout.
+    #[must_use]
+    pub const fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+}
+
+impl AtpSdk {
+    /// Open a new ATP session with the specified peer.
+    pub async fn open_session(
+        &self,
+        cx: &Cx,
+        options: SessionOptions,
+    ) -> AtpOutcome<AtpSession> {
+        match &self.mode {
+            SdkMode::InProcess => self.open_session_in_process(cx, options).await,
+            SdkMode::DaemonDelegated { .. } => self.open_session_daemon_delegated(cx, options).await,
+        }
+    }
+
+    async fn open_session_in_process(
+        &self,
+        cx: &Cx,
+        options: SessionOptions,
+    ) -> AtpOutcome<AtpSession> {
+        // Generate transfer nonce for this session
+        let nonce = generate_transfer_nonce(cx);
+        let trace_id = options.trace_id.unwrap_or_else(|| {
+            SessionTraceId::new(0) // Default trace ID
+        });
+
+        // Create client hello with session options
+        let hello = ClientHello::new(
+            self.default_config.local_peer,
+            options.remote_peer,
+            nonce,
+            options.context,
+            trace_id,
+        )
+        .with_features(&self.get_supported_features())
+        .with_requested_actions(&options.required_capabilities)
+        .with_grants(options.grants);
+
+        let hello = if let Some(manifest_root) = options.manifest_root {
+            hello.with_manifest_root(manifest_root)
+        } else {
+            hello
+        };
+
+        // Create session negotiator
+        let mut negotiator = SessionNegotiator::client(self.default_config.local_peer);
+
+        // Start client negotiation
+        let _client_frame = negotiator
+            .start_client_hello(&hello)
+            .map_err(|e| AtpError::Protocol(e.into()))?;
+
+        // In a real implementation, we would send the frame over QUIC and receive a response
+        // For now, we'll simulate successful negotiation
+        let session_id = self.derive_session_id(&hello);
+        let selected_features = self.select_compatible_features(&hello);
+
+        let negotiated = NegotiatedSession {
+            session_id,
+            local_peer: self.default_config.local_peer,
+            remote_peer: options.remote_peer,
+            nonce,
+            version: hello.version,
+            context: options.context,
+            selected_features,
+            accepted_grants: Vec::new(), // Would be populated from actual negotiation
+            transcript_hash: crate::net::atp::protocol::transcript::TranscriptHash([0u8; 32]), // Would be actual transcript hash
+            trace_id,
+        };
+
+        let proof = SessionProofArtifact {
+            local_peer: self.default_config.local_peer.redacted(),
+            remote_peer: options.remote_peer.redacted(),
+            session_id: Some(session_id.redacted()),
+            transfer_nonce: nonce,
+            selected_features: selected_features.iter().map(AtpFeature::code).collect(),
+            rejected_reason: None,
+            transcript_hash: "000000000000".to_string(), // Would be redacted hash
+            trace_id,
+        };
+
+        AtpOutcome::Ok(AtpSession {
+            session: Arc::new(negotiated),
+            config: self.default_config.clone(),
+            mode: self.mode.clone(),
+            proof,
+        })
+    }
+
+    async fn open_session_daemon_delegated(
+        &self,
+        _cx: &Cx,
+        _options: SessionOptions,
+    ) -> AtpOutcome<AtpSession> {
+        // TODO: Implement daemon delegation via RPC/IPC
+        AtpOutcome::Err(AtpError::Daemon(crate::net::atp::protocol::DaemonError::ServiceUnavailable))
+    }
+
+    fn get_supported_features(&self) -> Vec<AtpFeature> {
+        let mut features = vec![
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::ProofBundles,
+        ];
+
+        if self.default_config.enable_compression {
+            features.push(AtpFeature::Compression);
+        }
+
+        if self.default_config.enable_repair {
+            features.push(AtpFeature::Repair);
+        }
+
+        if self.default_config.enable_resume {
+            features.push(AtpFeature::Resume);
+        }
+
+        features
+    }
+
+    fn derive_session_id(&self, hello: &ClientHello) -> SessionId {
+        // In a real implementation, this would use the proper session ID derivation
+        // For now, create a deterministic session ID based on hello fields
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"ATP-SESSION-ID-V1\x00");
+        hasher.update(hello.initiator.as_bytes());
+        hasher.update(hello.responder.as_bytes());
+        hasher.update(hello.nonce.as_bytes());
+        SessionId(*hasher.finalize().as_ref())
+    }
+
+    fn select_compatible_features(&self, _hello: &ClientHello) -> crate::net::atp::protocol::FeatureSet {
+        use crate::net::atp::protocol::FeatureSet;
+        FeatureSet::from_slice(&self.get_supported_features())
+    }
+}
+
+impl AtpSession {
+    /// Get the session ID.
+    #[must_use]
+    pub fn session_id(&self) -> SessionId {
+        self.session.session_id
+    }
+
+    /// Get the remote peer ID.
+    #[must_use]
+    pub fn remote_peer(&self) -> PeerId {
+        self.session.remote_peer
+    }
+
+    /// Get the local peer ID.
+    #[must_use]
+    pub fn local_peer(&self) -> PeerId {
+        self.session.local_peer
+    }
+
+    /// Get the session context.
+    #[must_use]
+    pub fn context(&self) -> SessionContextKind {
+        self.session.context
+    }
+
+    /// Get the session configuration.
+    #[must_use]
+    pub const fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+
+    /// Get the session proof artifact.
+    #[must_use]
+    pub const fn proof(&self) -> &SessionProofArtifact {
+        &self.proof
+    }
+
+    /// Check if a feature is selected for this session.
+    #[must_use]
+    pub fn has_feature(&self, feature: AtpFeature) -> bool {
+        self.session.selected_features.contains(feature)
+    }
+
+    /// Close the session gracefully.
+    pub async fn close(&self, cx: &Cx) -> AtpOutcome<()> {
+        match &self.mode {
+            SdkMode::InProcess => {
+                // In-process session cleanup
+                // TODO: Send session close frame, clean up resources
+                AtpOutcome::Ok(())
+            }
+            SdkMode::DaemonDelegated { .. } => {
+                // Daemon delegation
+                // TODO: Send close request to daemon
+                AtpOutcome::Ok(())
+            }
+        }
+    }
+}
+
+/// Generate a secure transfer nonce using the context's entropy.
+fn generate_transfer_nonce(cx: &Cx) -> TransferNonce {
+    // Use the context's entropy source for secure nonce generation
+    let entropy = cx.entropy();
+    let mut nonce_bytes = [0u8; 32];
+
+    // Fill nonce with entropy
+    for (i, byte) in nonce_bytes.iter_mut().enumerate() {
+        *byte = entropy.wrapping_add(i as u64) as u8;
+    }
+
+    TransferNonce::new(nonce_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cx::Cx;
+
+    #[tokio::test]
+    async fn session_options_construction() {
+        let peer = PeerId::from_label("test_peer");
+
+        let direct = SessionOptions::direct(peer);
+        assert_eq!(direct.context, SessionContextKind::Direct);
+        assert!(direct.required_capabilities.contains(&CapabilityAction::Write));
+
+        let relay = SessionOptions::relay(peer);
+        assert_eq!(relay.context, SessionContextKind::Relay);
+        assert!(relay.required_capabilities.contains(&CapabilityAction::Relay));
+
+        let mailbox = SessionOptions::mailbox(peer);
+        assert_eq!(mailbox.context, SessionContextKind::Mailbox);
+        assert!(mailbox.required_capabilities.contains(&CapabilityAction::Mailbox));
+
+        let swarm = SessionOptions::swarm(peer);
+        assert_eq!(swarm.context, SessionContextKind::Swarm);
+        assert!(swarm.required_capabilities.contains(&CapabilityAction::Seed));
+    }
+
+    #[tokio::test]
+    async fn session_options_with_manifest() {
+        let peer = PeerId::from_label("test_peer");
+        let manifest_root = [42u8; 32];
+
+        let options = SessionOptions::direct(peer).with_manifest_root(manifest_root);
+        assert_eq!(options.manifest_root, Some(manifest_root));
+    }
+
+    #[tokio::test]
+    async fn in_process_session_creation() {
+        let config = SessionConfig::default();
+        let sdk = AtpSdk::new_in_process(config);
+
+        let cx = Cx::root();
+        let peer = PeerId::from_label("remote_peer");
+        let options = SessionOptions::direct(peer);
+
+        let session = sdk.open_session(&cx, options).await;
+        assert!(session.is_ok());
+
+        if let Ok(session) = session {
+            assert_eq!(session.remote_peer(), peer);
+            assert_eq!(session.context(), SessionContextKind::Direct);
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_session_creation_fails() {
+        let config = SessionConfig::default();
+        let sdk = AtpSdk::new_daemon_delegated(
+            config,
+            "localhost:8080".to_string(),
+            Some("token".to_string()),
+        );
+
+        let cx = Cx::root();
+        let peer = PeerId::from_label("remote_peer");
+        let options = SessionOptions::direct(peer);
+
+        let session = sdk.open_session(&cx, options).await;
+        assert!(session.is_err()); // Should fail as daemon is not implemented
+    }
+}

@@ -2,6 +2,7 @@
 
 pub mod codec;
 pub mod frames;
+pub mod outcome;
 pub mod packet_assembly;
 pub mod quic_frames;
 pub mod session;
@@ -11,6 +12,7 @@ pub mod varint;
 
 pub use codec::*;
 pub use frames::*;
+pub use outcome::*;
 pub use packet_assembly::*;
 pub use quic_frames::*;
 pub use session::*;
