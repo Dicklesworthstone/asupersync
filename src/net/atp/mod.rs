@@ -26,7 +26,13 @@ pub mod protocol;
 // pub mod sdk;
 // pub mod stun;
 
+// Re-export key types for H3 adapter
+pub use protocol::{AtpFrame, FrameType};
+
 // pub use loss::*;
 pub use protocol::*;
 // pub use quic::*;
 // pub use sdk::*;
+
+// H3 adapter for WebTransport support
+pub mod h3;
