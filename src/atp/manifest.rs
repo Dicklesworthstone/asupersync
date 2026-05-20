@@ -1463,7 +1463,7 @@ impl Manifest {
     /// Validate verification boundary specifications.
     fn validate_verification_boundary(
         transform_order: &Option<TransformOrder>,
-        proof_policy: &TransformProofPolicy,
+        _proof_policy: &TransformProofPolicy,
     ) -> Result<(), ManifestError> {
         if let Some(order) = transform_order {
             let boundary = &order.verification_boundary;
@@ -1515,7 +1515,7 @@ impl Manifest {
             }
 
             // Check compression ratio bounds
-            if let Some(max_ratio) = proof_policy.max_compression_ratio {
+            if let Some(_max_ratio) = proof_policy.max_compression_ratio {
                 // We'd need compression metadata to validate actual ratio
                 // This is a policy check that would be enforced during compression
             }
