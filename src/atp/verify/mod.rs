@@ -343,7 +343,11 @@ impl AtpBundleVerifier {
             VerificationStatus::Failed
         } else if checks.iter().any(|c| c.status.is_failure()) {
             VerificationStatus::Failed
-        } else if !warnings.is_empty() || checks.iter().any(|c| matches!(c.status, VerificationStatus::PassedWithWarnings)) {
+        } else if !warnings.is_empty()
+            || checks
+                .iter()
+                .any(|c| matches!(c.status, VerificationStatus::PassedWithWarnings))
+        {
             VerificationStatus::PassedWithWarnings
         } else {
             VerificationStatus::Passed
@@ -367,13 +371,18 @@ impl AtpBundleVerifier {
         }
     }
 
-    fn verify_bundle_format(&self, bundle: &AtpProofBundle) -> Result<VerificationCheck, VerificationError> {
+    fn verify_bundle_format(
+        &self,
+        bundle: &AtpProofBundle,
+    ) -> Result<VerificationCheck, VerificationError> {
         let start = SystemTime::now();
 
         // Validate the bundle itself
-        bundle.validate().map_err(|e| VerificationError::InvalidManifest {
-            reason: format!("Bundle validation failed: {e}"),
-        })?;
+        bundle
+            .validate()
+            .map_err(|e| VerificationError::InvalidManifest {
+                reason: format!("Bundle validation failed: {e}"),
+            })?;
 
         let duration = start.elapsed().unwrap_or_default().as_micros() as u64;
 
@@ -437,7 +446,8 @@ impl AtpBundleVerifier {
         if chunk_coverage < self.policy.min_chunk_coverage {
             warnings.push(VerificationWarning {
                 code: "low_chunk_coverage".to_string(),
-                message: format!("Chunk coverage {:.2}% below required {:.2}%",
+                message: format!(
+                    "Chunk coverage {:.2}% below required {:.2}%",
                     chunk_coverage * 100.0,
                     self.policy.min_chunk_coverage * 100.0
                 ),
@@ -451,11 +461,12 @@ impl AtpBundleVerifier {
         let verification_stages_total = if self.policy.require_all_stages { 8 } else { 2 }; // Minimum chunk + manifest
 
         // Verify repair integrity if present
-        let repair_integrity = if bundle.raptorq_metadata.is_some() || !bundle.repair_groups.is_empty() {
-            Some(self.verify_repair_integrity(bundle, checks))
-        } else {
-            None
-        };
+        let repair_integrity =
+            if bundle.raptorq_metadata.is_some() || !bundle.repair_groups.is_empty() {
+                Some(self.verify_repair_integrity(bundle, checks))
+            } else {
+                None
+            };
 
         ContentIntegrityReport {
             manifest_verified,
@@ -473,18 +484,29 @@ impl AtpBundleVerifier {
     ) -> RepairIntegrityReport {
         let raptorq_verified = if let Some(ref metadata) = bundle.raptorq_metadata {
             // Validate RaptorQ metadata consistency
-            let valid = metadata.decode_success_rate >= 0.0 && metadata.decode_success_rate <= 1.0
+            let valid = metadata.decode_success_rate >= 0.0
+                && metadata.decode_success_rate <= 1.0
                 && metadata.average_overhead_ratio >= 0.0;
 
             checks.push(VerificationCheck {
                 check_name: "raptorq_metadata".to_string(),
                 category: VerificationCategory::ContentIntegrity,
-                status: if valid { VerificationStatus::Passed } else { VerificationStatus::Failed },
+                status: if valid {
+                    VerificationStatus::Passed
+                } else {
+                    VerificationStatus::Failed
+                },
                 description: "RaptorQ metadata validation".to_string(),
                 duration_micros: 0,
                 metadata: BTreeMap::from([
-                    ("success_rate".to_string(), metadata.decode_success_rate.to_string()),
-                    ("overhead_ratio".to_string(), metadata.average_overhead_ratio.to_string()),
+                    (
+                        "success_rate".to_string(),
+                        metadata.decode_success_rate.to_string(),
+                    ),
+                    (
+                        "overhead_ratio".to_string(),
+                        metadata.average_overhead_ratio.to_string(),
+                    ),
                 ]),
             });
 
@@ -493,29 +515,40 @@ impl AtpBundleVerifier {
             false
         };
 
-        let repair_groups_verified = !bundle.repair_groups.is_empty() && bundle.repair_groups.iter().all(|group| {
-            !group.covered_objects.is_empty() && group.redundancy_factor >= 1.0
-        });
+        let repair_groups_verified = !bundle.repair_groups.is_empty()
+            && bundle
+                .repair_groups
+                .iter()
+                .all(|group| !group.covered_objects.is_empty() && group.redundancy_factor >= 1.0);
 
         if !bundle.repair_groups.is_empty() {
             checks.push(VerificationCheck {
                 check_name: "repair_groups".to_string(),
                 category: VerificationCategory::ContentIntegrity,
-                status: if repair_groups_verified { VerificationStatus::Passed } else { VerificationStatus::Failed },
+                status: if repair_groups_verified {
+                    VerificationStatus::Passed
+                } else {
+                    VerificationStatus::Failed
+                },
                 description: "Repair groups validation".to_string(),
                 duration_micros: 0,
-                metadata: BTreeMap::from([
-                    ("group_count".to_string(), bundle.repair_groups.len().to_string()),
-                ]),
+                metadata: BTreeMap::from([(
+                    "group_count".to_string(),
+                    bundle.repair_groups.len().to_string(),
+                )]),
             });
         }
 
-        let overhead_efficiency = bundle.raptorq_metadata.as_ref()
+        let overhead_efficiency = bundle
+            .raptorq_metadata
+            .as_ref()
             .map_or(1.0, |m| m.average_overhead_ratio);
 
-        let repair_justification_verified = bundle.repair_groups.iter()
-            .any(|g| g.repair_activated) == bundle.raptorq_metadata.as_ref()
-            .map_or(false, |m| m.repair_symbols_used > 0);
+        let repair_justification_verified = bundle.repair_groups.iter().any(|g| g.repair_activated)
+            == bundle
+                .raptorq_metadata
+                .as_ref()
+                .map_or(false, |m| m.repair_symbols_used > 0);
 
         RepairIntegrityReport {
             raptorq_verified,
@@ -575,7 +608,11 @@ impl AtpBundleVerifier {
         checks.push(VerificationCheck {
             check_name: "proof_strength".to_string(),
             category: VerificationCategory::PolicyCompliance,
-            status: if requirements_met { VerificationStatus::Passed } else { VerificationStatus::Failed },
+            status: if requirements_met {
+                VerificationStatus::Passed
+            } else {
+                VerificationStatus::Failed
+            },
             description: "Proof strength validation".to_string(),
             duration_micros: 0,
             metadata: BTreeMap::from([
@@ -606,48 +643,69 @@ impl AtpBundleVerifier {
         // Check repair evidence policy
         if bundle.metadata.require_repair_evidence {
             let has_repair = bundle.raptorq_metadata.is_some() || !bundle.repair_groups.is_empty();
-            let status = if has_repair { VerificationStatus::Passed } else { VerificationStatus::Failed };
+            let status = if has_repair {
+                VerificationStatus::Passed
+            } else {
+                VerificationStatus::Failed
+            };
 
             if !has_repair {
                 violations.push(PolicyViolation {
                     policy_name: "repair_evidence_required".to_string(),
                     severity: ViolationSeverity::Error,
                     description: "Policy requires repair evidence but none found".to_string(),
-                    remediation: Some("Ensure RaptorQ metadata or repair groups are included".to_string()),
+                    remediation: Some(
+                        "Ensure RaptorQ metadata or repair groups are included".to_string(),
+                    ),
                 });
             }
 
-            policy_checks.insert("repair_evidence".to_string(), PolicyCheckResult {
-                policy_name: "repair_evidence_required".to_string(),
-                status,
-                description: "Verify repair evidence requirement".to_string(),
-                details: BTreeMap::from([("required".to_string(), "true".to_string())]),
-            });
+            policy_checks.insert(
+                "repair_evidence".to_string(),
+                PolicyCheckResult {
+                    policy_name: "repair_evidence_required".to_string(),
+                    status,
+                    description: "Verify repair evidence requirement".to_string(),
+                    details: BTreeMap::from([("required".to_string(), "true".to_string())]),
+                },
+            );
         }
 
         // Check mailbox evidence policy
         if bundle.metadata.require_mailbox_evidence {
-            let has_mailbox = bundle.path_summary.relay_used || bundle.extensions.contains_key("mailbox_evidence");
-            let status = if has_mailbox { VerificationStatus::Passed } else { VerificationStatus::Failed };
+            let has_mailbox = bundle.path_summary.relay_used
+                || bundle.extensions.contains_key("mailbox_evidence");
+            let status = if has_mailbox {
+                VerificationStatus::Passed
+            } else {
+                VerificationStatus::Failed
+            };
 
             if !has_mailbox {
                 violations.push(PolicyViolation {
                     policy_name: "mailbox_evidence_required".to_string(),
                     severity: ViolationSeverity::Warning,
                     description: "Policy requires mailbox evidence but none found".to_string(),
-                    remediation: Some("Include relay usage evidence or mailbox artifacts".to_string()),
+                    remediation: Some(
+                        "Include relay usage evidence or mailbox artifacts".to_string(),
+                    ),
                 });
             }
 
-            policy_checks.insert("mailbox_evidence".to_string(), PolicyCheckResult {
-                policy_name: "mailbox_evidence_required".to_string(),
-                status,
-                description: "Verify mailbox evidence requirement".to_string(),
-                details: BTreeMap::from([("required".to_string(), "true".to_string())]),
-            });
+            policy_checks.insert(
+                "mailbox_evidence".to_string(),
+                PolicyCheckResult {
+                    policy_name: "mailbox_evidence_required".to_string(),
+                    status,
+                    description: "Verify mailbox evidence requirement".to_string(),
+                    details: BTreeMap::from([("required".to_string(), "true".to_string())]),
+                },
+            );
         }
 
-        let compliant = violations.iter().all(|v| v.severity < ViolationSeverity::Error);
+        let compliant = violations
+            .iter()
+            .all(|v| v.severity < ViolationSeverity::Error);
 
         // Add policy compliance warnings
         for violation in &violations {
@@ -656,9 +714,10 @@ impl AtpBundleVerifier {
                     code: violation.policy_name.clone(),
                     message: violation.description.clone(),
                     category: VerificationCategory::PolicyCompliance,
-                    context: BTreeMap::from([
-                        ("severity".to_string(), format!("{:?}", violation.severity)),
-                    ]),
+                    context: BTreeMap::from([(
+                        "severity".to_string(),
+                        format!("{:?}", violation.severity),
+                    )]),
                 });
             }
         }
@@ -666,7 +725,11 @@ impl AtpBundleVerifier {
         checks.push(VerificationCheck {
             check_name: "policy_compliance".to_string(),
             category: VerificationCategory::PolicyCompliance,
-            status: if compliant { VerificationStatus::Passed } else { VerificationStatus::Failed },
+            status: if compliant {
+                VerificationStatus::Passed
+            } else {
+                VerificationStatus::Failed
+            },
             description: "Policy compliance validation".to_string(),
             duration_micros: 0,
             metadata: BTreeMap::from([
@@ -714,7 +777,8 @@ impl AtpBundleVerifier {
         if !replay_supported {
             warnings.push(VerificationWarning {
                 code: "no_replay_capability".to_string(),
-                message: "No replay pointers available for deterministic reconstruction".to_string(),
+                message: "No replay pointers available for deterministic reconstruction"
+                    .to_string(),
                 category: VerificationCategory::ReplayCapability,
                 context: BTreeMap::new(),
             });
@@ -723,12 +787,22 @@ impl AtpBundleVerifier {
         checks.push(VerificationCheck {
             check_name: "replay_capability".to_string(),
             category: VerificationCategory::ReplayCapability,
-            status: if replay_supported { VerificationStatus::Passed } else { VerificationStatus::PassedWithWarnings },
+            status: if replay_supported {
+                VerificationStatus::Passed
+            } else {
+                VerificationStatus::PassedWithWarnings
+            },
             description: "Replay capability assessment".to_string(),
             duration_micros: 0,
             metadata: BTreeMap::from([
-                ("pointers_count".to_string(), replay_pointers_count.to_string()),
-                ("event_coverage".to_string(), format!("{:.2}", event_coverage)),
+                (
+                    "pointers_count".to_string(),
+                    replay_pointers_count.to_string(),
+                ),
+                (
+                    "event_coverage".to_string(),
+                    format!("{:.2}", event_coverage),
+                ),
             ]),
         });
 
@@ -748,7 +822,9 @@ impl AtpBundleVerifier {
             completion_ratio: bundle.chunk_bitmap.completion_ratio(),
             bytes_transferred: bundle.journal.size_bytes, // Approximate
             objects_transferred: bundle.object_roots.len(),
-            duration_millis: bundle.journal.finalized_at_micros
+            duration_millis: bundle
+                .journal
+                .finalized_at_micros
                 .and_then(|end| end.checked_sub(bundle.journal.created_at_micros))
                 .map(|duration_micros| duration_micros / 1000),
             primary_protocol: bundle.path_summary.primary_protocol.clone(),
@@ -776,11 +852,11 @@ impl fmt::Display for VerificationStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::proof::{
-        AtpProofBundle, AtpProofBundleBuilder, AtpProofBundleMetadata,
-        ChunkBitmap, PeerIdentityInfo, ProofStrength, TransferJournal, TransferPathSummary
-    };
     use crate::atp::object::{ContentId, Object};
+    use crate::atp::proof::{
+        AtpProofBundle, AtpProofBundleBuilder, AtpProofBundleMetadata, ChunkBitmap,
+        PeerIdentityInfo, ProofStrength, TransferJournal, TransferPathSummary,
+    };
     use crate::atp::verifier::{VerificationEvidence, VerificationStage};
 
     fn create_test_bundle() -> AtpProofBundle {

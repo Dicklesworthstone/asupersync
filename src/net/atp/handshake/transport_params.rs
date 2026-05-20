@@ -3,8 +3,8 @@
 //! Implements QUIC transport parameter encoding, decoding, and validation
 //! as specified in RFC 9000.
 
-use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
-use crate::net::atp::protocol::varint::{VarInt, VarIntError};
+use crate::bytes::{Buf, Bytes, BytesMut};
+use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::handshake::state_machine::HandshakeError;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;

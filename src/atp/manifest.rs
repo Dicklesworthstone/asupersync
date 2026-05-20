@@ -488,7 +488,9 @@ impl MerkleRoot {
             hasher.update([order.hash_point as u8]);
             hasher.update([order.verification_boundary.relay_verifiable as u8]);
             hasher.update([order.verification_boundary.mailbox_verifiable as u8]);
-            hasher.update([u8::from(order.verification_boundary.e2e_verification_required)]);
+            hasher.update([u8::from(
+                order.verification_boundary.e2e_verification_required,
+            )]);
             hasher.update([order.verification_boundary.privacy_level as u8]);
         }
 
@@ -525,16 +527,45 @@ impl MerkleRoot {
             hasher.update(repair_group.chunk_range.end_offset.to_be_bytes());
 
             // Hash repair layout
-            hasher.update(repair_group.repair_layout.total_repair_symbols.to_be_bytes());
+            hasher.update(
+                repair_group
+                    .repair_layout
+                    .total_repair_symbols
+                    .to_be_bytes(),
+            );
             hasher.update(deterministic_f32_be_bytes(
                 repair_group.repair_layout.overhead_ratio,
             ));
-            hasher.update(repair_group.repair_layout.systematic_config.systematic_rows.to_be_bytes());
-            hasher.update(repair_group.repair_layout.systematic_config.sub_symbols.to_be_bytes());
-            hasher.update(repair_group.repair_layout.systematic_config.alignment.to_be_bytes());
+            hasher.update(
+                repair_group
+                    .repair_layout
+                    .systematic_config
+                    .systematic_rows
+                    .to_be_bytes(),
+            );
+            hasher.update(
+                repair_group
+                    .repair_layout
+                    .systematic_config
+                    .sub_symbols
+                    .to_be_bytes(),
+            );
+            hasher.update(
+                repair_group
+                    .repair_layout
+                    .systematic_config
+                    .alignment
+                    .to_be_bytes(),
+            );
 
             // Hash interleaving pattern
-            hasher.update(repair_group.repair_layout.interleaving.block_size.to_be_bytes());
+            hasher.update(
+                repair_group
+                    .repair_layout
+                    .interleaving
+                    .block_size
+                    .to_be_bytes(),
+            );
             hasher.update(repair_group.repair_layout.interleaving.depth.to_be_bytes());
             match repair_group.repair_layout.interleaving.pattern_type {
                 InterleavingType::None => hasher.update([0]),
@@ -1140,10 +1171,21 @@ impl Manifest {
                     .map(|edge| (edge.name.clone(), edge.child_id.clone()))
                     .collect(),
                 content_hash,
-                chunk_boundaries: Self::compute_chunk_boundaries(&chunk_plan, object, &content_hash),
-                raptorq_symbols: Self::compute_raptorq_symbols(&raptorq_layout, object, &content_hash),
-                compression_metadata: Self::compute_compression_metadata(&compression_policy, object),
-                encryption_metadata: Self::compute_encryption_metadata(&encryption_policy, object)
+                chunk_boundaries: Self::compute_chunk_boundaries(
+                    &chunk_plan,
+                    object,
+                    &content_hash,
+                ),
+                raptorq_symbols: Self::compute_raptorq_symbols(
+                    &raptorq_layout,
+                    object,
+                    &content_hash,
+                ),
+                compression_metadata: Self::compute_compression_metadata(
+                    &compression_policy,
+                    object,
+                ),
+                encryption_metadata: Self::compute_encryption_metadata(&encryption_policy, object),
             };
             manifest_objects.insert(id.clone(), manifest_obj);
         }
@@ -1318,10 +1360,15 @@ impl Manifest {
             // Validate transform order if required
             if proof_policy.enforce_transform_order {
                 if let Some(order) = &self.transform_order {
-                    Self::validate_transform_order_consistency(order, &self.compression_policy, &self.encryption_policy)?;
+                    Self::validate_transform_order_consistency(
+                        order,
+                        &self.compression_policy,
+                        &self.encryption_policy,
+                    )?;
                 } else {
                     return Err(ManifestError::TransformPolicyViolation(
-                        "transform order enforcement requires transform_order specification".to_string(),
+                        "transform order enforcement requires transform_order specification"
+                            .to_string(),
                     ));
                 }
             }
@@ -1355,10 +1402,16 @@ impl Manifest {
         compression_policy: &Option<CompressionPolicy>,
         encryption_policy: &Option<EncryptionPolicy>,
     ) -> Result<(), ManifestError> {
-        let has_compression = compression_policy.is_some() &&
-            !matches!(compression_policy.as_ref().unwrap().algorithm, CompressionAlgorithm::None);
-        let has_encryption = encryption_policy.is_some() &&
-            !matches!(encryption_policy.as_ref().unwrap().algorithm, EncryptionAlgorithm::None);
+        let has_compression = compression_policy.is_some()
+            && !matches!(
+                compression_policy.as_ref().unwrap().algorithm,
+                CompressionAlgorithm::None
+            );
+        let has_encryption = encryption_policy.is_some()
+            && !matches!(
+                encryption_policy.as_ref().unwrap().algorithm,
+                EncryptionAlgorithm::None
+            );
 
         // Check compression transform consistency
         if has_compression && !order.transforms.contains(&TransformType::Compression) {
@@ -1388,8 +1441,14 @@ impl Manifest {
 
         // Validate standard transform ordering (compression before encryption)
         if let (Some(comp_pos), Some(enc_pos)) = (
-            order.transforms.iter().position(|&t| t == TransformType::Compression),
-            order.transforms.iter().position(|&t| t == TransformType::Encryption),
+            order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::Compression),
+            order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::Encryption),
         ) {
             if comp_pos >= enc_pos {
                 return Err(ManifestError::TransformOrderViolation(
@@ -1410,25 +1469,28 @@ impl Manifest {
             let boundary = &order.verification_boundary;
 
             // Check for ambiguous verification modes
-            if boundary.relay_verifiable == VerificationLevel::ContentHash &&
-               order.transforms.contains(&TransformType::Encryption) &&
-               order.hash_point == HashPoint::Ciphertext {
+            if boundary.relay_verifiable == VerificationLevel::ContentHash
+                && order.transforms.contains(&TransformType::Encryption)
+                && order.hash_point == HashPoint::Ciphertext
+            {
                 return Err(ManifestError::AmbiguousVerificationMode(
                     "relay cannot verify content hash of encrypted content".to_string(),
                 ));
             }
 
             // Validate privacy protection consistency
-            if boundary.privacy_level == PrivacyLevel::Public &&
-               order.transforms.contains(&TransformType::Encryption) {
+            if boundary.privacy_level == PrivacyLevel::Public
+                && order.transforms.contains(&TransformType::Encryption)
+            {
                 return Err(ManifestError::PrivacyPolicyViolation(
                     "public privacy level inconsistent with encryption".to_string(),
                 ));
             }
 
             // Check for privacy downgrade protection
-            if boundary.relay_verifiable == VerificationLevel::FullVerification &&
-               boundary.privacy_level != PrivacyLevel::Public {
+            if boundary.relay_verifiable == VerificationLevel::FullVerification
+                && boundary.privacy_level != PrivacyLevel::Public
+            {
                 return Err(ManifestError::PrivacyPolicyViolation(
                     "full relay verification requires public privacy level".to_string(),
                 ));
@@ -1469,9 +1531,10 @@ impl Manifest {
     ) -> Result<(), ManifestError> {
         if let Some(enc) = encryption_policy {
             // Check that encryption algorithm is allowed in domains
-            let allowed = proof_policy.encryption_domains.iter().any(|domain| {
-                domain.allowed_kdfs.contains(&enc.key_derivation.kdf)
-            });
+            let allowed = proof_policy
+                .encryption_domains
+                .iter()
+                .any(|domain| domain.allowed_kdfs.contains(&enc.key_derivation.kdf));
 
             if !proof_policy.encryption_domains.is_empty() && !allowed {
                 return Err(ManifestError::EncryptionDomainViolation(
@@ -1488,8 +1551,9 @@ impl Manifest {
         transform_order: &Option<TransformOrder>,
     ) -> Result<(), ManifestError> {
         if let Some(order) = transform_order {
-            if order.hash_point == HashPoint::Ciphertext &&
-               order.transforms.contains(&TransformType::Encryption) {
+            if order.hash_point == HashPoint::Ciphertext
+                && order.transforms.contains(&TransformType::Encryption)
+            {
                 return Err(ManifestError::PlaintextHashUnavailable(
                     "plaintext hash required but only ciphertext hash computed".to_string(),
                 ));
@@ -1503,8 +1567,14 @@ impl Manifest {
     fn validate_transform_order_semantics(order: &TransformOrder) -> Result<(), ManifestError> {
         // Error correction must come after chunking if both are present
         if let (Some(chunk_pos), Some(ec_pos)) = (
-            order.transforms.iter().position(|&t| t == TransformType::Chunking),
-            order.transforms.iter().position(|&t| t == TransformType::ErrorCorrection),
+            order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::Chunking),
+            order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::ErrorCorrection),
         ) {
             if chunk_pos >= ec_pos {
                 return Err(ManifestError::TransformOrderViolation(
@@ -1558,27 +1628,25 @@ impl Manifest {
                 if let Some(group_id) = &symbol.repair_group_id {
                     // Verify repair group exists
                     if !self.repair_groups.contains_key(group_id) {
-                        return Err(ManifestError::RepairGroupReferenceError(
-                            format!("symbol references non-existent repair group: {group_id}")
-                        ));
+                        return Err(ManifestError::RepairGroupReferenceError(format!(
+                            "symbol references non-existent repair group: {group_id}"
+                        )));
                     }
 
                     // Verify symbol belongs to correct object
                     let repair_group = &self.repair_groups[group_id];
                     if repair_group.object_id != manifest_obj.id {
-                        return Err(ManifestError::RepairGroupReferenceError(
-                            format!(
-                                "symbol in object {} references repair group for object {}",
-                                manifest_obj.id, repair_group.object_id
-                            )
-                        ));
+                        return Err(ManifestError::RepairGroupReferenceError(format!(
+                            "symbol in object {} references repair group for object {}",
+                            manifest_obj.id, repair_group.object_id
+                        )));
                     }
 
                     // Verify authentication tag is present
                     if symbol.auth_tag.is_none() {
-                        return Err(ManifestError::RepairGroupAuthenticationError(
-                            format!("repair symbol missing authentication tag: group {group_id}")
-                        ));
+                        return Err(ManifestError::RepairGroupAuthenticationError(format!(
+                            "repair symbol missing authentication tag: group {group_id}"
+                        )));
                     }
                 }
             }
@@ -1603,89 +1671,90 @@ impl Manifest {
             repair_group.k_prime,
         );
         if repair_group.group_id != expected_id {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!(
-                    "repair group ID mismatch: expected {expected_id}, got {}",
-                    repair_group.group_id
-                )
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "repair group ID mismatch: expected {expected_id}, got {}",
+                repair_group.group_id
+            )));
         }
 
         // Validate object exists in manifest
         if !self.objects.contains_key(&repair_group.object_id) {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!("repair group references non-existent object: {}", repair_group.object_id)
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "repair group references non-existent object: {}",
+                repair_group.object_id
+            )));
         }
 
         // Validate K' >= K (extended source symbols)
         if repair_group.k_prime < repair_group.source_symbols_k {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!(
-                    "k_prime ({}) must be >= source_symbols_k ({}) for group {}",
-                    repair_group.k_prime, repair_group.source_symbols_k, repair_group.group_id
-                )
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "k_prime ({}) must be >= source_symbols_k ({}) for group {}",
+                repair_group.k_prime, repair_group.source_symbols_k, repair_group.group_id
+            )));
         }
 
         // Validate symbol size is non-zero
         if repair_group.symbol_size == 0 {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!("symbol_size cannot be zero for group {}", repair_group.group_id)
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "symbol_size cannot be zero for group {}",
+                repair_group.group_id
+            )));
         }
 
         // Validate chunk range consistency
         if repair_group.chunk_range.end_chunk <= repair_group.chunk_range.start_chunk {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!("invalid chunk range for group {}: end <= start", repair_group.group_id)
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "invalid chunk range for group {}: end <= start",
+                repair_group.group_id
+            )));
         }
 
         if repair_group.chunk_range.end_offset <= repair_group.chunk_range.start_offset {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!("invalid byte range for group {}: end <= start", repair_group.group_id)
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "invalid byte range for group {}: end <= start",
+                repair_group.group_id
+            )));
         }
 
         // Validate repair layout
         if repair_group.repair_layout.total_repair_symbols == 0 {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!("total_repair_symbols cannot be zero for group {}", repair_group.group_id)
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "total_repair_symbols cannot be zero for group {}",
+                repair_group.group_id
+            )));
         }
 
-        if repair_group.repair_layout.overhead_ratio < 0.0 || repair_group.repair_layout.overhead_ratio > 10.0 {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!(
-                    "overhead_ratio ({}) out of range [0.0, 10.0] for group {}",
-                    repair_group.repair_layout.overhead_ratio, repair_group.group_id
-                )
-            ));
+        if repair_group.repair_layout.overhead_ratio < 0.0
+            || repair_group.repair_layout.overhead_ratio > 10.0
+        {
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "overhead_ratio ({}) out of range [0.0, 10.0] for group {}",
+                repair_group.repair_layout.overhead_ratio, repair_group.group_id
+            )));
         }
 
         // Validate systematic encoding parameters
         if repair_group.repair_layout.systematic_config.systematic_rows == 0 {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!("systematic_rows cannot be zero for group {}", repair_group.group_id)
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "systematic_rows cannot be zero for group {}",
+                repair_group.group_id
+            )));
         }
 
         // Validate authentication domain
         if repair_group.auth_domain.domain_id.is_empty() {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!("authentication domain_id cannot be empty for group {}", repair_group.group_id)
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "authentication domain_id cannot be empty for group {}",
+                repair_group.group_id
+            )));
         }
 
         // Validate manifest root binding
         if repair_group.manifest_root != self.merkle_root {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!(
-                    "repair group manifest_root mismatch for group {}: expected {}, got {}",
-                    repair_group.group_id, self.merkle_root, repair_group.manifest_root
-                )
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "repair group manifest_root mismatch for group {}: expected {}, got {}",
+                repair_group.group_id, self.merkle_root, repair_group.manifest_root
+            )));
         }
 
         Ok(())
@@ -1699,32 +1768,28 @@ impl Manifest {
     ) -> Result<(), ManifestError> {
         // Verify symbol size matches layout
         if repair_group.symbol_size != layout.symbol_size {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!(
-                    "repair group symbol_size ({}) does not match layout symbol_size ({}) for group {}",
-                    repair_group.symbol_size, layout.symbol_size, repair_group.group_id
-                )
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "repair group symbol_size ({}) does not match layout symbol_size ({}) for group {}",
+                repair_group.symbol_size, layout.symbol_size, repair_group.group_id
+            )));
         }
 
         // Verify K is within layout bounds
         if repair_group.source_symbols_k > layout.source_symbols {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!(
-                    "repair group source_symbols_k ({}) exceeds layout source_symbols ({}) for group {}",
-                    repair_group.source_symbols_k, layout.source_symbols, repair_group.group_id
-                )
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "repair group source_symbols_k ({}) exceeds layout source_symbols ({}) for group {}",
+                repair_group.source_symbols_k, layout.source_symbols, repair_group.group_id
+            )));
         }
 
         // Verify total repair symbols is reasonable
         if repair_group.repair_layout.total_repair_symbols > layout.total_symbols {
-            return Err(ManifestError::RepairGroupValidationError(
-                format!(
-                    "repair group total_repair_symbols ({}) exceeds layout total_symbols ({}) for group {}",
-                    repair_group.repair_layout.total_repair_symbols, layout.total_symbols, repair_group.group_id
-                )
-            ));
+            return Err(ManifestError::RepairGroupValidationError(format!(
+                "repair group total_repair_symbols ({}) exceeds layout total_symbols ({}) for group {}",
+                repair_group.repair_layout.total_repair_symbols,
+                layout.total_symbols,
+                repair_group.group_id
+            )));
         }
 
         Ok(())
@@ -1931,14 +1996,20 @@ impl Manifest {
         object: &crate::atp::object::Object,
         _content_hash: &Option<[u8; 32]>,
     ) -> Vec<ChunkBoundary> {
-        let Some(plan) = chunk_plan else { return Vec::new() };
-        let Some(size) = object.metadata.size_bytes else { return Vec::new() };
+        let Some(plan) = chunk_plan else {
+            return Vec::new();
+        };
+        let Some(size) = object.metadata.size_bytes else {
+            return Vec::new();
+        };
 
         if size < plan.min_chunk_size {
             return Vec::new();
         }
 
-        let chunk_size = plan.cdc_params.as_ref()
+        let chunk_size = plan
+            .cdc_params
+            .as_ref()
             .map(|cdc| cdc.average_chunk_size)
             .unwrap_or(plan.target_chunk_size);
 
@@ -1969,9 +2040,15 @@ impl Manifest {
         object: &crate::atp::object::Object,
         content_hash: &Option<[u8; 32]>,
     ) -> Vec<RaptorQSymbol> {
-        let Some(_layout) = raptorq_layout else { return Vec::new() };
-        let Some(content_hash) = content_hash else { return Vec::new() };
-        let Some(size) = object.metadata.size_bytes else { return Vec::new() };
+        let Some(_layout) = raptorq_layout else {
+            return Vec::new();
+        };
+        let Some(content_hash) = content_hash else {
+            return Vec::new();
+        };
+        let Some(size) = object.metadata.size_bytes else {
+            return Vec::new();
+        };
 
         // Generate basic systematic symbols for the object
         let symbol_size = 1316; // Standard MTU-friendly symbol size
@@ -1984,9 +2061,9 @@ impl Manifest {
                 esi: i, // Encoding Symbol ID matches index for systematic symbols
                 size_bytes: symbol_size as u32,
                 content_hash: *content_hash, // Use object hash as symbol hash for now
-                is_source: true, // These are systematic source symbols
-                repair_group_id: None, // No repair groups for basic implementation
-                auth_tag: None, // No authentication for basic implementation
+                is_source: true,             // These are systematic source symbols
+                repair_group_id: None,       // No repair groups for basic implementation
+                auth_tag: None,              // No authentication for basic implementation
             });
         }
 
@@ -2015,17 +2092,29 @@ impl Manifest {
             CompressionAlgorithm::None => return None,
             CompressionAlgorithm::Lz4 => {
                 // LZ4 typically achieves ~2:1 compression on text, less on binary
-                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) { 0.6 } else { 0.8 };
+                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) {
+                    0.6
+                } else {
+                    0.8
+                };
                 ((size as f32 * ratio) as u64, ratio)
             }
             CompressionAlgorithm::Gzip => {
                 // Gzip achieves better compression than LZ4 but slower
-                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) { 0.4 } else { 0.7 };
+                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) {
+                    0.4
+                } else {
+                    0.7
+                };
                 ((size as f32 * ratio) as u64, ratio)
             }
             CompressionAlgorithm::Brotli => {
                 // Brotli achieves best compression
-                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) { 0.3 } else { 0.6 };
+                let ratio = if matches!(object.metadata.kind, ObjectKind::FileObject) {
+                    0.3
+                } else {
+                    0.6
+                };
                 ((size as f32 * ratio) as u64, ratio)
             }
         };
@@ -2056,7 +2145,7 @@ impl Manifest {
             EncryptionAlgorithm::ChaCha20Poly1305 => {
                 Some(EncryptionMetadata {
                     algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
-                    iv: vec![0u8; 12], // 96-bit nonce for ChaCha20
+                    iv: vec![0u8; 12],       // 96-bit nonce for ChaCha20
                     auth_tag: vec![0u8; 16], // 128-bit auth tag
                     key_derivation: policy.key_derivation.clone(),
                 })
@@ -2064,7 +2153,7 @@ impl Manifest {
             EncryptionAlgorithm::Aes256Gcm => {
                 Some(EncryptionMetadata {
                     algorithm: EncryptionAlgorithm::Aes256Gcm,
-                    iv: vec![0u8; 12], // 96-bit IV for GCM
+                    iv: vec![0u8; 12],       // 96-bit IV for GCM
                     auth_tag: vec![0u8; 16], // 128-bit GCM tag
                     key_derivation: policy.key_derivation.clone(),
                 })
@@ -2348,9 +2437,9 @@ mod tests {
     #[test]
     fn deterministic_f32_be_bytes_canonical_nan() {
         // Any NaN should map to canonical NaN
-        let nan1 = f32::from_bits(0x7fc0_0001);  // Signaling NaN
-        let nan2 = f32::from_bits(0x7ff0_1234);  // Quiet NaN with payload
-        let nan3 = f32::NAN;                     // Standard NaN
+        let nan1 = f32::from_bits(0x7fc0_0001); // Signaling NaN
+        let nan2 = f32::from_bits(0x7ff0_1234); // Quiet NaN with payload
+        let nan3 = f32::NAN; // Standard NaN
 
         let expected = [0x7f, 0xc0, 0x00, 0x00]; // Canonical NaN in big-endian
         assert_eq!(deterministic_f32_be_bytes(nan1), expected);
@@ -2369,8 +2458,14 @@ mod tests {
     #[test]
     fn deterministic_f32_signed_zero_normalization() {
         // Both +0.0 and -0.0 should normalize to +0.0
-        assert_eq!(deterministic_f32_be_bytes(0.0), deterministic_f32_be_bytes(-0.0));
-        assert_eq!(deterministic_f32_le_bytes(0.0), deterministic_f32_le_bytes(-0.0));
+        assert_eq!(
+            deterministic_f32_be_bytes(0.0),
+            deterministic_f32_be_bytes(-0.0)
+        );
+        assert_eq!(
+            deterministic_f32_le_bytes(0.0),
+            deterministic_f32_le_bytes(-0.0)
+        );
         assert_eq!(deterministic_f32_be_bytes(0.0), [0x00, 0x00, 0x00, 0x00]);
         assert_eq!(deterministic_f32_le_bytes(0.0), [0x00, 0x00, 0x00, 0x00]);
     }
@@ -2378,9 +2473,9 @@ mod tests {
     #[test]
     fn deterministic_f64_be_bytes_canonical_nan() {
         // Any NaN should map to canonical NaN
-        let nan1 = f64::from_bits(0x7ff8_0000_0000_0001);  // Signaling NaN
-        let nan2 = f64::from_bits(0x7ff0_1234_5678_9abc);  // Quiet NaN with payload
-        let nan3 = f64::NAN;                               // Standard NaN
+        let nan1 = f64::from_bits(0x7ff8_0000_0000_0001); // Signaling NaN
+        let nan2 = f64::from_bits(0x7ff0_1234_5678_9abc); // Quiet NaN with payload
+        let nan3 = f64::NAN; // Standard NaN
 
         let expected = [0x7f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // Canonical NaN in big-endian
         assert_eq!(deterministic_f64_be_bytes(nan1), expected);
@@ -2399,8 +2494,14 @@ mod tests {
     #[test]
     fn deterministic_f64_signed_zero_normalization() {
         // Both +0.0 and -0.0 should normalize to +0.0
-        assert_eq!(deterministic_f64_be_bytes(0.0), deterministic_f64_be_bytes(-0.0));
-        assert_eq!(deterministic_f64_le_bytes(0.0), deterministic_f64_le_bytes(-0.0));
+        assert_eq!(
+            deterministic_f64_be_bytes(0.0),
+            deterministic_f64_be_bytes(-0.0)
+        );
+        assert_eq!(
+            deterministic_f64_le_bytes(0.0),
+            deterministic_f64_le_bytes(-0.0)
+        );
         assert_eq!(deterministic_f64_be_bytes(0.0), [0x00; 8]);
         assert_eq!(deterministic_f64_le_bytes(0.0), [0x00; 8]);
     }
@@ -2411,19 +2512,43 @@ mod tests {
         let f32_val = 3.14159f32;
         let f64_val = 3.14159265358979323846f64;
 
-        assert_eq!(deterministic_f32_be_bytes(f32_val), f32_val.to_bits().to_be_bytes());
-        assert_eq!(deterministic_f32_le_bytes(f32_val), f32_val.to_bits().to_le_bytes());
-        assert_eq!(deterministic_f64_be_bytes(f64_val), f64_val.to_bits().to_be_bytes());
-        assert_eq!(deterministic_f64_le_bytes(f64_val), f64_val.to_bits().to_le_bytes());
+        assert_eq!(
+            deterministic_f32_be_bytes(f32_val),
+            f32_val.to_bits().to_be_bytes()
+        );
+        assert_eq!(
+            deterministic_f32_le_bytes(f32_val),
+            f32_val.to_bits().to_le_bytes()
+        );
+        assert_eq!(
+            deterministic_f64_be_bytes(f64_val),
+            f64_val.to_bits().to_be_bytes()
+        );
+        assert_eq!(
+            deterministic_f64_le_bytes(f64_val),
+            f64_val.to_bits().to_le_bytes()
+        );
     }
 
     #[test]
     fn deterministic_float_infinities() {
         // Infinities should be unchanged
-        assert_eq!(deterministic_f32_be_bytes(f32::INFINITY), f32::INFINITY.to_bits().to_be_bytes());
-        assert_eq!(deterministic_f32_be_bytes(f32::NEG_INFINITY), f32::NEG_INFINITY.to_bits().to_be_bytes());
-        assert_eq!(deterministic_f64_be_bytes(f64::INFINITY), f64::INFINITY.to_bits().to_be_bytes());
-        assert_eq!(deterministic_f64_be_bytes(f64::NEG_INFINITY), f64::NEG_INFINITY.to_bits().to_be_bytes());
+        assert_eq!(
+            deterministic_f32_be_bytes(f32::INFINITY),
+            f32::INFINITY.to_bits().to_be_bytes()
+        );
+        assert_eq!(
+            deterministic_f32_be_bytes(f32::NEG_INFINITY),
+            f32::NEG_INFINITY.to_bits().to_be_bytes()
+        );
+        assert_eq!(
+            deterministic_f64_be_bytes(f64::INFINITY),
+            f64::INFINITY.to_bits().to_be_bytes()
+        );
+        assert_eq!(
+            deterministic_f64_be_bytes(f64::NEG_INFINITY),
+            f64::NEG_INFINITY.to_bits().to_be_bytes()
+        );
     }
 
     #[test]
@@ -3114,8 +3239,16 @@ mod tests {
         // ATP-C4 specific validations
         let transform_order = manifest.transform_order.as_ref().unwrap();
         assert_eq!(transform_order.transforms.len(), 4);
-        assert!(transform_order.transforms.contains(&TransformType::Compression));
-        assert!(transform_order.transforms.contains(&TransformType::Encryption));
+        assert!(
+            transform_order
+                .transforms
+                .contains(&TransformType::Compression)
+        );
+        assert!(
+            transform_order
+                .transforms
+                .contains(&TransformType::Encryption)
+        );
         assert_eq!(transform_order.hash_point, HashPoint::MultiPoint);
 
         let proof_policy = manifest.transform_proof_policy.as_ref().unwrap();
@@ -3135,7 +3268,7 @@ mod tests {
 
     mod atp_g2_tests {
         use super::*;
-        use crate::atp::object::{Object, ObjectGraph, ObjectKind, ContentId};
+        use crate::atp::object::{ContentId, Object, ObjectGraph, ObjectKind};
         use std::collections::BTreeMap;
 
         /// Create a test repair group for validation testing.
@@ -3208,7 +3341,9 @@ mod tests {
             let group_id = repair_group.group_id.clone();
 
             let mut manifest = Manifest::from_graph(&graph, MetadataPolicy::Portable).unwrap();
-            manifest.repair_groups.insert(group_id.clone(), repair_group);
+            manifest
+                .repair_groups
+                .insert(group_id.clone(), repair_group);
 
             // Add symbols to the manifest object referencing the repair group
             if let Some(manifest_obj) = manifest.objects.get_mut(&object_id) {
@@ -3276,7 +3411,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupValidationError(_))
+            ));
         }
 
         #[test]
@@ -3289,7 +3427,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupValidationError(_))
+            ));
         }
 
         #[test]
@@ -3297,7 +3438,11 @@ mod tests {
             let mut manifest = create_test_manifest_with_repair_groups();
 
             // Add a symbol that references a non-existent repair group
-            let fake_group_id = RepairGroupId::new(&ObjectId::content(ContentId::from_hash([99u8; 32])), 99, 999);
+            let fake_group_id = RepairGroupId::new(
+                &ObjectId::content(ContentId::from_hash([99u8; 32])),
+                99,
+                999,
+            );
 
             if let Some(manifest_obj) = manifest.objects.values_mut().next() {
                 manifest_obj.raptorq_symbols.push(RaptorQSymbol {
@@ -3312,7 +3457,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupReferenceError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupReferenceError(_))
+            ));
         }
 
         #[test]
@@ -3327,7 +3475,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupAuthenticationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupAuthenticationError(_))
+            ));
         }
 
         #[test]
@@ -3340,7 +3491,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupValidationError(_))
+            ));
         }
 
         #[test]
@@ -3353,7 +3507,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupValidationError(_))
+            ));
         }
 
         #[test]
@@ -3366,7 +3523,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupValidationError(_))
+            ));
 
             // Fix and try too large overhead ratio
             if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
@@ -3374,7 +3534,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupValidationError(_))
+            ));
         }
 
         #[test]
@@ -3387,7 +3550,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupValidationError(_))
+            ));
         }
 
         #[test]
@@ -3400,7 +3566,10 @@ mod tests {
             }
 
             let result = manifest.validate();
-            assert!(matches!(result, Err(ManifestError::RepairGroupValidationError(_))));
+            assert!(matches!(
+                result,
+                Err(ManifestError::RepairGroupValidationError(_))
+            ));
         }
 
         #[test]
@@ -3465,7 +3634,8 @@ mod tests {
             repair_group2.repair_layout.interleaving.pattern_type = InterleavingType::Block;
 
             let mut repair_group3 = repair_group1.clone();
-            repair_group3.repair_layout.interleaving.pattern_type = InterleavingType::Randomized(12345);
+            repair_group3.repair_layout.interleaving.pattern_type =
+                InterleavingType::Randomized(12345);
 
             let groups1 = {
                 let mut map = BTreeMap::new();
@@ -3486,15 +3656,39 @@ mod tests {
             };
 
             let root1 = MerkleRoot::from_manifest_components(
-                &BTreeMap::new(), &None, &None, &None, &None, &None, &None, &None, &groups1
+                &BTreeMap::new(),
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &groups1,
             );
 
             let root2 = MerkleRoot::from_manifest_components(
-                &BTreeMap::new(), &None, &None, &None, &None, &None, &None, &None, &groups2
+                &BTreeMap::new(),
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &groups2,
             );
 
             let root3 = MerkleRoot::from_manifest_components(
-                &BTreeMap::new(), &None, &None, &None, &None, &None, &None, &None, &groups3
+                &BTreeMap::new(),
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &None,
+                &groups3,
             );
 
             // All should be different

@@ -1073,7 +1073,13 @@ mod tests {
         assert_eq!(original_settled, restarted_settled);
 
         // Verify specific obligation IDs and outcomes are preserved
-        assert!(original_settled.contains(&(TransferObligationId::new(101), ObligationOutcome::Committed)));
-        assert!(original_settled.contains(&(TransferObligationId::new(102), ObligationOutcome::Committed)));
+        assert!(
+            original_settled
+                .contains(&(TransferObligationId::new(101), ObligationOutcome::Committed))
+        );
+        assert!(
+            original_settled
+                .contains(&(TransferObligationId::new(102), ObligationOutcome::Committed))
+        );
     }
 }

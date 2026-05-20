@@ -72,6 +72,7 @@ pub mod context;
 mod cryptographic_boundary_tests;
 pub mod error;
 pub mod key;
+pub mod keys;
 pub mod secret;
 pub mod tag;
 
@@ -79,5 +80,6 @@ pub use authenticated::AuthenticatedSymbol;
 pub use context::{AuthMode, SecurityContext};
 pub use error::{AuthError, AuthErrorKind, AuthResult};
 pub use key::{AUTH_KEY_SIZE, AuthKey, KeyRing};
+pub use keys::{IdentityKeyStore, KeyFingerprint, KeyStoreError, PublicIdentityKey};
 pub use secret::SecretString;
 pub use tag::AuthenticationTag;

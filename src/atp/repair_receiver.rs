@@ -5,11 +5,10 @@
 //! requirements as specified in ATP-G2.
 
 use crate::atp::manifest::{
-    AuthenticationAlgorithm, RepairGroup, RepairGroupId, RaptorQSymbol,
-    MerkleRoot,
+    AuthenticationAlgorithm, MerkleRoot, RaptorQSymbol, RepairGroup, RepairGroupId,
 };
-use sha2::{Sha256};
 use hmac::KeyInit;
+use sha2::Sha256;
 use std::time::{Duration, SystemTime};
 
 /// Errors specific to repair symbol reception and validation.
@@ -66,23 +65,45 @@ impl std::fmt::Display for RepairReceiveError {
             Self::UnknownRepairGroup(id) => {
                 write!(f, "unknown repair group: {id}")
             }
-            Self::ParameterMismatch { field, expected, received } => {
-                write!(f, "parameter mismatch in {field}: expected {expected}, got {received}")
+            Self::ParameterMismatch {
+                field,
+                expected,
+                received,
+            } => {
+                write!(
+                    f,
+                    "parameter mismatch in {field}: expected {expected}, got {received}"
+                )
             }
             Self::AuthenticationFailed(msg) => {
                 write!(f, "authentication failed: {msg}")
             }
-            Self::ReplayedSymbol { esi, previous_timestamp } => {
-                write!(f, "replayed symbol ESI {esi}, previously received at {previous_timestamp:?}")
+            Self::ReplayedSymbol {
+                esi,
+                previous_timestamp,
+            } => {
+                write!(
+                    f,
+                    "replayed symbol ESI {esi}, previously received at {previous_timestamp:?}"
+                )
             }
-            Self::ExpiredSession { expired_at, current_time } => {
-                write!(f, "session expired at {expired_at:?}, current time {current_time:?}")
+            Self::ExpiredSession {
+                expired_at,
+                current_time,
+            } => {
+                write!(
+                    f,
+                    "session expired at {expired_at:?}, current time {current_time:?}"
+                )
             }
             Self::ObjectIdMismatch { expected, received } => {
                 write!(f, "object ID mismatch: expected {expected}, got {received}")
             }
             Self::ManifestRootMismatch { expected, received } => {
-                write!(f, "manifest root mismatch: expected {expected}, got {received}")
+                write!(
+                    f,
+                    "manifest root mismatch: expected {expected}, got {received}"
+                )
             }
             Self::TransformPolicyMismatch(msg) => {
                 write!(f, "transform policy mismatch: {msg}")
@@ -217,9 +238,10 @@ impl RepairReceiver {
         })?;
 
         // Verify repair group exists
-        let repair_group = self.repair_groups.get(group_id).ok_or_else(|| {
-            RepairReceiveError::UnknownRepairGroup(group_id.clone())
-        })?;
+        let repair_group = self
+            .repair_groups
+            .get(group_id)
+            .ok_or_else(|| RepairReceiveError::UnknownRepairGroup(group_id.clone()))?;
 
         // Validate manifest root
         if *claimed_manifest_root != self.expected_manifest_root {
@@ -261,7 +283,8 @@ impl RepairReceiver {
         repair_group: &RepairGroup,
     ) -> Result<(), RepairReceiveError> {
         // Validate ESI is within valid range for this repair group
-        let max_esi = repair_group.source_symbols_k + repair_group.repair_layout.total_repair_symbols;
+        let max_esi =
+            repair_group.source_symbols_k + repair_group.repair_layout.total_repair_symbols;
         if symbol.esi >= max_esi {
             return Err(RepairReceiveError::ParameterMismatch {
                 field: "esi".to_string(),
@@ -341,18 +364,18 @@ impl RepairReceiver {
                 let expected_tag = self.compute_hmac_sha256_tag(symbol, repair_group, session)?;
                 if auth_tag != &expected_tag {
                     return Err(RepairReceiveError::AuthenticationFailed(
-                        "HMAC-SHA256 verification failed".to_string()
+                        "HMAC-SHA256 verification failed".to_string(),
                     ));
                 }
             }
             AuthenticationAlgorithm::EdDsa => {
                 return Err(RepairReceiveError::AuthenticationFailed(
-                    "EdDSA authentication not yet implemented".to_string()
+                    "EdDSA authentication not yet implemented".to_string(),
                 ));
             }
             AuthenticationAlgorithm::X25519Ecdh => {
                 return Err(RepairReceiveError::AuthenticationFailed(
-                    "X25519-ECDH authentication not yet implemented".to_string()
+                    "X25519-ECDH authentication not yet implemented".to_string(),
                 ));
             }
         }
@@ -370,8 +393,9 @@ impl RepairReceiver {
         use hmac::{Hmac, Mac};
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(&session.auth_key)
-            .map_err(|_| RepairReceiveError::AuthenticationFailed("invalid auth key".to_string()))?;
+        let mut mac = HmacSha256::new_from_slice(&session.auth_key).map_err(|_| {
+            RepairReceiveError::AuthenticationFailed("invalid auth key".to_string())
+        })?;
 
         // Include all critical symbol and group parameters in the MAC
         mac.update(b"ATP-G2-RepairSymbol");
@@ -399,13 +423,15 @@ impl RepairReceiver {
     /// Clean up expired sessions.
     pub fn cleanup_expired_sessions(&mut self) {
         let current_time = SystemTime::now();
-        self.sessions.retain(|_, session| current_time <= session.expiry_time);
+        self.sessions
+            .retain(|_, session| current_time <= session.expiry_time);
     }
 
     /// Get statistics about active sessions.
     pub fn session_stats(&self) -> (usize, usize) {
         let active_sessions = self.sessions.len();
-        let total_received_symbols: usize = self.sessions
+        let total_received_symbols: usize = self
+            .sessions
             .values()
             .map(|session| session.received_esis.len())
             .sum();
@@ -499,7 +525,10 @@ mod tests {
             vec![1, 2, 3, 4],
             None,
         );
-        assert!(matches!(result, Err(RepairReceiveError::UnknownRepairGroup(_))));
+        assert!(matches!(
+            result,
+            Err(RepairReceiveError::UnknownRepairGroup(_))
+        ));
     }
 
     #[test]
@@ -525,7 +554,8 @@ mod tests {
         };
 
         // Should pass parameter validation (ignoring session/auth for this test)
-        let result = receiver.validate_symbol_parameters(&valid_symbol, &receiver.repair_groups[&group_id]);
+        let result =
+            receiver.validate_symbol_parameters(&valid_symbol, &receiver.repair_groups[&group_id]);
         assert!(result.is_ok());
 
         // Invalid ESI (too high)
@@ -534,8 +564,11 @@ mod tests {
             ..valid_symbol.clone()
         };
 
-        let result = receiver.validate_symbol_parameters(&invalid_esi_symbol, &receiver.repair_groups[&group_id]);
-        assert!(matches!(result, Err(RepairReceiveError::ParameterMismatch { field, .. }) if field == "esi"));
+        let result = receiver
+            .validate_symbol_parameters(&invalid_esi_symbol, &receiver.repair_groups[&group_id]);
+        assert!(
+            matches!(result, Err(RepairReceiveError::ParameterMismatch { field, .. }) if field == "esi")
+        );
 
         // Invalid size
         let invalid_size_symbol = RaptorQSymbol {
@@ -543,8 +576,11 @@ mod tests {
             ..valid_symbol.clone()
         };
 
-        let result = receiver.validate_symbol_parameters(&invalid_size_symbol, &receiver.repair_groups[&group_id]);
-        assert!(matches!(result, Err(RepairReceiveError::ParameterMismatch { field, .. }) if field == "size_bytes"));
+        let result = receiver
+            .validate_symbol_parameters(&invalid_size_symbol, &receiver.repair_groups[&group_id]);
+        assert!(
+            matches!(result, Err(RepairReceiveError::ParameterMismatch { field, .. }) if field == "size_bytes")
+        );
     }
 
     #[test]
@@ -574,12 +610,8 @@ mod tests {
         let (group_id, _) = create_test_repair_group();
 
         // Create session with very short duration
-        let session = RepairSessionContext::new(
-            group_id,
-            Duration::from_millis(1),
-            vec![1, 2, 3, 4],
-            None,
-        );
+        let session =
+            RepairSessionContext::new(group_id, Duration::from_millis(1), vec![1, 2, 3, 4], None);
 
         // Wait for expiry
         std::thread::sleep(Duration::from_millis(10));

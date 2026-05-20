@@ -1027,7 +1027,10 @@ mod tests {
         assert!(graph.has_parent(&child2_id), "child2 should have a parent");
 
         // Directory should not have a parent (it's a root)
-        assert!(!graph.has_parent(&dir_id), "directory should not have a parent");
+        assert!(
+            !graph.has_parent(&dir_id),
+            "directory should not have a parent"
+        );
     }
 
     #[test]
@@ -1042,7 +1045,8 @@ mod tests {
         let intermediate = Object::directory(vec![edge_to_leaf]);
         let intermediate_id = intermediate.id.clone();
 
-        let edge_to_intermediate = ObjectEdge::new(intermediate_id.clone(), "intermediate".to_string());
+        let edge_to_intermediate =
+            ObjectEdge::new(intermediate_id.clone(), "intermediate".to_string());
         let root = Object::directory(vec![edge_to_intermediate]);
         let root_id = root.id.clone();
 
@@ -1053,7 +1057,10 @@ mod tests {
 
         // Check parent relationships (these should be O(1) lookups)
         assert!(!graph.has_parent(&root_id), "root should not have parent");
-        assert!(graph.has_parent(&intermediate_id), "intermediate should have parent");
+        assert!(
+            graph.has_parent(&intermediate_id),
+            "intermediate should have parent"
+        );
         assert!(graph.has_parent(&leaf_id), "leaf should have parent");
 
         // Verify that objects_with_parents set contains exactly the non-root objects
@@ -1089,12 +1096,21 @@ mod tests {
 
         // File should now have a parent and be removed from roots
         assert!(graph.has_parent(&file_id), "file should now have a parent");
-        assert!(!graph.has_parent(&dir_id), "directory should not have a parent");
+        assert!(
+            !graph.has_parent(&dir_id),
+            "directory should not have a parent"
+        );
 
         // Check roots - file should be removed, directory should not be in roots yet
         let roots: Vec<_> = graph.roots().cloned().collect();
-        assert!(!roots.contains(&file_id), "file should be removed from roots");
-        assert!(!roots.contains(&dir_id), "directory should not be auto-added to roots");
+        assert!(
+            !roots.contains(&file_id),
+            "file should be removed from roots"
+        );
+        assert!(
+            !roots.contains(&dir_id),
+            "directory should not be auto-added to roots"
+        );
     }
 
     #[test]

@@ -2,8 +2,7 @@
 //!
 //! Generates comprehensive traces for handshake replay, diagnostics, and debugging.
 
-use crate::net::atp::handshake::state_machine::{HandshakeEvent, EndpointRole, PacketSpace};
-use crate::bytes::Bytes;
+use crate::net::atp::handshake::state_machine::{HandshakeEvent, PacketSpace};
 use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

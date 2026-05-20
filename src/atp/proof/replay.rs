@@ -323,22 +323,14 @@ impl ReplayEventFilter {
     }
 
     /// Set timestamp range filter.
-    pub fn timestamp_range(
-        mut self,
-        min_micros: Option<u64>,
-        max_micros: Option<u64>,
-    ) -> Self {
+    pub fn timestamp_range(mut self, min_micros: Option<u64>, max_micros: Option<u64>) -> Self {
         self.min_timestamp_micros = min_micros;
         self.max_timestamp_micros = max_micros;
         self
     }
 
     /// Add a custom filter predicate.
-    pub fn with_predicate(
-        mut self,
-        key: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn with_predicate(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.predicates.insert(key.into(), value.into());
         self
     }
@@ -441,7 +433,10 @@ impl std::fmt::Display for ReplayPointerError {
                 write!(f, "invalid timestamp range: min {min} > max {max}")
             }
             Self::ChecksumMismatch { expected, computed } => {
-                write!(f, "checksum mismatch: expected {expected}, computed {computed}")
+                write!(
+                    f,
+                    "checksum mismatch: expected {expected}, computed {computed}"
+                )
             }
         }
     }
@@ -477,13 +472,17 @@ mod tests {
 
         // Invalid range
         let invalid_range = AtpReplayPointer::new("stream-1", 200, 100, checksum.clone());
-        let err = invalid_range.validate().expect_err("invalid range should fail");
+        let err = invalid_range
+            .validate()
+            .expect_err("invalid range should fail");
         assert!(matches!(err, ReplayPointerError::InvalidRange { .. }));
 
         // Empty stream ID
         let mut empty_stream = AtpReplayPointer::new("stream-1", 100, 200, checksum);
         empty_stream.stream_id = String::new();
-        let err = empty_stream.validate().expect_err("empty stream ID should fail");
+        let err = empty_stream
+            .validate()
+            .expect_err("empty stream ID should fail");
         assert!(matches!(err, ReplayPointerError::EmptyStreamId));
     }
 
@@ -542,8 +541,13 @@ mod tests {
     fn replay_event_filter_validation() {
         // Invalid timestamp range
         let invalid_filter = ReplayEventFilter::new().timestamp_range(Some(2000), Some(1000));
-        let err = invalid_filter.validate().expect_err("invalid timestamp range should fail");
-        assert!(matches!(err, ReplayPointerError::InvalidTimestampRange { .. }));
+        let err = invalid_filter
+            .validate()
+            .expect_err("invalid timestamp range should fail");
+        assert!(matches!(
+            err,
+            ReplayPointerError::InvalidTimestampRange { .. }
+        ));
 
         // Valid filter
         let valid_filter = ReplayEventFilter::new().timestamp_range(Some(1000), Some(2000));
@@ -552,7 +556,10 @@ mod tests {
 
     #[test]
     fn replayable_event_kind_properties() {
-        assert_eq!(ReplayableEventKind::ChunkTransfer.as_str(), "chunk_transfer");
+        assert_eq!(
+            ReplayableEventKind::ChunkTransfer.as_str(),
+            "chunk_transfer"
+        );
         assert!(ReplayableEventKind::SessionStart.is_critical());
         assert!(ReplayableEventKind::Error.is_critical());
         assert!(!ReplayableEventKind::PeerAuth.is_critical());
@@ -561,8 +568,8 @@ mod tests {
     #[test]
     fn replay_pointer_with_context_and_filter() {
         let checksum = SerializableContentId::from(&ContentId::from_bytes(b"test-stream"));
-        let filter = ReplayEventFilter::new()
-            .include_kinds(vec![ReplayableEventKind::ChunkTransfer]);
+        let filter =
+            ReplayEventFilter::new().include_kinds(vec![ReplayableEventKind::ChunkTransfer]);
 
         let pointer = AtpReplayPointer::new("stream-1", 100, 200, checksum)
             .with_filter(filter)
@@ -570,9 +577,17 @@ mod tests {
             .with_context("peer_id", "peer-123");
 
         assert!(pointer.event_filter.is_some());
-        assert_eq!(pointer.context.get("session_id"), Some(&"test-session".to_string()));
-        assert_eq!(pointer.context.get("peer_id"), Some(&"peer-123".to_string()));
+        assert_eq!(
+            pointer.context.get("session_id"),
+            Some(&"test-session".to_string())
+        );
+        assert_eq!(
+            pointer.context.get("peer_id"),
+            Some(&"peer-123".to_string())
+        );
 
-        pointer.validate().expect("pointer with context and filter should be valid");
+        pointer
+            .validate()
+            .expect("pointer with context and filter should be valid");
     }
 }

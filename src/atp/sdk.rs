@@ -4,16 +4,23 @@
 //! write(really_big_buffer) experience without bypassing ATP correctness.
 //! All APIs are Cx-first and support native Asupersync semantics.
 
-use crate::types::outcome::Outcome;
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome};
-use crate::atp::transfer::{TransferId, TransferState, TransferActor, TransferCommand, TransferCommandKind, IdempotencyKey};
-use crate::atp::object::{ObjectId, ContentId};
-use crate::atp::stream_object::{StreamManifest, StreamEpoch, EpochState, ByteRange, PrefixConsumer, ConsumptionPolicy};
-use crate::atp::writer::{AtpWriter, AtpSink, WriterConfig, WriterProgress, WriterState, TransferProof, ResumeToken, ProofMode};
+use crate::atp::object::{ContentId, ObjectId};
+use crate::atp::stream_object::{
+    ByteRange, ConsumptionPolicy, EpochState, PrefixConsumer, StreamEpoch, StreamManifest,
+};
+use crate::atp::transfer::{
+    IdempotencyKey, TransferActor, TransferCommand, TransferCommandKind, TransferId, TransferState,
+};
+use crate::atp::writer::{
+    AtpSink, AtpWriter, ProofMode, ResumeToken, TransferProof, WriterConfig, WriterProgress,
+    WriterState,
+};
 use crate::cx::Cx;
+use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome};
 use crate::sync::ContendedMutex;
-use std::path::Path;
+use crate::types::outcome::Outcome;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, PoisonError};
 
 const TRANSFER_REGISTRY_SHARDS: usize = 64;
@@ -250,8 +257,10 @@ impl AtpSession {
         };
 
         if self.config.enable_diagnostics {
-            cx.trace(&format!("received object {:?} with policy {:?}",
-                receipt.object_id, receipt.consumption_policy));
+            cx.trace(&format!(
+                "received object {:?} with policy {:?}",
+                receipt.object_id, receipt.consumption_policy
+            ));
         }
 
         Outcome::ok(receipt)
@@ -304,7 +313,10 @@ impl AtpSession {
         let mut manifest = StreamManifest::new(object_id.clone());
 
         // Determine chunk boundaries based on config
-        let chunk_size = self.config.target_chunk_size.min(self.config.max_chunk_size);
+        let chunk_size = self
+            .config
+            .target_chunk_size
+            .min(self.config.max_chunk_size);
         let mut offset = 0;
         let mut epoch_seq = 1;
 
@@ -316,12 +328,16 @@ impl AtpSession {
                 epoch_seq,
                 object_id.clone(),
                 ByteRange::new(offset as u64, end_offset as u64),
-                if is_final { EpochState::Final } else { EpochState::Verified },
+                if is_final {
+                    EpochState::Final
+                } else {
+                    EpochState::Verified
+                },
                 vec![], // Chunk boundaries would be computed here
             );
 
             match manifest.add_epoch(epoch) {
-                Outcome::Ok(_) => {},
+                Outcome::Ok(_) => {}
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -339,8 +355,11 @@ impl AtpSession {
         };
 
         if self.config.enable_diagnostics {
-            cx.trace(&format!("created stream {} with {} epochs",
-                stream_handle.stream_id, epoch_seq - 1));
+            cx.trace(&format!(
+                "created stream {} with {} epochs",
+                stream_handle.stream_id,
+                epoch_seq - 1
+            ));
         }
 
         Outcome::ok(stream_handle)
@@ -382,7 +401,10 @@ impl AtpSession {
         transfer_id: TransferId,
         journal_position: u64,
     ) -> AtpOutcome<TransferHandle> {
-        cx.trace(&format!("resuming transfer {:?} from position {}", transfer_id, journal_position));
+        cx.trace(&format!(
+            "resuming transfer {:?} from position {}",
+            transfer_id, journal_position
+        ));
 
         // TODO: Implement transfer resume
         // 1. Load journal entries
@@ -403,11 +425,7 @@ impl AtpSession {
     }
 
     /// Cancel an active transfer.
-    pub async fn cancel_transfer(
-        &self,
-        cx: &Cx,
-        transfer_id: TransferId,
-    ) -> AtpOutcome<()> {
+    pub async fn cancel_transfer(&self, cx: &Cx, transfer_id: TransferId) -> AtpOutcome<()> {
         cx.trace(&format!("cancelling transfer {:?}", transfer_id));
 
         if let Some(actor) = self.active_transfers.remove(transfer_id) {
@@ -474,15 +492,13 @@ impl AtpSession {
         // 3. Return verified epoch sequence
 
         // Mock implementation
-        let epochs = vec![
-            StreamEpoch::new(
-                1,
-                object_id.clone(),
-                ByteRange::new(0, 1024),
-                EpochState::Verified,
-                vec![],
-            ),
-        ];
+        let epochs = vec![StreamEpoch::new(
+            1,
+            object_id.clone(),
+            ByteRange::new(0, 1024),
+            EpochState::Verified,
+            vec![],
+        )];
 
         if self.config.enable_diagnostics {
             cx.trace(&format!("found {} epochs for object", epochs.len()));
@@ -570,7 +586,10 @@ impl AtpSession {
         remote_peer: [u8; 32],
         config: Option<WriterConfig>,
     ) -> AtpOutcome<TransferProof> {
-        cx.trace(&format!("atp_session_write_buffer {} bytes to peer", data.len()));
+        cx.trace(&format!(
+            "atp_session_write_buffer {} bytes to peer",
+            data.len()
+        ));
 
         let mut writer = match self.create_writer(remote_peer, config) {
             Outcome::Ok(writer) => writer,
@@ -584,7 +603,8 @@ impl AtpSession {
             let data_len = data.len();
             writer.set_progress_callback(move |progress| {
                 // TODO: Emit structured logs for progress
-                eprintln!("ATP transfer progress: {:.1}% ({} bytes written)",
+                eprintln!(
+                    "ATP transfer progress: {:.1}% ({} bytes written)",
                     progress.bytes_written as f64 / data_len as f64 * 100.0,
                     progress.bytes_written
                 );
@@ -616,9 +636,11 @@ impl AtpSession {
         if self.config.enable_diagnostics {
             let path_display = path.display().to_string();
             writer.set_progress_callback(move |progress| {
-                eprintln!("ATP file transfer progress for {}: {:.1}% ({} bytes written)",
+                eprintln!(
+                    "ATP file transfer progress for {}: {:.1}% ({} bytes written)",
                     path_display,
-                    progress.bytes_written as f64 * 100.0 / progress.total_bytes.unwrap_or(1) as f64,
+                    progress.bytes_written as f64 * 100.0
+                        / progress.total_bytes.unwrap_or(1) as f64,
                     progress.bytes_written
                 );
             });
@@ -646,8 +668,10 @@ impl AtpSession {
         // Set up for streaming with unknown final size
         if self.config.enable_diagnostics {
             writer.set_progress_callback(|progress| {
-                eprintln!("ATP stream progress: {} bytes written, {} chunks",
-                    progress.bytes_written, progress.chunks_completed);
+                eprintln!(
+                    "ATP stream progress: {} bytes written, {} chunks",
+                    progress.bytes_written, progress.chunks_completed
+                );
             });
         }
 
@@ -662,7 +686,10 @@ impl AtpSession {
         remote_peer: [u8; 32],
         config: Option<WriterConfig>,
     ) -> AtpOutcome<TransferProof> {
-        cx.trace(&format!("atp_session_send_object_graph {:?} to peer", root_object));
+        cx.trace(&format!(
+            "atp_session_send_object_graph {:?} to peer",
+            root_object
+        ));
 
         // TODO: Implement object graph traversal and chunking
         // 1. Walk object graph from root
@@ -783,21 +810,24 @@ impl StreamHandle {
 
     /// Get the number of verified epochs in the stream.
     pub fn verified_epochs_count(&self) -> usize {
-        self.manifest.as_ref()
+        self.manifest
+            .as_ref()
             .map(|m| m.verified_epochs().len())
             .unwrap_or(0)
     }
 
     /// Get the latest verified offset in the stream.
     pub fn latest_verified_offset(&self) -> u64 {
-        self.manifest.as_ref()
+        self.manifest
+            .as_ref()
             .map(|m| m.latest_verified_offset())
             .unwrap_or(0)
     }
 
     /// Check if the stream has a final manifest.
     pub fn is_finalized(&self) -> bool {
-        self.manifest.as_ref()
+        self.manifest
+            .as_ref()
             .map(|m| m.is_complete())
             .unwrap_or(false)
     }
@@ -1003,7 +1033,9 @@ mod tests {
 
             // Close session
             session.close(cx).await.unwrap();
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1017,7 +1049,9 @@ mod tests {
             assert!(!diagnostics.direct_connectivity);
             assert!(!diagnostics.relay_available);
             assert_eq!(diagnostics.preferred_path, PathType::Unknown);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1031,7 +1065,9 @@ mod tests {
             assert_eq!(result.object_id, object_id);
             assert!(result.verified);
             assert!(!result.signature_valid);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1043,7 +1079,9 @@ mod tests {
 
             // Cancel transfer (should not error even if transfer doesn't exist)
             session.cancel_transfer(cx, transfer_id).await.unwrap();
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1055,7 +1093,10 @@ mod tests {
             let remote_peer = [2u8; 32];
 
             // Stream the buffer
-            let stream_handle = session.stream_large_buffer(cx, &data, remote_peer).await.unwrap();
+            let stream_handle = session
+                .stream_large_buffer(cx, &data, remote_peer)
+                .await
+                .unwrap();
 
             // Verify stream manifest integration
             assert!(stream_handle.manifest().is_some());
@@ -1065,11 +1106,16 @@ mod tests {
 
             // Test consumption policy creation
             let manifest = stream_handle.manifest().unwrap().clone();
-            let consumer = session.create_stream_consumer(manifest, ConsumptionPolicy::VerifiedOnly).await.unwrap();
+            let consumer = session
+                .create_stream_consumer(manifest, ConsumptionPolicy::VerifiedOnly)
+                .await
+                .unwrap();
 
             // Consumer should be ready to consume verified data
             assert!(consumer.data_available());
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1083,7 +1129,9 @@ mod tests {
             assert_eq!(epochs.len(), 1);
             assert_eq!(epochs[0].sequence, 1);
             assert_eq!(epochs[0].state, EpochState::Verified);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1095,13 +1143,18 @@ mod tests {
             let data = b"This is the write(really_big_buffer) test!".repeat(1000);
 
             // This is the primary ergonomic API
-            let proof = session.write_buffer(cx, &data, remote_peer, None).await.unwrap();
+            let proof = session
+                .write_buffer(cx, &data, remote_peer, None)
+                .await
+                .unwrap();
 
             // Verify the proof represents the complete transfer
             assert_eq!(proof.total_bytes, data.len() as u64);
             assert_eq!(proof.proof_mode, ProofMode::Full);
             assert!(!proof.signatures.is_empty() || proof.proof_mode != ProofMode::Full); // Allow empty sigs in mock
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1116,7 +1169,10 @@ mod tests {
             writer_config.enable_progress = true;
             writer_config.chunk_size = 1024;
 
-            let mut writer = session.create_writer(remote_peer, Some(writer_config)).await.unwrap();
+            let mut writer = session
+                .create_writer(remote_peer, Some(writer_config))
+                .await
+                .unwrap();
 
             // Set up progress tracking
             let mut progress_updates = 0;
@@ -1133,7 +1189,9 @@ mod tests {
 
             let proof = writer.finalize(cx).await.unwrap();
             assert_eq!(proof.total_bytes, (chunk1.len() + chunk2.len()) as u64);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1151,7 +1209,9 @@ mod tests {
 
             let proof = sink.close(cx).await.unwrap();
             assert!(proof.total_bytes >= 22); // "Sink data 1Sink data 2"
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1165,7 +1225,10 @@ mod tests {
             let mut config = WriterConfig::default();
             config.enable_resume = true;
 
-            let mut writer = session.create_writer(remote_peer, Some(config.clone())).await.unwrap();
+            let mut writer = session
+                .create_writer(remote_peer, Some(config.clone()))
+                .await
+                .unwrap();
             writer.write_all(cx, b"Partial transfer").await.unwrap();
 
             // Get resume token
@@ -1177,12 +1240,17 @@ mod tests {
             assert_eq!(cancel_token.verified_bytes, resume_token.verified_bytes);
 
             // Resume with new writer
-            let mut resumed_writer = session.resume_writer(resume_token, remote_peer, Some(config)).await.unwrap();
+            let mut resumed_writer = session
+                .resume_writer(resume_token, remote_peer, Some(config))
+                .await
+                .unwrap();
             resumed_writer.write_all(cx, b" completed").await.unwrap();
 
             let proof = resumed_writer.finalize(cx).await.unwrap();
             assert!(proof.total_bytes >= 26); // "Partial transfer completed"
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1192,7 +1260,10 @@ mod tests {
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [7u8; 32];
 
-            let mut writer = session.create_stream_writer(cx, remote_peer, None).await.unwrap();
+            let mut writer = session
+                .create_stream_writer(cx, remote_peer, None)
+                .await
+                .unwrap();
 
             // Simulate streaming data of unknown final size
             for i in 0..10 {
@@ -1202,7 +1273,9 @@ mod tests {
 
             let proof = writer.finalize(cx).await.unwrap();
             assert!(proof.total_bytes > 0);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1214,8 +1287,13 @@ mod tests {
 
             let root_object = ObjectId::content(ContentId::new([42u8; 32]));
 
-            let proof = session.send_object_graph(cx, root_object, remote_peer, None).await.unwrap();
+            let proof = session
+                .send_object_graph(cx, root_object, remote_peer, None)
+                .await
+                .unwrap();
             assert!(proof.total_bytes > 0);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

@@ -17,9 +17,7 @@ pub struct SerializableMerkleRoot {
 
 impl From<&MerkleRoot> for SerializableMerkleRoot {
     fn from(root: &MerkleRoot) -> Self {
-        Self {
-            hash: *root.hash(),
-        }
+        Self { hash: *root.hash() }
     }
 }
 
@@ -80,7 +78,9 @@ impl From<SerializableObjectId> for ObjectId {
     fn from(object_id: SerializableObjectId) -> Self {
         match object_id {
             SerializableObjectId::Content { hash } => Self::Content(ContentId::new(hash)),
-            SerializableObjectId::Manifest { hash } => Self::Manifest(crate::atp::object::ManifestId::new(hash)),
+            SerializableObjectId::Manifest { hash } => {
+                Self::Manifest(crate::atp::object::ManifestId::new(hash))
+            }
         }
     }
 }

@@ -4,9 +4,7 @@
 //! transitions and comprehensive trace generation for replay.
 
 use crate::cx::Cx;
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, ProtocolError};
-use crate::net::atp::protocol::varint::VarInt;
-use crate::net::atp::quic::packet_protection::{AtpPacketProtectionConfig, PacketProtectionSpace};
+use crate::net::atp::quic::packet_protection::AtpPacketProtectionConfig;
 use crate::types::outcome::Outcome;
 use crate::bytes::Bytes;
 use std::time::{Duration, Instant};

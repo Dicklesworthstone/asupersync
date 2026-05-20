@@ -13,7 +13,7 @@ use crate::atp::proof::serde_types::{
 };
 use crate::atp::verifier::VerificationEvidence;
 use crate::security::AuthKey;
-use hmac::{Hmac, Mac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -147,8 +147,15 @@ impl From<&AtpProofBundle> for SerializableAtpProofBundle {
             transfer_id: bundle.transfer_id.clone(),
             metadata: bundle.metadata.clone(),
             manifest_root: SerializableMerkleRoot::from(&bundle.manifest_root),
-            object_roots: bundle.object_roots.iter().map(SerializableObjectId::from).collect(),
-            commit_record: bundle.commit_record.as_ref().map(SerializableGraphCommit::from),
+            object_roots: bundle
+                .object_roots
+                .iter()
+                .map(SerializableObjectId::from)
+                .collect(),
+            commit_record: bundle
+                .commit_record
+                .as_ref()
+                .map(SerializableGraphCommit::from),
             chunk_hash_algorithm: SerializableHashAlgorithm::from(&bundle.chunk_hash_algorithm),
             chunk_bitmap: bundle.chunk_bitmap.clone(),
             verification_evidence: bundle
@@ -184,7 +191,11 @@ impl TryFrom<SerializableAtpProofBundle> for AtpProofBundle {
             transfer_id: bundle.transfer_id,
             metadata: bundle.metadata,
             manifest_root: MerkleRoot::from(bundle.manifest_root),
-            object_roots: bundle.object_roots.into_iter().map(ObjectId::from).collect(),
+            object_roots: bundle
+                .object_roots
+                .into_iter()
+                .map(ObjectId::from)
+                .collect(),
             commit_record: None, // We can't reconstruct GraphCommit from serializable version
             chunk_hash_algorithm: HashAlgorithm::from(bundle.chunk_hash_algorithm),
             chunk_bitmap: bundle.chunk_bitmap,
@@ -557,11 +568,7 @@ impl AtpProofBundleBuilder {
     }
 
     /// Add an extension field.
-    pub fn add_extension(
-        mut self,
-        key: impl Into<String>,
-        value: serde_json::Value,
-    ) -> Self {
+    pub fn add_extension(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.extensions.insert(key.into(), value);
         self
     }
@@ -732,9 +739,12 @@ impl AtpProofBundle {
 
     /// Deserialize a proof bundle from JSON bytes.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, AtpProofBundleError> {
-        let serializable: SerializableAtpProofBundle = serde_json::from_slice(bytes).map_err(|e| {
-            AtpProofBundleError::SemanticValidationFailed(format!("JSON deserialization failed: {e}"))
-        })?;
+        let serializable: SerializableAtpProofBundle =
+            serde_json::from_slice(bytes).map_err(|e| {
+                AtpProofBundleError::SemanticValidationFailed(format!(
+                    "JSON deserialization failed: {e}"
+                ))
+            })?;
         AtpProofBundle::try_from(serializable)
     }
 
@@ -850,7 +860,11 @@ impl AtpProofBundle {
             }
 
             // Verify key fingerprint is in peer identity
-            if !self.peer_identity.key_fingerprints.contains(&signature.key_fingerprint) {
+            if !self
+                .peer_identity
+                .key_fingerprints
+                .contains(&signature.key_fingerprint)
+            {
                 continue; // Skip signatures from unrecognized keys
             }
 
@@ -903,12 +917,17 @@ impl AtpProofBundle {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Ensure signer is a valid participant
         if signer_id != self.peer_identity.source_peer_id
-            && signer_id != self.peer_identity.destination_peer_id {
+            && signer_id != self.peer_identity.destination_peer_id
+        {
             return Err("Signer is not a participant in this transfer".into());
         }
 
         // Ensure key fingerprint is registered
-        if !self.peer_identity.key_fingerprints.contains(&key_fingerprint.to_string()) {
+        if !self
+            .peer_identity
+            .key_fingerprints
+            .contains(&key_fingerprint.to_string())
+        {
             return Err("Key fingerprint not found in peer identity".into());
         }
 
@@ -1042,9 +1061,10 @@ impl AtpProofBundle {
 
         for block in &metadata.source_blocks {
             if block.overhead_ratio < 0.0 {
-                return Err(AtpProofBundleError::InvalidRaptorQMetadata(
-                    format!("block {} has negative overhead ratio", block.block_index),
-                ));
+                return Err(AtpProofBundleError::InvalidRaptorQMetadata(format!(
+                    "block {} has negative overhead ratio",
+                    block.block_index
+                )));
             }
         }
 
@@ -1233,7 +1253,9 @@ mod tests {
         };
 
         let journal = TransferJournal {
-            digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(b"journal")),
+            digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(
+                b"journal",
+            )),
             format_version: 1,
             entry_count: 10,
             size_bytes: 1024,
@@ -1297,7 +1319,9 @@ mod tests {
         };
 
         let journal = TransferJournal {
-            digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(b"journal")),
+            digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(
+                b"journal",
+            )),
             format_version: 1,
             entry_count: 10,
             size_bytes: 1024,
@@ -1323,7 +1347,10 @@ mod tests {
             .expect("bundle should build");
 
         let err = bundle.validate().expect_err("validation should fail");
-        assert!(matches!(err, AtpProofBundleError::InvalidVerificationEvidence(_)));
+        assert!(matches!(
+            err,
+            AtpProofBundleError::InvalidVerificationEvidence(_)
+        ));
     }
 
     #[test]
@@ -1394,7 +1421,10 @@ mod tests {
             "cryptographic_signatures".to_string(),
             serde_json::json!({"type": "ed25519"}),
         );
-        assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Cryptographic);
+        assert_eq!(
+            bundle.calculate_proof_strength(),
+            ProofStrength::Cryptographic
+        );
     }
 
     #[test]
@@ -1459,14 +1489,19 @@ mod tests {
             .build()
             .expect("bundle should build");
 
-        let err = bundle.validate().expect_err("semantic validation should fail");
-        assert!(matches!(err, AtpProofBundleError::SemanticValidationFailed(_)));
+        let err = bundle
+            .validate()
+            .expect_err("semantic validation should fail");
+        assert!(matches!(
+            err,
+            AtpProofBundleError::SemanticValidationFailed(_)
+        ));
     }
 
     #[test]
     fn cryptographic_signature_verification() {
-        use crate::security::AuthKey;
         use crate::atp::object::ObjectId;
+        use crate::security::AuthKey;
 
         let manifest_root = crate::atp::manifest::MerkleRoot::new([1; 32]);
         let object_id = ObjectId::content(crate::atp::object::ContentId::from_bytes(b"test"));
@@ -1530,11 +1565,15 @@ mod tests {
 
         // Sign the bundle
         let auth_key = AuthKey::from_seed(12345);
-        bundle.sign_bundle("peer1", "test-key-fp", &auth_key)
+        bundle
+            .sign_bundle("peer1", "test-key-fp", &auth_key)
             .expect("signing should succeed");
 
         // Should now be Cryptographic strength
-        assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Cryptographic);
+        assert_eq!(
+            bundle.calculate_proof_strength(),
+            ProofStrength::Cryptographic
+        );
     }
 
     #[test]
@@ -1610,8 +1649,8 @@ mod tests {
 
     #[test]
     fn cryptographic_signature_rejects_unauthorized_signers() {
-        use crate::security::AuthKey;
         use crate::atp::object::ObjectId;
+        use crate::security::AuthKey;
 
         let manifest_root = crate::atp::manifest::MerkleRoot::new([1; 32]);
         let object_id = ObjectId::content(crate::atp::object::ContentId::from_bytes(b"test"));
