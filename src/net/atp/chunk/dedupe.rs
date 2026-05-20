@@ -9,6 +9,7 @@ use crate::atp::manifest::{ChunkBoundary, ChunkStrategy, ChunkMetadata};
 use super::{ChunkingProfileError, profiles::ChunkingProfile};
 use std::collections::{HashMap, BTreeMap, BTreeSet};
 use sha2::{Digest, Sha256};
+use crate::bytes::Bytes;
 
 /// Content-defined chunking engine with rolling hash boundary detection.
 pub struct CdcEngine;
@@ -201,7 +202,7 @@ pub struct ChunkCache {
 #[derive(Debug, Clone)]
 pub struct CachedChunk {
     /// Chunk data.
-    pub data: Vec<u8>,
+    pub data: Bytes,
     /// When this chunk was last accessed.
     pub last_accessed: std::time::SystemTime,
     /// How many times this chunk has been reused.
@@ -222,7 +223,7 @@ impl ChunkCache {
     }
 
     /// Store chunk in cache.
-    pub fn store_chunk(&mut self, identity: ChunkIdentity, data: Vec<u8>, source_object: Option<String>) -> Result<(), ChunkingProfileError> {
+    pub fn store_chunk(&mut self, identity: ChunkIdentity, data: Bytes, source_object: Option<String>) -> Result<(), ChunkingProfileError> {
         // Validate chunk data matches identity
         if data.len() != identity.size as usize {
             return Err(ChunkingProfileError::InvalidChunkParameters(
@@ -264,11 +265,11 @@ impl ChunkCache {
     }
 
     /// Lookup chunk by identity.
-    pub fn lookup_chunk(&mut self, identity: &ChunkIdentity) -> Option<&Vec<u8>> {
+    pub fn lookup_chunk(&mut self, identity: &ChunkIdentity) -> Option<Bytes> {
         if let Some(chunk) = self.chunks.get_mut(identity) {
             chunk.last_accessed = std::time::SystemTime::now();
             chunk.reuse_count += 1;
-            Some(&chunk.data)
+            Some(chunk.data.clone())
         } else {
             None
         }
@@ -385,7 +386,7 @@ impl ChunkReuseManager {
         &mut self,
         chunk_identity: &ChunkIdentity,
         transfer_id: &str,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Bytes> {
         let requesting_context = self.active_contexts.get(transfer_id).copied();
 
         // Check if chunk can be reused given capability scope
@@ -395,7 +396,7 @@ impl ChunkReuseManager {
 
         // Try direct lookup
         if let Some(data) = self.cache.lookup_chunk(chunk_identity) {
-            return Some(data.clone());
+            return Some(data);
         }
 
         // Try finding similar chunks with different context
@@ -403,7 +404,7 @@ impl ChunkReuseManager {
         for similar_identity in similar_chunks {
             if self.cache.can_reuse_chunk(similar_identity, requesting_context) {
                 if let Some(data) = self.cache.lookup_chunk(similar_identity) {
-                    return Some(data.clone());
+                    return Some(data);
                 }
             }
         }
@@ -422,7 +423,7 @@ impl ChunkReuseManager {
         let context_hash = self.active_contexts.get(transfer_id).copied();
         let identity = ChunkIdentity::from_data(chunk_data, chunking_profile, context_hash);
 
-        self.cache.store_chunk(identity.clone(), chunk_data.to_vec(), source_object)?;
+        self.cache.store_chunk(identity.clone(), Bytes::copy_from_slice(chunk_data), source_object)?;
 
         Ok(identity)
     }
@@ -527,15 +528,15 @@ mod tests {
         let identity3 = ChunkIdentity::from_data(&data3, "test", None);
 
         // Store first two chunks
-        cache.store_chunk(identity1.clone(), data1.clone(), None).unwrap();
-        cache.store_chunk(identity2.clone(), data2.clone(), None).unwrap();
+        cache.store_chunk(identity1.clone(), Bytes::copy_from_slice(&data1), None).unwrap();
+        cache.store_chunk(identity2.clone(), Bytes::copy_from_slice(&data2), None).unwrap();
 
         // Both should be present
         assert!(cache.lookup_chunk(&identity1).is_some());
         assert!(cache.lookup_chunk(&identity2).is_some());
 
         // Store third chunk (should evict oldest)
-        cache.store_chunk(identity3.clone(), data3.clone(), None).unwrap();
+        cache.store_chunk(identity3.clone(), Bytes::copy_from_slice(&data3), None).unwrap();
 
         // First chunk should be evicted
         assert!(cache.lookup_chunk(&identity1).is_none());
