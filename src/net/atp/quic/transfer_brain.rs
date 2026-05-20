@@ -3,8 +3,7 @@
 //! Intelligent path selection and congestion adaptation based on transport metrics.
 
 use super::metrics::{AtpTransportMetrics, PathPerformanceClass, PathRecommendation};
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, TransportError};
-use serde::{Deserialize, Serialize};
+use crate::net::atp::protocol::outcome::{AtpOutcome, TransportError};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
@@ -609,7 +608,7 @@ impl PathHistory {
 }
 
 /// Path optimization recommendation with urgency.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PathOptimizationRecommendation {
     /// Path this recommendation applies to.
     pub path_id: String,

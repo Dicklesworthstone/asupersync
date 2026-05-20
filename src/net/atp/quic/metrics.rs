@@ -3,16 +3,11 @@
 //! Exposes QUIC transport metrics to the ATP Transfer Brain for path selection,
 //! congestion adaptation, and performance monitoring.
 
-use crate::atp::doctor::AtpPlatformDoctorDocument;
-use crate::net::quic_native::{QuicTransportMachine, RttEstimator};
 use crate::observability::metrics::{Counter, Gauge};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// ATP transport metrics snapshot for Transfer Brain decision-making.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AtpTransportMetrics {
     /// Connection identifier for correlation.
     pub connection_id: String,

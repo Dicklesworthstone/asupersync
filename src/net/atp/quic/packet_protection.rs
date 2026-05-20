@@ -7,7 +7,7 @@
 use crate::cx::Cx;
 use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, ProtocolError};
 use crate::net::quic_native::tls::{
-    HeaderProtectionMask, KeyUpdateEvent, PacketProtectionRequest, PacketProtectionSpace,
+    HeaderProtectionMask, PacketProtectionRequest, PacketProtectionSpace,
     ProtectedPacket, ProtectionKeySnapshot, ProtectionProof, QuicHandshakeTranscript,
     QuicPacketProtectionProvider, QuicTlsError, TranscriptHash, UnprotectedPacket,
 };
@@ -18,7 +18,6 @@ use crate::net::quic_native::tls::DeterministicQuicCryptoProvider;
 #[cfg(feature = "tls")]
 use crate::net::quic_native::tls::{RustlsQuicCryptoProvider, RustlsQuicProviderSide};
 use crate::types::outcome::Outcome;
-use std::sync::Arc;
 
 /// ATP packet protection configuration.
 #[derive(Debug, Clone)]
