@@ -5,12 +5,10 @@
 //! requirements as specified in ATP-G2.
 
 use crate::atp::manifest::{
-    AuthenticationAlgorithm, ManifestError, RepairGroup, RepairGroupId, RaptorQSymbol,
+    AuthenticationAlgorithm, RepairGroup, RepairGroupId, RaptorQSymbol,
     MerkleRoot,
 };
-use crate::atp::object::ObjectId;
-use crate::types::outcome::Outcome;
-use sha2::{Digest, Sha256};
+use sha2::{Sha256};
 use hmac::KeyInit;
 use std::time::{Duration, SystemTime};
 
@@ -377,7 +375,7 @@ impl RepairReceiver {
 
         // Include all critical symbol and group parameters in the MAC
         mac.update(b"ATP-G2-RepairSymbol");
-        mac.update(&repair_group.group_id.as_bytes());
+        mac.update(repair_group.group_id.as_bytes());
         mac.update(repair_group.manifest_root.hash());
         mac.update(repair_group.object_id.hash_bytes());
         mac.update(&repair_group.source_block_number.to_be_bytes());

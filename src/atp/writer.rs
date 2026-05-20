@@ -213,7 +213,7 @@ impl AtpWriter {
         config: WriterConfig,
     ) -> AtpOutcome<Self> {
         if !resume_token.is_valid() {
-            return Outcome::Err(AtpError::Protocol(ProtocolError::InvalidFrame("Token expired".to_string())));
+            return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
         }
 
         let id = format!("writer-resumed-{:?}", resume_token.transfer_id);
@@ -265,7 +265,7 @@ impl AtpWriter {
         cx.trace(&format!("atp_writer_write {} bytes", data.len()));
 
         if self.state == WriterState::Cancelled || self.state == WriterState::Error {
-            return Outcome::Err(AtpError::Protocol(ProtocolError::InvalidFrame("Writer is not active".to_string())));
+            return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
         }
 
         // Initialize transfer on first write
@@ -331,8 +331,10 @@ impl AtpWriter {
         // 4. Emit progress during streaming
 
         // For now, read entire file and write
-        let data = std::fs::read(path)
-            .map_err(|_e| AtpError::Disk(DiskError::IoError))?;
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(_) => return Outcome::Err(AtpError::Disk(DiskError::IoError)),
+        };
 
         self.write_buffer(cx, &data).await
     }
@@ -342,7 +344,7 @@ impl AtpWriter {
         cx.trace("atp_writer_finalize");
 
         if self.state == WriterState::Cancelled || self.state == WriterState::Error {
-            return Outcome::Err(AtpError::Protocol(ProtocolError::InvalidFrame("Cannot finalize inactive writer".to_string())));
+            return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
         }
 
         self.state = WriterState::Finalizing;

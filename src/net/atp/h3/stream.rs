@@ -98,7 +98,10 @@ impl AtpH3Stream {
     pub fn can_send(&self) -> bool {
         match &self.direction {
             StreamDirection::Bidirectional | StreamDirection::Outbound => {
-                matches!(self.state, StreamState::Open | StreamState::HalfClosedRemote)
+                matches!(
+                    self.state,
+                    StreamState::Open | StreamState::HalfClosedRemote
+                )
             }
             StreamDirection::Inbound => false,
         }
@@ -116,28 +119,33 @@ impl AtpH3Stream {
 
     /// Check if the stream is closed.
     pub fn is_closed(&self) -> bool {
-        matches!(self.state, StreamState::Closed | StreamState::Error(_) | StreamState::Reset)
+        matches!(
+            self.state,
+            StreamState::Closed | StreamState::Error(_) | StreamState::Reset
+        )
     }
 
     /// Send data on the stream.
     pub fn send(&mut self, data: &[u8]) -> AtpH3Result<()> {
         if !self.can_send() {
-            return Err(AtpH3Error::Stream(
-                format!("Cannot send on stream {} in state {:?}", self.stream_id, self.state)
-            ));
+            return Err(AtpH3Error::Stream(format!(
+                "Cannot send on stream {} in state {:?}",
+                self.stream_id, self.state
+            )));
         }
 
         if self.send_queue.len() >= self.send_queue_high_water {
             return Err(AtpH3Error::Stream(
-                "Send queue full - apply backpressure".to_string()
+                "Send queue full - apply backpressure".to_string(),
             ));
         }
 
         if data.len() > self.max_buffer_size {
-            return Err(AtpH3Error::Stream(
-                format!("Data size {} exceeds maximum buffer size {}",
-                       data.len(), self.max_buffer_size)
-            ));
+            return Err(AtpH3Error::Stream(format!(
+                "Data size {} exceeds maximum buffer size {}",
+                data.len(),
+                self.max_buffer_size
+            )));
         }
 
         self.send_queue.push_back(data.to_vec());
@@ -167,14 +175,15 @@ impl AtpH3Stream {
     /// Receive data on the stream.
     pub fn receive(&mut self, data: &[u8]) -> AtpH3Result<()> {
         if !self.can_receive() {
-            return Err(AtpH3Error::Stream(
-                format!("Cannot receive on stream {} in state {:?}", self.stream_id, self.state)
-            ));
+            return Err(AtpH3Error::Stream(format!(
+                "Cannot receive on stream {} in state {:?}",
+                self.stream_id, self.state
+            )));
         }
 
         if self.recv_buffer.len() + data.len() > self.max_buffer_size {
             return Err(AtpH3Error::Stream(
-                "Receive buffer full - apply backpressure".to_string()
+                "Receive buffer full - apply backpressure".to_string(),
             ));
         }
 
@@ -206,7 +215,7 @@ impl AtpH3Stream {
             StreamState::Open => {
                 if self.direction == StreamDirection::Inbound {
                     return Err(AtpH3Error::Stream(
-                        "Cannot close send on inbound-only stream".to_string()
+                        "Cannot close send on inbound-only stream".to_string(),
                     ));
                 }
                 self.state = StreamState::HalfClosedLocal;
@@ -218,9 +227,10 @@ impl AtpH3Stream {
                 self.update_activity();
                 Ok(())
             }
-            _ => Err(AtpH3Error::Stream(
-                format!("Cannot close send in state {:?}", self.state)
-            )),
+            _ => Err(AtpH3Error::Stream(format!(
+                "Cannot close send in state {:?}",
+                self.state
+            ))),
         }
     }
 

@@ -1,6 +1,6 @@
 //! H3 session management for ATP-over-WebTransport.
 
-use super::{AdapterConfig, AtpH3Error, AtpH3Result, H3FrameCodec, AtpH3Stream, StreamDirection};
+use super::{AdapterConfig, AtpH3Error, AtpH3Result, AtpH3Stream, H3FrameCodec, StreamDirection};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -89,9 +89,10 @@ impl H3Session {
                 self.update_activity();
                 Ok(())
             }
-            _ => Err(AtpH3Error::Session(
-                format!("Cannot activate session in state {:?}", self.state)
-            )),
+            _ => Err(AtpH3Error::Session(format!(
+                "Cannot activate session in state {:?}",
+                self.state
+            ))),
         }
     }
 
@@ -151,7 +152,9 @@ impl H3Session {
             return Err(AtpH3Error::Session("Session is not active".to_string()));
         }
 
-        let stream = self.streams.get_mut(&stream_id)
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
             .ok_or_else(|| AtpH3Error::Stream(format!("Stream {} not found", stream_id)))?;
 
         stream.send(data)?;
@@ -166,10 +169,11 @@ impl H3Session {
         }
 
         if data.len() > self.config.max_datagram_size {
-            return Err(AtpH3Error::Session(
-                format!("Datagram size {} exceeds maximum {}",
-                       data.len(), self.config.max_datagram_size)
-            ));
+            return Err(AtpH3Error::Session(format!(
+                "Datagram size {} exceeds maximum {}",
+                data.len(),
+                self.config.max_datagram_size
+            )));
         }
 
         // TODO: Implement actual datagram transmission
@@ -312,7 +316,9 @@ mod tests {
         session.activate().unwrap();
 
         // Create streams
-        let stream_id1 = session.create_stream(StreamDirection::Bidirectional).unwrap();
+        let stream_id1 = session
+            .create_stream(StreamDirection::Bidirectional)
+            .unwrap();
         assert_eq!(stream_id1, 0);
 
         let stream_id2 = session.create_stream(StreamDirection::Outbound).unwrap();
@@ -339,11 +345,23 @@ mod tests {
         session.activate().unwrap();
 
         // Create maximum streams
-        assert!(session.create_stream(StreamDirection::Bidirectional).is_ok());
-        assert!(session.create_stream(StreamDirection::Bidirectional).is_ok());
+        assert!(
+            session
+                .create_stream(StreamDirection::Bidirectional)
+                .is_ok()
+        );
+        assert!(
+            session
+                .create_stream(StreamDirection::Bidirectional)
+                .is_ok()
+        );
 
         // Exceed limit
-        assert!(session.create_stream(StreamDirection::Bidirectional).is_err());
+        assert!(
+            session
+                .create_stream(StreamDirection::Bidirectional)
+                .is_err()
+        );
     }
 
     #[test]
@@ -353,7 +371,9 @@ mod tests {
         session.activate().unwrap();
 
         // Create stream
-        let _stream_id = session.create_stream(StreamDirection::Bidirectional).unwrap();
+        let _stream_id = session
+            .create_stream(StreamDirection::Bidirectional)
+            .unwrap();
 
         // Start close
         assert!(session.start_close().is_ok());
@@ -384,7 +404,9 @@ mod tests {
         let mut session = H3Session::new("test-session".to_string(), &config).unwrap();
         session.activate().unwrap();
 
-        let _stream_id = session.create_stream(StreamDirection::Bidirectional).unwrap();
+        let _stream_id = session
+            .create_stream(StreamDirection::Bidirectional)
+            .unwrap();
 
         let stats = session.stats();
         assert_eq!(stats.session_id, "test-session");

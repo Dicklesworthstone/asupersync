@@ -8,6 +8,7 @@ use crate::atp::object::{ObjectId, ManifestId, ContentId};
 use crate::atp::manifest::{ChunkBoundary, ChunkMetadata};
 use crate::net::atp::protocol::outcome::{AtpOutcome, AtpError};
 use crate::types::outcome::Outcome;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
@@ -81,7 +82,7 @@ impl StreamEpoch {
         // Hash chunk boundaries
         for boundary in chunk_boundaries {
             boundary.index.hash(&mut hasher);
-            boundary.offset.hash(&mut hasher);
+            boundary.byte_offset.hash(&mut hasher);
             boundary.size_bytes.hash(&mut hasher);
             boundary.content_hash.hash(&mut hasher);
         }

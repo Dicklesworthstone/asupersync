@@ -148,9 +148,10 @@ impl AtpH3Adapter {
             }
             FrameType::Session => Ok(TransmissionStrategy::ReliableStream),
             FrameType::Manifest => Ok(TransmissionStrategy::ReliableStream),
-            _ => Err(AtpH3Error::UnsupportedFeature(
-                format!("Frame type {:?} not supported over WebTransport", frame.frame_type())
-            )),
+            _ => Err(AtpH3Error::UnsupportedFeature(format!(
+                "Frame type {:?} not supported over WebTransport",
+                frame.frame_type()
+            ))),
         }
     }
 
@@ -165,23 +166,27 @@ impl AtpH3Adapter {
     }
 
     /// Validate frame size for WebTransport constraints.
-    pub fn validate_frame_size(&self, frame: &AtpFrame, strategy: &TransmissionStrategy) -> AtpH3Result<()> {
+    pub fn validate_frame_size(
+        &self,
+        frame: &AtpFrame,
+        strategy: &TransmissionStrategy,
+    ) -> AtpH3Result<()> {
         let encoded_size = self.encode_frame(frame)?.len();
 
         match strategy {
             TransmissionStrategy::UnreliableDatagram => {
                 if encoded_size > self.config.max_datagram_size {
-                    return Err(AtpH3Error::SecurityConstraint(
-                        format!("Frame size {} exceeds datagram limit {}",
-                                encoded_size, self.config.max_datagram_size)
-                    ));
+                    return Err(AtpH3Error::SecurityConstraint(format!(
+                        "Frame size {} exceeds datagram limit {}",
+                        encoded_size, self.config.max_datagram_size
+                    )));
                 }
             }
             TransmissionStrategy::ReliableStream => {
                 // Streams can handle larger frames but may need fragmentation
                 if encoded_size > 64 * 1024 {
                     return Err(AtpH3Error::Stream(
-                        "Frame too large for efficient stream transmission".to_string()
+                        "Frame too large for efficient stream transmission".to_string(),
                     ));
                 }
             }

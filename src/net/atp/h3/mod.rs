@@ -41,7 +41,9 @@ pub mod codec;
 pub mod session;
 pub mod stream;
 
-pub use adapter::{AtpH3Adapter, AdapterConfig, FeatureSupport, TransmissionStrategy, AdapterStats};
+pub use adapter::{
+    AdapterConfig, AdapterStats, AtpH3Adapter, FeatureSupport, TransmissionStrategy,
+};
 pub use codec::{H3FrameCodec, WebTransportFrameType};
 pub use session::{H3Session, SessionState, SessionStats};
 pub use stream::{AtpH3Stream, StreamDirection, StreamState, StreamStats};

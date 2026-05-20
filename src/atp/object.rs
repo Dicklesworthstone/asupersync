@@ -146,6 +146,12 @@ impl ObjectId {
             Self::Manifest(manifest_id) => manifest_id.hash(),
         }
     }
+
+    /// Format as hex string for debugging and display.
+    #[must_use]
+    pub fn as_hex(&self) -> String {
+        hex::encode(self.hash_bytes())
+    }
 }
 
 impl fmt::Display for ObjectId {

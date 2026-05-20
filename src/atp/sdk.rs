@@ -501,14 +501,20 @@ impl AtpSession {
     ) -> AtpOutcome<TransferProof> {
         cx.trace(&format!("atp_session_write_buffer {} bytes to peer", data.len()));
 
-        let mut writer = self.create_writer(remote_peer, config)?;
+        let mut writer = match self.create_writer(remote_peer, config) {
+            Outcome::Ok(writer) => writer,
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(msg) => return Outcome::Panicked(msg),
+        };
 
         // Enable progress reporting if session diagnostics are enabled
         if self.config.enable_diagnostics {
-            writer.set_progress_callback(|progress| {
+            let data_len = data.len();
+            writer.set_progress_callback(move |progress| {
                 // TODO: Emit structured logs for progress
                 eprintln!("ATP transfer progress: {:.1}% ({} bytes written)",
-                    progress.bytes_written as f64 / data.len() as f64 * 100.0,
+                    progress.bytes_written as f64 / data_len as f64 * 100.0,
                     progress.bytes_written
                 );
             });
@@ -528,7 +534,12 @@ impl AtpSession {
         let path = path.as_ref();
         cx.trace(&format!("atp_session_write_file {:?} to peer", path));
 
-        let mut writer = self.create_writer(remote_peer, config)?;
+        let mut writer = match self.create_writer(remote_peer, config) {
+            Outcome::Ok(writer) => writer,
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(msg) => return Outcome::Panicked(msg),
+        };
 
         // Enable progress reporting if session diagnostics are enabled
         if self.config.enable_diagnostics {
@@ -554,7 +565,12 @@ impl AtpSession {
     ) -> AtpOutcome<AtpWriter> {
         cx.trace("atp_session_create_stream_writer");
 
-        let mut writer = self.create_writer(remote_peer, config)?;
+        let mut writer = match self.create_writer(remote_peer, config) {
+            Outcome::Ok(writer) => writer,
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(msg) => return Outcome::Panicked(msg),
+        };
 
         // Set up for streaming with unknown final size
         if self.config.enable_diagnostics {
@@ -584,7 +600,12 @@ impl AtpSession {
         // 4. Generate final proof for complete graph
 
         let writer_config = config.unwrap_or_default();
-        let mut writer = self.create_writer(remote_peer, Some(writer_config))?;
+        let mut writer = match self.create_writer(remote_peer, Some(writer_config)) {
+            Outcome::Ok(writer) => writer,
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(msg) => return Outcome::Panicked(msg),
+        };
 
         // For now, write a placeholder representing the object graph
         let placeholder_data = format!("object-graph:{}", root_object.as_hex()).into_bytes();

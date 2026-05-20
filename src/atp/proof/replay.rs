@@ -4,7 +4,6 @@
 //! deterministic reconstruction of transfer operations for debugging,
 //! compliance auditing, and incident analysis.
 
-use crate::atp::object::ContentId;
 use crate::atp::proof::serde_types::SerializableContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
