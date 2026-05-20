@@ -10,6 +10,7 @@ pub mod actor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
 pub mod identity;
+pub mod journal;
 pub mod manifest;
 pub mod object;
 pub mod path;
