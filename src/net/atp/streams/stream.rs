@@ -472,7 +472,18 @@ pub struct StreamStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cx::test_cx;
+    use crate::cx::Cx;
+
+    fn test_cx() -> Cx {
+        Cx::for_testing()
+    }
+
+    fn assert_receive_ok(outcome: Outcome<Vec<Bytes>, StreamError>, context: &str) -> Vec<Bytes> {
+        match outcome {
+            Outcome::Ok(received) => received,
+            other => panic!("{context}: expected receive_data to succeed, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_stream_send_receive() {
@@ -494,7 +505,8 @@ mod tests {
         }
 
         // Receive the same data
-        let received = stream.receive_data(&cx, 0, data, false).unwrap();
+        let received =
+            assert_receive_ok(stream.receive_data(&cx, 0, data, false), "in-order receive");
         assert_eq!(received.len(), 1);
         assert_eq!(received[0], Bytes::from("hello world"));
     }
@@ -516,14 +528,16 @@ mod tests {
         let mut stream = AtpStream::new(StreamId::new(8), true, StreamPriority::Data, false);
 
         // Receive data out of order
-        let data1 = stream
-            .receive_data(&cx, 5, Bytes::from("world"), false)
-            .unwrap();
+        let data1 = assert_receive_ok(
+            stream.receive_data(&cx, 5, Bytes::from("world"), false),
+            "out-of-order suffix receive",
+        );
         assert_eq!(data1.len(), 0); // Buffered, not delivered
 
-        let data2 = stream
-            .receive_data(&cx, 0, Bytes::from("hello"), false)
-            .unwrap();
+        let data2 = assert_receive_ok(
+            stream.receive_data(&cx, 0, Bytes::from("hello"), false),
+            "out-of-order prefix receive",
+        );
         assert_eq!(data2.len(), 2); // Both segments delivered
         assert_eq!(data2[0], Bytes::from("hello"));
         assert_eq!(data2[1], Bytes::from("world"));
@@ -546,7 +560,10 @@ mod tests {
         }
 
         // Receive with FIN should complete the stream
-        let received = stream.receive_data(&cx, 0, data, true).unwrap();
+        let received = assert_receive_ok(
+            stream.receive_data(&cx, 0, data, true),
+            "receive with final size",
+        );
         assert_eq!(received.len(), 1);
         assert!(matches!(stream.receive_state, ReceiveState::DataRecvd));
     }
