@@ -14,7 +14,11 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 ## [Unreleased]
 
-> 3,657 commits since v0.3.1 (2026-04-22 → 2026-05-05) | [compare](https://github.com/Dicklesworthstone/asupersync/compare/v0.3.1...main)
+## [v0.3.2] -- 2026-05-20 (Release)
+
+> 3,657 commits since v0.3.1 (2026-04-22 → 2026-05-20) | [compare](https://github.com/Dicklesworthstone/asupersync/compare/v0.3.1...v0.3.2)
+>
+> Triaged-issue fixes shipped in this release: Windows HTTPS connect path returning `Ok` then failing with `WSAENOTCONN (10057)` (#35, `bc7d3dec`); `Runtime::block_on` not installing an ambient `Cx`, causing `TcpListener::accept` to busy-poll instead of waiting on the reactor (#41, `73dfaaad`); and heuristic `module_desync` epoch-consistency logs demoted from `error!` to `debug!` so normal task-table epoch advances no longer spam errors (#42, `357df7f5`).
 
 ### Release theme
 
