@@ -1,20 +1,23 @@
 //! Platform Capability Detection for Filesystem Features
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
 use std::ffi::CString;
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
 use std::mem::MaybeUninit;
 
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 /// Static operation costs to avoid repeated HashMap allocation
 static OPERATION_COSTS: OnceLock<HashMap<&'static str, u32>> = OnceLock::new();
+static PROBE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Get operation costs HashMap (initialized once)
 fn get_operation_costs() -> &'static HashMap<&'static str, u32> {
@@ -390,6 +393,36 @@ impl PlatformCapabilities {
 
     // Helper methods for capability testing
 
+    fn unique_probe_path(directory: &Path, label: &str) -> std::path::PathBuf {
+        let sequence = PROBE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        directory.join(format!(
+            ".atp_{label}_probe_{}_{}",
+            std::process::id(),
+            sequence
+        ))
+    }
+
+    fn create_unique_probe_file(
+        directory: &Path,
+        label: &str,
+    ) -> Option<(std::path::PathBuf, std::fs::File)> {
+        for _ in 0..8 {
+            let path = Self::unique_probe_path(directory, label);
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Some((path, file)),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(_) => return None,
+            }
+        }
+
+        None
+    }
+
     fn detect_filesystem_type(path: &Path) -> Outcome<String, CapabilityError> {
         // Platform-specific filesystem detection
         #[cfg(target_os = "linux")]
@@ -465,40 +498,74 @@ impl PlatformCapabilities {
 
     #[allow(unsafe_code)]
     async fn test_preallocation_support(path: &Path) -> bool {
-        let test_file = path.join(".atp_prealloc_test");
+        let Some((test_file, file)) = Self::create_unique_probe_file(path, "prealloc") else {
+            return false;
+        };
 
         #[cfg(target_os = "linux")]
         {
-            if let Ok(file) = std::fs::File::create(&test_file) {
-                use std::os::unix::io::AsRawFd;
-                let fd = file.as_raw_fd();
-                let result = unsafe { libc::fallocate(fd, 0, 0, 4096) };
-                std::fs::remove_file(&test_file).ok();
-                return result == 0;
-            }
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+            let result = unsafe { libc::fallocate(fd, 0, 0, 4096) };
+            drop(file);
+            let _ = std::fs::remove_file(&test_file);
+            result == 0
         }
 
         // Fallback test for other platforms
-        false
+        #[cfg(not(target_os = "linux"))]
+        {
+            drop(file);
+            let _ = std::fs::remove_file(&test_file);
+            false
+        }
     }
 
-    async fn test_atomic_rename_support(_path: &Path) -> bool {
-        // On POSIX systems, rename within the same filesystem is atomic
-        true
+    async fn test_atomic_rename_support(path: &Path) -> bool {
+        let Some((source_path, source_file)) = Self::create_unique_probe_file(path, "rename_src")
+        else {
+            return false;
+        };
+        drop(source_file);
+
+        let Some((target_path, target_file)) = Self::create_unique_probe_file(path, "rename_dst")
+        else {
+            let _ = std::fs::remove_file(&source_path);
+            return false;
+        };
+        drop(target_file);
+
+        #[cfg(target_os = "windows")]
+        if std::fs::remove_file(&target_path).is_err() {
+            let _ = std::fs::remove_file(&source_path);
+            return false;
+        }
+
+        let renamed = std::fs::rename(&source_path, &target_path).is_ok();
+        if renamed {
+            let _ = std::fs::remove_file(&target_path);
+        } else {
+            let _ = std::fs::remove_file(&source_path);
+            let _ = std::fs::remove_file(&target_path);
+        }
+
+        renamed
     }
 
     async fn test_hard_link_support(path: &Path) -> bool {
-        let test_file1 = path.join(".atp_link_test1");
-        let test_file2 = path.join(".atp_link_test2");
+        let Some((test_file1, file)) = Self::create_unique_probe_file(path, "hardlink_src") else {
+            return false;
+        };
+        drop(file);
 
-        if let Ok(_) = std::fs::File::create(&test_file1) {
-            let result = std::fs::hard_link(&test_file1, &test_file2).is_ok();
-            std::fs::remove_file(&test_file1).ok();
-            std::fs::remove_file(&test_file2).ok();
-            return result;
+        let test_file2 = Self::unique_probe_path(path, "hardlink_dst");
+        let linked = std::fs::hard_link(&test_file1, &test_file2).is_ok();
+        let _ = std::fs::remove_file(&test_file1);
+        if linked {
+            let _ = std::fs::remove_file(&test_file2);
         }
 
-        false
+        linked
     }
 
     async fn test_sparse_file_support(_path: &Path) -> bool {
@@ -657,5 +724,37 @@ mod tests {
 
         #[cfg(target_os = "windows")]
         assert_eq!(os_type, OsType::Windows);
+    }
+
+    #[test]
+    fn capability_probe_files_do_not_overwrite_existing_sentinels() {
+        let temp_root = std::env::temp_dir();
+        let test_dir = PlatformCapabilities::unique_probe_path(&temp_root, "sentinel_dir");
+        std::fs::create_dir(&test_dir).unwrap();
+
+        let sentinels = [
+            (".atp_prealloc_test", b"keep prealloc sentinel".as_slice()),
+            (".atp_link_test1", b"keep link source sentinel".as_slice()),
+            (".atp_link_test2", b"keep link target sentinel".as_slice()),
+        ];
+
+        for (name, contents) in sentinels {
+            std::fs::write(test_dir.join(name), contents).unwrap();
+        }
+
+        let _ = futures_lite::future::block_on(PlatformCapabilities::test_preallocation_support(
+            &test_dir,
+        ));
+        let _ = futures_lite::future::block_on(PlatformCapabilities::test_atomic_rename_support(
+            &test_dir,
+        ));
+        let _ =
+            futures_lite::future::block_on(PlatformCapabilities::test_hard_link_support(&test_dir));
+
+        for (name, contents) in sentinels {
+            assert_eq!(std::fs::read(test_dir.join(name)).unwrap(), contents);
+            std::fs::remove_file(test_dir.join(name)).unwrap();
+        }
+        std::fs::remove_dir(test_dir).unwrap();
     }
 }

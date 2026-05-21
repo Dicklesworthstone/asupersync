@@ -10,8 +10,9 @@ use crate::types::outcome::Outcome;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
+use parking_lot::{Mutex, MutexGuard};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Configuration for sparse writer behavior
@@ -162,8 +163,15 @@ impl SparseWriter {
     ) -> Outcome<Self, SparseWriterError> {
         let final_path = final_path.as_ref().to_path_buf();
 
-        // Detect platform capabilities
-        let platform = match PlatformCapabilities::detect(cx).await {
+        let destination_dir = final_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+
+        // Detect capabilities for the destination filesystem. ATP transfers may
+        // target a mounted volume whose sparse/preallocation/rename behavior
+        // differs from the process working directory.
+        let platform = match PlatformCapabilities::detect_for_path(cx, destination_dir).await {
             crate::types::outcome::Outcome::Ok(caps) => Arc::new(caps),
             crate::types::outcome::Outcome::Err(e) => {
                 return crate::types::outcome::Outcome::Err(SparseWriterError::PlatformDetection(
@@ -179,9 +187,7 @@ impl SparseWriter {
         };
 
         // Initialize path manager
-        let path_manager = Arc::new(Mutex::new(TempPathManager::new(
-            final_path.parent().unwrap_or(Path::new(".")),
-        )));
+        let path_manager = Arc::new(Mutex::new(TempPathManager::new(destination_dir)));
 
         // Create initial state
         let state = Arc::new(Mutex::new(SparseWriterState {
@@ -208,7 +214,7 @@ impl SparseWriter {
     }
 
     fn lock_state(&self) -> MutexGuard<'_, SparseWriterState> {
-        self.state.lock().unwrap()
+        self.state.lock()
     }
 
     /// Set expected final size for preallocation
@@ -408,7 +414,7 @@ impl SparseWriter {
 
         // Generate temp path
         let temp_path = {
-            let mut path_mgr = self.path_manager.lock().unwrap();
+            let mut path_mgr = self.path_manager.lock();
             path_mgr
                 .create_temp_path(&state.object_id.to_string())
                 .map_err(|e| SparseWriterError::TempPathCreation(e.to_string()))?
@@ -648,7 +654,7 @@ impl SparseWriter {
         let mut state = self.lock_state();
 
         if let Some(temp_path) = state.temp_path.take() {
-            let mut path_mgr = self.path_manager.lock().unwrap();
+            let mut path_mgr = self.path_manager.lock();
             path_mgr
                 .quarantine_file(&temp_path, reason)
                 .map_err(|e| SparseWriterError::TempPathCreation(e.to_string()))?;

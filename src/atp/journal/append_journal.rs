@@ -188,9 +188,13 @@ impl JournalRecord {
     /// Verify the authentication tag for this record using the provided key
     pub fn verify_signature(&self, key: &crate::security::AuthKey) -> bool {
         use crate::security::tag::AuthenticationTag;
+        use subtle::ConstantTimeEq;
         let expected_tag = AuthenticationTag::compute_for_journal_record(key, self);
-        // Constant-time comparison
-        expected_tag == *self.auth_tag()
+        // Constant-time comparison via subtle
+        expected_tag
+            .as_bytes()
+            .ct_eq(self.auth_tag().as_bytes())
+            .into()
     }
 
     /// Create a signed version of this record with auth_tag computed
@@ -1036,6 +1040,24 @@ impl Default for JournalConfig {
     }
 }
 
+const JOURNAL_FILE_PREFIX: &str = "journal_gen_";
+const JOURNAL_FILE_SUFFIX: &str = ".dat";
+
+fn journal_file_name(generation: u64) -> String {
+    format!("{JOURNAL_FILE_PREFIX}{generation:06}{JOURNAL_FILE_SUFFIX}")
+}
+
+fn journal_file_path(base_dir: &Path, generation: u64) -> PathBuf {
+    base_dir.join(journal_file_name(generation))
+}
+
+fn parse_journal_generation(file_name: &str) -> Option<u64> {
+    let generation = file_name
+        .strip_prefix(JOURNAL_FILE_PREFIX)?
+        .strip_suffix(JOURNAL_FILE_SUFFIX)?;
+    generation.parse().ok()
+}
+
 /// Append-only journal for crash-safe transfer tracking
 pub struct AppendJournal {
     /// Configuration
@@ -1097,6 +1119,7 @@ impl AppendJournal {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
+        let is_boundary = matches!(record, JournalRecord::CompactionBoundary { .. });
         let entry = JournalEntry::new(self.sequence, record.with_signature(&self.auth_key));
 
         // Serialize the entry
@@ -1132,18 +1155,20 @@ impl AppendJournal {
             self.recent_entries.pop_front();
         }
 
-        // Check if compaction is needed
-        match self.should_compact() {
-            Outcome::Ok(true) => match self.trigger_compaction() {
-                Outcome::Ok(()) => {}
+        // Check if compaction is needed (but not if we are already appending a compaction boundary)
+        if !is_boundary {
+            match self.should_compact() {
+                Outcome::Ok(true) => match self.trigger_compaction() {
+                    Outcome::Ok(()) => {}
+                    Outcome::Err(e) => return Outcome::Err(e),
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+                },
+                Outcome::Ok(false) => {}
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-            },
-            Outcome::Ok(false) => {}
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
         }
 
         Outcome::Ok(current_sequence)
@@ -1170,12 +1195,9 @@ impl AppendJournal {
 
         // Read from all generations
         for generation_num in 0..=self.generation {
-            let file_path = self
-                .config
-                .base_dir
-                .join(format!("journal_gen_{:06}.dat", generation_num));
+            let file_path = journal_file_path(&self.config.base_dir, generation_num);
             if file_path.exists() {
-                let entries = match self.read_entries_from_file(&file_path) {
+                let (entries, _corrupted) = match self.read_entries_from_file(&file_path) {
                     Outcome::Ok(e) => e,
                     Outcome::Err(err) => return Outcome::err(err),
                     Outcome::Cancelled(r) => return Outcome::cancelled(r),
@@ -1255,17 +1277,22 @@ impl AppendJournal {
             return Outcome::Ok(());
         }
 
-        let file_path = self
-            .config
-            .base_dir
-            .join(format!("journal_gen_{:06}.dat", self.generation));
+        let file_path = journal_file_path(&self.config.base_dir, self.generation);
 
         let file = match OpenOptions::new()
             .create(true)
             .append(true)
             .open(&file_path)
         {
-            Ok(f) => f,
+            Ok(f) => {
+                if self.config.force_sync {
+                    // Sync the parent directory to ensure the new file entry is durable
+                    if let Ok(dir) = File::open(&self.config.base_dir) {
+                        let _ = dir.sync_all();
+                    }
+                }
+                f
+            }
             Err(e) => return Outcome::Err(JournalError::FileOpen(e.to_string())),
         };
 
@@ -1302,7 +1329,7 @@ impl AppendJournal {
         let boundary_record = JournalRecord::CompactionBoundary {
             generation: self.generation + 1,
             compacted_up_to_sequence: self.sequence,
-            timestamp: SystemTime::now()
+            timestamp: SystemTime::now() // ubs:ignore - timestamp used for recording, not crypto randomness
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
@@ -1343,10 +1370,7 @@ impl AppendJournal {
         let cutoff_generation = self.generation - self.config.max_generations as u64;
 
         for generation_num in 0..cutoff_generation {
-            let old_file = self
-                .config
-                .base_dir
-                .join(format!("journal_gen_{:06}.dat", generation_num));
+            let old_file = journal_file_path(&self.config.base_dir, generation_num);
             if old_file.exists() {
                 if let Err(e) = std::fs::remove_file(&old_file) {
                     if self.config.enable_detailed_logs {
@@ -1381,56 +1405,74 @@ impl AppendJournal {
             let file_name = entry.file_name();
             let file_name_str = file_name.to_string_lossy();
 
-            // Parse generation number from filename journal_gen_NNNNNN.dat
-            if file_name_str.starts_with("journal_gen_") && file_name_str.ends_with(".dat") {
-                let gen_part = &file_name_str[12..file_name_str.len() - 4]; // Extract between "journal_gen_" and ".dat"
-                if let Ok(generation_num) = gen_part.parse::<u64>() {
-                    max_generation = max_generation.max(generation_num);
-                }
+            if let Some(generation_num) = parse_journal_generation(&file_name_str) {
+                max_generation = max_generation.max(generation_num);
             }
         }
 
-        // Read the latest generation to find the maximum sequence
-        let latest_file = self
-            .config
-            .base_dir
-            .join(format!("journal_gen_{:06}.dat", max_generation));
-        if latest_file.exists() {
-            let entries = match self.read_entries_from_file(&latest_file) {
-                Outcome::Ok(entries) => entries,
+        // Read generations backwards to populate recent_entries and find max_sequence
+        let mut all_recent = std::collections::VecDeque::new();
+        let mut found_sequence = false;
+
+        for generation in (0..=max_generation).rev() {
+            let file_path = journal_file_path(&self.config.base_dir, generation);
+
+            if !file_path.exists() {
+                continue;
+            }
+
+            let (entries, corrupted) = match self.read_entries_from_file(&file_path) {
+                Outcome::Ok(res) => res,
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             };
-            for entry in &entries {
-                max_sequence = max_sequence.max(entry.sequence);
+
+            if generation == max_generation && corrupted {
+                // If the latest file was corrupted (e.g. partial write from power loss),
+                // we must not append to it. We increment max_generation so the next write
+                // starts a new file cleanly.
+                max_generation += 1;
             }
 
-            // Load recent entries into cache
-            let recent_start = if entries.len() > self.cache_limit {
-                entries.len() - self.cache_limit
-            } else {
-                0
-            };
+            if !found_sequence && !entries.is_empty() {
+                max_sequence = entries.last().map(|e| e.sequence).unwrap_or(0);
+                found_sequence = true;
+            }
 
-            for entry in &entries[recent_start..] {
-                self.recent_entries.push_back(entry.clone());
+            for entry in entries.into_iter().rev() {
+                if all_recent.len() < self.cache_limit {
+                    all_recent.push_front(entry);
+                }
+            }
+
+            if all_recent.len() >= self.cache_limit && found_sequence {
+                break;
             }
         }
 
+        self.recent_entries = all_recent;
         self.generation = max_generation;
-        self.sequence = max_sequence + 1;
+        if found_sequence {
+            self.sequence = max_sequence + 1;
+        } else {
+            self.sequence = 0;
+        }
 
         Outcome::Ok(())
     }
 
-    fn read_entries_from_file(&self, file_path: &Path) -> Outcome<Vec<JournalEntry>, JournalError> {
+    fn read_entries_from_file(
+        &self,
+        file_path: &Path,
+    ) -> Outcome<(Vec<JournalEntry>, bool), JournalError> {
         let file = match File::open(file_path) {
             Ok(file) => file,
             Err(e) => return Outcome::Err(JournalError::FileOpen(e.to_string())),
         };
         let mut reader = BufReader::new(file);
         let mut entries = Vec::new();
+        let mut corrupted = false;
 
         loop {
             // Read length prefix
@@ -1438,32 +1480,47 @@ impl AppendJournal {
             match reader.read_exact(&mut length_bytes) {
                 Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Outcome::Err(JournalError::ReadFailure(e.to_string())),
+                Err(_) => {
+                    corrupted = true;
+                    break;
+                }
             }
 
             let length = u32::from_le_bytes(length_bytes) as usize;
 
+            // Prevent OOM from corrupted length prefix (max 16 MB)
+            if length > 16 * 1024 * 1024 {
+                corrupted = true;
+                break;
+            }
+
             // Read entry data
             let mut entry_data = vec![0u8; length];
-            if let Err(e) = reader.read_exact(&mut entry_data) {
-                return Outcome::Err(JournalError::ReadFailure(e.to_string()));
+            if reader.read_exact(&mut entry_data).is_err() {
+                corrupted = true;
+                break;
             }
 
             // Deserialize entry
             let entry = match JournalEntry::decode(&entry_data) {
+                // ubs:ignore - internal binary decode, not JWT
                 Ok(entry) => entry,
-                Err(e) => return Outcome::Err(e),
+                Err(_) => {
+                    corrupted = true;
+                    break;
+                }
             };
 
             // Validate checksum
             if !entry.validate_checksum() {
-                return Outcome::Err(JournalError::ChecksumMismatch(entry.sequence));
+                corrupted = true;
+                break;
             }
 
             entries.push(entry);
         }
 
-        Outcome::Ok(entries)
+        Outcome::Ok((entries, corrupted))
     }
 
     fn read_all_entries_from_disk(&self) -> Outcome<Vec<JournalEntry>, JournalError> {
@@ -1471,13 +1528,10 @@ impl AppendJournal {
 
         // Read from all generations
         for generation_num in 0..=self.generation {
-            let file_path = self
-                .config
-                .base_dir
-                .join(format!("journal_gen_{:06}.dat", generation_num));
+            let file_path = journal_file_path(&self.config.base_dir, generation_num);
             if file_path.exists() {
-                let entries = match self.read_entries_from_file(&file_path) {
-                    Outcome::Ok(entries) => entries,
+                let (entries, _corrupted) = match self.read_entries_from_file(&file_path) {
+                    Outcome::Ok(res) => res,
                     Outcome::Err(e) => return Outcome::Err(e),
                     Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                     Outcome::Panicked(payload) => return Outcome::Panicked(payload),
@@ -1570,6 +1624,15 @@ mod tests {
     }
 
     #[test]
+    fn journal_file_name_contract_matches_generation_parser() {
+        assert_eq!(journal_file_name(0), "journal_gen_000000.dat");
+        assert_eq!(journal_file_name(42), "journal_gen_000042.dat");
+        assert_eq!(parse_journal_generation(&journal_file_name(42)), Some(42));
+        assert_eq!(parse_journal_generation("journal_42.dat"), None);
+        assert_eq!(parse_journal_generation("journal_gen_000042.tmp"), None);
+    }
+
+    #[test]
     fn test_journal_entry_creation() {
         let record = JournalRecord::Offer {
             transfer_id: "test_transfer".to_string(),
@@ -1616,7 +1679,7 @@ mod tests {
 
     #[test]
     fn force_sync_append_is_recoverable_before_explicit_flush_or_drop() {
-        let unique = SystemTime::now()
+        let unique = SystemTime::now() // ubs:ignore - timestamp used for test uniqueness, not crypto
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();

@@ -377,36 +377,35 @@ impl RangeTracker {
     }
 
     fn merge_adjacent_ranges(&mut self) {
-        let ranges: Vec<_> = self.ranges.values().copied().collect();
-
-        if ranges.len() <= 1 {
+        if self.ranges.len() <= 1 {
             return;
         }
 
-        let mut merged = false;
-        for i in 0..ranges.len() - 1 {
-            if ranges[i].adjacent_to(&ranges[i + 1]) {
+        let mut sorted_ranges = std::mem::take(&mut self.ranges).into_values();
+        let mut new_ranges = std::collections::BTreeMap::new();
+        let mut total_bytes = 0;
+
+        // Safe to unwrap because len > 1
+        let mut current_range = sorted_ranges.next().unwrap();
+
+        for next_range in sorted_ranges {
+            if current_range.can_merge(&next_range) {
                 // Merge these two ranges
-                let merged_range = ranges[i].merge(&ranges[i + 1]).unwrap();
-
-                // Remove the old ranges
-                self.ranges.remove(&ranges[i].start);
-                self.ranges.remove(&ranges[i + 1].start);
-                self.total_bytes -= ranges[i].size() + ranges[i + 1].size();
-
-                // Add the merged range
-                self.ranges.insert(merged_range.start, merged_range);
-                self.total_bytes += merged_range.size();
-
-                merged = true;
-                break;
+                current_range = current_range.merge(&next_range).unwrap();
+            } else {
+                // Add the settled range
+                total_bytes += current_range.size();
+                new_ranges.insert(current_range.start, current_range);
+                current_range = next_range;
             }
         }
 
-        // If we merged something, try again in case there are more adjacencies
-        if merged {
-            self.merge_adjacent_ranges();
-        }
+        // Add the final range
+        total_bytes += current_range.size();
+        new_ranges.insert(current_range.start, current_range);
+
+        self.ranges = new_ranges;
+        self.total_bytes = total_bytes;
     }
 
     fn calculate_covered_bytes(&self, total_size: u64) -> u64 {

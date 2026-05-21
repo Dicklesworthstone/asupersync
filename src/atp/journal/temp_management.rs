@@ -6,12 +6,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const MAX_SAFE_FILENAME_COMPONENT_LEN: usize = 96;
+
+static NEXT_MANAGER_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Manager for temporary file paths and lifecycle
 pub struct TempPathManager {
     /// Base directory for temporary files
     base_dir: PathBuf,
     /// Quarantine directory for failed operations
     quarantine_dir: PathBuf,
+    /// Process-unique manager identifier included in generated names
+    manager_id: u64,
     /// Counter for unique temp file generation
     counter: AtomicU64,
     /// Active temporary files being tracked
@@ -69,6 +75,36 @@ struct TempFileInfo {
     committed: bool,
     /// Reason for quarantine if applicable
     quarantine_reason: Option<String>,
+}
+
+/// Public snapshot of a managed temporary file.
+#[derive(Debug, Clone)]
+pub struct TempFileSnapshot {
+    /// When the temp file was created
+    pub created_at: SystemTime,
+    /// Associated object ID or operation
+    pub operation_id: String,
+    /// Current state of the temp file
+    pub state: PathState,
+    /// Size of the temp file if known
+    pub size: Option<u64>,
+    /// Whether the file has been committed
+    pub committed: bool,
+    /// Reason for quarantine if applicable
+    pub quarantine_reason: Option<String>,
+}
+
+impl TempFileInfo {
+    fn snapshot(&self) -> TempFileSnapshot {
+        TempFileSnapshot {
+            created_at: self.created_at,
+            operation_id: self.operation_id.clone(),
+            state: self.state.clone(),
+            size: self.size,
+            committed: self.committed,
+            quarantine_reason: self.quarantine_reason.clone(),
+        }
+    }
 }
 
 /// Current state of a temporary file path
@@ -157,6 +193,7 @@ impl TempPathManager {
         let manager = Self {
             base_dir,
             quarantine_dir,
+            manager_id: NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
             counter: AtomicU64::new(1),
             active_temps: HashMap::new(),
             config,
@@ -287,8 +324,8 @@ impl TempPathManager {
     }
 
     /// Get information about a temporary file
-    pub fn get_temp_info(&self, temp_path: &Path) -> Option<&TempFileInfo> {
-        self.active_temps.get(temp_path)
+    pub fn get_temp_info(&self, temp_path: &Path) -> Option<TempFileSnapshot> {
+        self.active_temps.get(temp_path).map(TempFileInfo::snapshot)
     }
 
     /// Get list of all active temporary files
@@ -330,7 +367,7 @@ impl TempPathManager {
                     }
                 } else {
                     // Just remove it
-                    if let Ok(()) = self.cleanup_temp_file(&path) {
+                    if self.cleanup_temp_file(&path).is_ok() {
                         cleaned_files.push(path);
                     }
                 }
@@ -391,24 +428,23 @@ impl TempPathManager {
             .unwrap_or_default()
             .as_secs();
 
-        let mut filename = format!("{}.{}.{}", self.config.temp_prefix, timestamp, counter);
+        let temp_prefix = safe_filename_component(
+            &self.config.temp_prefix,
+            "atp_sparse",
+            MAX_SAFE_FILENAME_COMPONENT_LEN,
+        );
+        let mut filename = format!(
+            "{}.{}.{}.{}",
+            temp_prefix, timestamp, self.manager_id, counter
+        );
 
         if self.config.include_pid_in_name {
             let pid = std::process::id();
             filename.push_str(&format!(".{}", pid));
         }
 
-        // Sanitize operation ID for filesystem safety
-        let safe_operation_id = operation_id
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
+        let safe_operation_id =
+            safe_filename_component(operation_id, "operation", MAX_SAFE_FILENAME_COMPONENT_LEN);
 
         filename.push_str(&format!(".{}.tmp", safe_operation_id));
 
@@ -429,8 +465,12 @@ impl TempPathManager {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
+        let safe_original_name =
+            safe_filename_component(original_name, "unknown", MAX_SAFE_FILENAME_COMPONENT_LEN);
 
-        let quarantine_name = format!("{}.{}.{}", original_name, reason, timestamp);
+        let safe_reason =
+            safe_filename_component(reason, "quarantine", MAX_SAFE_FILENAME_COMPONENT_LEN);
+        let quarantine_name = format!("{}.{}.{}", safe_original_name, safe_reason, timestamp);
 
         Ok(self.quarantine_dir.join(quarantine_name))
     }
@@ -478,6 +518,27 @@ impl TempPathManager {
         }
 
         Ok(())
+    }
+}
+
+fn safe_filename_component(input: &str, fallback: &str, max_len: usize) -> String {
+    let mut component = String::new();
+    for ch in input.chars() {
+        let safe = if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            ch
+        } else {
+            '_'
+        };
+        if component.len() >= max_len {
+            break;
+        }
+        component.push(safe);
+    }
+
+    if component.is_empty() {
+        fallback.to_string()
+    } else {
+        component
     }
 }
 
@@ -548,6 +609,73 @@ mod tests {
 
         // Clean up test directory
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_temp_paths_are_unique_across_managers() {
+        let temp_dir = std::env::temp_dir().join("atp_test_temp_manager_uniqueness");
+        let mut manager_a = TempPathManager::new(&temp_dir);
+        let mut manager_b = TempPathManager::new(&temp_dir);
+
+        let temp_a = manager_a.create_temp_path("same_operation").unwrap();
+        let temp_b = manager_b.create_temp_path("same_operation").unwrap();
+
+        assert_ne!(temp_a, temp_b);
+        assert_eq!(temp_a.parent(), Some(temp_dir.as_path()));
+        assert_eq!(temp_b.parent(), Some(temp_dir.as_path()));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_quarantine_reason_is_single_safe_path_component() {
+        let temp_dir = std::env::temp_dir().join("atp_test_quarantine_reason_safety");
+        let mut manager = TempPathManager::new(&temp_dir);
+
+        let temp_path = manager.create_temp_path("quarantine_reason").unwrap();
+        File::create(&temp_path).unwrap();
+
+        let quarantine_path = manager
+            .quarantine_file(&temp_path, "../../escape/attempt")
+            .unwrap();
+        assert_eq!(
+            quarantine_path.parent(),
+            Some(manager.quarantine_dir.as_path())
+        );
+        let quarantine_name = quarantine_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap();
+        assert!(quarantine_name.contains("______escape_attempt"));
+        assert!(!quarantine_name.contains('/'));
+        assert!(!quarantine_name.contains(".."));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_quarantine_original_name_is_single_safe_path_component() {
+        let temp_dir = std::env::temp_dir().join("atp_test_quarantine_original_safety");
+        let manager = TempPathManager::new(&temp_dir);
+        let original_path = PathBuf::from("bad name..\n\t.tmp");
+
+        let quarantine_path = manager
+            .generate_quarantine_path(&original_path, "../../escape/attempt")
+            .unwrap();
+        assert_eq!(
+            quarantine_path.parent(),
+            Some(manager.quarantine_dir.as_path())
+        );
+        let quarantine_name = quarantine_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap();
+        assert!(quarantine_name.starts_with("bad_name_____tmp."));
+        assert!(quarantine_name.contains("______escape_attempt"));
+        assert!(!quarantine_name.contains('/'));
+        assert!(!quarantine_name.contains(".."));
+        assert!(!quarantine_name.contains('\n'));
+        assert!(!quarantine_name.contains('\t'));
     }
 
     #[test]

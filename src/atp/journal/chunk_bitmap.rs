@@ -335,7 +335,7 @@ impl ChunkBitmap {
         }
 
         for entry in self.chunks.values() {
-            *state_counts.get_mut(&entry.state).unwrap() += 1;
+            *state_counts.get_mut(&entry.state).unwrap() += 1; // ubs:ignore - map pre-initialized with all variants
         }
 
         let total_chunks = self.chunks.len();
@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(bitmap2.get_chunk_state(100), Some(ChunkState::Written));
         assert_eq!(bitmap2.get_chunk_state(200), Some(ChunkState::Wanted)); // From export
 
-        let entry1 = bitmap2.get_chunk_entry(0).unwrap();
+        let entry1 = bitmap2.get_chunk_entry(0).unwrap(); // ubs:ignore - test oracle
         assert_eq!(entry1.chunk_hash, Some([1u8; 32]));
     }
 }

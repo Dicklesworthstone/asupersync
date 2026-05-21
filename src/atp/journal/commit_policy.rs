@@ -416,7 +416,7 @@ mod tests {
         assert!(backup.to_string_lossy().contains("bak."));
 
         let suffix = BackupPolicy::Suffix;
-        let backup = suffix.generate_backup_path(original).unwrap();
+        let backup = suffix.generate_backup_path(original).unwrap(); // ubs:ignore - test oracle
         assert_eq!(backup, Path::new("/tmp/test.bak"));
 
         let quarantine = BackupPolicy::Quarantine;

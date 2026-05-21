@@ -214,7 +214,7 @@ impl RecoveryContext {
 
         for (transfer_id, transfer_state) in self.transfers {
             if !transfer_state.chunk_states.is_empty() {
-                let mut bitmap = ChunkBitmap::new(transfer_id.clone(), 0, 4096, 0);
+                let mut bitmap = ChunkBitmap::new(transfer_id.clone(), 0, 4096, 0); // ubs:ignore - required to insert both key and bitmap value into map
                 for (chunk_id, state) in transfer_state.chunk_states {
                     let _ = bitmap.update_chunk_state(chunk_id.as_u64(), state, 0, None);
                     stats.chunks_recovered += 1;
@@ -504,7 +504,7 @@ mod tests {
             object_id: test_object_id(b"test123"),
             manifest_root: MerkleRoot::new([0u8; 32]),
             total_size: 1024,
-            timestamp: SystemTime::now()
+            timestamp: SystemTime::now() // ubs:ignore - test oracle non-crypto time
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
@@ -522,7 +522,7 @@ mod tests {
             object_id: test_object_id(b"test456"),
             manifest_root: MerkleRoot::new([0u8; 32]),
             total_size: 2048,
-            timestamp: SystemTime::now()
+            timestamp: SystemTime::now() // ubs:ignore - test oracle non-crypto time
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
