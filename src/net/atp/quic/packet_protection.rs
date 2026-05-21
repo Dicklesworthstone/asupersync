@@ -151,6 +151,7 @@ impl AtpPacketProtection {
             }
         };
 
+        #[allow(unreachable_code)]
         Outcome::ok(Self {
             provider,
             config,

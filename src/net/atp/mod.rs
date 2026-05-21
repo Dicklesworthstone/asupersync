@@ -37,16 +37,18 @@ pub mod stun;
 pub use protocol::{AtpFrame, FrameType};
 
 pub use chunk::*;
-pub use datagram::*;
+// Datagram module exports CongestionAlgorithm, avoid glob
+// pub use datagram::*;
 pub use discovery::*;
-pub use handshake::*;
+// Handshake module exports TransportParameters, avoid glob
+// pub use handshake::*;
 pub use object::*;
 // pub use loss::*;
 pub use path::*;
-pub use protocol::*;
+// pub use protocol::*;
 pub use quic::*;
 // pub use sdk::*;
-pub use streams::*;
+// pub use streams::*;
 
 // H3 adapter for WebTransport support
 pub mod h3;

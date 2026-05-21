@@ -299,6 +299,11 @@ impl AtpRecoveryManager {
         AtpOutcome::ok(())
     }
 
+    /// Process received datagram (updates anti-amplification limits).
+    pub fn on_datagram_received(&mut self, bytes: u64) {
+        self.anti_amplification.on_datagram_received(bytes);
+    }
+
     /// Process ACK with recovery tracking.
     pub fn on_ack_received(
         &mut self,
@@ -821,6 +826,10 @@ impl AntiAmplificationTracker {
         self.maybe_reset();
     }
 
+    fn on_datagram_received(&mut self, bytes: u64) {
+        self.bytes_received = self.bytes_received.saturating_add(bytes);
+    }
+
     fn on_ack_received(&mut self) {
         // Receiving an ACK validates the address
         self.address_validated = true;
@@ -901,12 +910,25 @@ mod tests {
     fn anti_amplification_limits() {
         let mut tracker = AntiAmplificationTracker::new();
 
-        // Should allow sending initially (no bytes received yet, but under limits)
-        assert!(!tracker.can_send(1000)); // No bytes received, can't send anything
+        // No bytes received, can't send anything
+        assert!(!tracker.can_send(1000));
 
-        // Simulate receiving some data (validates address)
+        // Receive 400 bytes, can send up to 1200 bytes
+        tracker.on_datagram_received(400);
+        assert!(tracker.can_send(1000));
+        assert!(tracker.can_send(1200));
+        assert!(!tracker.can_send(1201));
+
+        // Send 1000 bytes
+        tracker.on_packet_sent(1000);
+        
+        // Only 200 bytes left
+        assert!(tracker.can_send(200));
+        assert!(!tracker.can_send(201));
+
+        // Simulate receiving an ACK (validates address)
         tracker.on_ack_received();
-        assert!(tracker.can_send(1000)); // Address validated, can send freely
+        assert!(tracker.can_send(5000)); // Address validated, can send freely
     }
 
     #[test]

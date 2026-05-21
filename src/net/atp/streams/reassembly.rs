@@ -76,7 +76,19 @@ impl ReassemblyBuffer {
     }
 
     /// Insert a data segment into the buffer
-    pub fn insert_segment(&mut self, segment: DataSegment) -> Outcome<Vec<Bytes>, StreamError> {
+    pub fn insert_segment(&mut self, mut segment: DataSegment) -> Outcome<Vec<Bytes>, StreamError> {
+        // Handle overlap with already delivered data
+        if segment.offset < self.next_offset {
+            if segment.end_offset() <= self.next_offset {
+                // Completely duplicate (already delivered), ignore it
+                return Outcome::ok(Vec::new());
+            }
+            // Partially duplicate, truncate the already-delivered portion
+            let duplicate_len = (self.next_offset - segment.offset) as usize;
+            segment.data = segment.data.slice(duplicate_len..);
+            segment.offset = self.next_offset;
+        }
+
         // Check for final size consistency
         if segment.is_final {
             let segment_final_size = segment.end_offset();
@@ -109,7 +121,7 @@ impl ReassemblyBuffer {
                 // A more sophisticated implementation could merge them
                 return Outcome::err(StreamError::InvalidState {
                     stream_id: StreamId::new(0), // Will be filled by caller
-                    state: format!("Overlapping segment at offset {}", segment.offset),
+                    state: format!("Overlapping segment at offset {}", segment.offset), // ubs:ignore - error path only
                 });
             }
         }
@@ -152,7 +164,7 @@ impl ReassemblyBuffer {
             && self.segments.is_empty()
             && self
                 .final_size
-                .map_or(false, |size| self.next_offset >= size)
+                .is_some_and(|size| self.next_offset >= size)
     }
 
     /// Get the current next expected offset
@@ -266,11 +278,11 @@ mod tests {
         let segment1 = DataSegment::new(0, Bytes::from("hello"), false);
         let segment2 = DataSegment::new(5, Bytes::from("world"), true);
 
-        let result1 = buffer.insert_segment(segment1).unwrap();
+        let result1 = buffer.insert_segment(segment1).unwrap(); // ubs:ignore - test oracle
         assert_eq!(result1.len(), 1);
         assert_eq!(&result1[0][..], b"hello");
 
-        let result2 = buffer.insert_segment(segment2).unwrap();
+        let result2 = buffer.insert_segment(segment2).unwrap(); // ubs:ignore - test oracle
         assert_eq!(result2.len(), 1);
         assert_eq!(&result2[0][..], b"world");
 
@@ -287,11 +299,11 @@ mod tests {
         let segment1 = DataSegment::new(0, Bytes::from("hello"), false);
 
         // Second segment first - should be buffered
-        let result1 = buffer.insert_segment(segment2).unwrap();
+        let result1 = buffer.insert_segment(segment2).unwrap(); // ubs:ignore - test oracle
         assert_eq!(result1.len(), 0); // Nothing deliverable yet
 
         // First segment - should deliver both
-        let result2 = buffer.insert_segment(segment1).unwrap();
+        let result2 = buffer.insert_segment(segment1).unwrap(); // ubs:ignore - test oracle
         assert_eq!(result2.len(), 2);
         assert_eq!(&result2[0][..], b"hello");
         assert_eq!(&result2[1][..], b"world");
@@ -306,7 +318,7 @@ mod tests {
         let segment1 = DataSegment::new(0, Bytes::from("hello"), true);
         let segment2 = DataSegment::new(5, Bytes::from("world"), true);
 
-        buffer.insert_segment(segment1).unwrap();
+        buffer.insert_segment(segment1).unwrap(); // ubs:ignore - test oracle
 
         // This should fail due to final size mismatch
         let result = buffer.insert_segment(segment2);
@@ -320,7 +332,7 @@ mod tests {
         let segment1 = DataSegment::new(0, Bytes::from("hello"), false);
         let segment2 = DataSegment::new(2, Bytes::from("llo"), false);
 
-        buffer.insert_segment(segment1).unwrap();
+        buffer.insert_segment(segment1).unwrap(); // ubs:ignore - test oracle
 
         // This should fail due to overlap
         let result = buffer.insert_segment(segment2);

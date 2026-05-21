@@ -107,6 +107,37 @@ struct PeerResourceUsage {
     last_activity: Instant,
 }
 
+/// Public snapshot of per-peer resource usage.
+///
+/// The manager keeps timestamp history private so callers cannot mutate
+/// accounting state or depend on wall-clock internals. This snapshot exposes
+/// the counters needed for diagnostics and admission decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerResourceSnapshot {
+    /// Current memory usage in bytes.
+    pub memory_usage: u64,
+    /// Number of frames admitted but not yet processed.
+    pub pending_frames: u32,
+    /// Number of frame timestamps currently inside the rate-limit window.
+    pub recent_frame_count: usize,
+    /// Number of active sessions.
+    pub active_sessions: u32,
+    /// Number of pending object requests.
+    pub pending_requests: u32,
+}
+
+impl PeerResourceUsage {
+    fn snapshot(&self) -> PeerResourceSnapshot {
+        PeerResourceSnapshot {
+            memory_usage: self.memory_usage,
+            pending_frames: self.pending_frames,
+            recent_frame_count: self.frame_timestamps.len(),
+            active_sessions: self.active_sessions,
+            pending_requests: self.pending_requests,
+        }
+    }
+}
+
 impl Default for PeerResourceUsage {
     fn default() -> Self {
         Self {
@@ -161,17 +192,26 @@ impl ResourceManager {
     pub fn can_allocate_memory(&self, peer_id: &PeerId, bytes: u64) -> bool {
         let usage = self.peer_usage.get(peer_id);
         let current_usage = usage.map_or(0, |u| u.memory_usage);
-        current_usage + bytes <= self.limits.max_memory_per_peer
+        current_usage
+            .checked_add(bytes)
+            .is_some_and(|next_usage| next_usage <= self.limits.max_memory_per_peer)
     }
 
     /// Allocate memory for a peer, returning false if over limit.
     pub fn allocate_memory(&mut self, peer_id: PeerId, bytes: u64) -> bool {
-        if !self.can_allocate_memory(&peer_id, bytes) {
+        let current_usage = self
+            .peer_usage
+            .get(&peer_id)
+            .map_or(0, |usage| usage.memory_usage);
+        let Some(next_usage) = current_usage.checked_add(bytes) else {
+            return false;
+        };
+        if next_usage > self.limits.max_memory_per_peer {
             return false;
         }
 
         let usage = self.peer_usage.entry(peer_id).or_default();
-        usage.memory_usage += bytes;
+        usage.memory_usage = next_usage;
         usage.last_activity = Instant::now();
         true
     }
@@ -189,8 +229,11 @@ impl ResourceManager {
         let now = Instant::now();
 
         // Clean old frame timestamps outside the rate limit window
-        let window_start = now - Duration::from_secs(self.limits.rate_limit_window.into());
-        usage.frame_timestamps.retain(|&ts| ts > window_start);
+        if let Some(window_start) =
+            now.checked_sub(Duration::from_secs(self.limits.rate_limit_window.into()))
+        {
+            usage.frame_timestamps.retain(|&ts| ts > window_start);
+        }
 
         // Check frame rate limit
         if usage.frame_timestamps.len() >= self.limits.max_frame_rate as usize {
@@ -283,8 +326,10 @@ impl ResourceManager {
 
     /// Get current resource usage for a peer.
     #[must_use]
-    pub fn peer_usage(&self, peer_id: &PeerId) -> Option<&PeerResourceUsage> {
-        self.peer_usage.get(peer_id)
+    pub fn peer_usage(&self, peer_id: &PeerId) -> Option<PeerResourceSnapshot> {
+        self.peer_usage
+            .get(peer_id)
+            .map(PeerResourceUsage::snapshot)
     }
 
     /// Get memory usage for a peer.
@@ -321,7 +366,9 @@ impl ResourceManager {
     /// Get aggregate memory usage across all peers.
     #[must_use]
     pub fn total_memory_usage(&self) -> u64 {
-        self.peer_usage.values().map(|u| u.memory_usage).sum()
+        self.peer_usage
+            .values()
+            .fold(0, |total, usage| total.saturating_add(usage.memory_usage))
     }
 
     /// Check if the system is under resource pressure.
@@ -417,6 +464,41 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_accounting_rejects_u64_overflow() {
+        let limits = ResourceLimits {
+            max_memory_per_peer: u64::MAX,
+            ..ResourceLimits::default()
+        };
+        let mut manager = ResourceManager::with_limits(limits);
+        let peer_id = PeerId::from_label("overflow-peer");
+
+        assert!(manager.allocate_memory(peer_id, u64::MAX - 1));
+        assert!(!manager.can_allocate_memory(&peer_id, 2));
+        assert!(!manager.allocate_memory(peer_id, 2));
+        assert_eq!(manager.peer_memory_usage(&peer_id), u64::MAX - 1);
+    }
+
+    #[test]
+    fn test_peer_usage_returns_public_snapshot() {
+        let mut manager = ResourceManager::new();
+        let peer_id = PeerId::from_label("snapshot-peer");
+
+        assert!(manager.allocate_memory(peer_id, 4096));
+        assert!(manager.record_frame(peer_id));
+        assert!(manager.start_session(peer_id));
+        assert!(manager.request_object(peer_id));
+
+        let usage = manager
+            .peer_usage(&peer_id)
+            .expect("peer should be tracked");
+        assert_eq!(usage.memory_usage, 4096);
+        assert_eq!(usage.pending_frames, 1);
+        assert_eq!(usage.recent_frame_count, 1);
+        assert_eq!(usage.active_sessions, 1);
+        assert_eq!(usage.pending_requests, 1);
+    }
+
+    #[test]
     fn test_frame_rate_limiting() {
         let limits = ResourceLimits {
             max_frame_rate: 2,
@@ -433,11 +515,28 @@ mod tests {
         // Should reject frames exceeding rate limit
         assert!(!manager.record_frame(peer_id));
 
-        // Mark frames as processed
+        // Marking frames as processed relieves pending-frame pressure, but it
+        // must not erase the rate-limit history inside the active time window.
         manager.frame_processed(&peer_id);
         manager.frame_processed(&peer_id);
+        assert!(!manager.record_frame(peer_id));
+    }
 
-        // Should allow new frames after processing
+    #[test]
+    fn test_pending_frame_limit_recovers_after_processing() {
+        let limits = ResourceLimits {
+            max_frames_per_peer: 2,
+            max_frame_rate: 100,
+            ..ResourceLimits::default()
+        };
+        let mut manager = ResourceManager::with_limits(limits);
+        let peer_id = PeerId::from_label("pending-frame-peer");
+
+        assert!(manager.record_frame(peer_id));
+        assert!(manager.record_frame(peer_id));
+        assert!(!manager.record_frame(peer_id));
+
+        manager.frame_processed(&peer_id);
         assert!(manager.record_frame(peer_id));
     }
 

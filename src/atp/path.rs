@@ -689,7 +689,7 @@ impl PathRace {
             .keys()
             .copied()
             .filter(|id| *id != winner)
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>(); // ubs:ignore - collect needed to drop immutable borrow
         for loser_id in loser_ids {
             let loser_state = self
                 .candidates

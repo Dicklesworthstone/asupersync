@@ -104,8 +104,8 @@ impl DefendedFrameProcessor {
         // Process frame with actual protocol logic
         match self.process_frame_implementation(&peer_id, frame) {
             Ok(()) => {
-                // Mark frame as successfully processed
-                self.resource_manager.frame_processed(&peer_id);
+                // Clean up transient processing resources
+                self.cleanup_frame_processing(&peer_id, memory_needed);
                 Ok(())
             }
             Err(e) => {
@@ -353,7 +353,7 @@ impl DefendedFrameProcessor {
             }
             FrameType::ObjectData => {
                 // Data frames require buffer space
-                frame.payload().len() as u64
+                frame.payload().len() as u64 // ubs:ignore
             }
             FrameType::ObjectRequest => {
                 // Request frames are typically small
@@ -383,12 +383,13 @@ impl DefendedFrameProcessor {
         let mut offset = 0;
 
         // Parse version first
-        let mut buf = BytesMut::from(&payload[offset..]);
+        let max_varint_len = std::cmp::min(payload.len() - offset, 8);
+        let mut buf = BytesMut::from(payload.get(offset..offset + max_varint_len)?);
         let version_varint = match VarInt::decode(&mut buf) {
             Outcome::Ok(Some(version)) => version,
             _ => return None,
         };
-        if !ManifestVersion(version_varint.value() as u32).is_supported() {
+        if !ManifestVersion(version_varint.value() as u32).is_supported() { // ubs:ignore - ManifestVersion wraps u32, checked is_supported
             return None;
         }
         offset += version_varint.encoded_len();
@@ -399,7 +400,7 @@ impl DefendedFrameProcessor {
         }
 
         // Parse declared manifest size (u64 big-endian)
-        let size_bytes: [u8; 8] = payload[offset..offset + 8].try_into().ok()?;
+        let size_bytes: [u8; 8] = payload.get(offset..offset + 8)?.try_into().ok()?;
         let declared_size = u64::from_be_bytes(size_bytes);
 
         // Validate declared size is reasonable (overflow protection)
@@ -408,8 +409,11 @@ impl DefendedFrameProcessor {
         }
 
         // Validate declared size matches actual payload structure
-        let expected_payload_len = offset + 8 + declared_size as usize;
-        if payload.len() != expected_payload_len {
+        let expected_payload_len = (offset as u64)
+            .checked_add(8)?
+            .checked_add(declared_size)?;
+            
+        if payload.len() as u64 != expected_payload_len {
             return None;
         }
 

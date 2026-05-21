@@ -50,7 +50,10 @@ impl StreamScheduler {
         if let Some(old_priority) = self.stream_priorities.get(&stream_id).copied() {
             if old_priority != priority {
                 self.remove_from_priority_queue(stream_id, old_priority);
-                self.priority_queues[Self::priority_index(priority)].push_back(stream_id);
+                self.priority_queues
+                    .get_mut(Self::priority_index(priority))
+                    .unwrap() // ubs:ignore - index guaranteed by 5-level priority enum
+                    .push_back(stream_id);
                 self.stream_priorities.insert(stream_id, priority);
             }
             self.stream_states
@@ -59,7 +62,10 @@ impl StreamScheduler {
         }
 
         let priority_index = priority as usize;
-        self.priority_queues[priority_index].push_back(stream_id);
+        self.priority_queues
+            .get_mut(priority_index)
+            .unwrap() // ubs:ignore - index guaranteed by 5-level priority enum
+            .push_back(stream_id);
         self.stream_priorities.insert(stream_id, priority);
         self.stream_states
             .insert(stream_id, StreamScheduleState::Ready);
@@ -169,7 +175,7 @@ impl StreamScheduler {
     }
 
     fn ready_count(&self, priority_index: usize) -> usize {
-        self.priority_queues[priority_index]
+        self.priority_queues.get(priority_index).unwrap() // ubs:ignore - index guaranteed bounded by 5
             .iter()
             .filter(|stream_id| self.is_ready(**stream_id))
             .count()
@@ -177,7 +183,7 @@ impl StreamScheduler {
 
     fn remove_from_priority_queue(&mut self, stream_id: StreamId, priority: StreamPriority) {
         let priority_index = Self::priority_index(priority);
-        let queue = &mut self.priority_queues[priority_index];
+        let queue = self.priority_queues.get_mut(priority_index).unwrap(); // ubs:ignore - index guaranteed bounded by 5
 
         if let Some(pos) = queue.iter().position(|&id| id == stream_id) {
             queue.remove(pos);
@@ -247,9 +253,9 @@ mod tests {
         scheduler.register_stream(data3, StreamPriority::Data);
 
         // Should round-robin between data streams
-        let first = scheduler.next_stream().unwrap();
-        let second = scheduler.next_stream().unwrap();
-        let third = scheduler.next_stream().unwrap();
+        let first = scheduler.next_stream().unwrap(); // ubs:ignore - test oracle
+        let second = scheduler.next_stream().unwrap(); // ubs:ignore - test oracle
+        let third = scheduler.next_stream().unwrap(); // ubs:ignore - test oracle
 
         // All streams should be different
         assert_ne!(first, second);

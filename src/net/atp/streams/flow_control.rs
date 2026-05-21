@@ -137,20 +137,12 @@ impl FlowControlWindow {
 
     /// Get available send capacity
     pub fn send_capacity(&self) -> u64 {
-        if self.send_window > self.bytes_sent {
-            self.send_window - self.bytes_sent
-        } else {
-            0
-        }
+        self.send_window.saturating_sub(self.bytes_sent)
     }
 
-    /// Get available receive capacity
+    /// Get remaining receive capacity (window - received)
     pub fn receive_capacity(&self) -> u64 {
-        if self.receive_window > self.bytes_received {
-            self.receive_window - self.bytes_received
-        } else {
-            0
-        }
+        self.receive_window.saturating_sub(self.bytes_received)
     }
 }
 

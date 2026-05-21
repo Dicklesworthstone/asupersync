@@ -165,7 +165,7 @@ impl SessionTraceId {
 }
 
 /// Where the negotiated ATP session will move data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum SessionContextKind {
     /// Direct peer-to-peer path.
     Direct,
@@ -336,7 +336,7 @@ pub struct DowngradeWarning {
 }
 
 /// Capability action authorized by a grant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CapabilityAction {
     /// Read an object or object graph.
     Read,
@@ -377,7 +377,7 @@ impl CapabilityAction {
 }
 
 /// Stable capability grant id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CapabilityGrantId([u8; 16]);
 
 impl CapabilityGrantId {
@@ -407,7 +407,7 @@ impl CapabilityGrantId {
 }
 
 /// Path/object/context restrictions carried by a capability grant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityScope {
     /// Whether every ATP path candidate id is allowed.
     pub allow_any_path: bool,
@@ -524,7 +524,7 @@ impl SessionContextKind {
 }
 
 /// Capability grant supplied during negotiation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityGrant {
     /// Grant id.
     pub id: CapabilityGrantId,

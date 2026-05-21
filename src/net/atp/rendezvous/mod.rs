@@ -1344,7 +1344,7 @@ mod tests {
 
     impl CandidateSignatureVerifier for RelayVerifier {
         fn verify(&self, candidate: &SignedCandidate) -> bool {
-            candidate.signature().bytes() == [1, 2, 3]
+            candidate.signature().bytes() == [1, 2, 3] // ubs:ignore - test oracle
         }
 
         fn verify_relay_authorization(
@@ -1352,7 +1352,7 @@ mod tests {
             _candidate: &SignedCandidate,
             authorization: &RelayAuthorization,
         ) -> bool {
-            self.relay_authorization_valid && authorization.signature().bytes() == [9, 9]
+            self.relay_authorization_valid && authorization.signature().bytes() == [9, 9] // ubs:ignore - test oracle
         }
     }
 
