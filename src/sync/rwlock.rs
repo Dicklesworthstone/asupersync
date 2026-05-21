@@ -66,7 +66,6 @@
 use parking_lot::Mutex as ParkingMutex;
 use smallvec::SmallVec;
 use std::cell::UnsafeCell;
-use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -74,6 +73,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
+use super::waiter::WaiterChain;
 use crate::cx::Cx;
 use crate::sync::lock_ordering::{self, LockRank};
 
@@ -154,13 +154,13 @@ impl std::fmt::Display for TryWriteError {
 
 impl std::error::Error for TryWriteError {}
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct State {
     readers: usize,
     writer_active: bool,
     writer_waiters: usize,
-    reader_waiters: VecDeque<Waiter>,
-    writer_queue: VecDeque<Waiter>,
+    reader_waiters: WaiterChain<u64>,
+    writer_queue: WaiterChain<u64>,
     next_waiter_id: u64,
     /// br-asupersync-4j40bb: count of consecutive writer hand-offs from
     /// the queue while readers were also queued. Reset to 0 whenever a
@@ -168,10 +168,18 @@ struct State {
     consecutive_writers_served: usize,
 }
 
-#[derive(Debug, Clone)]
-struct Waiter {
-    waker: Waker,
-    id: u64,
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            readers: 0,
+            writer_active: false,
+            writer_waiters: 0,
+            reader_waiters: WaiterChain::new(),
+            writer_queue: WaiterChain::new(),
+            next_waiter_id: 0,
+            consecutive_writers_served: 0,
+        }
+    }
 }
 
 /// A cancel-aware read-write lock with writer-preference fairness.
@@ -370,24 +378,19 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn pop_writer_waiter(state: &mut State) -> Option<Waker> {
-        state.writer_queue.pop_front().map(|w| w.waker)
+        state.writer_queue.pop_front().map(|(_, waker, _)| waker)
     }
 
     #[inline]
     fn drain_reader_waiters(state: &mut State) -> SmallVec<[Waker; 4]> {
-        state.reader_waiters.drain(..).map(|w| w.waker).collect()
+        SmallVec::from_vec(state.reader_waiters.drain())
     }
 
     #[inline]
     fn queued_waiter_wakers(state: &State) -> SmallVec<[Waker; 4]> {
         let mut wakers = SmallVec::new();
-        wakers.extend(
-            state
-                .reader_waiters
-                .iter()
-                .map(|waiter| waiter.waker.clone()),
-        );
-        wakers.extend(state.writer_queue.iter().map(|waiter| waiter.waker.clone()));
+        wakers.extend(state.reader_waiters.clone_wakers());
+        wakers.extend(state.writer_queue.clone_wakers());
         wakers
     }
 
@@ -398,19 +401,16 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn take_eligible_reader_waiters(state: &mut State) -> SmallVec<[Waker; 4]> {
-        let Some(first_writer) = state.writer_queue.front() else {
+        let Some(first_writer_id) = state.writer_queue.front_tag().copied() else {
             return Self::drain_reader_waiters(state);
         };
 
-        let first_writer_id = first_writer.id;
         let mut wakers = SmallVec::new();
-        while state
-            .reader_waiters
-            .front()
-            .is_some_and(|reader| Self::reader_arrived_before_writer(reader.id, first_writer_id))
-        {
-            if let Some(waiter) = state.reader_waiters.pop_front() {
-                wakers.push(waiter.waker);
+        while state.reader_waiters.front_tag().is_some_and(|reader_id| {
+            Self::reader_arrived_before_writer(*reader_id, first_writer_id)
+        }) {
+            if let Some((_, waker, _)) = state.reader_waiters.pop_front() {
+                wakers.push(waker);
             }
         }
         wakers
@@ -419,8 +419,8 @@ impl<T> RwLock<T> {
     #[inline]
     fn take_forced_reader_turn(state: &mut State) -> SmallVec<[Waker; 4]> {
         let mut wakers = SmallVec::new();
-        if let Some(waiter) = state.reader_waiters.pop_front() {
-            wakers.push(waiter.waker);
+        if let Some((_, waker, _)) = state.reader_waiters.pop_front() {
+            wakers.push(waker);
         }
         wakers
     }
@@ -436,9 +436,12 @@ impl<T> RwLock<T> {
 
         // Both queues are non-empty. Wake whichever waiter arrived first.
         // Wrapping arithmetic keeps ordering stable across waiter-id wraparound.
-        match (state.writer_queue.front(), state.reader_waiters.front()) {
-            (Some(writer), Some(reader)) => {
-                !Self::reader_arrived_before_writer(reader.id, writer.id)
+        match (
+            state.writer_queue.front_tag().copied(),
+            state.reader_waiters.front_tag().copied(),
+        ) {
+            (Some(writer_id), Some(reader_id)) => {
+                !Self::reader_arrived_before_writer(reader_id, writer_id)
             }
             _ => false,
         }
@@ -542,15 +545,14 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn abandon_read_waiter(&self, waiter_id: &mut Option<u64>) {
+    fn abandon_read_waiter(&self, waiter_id: &mut Option<usize>) {
         let Some(waiter_id) = waiter_id.take() else {
             return;
         };
 
         let writer_waker = {
             let mut state = self.state.lock();
-            if let Some(pos) = state.reader_waiters.iter().position(|w| w.id == waiter_id) {
-                state.reader_waiters.remove(pos);
+            if state.reader_waiters.remove(waiter_id).is_some() {
                 None
             } else {
                 // We were granted the lock but never took the guard.
@@ -588,7 +590,7 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn abandon_write_waiter(&self, waiter_id: &mut Option<u64>, counted: &mut bool) {
+    fn abandon_write_waiter(&self, waiter_id: &mut Option<usize>, counted: &mut bool) {
         if !*counted {
             return;
         }
@@ -598,8 +600,7 @@ impl<T> RwLock<T> {
         let (writer_waker, reader_wakers) = {
             let mut state = self.state.lock();
             let result = if let Some(waiter_id) = waiter_id {
-                if let Some(pos) = state.writer_queue.iter().position(|w| w.id == waiter_id) {
-                    state.writer_queue.remove(pos);
+                if state.writer_queue.remove(waiter_id).is_some() {
                     state.writer_waiters = state.writer_waiters.saturating_sub(1);
                     if state.writer_waiters == 0 && !state.writer_active {
                         if poisoned {
@@ -690,7 +691,7 @@ impl<T> RwLock<T> {
 
     #[cfg(test)]
     fn debug_state(&self) -> State {
-        self.state.lock().clone()
+        (*self.state.lock()).clone()
     }
 }
 
@@ -700,7 +701,7 @@ impl<T> RwLock<T> {
 pub struct ReadFuture<'a, 'b, T> {
     lock: &'a RwLock<T>,
     cx: &'b Cx,
-    waiter_id: Option<u64>,
+    waiter_id: Option<usize>,
     completed: bool,
 }
 
@@ -729,10 +730,10 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
         }
 
         if let Some(waiter_id) = this.waiter_id {
-            if let Some(existing) = state.reader_waiters.iter_mut().find(|w| w.id == waiter_id) {
-                if !existing.waker.will_wake(context.waker()) {
-                    existing.waker.clone_from(context.waker());
-                }
+            if state
+                .reader_waiters
+                .update_waker(waiter_id, context.waker())
+            {
                 drop(state);
                 return Poll::Pending;
             }
@@ -773,12 +774,11 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
 
         let id = state.next_waiter_id;
         state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        state.reader_waiters.push_back(Waiter {
-            waker: context.waker().clone(),
-            id,
-        });
+        let waiter_id = state
+            .reader_waiters
+            .push_back_tagged(context.waker().clone(), id);
         drop(state);
-        this.waiter_id = Some(id);
+        this.waiter_id = Some(waiter_id);
         Poll::Pending
     }
 }
@@ -793,7 +793,7 @@ impl<T> Drop for ReadFuture<'_, '_, T> {
 pub struct WriteFuture<'a, 'b, T> {
     lock: &'a RwLock<T>,
     cx: &'b Cx,
-    waiter_id: Option<u64>,
+    waiter_id: Option<usize>,
     counted: bool,
     completed: bool,
 }
@@ -830,10 +830,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
         }
 
         if let Some(waiter_id) = this.waiter_id {
-            if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
-                if !existing.waker.will_wake(context.waker()) {
-                    existing.waker.clone_from(context.waker());
-                }
+            if state.writer_queue.update_waker(waiter_id, context.waker()) {
                 drop(state);
                 return Poll::Pending;
             }
@@ -884,12 +881,11 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
 
         let id = state.next_waiter_id;
         state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        state.writer_queue.push_back(Waiter {
-            waker: context.waker().clone(),
-            id,
-        });
+        let waiter_id = state
+            .writer_queue
+            .push_back_tagged(context.waker().clone(), id);
         drop(state);
-        this.waiter_id = Some(id);
+        this.waiter_id = Some(waiter_id);
         Poll::Pending
     }
 }
@@ -1222,7 +1218,7 @@ impl<T> OwnedRwLockWriteGuard<T> {
 pub struct OwnedReadFuture<'b, T> {
     lock: Arc<RwLock<T>>,
     cx: &'b Cx,
-    waiter_id: Option<u64>,
+    waiter_id: Option<usize>,
     completed: bool,
 }
 
@@ -1251,10 +1247,10 @@ impl<T> Future for OwnedReadFuture<'_, T> {
         }
 
         if let Some(waiter_id) = this.waiter_id {
-            if let Some(existing) = state.reader_waiters.iter_mut().find(|w| w.id == waiter_id) {
-                if !existing.waker.will_wake(context.waker()) {
-                    existing.waker.clone_from(context.waker());
-                }
+            if state
+                .reader_waiters
+                .update_waker(waiter_id, context.waker())
+            {
                 drop(state);
                 return Poll::Pending;
             }
@@ -1299,12 +1295,11 @@ impl<T> Future for OwnedReadFuture<'_, T> {
 
         let id = state.next_waiter_id;
         state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        state.reader_waiters.push_back(Waiter {
-            waker: context.waker().clone(),
-            id,
-        });
+        let waiter_id = state
+            .reader_waiters
+            .push_back_tagged(context.waker().clone(), id);
         drop(state);
-        this.waiter_id = Some(id);
+        this.waiter_id = Some(waiter_id);
         Poll::Pending
     }
 }
@@ -1319,7 +1314,7 @@ impl<T> Drop for OwnedReadFuture<'_, T> {
 pub struct OwnedWriteFuture<'b, T> {
     lock: Arc<RwLock<T>>,
     cx: &'b Cx,
-    waiter_id: Option<u64>,
+    waiter_id: Option<usize>,
     counted: bool,
     completed: bool,
 }
@@ -1357,10 +1352,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
         }
 
         if let Some(waiter_id) = this.waiter_id {
-            if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
-                if !existing.waker.will_wake(context.waker()) {
-                    existing.waker.clone_from(context.waker());
-                }
+            if state.writer_queue.update_waker(waiter_id, context.waker()) {
                 drop(state);
                 return Poll::Pending;
             }
@@ -1415,12 +1407,11 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
 
         let id = state.next_waiter_id;
         state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        state.writer_queue.push_back(Waiter {
-            waker: context.waker().clone(),
-            id,
-        });
+        let waiter_id = state
+            .writer_queue
+            .push_back_tagged(context.waker().clone(), id);
         drop(state);
-        this.waiter_id = Some(id);
+        this.waiter_id = Some(waiter_id);
         Poll::Pending
     }
 }
