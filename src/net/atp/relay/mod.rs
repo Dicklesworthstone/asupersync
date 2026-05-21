@@ -585,6 +585,8 @@ pub enum RelayEventKind {
     PacketLossRecorded,
     /// Quota rejected a packet or reservation.
     QuotaRejected,
+    /// Authorization rejected a grant or packet sender.
+    AuthorizationRejected,
     /// Reservation expired.
     ReservationExpired,
     /// Reservation cancelled.
@@ -742,10 +744,28 @@ impl RelayService {
         if path_id.trim().is_empty() {
             return Err(RelayError::EmptyPathId);
         }
+        if grant.expires_at_micros <= now_micros {
+            return Err(RelayError::ExpiredReservation);
+        }
+        if !verifier.verify(&grant) {
+            self.push_event(RelayEventDraft {
+                kind: RelayEventKind::AuthorizationRejected,
+                reservation_id: Some(reservation_id),
+                transfer_nonce: Some(grant.transfer_nonce),
+                path_id: Some(path_id.clone()),
+                from_peer: Some(grant.source_peer_id),
+                to_peer: Some(grant.destination_peer_id),
+                transport: None,
+                opaque_bytes: 0,
+                quota_decision: "grant_authorization_rejected",
+                fallback_reason: None,
+            });
+            return Err(RelayError::InvalidAuthorization);
+        }
         if self.reservations.contains_key(&reservation_id) {
             return Err(RelayError::DuplicateReservation);
         }
-        if self.reservations.len() >= self.config.max_active_reservations {
+        if self.active_reservation_count(now_micros) >= self.config.max_active_reservations {
             self.push_event(RelayEventDraft {
                 kind: RelayEventKind::QuotaRejected,
                 reservation_id: Some(reservation_id),
@@ -759,12 +779,6 @@ impl RelayService {
                 fallback_reason: None,
             });
             return Err(RelayError::QuotaExceeded);
-        }
-        if grant.expires_at_micros <= now_micros {
-            return Err(RelayError::ExpiredReservation);
-        }
-        if !verifier.verify(&grant) {
-            return Err(RelayError::InvalidAuthorization);
         }
 
         let (primary_transport, fallback_transport) = self.select_transports(&grant)?;
@@ -787,7 +801,7 @@ impl RelayService {
             transport: Some(primary_transport),
             opaque_bytes: 0,
             quota_decision: "reservation_accepted",
-            fallback_reason: fallback_transport.and_then(RelayTransport::fallback_reason),
+            fallback_reason: primary_transport.fallback_reason(),
         });
 
         let candidate = RelayPathCandidate {
@@ -806,8 +820,8 @@ impl RelayService {
     ///
     /// # Errors
     ///
-    /// Returns an error when the reservation is unknown, expired, cancelled,
-    /// unauthorized, over quota, or uses an unavailable transport.
+    /// Returns an error when the reservation is unknown, unauthorized, expired,
+    /// cancelled, over quota, or uses an unavailable transport.
     pub fn forward(
         &mut self,
         now_micros: u64,
@@ -821,6 +835,26 @@ impl RelayService {
             .cloned()
             .ok_or(RelayError::UnknownReservation)?;
 
+        let to_peer_id = if from_peer_id == state.grant.source_peer_id {
+            state.grant.destination_peer_id
+        } else if from_peer_id == state.grant.destination_peer_id {
+            state.grant.source_peer_id
+        } else {
+            self.push_event(RelayEventDraft {
+                kind: RelayEventKind::AuthorizationRejected,
+                reservation_id: Some(reservation_id),
+                transfer_nonce: Some(state.grant.transfer_nonce),
+                path_id: Some(state.path_id.clone()),
+                from_peer: Some(from_peer_id),
+                to_peer: None,
+                transport: Some(packet.transport),
+                opaque_bytes: packet.opaque_len() as u64,
+                quota_decision: "peer_authorization_rejected",
+                fallback_reason: None,
+            });
+            return Err(RelayError::UnauthorizedPeer);
+        };
+
         if state.cancelled {
             return Err(RelayError::ReservationCancelled);
         }
@@ -831,7 +865,7 @@ impl RelayService {
                 transfer_nonce: Some(state.grant.transfer_nonce),
                 path_id: Some(state.path_id.clone()),
                 from_peer: Some(from_peer_id),
-                to_peer: None,
+                to_peer: Some(to_peer_id),
                 transport: Some(packet.transport),
                 opaque_bytes: 0,
                 quota_decision: "reservation_expired",
@@ -839,21 +873,14 @@ impl RelayService {
             });
             return Err(RelayError::ExpiredReservation);
         }
+
         if !state.grant.allows_transport(packet.transport)
             || !self.transport_available(packet.transport)
         {
             return Err(RelayError::TransportUnavailable);
         }
 
-        let to_peer_id = if from_peer_id == state.grant.source_peer_id {
-            state.grant.destination_peer_id
-        } else if from_peer_id == state.grant.destination_peer_id {
-            state.grant.source_peer_id
-        } else {
-            return Err(RelayError::UnauthorizedPeer);
-        };
-
-        self.apply_quota(reservation_id, &state, &packet)?;
+        self.apply_quota(reservation_id, &state, from_peer_id, to_peer_id, &packet)?;
 
         let forwarded = ForwardedPacket {
             reservation_id,
@@ -872,7 +899,7 @@ impl RelayService {
             kind: RelayEventKind::PacketForwarded,
             reservation_id: Some(reservation_id),
             transfer_nonce: Some(state.grant.transfer_nonce),
-            path_id: Some(state.path_id),
+            path_id: Some(state.path_id.clone()),
             from_peer: Some(from_peer_id),
             to_peer: Some(to_peer_id),
             transport: Some(forwarded.packet.transport),
@@ -887,7 +914,11 @@ impl RelayService {
     /// Dequeue the next forwarded packet for a peer.
     #[must_use]
     pub fn dequeue_for_peer(&mut self, peer_id: PeerId) -> Option<ForwardedPacket> {
-        self.queues.get_mut(&peer_id).and_then(VecDeque::pop_front)
+        let forwarded = self.queues.get_mut(&peer_id).and_then(VecDeque::pop_front);
+        if self.queues.get(&peer_id).is_some_and(VecDeque::is_empty) {
+            self.queues.remove(&peer_id);
+        }
+        forwarded
     }
 
     /// Cancel a reservation under structured cancellation.
@@ -899,12 +930,28 @@ impl RelayService {
         &mut self,
         reservation_id: RelayReservationId,
     ) -> Result<(), RelayError> {
+        let already_cancelled = self
+            .reservations
+            .get(&reservation_id)
+            .ok_or(RelayError::UnknownReservation)?
+            .cancelled;
+        if already_cancelled {
+            return Ok(());
+        }
+
+        let (dropped_queued_packets, dropped_queued_bytes) =
+            self.drain_queued_packets_for_reservation(reservation_id);
+        if let Some(usage) = self.usage.get_mut(&reservation_id) {
+            usage.dropped_packets = usage.dropped_packets.saturating_add(dropped_queued_packets);
+        }
+
         let event = {
             let state = self
                 .reservations
                 .get_mut(&reservation_id)
                 .ok_or(RelayError::UnknownReservation)?;
             state.cancelled = true;
+            let usage_snapshot = self.usage.get(&reservation_id).copied().unwrap_or_default();
             RelayEventDraft {
                 kind: RelayEventKind::ReservationCancelled,
                 reservation_id: Some(reservation_id),
@@ -913,11 +960,13 @@ impl RelayService {
                 from_peer: Some(state.grant.source_peer_id),
                 to_peer: Some(state.grant.destination_peer_id),
                 transport: Some(state.primary_transport),
-                opaque_bytes: 0,
-                quota_decision: "reservation_cancelled",
-                fallback_reason: state
-                    .fallback_transport
-                    .and_then(RelayTransport::fallback_reason),
+                opaque_bytes: dropped_queued_bytes,
+                quota_decision: if dropped_queued_packets == 0 {
+                    "reservation_cancelled"
+                } else {
+                    "reservation_cancelled_queued_packets_drained"
+                },
+                fallback_reason: Self::fallback_reason_for_usage(state, usage_snapshot),
             }
         };
         self.push_event(event);
@@ -951,29 +1000,27 @@ impl RelayService {
             total_packets,
             loss_ppm,
         };
-        let forwarded_bytes = {
+        let usage_snapshot = {
             let usage = self
                 .usage
                 .get_mut(&reservation_id)
                 .ok_or(RelayError::UnknownReservation)?;
             usage.dropped_packets = usage.dropped_packets.saturating_add(lost_packets);
             usage.loss_summary = Some(summary);
-            usage.forwarded_bytes
+            *usage
         };
 
         self.push_event(RelayEventDraft {
             kind: RelayEventKind::PacketLossRecorded,
             reservation_id: Some(reservation_id),
             transfer_nonce: Some(state.grant.transfer_nonce),
-            path_id: Some(state.path_id),
+            path_id: Some(state.path_id.clone()),
             from_peer: Some(state.grant.source_peer_id),
             to_peer: Some(state.grant.destination_peer_id),
             transport: Some(state.primary_transport),
-            opaque_bytes: forwarded_bytes,
+            opaque_bytes: usage_snapshot.forwarded_bytes,
             quota_decision: "loss_summary_recorded",
-            fallback_reason: state
-                .fallback_transport
-                .and_then(RelayTransport::fallback_reason),
+            fallback_reason: Self::fallback_reason_for_usage(&state, usage_snapshot),
         });
 
         Ok(summary)
@@ -1066,9 +1113,7 @@ impl RelayService {
             fallback_transport: state.fallback_transport,
             accepted_at_micros: state.accepted_at_micros,
             quota_decision: "quota_accounted",
-            fallback_reason: state
-                .fallback_transport
-                .and_then(RelayTransport::fallback_reason),
+            fallback_reason: Self::fallback_reason_for_usage(state, usage),
             opaque_bytes_forwarded: usage.forwarded_bytes,
             packets_forwarded: usage.forwarded_packets,
             loss_summary: usage.loss_summary,
@@ -1077,6 +1122,13 @@ impl RelayService {
             replay_pointer: self.replay_pointer,
             e2e_proof_preserved: true,
         })
+    }
+
+    fn active_reservation_count(&self, now_micros: u64) -> usize {
+        self.reservations
+            .values()
+            .filter(|state| !state.cancelled && state.grant.expires_at_micros > now_micros)
+            .count()
     }
 
     fn select_transports(
@@ -1095,6 +1147,17 @@ impl RelayService {
         }
     }
 
+    fn fallback_reason_for_usage(
+        state: &RelayReservationState,
+        usage: RelayUsage,
+    ) -> Option<&'static str> {
+        if state.primary_transport == RelayTransport::TcpTls443 || usage.tcp_tls_443_packets > 0 {
+            RelayTransport::TcpTls443.fallback_reason()
+        } else {
+            None
+        }
+    }
+
     fn transport_available(&self, transport: RelayTransport) -> bool {
         match transport {
             RelayTransport::Udp => self.config.udp_enabled,
@@ -1106,11 +1169,13 @@ impl RelayService {
         &mut self,
         reservation_id: RelayReservationId,
         state: &RelayReservationState,
+        from_peer_id: PeerId,
+        to_peer_id: PeerId,
         packet: &OpaqueRelayPacket,
     ) -> Result<(), RelayError> {
         let packet_len = packet.opaque_len();
         if packet_len > state.grant.quota.max_packet_bytes {
-            self.push_quota_rejected(reservation_id, state, packet);
+            self.push_quota_rejected(reservation_id, state, from_peer_id, to_peer_id, packet);
             return Err(RelayError::PacketTooLarge);
         }
 
@@ -1120,7 +1185,7 @@ impl RelayService {
             .get_mut(&reservation_id)
             .ok_or(RelayError::UnknownReservation)?;
         if usage.forwarded_packets >= state.grant.quota.max_packets_per_reservation {
-            self.push_quota_rejected(reservation_id, state, packet);
+            self.push_quota_rejected(reservation_id, state, from_peer_id, to_peer_id, packet);
             return Err(RelayError::QuotaExceeded);
         }
 
@@ -1129,7 +1194,7 @@ impl RelayService {
             .checked_add(packet_len_u64)
             .ok_or(RelayError::QuotaExceeded)?;
         if next_bytes > state.grant.quota.max_bytes_per_reservation {
-            self.push_quota_rejected(reservation_id, state, packet);
+            self.push_quota_rejected(reservation_id, state, from_peer_id, to_peer_id, packet);
             return Err(RelayError::QuotaExceeded);
         }
 
@@ -1142,10 +1207,43 @@ impl RelayService {
         Ok(())
     }
 
+    fn drain_queued_packets_for_reservation(
+        &mut self,
+        reservation_id: RelayReservationId,
+    ) -> (u64, u64) {
+        let mut dropped_packets = 0_u64;
+        let mut dropped_bytes = 0_u64;
+        let mut empty_peers = Vec::new();
+
+        for (peer_id, queue) in &mut self.queues {
+            queue.retain(|forwarded| {
+                if forwarded.reservation_id == reservation_id {
+                    dropped_packets = dropped_packets.saturating_add(1);
+                    dropped_bytes =
+                        dropped_bytes.saturating_add(forwarded.packet.opaque_len() as u64);
+                    false
+                } else {
+                    true
+                }
+            });
+            if queue.is_empty() {
+                empty_peers.push(*peer_id);
+            }
+        }
+
+        for peer_id in empty_peers {
+            self.queues.remove(&peer_id);
+        }
+
+        (dropped_packets, dropped_bytes)
+    }
+
     fn push_quota_rejected(
         &mut self,
         reservation_id: RelayReservationId,
         state: &RelayReservationState,
+        from_peer_id: PeerId,
+        to_peer_id: PeerId,
         packet: &OpaqueRelayPacket,
     ) {
         self.push_event(RelayEventDraft {
@@ -1153,8 +1251,8 @@ impl RelayService {
             reservation_id: Some(reservation_id),
             transfer_nonce: Some(state.grant.transfer_nonce),
             path_id: Some(state.path_id.clone()),
-            from_peer: Some(state.grant.source_peer_id),
-            to_peer: Some(state.grant.destination_peer_id),
+            from_peer: Some(from_peer_id),
+            to_peer: Some(to_peer_id),
             transport: Some(packet.transport),
             opaque_bytes: packet.opaque_len() as u64,
             quota_decision: "packet_quota_rejected",
@@ -1331,6 +1429,7 @@ mod tests {
         );
         assert_eq!(candidate.path_id(), "path-relay-1");
         assert_eq!(service.events()[0].quota_decision, "reservation_accepted");
+        assert_eq!(service.events()[0].fallback_reason, None);
     }
 
     #[test]
@@ -1379,6 +1478,43 @@ mod tests {
         assert_eq!(
             service.dequeue_for_peer(peer(2)).expect("queued packet"),
             forwarded
+        );
+    }
+
+    #[test]
+    fn dequeue_removes_empty_peer_queue_from_restart_snapshot() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(25),
+                "path-relay-25",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(25),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("forward");
+
+        assert!(service.dequeue_for_peer(peer(2)).is_some());
+        let snapshot = service.snapshot();
+        assert!(
+            snapshot
+                .queues
+                .iter()
+                .all(|(queued_peer, _)| *queued_peer != peer(2))
+        );
+        assert!(
+            snapshot
+                .queues
+                .iter()
+                .all(|(_, queued_packets)| !queued_packets.is_empty())
         );
     }
 
@@ -1466,6 +1602,247 @@ mod tests {
     }
 
     #[test]
+    fn invalid_grant_authorization_is_logged_without_accepting_reservation() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        assert_eq!(
+            service
+                .reserve(
+                    10,
+                    reservation_id(17),
+                    "path-relay-17",
+                    grant(1_000, RelayQuota::default()),
+                    &|_: &RelayReservationGrant| false,
+                )
+                .expect_err("auth"),
+            RelayError::InvalidAuthorization
+        );
+
+        let event = service.events().last().expect("auth event");
+        assert_eq!(event.kind, RelayEventKind::AuthorizationRejected);
+        assert_eq!(event.reservation_id, Some(reservation_id(17)));
+        assert_eq!(event.path_id.as_deref(), Some("path-relay-17"));
+        assert_eq!(event.from_peer.as_deref(), Some("peer:redacted"));
+        assert_eq!(event.to_peer.as_deref(), Some("peer:redacted"));
+        assert_eq!(event.transport, None);
+        assert_eq!(event.opaque_bytes, 0);
+        assert_eq!(event.quota_decision, "grant_authorization_rejected");
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(17))
+                .expect_err("rejected reservation must not be installed"),
+            RelayError::UnknownReservation
+        );
+    }
+
+    #[test]
+    fn invalid_grant_authorization_precedes_duplicate_and_capacity_checks() {
+        let config = RelayServiceConfig::new("tiny-relay", 1).expect("config");
+        let mut service = RelayService::new(config);
+        service
+            .reserve(
+                10,
+                reservation_id(19),
+                "path-relay-19",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        assert_eq!(
+            service
+                .reserve(
+                    11,
+                    reservation_id(19),
+                    "path-relay-duplicate-invalid",
+                    grant(1_000, RelayQuota::default()),
+                    &|_: &RelayReservationGrant| false,
+                )
+                .expect_err("invalid duplicate grant"),
+            RelayError::InvalidAuthorization
+        );
+        assert_eq!(
+            service
+                .reserve(
+                    12,
+                    reservation_id(20),
+                    "path-relay-over-capacity-invalid",
+                    grant(1_000, RelayQuota::default()),
+                    &|_: &RelayReservationGrant| false,
+                )
+                .expect_err("invalid over-capacity grant"),
+            RelayError::InvalidAuthorization
+        );
+
+        let auth_rejections = service
+            .events()
+            .iter()
+            .filter(|event| event.kind == RelayEventKind::AuthorizationRejected)
+            .count();
+        assert_eq!(auth_rejections, 2);
+        assert!(
+            service
+                .events()
+                .iter()
+                .all(|event| event.quota_decision != "active_reservation_quota_rejected")
+        );
+    }
+
+    #[test]
+    fn unauthorized_peer_rejection_is_logged_before_transport_policy() {
+        let config = RelayServiceConfig::default().with_tcp_tls_443_enabled(false);
+        let mut service = RelayService::new(config);
+        service
+            .reserve(
+                10,
+                reservation_id(18),
+                "path-relay-18",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        assert_eq!(
+            service
+                .forward(
+                    20,
+                    reservation_id(18),
+                    peer(9),
+                    packet(RelayTransport::TcpTls443, b"ciphertext", 1),
+                )
+                .expect_err("unauthorized"),
+            RelayError::UnauthorizedPeer
+        );
+
+        let event = service.events().last().expect("auth event");
+        assert_eq!(event.kind, RelayEventKind::AuthorizationRejected);
+        assert_eq!(event.reservation_id, Some(reservation_id(18)));
+        assert_eq!(event.from_peer.as_deref(), Some("peer:redacted"));
+        assert_eq!(event.to_peer, None);
+        assert_eq!(event.transport, Some(RelayTransport::TcpTls443));
+        assert_eq!(event.opaque_bytes, 10);
+        assert_eq!(event.quota_decision, "peer_authorization_rejected");
+        assert_eq!(event.fallback_reason, None);
+        assert_eq!(
+            service.usage(reservation_id(18)).expect("usage"),
+            RelayUsage::default()
+        );
+    }
+
+    #[test]
+    fn unauthorized_peer_rejection_precedes_lifecycle_state() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(21),
+                "path-relay-21",
+                grant(30, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .cancel_reservation(reservation_id(21))
+            .expect("cancel");
+
+        assert_eq!(
+            service
+                .forward(
+                    40,
+                    reservation_id(21),
+                    peer(9),
+                    packet(RelayTransport::Udp, b"ciphertext", 1),
+                )
+                .expect_err("unauthorized cancellation probe"),
+            RelayError::UnauthorizedPeer
+        );
+        let cancelled_probe_event = service.events().last().expect("auth event");
+        assert_eq!(
+            cancelled_probe_event.kind,
+            RelayEventKind::AuthorizationRejected
+        );
+        assert_eq!(
+            cancelled_probe_event.quota_decision,
+            "peer_authorization_rejected"
+        );
+
+        service
+            .reserve(
+                10,
+                reservation_id(22),
+                "path-relay-22",
+                grant(20, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        assert_eq!(
+            service
+                .forward(
+                    30,
+                    reservation_id(22),
+                    peer(9),
+                    packet(RelayTransport::Udp, b"ciphertext", 2),
+                )
+                .expect_err("unauthorized expiry probe"),
+            RelayError::UnauthorizedPeer
+        );
+        let expired_probe_event = service.events().last().expect("auth event");
+        assert_eq!(
+            expired_probe_event.kind,
+            RelayEventKind::AuthorizationRejected
+        );
+        assert!(
+            service
+                .events()
+                .iter()
+                .filter(|event| event.reservation_id == Some(reservation_id(22)))
+                .all(|event| event.kind != RelayEventKind::ReservationExpired)
+        );
+    }
+
+    #[test]
+    fn quota_rejection_logs_actual_packet_direction() {
+        let quota = RelayQuota {
+            max_packets_per_reservation: 4,
+            max_bytes_per_reservation: 4,
+            max_packet_bytes: 4,
+        };
+        let mut service = RelayService::new(RelayServiceConfig::default().with_log_peer_ids(true));
+        service
+            .reserve(
+                10,
+                reservation_id(23),
+                "path-relay-23",
+                grant(1_000, quota),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        assert_eq!(
+            service
+                .forward(
+                    20,
+                    reservation_id(23),
+                    peer(2),
+                    packet(RelayTransport::Udp, b"abcde", 1),
+                )
+                .expect_err("oversized reverse packet"),
+            RelayError::PacketTooLarge
+        );
+
+        let event = service.events().last().expect("quota event");
+        assert_eq!(event.kind, RelayEventKind::QuotaRejected);
+        assert_eq!(event.reservation_id, Some(reservation_id(23)));
+        assert_eq!(event.from_peer.as_deref(), Some("peer:0202..."));
+        assert_eq!(event.to_peer.as_deref(), Some("peer:0101..."));
+        assert_eq!(event.opaque_bytes, 5);
+        assert_eq!(event.quota_decision, "packet_quota_rejected");
+        assert_eq!(
+            service.usage(reservation_id(23)).expect("usage"),
+            RelayUsage::default()
+        );
+    }
+
+    #[test]
     fn rejects_invalid_auth_and_cancelled_reservations() {
         let mut service = RelayService::new(RelayServiceConfig::default());
         assert_eq!(
@@ -1503,6 +1880,195 @@ mod tests {
                 )
                 .expect_err("cancelled"),
             RelayError::ReservationCancelled
+        );
+    }
+
+    #[test]
+    fn cancellation_drains_queued_packets_for_reservation() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(12),
+                "path-relay-12",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(12),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("forward");
+
+        service
+            .cancel_reservation(reservation_id(12))
+            .expect("cancel");
+
+        assert_eq!(service.dequeue_for_peer(peer(2)), None);
+        let usage = service.usage(reservation_id(12)).expect("usage");
+        assert_eq!(usage.dropped_packets, 1);
+        assert_eq!(
+            service
+                .events()
+                .last()
+                .expect("cancel event")
+                .quota_decision,
+            "reservation_cancelled_queued_packets_drained"
+        );
+    }
+
+    #[test]
+    fn cancel_reservation_is_idempotent_after_first_drain() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(24),
+                "path-relay-24",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(24),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("forward");
+
+        service
+            .cancel_reservation(reservation_id(24))
+            .expect("first cancel");
+        let events_after_first_cancel = service.events().len();
+        let usage_after_first_cancel = service.usage(reservation_id(24)).expect("usage");
+        service
+            .cancel_reservation(reservation_id(24))
+            .expect("second cancel");
+
+        assert_eq!(service.events().len(), events_after_first_cancel);
+        assert_eq!(
+            service.usage(reservation_id(24)).expect("usage"),
+            usage_after_first_cancel
+        );
+        assert_eq!(usage_after_first_cancel.dropped_packets, 1);
+        assert_eq!(service.dequeue_for_peer(peer(2)), None);
+    }
+
+    #[test]
+    fn expired_reservations_do_not_consume_active_capacity() {
+        let config = RelayServiceConfig::new("tiny-relay", 1).expect("config");
+        let mut service = RelayService::new(config);
+        service
+            .reserve(
+                10,
+                reservation_id(13),
+                "path-relay-13",
+                grant(20, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("first reservation");
+
+        let candidate = service
+            .reserve(
+                30,
+                reservation_id(14),
+                "path-relay-14",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("expired reservation should not occupy the only active slot");
+
+        assert_eq!(candidate.reservation_id(), reservation_id(14));
+    }
+
+    #[test]
+    fn tcp_tls_fallback_reason_is_reported_only_after_tcp_path_is_used() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(15),
+                "path-relay-15",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(15))
+                .expect("pre-forward artifact")
+                .fallback_reason,
+            None
+        );
+        service
+            .forward(
+                20,
+                reservation_id(15),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("udp forward");
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(15))
+                .expect("udp artifact")
+                .fallback_reason,
+            None
+        );
+        service
+            .forward(
+                21,
+                reservation_id(15),
+                peer(1),
+                packet(RelayTransport::TcpTls443, b"ciphertext", 2),
+            )
+            .expect("tcp fallback forward");
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(15))
+                .expect("tcp artifact")
+                .fallback_reason,
+            Some("udp_unavailable_tcp_tls_443")
+        );
+    }
+
+    #[test]
+    fn cancellation_event_preserves_tcp_tls_fallback_reason_after_tcp_use() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(16),
+                "path-relay-16",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(16),
+                peer(1),
+                packet(RelayTransport::TcpTls443, b"ciphertext", 1),
+            )
+            .expect("tcp fallback forward");
+
+        service
+            .cancel_reservation(reservation_id(16))
+            .expect("cancel");
+
+        let cancel_event = service.events().last().expect("cancel event");
+        assert_eq!(cancel_event.kind, RelayEventKind::ReservationCancelled);
+        assert_eq!(
+            cancel_event.fallback_reason,
+            Some("udp_unavailable_tcp_tls_443")
         );
     }
 
