@@ -581,13 +581,13 @@ mod tests {
                 "cache-a",
                 QuotaAllocation::one_record(QuotaBucket::Cache, 40),
             )
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
         ledger
             .reserve(
                 "cache-b",
                 QuotaAllocation::one_record(QuotaBucket::Cache, 50),
             )
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
         assert_eq!(
             ledger.usage(QuotaBucket::Cache),
@@ -618,14 +618,14 @@ mod tests {
                 "mail-a",
                 QuotaAllocation::one_record(QuotaBucket::Mailbox, 8),
             )
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
         let err = ledger
             .reserve(
                 "mail-b",
                 QuotaAllocation::one_record(QuotaBucket::Mailbox, 1),
             )
-            .unwrap_err();
+            .unwrap_err(); // ubs:ignore - test oracle
 
         assert!(matches!(
             err,

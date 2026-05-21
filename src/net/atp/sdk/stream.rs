@@ -384,6 +384,10 @@ impl AsyncWrite for AtpWriter {
                 std::io::ErrorKind::BrokenPipe,
                 "Channel closed",
             ))),
+            Err(mpsc::SendError::Cancelled(_)) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Channel cancelled",
+            ))),
         }
     }
 
@@ -441,7 +445,7 @@ impl AsyncRead for AtpReader {
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
-            Err(mpsc::RecvError::Disconnected) => {
+            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => {
                 self.state = ReaderState::Closed;
                 Poll::Ready(Ok(()))
             }
@@ -454,7 +458,14 @@ impl Stream for AtpWriter {
     type Item = TransferProgress;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.progress_rx.poll_recv(cx)
+        match self.progress_rx.try_recv() {
+            Ok(p) => Poll::Ready(Some(p)),
+            Err(mpsc::RecvError::Empty) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => Poll::Ready(None),
+        }
     }
 }
 
@@ -462,7 +473,14 @@ impl Stream for AtpReader {
     type Item = TransferProgress;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.progress_rx.poll_recv(cx)
+        match self.progress_rx.try_recv() {
+            Ok(p) => Poll::Ready(Some(p)),
+            Err(mpsc::RecvError::Empty) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => Poll::Ready(None),
+        }
     }
 }
 
@@ -489,7 +507,7 @@ mod tests {
     fn assert_missing_stream_transport<T: std::fmt::Debug>(outcome: AtpOutcome<T>) {
         match outcome {
             AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
-            other => panic!("stream setup must fail closed without transport: {other:?}"),
+            other => panic!("stream setup must fail closed without transport: {other:?}"), // ubs:ignore
         }
     }
 
@@ -538,7 +556,7 @@ mod tests {
             })
             .unwrap();
 
-        runtime.run_until_stalled();
+        runtime.run_until_idle();
         result.join().unwrap();
 
         crate::test_complete!("atp_writer_creation");
@@ -573,7 +591,7 @@ mod tests {
             })
             .unwrap();
 
-        runtime.run_until_stalled();
+        runtime.run_until_idle();
         result.join().unwrap();
 
         crate::test_complete!("atp_reader_creation");
@@ -608,7 +626,7 @@ mod tests {
             })
             .unwrap();
 
-        runtime.run_until_stalled();
+        runtime.run_until_idle();
         result.join().unwrap();
 
         crate::test_complete!("writer_chunk_operations");
@@ -643,7 +661,7 @@ mod tests {
             })
             .unwrap();
 
-        runtime.run_until_stalled();
+        runtime.run_until_idle();
         result.join().unwrap();
 
         crate::test_complete!("reader_chunk_operations");
@@ -678,7 +696,7 @@ mod tests {
             })
             .unwrap();
 
-        runtime.run_until_stalled();
+        runtime.run_until_idle();
         result.join().unwrap();
 
         crate::test_complete!("async_write_interface");
@@ -713,7 +731,7 @@ mod tests {
             })
             .unwrap();
 
-        runtime.run_until_stalled();
+        runtime.run_until_idle();
         result.join().unwrap();
 
         crate::test_complete!("async_read_interface");

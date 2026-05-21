@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use serde::{Deserialize, Serialize};
 
 /// Comprehensive path diagnosis result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PathDiagnosis {
     /// Target peer being diagnosed.
     pub peer_id: PeerId,
@@ -34,7 +34,7 @@ pub struct PathDiagnosis {
 }
 
 /// Overall connectivity assessment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ConnectivityResult {
     /// Direct connection is possible.
     DirectConnectable,
@@ -47,7 +47,7 @@ pub enum ConnectivityResult {
 }
 
 /// Path candidate discovered during diagnosis.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PathCandidate {
     /// Path candidate identifier.
     pub id: PathCandidateId,
@@ -98,7 +98,7 @@ pub struct PathQuality {
 }
 
 /// NAT traversal assessment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NatTraversalResult {
     /// Local NAT type.
     pub local_nat_type: NatType,
@@ -160,7 +160,7 @@ pub struct RelayInfo {
 }
 
 /// Relay server details.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayServer {
     /// Relay server address.
     pub address: SocketAddr,
@@ -188,7 +188,7 @@ pub struct RelayPerformance {
 }
 
 /// STUN server test result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StunResult {
     /// STUN server address.
     pub server_address: SocketAddr,
@@ -235,7 +235,7 @@ pub enum CongestionLevel {
 }
 
 /// Recommended transfer strategy based on diagnosis.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransferStrategy {
     /// Primary transfer method.
     pub primary_method: TransferMethod,
@@ -267,7 +267,7 @@ pub enum TransferMethod {
 }
 
 /// Diagnostic warning or issue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiagnosticWarning {
     /// Warning severity.
     pub severity: WarningSeverity,
@@ -621,7 +621,7 @@ mod tests {
             assert!(diagnosis.timestamp_nanos > 0);
         }).unwrap();
 
-        runtime.run_until_stalled();
+        runtime.run_until_idle();
         result.join().unwrap();
 
         crate::test_complete!("path_diagnosis_basic");
@@ -718,7 +718,7 @@ mod tests {
             crate::time::sleep(Duration::from_millis(50)).await;
         }).unwrap();
 
-        runtime.run_until_stalled();
+        runtime.run_until_idle();
         result.join().unwrap();
 
         crate::test_complete!("path_monitoring");

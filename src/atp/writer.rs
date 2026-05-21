@@ -299,7 +299,7 @@ impl AtpWriter {
             total_bytes: None,      // Unknown for streaming
             transfer_rate_bps: 0.0, // TODO: Calculate from recent history
             estimated_completion: None,
-            chunks_completed: self.bytes_written / self.config.chunk_size,
+            chunks_completed: self.progress_chunks_completed(),
             chunks_in_flight: 0, // TODO: Track from transfer state
             state: self.state,
         }
@@ -538,9 +538,9 @@ impl AtpWriter {
         }
 
         // Create and store token if resume is enabled and transfer is active
-        if self.config.enable_resume && self.transfer_id.is_some() {
+        if let (true, Some(transfer_id)) = (self.config.enable_resume, self.transfer_id) {
             let resume_token = ResumeToken {
-                transfer_id: self.transfer_id.unwrap(),
+                transfer_id,
                 object_id: self.object_id.clone(),
                 verified_bytes: self.bytes_written,
                 manifest_root: self.current_manifest_root(),
@@ -561,10 +561,7 @@ impl AtpWriter {
 
     fn file_stream_chunk_len(&self) -> usize {
         let max_chunk_size = self.config.max_chunk_size.max(1);
-        let hard_limit = match u64::try_from(MAX_FILE_STREAM_CHUNK_LEN) {
-            Ok(limit) => limit,
-            Err(_) => u64::MAX,
-        };
+        let hard_limit = u64::try_from(MAX_FILE_STREAM_CHUNK_LEN).unwrap_or(u64::MAX);
         let target_chunk_size = self
             .config
             .chunk_size
@@ -578,6 +575,15 @@ impl AtpWriter {
             Ok(chunk_len) => chunk_len,
             Err(_) => MAX_FILE_STREAM_CHUNK_LEN,
         }
+    }
+
+    fn progress_chunks_completed(&self) -> u64 {
+        let chunk_size = u64::try_from(self.file_stream_chunk_len())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let base_chunks = div_ceil_u64(self.base_verified_bytes, chunk_size);
+        let local_chunks = u64::try_from(self.verified_chunks.len()).unwrap_or(u64::MAX);
+        base_chunks.saturating_add(local_chunks)
     }
 
     async fn initialize_transfer(&mut self, cx: &Cx) -> AtpOutcome<()> {
@@ -598,6 +604,13 @@ impl AtpWriter {
         }
 
         self.ensure_transfer_context(cx);
+        let buffered_len = match u64::try_from(self.buffer.len()) {
+            Ok(len) => len,
+            Err(_) => return Outcome::Err(AtpError::Protocol(ProtocolError::FrameTooLarge)),
+        };
+        if self.bytes_written.checked_add(buffered_len).is_none() {
+            return Outcome::Err(AtpError::Protocol(ProtocolError::FrameTooLarge));
+        }
 
         let chunk_len = self.file_stream_chunk_len();
         let buffered = std::mem::take(&mut self.buffer);
@@ -611,7 +624,10 @@ impl AtpWriter {
                 size_bytes,
                 hash,
             });
-            offset = offset.saturating_add(size_bytes);
+            offset = match offset.checked_add(size_bytes) {
+                Some(next_offset) => next_offset,
+                None => return Outcome::Err(AtpError::Protocol(ProtocolError::FrameTooLarge)),
+            };
         }
         self.bytes_written = offset;
 
@@ -778,6 +794,12 @@ fn ensure_nonzero(bytes: &mut [u8; 32]) {
     }
 }
 
+fn div_ceil_u64(numerator: u64, denominator: u64) -> u64 {
+    debug_assert!(denominator > 0);
+    let quotient = numerator / denominator;
+    quotient + u64::from(numerator % denominator != 0)
+}
+
 /// ATP sink for streaming data with backpressure.
 pub struct AtpSink {
     writer: AtpWriter,
@@ -856,6 +878,56 @@ mod tests {
         assert_eq!(progress.bytes_written, 0);
         assert_eq!(progress.state, WriterState::Ready);
         assert_eq!(progress.chunks_completed, 0);
+    }
+
+    #[test]
+    fn test_writer_progress_handles_zero_chunk_size() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let object_id = ObjectId::content(ContentId::new([1; 32]));
+            let mut config = WriterConfig::default();
+            config.chunk_size = 0;
+            config.min_chunk_size = 0;
+            config.max_chunk_size = 0;
+            config.backpressure_threshold = 0;
+
+            let mut writer = AtpWriter::new(object_id, [2; 32], config);
+            assert_eq!(writer.progress().chunks_completed, 0);
+
+            let bytes_written = writer.write_all(&cx, b"abc").await.unwrap();
+            assert_eq!(bytes_written, 3);
+            assert_eq!(writer.progress().chunks_completed, 3);
+        });
+    }
+
+    #[test]
+    fn test_resumed_write_overflow_fails_closed_before_mutating_proof_state() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let object_id = ObjectId::content(ContentId::new([1; 32]));
+            let transfer_id = TransferId::derive([1; 32], [2; 32], [3; 32], [4; 32]);
+            let token = ResumeToken {
+                transfer_id,
+                object_id,
+                verified_bytes: u64::MAX,
+                manifest_root: MerkleRoot::new([9; 32]),
+                journal_position: u64::MAX,
+                created_at: SystemTime::now(),
+                expires_at: SystemTime::now() + Duration::from_secs(3600),
+            };
+
+            let mut writer =
+                AtpWriter::from_resume_token(token, [2; 32], WriterConfig::default()).unwrap();
+            let result = writer.write_all(&cx, b"x").await;
+
+            assert!(matches!(
+                result,
+                Outcome::Err(AtpError::Protocol(ProtocolError::FrameTooLarge))
+            ));
+            assert_eq!(writer.bytes_written, u64::MAX);
+            assert_eq!(writer.buffer.as_slice(), b"x");
+            assert!(writer.verified_chunks.is_empty());
+        });
     }
 
     #[tokio::test]

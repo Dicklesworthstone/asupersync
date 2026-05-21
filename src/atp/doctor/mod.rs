@@ -95,7 +95,7 @@ fn log_entry(
         measurement_kind: probe.source.as_str().to_string(),
         detail: probe.detail.clone(),
         degradation_reason: probe.degradation_reason.clone(),
-        skip_reason: (probe.source == ProbeSource::Skipped).then(|| probe.detail.clone()),
+        skip_reason: (probe.source == ProbeSource::Skipped).then(|| probe.detail.clone()), // ubs:ignore - enum comparison, not a secret
         suggested_recovery_command: probe.suggested_recovery_command.clone(),
     }
 }

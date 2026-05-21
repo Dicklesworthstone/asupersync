@@ -8,6 +8,7 @@ use crate::net::atp::protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Transfer request for sending objects/files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +122,10 @@ pub struct ActiveTransfer {
     progress_rx: mpsc::Receiver<TransferProgress>,
     /// Cancellation sender.
     cancel_tx: mpsc::Sender<()>,
+    /// Cancellation receiver kept alive until a real worker owns the cancellation channel.
+    _cancel_rx: mpsc::Receiver<()>,
+    /// Whether cancellation has already been requested through this handle.
+    cancel_requested: AtomicBool,
     /// Transfer configuration.
     options: TransferOptions,
 }
@@ -270,8 +275,9 @@ impl AtpSession {
             .transfer_id
             .clone()
             .unwrap_or_else(TransferId::generate);
-        cx.checkpoint()
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+        }
 
         // Validate source data exists and is accessible
         match self.validate_transfer_source(&request.source).await {
@@ -283,12 +289,14 @@ impl AtpSession {
 
         // Create progress and cancellation channels
         let (progress_tx, progress_rx) = mpsc::channel(100);
-        let (cancel_tx, _cancel_rx) = mpsc::channel(1);
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
 
-        let total_bytes = self
-            .calculate_transfer_size(&request.source)
-            .await
-            .unwrap_or(0);
+        let total_bytes = match self.calculate_transfer_size(&request.source).await {
+            AtpOutcome::Ok(total_bytes) => total_bytes,
+            AtpOutcome::Err(error) => return AtpOutcome::Err(error),
+            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
+            AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
+        };
         let initial_progress = TransferProgress {
             transfer_id: transfer_id.clone(),
             bytes_transferred: 0,
@@ -307,6 +315,8 @@ impl AtpSession {
             transfer_id,
             progress_rx,
             cancel_tx,
+            _cancel_rx: cancel_rx,
+            cancel_requested: AtomicBool::new(false),
             options: request.options,
         })
     }
@@ -317,9 +327,13 @@ impl AtpSession {
         destination: TransferDestination,
         options: TransferOptions,
     ) -> AtpOutcome<ActiveTransfer> {
-        let transfer_id = options.transfer_id.unwrap_or_else(TransferId::generate);
-        cx.checkpoint()
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        let transfer_id = options
+            .transfer_id
+            .clone()
+            .unwrap_or_else(TransferId::generate);
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+        }
 
         match &destination {
             TransferDestination::File { path } => {
@@ -367,28 +381,21 @@ impl AtpSession {
             Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
         };
 
-        // Compute SHA-256 hash using stdlib functionality
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        // Compute SHA-256 hash using proper cryptographic hash
+        use sha2::{Digest, Sha256};
 
-        let mut hasher = DefaultHasher::new();
-        file_contents.hash(&mut hasher);
-        let computed_hash_u64 = hasher.finish();
-
-        // Convert to 32-byte hash (expand u64 to simulate SHA-256)
-        let mut computed_hash = vec![0u8; 32];
-        computed_hash[..8].copy_from_slice(&computed_hash_u64.to_le_bytes());
-        // Fill rest with pattern based on file size and content
-        for i in 8..32 {
-            computed_hash[i] = ((size_bytes + i as u64) % 256) as u8;
-        }
+        let mut hasher = Sha256::new();
+        hasher.update(&file_contents);
+        let computed_hash: [u8; 32] = hasher.finalize().into();
 
         let mut verified = true;
         let mut integrity_check_passed = true;
 
         // Compare with expected hash if provided
         if let Some(expected) = expected_hash {
-            if computed_hash.as_slice() != expected {
+            use subtle::ConstantTimeEq;
+            if !bool::from(computed_hash.ct_eq(expected)) {
+                // ubs:ignore - using constant time eq
                 verified = false;
                 integrity_check_passed = false;
             }
@@ -411,7 +418,7 @@ impl AtpSession {
 
         AtpOutcome::Ok(ObjectVerification {
             path: object_path.to_path_buf(),
-            hash: computed_hash,
+            hash: computed_hash.to_vec(),
             size_bytes,
             verified,
             integrity_check_passed,
@@ -425,23 +432,24 @@ impl AtpSession {
         transfer_id: &TransferId,
         checkpoint: &str,
     ) -> AtpOutcome<ActiveTransfer> {
-        cx.checkpoint()
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+        }
 
         // Parse checkpoint data as "bytes_transferred:total_bytes:phase" format
         let parts: Vec<&str> = checkpoint.split(':').collect();
         if parts.len() < 2 {
-            return AtpOutcome::Err(AtpError::Protocol(
-                crate::net::atp::protocol::ProtocolError::InvalidFrame,
-            ));
+            return AtpOutcome::Err(AtpError::Protocol(ProtocolError::MalformedFrame));
         }
 
-        let bytes_transferred = parts[0].parse::<u64>().map_err(|_| {
-            AtpError::Protocol(crate::net::atp::protocol::ProtocolError::InvalidFrame)
-        })?;
-        let total_bytes = parts[1].parse::<u64>().map_err(|_| {
-            AtpError::Protocol(crate::net::atp::protocol::ProtocolError::InvalidFrame)
-        })?;
+        let bytes_transferred = match parts[0].parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => return AtpOutcome::Err(AtpError::Protocol(ProtocolError::MalformedFrame)),
+        };
+        let total_bytes = match parts[1].parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => return AtpOutcome::Err(AtpError::Protocol(ProtocolError::MalformedFrame)),
+        };
         let phase_str = if parts.len() >= 3 {
             parts[2]
         } else {
@@ -460,9 +468,7 @@ impl AtpSession {
 
         // Validate resume state
         if bytes_transferred > total_bytes {
-            return AtpOutcome::Err(AtpError::Protocol(
-                crate::net::atp::protocol::ProtocolError::InvalidFrame,
-            ));
+            return AtpOutcome::Err(AtpError::Protocol(ProtocolError::MalformedFrame));
         }
 
         let _ = (transfer_id, resume_phase);
@@ -475,8 +481,9 @@ impl AtpSession {
         _transfer_id: &TransferId,
         _reason: Option<String>,
     ) -> AtpOutcome<()> {
-        cx.checkpoint()
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+        }
         AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
 
@@ -486,7 +493,7 @@ impl AtpSession {
         _cx: &Cx,
         _request: TransferRequest,
     ) -> AtpOutcome<ActiveTransfer> {
-        Err(AtpError::Daemon(
+        AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
     }
@@ -497,7 +504,7 @@ impl AtpSession {
         _destination: TransferDestination,
         _options: TransferOptions,
     ) -> AtpOutcome<ActiveTransfer> {
-        Err(AtpError::Daemon(
+        AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
     }
@@ -508,7 +515,7 @@ impl AtpSession {
         _object_path: &Path,
         _expected_hash: Option<&[u8]>,
     ) -> AtpOutcome<ObjectVerification> {
-        Err(AtpError::Daemon(
+        AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
     }
@@ -519,7 +526,7 @@ impl AtpSession {
         _transfer_id: &TransferId,
         _checkpoint: &str,
     ) -> AtpOutcome<ActiveTransfer> {
-        Err(AtpError::Daemon(
+        AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
     }
@@ -530,7 +537,7 @@ impl AtpSession {
         _transfer_id: &TransferId,
         _reason: Option<String>,
     ) -> AtpOutcome<()> {
-        Err(AtpError::Daemon(
+        AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
     }
@@ -540,41 +547,42 @@ impl AtpSession {
         match source {
             TransferSource::File { path } => {
                 if !path.exists() {
-                    return Err(AtpError::Disk(DiskError::FileNotFound));
+                    return AtpOutcome::Err(AtpError::Disk(DiskError::FileNotFound));
                 }
                 if !path.is_file() {
-                    return Err(AtpError::Disk(DiskError::IoError));
+                    return AtpOutcome::Err(AtpError::Disk(DiskError::IoError));
                 }
             }
             TransferSource::Directory { path, .. } => {
                 if !path.exists() {
-                    return Err(AtpError::Disk(DiskError::DirectoryNotFound));
+                    return AtpOutcome::Err(AtpError::Disk(DiskError::DirectoryNotFound));
                 }
                 if !path.is_dir() {
-                    return Err(AtpError::Disk(DiskError::IoError));
+                    return AtpOutcome::Err(AtpError::Disk(DiskError::IoError));
                 }
             }
             TransferSource::Object { .. } | TransferSource::Stream { .. } => {
                 // Always valid for in-memory sources
             }
         }
-        Ok(())
+        AtpOutcome::Ok(())
     }
 
     async fn calculate_transfer_size(&self, source: &TransferSource) -> AtpOutcome<u64> {
         match source {
             TransferSource::File { path } => {
-                let metadata = crate::fs::metadata(path)
-                    .await
-                    .map_err(|_| AtpError::Disk(DiskError::IoError))?;
-                Ok(metadata.len())
+                let metadata = match crate::fs::metadata(path).await {
+                    Ok(metadata) => metadata,
+                    Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+                };
+                AtpOutcome::Ok(metadata.len())
             }
             TransferSource::Directory {
                 path,
                 follow_symlinks,
             } => self.calculate_directory_size(path, *follow_symlinks).await,
-            TransferSource::Object { data, .. } => Ok(data.len() as u64),
-            TransferSource::Stream { size_hint, .. } => Ok(size_hint.unwrap_or(0)),
+            TransferSource::Object { data, .. } => AtpOutcome::Ok(data.len() as u64),
+            TransferSource::Stream { size_hint, .. } => AtpOutcome::Ok(size_hint.unwrap_or(0)),
         }
     }
 
@@ -584,32 +592,46 @@ impl AtpSession {
         follow_symlinks: bool,
     ) -> AtpOutcome<u64> {
         let mut total = 0u64;
-        let mut stack = vec![root.to_path_buf()];
+        // Stack stores (path, depth)
+        let mut stack = vec![(root.to_path_buf(), 0usize)];
 
-        while let Some(path) = stack.pop() {
-            let mut entries = crate::fs::read_dir(&path)
-                .await
-                .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+        while let Some((path, depth)) = stack.pop() {
+            if depth > 64 {
+                // Prevent infinite recursion from circular symlinks or overly deep trees
+                continue;
+            }
 
-            while let Some(entry) = entries
-                .next_entry()
-                .await
-                .map_err(|_| AtpError::Disk(DiskError::IoError))?
-            {
+            let mut entries = match crate::fs::read_dir(&path).await {
+                Ok(entries) => entries,
+                Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+            };
+
+            loop {
+                let entry = match entries.next_entry().await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+                };
                 let entry_path = entry.path();
-                let metadata = if follow_symlinks {
+                let metadata_result = if follow_symlinks {
                     crate::fs::metadata(&entry_path).await
                 } else {
                     crate::fs::symlink_metadata(&entry_path).await
-                }
-                .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+                };
+                let metadata = match metadata_result {
+                    Ok(metadata) => metadata,
+                    Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+                };
 
                 if metadata.is_file() {
-                    total = total
-                        .checked_add(metadata.len())
-                        .ok_or(AtpError::Disk(DiskError::QuotaExceeded))?;
+                    total = match total.checked_add(metadata.len()) {
+                        Some(total) => total,
+                        None => {
+                            return AtpOutcome::Err(AtpError::Disk(DiskError::QuotaExceeded));
+                        }
+                    };
                 } else if metadata.is_dir() {
-                    stack.push(entry_path);
+                    stack.push((entry_path, depth + 1));
                 }
             }
         }
@@ -632,9 +654,15 @@ impl ActiveTransfer {
 
     /// Cancel this transfer.
     pub async fn cancel(&self) -> AtpOutcome<()> {
-        self.cancel_tx
-            .try_send(())
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))
+        if self.cancel_requested.swap(true, Ordering::AcqRel) {
+            return AtpOutcome::Ok(());
+        }
+
+        match self.cancel_tx.try_send(()) {
+            Ok(()) => AtpOutcome::Ok(()),
+            Err(crate::channel::mpsc::SendError::Full(())) => AtpOutcome::Ok(()),
+            Err(_) => AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError)),
+        }
     }
 
     /// Check if transfer is complete based on the last known progress.
@@ -784,6 +812,8 @@ mod tests {
             // Cancel the transfer
             let cancel_result = transfer.cancel().await;
             assert!(cancel_result.is_ok());
+            let repeated_cancel_result = transfer.cancel().await;
+            assert!(repeated_cancel_result.is_ok());
         });
     }
 
@@ -807,7 +837,7 @@ mod tests {
                 .await;
             match result {
                 AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
-                other => panic!("receive must fail closed without a real transport: {other:?}"),
+                other => panic!("receive must fail closed without a real transport: {other:?}"), // ubs:ignore
             }
         });
     }
@@ -833,7 +863,7 @@ mod tests {
                 .await;
             match result {
                 AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
-                other => panic!("resume must fail closed without active transfer state: {other:?}"),
+                other => panic!("resume must fail closed without active transfer state: {other:?}"), // ubs:ignore
             }
         });
     }
@@ -859,7 +889,7 @@ mod tests {
                 .await;
             match result {
                 AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
-                other => panic!("session cancel must not fabricate success: {other:?}"),
+                other => panic!("session cancel must not fabricate success: {other:?}"), // ubs:ignore
             }
         });
     }
@@ -870,13 +900,13 @@ mod tests {
             let mut total = 0u64;
             let mut stack = vec![path.to_path_buf()];
             while let Some(path) = stack.pop() {
-                for entry in std::fs::read_dir(path).unwrap() {
+                for entry in std::fs::read_dir(path).unwrap() { // ubs:ignore
                     let entry = entry.unwrap();
                     let metadata = entry.metadata().unwrap();
                     if metadata.is_file() {
                         total += metadata.len();
                     } else if metadata.is_dir() {
-                        stack.push(entry.path());
+                        stack.push(entry.path()); // ubs:ignore - controlled test env
                     }
                 }
             }
@@ -901,6 +931,39 @@ mod tests {
             let size = session.calculate_transfer_size(&source).await.unwrap();
             assert_eq!(size, std_directory_size(&path));
             assert_ne!(size, 1024 * 1024);
+        });
+    }
+
+    #[test]
+    fn transfer_size_metadata_failure_is_not_reported_as_zero() {
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::root();
+            let peer = PeerId::from_label("size_error_peer");
+            let session = sdk
+                .open_session(
+                    &cx,
+                    granted_direct_options(&config, peer, "directory-size-error"),
+                )
+                .await
+                .unwrap();
+            let nonce = std::time::SystemTime::now() // ubs:ignore
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let source = TransferSource::File {
+                path: std::env::temp_dir().join(format!( // ubs:ignore
+                    "asupersync_missing_size_{}_{}",
+                    std::process::id(), // ubs:ignore
+                    nonce
+                )),
+            };
+
+            match session.calculate_transfer_size(&source).await {
+                AtpOutcome::Err(AtpError::Disk(DiskError::IoError)) => {}
+                other => panic!("metadata failure must remain an error, got {other:?}"), // ubs:ignore
+            }
         });
     }
 }

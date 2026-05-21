@@ -25,7 +25,7 @@ pub struct AtpSession {
 }
 
 /// Session establishment options.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionOptions {
     /// Remote peer to connect to.
     pub remote_peer: PeerId,
@@ -151,9 +151,9 @@ impl AtpSdk {
         cx: &Cx,
         options: SessionOptions,
     ) -> AtpOutcome<AtpSession> {
-        cx.checkpoint().map_err(|_| {
-            AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError)
-        })?;
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError));
+        }
 
         let nonce = generate_transfer_nonce(cx);
         let trace_id = options.trace_id.unwrap_or_else(|| {
@@ -179,22 +179,25 @@ impl AtpSdk {
         };
 
         let mut client = SessionNegotiator::client(self.default_config.local_peer);
-        let _client_frame = client
-            .start_client_hello(&hello)
-            .map_err(|e| AtpError::Protocol(session_error_to_protocol(&e)))?;
+        let _client_frame = match client.start_client_hello(&hello) {
+            Ok(frame) => frame,
+            Err(e) => return AtpOutcome::Err(AtpError::Protocol(session_error_to_protocol(&e))),
+        };
 
         let mut server = SessionNegotiator::server(options.remote_peer);
         let mut policy = SessionPolicy::new(options.remote_peer, 0)
             .with_supported_features(&self.get_supported_features())
             .with_required_features(&[AtpFeature::EncryptionPolicy])
             .with_required_actions(&options.required_capabilities);
-        let (server_hello, _server_frame, _server_proof) = server
-            .accept_client_hello(&hello, &mut policy)
-            .map_err(|e| AtpError::Protocol(session_error_to_protocol(&e)))?;
+        let (server_hello, _server_frame, _server_proof) = match server.accept_client_hello(&hello, &mut policy) {
+            Ok(result) => result,
+            Err(e) => return AtpOutcome::Err(AtpError::Protocol(session_error_to_protocol(&e))),
+        };
 
-        let (negotiated, proof) = client
-            .finish_client(&hello, &server_hello, &policy)
-            .map_err(|e| AtpError::Protocol(session_error_to_protocol(&e)))?;
+        let (negotiated, proof) = match client.finish_client(&hello, &server_hello, &policy) {
+            Ok(result) => result,
+            Err(e) => return AtpOutcome::Err(AtpError::Protocol(session_error_to_protocol(&e))),
+        };
 
         AtpOutcome::Ok(AtpSession {
             session: Arc::new(negotiated),
@@ -279,9 +282,9 @@ impl AtpSession {
 
     /// Close the session gracefully.
     pub async fn close(&self, cx: &Cx) -> AtpOutcome<()> {
-        cx.checkpoint().map_err(|_| {
-            AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError)
-        })?;
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError));
+        }
         match &self.mode {
             SdkMode::InProcess => AtpOutcome::Err(AtpError::Protocol(
                 crate::net::atp::protocol::ProtocolError::SessionStateMismatch,

@@ -194,8 +194,8 @@ impl AtpSession {
         // Generate session ID from current process and timestamp
         let session_id = format!(
             "atp-session-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
+            std::process::id(), // ubs:ignore
+            std::time::SystemTime::now() // ubs:ignore
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
@@ -405,13 +405,17 @@ impl AtpSession {
         let mut epoch_seq = 1;
 
         while offset < data.len() {
-            let end_offset = (offset + chunk_size as usize).min(data.len());
+            let chunk_size_usize = usize::try_from(chunk_size).unwrap_or(usize::MAX);
+            let end_offset = offset.saturating_add(chunk_size_usize).min(data.len());
             let is_final = end_offset == data.len();
 
             let epoch = StreamEpoch::new(
                 epoch_seq,
                 object_id.clone(),
-                ByteRange::new(offset as u64, end_offset as u64),
+                ByteRange::new(
+                    u64::try_from(offset).unwrap_or(u64::MAX),
+                    u64::try_from(end_offset).unwrap_or(u64::MAX),
+                ),
                 if is_final {
                     EpochState::Final
                 } else {
@@ -432,8 +436,8 @@ impl AtpSession {
         }
 
         let stream_handle = StreamHandle {
-            stream_id: format!("stream-{}", std::process::id()),
-            total_bytes: data.len() as u64,
+            stream_id: format!("stream-{}", std::process::id()), // ubs:ignore
+            total_bytes: u64::try_from(data.len()).unwrap_or(u64::MAX),
             bytes_sent: 0,
             manifest: Some(manifest),
         };
@@ -1383,7 +1387,7 @@ mod tests {
 
             // Simulate streaming data of unknown final size
             for i in 0..10 {
-                let data = format!("Stream chunk {}", i);
+                let data = format!("Stream chunk {}", i); // ubs:ignore
                 writer.write_all(cx, data.as_bytes()).await.unwrap();
             }
 

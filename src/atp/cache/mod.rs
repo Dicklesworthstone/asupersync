@@ -495,7 +495,7 @@ impl ObjectCache {
     fn eviction_candidate(&self, protected_root: &ObjectDigest) -> Option<ObjectDigest> {
         self.entries
             .iter()
-            .filter(|(root, entry)| *root != protected_root && entry.is_resident())
+            .filter(|(root, entry)| *root != protected_root && entry.is_resident()) // ubs:ignore - object digest filtering, not secret check
             .min_by(|(left_root, left), (right_root, right)| {
                 left.last_verified_epoch_secs
                     .cmp(&right.last_verified_epoch_secs)

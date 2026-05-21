@@ -712,7 +712,7 @@ mod tests {
         snapshot.schema_version = AtpdSchemaVersion(ATPD_STATE_SCHEMA_VERSION + 1);
 
         assert_eq!(
-            AtpdPersistentState::restore(snapshot).unwrap_err(),
+            AtpdPersistentState::restore(snapshot).unwrap_err(), // ubs:ignore - test oracle
             AtpdStateError::UnsupportedSchema(AtpdSchemaVersion(ATPD_STATE_SCHEMA_VERSION + 1))
         );
     }
@@ -731,7 +731,7 @@ mod tests {
                 10,
                 StateSensitivity::PrivateContent,
             ))
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
         let err = state
             .insert_record(record(
@@ -804,7 +804,7 @@ mod tests {
                 80,
                 StateSensitivity::Internal,
             ))
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
         state
             .insert_record(record(
                 "trace-new",
@@ -813,7 +813,7 @@ mod tests {
                 95,
                 StateSensitivity::Internal,
             ))
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
         assert_eq!(
             state.apply_retention(100).unwrap(),
@@ -836,9 +836,9 @@ mod tests {
                 )
                 .with_export_policy(StateExportPolicy::ExplicitPolicyRequired),
             )
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
-        let export = state.export(AtpdExportMode::Redacted, false).unwrap();
+        let export = state.export(AtpdExportMode::Redacted, false).unwrap(); // ubs:ignore - test oracle
         assert_eq!(export.records.len(), 1);
         assert!(export.records[0].redacted);
         assert!(export.records[0].payload_digest.ends_with("..."));
@@ -858,9 +858,9 @@ mod tests {
                 )
                 .with_export_policy(StateExportPolicy::ExplicitPolicyRequired),
             )
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
-        let export = state.privacy_safe_diagnostics_export().unwrap();
+        let export = state.privacy_safe_diagnostics_export().unwrap(); // ubs:ignore - test oracle
         assert_eq!(export.mode, "redacted");
         assert!(export.records[0].redacted);
     }
@@ -879,13 +879,13 @@ mod tests {
                 )
                 .with_export_policy(StateExportPolicy::ExplicitPolicyRequired),
             )
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
         assert_eq!(
-            state.export(AtpdExportMode::Full, false).unwrap_err(),
+            state.export(AtpdExportMode::Full, false).unwrap_err(), // ubs:ignore - test oracle
             AtpdStateError::PolicyRequiredForFullExport
         );
-        let export = state.export(AtpdExportMode::Full, true).unwrap();
+        let export = state.export(AtpdExportMode::Full, true).unwrap(); // ubs:ignore - test oracle
         assert!(!export.records[0].redacted);
         assert!(!export.records[0].payload_digest.ends_with("..."));
     }
@@ -904,9 +904,9 @@ mod tests {
                 )
                 .with_export_policy(StateExportPolicy::ExplicitPolicyRequired),
             )
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
-        let export = state.export(AtpdExportMode::Full, true).unwrap();
+        let export = state.export(AtpdExportMode::Full, true).unwrap(); // ubs:ignore - test oracle
         assert!(!export.records[0].redacted);
     }
 
@@ -922,9 +922,9 @@ mod tests {
                 10,
                 StateSensitivity::GrantSecret,
             ))
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
-        let restored = AtpdPersistentState::restore(state.clone()).unwrap();
+        let restored = AtpdPersistentState::restore(state.clone()).unwrap(); // ubs:ignore - test oracle
         assert_eq!(
             state.deterministic_snapshot_json().unwrap(),
             restored.deterministic_snapshot_json().unwrap()
@@ -945,7 +945,7 @@ mod tests {
                 10,
                 StateSensitivity::Quarantine,
             ))
-            .unwrap();
+            .unwrap(); // ubs:ignore - test oracle
 
         assert_eq!(
             state.expired_record_ids(12),

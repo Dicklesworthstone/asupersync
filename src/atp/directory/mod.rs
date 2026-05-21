@@ -1047,7 +1047,7 @@ pub enum DirectoryIoError {
 
 /// Parse a full 32-byte peer id hex string.
 pub fn peer_id_from_hex(hex_text: &str) -> Result<PeerId, DirectoryError> {
-    let bytes = hex::decode(hex_text).map_err(|_| DirectoryError::InvalidPeerIdHex)?;
+    let bytes = hex::decode(hex_text).map_err(|_| DirectoryError::InvalidPeerIdHex)?; // ubs:ignore - hex decoding, not JWT decoding
     let bytes: [u8; 32] = bytes
         .try_into()
         .map_err(|_| DirectoryError::InvalidPeerIdHex)?;
@@ -1182,9 +1182,9 @@ mod tests {
                 device_id: "laptop".to_string()
             }
         );
-        let view = directory.inspect(&subject).expect("inspect");
+        let view = directory.inspect(&subject).expect("inspect"); // ubs:ignore - test oracle
         let DirectoryEntryView::Device(device) = view else {
-            panic!("expected device");
+            panic!("expected device"); // ubs:ignore - test oracle
         };
         assert_eq!(device.device_name, "workstation");
     }

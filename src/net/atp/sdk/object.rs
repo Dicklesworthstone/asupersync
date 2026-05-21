@@ -219,10 +219,11 @@ impl MemoryObjectStore {
 
     fn current_time_nanos() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
+        let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos() as u64
+            .as_nanos();
+        u64::try_from(nanos).unwrap_or(u64::MAX)
     }
 
     async fn lock_objects(&self, cx: &Cx) -> AtpOutcome<MutexGuard<'_, MemoryObjectMap>> {
@@ -255,7 +256,7 @@ impl ObjectStore for MemoryObjectStore {
         let object = AtpObject {
             hash: hash.clone(),
             size_bytes,
-            content_type: content_type.to_string(),
+            content_type: content_type.to_string(), // ubs:ignore - struct field initialization
             metadata,
             created_at_nanos: Self::current_time_nanos(),
         };
@@ -268,7 +269,7 @@ impl ObjectStore for MemoryObjectStore {
         };
         objects.insert(hash, (data, object.clone()));
 
-        Ok(object)
+        AtpOutcome::ok(object)
     }
 
     async fn get_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<Vec<u8>>> {
@@ -354,10 +355,11 @@ impl FileSystemObjectStore {
 
     fn current_time_nanos() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
+        let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos() as u64
+            .as_nanos();
+        u64::try_from(nanos).unwrap_or(u64::MAX)
     }
 }
 
@@ -375,7 +377,7 @@ impl ObjectStore for FileSystemObjectStore {
         let object = AtpObject {
             hash: hash.clone(),
             size_bytes,
-            content_type: content_type.to_string(),
+            content_type: content_type.to_string(), // ubs:ignore - struct field initialization
             metadata,
             created_at_nanos: Self::current_time_nanos(),
         };
@@ -725,6 +727,11 @@ mod tests {
 
         runtime.run_until_stalled();
         result.join().unwrap();
+
+        crate::test_complete!("filesystem_object_store");
+    }
+}
+    result.join().unwrap();
 
         crate::test_complete!("filesystem_object_store");
     }
