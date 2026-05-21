@@ -64,12 +64,30 @@ where
         match Pin::new(&mut *writer).poll_write(cx, &buf[*pos..cap]) {
             Poll::Pending | Poll::Ready(Err(_) | Ok(0)) => break,
             Poll::Ready(Ok(n)) => {
-                *pos += n;
-                drained += n as u64;
+                let remaining = cap - *pos;
+                let advanced = n.min(remaining);
+                *pos += advanced;
+                drained += advanced as u64;
+                if n > remaining {
+                    break;
+                }
             }
         }
     }
     drained
+}
+
+fn checked_write_progress(n: usize, remaining: usize) -> io::Result<usize> {
+    if n > remaining {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("writer reported {n} bytes written for {remaining}-byte buffer"),
+        ))
+    } else if n == 0 && remaining > 0 {
+        Err(io::Error::from(io::ErrorKind::WriteZero))
+    } else {
+        Ok(n)
+    }
 }
 
 /// Copy all data from a reader to a writer.
@@ -170,11 +188,15 @@ where
                         this.completed = true;
                         return Poll::Ready(Err(err));
                     }
-                    Poll::Ready(Ok(0)) => {
-                        this.completed = true;
-                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
-                    }
                     Poll::Ready(Ok(n)) => {
+                        let remaining = this.cap - this.pos;
+                        let n = match checked_write_progress(n, remaining) {
+                            Ok(n) => n,
+                            Err(err) => {
+                                this.completed = true;
+                                return Poll::Ready(Err(err));
+                            }
+                        };
                         this.pos += n;
                         this.total += n as u64;
                         this.need_flush = true;
@@ -392,11 +414,15 @@ where
                     this.completed = true;
                     return Poll::Ready(Err(err));
                 }
-                Poll::Ready(Ok(0)) => {
-                    this.completed = true;
-                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
-                }
                 Poll::Ready(Ok(n)) => n,
+            };
+
+            let n = match checked_write_progress(n, buf.len()) {
+                Ok(n) => n,
+                Err(err) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
             };
 
             Pin::new(&mut *this.reader).consume(n);
@@ -516,11 +542,15 @@ where
                         this.completed = true;
                         return Poll::Ready(Err(err));
                     }
-                    Poll::Ready(Ok(0)) => {
-                        this.completed = true;
-                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
-                    }
                     Poll::Ready(Ok(n)) => {
+                        let remaining = this.cap - this.pos;
+                        let n = match checked_write_progress(n, remaining) {
+                            Ok(n) => n,
+                            Err(err) => {
+                                this.completed = true;
+                                return Poll::Ready(Err(err));
+                            }
+                        };
                         this.pos += n;
                         this.total += n as u64;
                         (this.on_progress)(this.total);
@@ -673,10 +703,12 @@ where
             match Pin::new(&mut *self.b).poll_write(cx, &self.a_to_b_buf[state.pos..state.cap]) {
                 Poll::Pending => return TransferResult::Pending,
                 Poll::Ready(Err(err)) => return TransferResult::Error(err),
-                Poll::Ready(Ok(0)) => {
-                    return TransferResult::Error(io::Error::from(io::ErrorKind::WriteZero));
-                }
                 Poll::Ready(Ok(n)) => {
+                    let remaining = state.cap - state.pos;
+                    let n = match checked_write_progress(n, remaining) {
+                        Ok(n) => n,
+                        Err(err) => return TransferResult::Error(err),
+                    };
                     state.pos += n;
                     self.a_to_b_total += n as u64;
                     state.need_flush = true;
@@ -754,10 +786,12 @@ where
             match Pin::new(&mut *self.a).poll_write(cx, &self.b_to_a_buf[state.pos..state.cap]) {
                 Poll::Pending => return TransferResult::Pending,
                 Poll::Ready(Err(err)) => return TransferResult::Error(err),
-                Poll::Ready(Ok(0)) => {
-                    return TransferResult::Error(io::Error::from(io::ErrorKind::WriteZero));
-                }
                 Poll::Ready(Ok(n)) => {
+                    let remaining = state.cap - state.pos;
+                    let n = match checked_write_progress(n, remaining) {
+                        Ok(n) => n,
+                        Err(err) => return TransferResult::Error(err),
+                    };
                     state.pos += n;
                     self.b_to_a_total += n as u64;
                     state.need_flush = true;
@@ -1050,6 +1084,110 @@ mod tests {
         }
     }
 
+    struct OverreportingWriter {
+        written: Vec<u8>,
+    }
+
+    impl OverreportingWriter {
+        fn new() -> Self {
+            Self {
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncWrite for OverreportingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            this.written.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len() + 1))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn copy_rejects_overreported_writer_progress() {
+        init_test("copy_rejects_overreported_writer_progress");
+        let mut reader: &[u8] = b"abc";
+        let mut writer = OverreportingWriter::new();
+        let mut fut = copy(&mut reader, &mut writer);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect_err("overreported write must fail closed");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            err.kind()
+        );
+        crate::assert_with_log!(writer.written == b"abc", "written", b"abc", writer.written);
+        crate::test_complete!("copy_rejects_overreported_writer_progress");
+    }
+
+    #[test]
+    fn copy_buf_rejects_overreported_writer_before_consuming_reader() {
+        init_test("copy_buf_rejects_overreported_writer_before_consuming_reader");
+        let mut reader: &[u8] = b"abc";
+        let mut writer = OverreportingWriter::new();
+        let mut fut = copy_buf(&mut reader, &mut writer);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect_err("overreported write must fail closed");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            err.kind()
+        );
+        crate::assert_with_log!(reader == b"abc", "reader not consumed", b"abc", reader);
+        crate::assert_with_log!(writer.written == b"abc", "written", b"abc", writer.written);
+        crate::test_complete!("copy_buf_rejects_overreported_writer_before_consuming_reader");
+    }
+
+    #[test]
+    fn copy_with_progress_rejects_overreported_writer_before_progress() {
+        init_test("copy_with_progress_rejects_overreported_writer_before_progress");
+        let mut reader: &[u8] = b"abc";
+        let mut writer = OverreportingWriter::new();
+        let mut progress = Vec::new();
+        let mut fut = copy_with_progress(&mut reader, &mut writer, |total| {
+            progress.push(total);
+        });
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect_err("overreported write must fail closed");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            progress.is_empty(),
+            "progress calls",
+            true,
+            progress.is_empty()
+        );
+        crate::test_complete!("copy_with_progress_rejects_overreported_writer_before_progress");
+    }
+
     #[test]
     fn copy_partial_write_interrupt_preserves_committed_prefix() {
         init_test("copy_partial_write_interrupt_preserves_committed_prefix");
@@ -1231,6 +1369,74 @@ mod tests {
             self.get_mut().shutdown_called = true;
             Poll::Ready(Ok(()))
         }
+    }
+
+    struct OverreportingDuplex {
+        inner: TestDuplex,
+    }
+
+    impl OverreportingDuplex {
+        fn new(read_data: &[u8]) -> Self {
+            Self {
+                inner: TestDuplex::new(read_data),
+            }
+        }
+    }
+
+    impl AsyncRead for OverreportingDuplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for OverreportingDuplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            this.inner.written.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len() + 1))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        }
+    }
+
+    #[test]
+    fn copy_bidirectional_rejects_overreported_writer_progress() {
+        init_test("copy_bidirectional_rejects_overreported_writer_progress");
+        let mut a = TestDuplex::new(b"abc");
+        let mut b = OverreportingDuplex::new(b"");
+        let mut fut = copy_bidirectional(&mut a, &mut b);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect_err("overreported write must fail closed");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            b.inner.written == b"abc",
+            "written",
+            b"abc",
+            b.inner.written
+        );
+        crate::test_complete!("copy_bidirectional_rejects_overreported_writer_progress");
     }
 
     #[test]

@@ -326,6 +326,19 @@ pub trait AsyncWriteExt: AsyncWrite {
 
 impl<W: AsyncWrite + ?Sized> AsyncWriteExt for W {}
 
+fn checked_write_progress(n: usize, remaining: usize) -> io::Result<usize> {
+    if n > remaining {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("writer reported {n} bytes written for {remaining}-byte buffer"),
+        ))
+    } else if n == 0 && remaining > 0 {
+        Err(io::Error::from(io::ErrorKind::WriteZero))
+    } else {
+        Ok(n)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Future types
 // ---------------------------------------------------------------------------
@@ -350,11 +363,20 @@ where
                 "Write future polled after completion",
             )));
         }
-        let result = Pin::new(&mut *this.writer).poll_write(cx, this.buf);
-        if result.is_ready() {
-            this.completed = true;
+        match Pin::new(&mut *this.writer).poll_write(cx, this.buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => {
+                this.completed = true;
+                Poll::Ready(Err(err))
+            }
+            Poll::Ready(Ok(n)) => {
+                this.completed = true;
+                match checked_write_progress(n, this.buf.len()) {
+                    Ok(n) => Poll::Ready(Ok(n)),
+                    Err(err) => Poll::Ready(Err(err)),
+                }
+            }
         }
-        result
     }
 }
 
@@ -399,10 +421,14 @@ where
                     return Poll::Ready(Err(err));
                 }
                 Poll::Ready(Ok(n)) => {
-                    if n == 0 {
-                        this.completed = true;
-                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
-                    }
+                    let remaining = this.buf.len() - this.pos;
+                    let n = match checked_write_progress(n, remaining) {
+                        Ok(n) => n,
+                        Err(err) => {
+                            this.completed = true;
+                            return Poll::Ready(Err(err));
+                        }
+                    };
                     this.pos += n;
                 }
             }
@@ -458,10 +484,13 @@ where
                     return Poll::Ready(Err(err));
                 }
                 Poll::Ready(Ok(n)) => {
-                    if n == 0 {
-                        this.completed = true;
-                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
-                    }
+                    let n = match checked_write_progress(n, chunk.len()) {
+                        Ok(n) => n,
+                        Err(err) => {
+                            this.completed = true;
+                            return Poll::Ready(Err(err));
+                        }
+                    };
                     this.buf.advance(n);
                 }
             }
@@ -500,10 +529,9 @@ where
             }
             Poll::Ready(Ok(n)) => {
                 this.completed = true;
-                if n == 0 {
-                    Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)))
-                } else {
-                    Poll::Ready(Ok(()))
+                match checked_write_progress(n, 1) {
+                    Ok(_) => Poll::Ready(Ok(())),
+                    Err(err) => Poll::Ready(Err(err)),
                 }
             }
         }
@@ -539,10 +567,9 @@ where
             }
             Poll::Ready(Ok(n)) => {
                 this.completed = true;
-                if n == 0 {
-                    Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)))
-                } else {
-                    Poll::Ready(Ok(()))
+                match checked_write_progress(n, 1) {
+                    Ok(_) => Poll::Ready(Ok(())),
+                    Err(err) => Poll::Ready(Err(err)),
                 }
             }
         }
@@ -623,11 +650,27 @@ where
                 "WriteVectored future polled after completion",
             )));
         }
-        let result = Pin::new(&mut *this.writer).poll_write_vectored(cx, this.bufs);
-        if result.is_ready() {
-            this.completed = true;
+        match Pin::new(&mut *this.writer).poll_write_vectored(cx, this.bufs) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => {
+                this.completed = true;
+                Poll::Ready(Err(err))
+            }
+            Poll::Ready(Ok(n)) => {
+                this.completed = true;
+                let remaining = this
+                    .bufs
+                    .iter()
+                    .try_fold(0usize, |total, buf| total.checked_add(buf.len()))
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "vectored buffers too large")
+                    });
+                match remaining.and_then(|remaining| checked_write_progress(n, remaining)) {
+                    Ok(n) => Poll::Ready(Ok(n)),
+                    Err(err) => Poll::Ready(Err(err)),
+                }
+            }
         }
-        result
     }
 }
 
@@ -668,10 +711,14 @@ macro_rules! write_int_future {
                             return Poll::Ready(Err(err));
                         }
                         Poll::Ready(Ok(n)) => {
-                            if n == 0 {
-                                this.completed = true;
-                                return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
-                            }
+                            let remaining = $size - this.pos;
+                            let n = match checked_write_progress(n, remaining) {
+                                Ok(n) => n,
+                                Err(err) => {
+                                    this.completed = true;
+                                    return Poll::Ready(Err(err));
+                                }
+                            };
                             this.pos += n;
                         }
                     }
@@ -727,6 +774,52 @@ mod tests {
         std::task::Waker::noop().clone()
     }
 
+    struct OverreportingWriter {
+        written: Vec<u8>,
+    }
+
+    impl OverreportingWriter {
+        fn new() -> Self {
+            Self {
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncWrite for OverreportingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            this.written.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len() + 1))
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            let mut total = 0usize;
+            for buf in bufs {
+                this.written.extend_from_slice(buf);
+                total += buf.len();
+            }
+            Poll::Ready(Ok(total + 1))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     fn poll_ready<F: Future>(fut: &mut Pin<&mut F>) -> F::Output {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -736,6 +829,15 @@ mod tests {
             }
         }
         unreachable!("future did not resolve");
+    }
+
+    fn assert_invalid_data(err: io::Error) {
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            err.kind()
+        );
     }
 
     #[test]
@@ -751,6 +853,32 @@ mod tests {
     }
 
     #[test]
+    fn write_empty_returns_zero() {
+        init_test("write_empty_returns_zero");
+        let mut output = Vec::new();
+        let mut fut = output.write(b"");
+        let mut fut = Pin::new(&mut fut);
+
+        let n = poll_ready(&mut fut).unwrap();
+        crate::assert_with_log!(n == 0, "bytes written", 0, n);
+        crate::assert_with_log!(output.is_empty(), "output empty", true, output.is_empty());
+        crate::test_complete!("write_empty_returns_zero");
+    }
+
+    #[test]
+    fn write_rejects_overreported_writer_progress() {
+        init_test("write_rejects_overreported_writer_progress");
+        let mut output = OverreportingWriter::new();
+        let mut fut = output.write(b"abc");
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut).expect_err("overreported write must fail closed");
+        assert_invalid_data(err);
+        crate::assert_with_log!(output.written == b"abc", "written", b"abc", output.written);
+        crate::test_complete!("write_rejects_overreported_writer_progress");
+    }
+
+    #[test]
     fn write_all_ok() {
         init_test("write_all_ok");
         let mut output = Vec::new();
@@ -763,6 +891,19 @@ mod tests {
     }
 
     #[test]
+    fn write_all_rejects_overreported_writer_progress() {
+        init_test("write_all_rejects_overreported_writer_progress");
+        let mut output = OverreportingWriter::new();
+        let mut fut = output.write_all(b"abc");
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut).expect_err("overreported write_all must fail closed");
+        assert_invalid_data(err);
+        crate::assert_with_log!(output.written == b"abc", "written", b"abc", output.written);
+        crate::test_complete!("write_all_rejects_overreported_writer_progress");
+    }
+
+    #[test]
     fn write_u8_ok() {
         init_test("write_u8_ok");
         let mut output = Vec::new();
@@ -772,6 +913,24 @@ mod tests {
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::assert_with_log!(output == vec![0x42], "output", vec![0x42], output);
         crate::test_complete!("write_u8_ok");
+    }
+
+    #[test]
+    fn write_u8_rejects_overreported_writer_progress() {
+        init_test("write_u8_rejects_overreported_writer_progress");
+        let mut output = OverreportingWriter::new();
+        let mut fut = output.write_u8(0x42);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut).expect_err("overreported write_u8 must fail closed");
+        assert_invalid_data(err);
+        crate::assert_with_log!(
+            output.written == vec![0x42],
+            "written",
+            vec![0x42],
+            output.written
+        );
+        crate::test_complete!("write_u8_rejects_overreported_writer_progress");
     }
 
     #[test]
@@ -801,6 +960,24 @@ mod tests {
             output
         );
         crate::test_complete!("write_u16_big_endian");
+    }
+
+    #[test]
+    fn write_u16_rejects_overreported_writer_progress() {
+        init_test("write_u16_rejects_overreported_writer_progress");
+        let mut output = OverreportingWriter::new();
+        let mut fut = output.write_u16(0x0102);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut).expect_err("overreported write_u16 must fail closed");
+        assert_invalid_data(err);
+        crate::assert_with_log!(
+            output.written == vec![0x01, 0x02],
+            "written",
+            vec![0x01, 0x02],
+            output.written
+        );
+        crate::test_complete!("write_u16_rejects_overreported_writer_progress");
     }
 
     #[test]
@@ -886,6 +1063,41 @@ mod tests {
     }
 
     #[test]
+    fn write_vectored_empty_returns_zero() {
+        init_test("write_vectored_empty_returns_zero");
+        let mut output = Vec::new();
+        let bufs = &[IoSlice::new(b""), IoSlice::new(b"")];
+        let mut fut = output.write_vectored(bufs);
+        let mut fut = Pin::new(&mut fut);
+
+        let n = poll_ready(&mut fut).unwrap();
+        crate::assert_with_log!(n == 0, "bytes written", 0, n);
+        crate::assert_with_log!(output.is_empty(), "output empty", true, output.is_empty());
+        crate::test_complete!("write_vectored_empty_returns_zero");
+    }
+
+    #[test]
+    fn write_vectored_rejects_overreported_writer_progress() {
+        init_test("write_vectored_rejects_overreported_writer_progress");
+        let mut output = OverreportingWriter::new();
+        let data1 = b"hello ";
+        let data2 = b"world";
+        let bufs = &[IoSlice::new(data1), IoSlice::new(data2)];
+        let mut fut = output.write_vectored(bufs);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut).expect_err("overreported write_vectored must fail closed");
+        assert_invalid_data(err);
+        crate::assert_with_log!(
+            output.written == b"hello world",
+            "written",
+            b"hello world",
+            output.written
+        );
+        crate::test_complete!("write_vectored_rejects_overreported_writer_progress");
+    }
+
+    #[test]
     fn write_all_buf_ok() {
         init_test("write_all_buf_ok");
         let mut output = Vec::new();
@@ -898,6 +1110,26 @@ mod tests {
         crate::assert_with_log!(empty, "input empty", true, empty);
         crate::assert_with_log!(output == b"buffered", "output", b"buffered", output);
         crate::test_complete!("write_all_buf_ok");
+    }
+
+    #[test]
+    fn write_all_buf_rejects_overreported_writer_before_advancing_buf() {
+        init_test("write_all_buf_rejects_overreported_writer_before_advancing_buf");
+        let mut output = OverreportingWriter::new();
+        let mut input: &[u8] = b"buffered";
+        let mut fut = output.write_all_buf(&mut input);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut).expect_err("overreported write_all_buf must fail closed");
+        assert_invalid_data(err);
+        crate::assert_with_log!(input == b"buffered", "input", b"buffered", input);
+        crate::assert_with_log!(
+            output.written == b"buffered",
+            "written",
+            b"buffered",
+            output.written
+        );
+        crate::test_complete!("write_all_buf_rejects_overreported_writer_before_advancing_buf");
     }
 
     #[test]
