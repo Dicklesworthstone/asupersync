@@ -7,7 +7,7 @@
 use crate::types::{CancelKind, CancelReason};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
@@ -311,7 +311,7 @@ impl ProcessingStats {
 pub struct CancellationDebtMonitor {
     config: CancellationDebtConfig,
     /// Pending work by work type.
-    pending_work: Arc<Mutex<HashMap<WorkType, HashMap<u64, PendingWork>>>>,
+    pending_work: Arc<Mutex<HashMap<WorkType, BTreeMap<u64, PendingWork>>>>,
     /// Processing statistics by work type.
     processing_stats: Arc<Mutex<HashMap<WorkType, ProcessingStats>>>,
     /// Next work ID.
@@ -433,13 +433,10 @@ impl CancellationDebtMonitor {
             let mut pending = self.pending_work.lock();
             let map = pending.entry(work_type).or_default();
             let evicted = if map.len() >= self.config.max_pending_per_work_type {
-                // Find the oldest entry (smallest queued_at). Linear scan is
-                // OK since the cap bounds the search size.
-                let oldest_id = map
-                    .iter()
-                    .min_by_key(|(_, w)| w.queued_at)
-                    .map(|(id, _)| *id);
-                oldest_id.and_then(|id| map.remove(&id)).map(|w| {
+                // Find the oldest entry. Since we use a BTreeMap keyed by
+                // monotonically increasing `work_id`, `pop_first()` gives
+                // the oldest entry in O(log N) time instead of O(N).
+                map.pop_first().map(|(_, w)| {
                     let evicted_size = std::mem::size_of::<PendingWork>()
                         + w.entity_id.len()
                         + w.cancel_reason.len();

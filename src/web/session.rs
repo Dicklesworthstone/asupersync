@@ -127,7 +127,18 @@ impl<S: SessionStore + ?Sized> Drop for RegenerateGuard<'_, S> {
             guard.get(REGENERATE_FLAG_KEY).is_some()
         };
         if regenerate_requested && !self.is_new {
-            self.store.delete(&self.session_id);
+            if std::thread::panicking() {
+                // Avoid aborting the process with a double panic while preserving
+                // the original handler failure. Outside unwind, let store.delete
+                // panics surface: hiding a normal-path invalidation failure would
+                // make session rotation look safer than it was.
+                let _delete_outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.store.delete(&self.session_id);
+                    }));
+            } else {
+                self.store.delete(&self.session_id);
+            }
         }
     }
 }
@@ -1826,6 +1837,71 @@ mod tests {
             store.len(),
             1,
             "guard must NOT invalidate sessions that did not request regenerate"
+        );
+    }
+
+    struct PanicOnDeleteStore;
+
+    impl SessionStore for PanicOnDeleteStore {
+        fn load(&self, _id: &str) -> Option<SessionData> {
+            None
+        }
+
+        fn save(&self, _id: &str, _data: &SessionData) {}
+
+        fn delete(&self, _id: &str) {
+            std::panic::panic_any("delete backend unavailable");
+        }
+    }
+
+    #[test]
+    fn regenerate_guard_drop_suppresses_store_delete_panic_during_handler_unwind() {
+        let mut data = SessionData::new();
+        data.insert(REGENERATE_FLAG_KEY, "1");
+        let session_handle = Arc::new(Mutex::new(data));
+        let store = PanicOnDeleteStore;
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = RegenerateGuard {
+                armed: true,
+                store: &store,
+                session_handle,
+                session_id: "00112233445566778899aabbccddeeff".to_string(),
+                is_new: false,
+            };
+            std::panic::panic_any("handler failed after requesting regenerate");
+        }));
+
+        let panic_payload = outcome.expect_err("the original handler unwind should propagate");
+        assert_eq!(
+            panic_payload.downcast_ref::<&str>(),
+            Some(&"handler failed after requesting regenerate"),
+            "the guard must preserve the original handler panic"
+        );
+    }
+
+    #[test]
+    fn regenerate_guard_drop_surfaces_store_delete_panic_without_handler_unwind() {
+        let mut data = SessionData::new();
+        data.insert(REGENERATE_FLAG_KEY, "1");
+        let session_handle = Arc::new(Mutex::new(data));
+        let store = PanicOnDeleteStore;
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = RegenerateGuard {
+                armed: true,
+                store: &store,
+                session_handle,
+                session_id: "00112233445566778899aabbccddeeff".to_string(),
+                is_new: false,
+            };
+        }));
+
+        let panic_payload = outcome.expect_err("normal-path store.delete panic should propagate");
+        assert_eq!(
+            panic_payload.downcast_ref::<&str>(),
+            Some(&"delete backend unavailable"),
+            "normal-path store.delete panics should not be silently swallowed"
         );
     }
 

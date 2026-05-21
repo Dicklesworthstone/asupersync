@@ -809,7 +809,7 @@ fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
             if abs == 0 || matches!(lower.as_bytes()[abs - 1], b';' | b' ' | b'\t') {
                 break abs;
             }
-            start = abs + 1;
+            start = abs + search.len();
         }
     };
     let after = &disposition[idx + search.len()..];
@@ -862,7 +862,7 @@ fn parse_disposition_ext_param(disposition: &str, param: &str) -> Option<String>
             if abs == 0 || matches!(lower.as_bytes()[abs - 1], b';' | b' ' | b'\t') {
                 break abs;
             }
-            start = abs + 1;
+            start = abs + search.len();
         }
     };
 

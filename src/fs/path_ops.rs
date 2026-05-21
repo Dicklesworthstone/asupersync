@@ -601,9 +601,9 @@ mod tests {
     }
 
     #[test]
-    fn write_atomic_retries_when_stale_temp_name_exists() {
-        init_test("write_atomic_retries_when_stale_temp_name_exists");
-        let dir = TempDir::new("write_atomic_collision").unwrap();
+    fn write_atomic_preserves_preexisting_stale_temp_files() {
+        init_test("write_atomic_preserves_preexisting_stale_temp_files");
+        let dir = TempDir::new("write_atomic_stale_temp").unwrap();
         let path = dir.path().join("target.txt");
         let file_name = path.file_name().expect("target file name");
         let start = ATOMIC_WRITE_COUNTER.load(Ordering::Relaxed);
@@ -611,9 +611,8 @@ mod tests {
         for offset in 0..8 {
             let counter = start.saturating_add(offset);
             let stale = dir.path().join(format!(
-                ".{}.asupersync-tmp-{}-{counter}",
+                ".{}.asupersync-tmp-deadbeefdeadbeef-{counter}",
                 file_name.to_string_lossy(),
-                std::process::id()
             ));
             fs::write(stale, b"stale-temp").unwrap();
         }
@@ -641,7 +640,7 @@ mod tests {
                 stale_count
             );
         });
-        crate::test_complete!("write_atomic_retries_when_stale_temp_name_exists");
+        crate::test_complete!("write_atomic_preserves_preexisting_stale_temp_files");
     }
 
     #[cfg(unix)]

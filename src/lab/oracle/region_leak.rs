@@ -48,7 +48,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 #[cfg(any(test, feature = "deterministic-mode"))]
 use std::time::UNIX_EPOCH;
@@ -167,9 +167,9 @@ pub struct RegionState {
     /// Timestamp of the last activity in this region.
     pub last_activity: Instant,
     /// Set of active task IDs in this region.
-    pub active_tasks: HashSet<TaskId>,
+    pub active_tasks: BTreeSet<TaskId>,
     /// Set of child region IDs.
-    pub child_regions: HashSet<RegionId>,
+    pub child_regions: BTreeSet<RegionId>,
     /// Number of finalizers expected to run.
     pub expected_finalizers: u32,
     /// Number of finalizers that have completed.
@@ -305,14 +305,20 @@ pub enum TaskLifecycleState {
     Panicked,
 }
 
+impl TaskLifecycleState {
+    #[inline]
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Cancelled | Self::Panicked)
+    }
+}
+
 /// The main region leak detection oracle.
 ///
-/// br-asupersync-qdcchl: `regions` and `tasks` are now `BTreeMap`
-/// rather than `HashMap`. Iteration over either map (for violation
-/// scans, snapshot exports, or the eviction logic in
-/// `cleanup_if_needed`) is now sorted by `RegionId` / `TaskId`, so
-/// the oracle's observable output stops depending on
-/// `RandomState`'s per-process hash seed.
+/// br-asupersync-qdcchl: `regions` and `tasks` are `BTreeMap`, and
+/// per-region task/child membership uses `BTreeSet`. Iteration over
+/// these structures is sorted by `RegionId` / `TaskId`, so the oracle's
+/// observable output stops depending on `RandomState`'s per-process hash
+/// seed.
 pub struct RegionLeakOracle {
     config: RegionLeakConfig,
     regions: BTreeMap<RegionId, RegionState>,
@@ -435,8 +441,8 @@ impl RegionLeakOracle {
             state: RegionLifecycleState::Created,
             creation_time: now,
             last_activity: now,
-            active_tasks: HashSet::new(),
-            child_regions: HashSet::new(),
+            active_tasks: BTreeSet::new(),
+            child_regions: BTreeSet::new(),
             expected_finalizers: 0,
             completed_finalizers: 0,
             creation_context: context,
@@ -519,13 +525,17 @@ impl RegionLeakOracle {
     pub fn on_task_completed(&mut self, task_id: TaskId, outcome: Outcome<(), String>) {
         let now = (self.time_source)();
 
-        if let Some(task) = self.tasks.get_mut(&task_id) {
+        let mut completed_new_terminal_state = false;
+        if let Some(task) = self.tasks.get_mut(&task_id)
+            && !task.state.is_terminal()
+        {
             task.state = match outcome {
                 Outcome::Ok(()) => TaskLifecycleState::Completed,
                 Outcome::Err(_) => TaskLifecycleState::Completed,
                 Outcome::Cancelled(_) => TaskLifecycleState::Cancelled,
                 Outcome::Panicked(_) => TaskLifecycleState::Panicked,
             };
+            completed_new_terminal_state = true;
 
             // Remove from region's active task list
             if let Some(region) = self.regions.get_mut(&task.region_id) {
@@ -534,7 +544,9 @@ impl RegionLeakOracle {
             }
         }
 
-        self.total_tasks_completed += 1;
+        if completed_new_terminal_state {
+            self.total_tasks_completed += 1;
+        }
 
         if self.config.continuous_checking {
             let _ = self.check_for_violations();
@@ -557,7 +569,7 @@ impl RegionLeakOracle {
     /// Called when a finalizer completes within a region
     pub fn on_finalizer_completed(&mut self, region_id: RegionId) {
         if let Some(region) = self.regions.get_mut(&region_id) {
-            region.completed_finalizers += 1;
+            region.completed_finalizers = region.completed_finalizers.saturating_add(1);
             region.last_activity = (self.time_source)();
 
             // Transition to finalizing if all children done but finalizers remain
@@ -576,19 +588,27 @@ impl RegionLeakOracle {
 
     /// Called when a region has fully closed
     pub fn on_region_closed(&mut self, region_id: RegionId) {
-        if let Some(region) = self.regions.get_mut(&region_id) {
+        let mut closed_new_region = false;
+        if let Some(region) = self.regions.get_mut(&region_id)
+            && region.state != RegionLifecycleState::Closed
+        {
             region.state = RegionLifecycleState::Closed;
             region.last_activity = (self.time_source)();
+            closed_new_region = true;
         }
 
-        self.total_regions_closed += 1;
+        if closed_new_region {
+            self.total_regions_closed += 1;
+        }
 
         // Remove from parent's child list
-        let parent_id = self.regions.get(&region_id).and_then(|r| r.parent_id);
-        if let Some(parent) = parent_id {
-            if let Some(parent_region) = self.regions.get_mut(&parent) {
-                parent_region.child_regions.remove(&region_id);
-                parent_region.last_activity = (self.time_source)();
+        if closed_new_region {
+            let parent_id = self.regions.get(&region_id).and_then(|r| r.parent_id);
+            if let Some(parent) = parent_id {
+                if let Some(parent_region) = self.regions.get_mut(&parent) {
+                    parent_region.child_regions.remove(&region_id);
+                    parent_region.last_activity = (self.time_source)();
+                }
             }
         }
 
@@ -646,13 +666,23 @@ impl RegionLeakOracle {
     /// Get summary statistics about the oracle's monitoring
     #[must_use]
     pub fn statistics(&self) -> RegionLeakStatistics {
+        let active_regions = self
+            .regions
+            .values()
+            .filter(|region| region.state != RegionLifecycleState::Closed)
+            .count() as u64;
+        let active_tasks = self
+            .tasks
+            .values()
+            .filter(|task| !task.state.is_terminal())
+            .count() as u64;
         RegionLeakStatistics {
             total_regions_created: self.total_regions_created,
             total_regions_closed: self.total_regions_closed,
             total_tasks_spawned: self.total_tasks_spawned,
             total_tasks_completed: self.total_tasks_completed,
-            active_regions: self.regions.len() as u64,
-            active_tasks: self.tasks.len() as u64,
+            active_regions,
+            active_tasks,
             total_violations: self.violations.len() as u64,
             monitoring_duration: self.last_check_time.duration_since(self.start_time),
         }
@@ -770,10 +800,7 @@ impl RegionLeakOracle {
     }
 
     fn check_task_violations(&self, task: &TaskState, now: Instant) -> Option<RegionViolation> {
-        if task.state == TaskLifecycleState::Completed
-            || task.state == TaskLifecycleState::Cancelled
-            || task.state == TaskLifecycleState::Panicked
-        {
+        if task.state.is_terminal() {
             return None;
         }
 
@@ -886,7 +913,9 @@ impl RegionLeakOracle {
             child_regions: region.child_regions.iter().copied().collect(),
             parent_region: region.parent_id,
             last_activity_description: format!("Last activity: {:?}", region.last_activity),
-            outstanding_finalizers: region.expected_finalizers - region.completed_finalizers,
+            outstanding_finalizers: region
+                .expected_finalizers
+                .saturating_sub(region.completed_finalizers),
             budget_info: BudgetInfo {
                 budget_type: format!("{:?}", region.budget),
                 initial_amount: "Unknown".to_string(),
@@ -1028,6 +1057,74 @@ mod tests {
         let stats = oracle.statistics();
         assert_eq!(stats.total_tasks_spawned, 1);
         assert_eq!(stats.total_tasks_completed, 1);
+    }
+
+    #[test]
+    fn statistics_report_current_active_entities() {
+        let mut oracle = RegionLeakOracle::with_defaults();
+        let region_id = RegionId::new_for_test(1, 0);
+        let task_id = TaskId::new_for_test(100, 0);
+
+        oracle.on_region_created(region_id, None, None, Budget::INFINITE);
+        oracle.on_task_spawned(task_id, region_id, None);
+
+        let active_stats = oracle.statistics();
+        assert_eq!(active_stats.active_regions, 1);
+        assert_eq!(active_stats.active_tasks, 1);
+
+        oracle.on_task_completed(task_id, Outcome::Ok(()));
+        oracle.on_task_completed(task_id, Outcome::Err("duplicate completion".to_string()));
+        oracle.on_task_completed(TaskId::new_for_test(999, 0), Outcome::Ok(()));
+        oracle.on_region_closing(region_id, 0);
+        oracle.on_region_closed(region_id);
+        oracle.on_region_closed(region_id);
+        oracle.on_region_closed(RegionId::new_for_test(999, 0));
+
+        let closed_stats = oracle.statistics();
+        assert_eq!(closed_stats.active_regions, 0);
+        assert_eq!(closed_stats.active_tasks, 0);
+        assert_eq!(closed_stats.total_regions_created, 1);
+        assert_eq!(closed_stats.total_regions_closed, 1);
+        assert_eq!(closed_stats.total_tasks_spawned, 1);
+        assert_eq!(closed_stats.total_tasks_completed, 1);
+    }
+
+    #[test]
+    fn violation_context_ids_are_deterministically_ordered() {
+        let mut oracle = RegionLeakOracle::with_defaults();
+        let parent = RegionId::new_for_test(10, 0);
+        let child_a = RegionId::new_for_test(30, 0);
+        let child_b = RegionId::new_for_test(20, 0);
+        let task_a = TaskId::new_for_test(300, 0);
+        let task_b = TaskId::new_for_test(100, 0);
+        let task_c = TaskId::new_for_test(200, 0);
+
+        oracle.on_region_created(parent, None, None, Budget::INFINITE);
+        oracle.on_region_created(child_a, Some(parent), None, Budget::INFINITE);
+        oracle.on_region_created(child_b, Some(parent), None, Budget::INFINITE);
+        oracle.on_task_spawned(task_a, parent, None);
+        oracle.on_task_spawned(task_b, parent, None);
+        oracle.on_task_spawned(task_c, parent, None);
+
+        let parent_region = oracle.regions.get(&parent).unwrap();
+        let context = oracle.build_violation_context(parent_region);
+        assert_eq!(context.active_tasks, vec![task_b, task_c, task_a]);
+        assert_eq!(context.child_regions, vec![child_b, child_a]);
+    }
+
+    #[test]
+    fn extra_finalizer_events_do_not_underflow_context() {
+        let mut oracle = RegionLeakOracle::with_defaults();
+        let region_id = RegionId::new_for_test(1, 0);
+
+        oracle.on_region_created(region_id, None, None, Budget::INFINITE);
+        oracle.on_region_closing(region_id, 1);
+        oracle.on_finalizer_completed(region_id);
+        oracle.on_finalizer_completed(region_id);
+
+        let region = oracle.regions.get(&region_id).unwrap();
+        let context = oracle.build_violation_context(region);
+        assert_eq!(context.outstanding_finalizers, 0);
     }
 
     #[test]

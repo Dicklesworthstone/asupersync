@@ -4,10 +4,10 @@
 //! trace minimization and failure reproduction capabilities.
 
 use crate::lab::crashpack::AtpCrashpack;
-use crate::lab::oracle::{OracleReport, OracleStats};
-use crate::trace::{TraceBuffer, TraceEvent};
+use crate::lab::oracle::OracleReport;
+use crate::trace::TraceEvent;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::Path;
 use thiserror::Error;
 
@@ -173,7 +173,7 @@ impl TraceMinimizer {
 
             // Try removing a candidate event
             if let Some(candidate_idx) = candidates_for_removal.first() {
-                let mut test_trace = minimized.clone();
+                let mut test_trace = minimized.clone(); // ubs:ignore - required for iterative reduction
                 test_trace.remove(*candidate_idx);
 
                 // Verify that removing this event doesn't break failure reproduction

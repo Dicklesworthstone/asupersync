@@ -24,6 +24,8 @@ pub struct CancellationTracerIntegration {
     task_traces: Arc<RwLock<HashMap<TaskId, CancellationTraceId>>>,
     /// Active traces by region ID.
     region_traces: Arc<RwLock<HashMap<RegionId, CancellationTraceId>>>,
+    /// Reference counts for active traces to avoid O(N) completion checks.
+    trace_refs: Arc<RwLock<HashMap<CancellationTraceId, usize>>>,
 }
 
 impl CancellationTracerIntegration {
@@ -34,6 +36,7 @@ impl CancellationTracerIntegration {
             tracer: Arc::new(CancellationTracer::new(config)),
             task_traces: Arc::new(RwLock::new(HashMap::new())),
             region_traces: Arc::new(RwLock::new(HashMap::new())),
+            trace_refs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -92,6 +95,7 @@ impl CancellationTracerIntegration {
 
         // Track the trace for this task
         self.task_traces.write().insert(task_id, trace_id);
+        *self.trace_refs.write().entry(trace_id).or_insert(0) += 1;
     }
 
     /// Called when a task acknowledges cancellation.
@@ -156,14 +160,20 @@ impl CancellationTracerIntegration {
         // (observed as `test_task_cancel_flow` hanging indefinitely).
         let removed_trace_id = self.task_traces.write().remove(&task_id);
         if let Some(trace_id) = removed_trace_id {
-            // Check if this was the root task of the trace
+            // Check if this was the root task of the trace via reference counting
             let should_complete_trace = {
-                let task_traces = self.task_traces.read();
-                let region_traces = self.region_traces.read();
-
-                // If no other tasks or regions reference this trace, complete it
-                !task_traces.values().any(|&id| id == trace_id)
-                    && !region_traces.values().any(|&id| id == trace_id)
+                let mut refs = self.trace_refs.write();
+                if let Some(count) = refs.get_mut(&trace_id) {
+                    *count -= 1;
+                    if *count == 0 {
+                        refs.remove(&trace_id);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                }
             };
 
             if should_complete_trace {
@@ -221,6 +231,7 @@ impl CancellationTracerIntegration {
 
         // Track the trace for this region
         self.region_traces.write().insert(region_id, trace_id);
+        *self.trace_refs.write().entry(trace_id).or_insert(0) += 1;
     }
 
     /// Called when a region state transitions during cancellation.
@@ -264,14 +275,20 @@ impl CancellationTracerIntegration {
         // subsequent read acquisitions inside the `if let` body.
         let removed_trace_id = self.region_traces.write().remove(&region_id);
         if let Some(trace_id) = removed_trace_id {
-            // Check if this was the root region of the trace
+            // Check if this was the root region of the trace via reference counting
             let should_complete_trace = {
-                let task_traces = self.task_traces.read();
-                let region_traces = self.region_traces.read();
-
-                // If no other tasks or regions reference this trace, complete it
-                !task_traces.values().any(|&id| id == trace_id)
-                    && !region_traces.values().any(|&id| id == trace_id)
+                let mut refs = self.trace_refs.write();
+                if let Some(count) = refs.get_mut(&trace_id) {
+                    *count -= 1;
+                    if *count == 0 {
+                        refs.remove(&trace_id);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                }
             };
 
             if should_complete_trace {

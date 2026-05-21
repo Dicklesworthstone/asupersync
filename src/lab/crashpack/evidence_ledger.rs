@@ -45,7 +45,7 @@ impl AtpEvidenceLedger {
         // Store artifact path if provided
         if let Some(ref path) = artifact_path {
             if !self.artifact_paths.contains(path) {
-                self.artifact_paths.push(path.clone());
+                self.artifact_paths.push(path.clone()); // ubs:ignore - pushing to vector, not path join
             }
         }
 

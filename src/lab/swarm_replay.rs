@@ -646,7 +646,7 @@ pub fn run_swarm_replay_scenario(
             .create_child_region(scenario_root, Budget::INFINITE)
             .map_err(|err| SwarmReplayError::RegionCreateRejected {
                 region_index,
-                reason: format!("{err:?}"),
+                reason: format!("{err:?}"), // ubs:ignore - error path only
             })?;
         region_ids.push(region);
 
@@ -735,7 +735,7 @@ pub fn run_swarm_replay_scenario(
                 .map_err(|err| SwarmReplayError::TaskSpawnRejected {
                     region_index,
                     task_index,
-                    reason: format!("{err:?}"),
+                    reason: format!("{err:?}"), // ubs:ignore - error path only
                 })?;
 
             tracked_tasks.push(task_id);
@@ -758,7 +758,7 @@ pub fn run_swarm_replay_scenario(
         let mut scheduler = runtime.scheduler.lock();
         for (task_id, event) in &scheduled_tasks {
             scheduler.schedule(*task_id, 0);
-            events.lock().push(event.clone());
+            events.lock().push(event.clone()); // ubs:ignore - simulation setup iteration
         }
     }
 
@@ -921,7 +921,7 @@ pub fn run_swarm_pressure_scenario(
 
     let mut proof_throttled_count = 0usize;
     for index in 0..scenario.proof_tasks {
-        let step = index as u64 % scenario.max_steps;
+        let step = index as u64 % scenario.max_steps; // ubs:ignore - test oracle truncation
         let disk_pressure = disk_pressure_at_step(&disk_transitions, step);
         let rch_workers_available = rch_workers_at_step(
             &rch_events,
@@ -1031,7 +1031,7 @@ pub fn run_swarm_pressure_scenario(
         disk_pressure_transition_count: disk_transitions.len(),
         rch_worker_loss_events: rch_events
             .iter()
-            .filter(|event| event.kind == SwarmRchWorkerEventKind::Loss)
+            .filter(|event| event.kind == SwarmRchWorkerEventKind::Loss) // ubs:ignore - enum comparison, not a secret
             .count(),
         rch_worker_recovery_events: rch_events
             .iter()

@@ -5,7 +5,6 @@
 //! abstraction that the router uses to invoke handlers.
 
 use std::future::Future;
-use std::sync::OnceLock;
 
 use crate::Cx;
 use crate::runtime::{Runtime, RuntimeBuilder};
@@ -13,10 +12,6 @@ use crate::types::Budget;
 
 use super::extract::{FromRequest, FromRequestParts, Request};
 use super::response::{IntoResponse, Response, StatusCode};
-
-thread_local! {
-    static HANDLER_RUNTIME: OnceLock<Runtime> = const { OnceLock::new() };
-}
 
 /// A request handler.
 ///
@@ -243,6 +238,10 @@ where
     Ok((t1, t2, t3, t4))
 }
 
+thread_local! {
+    static HANDLER_RUNTIME: std::cell::OnceCell<Runtime> = std::cell::OnceCell::new();
+}
+
 #[inline]
 pub(crate) fn run_async_handler_with_runtime_cx<F, Fut, Res>(f: F) -> Response
 where
@@ -262,24 +261,13 @@ where
         );
     }
 
-    HANDLER_RUNTIME.with(|runtime| {
-        let rt = if let Some(rt) = runtime.get() {
-            rt
-        } else {
-            match RuntimeBuilder::current_thread().build() {
-                Ok(rt) => {
-                    let _ = runtime.set(rt);
-                    runtime
-                        .get()
-                        .expect("handler runtime should be initialized after set")
-                }
-                Err(_) => return Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
-            }
-        };
+    let rt = match RuntimeBuilder::current_thread().build() {
+        Ok(rt) => rt,
+        Err(_) => return Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
+    };
 
-        let cx = ambient_cx.unwrap_or_else(|| rt.request_cx_with_budget(Budget::INFINITE));
-        rt.block_on_with_cx(cx.clone(), f(cx)).into_response()
-    })
+    let cx = ambient_cx.unwrap_or_else(|| rt.request_cx_with_budget(Budget::INFINITE));
+    rt.block_on_with_cx(cx.clone(), f(cx)).into_response()
 }
 
 /// Wrapper for async handlers that receive a [`Cx`] and no extractors.

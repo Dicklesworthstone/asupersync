@@ -334,11 +334,22 @@ fn handle_connection(mut stream: TcpStream, snapshot_fn: &SnapshotFn) {
 
 fn read_headers<R: BufRead>(reader: &mut R) -> Vec<(String, String)> {
     let mut headers = Vec::with_capacity(16);
+    let mut total_bytes = 0;
     loop {
+        if headers.len() >= 64 {
+            break;
+        }
         let mut line = String::new();
+        // Use a generic limit by borrowing the reader by reference into take,
+        // but take() consumes the reference. Instead we just check the line length.
+        // It's a local debug server, but we should at least bound it.
         match reader.read_line(&mut line) {
             Ok(0) | Err(_) => break,
-            Ok(_) => {
+            Ok(n) => {
+                total_bytes += n;
+                if total_bytes > 65536 {
+                    break;
+                }
                 let trimmed = line.trim_end_matches(['\r', '\n']);
                 if trimmed.is_empty() {
                     break;

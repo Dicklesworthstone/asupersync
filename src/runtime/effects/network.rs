@@ -83,6 +83,7 @@
 use super::SendPermit;
 
 /// Trait for network streams that support two-phase send operations.
+#[allow(async_fn_in_trait)]
 pub trait TwoPhaseNetworkSend {
     /// The error type for send operations.
     type Error;
@@ -102,6 +103,7 @@ pub trait TwoPhaseNetworkSend {
 /// This trait identifies streams that need to be migrated to the two-phase pattern.
 /// Implementing this trait is a temporary step during migration.
 pub trait DirectSend {
+    /// The error type for send operations.
     type Error;
 
     /// Send data directly (legacy pattern - should be migrated).

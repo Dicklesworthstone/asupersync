@@ -37,8 +37,8 @@ pub use evidence_ledger::{AtpEvidenceLedger, AtpEvidenceEntry, EvidenceSummary};
 pub use oracle::{AtpTransferOracle, AtpTransferState, AtpOracleResult, AtpOracleChecks};
 pub use replay::{AtpReplayCoordinator, TraceMinimizer, TraceMinimizerConfig, ReplayError, AtpReplayResult};
 
-use crate::lab::oracle::{OracleReport, OracleStats};
-use crate::trace::{TraceBuffer, TraceEvent, TraceBufferHandle};
+use crate::lab::oracle::OracleStats;
+use crate::trace::{TraceBuffer, TraceEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -319,7 +319,7 @@ impl CrashpackBuilder {
     }
 
     pub fn with_artifact_path(mut self, path: impl Into<String>) -> Self {
-        self.artifact_paths.push(path.into());
+        self.artifact_paths.push(path.into()); // ubs:ignore - pushing to vector, not path join
         self
     }
 

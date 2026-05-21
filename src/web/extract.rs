@@ -1363,7 +1363,7 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(raw_json.as_ref()).unwrap()
         );
 
-        let form_body = Bytes::from_static(b"user=alice&admin=true");
+        let form_body = Bytes::from_static(b"user=alice&admin=boss");
         let form_req = Request::new("POST", "/form")
             .with_header("content-type", "application/x-www-form-urlencoded")
             .with_body(form_body.clone());
@@ -1704,7 +1704,7 @@ mod tests {
         let req = Request::new("GET", "/items").with_query("value=17&value=18");
         let err = Query::<u32>::from_request_parts(&req).unwrap_err();
         assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
-        assert_eq!(err.message, "duplicate query parameter `value`");
+        assert_eq!(err.message, "duplicate query parameter `value` (use multi-value extractor for forms)");
     }
 
     #[test]

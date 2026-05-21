@@ -437,7 +437,14 @@ where
     ///
     /// This method is cancel-safe. If cancelled, no data is lost.
     pub async fn recv(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
+        let mut steps = 0;
         loop {
+            steps += 1;
+            if steps >= 64 {
+                crate::runtime::yield_now().await;
+                steps = 0;
+            }
+
             // Check cancellation
             if cx.checkpoint().is_err() {
                 return Err(WsError::Io(io::Error::new(

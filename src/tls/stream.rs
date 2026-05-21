@@ -290,7 +290,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     ///
     /// Returns `Poll::Ready(Ok(()))` when handshake is complete.
     pub fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
+        let mut steps = 0;
         loop {
+            steps += 1;
+            if steps >= 64 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
             // Process any pending TLS data
             if let Err(e) = self.conn.process_new_packets() {
                 #[cfg(feature = "tracing-integration")]
@@ -479,7 +486,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             }
         }
 
+        let mut steps = 0;
         loop {
+            steps += 1;
+            if steps >= 64 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
             // Try to read from the decrypted buffer
             match io::Read::read(&mut self.conn.reader(), buf.unfilled()) {
                 Ok(n) => {

@@ -9,7 +9,7 @@
 //! - Proof bundle validity oracle
 
 use crate::lab::oracle::evidence::{EvidenceStrength, EvidenceEntry, BayesFactor, LogLikelihoodContributions, EvidenceLine};
-use crate::lab::oracle::{OracleReport, OracleStats};
+use crate::lab::oracle::OracleStats;
 use crate::lab::crashpack::evidence_ledger::AtpEvidenceLedger;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

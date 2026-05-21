@@ -525,6 +525,8 @@ impl CancellationTracer {
                 // Update statistics
                 self.update_completion_stats(&in_progress_trace.trace);
 
+                let root_entity = in_progress_trace.trace.root_entity.clone();
+
                 // Store completed trace
                 if let Ok(mut completed) = self.completed_traces.lock() {
                     completed.push_back(in_progress_trace.trace);
@@ -537,7 +539,14 @@ impl CancellationTracer {
 
                 // Clean up entity mappings
                 if let Ok(mut entity_traces) = self.entity_traces.lock() {
-                    for traces in entity_traces.values_mut() {
+                    if let Some(traces) = entity_traces.get_mut(&root_entity) {
+                        traces.retain(|&id| id != trace_id);
+                        if traces.is_empty() {
+                            entity_traces.remove(&root_entity);
+                        }
+                    }
+                    // Also check the overflow bucket in case it was stored there
+                    if let Some(traces) = entity_traces.get_mut(ENTITY_OVERFLOW_BUCKET) {
                         traces.retain(|&id| id != trace_id);
                     }
                 }

@@ -74,12 +74,17 @@ fn set_nonblocking() -> io::Result<()> {
 fn drain_nonblocking<R: Read>(reader: &mut R, out: &mut Vec<u8>) -> io::Result<(bool, bool)> {
     let mut any = false;
     let mut buf = [0u8; 4096];
+    let mut iterations = 0;
     loop {
         match reader.read(&mut buf) {
             Ok(0) => return Ok((true, any)),
             Ok(n) => {
                 any = true;
                 out.extend_from_slice(&buf[..n]);
+                iterations += 1;
+                if iterations >= 64 { // 256KB max per poll
+                    return Ok((false, any));
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok((false, any)),
             Err(e) => return Err(e),
