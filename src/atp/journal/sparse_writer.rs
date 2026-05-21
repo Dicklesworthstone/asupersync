@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 /// Configuration for sparse writer behavior
@@ -129,7 +129,7 @@ struct ChunkMetadata {
 /// Verification state tracking
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
-enum VerificationState {
+pub enum VerificationState {
     /// Not verified yet
     Pending,
     /// Verification in progress
@@ -207,9 +207,13 @@ impl SparseWriter {
         })
     }
 
+    fn lock_state(&self) -> MutexGuard<'_, SparseWriterState> {
+        self.state.lock().unwrap()
+    }
+
     /// Set expected final size for preallocation
     pub fn set_expected_size(&self, size: u64) -> Result<(), SparseWriterError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.expected_size = Some(size);
 
         // Trigger preallocation if enabled and file is open
@@ -238,63 +242,60 @@ impl SparseWriter {
             size: chunk_size,
         };
 
-        // Ensure temp file is open
-        match self.ensure_temp_file_open().await {
-            Ok(_) => {}
-            Err(e) => return Outcome::Err(e),
-        }
-
-        // Check for overlapping writes
-        {
-            let state = self.state.lock().unwrap();
-            if state.range_tracker.overlaps(&SparseRange {
-                start: offset,
-                end: offset + chunk_size,
-            }) {
-                return Outcome::Err(SparseWriterError::OverlappingWrite {
+        let end = match offset.checked_add(chunk_size) {
+            Some(end) => end,
+            None => {
+                return Outcome::Err(SparseWriterError::InvalidRange {
                     offset,
                     size: chunk_size,
                 });
             }
-        }
+        };
+        let sparse_range = SparseRange { start: offset, end };
 
-        // Perform the write
-        let (hash, synced) = match self.write_chunk_internal(offset, data, &options).await {
-            Ok((hash, synced)) => (hash, synced),
+        let mut state = self.lock_state();
+        if let Err(error) = self.ensure_temp_file_open_locked(&mut state) {
+            return Outcome::Err(error);
+        }
+        if state.range_tracker.overlaps(&sparse_range) {
+            return Outcome::Err(SparseWriterError::OverlappingWrite {
+                offset,
+                size: chunk_size,
+            });
+        }
+        let (hash, synced) = match self.write_chunk_locked(&mut state, offset, data, &options) {
+            Ok(result) => result,
             Err(e) => return Outcome::Err(e),
         };
-
-        // Update state
-        {
-            let mut state = self.state.lock().unwrap();
-            state.range_tracker.add_range(SparseRange {
-                start: offset,
-                end: offset + chunk_size,
-            });
-            state.written_chunks.insert(
+        let written_at = Instant::now();
+        state.range_tracker.add_range(sparse_range);
+        state.written_chunks.insert(
+            offset,
+            ChunkMetadata {
                 offset,
-                ChunkMetadata {
-                    offset,
-                    size: chunk_size,
-                    hash,
-                    written_at: Instant::now(),
-                    synced,
-                },
-            );
-            state.last_write_at = Instant::now();
-        }
+                size: chunk_size,
+                hash,
+                written_at,
+                synced,
+            },
+        );
+        state.last_write_at = written_at;
 
-        crate::types::outcome::Outcome::Ok(chunk_range)
+        Outcome::ok(chunk_range)
+    }
+
+    fn is_complete_locked(state: &SparseWriterState) -> bool {
+        if let Some(expected_size) = state.expected_size {
+            state.range_tracker.is_contiguous_to(expected_size)
+        } else {
+            false
+        }
     }
 
     /// Check if all expected ranges have been written
     pub fn is_complete(&self) -> bool {
-        let state = self.state.lock().unwrap();
-        if let Some(expected_size) = state.expected_size {
-            state.range_tracker.is_contiguous_to(expected_size)
-        } else {
-            false // Cannot be complete without expected size
-        }
+        let state = self.lock_state();
+        Self::is_complete_locked(&state)
     }
 
     /// Verify written data against expected manifest
@@ -303,15 +304,12 @@ impl SparseWriter {
         _cx: &Cx,
         _expected_manifest: &ManifestVersion,
     ) -> Outcome<(), SparseWriterError> {
-        {
-            let mut state = self.state.lock().unwrap();
-            state.verification_state = VerificationState::InProgress;
-        }
+        let mut state = self.lock_state();
+        state.verification_state = VerificationState::InProgress;
 
         // TODO: Implement manifest verification logic
         // This would compute hashes of written chunks and compare against manifest
 
-        let mut state = self.state.lock().unwrap();
         state.verification_state = VerificationState::Verified {
             manifest_root: MerkleRoot::zero(),
         };
@@ -321,14 +319,11 @@ impl SparseWriter {
 
     /// Commit the written data atomically to final destination
     pub async fn commit(&self, _cx: &Cx) -> Outcome<PathBuf, SparseWriterError> {
-        // Verify completion
-        if !self.is_complete() {
-            return Outcome::Err(SparseWriterError::IncompleteData);
-        }
-
-        // Verify data integrity
         {
-            let state = self.state.lock().unwrap();
+            let state = self.lock_state();
+            if !Self::is_complete_locked(&state) {
+                return Outcome::Err(SparseWriterError::IncompleteData);
+            }
             if !matches!(state.verification_state, VerificationState::Verified { .. }) {
                 return Outcome::Err(SparseWriterError::NotVerified);
             }
@@ -379,7 +374,7 @@ impl SparseWriter {
 
     /// Get current write statistics
     pub fn get_stats(&self) -> SparseWriterStats {
-        let state = self.state.lock().unwrap();
+        let state = self.lock_state();
         let total_written = state.range_tracker.total_bytes();
         let chunk_count = state.written_chunks.len();
         let completion_ratio = if let Some(expected) = state.expected_size {
@@ -403,9 +398,10 @@ impl SparseWriter {
 
     // Internal implementation methods
 
-    async fn ensure_temp_file_open(&self) -> Result<(), SparseWriterError> {
-        let mut state = self.state.lock().unwrap();
-
+    fn ensure_temp_file_open_locked(
+        &self,
+        state: &mut SparseWriterState,
+    ) -> Result<(), SparseWriterError> {
         if state.temp_file.is_some() {
             return Ok(());
         }
@@ -433,7 +429,7 @@ impl SparseWriter {
         // Apply preallocation if size is known
         if let Some(size) = state.expected_size {
             if self.config.enable_preallocation {
-                match self.preallocate_internal(&mut state, size) {
+                match self.preallocate_internal(state, size) {
                     Ok(()) => (),
                     Err(e) => return Err(e),
                 }
@@ -455,9 +451,11 @@ impl SparseWriter {
                 #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::io::AsRawFd;
+                    let size_i64 = i64::try_from(size)
+                        .map_err(|_| SparseWriterError::PreallocationTooLarge { size })?;
                     unsafe {
                         let fd = file.as_raw_fd();
-                        let result = libc::fallocate(fd, 0, 0, size as i64);
+                        let result = libc::fallocate(fd, 0, 0, size_i64);
                         if result == 0 {
                             state.allocated_size = size;
                             state.is_preallocated = true;
@@ -486,14 +484,13 @@ impl SparseWriter {
         Ok(())
     }
 
-    async fn write_chunk_internal(
+    fn write_chunk_locked(
         &self,
+        state: &mut SparseWriterState,
         offset: u64,
         data: &[u8],
         options: &WriteOptions,
     ) -> Result<([u8; 32], bool), SparseWriterError> {
-        let mut state = self.state.lock().unwrap();
-
         let file = state
             .temp_file
             .as_mut()
@@ -520,7 +517,8 @@ impl SparseWriter {
         };
 
         // Apply fsync if required
-        let synced = if options.force_sync || matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite)
+        let synced = if options.force_sync
+            || matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite)
         {
             file.sync_data()
                 .map_err(|e| SparseWriterError::SyncFailed(e.to_string()))?;
@@ -533,12 +531,13 @@ impl SparseWriter {
     }
 
     async fn apply_fsync_policy(&self) -> Outcome<(), SparseWriterError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let verified = matches!(state.verification_state, VerificationState::Verified { .. });
 
         // Check sync requirements before borrowing file mutably
-        let needs_sync_for_every_write = matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite)
-            && state.written_chunks.values().any(|chunk| !chunk.synced);
+        let needs_sync_for_every_write =
+            matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite)
+                && state.written_chunks.values().any(|chunk| !chunk.synced);
 
         if let Some(ref mut file) = state.temp_file {
             match self.config.fsync_policy {
@@ -583,7 +582,7 @@ impl SparseWriter {
     }
 
     async fn atomic_commit(&self) -> Outcome<PathBuf, SparseWriterError> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock_state();
         let temp_path = match state.temp_path.as_ref() {
             Some(path) => path,
             None => return Outcome::Err(SparseWriterError::NoTempFile),
@@ -635,7 +634,7 @@ impl SparseWriter {
     }
 
     async fn cleanup_temp_file(&self) -> Result<(), SparseWriterError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
 
         if let Some(temp_path) = state.temp_path.take() {
             std::fs::remove_file(&temp_path).ok(); // Ignore errors
@@ -646,7 +645,7 @@ impl SparseWriter {
     }
 
     async fn quarantine_temp_file(&self, reason: &str) -> Result<(), SparseWriterError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
 
         if let Some(temp_path) = state.temp_path.take() {
             let mut path_mgr = self.path_manager.lock().unwrap();
@@ -695,6 +694,12 @@ pub enum SparseWriterError {
     #[error("Overlapping write at offset {offset}, size {size}")]
     OverlappingWrite { offset: u64, size: u64 },
 
+    #[error("Invalid chunk range at offset {offset}, size {size}")]
+    InvalidRange { offset: u64, size: u64 },
+
+    #[error("Preallocation size is too large: {size}")]
+    PreallocationTooLarge { size: u64 },
+
     #[error("Seek failed: {0}")]
     SeekFailed(String),
 
@@ -717,105 +722,114 @@ pub enum SparseWriterError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use crate::atp::object::ContentId;
 
     fn create_test_cx() -> Cx {
-        // TODO: Create proper test context
-        panic!("Test context not implemented")
+        Cx::for_testing()
     }
 
-    #[tokio::test]
-    async fn test_sparse_writer_basic() {
-        let cx = create_test_cx();
-        let object_id = ObjectId::new("test-object");
-        let temp_dir = std::env::temp_dir();
-        let final_path = temp_dir.join("test_sparse_output");
-
-        let config = SparseWriterConfig::default();
-        let writer = SparseWriter::new(&cx, object_id, final_path, config)
-            .await
-            .unwrap();
-
-        // Set expected size
-        writer.set_expected_size(1000).unwrap();
-
-        // Write some chunks out of order
-        let options = WriteOptions::default();
-        writer
-            .write_chunk(&cx, 500, b"middle", options.clone())
-            .await
-            .unwrap();
-        writer
-            .write_chunk(&cx, 0, b"start", options.clone())
-            .await
-            .unwrap();
-        writer.write_chunk(&cx, 994, b"end", options).await.unwrap();
-
-        // Check completion status
-        assert!(!writer.is_complete()); // Still has gaps
-
-        // Fill remaining gaps
-        let fill_data = vec![0u8; 494];
-        writer
-            .write_chunk(&cx, 5, &fill_data, WriteOptions::default())
-            .await
-            .unwrap();
-        let end_fill = vec![0u8; 3];
-        writer
-            .write_chunk(&cx, 997, &end_fill, WriteOptions::default())
-            .await
-            .unwrap();
-
-        assert!(writer.is_complete());
+    fn test_object_id(label: &str) -> ObjectId {
+        ObjectId::content(ContentId::from_bytes(label.as_bytes()))
     }
 
-    #[tokio::test]
-    async fn test_overlapping_write_detection() {
-        let cx = create_test_cx();
-        let object_id = ObjectId::new("test-overlap");
-        let temp_dir = std::env::temp_dir();
-        let final_path = temp_dir.join("test_overlap_output");
+    #[test]
+    fn test_sparse_writer_basic() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let object_id = test_object_id("test-object");
+            let temp_dir = std::env::temp_dir();
+            let final_path = temp_dir.join("test_sparse_output");
 
-        let config = SparseWriterConfig::default();
-        let writer = SparseWriter::new(&cx, object_id, final_path, config)
-            .await
-            .unwrap();
+            let config = SparseWriterConfig::default();
+            let writer = SparseWriter::new(&cx, object_id, final_path, config)
+                .await
+                .unwrap();
 
-        let options = WriteOptions::default();
+            // Set expected size
+            writer.set_expected_size(1000).unwrap();
 
-        // First write
-        writer
-            .write_chunk(&cx, 0, b"hello", options.clone())
-            .await
-            .unwrap();
+            // Write some chunks out of order
+            let options = WriteOptions::default();
+            writer
+                .write_chunk(&cx, 500, b"middle", options.clone())
+                .await
+                .unwrap();
+            writer
+                .write_chunk(&cx, 0, b"start", options.clone())
+                .await
+                .unwrap();
+            writer.write_chunk(&cx, 994, b"end", options).await.unwrap();
 
-        // Overlapping write should fail
-        let result = writer.write_chunk(&cx, 2, b"world", options).await;
-        assert!(matches!(
-            result,
-            Err(SparseWriterError::OverlappingWrite { .. })
-        ));
+            // Check completion status
+            assert!(!writer.is_complete()); // Still has gaps
+
+            // Fill remaining gaps
+            let fill_data = vec![0u8; 494];
+            writer
+                .write_chunk(&cx, 5, &fill_data, WriteOptions::default())
+                .await
+                .unwrap();
+            let end_fill = vec![0u8; 3];
+            writer
+                .write_chunk(&cx, 997, &end_fill, WriteOptions::default())
+                .await
+                .unwrap();
+
+            assert!(writer.is_complete());
+        });
     }
 
-    #[tokio::test]
-    async fn test_preallocation() {
-        let cx = create_test_cx();
-        let object_id = ObjectId::new("test-prealloc");
-        let temp_dir = std::env::temp_dir();
-        let final_path = temp_dir.join("test_prealloc_output");
+    #[test]
+    fn test_overlapping_write_detection() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let object_id = test_object_id("test-overlap");
+            let temp_dir = std::env::temp_dir();
+            let final_path = temp_dir.join("test_overlap_output");
 
-        let mut config = SparseWriterConfig::default();
-        config.enable_preallocation = true;
+            let config = SparseWriterConfig::default();
+            let writer = SparseWriter::new(&cx, object_id, final_path, config)
+                .await
+                .unwrap();
 
-        let writer = SparseWriter::new(&cx, object_id, final_path, config)
-            .await
-            .unwrap();
+            let options = WriteOptions::default();
 
-        // Set expected size - should trigger preallocation
-        writer.set_expected_size(1024 * 1024).unwrap();
+            // First write
+            writer
+                .write_chunk(&cx, 0, b"hello", options.clone())
+                .await
+                .unwrap();
 
-        let stats = writer.get_stats();
-        // Note: actual preallocation depends on platform support
-        assert!(stats.allocated_size <= 1024 * 1024);
+            // Overlapping write should fail
+            let result = writer.write_chunk(&cx, 2, b"world", options).await;
+            assert!(matches!(
+                result,
+                Outcome::Err(SparseWriterError::OverlappingWrite { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn test_preallocation() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let object_id = test_object_id("test-prealloc");
+            let temp_dir = std::env::temp_dir();
+            let final_path = temp_dir.join("test_prealloc_output");
+
+            let mut config = SparseWriterConfig::default();
+            config.enable_preallocation = true;
+
+            let writer = SparseWriter::new(&cx, object_id, final_path, config)
+                .await
+                .unwrap();
+
+            // Set expected size - should trigger preallocation
+            writer.set_expected_size(1024 * 1024).unwrap();
+
+            let stats = writer.get_stats();
+            // Note: actual preallocation depends on platform support
+            assert!(stats.allocated_size <= 1024 * 1024);
+        });
     }
 }
