@@ -25,7 +25,11 @@
 //! });
 //! ```
 
-#[path = "../../conformance/src/traceability.rs"]
+// Vendored in-crate (was `#[path = "../../conformance/src/traceability.rs"]`, which
+// lives in the nested `asupersync-conformance` package and is therefore excluded from
+// this crate's published tarball, breaking `cargo publish` verification). The
+// `asupersync-conformance` crate keeps its own copy + a dev-dependency on this crate;
+// a future cleanup should hoist this into a small shared crate to drop the duplicate.
 pub mod traceability;
 
 pub use traceability::{
