@@ -1,0 +1,372 @@
+{
+  "contract_version": "atp-completion-dashboard-contract-v1",
+  "schema_version": "atp-completion-dashboard-v1",
+  "bead_id": "asupersync-vk4kcf.1",
+  "purpose": "Live ATP completion truth table. This artifact defines the required workstream rows, release gates, user-facing questions, stale-proof policy, and proof commands for the ATP-NR0 dashboard generator.",
+  "generator": "scripts/atp_completion_dashboard.py",
+  "verifier": "tests/atp_completion_dashboard_contract.rs",
+  "tracker_source": ".beads/issues.jsonl",
+  "proof_sources": [
+    "artifacts/proof_status_snapshot_v1.json",
+    "artifacts/proof_lane_manifest_v1.json",
+    "artifacts/no_mock_policy_contract_v1.json",
+    "artifacts/atp_quic_dependency_audit_gate_contract_v1.json"
+  ],
+  "stale_proof_policy": {
+    "max_age_days": 7,
+    "stale_is_release_blocking": true,
+    "reason": "ATP completion claims must not rely on old proof snapshots when the implementation is moving quickly."
+  },
+  "status_catalog": [
+    {
+      "status": "green",
+      "release_blocking": false,
+      "meaning": "The tracked issue is complete and all required artifacts for that row are present and fresh enough for this dashboard policy."
+    },
+    {
+      "status": "yellow_in_progress",
+      "release_blocking": true,
+      "meaning": "Work has started, but this row is not complete and cannot satisfy release signoff."
+    },
+    {
+      "status": "yellow_waived",
+      "release_blocking": false,
+      "meaning": "A separate explicit governance waiver is active. Waived rows must still remain visible and cannot be mistaken for implemented proof."
+    },
+    {
+      "status": "red_open",
+      "release_blocking": true,
+      "meaning": "The row is open in Beads and has not started or is still pending."
+    },
+    {
+      "status": "red_blocked",
+      "release_blocking": true,
+      "meaning": "The row is explicitly blocked in Beads. The first blocker and latest comments should explain whether this is implementation debt, test debt, environment capacity, platform coverage, or shared-main frontier."
+    },
+    {
+      "status": "red_missing_bead",
+      "release_blocking": true,
+      "meaning": "The required tracker bead is absent from the live Beads ledger."
+    },
+    {
+      "status": "red_missing_artifact",
+      "release_blocking": true,
+      "meaning": "A required proof or dashboard artifact is missing."
+    },
+    {
+      "status": "red_stale_proof",
+      "release_blocking": true,
+      "meaning": "The referenced proof artifact is older than the freshness policy permits."
+    }
+  ],
+  "required_workstreams": [
+    {
+      "workstream_id": "ATP-A",
+      "title": "Self-contained native QUIC endpoint sufficient for ATP"
+    },
+    {
+      "workstream_id": "ATP-B",
+      "title": "ATP protocol, session, authentication, capability, and SDK surfaces"
+    },
+    {
+      "workstream_id": "ATP-C",
+      "title": "Verified object graphs, manifests, Merkle roots, chunking, and proof bundles"
+    },
+    {
+      "workstream_id": "ATP-D",
+      "title": "Crash-safe disk, journal, sparse writer, resume, and verifier layer"
+    },
+    {
+      "workstream_id": "ATP-E",
+      "title": "Data-aware transfer brain, scheduling, pressure feedback, and early usability"
+    },
+    {
+      "workstream_id": "ATP-F",
+      "title": "Path Graph Engine for discovery, NAT traversal, relays, Tailscale candidates, and diagnostics"
+    },
+    {
+      "workstream_id": "ATP-G",
+      "title": "RaptorQ repair economics across tail, lossy, resume, relay, and swarm modes"
+    },
+    {
+      "workstream_id": "ATP-H",
+      "title": "atpd daemon, identity, grants, inbox, seeding, and diagnostics"
+    },
+    {
+      "workstream_id": "ATP-I",
+      "title": "CLI and operator UX for simple commands plus expert diagnostics"
+    },
+    {
+      "workstream_id": "ATP-J",
+      "title": "Offline mailbox, swarm transfer, peer-assisted cache, and multi-source scheduling"
+    },
+    {
+      "workstream_id": "ATP-K",
+      "title": "Compatibility adapters after native core: WebTransport, H3, MASQUE, and TCP/TLS fallback"
+    },
+    {
+      "workstream_id": "ATP-L",
+      "title": "Deterministic ATP lab, forensics, replay, minimization, and benchmark cartel"
+    },
+    {
+      "workstream_id": "ATP-M",
+      "title": "Dogfood, documentation, governance, proof lanes, and release signoff"
+    },
+    {
+      "workstream_id": "ATP-N",
+      "title": "Comprehensive unit, e2e, observability, and release-proof test harness"
+    }
+  ],
+  "required_release_gates": [
+    {
+      "gate_id": "ATP-NR0",
+      "bead_id": "asupersync-vk4kcf.1",
+      "title": "Live ATP completion dashboard and Definition-of-Done truth table",
+      "question_ids": [
+        "all_done"
+      ],
+      "required_artifacts": [
+        "scripts/atp_completion_dashboard.py",
+        "artifacts/atp_completion_dashboard_contract_v1.json",
+        "tests/atp_completion_dashboard_contract.rs"
+      ],
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_atp_completion_dashboard cargo test -p asupersync --test atp_completion_dashboard_contract -- --nocapture"
+    },
+    {
+      "gate_id": "ATP-NR1",
+      "bead_id": "asupersync-vk4kcf.2",
+      "title": "No-mock/no-placeholder ATP production and test gate",
+      "question_ids": [
+        "mock_free"
+      ],
+      "required_artifacts": [
+        "artifacts/no_mock_policy_contract_v1.json",
+        "scripts/check_no_mock_policy.py"
+      ],
+      "proof_command": "python3 scripts/check_no_mock_policy.py --report-json target/atp-no-mock-policy/no-mock-policy-report.json --max-errors 20"
+    },
+    {
+      "gate_id": "ATP-NR2",
+      "bead_id": "asupersync-vk4kcf.13",
+      "title": "Replace placeholder ATP test/proof modules with executable assertions",
+      "question_ids": [
+        "mock_free",
+        "unit_coverage_complete"
+      ],
+      "required_artifacts": [],
+      "proof_command": "python3 scripts/atp_completion_dashboard.py --format=json"
+    },
+    {
+      "gate_id": "ATP-NR3",
+      "bead_id": "asupersync-vk4kcf.3",
+      "title": "Real per-module unit/property/metamorphic coverage",
+      "question_ids": [
+        "unit_coverage_complete"
+      ],
+      "required_artifacts": [
+        "docs/atp_coverage_ledger.md",
+        "docs/atp_test_contract.md"
+      ],
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_atp_test_plan cargo test -p asupersync --test atp_test_plan -- --nocapture"
+    },
+    {
+      "gate_id": "ATP-NR4",
+      "bead_id": "asupersync-vk4kcf.12",
+      "title": "Deterministic ATP fixture corpus and golden log corpus",
+      "question_ids": [
+        "logging_failure_bundles_complete",
+        "e2e_scripts_complete"
+      ],
+      "required_artifacts": [],
+      "proof_command": "python3 scripts/atp_completion_dashboard.py --format=json"
+    },
+    {
+      "gate_id": "ATP-NR5",
+      "bead_id": "asupersync-vk4kcf.4",
+      "title": "Real local multi-process ATP e2e runner and script harness",
+      "question_ids": [
+        "e2e_scripts_complete",
+        "logging_failure_bundles_complete"
+      ],
+      "required_artifacts": [],
+      "proof_command": "bash scripts/run_atp_manifest_e2e.sh"
+    },
+    {
+      "gate_id": "ATP-NR6",
+      "bead_id": "asupersync-vk4kcf.8",
+      "title": "Object-graph transfer e2e matrix",
+      "question_ids": [
+        "e2e_scripts_complete"
+      ],
+      "required_artifacts": [],
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_atp_object_journal cargo test -p asupersync --test atp_object_journal_e2e_proof_suite -- --nocapture"
+    },
+    {
+      "gate_id": "ATP-NR7",
+      "bead_id": "asupersync-vk4kcf.5",
+      "title": "Crash/resume/cancel/tamper/partial-completion e2e matrix",
+      "question_ids": [
+        "e2e_scripts_complete",
+        "logging_failure_bundles_complete"
+      ],
+      "required_artifacts": [],
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_atp_crash_matrix cargo test -p asupersync --test atp_e2e_proof_suite -- --nocapture"
+    },
+    {
+      "gate_id": "ATP-NR8",
+      "bead_id": "asupersync-vk4kcf.6",
+      "title": "Native QUIC endpoint e2e without external QUIC crates",
+      "question_ids": [
+        "e2e_scripts_complete"
+      ],
+      "required_artifacts": [
+        "artifacts/atp_quic_dependency_audit_gate_contract_v1.json",
+        "tests/atp_native_quic_endpoint_contract.rs"
+      ],
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_atp_native_quic cargo test -p asupersync --test atp_native_quic_endpoint_contract --test atp_quic_dependency_audit_gate_contract -- --nocapture"
+    },
+    {
+      "gate_id": "ATP-NR9",
+      "bead_id": "asupersync-vk4kcf.7",
+      "title": "RaptorQ repair e2e proof matrix over ATP transfers",
+      "question_ids": [
+        "e2e_scripts_complete"
+      ],
+      "required_artifacts": [],
+      "proof_command": "NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile fast --bundle"
+    },
+    {
+      "gate_id": "ATP-NR10",
+      "bead_id": "asupersync-vk4kcf.9",
+      "title": "CLI, SDK, and daemon user-journey e2e scripts",
+      "question_ids": [
+        "e2e_scripts_complete",
+        "logging_failure_bundles_complete"
+      ],
+      "required_artifacts": [
+        "scripts/run_atp_cli_user_journey_e2e.sh",
+        "tests/cli/atp_user_journey_contract.py"
+      ],
+      "proof_command": "bash scripts/run_atp_cli_user_journey_e2e.sh"
+    },
+    {
+      "gate_id": "ATP-NR11",
+      "bead_id": "asupersync-vk4kcf.10",
+      "title": "Cross-platform ATP capability e2e and skip-report harness",
+      "question_ids": [
+        "cross_platform_complete"
+      ],
+      "required_artifacts": [],
+      "proof_command": "python3 scripts/atp_completion_dashboard.py --format=json"
+    },
+    {
+      "gate_id": "ATP-NR12",
+      "bead_id": "asupersync-vk4kcf.14",
+      "title": "Mailbox, swarm, cache, and multi-peer no-mock e2e matrix",
+      "question_ids": [
+        "e2e_scripts_complete"
+      ],
+      "required_artifacts": [],
+      "proof_command": "python3 scripts/atp_completion_dashboard.py --format=json"
+    },
+    {
+      "gate_id": "ATP-NR13",
+      "bead_id": "asupersync-vk4kcf.11",
+      "title": "ATP release proof aggregator",
+      "question_ids": [
+        "release_proof_green",
+        "all_done"
+      ],
+      "required_artifacts": [],
+      "proof_command": "python3 scripts/atp_completion_dashboard.py --format=json"
+    },
+    {
+      "gate_id": "ATP-NR14",
+      "bead_id": "asupersync-vk4kcf.15",
+      "title": "Reconcile older closed ATP-N proof claims with live implementation reality",
+      "question_ids": [
+        "all_done"
+      ],
+      "required_artifacts": [],
+      "proof_command": "python3 scripts/atp_completion_dashboard.py --format=json"
+    }
+  ],
+  "required_questions": [
+    {
+      "question_id": "all_done",
+      "question": "Is ATP completely done and releasable?",
+      "requires_gate_ids": [
+        "ATP-NR0",
+        "ATP-NR1",
+        "ATP-NR2",
+        "ATP-NR3",
+        "ATP-NR4",
+        "ATP-NR5",
+        "ATP-NR6",
+        "ATP-NR7",
+        "ATP-NR8",
+        "ATP-NR9",
+        "ATP-NR10",
+        "ATP-NR11",
+        "ATP-NR12",
+        "ATP-NR13",
+        "ATP-NR14"
+      ]
+    },
+    {
+      "question_id": "unit_coverage_complete",
+      "question": "Is comprehensive unit/property/metamorphic ATP coverage complete?",
+      "requires_gate_ids": [
+        "ATP-NR2",
+        "ATP-NR3"
+      ]
+    },
+    {
+      "question_id": "mock_free",
+      "question": "Is ATP mock-free and placeholder-free outside explicit deterministic lab models?",
+      "requires_gate_ids": [
+        "ATP-NR1",
+        "ATP-NR2"
+      ]
+    },
+    {
+      "question_id": "e2e_scripts_complete",
+      "question": "Are complete no-mock e2e scripts present for the user-facing ATP workflows?",
+      "requires_gate_ids": [
+        "ATP-NR4",
+        "ATP-NR5",
+        "ATP-NR6",
+        "ATP-NR7",
+        "ATP-NR8",
+        "ATP-NR9",
+        "ATP-NR10",
+        "ATP-NR12"
+      ]
+    },
+    {
+      "question_id": "logging_failure_bundles_complete",
+      "question": "Do ATP tests and e2e scripts produce detailed structured logs and redacted failure bundles?",
+      "requires_gate_ids": [
+        "ATP-NR4",
+        "ATP-NR5",
+        "ATP-NR7",
+        "ATP-NR10"
+      ]
+    },
+    {
+      "question_id": "cross_platform_complete",
+      "question": "Is ATP cross-platform proof complete with explicit skip reporting?",
+      "requires_gate_ids": [
+        "ATP-NR11"
+      ]
+    },
+    {
+      "question_id": "release_proof_green",
+      "question": "Is the ATP release-proof aggregator green?",
+      "requires_gate_ids": [
+        "ATP-NR13"
+      ]
+    }
+  ],
+  "waivers": []
+}
