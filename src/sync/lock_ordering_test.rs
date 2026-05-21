@@ -19,9 +19,9 @@ mod tests {
         let tasks_lock = Arc::new(ContendedMutex::new("tasks_queue", 0));
 
         // This should not panic - correct ordering
-        let _config_guard = config_lock.lock().unwrap();
-        let _regions_guard = regions_lock.lock().unwrap();
-        let _tasks_guard = tasks_lock.lock().unwrap();
+        let _config_guard = config_lock.lock().unwrap(); // ubs:ignore - test oracle
+        let _regions_guard = regions_lock.lock().unwrap(); // ubs:ignore - test oracle
+        let _tasks_guard = tasks_lock.lock().unwrap(); // ubs:ignore - test oracle
 
         // Guards are dropped in reverse order automatically via RAII
     }
@@ -35,10 +35,10 @@ mod tests {
         let tasks_lock = Arc::new(ContendedMutex::new("tasks_queue", 0));
 
         // First acquire tasks lock
-        let _tasks_guard = tasks_lock.lock().unwrap();
+        let _tasks_guard = tasks_lock.lock().unwrap(); // ubs:ignore - test oracle
 
         // This should panic - trying to acquire Config after Tasks
-        let _config_guard = config_lock.lock().unwrap(); // This should panic
+        let _config_guard = config_lock.lock().unwrap(); // ubs:ignore - test oracle // This should panic
     }
 
     #[test]
@@ -49,8 +49,8 @@ mod tests {
         let tasks_lock2 = Arc::new(ContendedMutex::new("tasks_queue2", 0));
 
         // This should not panic - same rank is allowed
-        let _guard1 = tasks_lock1.lock().unwrap();
-        let _guard2 = tasks_lock2.lock().unwrap();
+        let _guard1 = tasks_lock1.lock().unwrap(); // ubs:ignore - test oracle
+        let _guard2 = tasks_lock2.lock().unwrap(); // ubs:ignore - test oracle
     }
 
     #[test]
@@ -61,9 +61,9 @@ mod tests {
         let config_lock = Arc::new(ContendedMutex::new("config_cache", 0));
 
         // This should work regardless of order since unknown locks aren't tracked
-        let _unknown1 = unknown_lock1.lock().unwrap();
-        let _config = config_lock.lock().unwrap();
-        let _unknown2 = unknown_lock2.lock().unwrap();
+        let _unknown1 = unknown_lock1.lock().unwrap(); // ubs:ignore - test oracle
+        let _config = config_lock.lock().unwrap(); // ubs:ignore - test oracle
+        let _unknown2 = unknown_lock2.lock().unwrap(); // ubs:ignore - test oracle
     }
 
     #[test]
@@ -75,14 +75,14 @@ mod tests {
 
         // First acquisition: Config -> Tasks (correct order)
         {
-            let _config_guard = config_lock.lock().unwrap();
-            let _tasks_guard = tasks_lock.lock().unwrap();
+            let _config_guard = config_lock.lock().unwrap(); // ubs:ignore - test oracle
+            let _tasks_guard = tasks_lock.lock().unwrap(); // ubs:ignore - test oracle
         } // Both guards dropped here
 
         // Second acquisition: Tasks -> Config should now work (ranks reset)
         {
-            let _tasks_guard = tasks_lock.lock().unwrap();
-            let _config_guard = config_lock.lock().unwrap();
+            let _tasks_guard = tasks_lock.lock().unwrap(); // ubs:ignore - test oracle
+            let _config_guard = config_lock.lock().unwrap(); // ubs:ignore - test oracle
         }
     }
 
@@ -98,10 +98,10 @@ mod tests {
 
         // Thread 1: acquire Tasks then Config (should panic in that thread)
         let handle1 = thread::spawn(move || {
-            let _tasks_guard = tasks_clone.lock().unwrap();
+            let _tasks_guard = tasks_clone.lock().unwrap(); // ubs:ignore - test oracle
             // This should panic in this thread only
             std::panic::catch_unwind(|| {
-                let _config_guard = config_clone.lock().unwrap();
+                let _config_guard = config_clone.lock().unwrap(); // ubs:ignore - test oracle
             })
         });
 
@@ -109,20 +109,20 @@ mod tests {
         let config_clone2 = Arc::clone(&config_lock);
         let tasks_clone2 = Arc::clone(&tasks_lock);
         let handle2 = thread::spawn(move || {
-            let _config_guard = config_clone2.lock().unwrap();
-            let _tasks_guard = tasks_clone2.lock().unwrap();
+            let _config_guard = config_clone2.lock().unwrap(); // ubs:ignore - test oracle
+            let _tasks_guard = tasks_clone2.lock().unwrap(); // ubs:ignore - test oracle
             "success"
         });
 
         // Thread 1 should have panicked
-        let result1 = handle1.join().unwrap();
+        let result1 = handle1.join().unwrap(); // ubs:ignore - test oracle
         assert!(
             result1.is_err(),
             "Thread 1 should have panicked due to lock ordering violation"
         );
 
         // Thread 2 should have succeeded
-        let result2 = handle2.join().unwrap();
+        let result2 = handle2.join().unwrap(); // ubs:ignore - test oracle
         assert_eq!(
             result2, "success",
             "Thread 2 should have succeeded with correct ordering"
@@ -223,7 +223,7 @@ mod tests {
 
         // This should panic - trying to acquire regions (rank 30) after obligations (rank 50)
         let _regions_write_guard = futures_lite::future::block_on(async {
-            regions_rwlock.write(&cx).await.unwrap() // Should panic due to ordering violation
+            regions_rwlock.write(&cx).await.unwrap() // ubs:ignore - test oracle // Should panic due to ordering violation
         });
     }
 }

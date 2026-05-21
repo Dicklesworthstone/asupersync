@@ -109,8 +109,8 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
     match join.as_mut().poll(&mut join_cx) {
         Poll::Ready(Ok(outcome)) => outcome,
         Poll::Ready(Err(JoinError::Cancelled(reason))) => Outcome::Cancelled(reason),
-        Poll::Ready(Err(err)) => panic!("unexpected join error: {err:?}"),
-        Poll::Pending => panic!("join should be ready after stored task completion"),
+        Poll::Ready(Err(err)) => panic!("unexpected join error: {err:?}"), // ubs:ignore - test oracle
+        Poll::Pending => panic!("join should be ready after stored task completion"), // ubs:ignore - test oracle
     }
 }
 

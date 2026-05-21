@@ -92,7 +92,7 @@ fn run_reservation_trace(
         let permit = permits[slot]
             .take()
             .expect("commit order must not reuse a reservation slot");
-        permit.send(messages[slot].clone()).unwrap();
+        permit.send(messages[slot].clone()).unwrap(); // ubs:ignore - test oracle
     }
 
     let mut received = Vec::with_capacity(messages.len());

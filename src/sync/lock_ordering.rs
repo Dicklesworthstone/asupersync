@@ -265,7 +265,7 @@ fn record_order_edges(
         for locks_at_rank in held_locks.values() {
             for held in locks_at_rank {
                 edges.insert(LockOrderEdge {
-                    held_lock_name: held.name.clone(),
+                    held_lock_name: held.name.clone(), // ubs:ignore - debug diagnostic allocation
                     held_rank: held.rank,
                     held_module: held.module,
                     acquired_lock_name: lock_name.to_string(),

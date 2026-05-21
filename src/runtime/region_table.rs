@@ -958,7 +958,7 @@ mod tests {
         let finalizer = root_record.pop_finalizer().expect("pending finalizer");
         match finalizer {
             Finalizer::Sync(f) => f(),
-            Finalizer::Async(_) => panic!("expected sync finalizer"),
+            Finalizer::Async(_) => panic!("expected sync finalizer"), // ubs:ignore - test oracle
         }
 
         successful_complete_close_calls += usize::from(root_record.complete_close());

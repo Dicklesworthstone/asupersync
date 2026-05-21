@@ -43,7 +43,7 @@ fn test_cx() -> Cx {
 
 /// Simple block_on implementation for tests.
 fn block_on<F: Future>(f: F) -> F::Output {
-    let waker = std::task::Waker::noop().clone();
+    let waker = std::task::Waker::noop().clone(); // ubs:ignore - test oracle waker clone
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Box::pin(f);
     loop {
@@ -179,7 +179,7 @@ mod tests {
             let send_result = harness.send_messages(&cx, &messages);
             prop_assert!(send_result.is_ok(), "MR1 VIOLATION: Send failed with fast receivers: {:?}", send_result);
 
-            let reported_receiver_count = send_result.unwrap();
+            let reported_receiver_count = send_result.unwrap(); // ubs:ignore - test oracle
             prop_assert_eq!(reported_receiver_count, harness.receiver_count(),
                 "MR1 VIOLATION: Send reported wrong receiver count");
 
@@ -265,7 +265,7 @@ mod tests {
                 let mut harness = FastReceiverHarness::new(capacity, receiver_count);
 
                 // Send all messages
-                harness.send_messages(&cx, &messages).unwrap();
+                harness.send_messages(&cx, &messages).unwrap(); // ubs:ignore - test oracle
 
                 // Collect what each receiver sees
                 let mut receiver_sequences = Vec::new();
@@ -338,14 +338,14 @@ mod tests {
 
             // Strategy 1: Fast sends (burst)
             let mut harness_fast = FastReceiverHarness::new(capacity, 2);
-            harness_fast.send_messages(&cx, &messages).unwrap();
+            harness_fast.send_messages(&cx, &messages).unwrap(); // ubs:ignore - test oracle
 
             let mut fast_received_r0 = Vec::new();
             let mut fast_received_r1 = Vec::new();
 
             for _ in 0..message_count {
-                let msg0 = block_on(harness_fast.receiver_mut(0).recv(&cx)).unwrap();
-                let msg1 = block_on(harness_fast.receiver_mut(1).recv(&cx)).unwrap();
+                let msg0 = block_on(harness_fast.receiver_mut(0).recv(&cx)).unwrap(); // ubs:ignore - test oracle
+                let msg1 = block_on(harness_fast.receiver_mut(1).recv(&cx)).unwrap(); // ubs:ignore - test oracle
                 fast_received_r0.push(msg0);
                 fast_received_r1.push(msg1);
             }
@@ -358,11 +358,11 @@ mod tests {
 
             for msg in &messages {
                 // Send one message
-                harness_slow.send_message(&cx, msg.clone()).unwrap();
+                harness_slow.send_message(&cx, msg.clone()).unwrap(); // ubs:ignore - test oracle
 
                 // Immediately receive by both receivers (still "fast" receivers)
-                let msg0 = block_on(harness_slow.receiver_mut(0).recv(&cx)).unwrap();
-                let msg1 = block_on(harness_slow.receiver_mut(1).recv(&cx)).unwrap();
+                let msg0 = block_on(harness_slow.receiver_mut(0).recv(&cx)).unwrap(); // ubs:ignore - test oracle
+                let msg1 = block_on(harness_slow.receiver_mut(1).recv(&cx)).unwrap(); // ubs:ignore - test oracle
 
                 slow_received_r0.push(msg0);
                 slow_received_r1.push(msg1);
@@ -418,12 +418,12 @@ mod tests {
 
             // Send pre-subscription messages (early receiver should see these)
             for msg in &pre_subscription_messages {
-                sender_early.send(&cx, msg.clone()).unwrap();
+                sender_early.send(&cx, msg.clone()).unwrap(); // ubs:ignore - test oracle
             }
 
             // Send post-subscription messages
             for msg in &post_subscription_messages {
-                sender_early.send(&cx, msg.clone()).unwrap();
+                sender_early.send(&cx, msg.clone()).unwrap(); // ubs:ignore - test oracle
             }
 
             // Early receiver gets all messages
@@ -440,7 +440,7 @@ mod tests {
 
             // Send pre-subscription messages (to establish initial state)
             for msg in &pre_subscription_messages {
-                sender_late.send(&cx, msg.clone()).unwrap();
+                sender_late.send(&cx, msg.clone()).unwrap(); // ubs:ignore - test oracle
             }
 
             // Late subscription happens now
@@ -448,7 +448,7 @@ mod tests {
 
             // Send post-subscription messages (late receiver should see these)
             for msg in &post_subscription_messages {
-                sender_late.send(&cx, msg.clone()).unwrap();
+                sender_late.send(&cx, msg.clone()).unwrap(); // ubs:ignore - test oracle
             }
 
             // Late receiver only gets post-subscription messages

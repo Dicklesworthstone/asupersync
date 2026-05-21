@@ -411,7 +411,7 @@ mod tests {
         };
 
         autotuner.observe(obs);
-        let recommendation = autotuner.recommend().unwrap();
+        let recommendation = autotuner.recommend().unwrap(); // ubs:ignore - test oracle
 
         assert!(recommendation.steal_batch_size.unwrap() < 16);
         assert!(recommendation.reasoning.contains("latency"));
@@ -429,7 +429,7 @@ mod tests {
         };
 
         autotuner.observe(obs);
-        let recommendation = autotuner.recommend().unwrap();
+        let recommendation = autotuner.recommend().unwrap(); // ubs:ignore - test oracle
 
         assert!(recommendation.steal_batch_size.unwrap() < 12);
         assert!(recommendation.reasoning.contains("cancel responsiveness"));
@@ -448,7 +448,7 @@ mod tests {
         };
 
         autotuner.observe(obs);
-        let recommendation = autotuner.recommend().unwrap();
+        let recommendation = autotuner.recommend().unwrap(); // ubs:ignore - test oracle
 
         assert!(recommendation.steal_batch_size.unwrap() > 4);
         assert!(recommendation.reasoning.contains("throughput"));

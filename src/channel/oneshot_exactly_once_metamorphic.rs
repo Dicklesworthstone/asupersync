@@ -43,7 +43,7 @@ fn test_cx() -> Cx {
 
 /// Simple block_on implementation for tests.
 fn block_on<F: Future>(f: F) -> F::Output {
-    let waker = std::task::Waker::noop().clone();
+    let waker = std::task::Waker::noop().clone(); // ubs:ignore - test oracle
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Box::pin(f);
     loop {

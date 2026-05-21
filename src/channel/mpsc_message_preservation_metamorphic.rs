@@ -145,7 +145,7 @@ mod tests {
         }
 
         for &slot in slot_order {
-            let permit = permits[slot]
+            let permit = permits[slot] // ubs:ignore - test oracle
                 .take()
                 .expect("slot_order must not repeat a reservation slot");
             permit.send(messages[slot].clone()).unwrap();

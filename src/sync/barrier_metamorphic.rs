@@ -20,6 +20,8 @@
 
 #![allow(dead_code)]
 
+#![allow(unsafe_code)]
+
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::sync::{Barrier, BarrierWaitError};
@@ -251,21 +253,45 @@ async fn execute_barrier_work_unit(
         crate::time::sleep(cx.now(), Duration::from_millis(work_unit.start_delay_ms)).await;
     }
 
-    // Simulate spurious wakeup injection if enabled
-    if config.inject_spurious_wakeups {
-        let mut rng = crate::util::det_rng::DetRng::new(config.seed.wrapping_add(id as u64));
-        if rng.next_u64() % 10 == 0 {
-            global_state
-                .spurious_wakeups_injected
-                .store(true, Ordering::SeqCst);
-            futures_lite::future::yield_now().await;
+
+
+    // Wrapper to inject spurious wakeups during the wait
+    struct SpuriousWait<'a> {
+        inner: crate::sync::barrier::BarrierWaitFuture<'a>,
+        inject: bool,
+        injected: bool,
+        rng: crate::util::det_rng::DetRng,
+        global_state: std::sync::Arc<GlobalBarrierState>,
+    }
+    impl<'a> std::future::Future for SpuriousWait<'a> {
+        type Output = Result<crate::sync::barrier::BarrierWaitResult, crate::sync::barrier::BarrierWaitError>;
+        fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+            let this = unsafe { self.get_unchecked_mut() };
+            if this.inject && !this.injected {
+                if this.rng.next_u64() % 2 == 0 {
+                    this.injected = true;
+                    this.global_state.spurious_wakeups_injected.store(true, std::sync::atomic::Ordering::SeqCst);
+                    cx.waker().wake_by_ref();
+                    // Fall through to poll inner, but we know it will be re-polled because we just woke it
+                }
+            }
+            let inner = unsafe { std::pin::Pin::new_unchecked(&mut this.inner) };
+            inner.poll(cx)
         }
     }
+
+    let wait_fut = SpuriousWait {
+        inner: barrier.wait(cx),
+        inject: config.inject_spurious_wakeups,
+        injected: false,
+        rng: crate::util::det_rng::DetRng::new(config.seed.wrapping_add(id as u64)),
+        global_state: global_state.clone(),
+    };
 
     let result = if work_unit.should_cancel {
         // Cancel before or during wait
         cx.set_cancel_requested(true);
-        match barrier.wait(cx).await {
+        match wait_fut.await {
             Ok(result) => BarrierWorkResult::Completed {
                 is_leader: result.is_leader(),
             },
@@ -276,7 +302,7 @@ async fn execute_barrier_work_unit(
         }
     } else if work_unit.should_drop {
         // Start the wait, then drop the future (simulates select! cancellation)
-        let wait_future = barrier.wait(cx);
+        let wait_future = wait_fut;
         // Poll once to register with the barrier
         match futures_lite::future::poll_once(wait_future).await {
             Some(Ok(result)) => BarrierWorkResult::Completed {
@@ -293,7 +319,7 @@ async fn execute_barrier_work_unit(
         }
     } else {
         // Normal completion path
-        match barrier.wait(cx).await {
+        match wait_fut.await {
             Ok(result) => BarrierWorkResult::Completed {
                 is_leader: result.is_leader(),
             },

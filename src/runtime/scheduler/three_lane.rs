@@ -4753,6 +4753,12 @@ impl ThreeLaneWorker {
             );
             if is_drain_phase {
                 cert.observe(governor.compute_record(&snapshot).total);
+                // Prevent unbounded memory growth during long drain phases by compacting
+                // the observation history (keeping the last 64 observations for debugging)
+                // while preserving the O(1) running statistics.
+                if cert.len() > 128 {
+                    cert.compact(64);
+                }
                 Some(cert.verdict())
             } else {
                 // Not in a drain phase — reset the certificate so stale
@@ -7981,7 +7987,7 @@ mod tests {
 
         let mut scheduler = match Arc::try_unwrap(scheduler) {
             Ok(scheduler) => scheduler,
-            Err(_) => panic!("all producer handles should release the scheduler"),
+            Err(_) => panic!("all producer handles should release the scheduler"), // ubs:ignore - test oracle
         };
         let mut workers = scheduler.take_workers();
         let worker = workers
@@ -10446,7 +10452,7 @@ mod tests {
                 assert_eq!(*low_priority_task, low_global);
                 assert_eq!(*low_priority, 10);
             }
-            other => panic!("expected priority-order violation, got {other:?}"),
+            other => panic!("expected priority-order violation, got {other:?}"), // ubs:ignore - test oracle
         }
 
         let cert = worker.preemption_fairness_certificate();
@@ -10899,7 +10905,7 @@ mod tests {
                 assert_eq!(*lp_task, low_priority_task);
                 assert_eq!(*lp, 10);
             }
-            _ => panic!("Expected PriorityOrderViolation"),
+            _ => panic!("Expected PriorityOrderViolation"), // ubs:ignore - test oracle
         }
 
         // Verify violation statistics
@@ -13825,7 +13831,7 @@ mod tests {
         } else if ready_tasks.contains(&task) {
             StaticOracleLane::Ready
         } else {
-            panic!("unexpected task in static oracle trace: {task:?}");
+            panic!("unexpected task in static oracle trace: {task:?}"); // ubs:ignore - test oracle
         }
     }
 
