@@ -31,6 +31,7 @@ fn get_operation_costs() -> &'static HashMap<&'static str, u32> {
 /// Filesystem type constants to avoid allocations
 const FS_TYPE_APFS: &str = "apfs";
 const FS_TYPE_NTFS: &str = "ntfs";
+#[allow(dead_code)] // used on linux + the non-(linux/macos/windows) fallback
 const FS_TYPE_UNKNOWN: &str = "unknown";
 const FS_TYPE_EXT4: &str = "ext4";
 const FS_TYPE_EXT3: &str = "ext3";
@@ -39,12 +40,16 @@ const FS_TYPE_BTRFS: &str = "btrfs";
 const FS_TYPE_XFS: &str = "xfs";
 const FS_TYPE_ZFS: &str = "zfs";
 const FS_TYPE_TMPFS: &str = "tmpfs";
+#[allow(dead_code)] // linux-only (used in detect_linux_filesystem_type)
 const FS_TYPE_MINIX: &str = "minix";
+#[allow(dead_code)] // linux-only (used in detect_linux_filesystem_type)
 const FS_TYPE_MSDOS: &str = "msdos";
+#[allow(dead_code)] // linux-only (used in detect_linux_filesystem_type)
 const FS_TYPE_REISERFS: &str = "reiserfs";
 const FS_TYPE_NFS: &str = "nfs";
 
 /// System call names to avoid allocations
+#[allow(dead_code)] // linux-only (used in detect_linux_filesystem_type)
 const SYSCALL_STATFS: &str = "statfs";
 
 /// Detected platform capabilities for filesystem operations
