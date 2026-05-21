@@ -4,8 +4,9 @@ use super::{AtpSdk, SdkMode, SessionConfig, TransferId};
 use crate::cx::Cx;
 use crate::net::atp::protocol::{
     AtpError, AtpFeature, AtpOutcome, CapabilityAction, CapabilityGrant, CapabilityGrantId,
-    CapabilityScope, ClientHello, NegotiatedSession, PeerId, SessionContextKind, SessionId,
-    SessionNegotiator, SessionPolicy, SessionProofArtifact, SessionTraceId, TransferNonce,
+    CapabilityScope, ClientHello, NegotiatedSession, PeerId, ProtocolError, SessionContextKind,
+    SessionError, SessionId, SessionNegotiator, SessionPolicy, SessionProofArtifact,
+    SessionTraceId, TransferNonce,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -150,7 +151,10 @@ impl AtpSdk {
         cx: &Cx,
         options: SessionOptions,
     ) -> AtpOutcome<AtpSession> {
-        // Generate transfer nonce for this session
+        cx.checkpoint().map_err(|_| {
+            AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError)
+        })?;
+
         let nonce = generate_transfer_nonce(cx);
         let trace_id = options.trace_id.unwrap_or_else(|| {
             SessionTraceId::new(0) // Default trace ID
@@ -174,42 +178,23 @@ impl AtpSdk {
             hello
         };
 
-        // Create session negotiator
-        let mut negotiator = SessionNegotiator::client(self.default_config.local_peer);
-
-        // Start client negotiation
-        let _client_frame = negotiator
+        let mut client = SessionNegotiator::client(self.default_config.local_peer);
+        let _client_frame = client
             .start_client_hello(&hello)
-            .map_err(|e| AtpError::Protocol(e.into()))?;
+            .map_err(|e| AtpError::Protocol(session_error_to_protocol(&e)))?;
 
-        // In a real implementation, we would send the frame over QUIC and receive a response
-        // For now, we'll simulate successful negotiation
-        let session_id = self.derive_session_id(&hello);
-        let selected_features = self.select_compatible_features(&hello);
+        let mut server = SessionNegotiator::server(options.remote_peer);
+        let mut policy = SessionPolicy::new(options.remote_peer, 0)
+            .with_supported_features(&self.get_supported_features())
+            .with_required_features(&[AtpFeature::EncryptionPolicy])
+            .with_required_actions(&options.required_capabilities);
+        let (server_hello, _server_frame, _server_proof) = server
+            .accept_client_hello(&hello, &mut policy)
+            .map_err(|e| AtpError::Protocol(session_error_to_protocol(&e)))?;
 
-        let negotiated = NegotiatedSession {
-            session_id,
-            local_peer: self.default_config.local_peer,
-            remote_peer: options.remote_peer,
-            nonce,
-            version: hello.version,
-            context: options.context,
-            selected_features,
-            accepted_grants: Vec::new(), // Would be populated from actual negotiation
-            transcript_hash: crate::net::atp::protocol::transcript::TranscriptHash([0u8; 32]), // Would be actual transcript hash
-            trace_id,
-        };
-
-        let proof = SessionProofArtifact {
-            local_peer: self.default_config.local_peer.redacted(),
-            remote_peer: options.remote_peer.redacted(),
-            session_id: Some(session_id.redacted()),
-            transfer_nonce: nonce,
-            selected_features: selected_features.iter().map(AtpFeature::code).collect(),
-            rejected_reason: None,
-            transcript_hash: "000000000000".to_string(), // Would be redacted hash
-            trace_id,
-        };
+        let (negotiated, proof) = client
+            .finish_client(&hello, &server_hello, &policy)
+            .map_err(|e| AtpError::Protocol(session_error_to_protocol(&e)))?;
 
         AtpOutcome::Ok(AtpSession {
             session: Arc::new(negotiated),
@@ -246,26 +231,6 @@ impl AtpSdk {
         }
 
         features
-    }
-
-    fn derive_session_id(&self, hello: &ClientHello) -> SessionId {
-        // In a real implementation, this would use the proper session ID derivation
-        // For now, create a deterministic session ID based on hello fields
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(b"ATP-SESSION-ID-V1\x00");
-        hasher.update(hello.initiator.as_bytes());
-        hasher.update(hello.responder.as_bytes());
-        hasher.update(hello.nonce.as_bytes());
-        SessionId(*hasher.finalize().as_ref())
-    }
-
-    fn select_compatible_features(
-        &self,
-        _hello: &ClientHello,
-    ) -> crate::net::atp::protocol::FeatureSet {
-        use crate::net::atp::protocol::FeatureSet;
-        FeatureSet::from_slice(&self.get_supported_features())
     }
 }
 
@@ -314,17 +279,16 @@ impl AtpSession {
 
     /// Close the session gracefully.
     pub async fn close(&self, cx: &Cx) -> AtpOutcome<()> {
+        cx.checkpoint().map_err(|_| {
+            AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError)
+        })?;
         match &self.mode {
-            SdkMode::InProcess => {
-                // In-process session cleanup
-                // TODO: Send session close frame, clean up resources
-                AtpOutcome::Ok(())
-            }
-            SdkMode::DaemonDelegated { .. } => {
-                // Daemon delegation
-                // TODO: Send close request to daemon
-                AtpOutcome::Ok(())
-            }
+            SdkMode::InProcess => AtpOutcome::Err(AtpError::Protocol(
+                crate::net::atp::protocol::ProtocolError::SessionStateMismatch,
+            )),
+            SdkMode::DaemonDelegated { .. } => AtpOutcome::Err(AtpError::Daemon(
+                crate::net::atp::protocol::DaemonError::ServiceUnavailable,
+            )),
         }
     }
 }
@@ -342,10 +306,64 @@ fn generate_transfer_nonce(cx: &Cx) -> TransferNonce {
     }
 }
 
+fn session_error_to_protocol(error: &SessionError) -> ProtocolError {
+    match error {
+        SessionError::Frame(_) => ProtocolError::MalformedFrame,
+        SessionError::UnsupportedVersion(_) | SessionError::MissingRequiredFeature(_) => {
+            ProtocolError::ProtocolVersionMismatch
+        }
+        SessionError::InvalidTransition { .. }
+        | SessionError::InvalidRole { .. }
+        | SessionError::PeerConfusion
+        | SessionError::FeatureConfusion(_)
+        | SessionError::SessionIdMismatch => ProtocolError::SessionStateMismatch,
+        SessionError::ZeroNonce
+        | SessionError::ReplayedNonce
+        | SessionError::ContextDenied(_)
+        | SessionError::ManifestRootRequired
+        | SessionError::MissingGrantAction(_)
+        | SessionError::UntrustedGrantIssuer(_)
+        | SessionError::GrantNotYetValid(_)
+        | SessionError::GrantExpired(_)
+        | SessionError::GrantRevoked(_)
+        | SessionError::DelegationDenied(_)
+        | SessionError::InviteDenied(_)
+        | SessionError::PathScopeDenied { .. }
+        | SessionError::MissingRelayIdentity
+        | SessionError::UnexpectedRelayIdentity
+        | SessionError::UntrustedRelayIdentity(_)
+        | SessionError::RelayScopeDenied { .. }
+        | SessionError::ObjectScopeDenied { .. } => ProtocolError::SessionStateMismatch,
+        SessionError::WithProof { source, .. } => session_error_to_protocol(source),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cx::Cx;
+
+    fn grant_for_direct_peer(issuer: PeerId, subject: PeerId, label: &str) -> CapabilityGrant {
+        CapabilityGrant::new(
+            CapabilityGrantId::from_label(label),
+            issuer,
+            subject,
+            [CapabilityAction::Read, CapabilityAction::Write],
+            CapabilityScope::for_context(SessionContextKind::Direct),
+        )
+    }
+
+    fn granted_direct_options(
+        local_peer: PeerId,
+        remote_peer: PeerId,
+        label: &str,
+    ) -> SessionOptions {
+        SessionOptions::direct(remote_peer).with_grants(vec![grant_for_direct_peer(
+            remote_peer,
+            local_peer,
+            label,
+        )])
+    }
 
     #[tokio::test]
     async fn session_options_construction() {
@@ -412,11 +430,12 @@ mod tests {
     #[tokio::test]
     async fn in_process_session_creation() {
         let config = SessionConfig::default();
+        let local_peer = config.local_peer;
         let sdk = AtpSdk::new_in_process(config);
 
         let cx = Cx::root();
         let peer = PeerId::from_label("remote_peer");
-        let options = SessionOptions::direct(peer);
+        let options = granted_direct_options(local_peer, peer, "sdk-session-grant");
 
         let session = sdk.open_session(&cx, options).await;
         assert!(session.is_ok());
@@ -424,6 +443,24 @@ mod tests {
         if let Ok(session) = session {
             assert_eq!(session.remote_peer(), peer);
             assert_eq!(session.context(), SessionContextKind::Direct);
+            assert_eq!(session.session.accepted_grants.len(), 1);
+            assert_ne!(session.session.transcript_hash.0, [0u8; 32]);
+            assert_ne!(session.proof().transcript_hash, "0000000000000000");
+        }
+    }
+
+    #[tokio::test]
+    async fn in_process_session_rejects_empty_grants() {
+        let config = SessionConfig::default();
+        let sdk = AtpSdk::new_in_process(config);
+
+        let cx = Cx::root();
+        let peer = PeerId::from_label("remote_peer");
+        let result = sdk.open_session(&cx, SessionOptions::direct(peer)).await;
+
+        match result {
+            AtpOutcome::Err(AtpError::Protocol(_)) => {}
+            other => panic!("empty grants must not negotiate a session: {other:?}"),
         }
     }
 

@@ -1,17 +1,13 @@
 //! ATP transfer operations and management.
 
-use crate::cx::Cx;
-use crate::net::atp::protocol::{AtpOutcome, IdempotencyKey, AtpError, DiskError};
-use crate::runtime::io_op::IoOp;
-use crate::runtime::state::RuntimeState;
-use super::{
-    AtpSession, TransferId, TransferProgress, TransferPhase, SessionConfig,
-    SdkMode, TransferPolicy
-};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use super::{AtpSession, SdkMode, TransferId, TransferPhase, TransferProgress};
 use crate::channel::mpsc;
+use crate::cx::Cx;
+use crate::net::atp::protocol::{
+    AtpError, AtpOutcome, DiskError, IdempotencyKey, PlatformError, ProtocolError,
+};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Transfer request for sending objects/files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,9 +146,13 @@ impl AtpSession {
         options: TransferOptions,
     ) -> AtpOutcome<ActiveTransfer> {
         match &self.mode {
-            SdkMode::InProcess => self.receive_object_in_process(cx, destination, options).await,
+            SdkMode::InProcess => {
+                self.receive_object_in_process(cx, destination, options)
+                    .await
+            }
             SdkMode::DaemonDelegated { .. } => {
-                self.receive_object_daemon_delegated(cx, destination, options).await
+                self.receive_object_daemon_delegated(cx, destination, options)
+                    .await
             }
         }
     }
@@ -210,9 +210,13 @@ impl AtpSession {
         expected_hash: Option<&[u8]>,
     ) -> AtpOutcome<ObjectVerification> {
         match &self.mode {
-            SdkMode::InProcess => self.verify_object_in_process(cx, object_path, expected_hash).await,
+            SdkMode::InProcess => {
+                self.verify_object_in_process(cx, object_path, expected_hash)
+                    .await
+            }
             SdkMode::DaemonDelegated { .. } => {
-                self.verify_object_daemon_delegated(cx, object_path, expected_hash).await
+                self.verify_object_daemon_delegated(cx, object_path, expected_hash)
+                    .await
             }
         }
     }
@@ -225,9 +229,13 @@ impl AtpSession {
         checkpoint: &str,
     ) -> AtpOutcome<ActiveTransfer> {
         match &self.mode {
-            SdkMode::InProcess => self.resume_transfer_in_process(cx, transfer_id, checkpoint).await,
+            SdkMode::InProcess => {
+                self.resume_transfer_in_process(cx, transfer_id, checkpoint)
+                    .await
+            }
             SdkMode::DaemonDelegated { .. } => {
-                self.resume_transfer_daemon_delegated(cx, transfer_id, checkpoint).await
+                self.resume_transfer_daemon_delegated(cx, transfer_id, checkpoint)
+                    .await
             }
         }
     }
@@ -240,9 +248,13 @@ impl AtpSession {
         reason: Option<String>,
     ) -> AtpOutcome<()> {
         match &self.mode {
-            SdkMode::InProcess => self.cancel_transfer_in_process(cx, transfer_id, reason).await,
+            SdkMode::InProcess => {
+                self.cancel_transfer_in_process(cx, transfer_id, reason)
+                    .await
+            }
             SdkMode::DaemonDelegated { .. } => {
-                self.cancel_transfer_daemon_delegated(cx, transfer_id, reason).await
+                self.cancel_transfer_daemon_delegated(cx, transfer_id, reason)
+                    .await
             }
         }
     }
@@ -253,23 +265,30 @@ impl AtpSession {
         cx: &Cx,
         request: TransferRequest,
     ) -> AtpOutcome<ActiveTransfer> {
-        let transfer_id = request.options.transfer_id.clone()
+        let transfer_id = request
+            .options
+            .transfer_id
+            .clone()
             .unwrap_or_else(TransferId::generate);
+        cx.checkpoint()
+            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
 
         // Validate source data exists and is accessible
         match self.validate_transfer_source(&request.source).await {
-            AtpOutcome::Ok(_) => {},
+            AtpOutcome::Ok(_) => {}
             AtpOutcome::Err(e) => return AtpOutcome::Err(e),
-            AtpOutcome::Cancelled => return AtpOutcome::Cancelled,
+            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
             AtpOutcome::Panicked(p) => return AtpOutcome::Panicked(p),
         }
 
         // Create progress and cancellation channels
         let (progress_tx, progress_rx) = mpsc::channel(100);
-        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        let (cancel_tx, _cancel_rx) = mpsc::channel(1);
 
-        // Simulate initial progress (in a real implementation, background tasks would drive progress)
-        let total_bytes = self.calculate_transfer_size(&request.source).await.unwrap_or(0);
+        let total_bytes = self
+            .calculate_transfer_size(&request.source)
+            .await
+            .unwrap_or(0);
         let initial_progress = TransferProgress {
             transfer_id: transfer_id.clone(),
             bytes_transferred: 0,
@@ -299,10 +318,9 @@ impl AtpSession {
         options: TransferOptions,
     ) -> AtpOutcome<ActiveTransfer> {
         let transfer_id = options.transfer_id.unwrap_or_else(TransferId::generate);
-        let (progress_tx, progress_rx) = mpsc::channel(100);
-        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        cx.checkpoint()
+            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
 
-        // Validate destination path exists if needed
         match &destination {
             TransferDestination::File { path } => {
                 if let Some(parent) = path.parent() {
@@ -321,195 +339,8 @@ impl AtpSession {
             }
         }
 
-        let transfer_id_clone = transfer_id.clone();
-        let destination_clone = destination.clone();
-        let progress_tx_clone = progress_tx.clone();
-
-        // Spawn background task for receive operation
-        let background_task = async move {
-            let mut total_bytes = 0u64;
-            let mut bytes_received = 0u64;
-
-            // Start with path discovery phase
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: 0,
-                total_bytes: 0,
-                speed_bytes_per_sec: 0,
-                eta_ms: None,
-                phase: TransferPhase::PathDiscovery,
-                active_paths: 1,
-                repair_symbols_active: false,
-            });
-
-            // Simulate session negotiation
-            crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(100)).await;
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: 0,
-                total_bytes: 0,
-                speed_bytes_per_sec: 0,
-                eta_ms: None,
-                phase: TransferPhase::SessionNegotiation,
-                active_paths: 1,
-                repair_symbols_active: false,
-            });
-
-            // Simulate manifest transfer to determine size
-            crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(50)).await;
-            total_bytes = 1024 * 1024; // Simulate 1MB transfer
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: 0,
-                total_bytes,
-                speed_bytes_per_sec: 0,
-                eta_ms: Some(10000),
-                phase: TransferPhase::ManifestTransfer,
-                active_paths: 1,
-                repair_symbols_active: false,
-            });
-
-            // Data transfer phase
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: 0,
-                total_bytes,
-                speed_bytes_per_sec: 0,
-                eta_ms: Some(10000),
-                phase: TransferPhase::DataTransfer,
-                active_paths: 1,
-                repair_symbols_active: false,
-            });
-
-            // Simulate data chunks transfer
-            let chunk_size = 64 * 1024; // 64KB chunks
-            while bytes_received < total_bytes {
-                // Check for cancellation
-                if cancel_rx.try_recv().is_ok() {
-                    let _ = progress_tx_clone.try_send(TransferProgress {
-                        transfer_id: transfer_id_clone.clone(),
-                        bytes_transferred: bytes_received,
-                        total_bytes,
-                        speed_bytes_per_sec: 0,
-                        eta_ms: None,
-                        phase: TransferPhase::Cancelled,
-                        active_paths: 0,
-                        repair_symbols_active: false,
-                    });
-                    return;
-                }
-
-                let chunk_bytes = std::cmp::min(chunk_size, total_bytes - bytes_received);
-
-                // Simulate network delay
-                crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(10)).await;
-
-                bytes_received += chunk_bytes;
-                let speed = (chunk_bytes * 1000) / 10; // bytes per second
-                let remaining = total_bytes - bytes_received;
-                let eta = if speed > 0 { Some((remaining * 1000) / speed) } else { None };
-
-                let _ = progress_tx_clone.try_send(TransferProgress {
-                    transfer_id: transfer_id_clone.clone(),
-                    bytes_transferred: bytes_received,
-                    total_bytes,
-                    speed_bytes_per_sec: speed,
-                    eta_ms: eta,
-                    phase: TransferPhase::DataTransfer,
-                    active_paths: 1,
-                    repair_symbols_active: false,
-                });
-            }
-
-            // Write received data to destination
-            match destination_clone {
-                TransferDestination::File { path } => {
-                    // Simulate writing to file
-                    let dummy_data = vec![0u8; total_bytes as usize];
-                    if let Err(_) = crate::fs::write(&path, dummy_data).await {
-                        let _ = progress_tx_clone.try_send(TransferProgress {
-                            transfer_id: transfer_id_clone.clone(),
-                            bytes_transferred: bytes_received,
-                            total_bytes,
-                            speed_bytes_per_sec: 0,
-                            eta_ms: None,
-                            phase: TransferPhase::Failed,
-                            active_paths: 0,
-                            repair_symbols_active: false,
-                        });
-                        return;
-                    }
-                }
-                TransferDestination::Directory { .. } |
-                TransferDestination::Object { .. } |
-                TransferDestination::Stream => {
-                    // For other destinations, just simulate successful storage
-                }
-            }
-
-            // Verification phase
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: bytes_received,
-                total_bytes,
-                speed_bytes_per_sec: 0,
-                eta_ms: None,
-                phase: TransferPhase::Verification,
-                active_paths: 1,
-                repair_symbols_active: false,
-            });
-
-            crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(100)).await;
-
-            // Completion
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: bytes_received,
-                total_bytes,
-                speed_bytes_per_sec: 0,
-                eta_ms: None,
-                phase: TransferPhase::Completed,
-                active_paths: 0,
-                repair_symbols_active: false,
-            });
-        };
-
-        // Create obligation for background transfer task to ensure quiescence tracking
-        let mut task_obligation = IoOp::submit(
-            cx.runtime_state(),
-            cx.current_task(),
-            cx.current_region(),
-            Some(format!("ATP transfer background task {}", transfer_id)),
-        ).map_err(|_| AtpError::Platform(crate::net::atp::protocol::PlatformError::InternalError))?;
-
-        // Start the background task with obligation tracking
-        let background_task_with_obligation = async move {
-            background_task.await;
-            // Complete obligation when background task finishes
-            task_obligation.complete(cx.runtime_state()).ok();
-        };
-
-        let _task_handle = cx.spawn(background_task_with_obligation);
-
-        // Send initial progress
-        let initial_progress = TransferProgress {
-            transfer_id: transfer_id.clone(),
-            bytes_transferred: 0,
-            total_bytes: 0,
-            speed_bytes_per_sec: 0,
-            eta_ms: None,
-            phase: TransferPhase::Initializing,
-            active_paths: 1,
-            repair_symbols_active: false,
-        };
-        let _ = progress_tx.try_send(initial_progress);
-
-        AtpOutcome::Ok(ActiveTransfer {
-            transfer_id,
-            progress_rx,
-            cancel_tx,
-            options,
-        })
+        let _ = (transfer_id, options);
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
 
     async fn verify_object_in_process(
@@ -594,19 +425,23 @@ impl AtpSession {
         transfer_id: &TransferId,
         checkpoint: &str,
     ) -> AtpOutcome<ActiveTransfer> {
-        let (progress_tx, progress_rx) = mpsc::channel(100);
-        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        cx.checkpoint()
+            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
 
         // Parse checkpoint data as "bytes_transferred:total_bytes:phase" format
         let parts: Vec<&str> = checkpoint.split(':').collect();
         if parts.len() < 2 {
-            return AtpOutcome::Err(AtpError::Protocol(crate::net::atp::protocol::ProtocolError::InvalidFrame));
+            return AtpOutcome::Err(AtpError::Protocol(
+                crate::net::atp::protocol::ProtocolError::InvalidFrame,
+            ));
         }
 
-        let bytes_transferred = parts[0].parse::<u64>()
-            .map_err(|_| AtpError::Protocol(crate::net::atp::protocol::ProtocolError::InvalidFrame))?;
-        let total_bytes = parts[1].parse::<u64>()
-            .map_err(|_| AtpError::Protocol(crate::net::atp::protocol::ProtocolError::InvalidFrame))?;
+        let bytes_transferred = parts[0].parse::<u64>().map_err(|_| {
+            AtpError::Protocol(crate::net::atp::protocol::ProtocolError::InvalidFrame)
+        })?;
+        let total_bytes = parts[1].parse::<u64>().map_err(|_| {
+            AtpError::Protocol(crate::net::atp::protocol::ProtocolError::InvalidFrame)
+        })?;
         let phase_str = if parts.len() >= 3 {
             parts[2]
         } else {
@@ -625,178 +460,24 @@ impl AtpSession {
 
         // Validate resume state
         if bytes_transferred > total_bytes {
-            return AtpOutcome::Err(AtpError::Protocol(crate::net::atp::protocol::ProtocolError::InvalidFrame));
+            return AtpOutcome::Err(AtpError::Protocol(
+                crate::net::atp::protocol::ProtocolError::InvalidFrame,
+            ));
         }
 
-        let transfer_id_clone = transfer_id.clone();
-        let progress_tx_clone = progress_tx.clone();
-
-        // Spawn background task for resumed transfer
-        let background_task = async move {
-            let mut current_bytes = bytes_transferred;
-            let mut current_phase = resume_phase;
-
-            // Send initial resumed progress
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: current_bytes,
-                total_bytes,
-                speed_bytes_per_sec: 0,
-                eta_ms: None,
-                phase: current_phase,
-                active_paths: 1,
-                repair_symbols_active: false,
-            });
-
-            // Continue from where we left off
-            match current_phase {
-                TransferPhase::Initializing | TransferPhase::PathDiscovery => {
-                    current_phase = TransferPhase::SessionNegotiation;
-                    crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(50)).await;
-                }
-                TransferPhase::SessionNegotiation => {
-                    current_phase = TransferPhase::ManifestTransfer;
-                    crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(50)).await;
-                }
-                TransferPhase::ManifestTransfer => {
-                    current_phase = TransferPhase::DataTransfer;
-                }
-                _ => {
-                    // Already in data transfer or later
-                }
-            }
-
-            // Resume data transfer if needed
-            if current_bytes < total_bytes && current_phase == TransferPhase::DataTransfer {
-                let chunk_size = 64 * 1024; // 64KB chunks
-
-                while current_bytes < total_bytes {
-                    // Check for cancellation
-                    if cancel_rx.try_recv().is_ok() {
-                        let _ = progress_tx_clone.try_send(TransferProgress {
-                            transfer_id: transfer_id_clone.clone(),
-                            bytes_transferred: current_bytes,
-                            total_bytes,
-                            speed_bytes_per_sec: 0,
-                            eta_ms: None,
-                            phase: TransferPhase::Cancelled,
-                            active_paths: 0,
-                            repair_symbols_active: false,
-                        });
-                        return;
-                    }
-
-                    let chunk_bytes = std::cmp::min(chunk_size, total_bytes - current_bytes);
-
-                    // Simulate network delay (faster for resumed transfers)
-                    crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(5)).await;
-
-                    current_bytes += chunk_bytes;
-                    let speed = (chunk_bytes * 1000) / 5; // bytes per second
-                    let remaining = total_bytes - current_bytes;
-                    let eta = if speed > 0 { Some((remaining * 1000) / speed) } else { None };
-
-                    let _ = progress_tx_clone.try_send(TransferProgress {
-                        transfer_id: transfer_id_clone.clone(),
-                        bytes_transferred: current_bytes,
-                        total_bytes,
-                        speed_bytes_per_sec: speed,
-                        eta_ms: eta,
-                        phase: TransferPhase::DataTransfer,
-                        active_paths: 1,
-                        repair_symbols_active: false,
-                    });
-                }
-            }
-
-            // Verification phase
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: current_bytes,
-                total_bytes,
-                speed_bytes_per_sec: 0,
-                eta_ms: None,
-                phase: TransferPhase::Verification,
-                active_paths: 1,
-                repair_symbols_active: false,
-            });
-
-            crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(100)).await;
-
-            // Completion
-            let _ = progress_tx_clone.try_send(TransferProgress {
-                transfer_id: transfer_id_clone.clone(),
-                bytes_transferred: current_bytes,
-                total_bytes,
-                speed_bytes_per_sec: 0,
-                eta_ms: None,
-                phase: TransferPhase::Completed,
-                active_paths: 0,
-                repair_symbols_active: false,
-            });
-        };
-
-        // Create obligation for background transfer task to ensure quiescence tracking
-        let mut task_obligation = IoOp::submit(
-            cx.runtime_state(),
-            cx.current_task(),
-            cx.current_region(),
-            Some(format!("ATP send background task {}", transfer_id)),
-        ).map_err(|_| AtpError::Platform(crate::net::atp::protocol::PlatformError::InternalError))?;
-
-        // Start the background task with obligation tracking
-        let background_task_with_obligation = async move {
-            background_task.await;
-            // Complete obligation when background task finishes
-            task_obligation.complete(cx.runtime_state()).ok();
-        };
-
-        let _task_handle = cx.spawn(background_task_with_obligation);
-
-        AtpOutcome::Ok(ActiveTransfer {
-            transfer_id: transfer_id.clone(),
-            progress_rx,
-            cancel_tx,
-            options: TransferOptions::default(),
-        })
+        let _ = (transfer_id, resume_phase);
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
 
     async fn cancel_transfer_in_process(
         &self,
         cx: &Cx,
-        transfer_id: &TransferId,
-        reason: Option<String>,
+        _transfer_id: &TransferId,
+        _reason: Option<String>,
     ) -> AtpOutcome<()> {
-        // In a real implementation, we would maintain a registry of active transfers
-        // For now, simulate cancellation behavior
-
-        // Log cancellation request (in real implementation, this would go to proper logging)
-        let cancel_reason = reason.unwrap_or_else(|| "User requested cancellation".to_string());
-
-        // Simulate cancellation processing
-        crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(10)).await;
-
-        // In a real implementation, we would:
-        // 1. Find the active transfer by ID in a transfer registry
-        // 2. Send cancellation signal to background tasks
-        // 3. Clean up partially transferred files if configured to do so
-        // 4. Update transfer state to cancelled
-        // 5. Notify any listeners/observers
-
-        // For now, we simulate successful cancellation
-        // The actual background task will detect cancellation via the cancel channel
-        // which is handled in the receive/send implementations
-
-        // Simulate cleanup delay
-        crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_millis(50)).await;
-
-        // In a production implementation, we might want to return more specific errors:
-        // - TransferNotFound if transfer_id doesn't exist
-        // - AlreadyCancelled if already cancelled
-        // - CannotCancel if transfer is in finalization phase
-
-        // For now, assume success
-        AtpOutcome::Ok(())
+        cx.checkpoint()
+            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
 
     // Daemon-delegated implementations (stubs for now)
@@ -805,7 +486,9 @@ impl AtpSession {
         _cx: &Cx,
         _request: TransferRequest,
     ) -> AtpOutcome<ActiveTransfer> {
-        Err(AtpError::Daemon(crate::net::atp::protocol::DaemonError::ServiceUnavailable))
+        Err(AtpError::Daemon(
+            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
+        ))
     }
 
     async fn receive_object_daemon_delegated(
@@ -814,7 +497,9 @@ impl AtpSession {
         _destination: TransferDestination,
         _options: TransferOptions,
     ) -> AtpOutcome<ActiveTransfer> {
-        Err(AtpError::Daemon(crate::net::atp::protocol::DaemonError::ServiceUnavailable))
+        Err(AtpError::Daemon(
+            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
+        ))
     }
 
     async fn verify_object_daemon_delegated(
@@ -823,7 +508,9 @@ impl AtpSession {
         _object_path: &Path,
         _expected_hash: Option<&[u8]>,
     ) -> AtpOutcome<ObjectVerification> {
-        Err(AtpError::Daemon(crate::net::atp::protocol::DaemonError::ServiceUnavailable))
+        Err(AtpError::Daemon(
+            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
+        ))
     }
 
     async fn resume_transfer_daemon_delegated(
@@ -832,7 +519,9 @@ impl AtpSession {
         _transfer_id: &TransferId,
         _checkpoint: &str,
     ) -> AtpOutcome<ActiveTransfer> {
-        Err(AtpError::Daemon(crate::net::atp::protocol::DaemonError::ServiceUnavailable))
+        Err(AtpError::Daemon(
+            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
+        ))
     }
 
     async fn cancel_transfer_daemon_delegated(
@@ -841,7 +530,9 @@ impl AtpSession {
         _transfer_id: &TransferId,
         _reason: Option<String>,
     ) -> AtpOutcome<()> {
-        Err(AtpError::Daemon(crate::net::atp::protocol::DaemonError::ServiceUnavailable))
+        Err(AtpError::Daemon(
+            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
+        ))
     }
 
     // Helper methods
@@ -873,21 +564,57 @@ impl AtpSession {
     async fn calculate_transfer_size(&self, source: &TransferSource) -> AtpOutcome<u64> {
         match source {
             TransferSource::File { path } => {
-                let metadata = crate::fs::metadata(path).await
+                let metadata = crate::fs::metadata(path)
+                    .await
                     .map_err(|_| AtpError::Disk(DiskError::IoError))?;
                 Ok(metadata.len())
             }
-            TransferSource::Directory { path, .. } => {
-                // TODO: Calculate directory size recursively
-                Ok(1024 * 1024) // Placeholder: 1MB
-            }
-            TransferSource::Object { data, .. } => {
-                Ok(data.len() as u64)
-            }
-            TransferSource::Stream { size_hint, .. } => {
-                Ok(size_hint.unwrap_or(0))
+            TransferSource::Directory {
+                path,
+                follow_symlinks,
+            } => self.calculate_directory_size(path, *follow_symlinks).await,
+            TransferSource::Object { data, .. } => Ok(data.len() as u64),
+            TransferSource::Stream { size_hint, .. } => Ok(size_hint.unwrap_or(0)),
+        }
+    }
+
+    async fn calculate_directory_size(
+        &self,
+        root: &Path,
+        follow_symlinks: bool,
+    ) -> AtpOutcome<u64> {
+        let mut total = 0u64;
+        let mut stack = vec![root.to_path_buf()];
+
+        while let Some(path) = stack.pop() {
+            let mut entries = crate::fs::read_dir(&path)
+                .await
+                .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|_| AtpError::Disk(DiskError::IoError))?
+            {
+                let entry_path = entry.path();
+                let metadata = if follow_symlinks {
+                    crate::fs::metadata(&entry_path).await
+                } else {
+                    crate::fs::symlink_metadata(&entry_path).await
+                }
+                .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+
+                if metadata.is_file() {
+                    total = total
+                        .checked_add(metadata.len())
+                        .ok_or(AtpError::Disk(DiskError::QuotaExceeded))?;
+                } else if metadata.is_dir() {
+                    stack.push(entry_path);
+                }
             }
         }
+
+        AtpOutcome::Ok(total)
     }
 }
 
@@ -905,9 +632,9 @@ impl ActiveTransfer {
 
     /// Cancel this transfer.
     pub async fn cancel(&self) -> AtpOutcome<()> {
-        self.cancel_tx.send(())
-            .await
-            .map_err(|_| AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError))
+        self.cancel_tx
+            .try_send(())
+            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))
     }
 
     /// Check if transfer is complete based on the last known progress.
@@ -954,11 +681,24 @@ pub struct ObjectVerification {
 mod tests {
     use super::*;
     use crate::cx::Cx;
-    use crate::net::atp::protocol::PeerId;
+    use crate::net::atp::protocol::{
+        CapabilityAction, CapabilityGrant, CapabilityGrantId, CapabilityScope, PeerId,
+        ProtocolError, SessionContextKind,
+    };
     use crate::net::atp::sdk::{AtpSdk, SessionConfig, SessionOptions};
 
-    #[tokio::test]
-    async fn transfer_request_construction() {
+    fn granted_direct_options(config: &SessionConfig, peer: PeerId, label: &str) -> SessionOptions {
+        SessionOptions::direct(peer).with_grants(vec![CapabilityGrant::new(
+            CapabilityGrantId::from_label(label),
+            peer,
+            config.local_peer,
+            [CapabilityAction::Read, CapabilityAction::Write],
+            CapabilityScope::for_context(SessionContextKind::Direct),
+        )])
+    }
+
+    #[test]
+    fn transfer_request_construction() {
         let source = TransferSource::Object {
             data: vec![1, 2, 3, 4],
             content_type: Some("text/plain".to_string()),
@@ -976,70 +716,191 @@ mod tests {
         assert_eq!(request.destination, destination);
     }
 
-    #[tokio::test]
-    async fn active_transfer_lifecycle() {
-        let config = SessionConfig::default();
-        let sdk = AtpSdk::new_in_process(config);
-        let cx = Cx::root();
+    #[test]
+    fn active_transfer_lifecycle() {
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let peer = PeerId::from_label("test_peer");
+            let session_options = granted_direct_options(&config, peer, "active-transfer");
+            let sdk = AtpSdk::new_in_process(config);
+            let cx = Cx::root();
 
-        let peer = PeerId::from_label("test_peer");
-        let session_options = SessionOptions::direct(peer);
-        let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-        let source = TransferSource::Object {
-            data: vec![0u8; 1024],
-            content_type: Some("application/octet-stream".to_string()),
-        };
-        let destination = TransferDestination::Object {
-            object_id: "test_object".to_string(),
-        };
-        let request = TransferRequest {
-            source,
-            destination,
-            options: TransferOptions::default(),
-        };
+            let source = TransferSource::Object {
+                data: vec![0u8; 1024],
+                content_type: Some("application/octet-stream".to_string()),
+            };
+            let destination = TransferDestination::Object {
+                object_id: "test_object".to_string(),
+            };
+            let request = TransferRequest {
+                source,
+                destination,
+                options: TransferOptions::default(),
+            };
 
-        let mut transfer = session.send_object(&cx, request).await.unwrap();
+            let mut transfer = session.send_object(&cx, request).await.unwrap();
 
-        // Wait for some progress updates
-        let mut progress_count = 0;
-        while let Some(progress) = transfer.next_progress().await {
-            progress_count += 1;
-            if progress.is_complete() || progress_count > 10 {
-                break;
+            // Wait for some progress updates
+            let mut progress_count = 0;
+            while let Some(progress) = transfer.next_progress().await {
+                progress_count += 1;
+                if progress.is_complete() || progress_count > 10 {
+                    break;
+                }
             }
-        }
 
-        assert!(progress_count > 0);
+            assert!(progress_count > 0);
+        });
     }
 
-    #[tokio::test]
-    async fn transfer_cancellation() {
-        let config = SessionConfig::default();
-        let sdk = AtpSdk::new_in_process(config);
-        let cx = Cx::root();
+    #[test]
+    fn transfer_cancellation() {
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let peer = PeerId::from_label("test_peer");
+            let session_options = granted_direct_options(&config, peer, "transfer-cancel");
+            let sdk = AtpSdk::new_in_process(config);
+            let cx = Cx::root();
 
-        let peer = PeerId::from_label("test_peer");
-        let session_options = SessionOptions::direct(peer);
-        let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-        let source = TransferSource::Object {
-            data: vec![0u8; 1024 * 1024], // 1MB
-            content_type: None,
-        };
-        let destination = TransferDestination::Object {
-            object_id: "large_object".to_string(),
-        };
-        let request = TransferRequest {
-            source,
-            destination,
-            options: TransferOptions::default(),
-        };
+            let source = TransferSource::Object {
+                data: vec![0u8; 1024 * 1024], // 1MB
+                content_type: None,
+            };
+            let destination = TransferDestination::Object {
+                object_id: "large_object".to_string(),
+            };
+            let request = TransferRequest {
+                source,
+                destination,
+                options: TransferOptions::default(),
+            };
 
-        let transfer = session.send_object(&cx, request).await.unwrap();
+            let transfer = session.send_object(&cx, request).await.unwrap();
 
-        // Cancel the transfer
-        let cancel_result = transfer.cancel().await;
-        assert!(cancel_result.is_ok());
+            // Cancel the transfer
+            let cancel_result = transfer.cancel().await;
+            assert!(cancel_result.is_ok());
+        });
+    }
+
+    #[test]
+    fn receive_without_transport_fails_closed() {
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::root();
+            let peer = PeerId::from_label("receive_peer");
+            let session = sdk
+                .open_session(
+                    &cx,
+                    granted_direct_options(&config, peer, "receive-fail-closed"),
+                )
+                .await
+                .unwrap();
+
+            let result = session
+                .receive_object(&cx, TransferDestination::Stream, TransferOptions::default())
+                .await;
+            match result {
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
+                other => panic!("receive must fail closed without a real transport: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn resume_without_active_transfer_fails_closed() {
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::root();
+            let peer = PeerId::from_label("resume_peer");
+            let session = sdk
+                .open_session(
+                    &cx,
+                    granted_direct_options(&config, peer, "resume-fail-closed"),
+                )
+                .await
+                .unwrap();
+            let transfer_id = TransferId::new("missing-transfer");
+
+            let result = session
+                .resume_transfer(&cx, &transfer_id, "1:2:data_transfer")
+                .await;
+            match result {
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
+                other => panic!("resume must fail closed without active transfer state: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn session_cancel_without_active_transfer_fails_closed() {
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::root();
+            let peer = PeerId::from_label("cancel_peer");
+            let session = sdk
+                .open_session(
+                    &cx,
+                    granted_direct_options(&config, peer, "cancel-fail-closed"),
+                )
+                .await
+                .unwrap();
+            let transfer_id = TransferId::new("missing-transfer");
+
+            let result = session
+                .cancel_transfer(&cx, &transfer_id, Some("user requested".to_string()))
+                .await;
+            match result {
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
+                other => panic!("session cancel must not fabricate success: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn directory_size_uses_real_filesystem_metadata() {
+        fn std_directory_size(path: &Path) -> u64 {
+            let mut total = 0u64;
+            let mut stack = vec![path.to_path_buf()];
+            while let Some(path) = stack.pop() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    let entry = entry.unwrap();
+                    let metadata = entry.metadata().unwrap();
+                    if metadata.is_file() {
+                        total += metadata.len();
+                    } else if metadata.is_dir() {
+                        stack.push(entry.path());
+                    }
+                }
+            }
+            total
+        }
+
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::root();
+            let peer = PeerId::from_label("size_peer");
+            let session = sdk
+                .open_session(&cx, granted_direct_options(&config, peer, "directory-size"))
+                .await
+                .unwrap();
+            let path = PathBuf::from("src/net/atp/sdk");
+            let source = TransferSource::Directory {
+                path: path.clone(),
+                follow_symlinks: false,
+            };
+
+            let size = session.calculate_transfer_size(&source).await.unwrap();
+            assert_eq!(size, std_directory_size(&path));
+            assert_ne!(size, 1024 * 1024);
+        });
     }
 }
