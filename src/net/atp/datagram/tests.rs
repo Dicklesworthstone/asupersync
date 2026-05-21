@@ -9,6 +9,7 @@
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::net::atp::datagram::*;
+use crate::types::outcome::Outcome;
 use std::time::{Duration, Instant};
 
 /// Test DATAGRAM frame encoding/decoding with various payload sizes
@@ -53,7 +54,7 @@ fn test_oversized_datagram_rejection() {
 
     assert!(matches!(
         result,
-        Err(DatagramError::PayloadTooLarge {
+        Outcome::Err(DatagramError::PayloadTooLarge {
             size: 2048,
             max: 1024
         })
@@ -85,7 +86,7 @@ fn test_disabled_datagram_handling() {
 
     // Size validation should fail
     let result = disabled_transport.validate_size(100);
-    assert!(matches!(result, Err(DatagramError::NotSupported)));
+    assert!(matches!(result, Outcome::Err(DatagramError::NotSupported)));
 }
 
 /// Test DATAGRAM configuration validation
@@ -107,29 +108,24 @@ fn test_datagram_config_validation() {
 /// Test path beacon creation and statistics
 #[test]
 fn test_path_beacon_functionality() {
-    let mut beacon_manager = BeaconManager::new(
-        Duration::from_secs(30),
-        10, // max paths
-    );
-
-    // Add path
-    beacon_manager.add_path(1, "192.168.1.1:443".parse().unwrap());
-    assert_eq!(beacon_manager.path_count(), 1);
+    let mut beacon_manager = BeaconManager::new(Duration::from_secs(30));
 
     // Create beacon
-    let beacon_data = beacon_manager.create_beacon(1).unwrap();
+    let beacon = beacon_manager.create_beacon(1, BeaconMeasurement::with_rtt(50_000, 5_000));
+    let beacon_data = beacon.encode().unwrap();
     assert!(!beacon_data.is_empty());
 
     // Process beacon (simulate response)
     let beacon = PathBeacon::decode(&beacon_data).unwrap();
     assert_eq!(beacon.path_id, 1);
 
-    // Simulate RTT measurement
-    beacon_manager.update_path_rtt(1, Duration::from_millis(50));
+    let response = PathBeacon::response(2, 1, BeaconMeasurement::empty());
+    assert!(beacon_manager.process_received_beacon(response).is_none());
 
     let stats = beacon_manager.get_path_stats(1).unwrap();
-    assert!(stats.avg_rtt_ms > 0.0);
-    assert!(stats.is_active);
+    assert_eq!(stats.sent_count, 1);
+    assert_eq!(stats.response_count, 1);
+    assert!(stats.avg_rtt.is_some());
 }
 
 /// Test path probe creation and response handling
@@ -208,7 +204,10 @@ fn test_queue_depth_limiting() {
     let (normal_frame, normal_meta) = create_test_datagram(DatagramPriority::Normal);
     let result = controller.enqueue_datagram(normal_frame, normal_meta);
 
-    assert!(matches!(result, Err(DatagramError::CongestionDrop)));
+    assert!(matches!(
+        result,
+        Outcome::Err(DatagramError::CongestionDrop)
+    ));
 }
 
 /// Test expired datagram handling
@@ -241,12 +240,18 @@ fn test_malformed_frame_handling() {
     bad_frame.extend_from_slice(&[0x99]); // Invalid frame type
 
     let result = DatagramFrame::decode(&mut bad_frame, 1024);
-    assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
+    assert!(matches!(
+        result,
+        Outcome::Err(DatagramError::InvalidFrame(_))
+    ));
 
     // Empty buffer
     let mut empty_buf = BytesMut::new();
     let result = DatagramFrame::decode(&mut empty_buf, 1024);
-    assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
+    assert!(matches!(
+        result,
+        Outcome::Err(DatagramError::InvalidFrame(_))
+    ));
 
     // Truncated frame with length
     let mut truncated_buf = BytesMut::new();
@@ -254,7 +259,10 @@ fn test_malformed_frame_handling() {
     truncated_buf.extend_from_slice(&[1, 2, 3]); // Only 3 bytes payload
 
     let result = DatagramFrame::decode(&mut truncated_buf, 1024);
-    assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
+    assert!(matches!(
+        result,
+        Outcome::Err(DatagramError::InvalidFrame(_))
+    ));
 }
 
 /// Test probe encoding/decoding edge cases
@@ -279,7 +287,10 @@ fn test_probe_encoding_edge_cases() {
 
     // Invalid JSON
     let result = PathProbe::decode(b"invalid json");
-    assert!(matches!(result, Err(DatagramError::InvalidFrame(_))));
+    assert!(matches!(
+        result,
+        Outcome::Err(DatagramError::InvalidFrame(_))
+    ));
 }
 
 /// Test RTT calculation accuracy
@@ -302,21 +313,30 @@ fn test_rtt_calculation() {
 /// Test beacon statistics tracking
 #[test]
 fn test_beacon_statistics_tracking() {
-    let mut beacon_manager = BeaconManager::new(Duration::from_secs(10), 5);
+    let mut beacon_manager = BeaconManager::new(Duration::from_secs(10));
 
-    beacon_manager.add_path(1, "127.0.0.1:8080".parse().unwrap());
+    let beacon = beacon_manager.create_beacon(
+        1,
+        BeaconMeasurement {
+            srtt_us: Some(50_000),
+            rttvar_us: Some(5_000),
+            loss_rate_per_1000: Some(50),
+            bandwidth_bps: Some(1_000_000),
+            ..BeaconMeasurement::empty()
+        },
+    );
+    assert_eq!(beacon.measurement_data.srtt_us, Some(50_000));
+    assert_eq!(beacon.measurement_data.loss_rate_per_1000, Some(50));
+    assert_eq!(beacon.measurement_data.bandwidth_bps, Some(1_000_000));
 
-    // Update with various metrics
-    beacon_manager.update_path_rtt(1, Duration::from_millis(50));
-    beacon_manager.update_path_loss(1, 0.05);
-    beacon_manager.update_path_bandwidth(1, 1_000_000); // 1 Mbps
+    let response = PathBeacon::response(2, 1, BeaconMeasurement::empty());
+    assert!(beacon_manager.process_received_beacon(response).is_none());
 
     let stats = beacon_manager.get_path_stats(1).unwrap();
-    assert_eq!(stats.avg_rtt_ms, 50.0);
-    assert_eq!(stats.loss_ratio, 0.05);
-    assert_eq!(stats.bandwidth_bps, Some(1_000_000));
-    assert!(stats.is_active);
-    assert!(stats.quality_score > 0.0);
+    assert_eq!(stats.sent_count, 1);
+    assert_eq!(stats.response_count, 1);
+    assert!(stats.current_rtt().is_some());
+    assert!(stats.loss_rate >= 0.0);
 }
 
 /// Test different congestion algorithms
@@ -359,11 +379,8 @@ fn test_full_datagram_workflow() {
 
     // Setup managers
     let mut probe_manager = ProbeManager::new(transport.clone());
-    let mut beacon_manager = BeaconManager::new(Duration::from_secs(30), 10);
+    let mut beacon_manager = BeaconManager::new(Duration::from_secs(30));
     let mut congestion_controller = CongestionController::new(CongestionConfig::default());
-
-    // Add path
-    beacon_manager.add_path(1, "10.0.0.1:443".parse().unwrap());
 
     // Create and send probe
     let probe_frame = probe_manager.create_probe(ProbeType::Discovery, 1).unwrap();
@@ -378,8 +395,10 @@ fn test_full_datagram_workflow() {
     assert_eq!(sent_metadata.payload_class, "probe");
 
     // Create beacon
-    let beacon_data = beacon_manager.create_beacon(1).unwrap();
-    let beacon_frame = DatagramFrame::with_length(beacon_data);
+    let beacon_frame = beacon_manager
+        .create_beacon(1, BeaconMeasurement::empty())
+        .to_datagram_frame()
+        .unwrap();
     let beacon_metadata = DatagramMetadata::new("beacon").with_priority(DatagramPriority::Normal);
 
     congestion_controller
@@ -430,34 +449,28 @@ mod probe_manager_tests {
 #[cfg(test)]
 mod beacon_manager_tests {
     use super::*;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_beacon_manager_path_lifecycle() {
-        let mut manager = BeaconManager::new(Duration::from_secs(30), 5);
+        let mut manager = BeaconManager::new(Duration::from_secs(30));
+        assert!(manager.get_path_stats(42).is_none());
 
-        let addr: SocketAddr = "192.168.1.100:8443".parse().unwrap();
-        manager.add_path(42, addr);
-
-        assert_eq!(manager.path_count(), 1);
+        manager.create_beacon(42, BeaconMeasurement::empty());
         assert!(manager.get_path_stats(42).is_some());
 
-        // Remove path
-        manager.remove_path(42);
-        assert_eq!(manager.path_count(), 0);
+        manager.cleanup_old_stats(Duration::from_secs(0));
         assert!(manager.get_path_stats(42).is_none());
     }
 
     #[test]
     fn test_beacon_creation_disabled_transport() {
         let disabled_transport = DatagramTransport::disabled();
-        let mut manager = BeaconManager::new(Duration::from_secs(30), 5);
+        let mut manager = BeaconManager::new(Duration::from_secs(30));
 
-        manager.add_path(1, "127.0.0.1:443".parse().unwrap());
-
-        // Should fail when transport doesn't support DATAGRAM
-        let result = manager.create_beacon_with_transport(1, &disabled_transport);
-        assert!(matches!(result, Err(DatagramError::NotSupported)));
+        let beacon = manager.create_beacon(1, BeaconMeasurement::empty());
+        let encoded = beacon.encode().unwrap();
+        let result = disabled_transport.validate_size(encoded.len());
+        assert!(matches!(result, Outcome::Err(DatagramError::NotSupported)));
     }
 }
 
@@ -476,7 +489,7 @@ mod transport_tests {
         let result = transport.validate_size(101);
         assert!(matches!(
             result,
-            Err(DatagramError::PayloadTooLarge {
+            Outcome::Err(DatagramError::PayloadTooLarge {
                 size: 101,
                 max: 100
             })
@@ -488,8 +501,8 @@ mod transport_tests {
         let mut transport = DatagramTransport::new(true, 1024).unwrap();
 
         // Simulate peer negotiation
-        transport.peer_enabled = true;
-        transport.peer_max_size = Some(512);
+        let params = crate::net::atp::handshake::transport_params::TransportParameters::new();
+        transport.process_peer_params(&params).unwrap();
         assert!(transport.is_enabled());
 
         // Reset peer state

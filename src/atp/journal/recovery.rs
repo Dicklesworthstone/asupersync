@@ -104,7 +104,11 @@ impl RecoveryContext {
     }
 
     /// Process a journal record during recovery.
-    pub fn process_record(&mut self, record: &JournalRecord, auth_key: &AuthKey) -> Result<bool, RecoveryError> {
+    pub fn process_record(
+        &mut self,
+        record: &JournalRecord,
+        auth_key: &AuthKey,
+    ) -> Result<bool, RecoveryError> {
         self.stats.total_records += 1;
 
         // Verify cryptographic signature BEFORE any processing
@@ -456,20 +460,48 @@ mod tests {
         MerkleRoot::new(hash)
     }
 
+    fn test_auth_key() -> AuthKey {
+        AuthKey::from_seed(42)
+    }
+
+    fn unsigned_tag() -> crate::security::AuthenticationTag {
+        crate::security::AuthenticationTag::zero()
+    }
+
+    fn signed_record(record: JournalRecord) -> JournalRecord {
+        record.with_signature(&test_auth_key())
+    }
+
+    fn process_test_record(
+        ctx: &mut RecoveryContext,
+        record: JournalRecord,
+    ) -> Result<bool, RecoveryError> {
+        let auth_key = test_auth_key();
+        let record = record.with_signature(&auth_key);
+        ctx.process_record(&record, &auth_key)
+    }
+
+    fn process_signed_record(
+        ctx: &mut RecoveryContext,
+        record: &JournalRecord,
+    ) -> Result<bool, RecoveryError> {
+        let auth_key = test_auth_key();
+        ctx.process_record(record, &auth_key)
+    }
+
     #[tokio::test]
     async fn test_cryptographic_integrity_validation() {
-        use crate::security::{AuthKey, AuthenticationTag};
         use crate::atp::manifest::MerkleRoot;
-        use crate::atp::object::ObjectId;
+        use crate::security::AuthenticationTag;
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let mut ctx = RecoveryContext::new();
-        let auth_key = AuthKey::from_seed(42);
+        let auth_key = test_auth_key();
 
         // Create a valid record with correct signature
         let valid_record = JournalRecord::Offer {
             transfer_id: "test123".to_string(),
-            object_id: ObjectId::Content(Default::default()),
+            object_id: test_object_id(b"test123"),
             manifest_root: MerkleRoot::new([0u8; 32]),
             total_size: 1024,
             timestamp: SystemTime::now()
@@ -477,7 +509,8 @@ mod tests {
                 .unwrap()
                 .as_secs(),
             auth_tag: AuthenticationTag::zero(),
-        }.with_signature(&auth_key);
+        }
+        .with_signature(&auth_key);
 
         // Should process successfully
         let result = ctx.process_record(&valid_record, &auth_key);
@@ -486,7 +519,7 @@ mod tests {
         // Create an invalid record with wrong signature
         let invalid_record = JournalRecord::Offer {
             transfer_id: "test456".to_string(),
-            object_id: ObjectId::Content(Default::default()),
+            object_id: test_object_id(b"test456"),
             manifest_root: MerkleRoot::new([0u8; 32]),
             total_size: 2048,
             timestamp: SystemTime::now()
@@ -515,35 +548,47 @@ mod tests {
 
         // Process chunk progression
         assert!(
-            ctx.process_record(&JournalRecord::Offer {
-                transfer_id: transfer_id.clone(),
-                object_id: test_object_id(b"obj-1"),
-                manifest_root: test_root(1),
-                total_size: 8192,
-                timestamp: 1000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::Offer {
+                    transfer_id: transfer_id.clone(),
+                    object_id: test_object_id(b"obj-1"),
+                    manifest_root: test_root(1),
+                    total_size: 8192,
+                    timestamp: 1000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         assert!(
-            ctx.process_record(&JournalRecord::ChunkReceived {
-                transfer_id: transfer_id.clone(),
-                chunk_offset,
-                chunk_size: 1024,
-                chunk_hash: [0; 32],
-                timestamp: 2000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkReceived {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset,
+                    chunk_size: 1024,
+                    chunk_hash: [0; 32],
+                    timestamp: 2000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         assert!(
-            ctx.process_record(&JournalRecord::ChunkVerified {
-                transfer_id: transfer_id.clone(),
-                chunk_offset,
-                chunk_size: 1024,
-                verified_hash: [0; 32],
-                timestamp: 3000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkVerified {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset,
+                    chunk_size: 1024,
+                    verified_hash: [0; 32],
+                    timestamp: 3000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
@@ -565,18 +610,19 @@ mod tests {
         let transfer_id = "transfer-1".to_string();
         let chunk_offset = 4096;
 
-        let record = JournalRecord::ChunkReceived {
+        let record = signed_record(JournalRecord::ChunkReceived {
             transfer_id,
             chunk_offset,
             chunk_size: 1024,
             chunk_hash: [0; 32],
             timestamp: 2000,
-        };
+            auth_tag: unsigned_tag(),
+        });
 
         // First occurrence
-        assert!(ctx.process_record(&record).unwrap());
+        assert!(process_signed_record(&mut ctx, &record).unwrap());
         // Duplicate
-        assert!(!ctx.process_record(&record).unwrap());
+        assert!(!process_signed_record(&mut ctx, &record).unwrap());
 
         let (_, stats) = ctx.finalize();
         assert_eq!(stats.total_records, 2);
@@ -590,56 +636,76 @@ mod tests {
         let chunk_offset = 4096;
 
         assert!(
-            ctx.process_record(&JournalRecord::ChunkReceived {
-                transfer_id: transfer_id.clone(),
-                chunk_offset,
-                chunk_size: 1024,
-                chunk_hash: [0; 32],
-                timestamp: 1000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkReceived {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset,
+                    chunk_size: 1024,
+                    chunk_hash: [0; 32],
+                    timestamp: 1000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         assert!(
-            ctx.process_record(&JournalRecord::ChunkVerified {
-                transfer_id: transfer_id.clone(),
-                chunk_offset,
-                chunk_size: 1024,
-                verified_hash: [0; 32],
-                timestamp: 1500,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkVerified {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset,
+                    chunk_size: 1024,
+                    verified_hash: [0; 32],
+                    timestamp: 1500,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         assert!(
-            ctx.process_record(&JournalRecord::ChunkWritten {
-                transfer_id: transfer_id.clone(),
-                chunk_offset,
-                chunk_size: 1024,
-                file_path: "test".into(),
-                timestamp: 2000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkWritten {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset,
+                    chunk_size: 1024,
+                    file_path: "test".into(),
+                    timestamp: 2000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         assert!(
-            ctx.process_record(&JournalRecord::CommitComplete {
-                transfer_id: transfer_id.clone(),
-                final_path: "final".into(),
-                committed_size: 1024,
-                timestamp: 3000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::CommitComplete {
+                    transfer_id: transfer_id.clone(),
+                    final_path: "final".into(),
+                    committed_size: 1024,
+                    timestamp: 3000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         // Now try to go backwards to Received - should fail
-        let result = ctx.process_record(&JournalRecord::ChunkReceived {
-            transfer_id,
-            chunk_offset,
-            chunk_size: 1024,
-            chunk_hash: [0; 32],
-            timestamp: 4000,
-        });
+        let result = process_test_record(
+            &mut ctx,
+            JournalRecord::ChunkReceived {
+                transfer_id,
+                chunk_offset,
+                chunk_size: 1024,
+                chunk_hash: [0; 32],
+                timestamp: 4000,
+                auth_tag: unsigned_tag(),
+            },
+        );
 
         assert!(matches!(
             result,
@@ -654,57 +720,77 @@ mod tests {
         let chunk_offset = 4096;
 
         assert!(
-            ctx.process_record(&JournalRecord::ChunkReceived {
-                transfer_id: transfer_id.clone(),
-                chunk_offset,
-                chunk_size: 1024,
-                chunk_hash: [0; 32],
-                timestamp: 1000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkReceived {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset,
+                    chunk_size: 1024,
+                    chunk_hash: [0; 32],
+                    timestamp: 1000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         assert!(
-            ctx.process_record(&JournalRecord::ChunkVerified {
-                transfer_id: transfer_id.clone(),
-                chunk_offset,
-                chunk_size: 1024,
-                verified_hash: [0; 32],
-                timestamp: 1500,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkVerified {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset,
+                    chunk_size: 1024,
+                    verified_hash: [0; 32],
+                    timestamp: 1500,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         // Write chunk
         assert!(
-            ctx.process_record(&JournalRecord::ChunkWritten {
-                transfer_id: transfer_id.clone(),
-                chunk_offset,
-                chunk_size: 1024,
-                file_path: "test".into(),
-                timestamp: 2000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkWritten {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset,
+                    chunk_size: 1024,
+                    file_path: "test".into(),
+                    timestamp: 2000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         // Commit intent
         assert!(
-            ctx.process_record(&JournalRecord::CommitIntent {
-                transfer_id: transfer_id.clone(),
-                final_manifest_root: test_root(2),
-                timestamp: 3000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::CommitIntent {
+                    transfer_id: transfer_id.clone(),
+                    final_manifest_root: test_root(2),
+                    timestamp: 3000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
         // Rollback instead of commit
         assert!(
-            ctx.process_record(&JournalRecord::Rollback {
-                transfer_id: transfer_id.clone(),
-                rollback_reason: "timeout".into(),
-                checkpoint_sequence: 0,
-                timestamp: 4000,
-            })
+            process_test_record(
+                &mut ctx,
+                JournalRecord::Rollback {
+                    transfer_id: transfer_id.clone(),
+                    rollback_reason: "timeout".into(),
+                    checkpoint_sequence: 0,
+                    timestamp: 4000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
             .unwrap()
         );
 
@@ -827,13 +913,14 @@ mod tests {
         fn apply_phase(&mut self, phase: DiskFaultPhase) {
             match phase {
                 DiskFaultPhase::JournalAppend => {
-                    self.records.push(JournalRecord::Offer {
+                    self.records.push(signed_record(JournalRecord::Offer {
                         transfer_id: MATRIX_TRANSFER.to_string(),
                         object_id: test_object_id(b"fault-matrix-object"),
                         manifest_root: test_root(1),
                         total_size: CHUNK_SIZE * 2,
                         timestamp: 10,
-                    });
+                        auth_tag: unsigned_tag(),
+                    }));
                 }
                 DiskFaultPhase::BitmapUpdate => {
                     self.bitmap.update_chunk_state(
@@ -842,13 +929,15 @@ mod tests {
                         20,
                         Some([1; 32]),
                     );
-                    self.records.push(JournalRecord::ChunkReceived {
-                        transfer_id: MATRIX_TRANSFER.to_string(),
-                        chunk_offset: DATA_OFFSET,
-                        chunk_size: CHUNK_SIZE,
-                        chunk_hash: [1; 32],
-                        timestamp: 20,
-                    });
+                    self.records
+                        .push(signed_record(JournalRecord::ChunkReceived {
+                            transfer_id: MATRIX_TRANSFER.to_string(),
+                            chunk_offset: DATA_OFFSET,
+                            chunk_size: CHUNK_SIZE,
+                            chunk_hash: [1; 32],
+                            timestamp: 20,
+                            auth_tag: unsigned_tag(),
+                        }));
                 }
                 DiskFaultPhase::ChunkWrite => {
                     self.pending_obligations += 1;
@@ -858,26 +947,30 @@ mod tests {
                         30,
                         Some([2; 32]),
                     );
-                    self.records.push(JournalRecord::ChunkVerified {
-                        transfer_id: MATRIX_TRANSFER.to_string(),
-                        chunk_offset: DATA_OFFSET,
-                        chunk_size: CHUNK_SIZE,
-                        verified_hash: [2; 32],
-                        timestamp: 30,
-                    });
+                    self.records
+                        .push(signed_record(JournalRecord::ChunkVerified {
+                            transfer_id: MATRIX_TRANSFER.to_string(),
+                            chunk_offset: DATA_OFFSET,
+                            chunk_size: CHUNK_SIZE,
+                            verified_hash: [2; 32],
+                            timestamp: 30,
+                            auth_tag: unsigned_tag(),
+                        }));
                     self.bitmap.update_chunk_state(
                         DATA_OFFSET,
                         ChunkState::Written,
                         40,
                         Some([2; 32]),
                     );
-                    self.records.push(JournalRecord::ChunkWritten {
-                        transfer_id: MATRIX_TRANSFER.to_string(),
-                        chunk_offset: DATA_OFFSET,
-                        chunk_size: CHUNK_SIZE,
-                        file_path: "object.tmp".to_string(),
-                        timestamp: 40,
-                    });
+                    self.records
+                        .push(signed_record(JournalRecord::ChunkWritten {
+                            transfer_id: MATRIX_TRANSFER.to_string(),
+                            chunk_offset: DATA_OFFSET,
+                            chunk_size: CHUNK_SIZE,
+                            file_path: "object.tmp".to_string(),
+                            timestamp: 40,
+                            auth_tag: unsigned_tag(),
+                        }));
                     self.pending_obligations -= 1;
                 }
                 DiskFaultPhase::Fsync => {}
@@ -889,34 +982,40 @@ mod tests {
                         50,
                         Some([3; 32]),
                     );
-                    self.records.push(JournalRecord::RepairDecode {
-                        transfer_id: MATRIX_TRANSFER.to_string(),
-                        chunk_offset: REPAIR_OFFSET,
-                        chunk_size: CHUNK_SIZE,
-                        source_chunks: vec![DATA_OFFSET],
-                        timestamp: 50,
-                    });
+                    self.records
+                        .push(signed_record(JournalRecord::RepairDecode {
+                            transfer_id: MATRIX_TRANSFER.to_string(),
+                            chunk_offset: REPAIR_OFFSET,
+                            chunk_size: CHUNK_SIZE,
+                            source_chunks: vec![DATA_OFFSET],
+                            timestamp: 50,
+                            auth_tag: unsigned_tag(),
+                        }));
                     self.bitmap.update_chunk_state(
                         REPAIR_OFFSET,
                         ChunkState::Verified,
                         60,
                         Some([4; 32]),
                     );
-                    self.records.push(JournalRecord::ChunkVerified {
-                        transfer_id: MATRIX_TRANSFER.to_string(),
-                        chunk_offset: REPAIR_OFFSET,
-                        chunk_size: CHUNK_SIZE,
-                        verified_hash: [4; 32],
-                        timestamp: 60,
-                    });
+                    self.records
+                        .push(signed_record(JournalRecord::ChunkVerified {
+                            transfer_id: MATRIX_TRANSFER.to_string(),
+                            chunk_offset: REPAIR_OFFSET,
+                            chunk_size: CHUNK_SIZE,
+                            verified_hash: [4; 32],
+                            timestamp: 60,
+                            auth_tag: unsigned_tag(),
+                        }));
                     self.pending_obligations -= 1;
                 }
                 DiskFaultPhase::ManifestWrite => {
-                    self.records.push(JournalRecord::CommitIntent {
-                        transfer_id: MATRIX_TRANSFER.to_string(),
-                        final_manifest_root: test_root(2),
-                        timestamp: 70,
-                    });
+                    self.records
+                        .push(signed_record(JournalRecord::CommitIntent {
+                            transfer_id: MATRIX_TRANSFER.to_string(),
+                            final_manifest_root: test_root(2),
+                            timestamp: 70,
+                            auth_tag: unsigned_tag(),
+                        }));
                 }
                 DiskFaultPhase::TempFileRename => {
                     self.temp_renamed = true;
@@ -928,29 +1027,34 @@ mod tests {
                 DiskFaultPhase::Cleanup => {
                     self.cleanup_done = true;
                     self.final_file_verified = true;
-                    self.records.push(JournalRecord::CommitComplete {
-                        transfer_id: MATRIX_TRANSFER.to_string(),
-                        final_path: "object.final".to_string(),
-                        committed_size: CHUNK_SIZE * 2,
-                        timestamp: 80,
-                    });
+                    self.records
+                        .push(signed_record(JournalRecord::CommitComplete {
+                            transfer_id: MATRIX_TRANSFER.to_string(),
+                            final_path: "object.final".to_string(),
+                            committed_size: CHUNK_SIZE * 2,
+                            timestamp: 80,
+                            auth_tag: unsigned_tag(),
+                        }));
                 }
                 DiskFaultPhase::ProofEmission => {
                     self.proof_emitted = true;
-                    self.records.push(JournalRecord::ProofDigest {
+                    self.records.push(signed_record(JournalRecord::ProofDigest {
                         transfer_id: MATRIX_TRANSFER.to_string(),
                         proof_type: "receiver-finalizer".to_string(),
                         digest: [9; 32],
                         timestamp: 90,
-                    });
+                        auth_tag: unsigned_tag(),
+                    }));
                 }
                 DiskFaultPhase::JournalCompaction => {
                     self.compaction_seen = true;
-                    self.records.push(JournalRecord::CompactionBoundary {
-                        generation: 1,
-                        compacted_up_to_sequence: self.records.len() as u64,
-                        timestamp: 100,
-                    });
+                    self.records
+                        .push(signed_record(JournalRecord::CompactionBoundary {
+                            generation: 1,
+                            compacted_up_to_sequence: self.records.len() as u64,
+                            timestamp: 100,
+                            auth_tag: unsigned_tag(),
+                        }));
                 }
             }
         }
@@ -959,7 +1063,7 @@ mod tests {
             let mut ctx = RecoveryContext::new();
             let mut invalid_record = false;
             for record in &self.records {
-                if ctx.process_record(record).is_err() {
+                if process_signed_record(&mut ctx, record).is_err() {
                     invalid_record = true;
                 }
             }

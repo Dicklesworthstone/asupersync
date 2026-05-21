@@ -6,13 +6,9 @@
 //! stream flow control, datagrams, close/drain, migration, NAT rebinding,
 //! and key update.
 
-use asupersync::net::atp::protocol::quic_frames::{QuicFrameType, QuicFrame};
-use asupersync::net::atp::protocol::varint::VarInt;
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::net::atp::protocol::transport_params::TransportParameters;
-use asupersync::net::atp::quic::{recovery::RecoveryState, packet_protection::PacketProtection};
-use asupersync::bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 /// QUIC conformance test result
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +57,7 @@ impl QuicConformanceContext {
 fn test_quic_frame_roundtrip_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = QuicConformanceContext::new(
         "frame_roundtrip",
-        "QUIC frame codecs round-trip encode/decode"
+        "QUIC frame codecs round-trip encode/decode",
     );
 
     // Test all standard QUIC frame types
@@ -87,7 +83,10 @@ fn test_quic_frame_roundtrip_conformance() -> Result<(), Box<dyn std::error::Err
         ("RETIRE_CONNECTION_ID", create_retire_connection_id_frame()),
         ("PATH_CHALLENGE", create_path_challenge_frame()),
         ("PATH_RESPONSE", create_path_response_frame()),
-        ("CONNECTION_CLOSE_QUIC", create_connection_close_quic_frame()),
+        (
+            "CONNECTION_CLOSE_QUIC",
+            create_connection_close_quic_frame(),
+        ),
         ("CONNECTION_CLOSE_APP", create_connection_close_app_frame()),
         ("HANDSHAKE_DONE", create_handshake_done_frame()),
     ];
@@ -123,23 +122,26 @@ fn test_quic_frame_roundtrip_conformance() -> Result<(), Box<dyn std::error::Err
 fn test_packet_number_space_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = QuicConformanceContext::new(
         "packet_number_space",
-        "QUIC packet number spaces (Initial, Handshake, Application)"
+        "QUIC packet number spaces (Initial, Handshake, Application)",
     );
 
     // Test packet number encoding/decoding
     let pn_tests = vec![
-        (0u64, 1),           // Smallest packet number
-        (1, 1),              // Small packet number
-        (255, 1),            // 1-byte max
-        (256, 2),            // 2-byte min
-        (65535, 2),          // 2-byte max
-        (65536, 4),          // 4-byte min
-        (0x3FFFFFFF, 4),     // 4-byte max (30 bits)
+        (0u64, 1),       // Smallest packet number
+        (1, 1),          // Small packet number
+        (255, 1),        // 1-byte max
+        (256, 2),        // 2-byte min
+        (65535, 2),      // 2-byte max
+        (65536, 4),      // 4-byte min
+        (0x3FFFFFFF, 4), // 4-byte max (30 bits)
     ];
 
     for (packet_number, expected_length) in pn_tests {
         match test_packet_number_encoding(packet_number, expected_length) {
-            Ok(_) => println!("✓ Packet number {} encoded in {} bytes", packet_number, expected_length),
+            Ok(_) => println!(
+                "✓ Packet number {} encoded in {} bytes",
+                packet_number, expected_length
+            ),
             Err(e) => {
                 ctx.set_result(ConformanceResult::Fail(e.to_string()));
                 return Ok(());
@@ -157,7 +159,7 @@ fn test_packet_number_space_conformance() -> Result<(), Box<dyn std::error::Erro
 fn test_transport_parameters_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = QuicConformanceContext::new(
         "transport_params",
-        "Transport parameters negotiation and validation"
+        "Transport parameters negotiation and validation",
     );
 
     // Test transport parameter encoding/decoding
@@ -180,10 +182,8 @@ fn test_transport_parameters_conformance() -> Result<(), Box<dyn std::error::Err
 /// Test version negotiation conformance
 #[test]
 fn test_version_negotiation_conformance() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ctx = QuicConformanceContext::new(
-        "version_negotiation",
-        "QUIC version negotiation protocol"
-    );
+    let mut ctx =
+        QuicConformanceContext::new("version_negotiation", "QUIC version negotiation protocol");
 
     let supported_versions = vec![0x00000001]; // QUIC v1
     let unsupported_version = 0x12345678;
@@ -205,17 +205,18 @@ fn test_version_negotiation_conformance() -> Result<(), Box<dyn std::error::Erro
 /// Test ACK frame range handling
 #[test]
 fn test_ack_ranges_conformance() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ctx = QuicConformanceContext::new(
-        "ack_ranges",
-        "ACK frame range encoding and processing"
-    );
+    let mut ctx =
+        QuicConformanceContext::new("ack_ranges", "ACK frame range encoding and processing");
 
     let test_cases = vec![
         // (acked_packets, expected_ranges)
-        (vec![0, 1, 2, 3, 4], vec![(0, 4)]),                    // Contiguous range
-        (vec![0, 2, 4, 6, 8], vec![(8, 8), (6, 6), (4, 4), (2, 2), (0, 0)]), // Non-contiguous
-        (vec![0, 1, 2, 10, 11, 12], vec![(10, 12), (0, 2)]),   // Two ranges
-        (vec![5], vec![(5, 5)]),                                // Single packet
+        (vec![0, 1, 2, 3, 4], vec![(0, 4)]), // Contiguous range
+        (
+            vec![0, 2, 4, 6, 8],
+            vec![(8, 8), (6, 6), (4, 4), (2, 2), (0, 0)],
+        ), // Non-contiguous
+        (vec![0, 1, 2, 10, 11, 12], vec![(10, 12), (0, 2)]), // Two ranges
+        (vec![5], vec![(5, 5)]),             // Single packet
     ];
 
     for (i, (acked_packets, expected_ranges)) in test_cases.iter().enumerate() {
@@ -238,20 +239,23 @@ fn test_ack_ranges_conformance() -> Result<(), Box<dyn std::error::Error>> {
 fn test_flow_control_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = QuicConformanceContext::new(
         "flow_control",
-        "Stream and connection flow control boundaries"
+        "Stream and connection flow control boundaries",
     );
 
     // Test flow control at different limits
     let flow_control_tests = vec![
-        (1024, 512, true),    // Under limit
-        (1024, 1024, true),   // At limit
-        (1024, 1025, false),  // Over limit
-        (0, 1, false),        // Zero limit
+        (1024, 512, true),   // Under limit
+        (1024, 1024, true),  // At limit
+        (1024, 1025, false), // Over limit
+        (0, 1, false),       // Zero limit
     ];
 
     for (limit, data_size, should_allow) in flow_control_tests {
         match test_flow_control_boundary(limit, data_size, should_allow) {
-            Ok(_) => println!("✓ Flow control test (limit:{}, size:{}) passed", limit, data_size),
+            Ok(_) => println!(
+                "✓ Flow control test (limit:{}, size:{}) passed",
+                limit, data_size
+            ),
             Err(e) => {
                 ctx.set_result(ConformanceResult::Fail(e.to_string()));
                 return Ok(());
@@ -267,10 +271,8 @@ fn test_flow_control_conformance() -> Result<(), Box<dyn std::error::Error>> {
 /// Test connection close and drain behavior
 #[test]
 fn test_close_drain_conformance() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ctx = QuicConformanceContext::new(
-        "close_drain",
-        "Connection close and drain state machine"
-    );
+    let mut ctx =
+        QuicConformanceContext::new("close_drain", "Connection close and drain state machine");
 
     // Test different close scenarios
     let close_tests = vec![
@@ -331,32 +333,79 @@ fn create_ack_ecn_frame() -> Bytes {
 }
 
 // Placeholder implementations for other frame types
-fn create_reset_stream_frame() -> Bytes { Bytes::from(vec![0x04, 0x00, 0x00, 0x00]) }
-fn create_stop_sending_frame() -> Bytes { Bytes::from(vec![0x05, 0x00, 0x00]) }
-fn create_crypto_frame() -> Bytes { Bytes::from(vec![0x06, 0x00, 0x04, b'h', b'e', b'l', b'o']) }
-fn create_new_token_frame() -> Bytes { Bytes::from(vec![0x07, 0x04, b't', b'o', b'k', b'n']) }
-fn create_stream_frame() -> Bytes { Bytes::from(vec![0x08, 0x00, b'd', b'a', b't', b'a']) }
-fn create_max_data_frame() -> Bytes { Bytes::from(vec![0x10, 0x40, 0x00]) }
-fn create_max_stream_data_frame() -> Bytes { Bytes::from(vec![0x11, 0x00, 0x40, 0x00]) }
-fn create_max_streams_bidi_frame() -> Bytes { Bytes::from(vec![0x12, 0x10]) }
-fn create_max_streams_uni_frame() -> Bytes { Bytes::from(vec![0x13, 0x10]) }
-fn create_data_blocked_frame() -> Bytes { Bytes::from(vec![0x14, 0x40, 0x00]) }
-fn create_stream_data_blocked_frame() -> Bytes { Bytes::from(vec![0x15, 0x00, 0x40, 0x00]) }
-fn create_streams_blocked_bidi_frame() -> Bytes { Bytes::from(vec![0x16, 0x10]) }
-fn create_streams_blocked_uni_frame() -> Bytes { Bytes::from(vec![0x17, 0x10]) }
-fn create_new_connection_id_frame() -> Bytes { Bytes::from(vec![0x18, 0x01, 0x00, 0x08, 1,2,3,4,5,6,7,8, 0x00]) }
-fn create_retire_connection_id_frame() -> Bytes { Bytes::from(vec![0x19, 0x00]) }
-fn create_path_challenge_frame() -> Bytes { Bytes::from(vec![0x1a, 1,2,3,4,5,6,7,8]) }
-fn create_path_response_frame() -> Bytes { Bytes::from(vec![0x1b, 1,2,3,4,5,6,7,8]) }
-fn create_connection_close_quic_frame() -> Bytes { Bytes::from(vec![0x1c, 0x00, 0x00, 0x04, b't', b'e', b's', b't']) }
-fn create_connection_close_app_frame() -> Bytes { Bytes::from(vec![0x1d, 0x00, 0x04, b't', b'e', b's', b't']) }
-fn create_handshake_done_frame() -> Bytes { Bytes::from(vec![0x1e]) }
+fn create_reset_stream_frame() -> Bytes {
+    Bytes::from(vec![0x04, 0x00, 0x00, 0x00])
+}
+fn create_stop_sending_frame() -> Bytes {
+    Bytes::from(vec![0x05, 0x00, 0x00])
+}
+fn create_crypto_frame() -> Bytes {
+    Bytes::from(vec![0x06, 0x00, 0x04, b'h', b'e', b'l', b'o'])
+}
+fn create_new_token_frame() -> Bytes {
+    Bytes::from(vec![0x07, 0x04, b't', b'o', b'k', b'n'])
+}
+fn create_stream_frame() -> Bytes {
+    Bytes::from(vec![0x08, 0x00, b'd', b'a', b't', b'a'])
+}
+fn create_max_data_frame() -> Bytes {
+    Bytes::from(vec![0x10, 0x40, 0x00])
+}
+fn create_max_stream_data_frame() -> Bytes {
+    Bytes::from(vec![0x11, 0x00, 0x40, 0x00])
+}
+fn create_max_streams_bidi_frame() -> Bytes {
+    Bytes::from(vec![0x12, 0x10])
+}
+fn create_max_streams_uni_frame() -> Bytes {
+    Bytes::from(vec![0x13, 0x10])
+}
+fn create_data_blocked_frame() -> Bytes {
+    Bytes::from(vec![0x14, 0x40, 0x00])
+}
+fn create_stream_data_blocked_frame() -> Bytes {
+    Bytes::from(vec![0x15, 0x00, 0x40, 0x00])
+}
+fn create_streams_blocked_bidi_frame() -> Bytes {
+    Bytes::from(vec![0x16, 0x10])
+}
+fn create_streams_blocked_uni_frame() -> Bytes {
+    Bytes::from(vec![0x17, 0x10])
+}
+fn create_new_connection_id_frame() -> Bytes {
+    Bytes::from(vec![0x18, 0x01, 0x00, 0x08, 1, 2, 3, 4, 5, 6, 7, 8, 0x00])
+}
+fn create_retire_connection_id_frame() -> Bytes {
+    Bytes::from(vec![0x19, 0x00])
+}
+fn create_path_challenge_frame() -> Bytes {
+    Bytes::from(vec![0x1a, 1, 2, 3, 4, 5, 6, 7, 8])
+}
+fn create_path_response_frame() -> Bytes {
+    Bytes::from(vec![0x1b, 1, 2, 3, 4, 5, 6, 7, 8])
+}
+fn create_connection_close_quic_frame() -> Bytes {
+    Bytes::from(vec![0x1c, 0x00, 0x00, 0x04, b't', b'e', b's', b't'])
+}
+fn create_connection_close_app_frame() -> Bytes {
+    Bytes::from(vec![0x1d, 0x00, 0x04, b't', b'e', b's', b't'])
+}
+fn create_handshake_done_frame() -> Bytes {
+    Bytes::from(vec![0x1e])
+}
 
 // Test helper functions (placeholder implementations)
 
-fn test_frame_roundtrip(frame_name: &str, frame_data: &Bytes) -> Result<(), Box<dyn std::error::Error>> {
+fn test_frame_roundtrip(
+    frame_name: &str,
+    frame_data: &Bytes,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Parse frame, re-encode it, and verify it matches original
-    println!("Testing {} frame roundtrip with {} bytes", frame_name, frame_data.len());
+    println!(
+        "Testing {} frame roundtrip with {} bytes",
+        frame_name,
+        frame_data.len()
+    );
 
     // In a real implementation, this would:
     // 1. Decode the frame_data into a QuicFrame struct
@@ -366,9 +415,15 @@ fn test_frame_roundtrip(frame_name: &str, frame_data: &Bytes) -> Result<(), Box<
     Ok(())
 }
 
-fn test_packet_number_encoding(packet_number: u64, expected_length: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn test_packet_number_encoding(
+    packet_number: u64,
+    expected_length: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Test packet number encoding produces expected byte length
-    println!("Encoding packet number {} expecting {} bytes", packet_number, expected_length);
+    println!(
+        "Encoding packet number {} expecting {} bytes",
+        packet_number, expected_length
+    );
 
     // In a real implementation, this would encode the packet number
     // and verify the encoded length matches expected_length
@@ -381,27 +436,42 @@ fn create_test_transport_parameters() -> TransportParameters {
     TransportParameters::default()
 }
 
-fn test_transport_params_roundtrip(_params: &TransportParameters) -> Result<(), Box<dyn std::error::Error>> {
+fn test_transport_params_roundtrip(
+    _params: &TransportParameters,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Test transport parameters encoding/decoding roundtrip
     Ok(())
 }
 
-fn test_version_negotiation(_supported: Vec<u32>, _unsupported: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn test_version_negotiation(
+    _supported: Vec<u32>,
+    _unsupported: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Test version negotiation logic
     Ok(())
 }
 
-fn test_ack_range_encoding(_acked: Vec<u64>, _expected: Vec<(u64, u64)>) -> Result<(), Box<dyn std::error::Error>> {
+fn test_ack_range_encoding(
+    _acked: Vec<u64>,
+    _expected: Vec<(u64, u64)>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Test ACK range encoding/decoding
     Ok(())
 }
 
-fn test_flow_control_boundary(_limit: u64, _data_size: u64, _should_allow: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn test_flow_control_boundary(
+    _limit: u64,
+    _data_size: u64,
+    _should_allow: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Test flow control boundary conditions
     Ok(())
 }
 
-fn test_connection_close(_error_code: u64, _reason: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn test_connection_close(
+    _error_code: u64,
+    _reason: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Test connection close frame handling
     Ok(())
 }

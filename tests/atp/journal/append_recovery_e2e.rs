@@ -1,9 +1,6 @@
 //! Journal Append and Recovery E2E Tests
 
 use super::*;
-use std::fs::OpenOptions;
-use std::io::{Write, Seek, SeekFrom};
-
 #[test]
 fn test_journal_append_recovery_basic() -> Result<(), Box<dyn std::error::Error>> {
     let config = JournalTestConfig::default();
@@ -18,9 +15,9 @@ fn test_journal_append_recovery_basic() -> Result<(), Box<dyn std::error::Error>
 
         // Create test journal entries
         let entries = vec![
-            test_utils::create_test_journal_entry(ObjectId::new(), ObjectKind::File),
-            test_utils::create_test_journal_entry(ObjectId::new(), ObjectKind::Directory),
-            test_utils::create_test_journal_entry(ObjectId::new(), ObjectKind::Stream),
+            test_utils::create_test_journal_entry(ObjectId::new(), ObjectKind::FileObject),
+            test_utils::create_test_journal_entry(ObjectId::new(), ObjectKind::DirectoryObject),
+            test_utils::create_test_journal_entry(ObjectId::new(), ObjectKind::StreamObject),
         ];
 
         // Simulate journal append operations
@@ -47,9 +44,7 @@ fn test_journal_append_recovery_basic() -> Result<(), Box<dyn std::error::Error>
             artifact.record_recovery_state(RecoveryState::Completed);
         }
 
-        artifact.journal_size = config.journal_path.metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
+        artifact.journal_size = config.journal_path.metadata().map(|m| m.len()).unwrap_or(0);
 
         Ok(artifact)
     })?;
@@ -75,11 +70,15 @@ fn test_journal_concurrent_append() -> Result<(), Box<dyn std::error::Error>> {
         // Simulate concurrent append operations
         for batch in 0..5 {
             for entry_in_batch in 0..10 {
-                let entry = test_utils::create_test_journal_entry(ObjectId::new(), ObjectKind::File);
+                let entry =
+                    test_utils::create_test_journal_entry(ObjectId::new(), ObjectKind::FileObject);
                 artifact.record_journal_entry(entry);
 
                 // Test crash during concurrent operations
-                if crash_point == Some(JournalCrashPoint::JournalAppend) && batch == 2 && entry_in_batch == 5 {
+                if crash_point == Some(JournalCrashPoint::JournalAppend)
+                    && batch == 2
+                    && entry_in_batch == 5
+                {
                     artifact.record_recovery_state(RecoveryState::ConcurrentAppendFailed);
                     return Err("Simulated crash during concurrent append".into());
                 }

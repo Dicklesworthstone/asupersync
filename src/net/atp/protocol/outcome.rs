@@ -1525,13 +1525,14 @@ mod tests {
         assert!(!policy.should_retry(&success, 1));
 
         // Should retry on retryable transport error within max attempts
-        let retryable_error = AtpOutcome::transport_error(TransportError::ConnectionTimeout);
+        let retryable_error: AtpOutcome<()> =
+            AtpOutcome::transport_error(TransportError::ConnectionTimeout);
         assert!(policy.should_retry(&retryable_error, 1));
         assert!(policy.should_retry(&retryable_error, 2));
         assert!(!policy.should_retry(&retryable_error, 3)); // At max attempts
 
         // Should not retry on non-retryable error
-        let non_retryable = AtpOutcome::auth_error(AuthError::InvalidSignature);
+        let non_retryable: AtpOutcome<()> = AtpOutcome::auth_error(AuthError::InvalidSignature);
         assert!(!policy.should_retry(&non_retryable, 1));
     }
 
@@ -1592,10 +1593,10 @@ mod tests {
         let success: AtpOutcome<()> = AtpOutcome::ok(());
         assert_eq!(OutcomeClass::from_outcome(&success), OutcomeClass::Success);
 
-        let error = AtpOutcome::transport_error(TransportError::ConnectionTimeout);
+        let error: AtpOutcome<()> = AtpOutcome::transport_error(TransportError::ConnectionTimeout);
         assert_eq!(OutcomeClass::from_outcome(&error), OutcomeClass::Error);
 
-        let cancelled = AtpOutcome::atp_cancelled(AtpCancelReason::Timeout);
+        let cancelled: AtpOutcome<()> = AtpOutcome::atp_cancelled(AtpCancelReason::Timeout);
         assert_eq!(
             OutcomeClass::from_outcome(&cancelled),
             OutcomeClass::Cancelled

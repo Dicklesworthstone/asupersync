@@ -11,12 +11,9 @@
 //! Each profile balances different trade-offs between throughput, deduplication efficiency,
 //! proof strength, and use-case-specific requirements.
 
-use crate::atp::manifest::{
-    CdcParams, ChunkPlan, ChunkStrategy, ChunkBoundary, ChunkMetadata,
-    ThroughputTier, SparseHoleMetadata, ArtifactBuildContext, ProofStrength,
-};
+use crate::atp::manifest::{ChunkBoundary, ChunkPlan};
+pub(crate) use crate::atp::manifest::{ChunkMetadata, SparseHoleMetadata};
 use profiles::ChunkingProfile as ChunkingProfileTrait;
-use std::collections::BTreeMap;
 
 pub mod profiles;
 pub mod bulk_file;
@@ -200,6 +197,7 @@ impl std::error::Error for ChunkingProfileError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::manifest::{ChunkStrategy, ProofStrength, ThroughputTier};
 
     #[test]
     fn chunking_profile_all_variants_listed() {

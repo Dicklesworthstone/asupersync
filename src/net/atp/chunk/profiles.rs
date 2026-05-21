@@ -3,8 +3,8 @@
 //! This module defines the common interface that all chunking profiles implement,
 //! along with shared utilities for chunk boundary computation and validation.
 
-use crate::atp::manifest::{ChunkPlan, ChunkStrategy, ChunkBoundary, ChunkMetadata, ThroughputTier};
 use super::ChunkingProfileError;
+use crate::atp::manifest::{ChunkBoundary, ChunkMetadata, ChunkPlan, ChunkStrategy};
 
 /// Common interface for all chunking profiles.
 pub trait ChunkingProfile {
@@ -205,6 +205,7 @@ pub mod utils {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::atp::manifest::ThroughputTier;
 
         #[test]
         fn rolling_hash_is_deterministic() {

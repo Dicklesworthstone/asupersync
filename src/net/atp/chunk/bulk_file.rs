@@ -11,10 +11,12 @@
 //! - Reproducible chunking for proof strength
 //! - Adaptive sizing based on object size and network characteristics
 
-use crate::atp::manifest::{ChunkPlan, ChunkStrategy, ChunkBoundary, ChunkMetadata, ThroughputTier};
 use super::{
     ChunkingProfileError,
-    profiles::{utils, ChunkingProfile as ChunkingProfileTrait},
+    profiles::{ChunkingProfile as ChunkingProfileTrait, utils},
+};
+use crate::atp::manifest::{
+    ChunkBoundary, ChunkMetadata, ChunkPlan, ChunkStrategy, ThroughputTier,
 };
 
 /// Bulk file chunking profile implementation.
@@ -64,7 +66,7 @@ impl ChunkingProfileTrait for BulkFileProfile {
             data,
             &positions,
             ChunkStrategy::FixedSize,
-            |index, offset, size, _chunk_data| {
+            |_index, _offset, size, _chunk_data| {
                 let throughput_tier = Self::determine_throughput_tier(size, data.len() as u64);
                 ChunkMetadata::BulkFile { throughput_tier }
             },
@@ -80,29 +82,31 @@ impl ChunkingProfileTrait for BulkFileProfile {
         for boundary in boundaries {
             if !matches!(boundary.strategy, ChunkStrategy::FixedSize) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "bulk file profile requires fixed-size chunking".to_string()
+                    "bulk file profile requires fixed-size chunking".to_string(),
                 ));
             }
 
             if !matches!(boundary.metadata, Some(ChunkMetadata::BulkFile { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "bulk file profile requires BulkFile metadata".to_string()
+                    "bulk file profile requires BulkFile metadata".to_string(),
                 ));
             }
 
             // Validate chunk size is within reasonable bounds
             if boundary.size_bytes < Self::absolute_min_chunk_size() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} below minimum {}",
-                           boundary.size_bytes, Self::absolute_min_chunk_size())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} below minimum {}",
+                    boundary.size_bytes,
+                    Self::absolute_min_chunk_size()
+                )));
             }
 
             if boundary.size_bytes > Self::max_chunk_size() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} above maximum {}",
-                           boundary.size_bytes, Self::max_chunk_size())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} above maximum {}",
+                    boundary.size_bytes,
+                    Self::max_chunk_size()
+                )));
             }
         }
 
@@ -185,7 +189,9 @@ impl BulkFileProfile {
         let bandwidth_factor = (bandwidth_mbps as f64 / 100.0).max(0.1).min(10.0); // 100Mbps baseline
 
         // Higher latency or lower bandwidth benefits from larger chunks
-        let size_multiplier = (latency_factor * (2.0 / bandwidth_factor)).max(0.5).min(4.0);
+        let size_multiplier = (latency_factor * (2.0 / bandwidth_factor))
+            .max(0.5)
+            .min(4.0);
 
         let adjusted_target = (base_plan.target_chunk_size as f64 * size_multiplier) as u64;
         let adjusted_min = (base_plan.min_chunk_size as f64 * size_multiplier.min(2.0)) as u64;
@@ -207,8 +213,8 @@ impl BulkFileProfile {
         bandwidth_mbps: u64,
         latency_ms: u64,
     ) -> std::time::Duration {
-        let num_chunks = (object_size_bytes + chunk_plan.target_chunk_size - 1)
-                        / chunk_plan.target_chunk_size;
+        let num_chunks =
+            (object_size_bytes + chunk_plan.target_chunk_size - 1) / chunk_plan.target_chunk_size;
 
         let transfer_time_ms = (object_size_bytes as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
         let latency_overhead_ms = num_chunks as f64 * latency_ms as f64;
@@ -275,7 +281,11 @@ mod tests {
 
         // All chunks should be reasonably sized
         for boundary in &boundaries {
-            assert!(boundary.size_bytes >= 1000, "Chunk too small: {}", boundary.size_bytes);
+            assert!(
+                boundary.size_bytes >= 1000,
+                "Chunk too small: {}",
+                boundary.size_bytes
+            );
         }
     }
 
@@ -302,15 +312,15 @@ mod tests {
         let high_latency_plan = BulkFileProfile::chunk_plan_for_network(
             10 * 1024 * 1024,
             100, // 100 Mbps
-            200  // 200ms latency
+            200, // 200ms latency
         );
         assert!(high_latency_plan.target_chunk_size > base_plan.target_chunk_size);
 
         // Low bandwidth should increase chunk size
         let low_bandwidth_plan = BulkFileProfile::chunk_plan_for_network(
             10 * 1024 * 1024,
-            10,  // 10 Mbps
-            50   // 50ms latency
+            10, // 10 Mbps
+            50, // 50ms latency
         );
         assert!(low_bandwidth_plan.target_chunk_size > base_plan.target_chunk_size);
     }
@@ -355,7 +365,7 @@ mod tests {
             10 * 1024 * 1024, // 10MB
             &plan,
             100, // 100 Mbps
-            50   // 50ms latency
+            50,  // 50ms latency
         );
 
         // Should be reasonable (less than 10 seconds for 10MB at 100Mbps)
@@ -383,7 +393,7 @@ mod tests {
 
         assert_eq!(boundaries.len(), 1);
         assert_eq!(boundaries[0].size_bytes, data.len() as u64);
-        assert_eq!(boundaries[0].offset, 0);
+        assert_eq!(boundaries[0].byte_offset, 0);
         assert_eq!(boundaries[0].index, 0);
     }
 }

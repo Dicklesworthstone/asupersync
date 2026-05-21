@@ -3,13 +3,21 @@
 //! End-to-end testing script that transfers ATP test frames over native QUIC
 //! between two local endpoints with comprehensive logging and evidence generation.
 
-use asupersync::bytes::{Bytes, BytesMut, Buf, BufMut};
-use asupersync::net::atp::protocol::quic_frames::QuicFrame;
+use asupersync::bytes::{BufMut, BytesMut};
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Macro for creating hashmaps easily
+macro_rules! hashmap {
+    ($($key:expr => $val:expr),* $(,)?) => {{
+        let mut map = HashMap::new();
+        $(map.insert($key, $val);)*
+        map
+    }}
+}
 
 /// E2E test configuration
 #[derive(Debug, Clone)]
@@ -122,7 +130,7 @@ pub struct E2EEventLogger {
 }
 
 /// QLog-style event entry
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct QLogEvent {
     /// Relative timestamp in microseconds
     pub time: u64,
@@ -215,7 +223,10 @@ impl QuicE2EEndpoint {
 
     /// Start E2E test as client
     pub fn start_client(&self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Starting QUIC E2E client connecting to {}", self.config.server_addr);
+        println!(
+            "Starting QUIC E2E client connecting to {}",
+            self.config.server_addr
+        );
 
         self.log_event("transport", "connection_started", hashmap! {
             "remote_addr".to_string() => serde_json::Value::String(self.config.server_addr.to_string()),
@@ -262,7 +273,11 @@ impl QuicE2EEndpoint {
     }
 
     /// Handle received packet
-    fn handle_received_packet(&self, data: &[u8], from: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    fn handle_received_packet(
+        &self,
+        data: &[u8],
+        from: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = self.state.lock().unwrap();
 
         state.packets_received += 1;
@@ -278,8 +293,7 @@ impl QuicE2EEndpoint {
         // Parse packet (simplified)
         if data.len() >= 8 {
             let packet_number = u64::from_be_bytes([
-                data[0], data[1], data[2], data[3],
-                data[4], data[5], data[6], data[7]
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ]);
 
             self.process_ack(packet_number)?;
@@ -289,7 +303,10 @@ impl QuicE2EEndpoint {
     }
 
     /// Create response packet
-    fn create_response_packet(&self, received_data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    fn create_response_packet(
+        &self,
+        received_data: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut packet = BytesMut::new();
 
         // Simple response: echo with packet number
@@ -306,18 +323,26 @@ impl QuicE2EEndpoint {
 
         let mut state = self.state.lock().unwrap();
         state.packet_number += 1;
+        let packet_number = state.packet_number;
 
-        packet.put_u64(state.packet_number);
+        packet.put_u64(packet_number);
         packet.put_slice(data);
 
         // Record outstanding packet
-        state.loss_recovery.outstanding_packets.insert(state.packet_number, Instant::now());
+        state
+            .loss_recovery
+            .outstanding_packets
+            .insert(packet_number, Instant::now());
 
-        self.log_event("transport", "packet_sent", hashmap! {
-            "packet_number".to_string() => serde_json::Value::Number(state.packet_number.into()),
-            "size".to_string() => serde_json::Value::Number((data.len() + 8).into()),
-            "stream_id".to_string() => serde_json::Value::Number(0.into()),
-        });
+        self.log_event(
+            "transport",
+            "packet_sent",
+            hashmap! {
+                "packet_number".to_string() => serde_json::Value::Number(packet_number.into()),
+                "size".to_string() => serde_json::Value::Number((data.len() + 8).into()),
+                "stream_id".to_string() => serde_json::Value::Number(0.into()),
+            },
+        );
 
         Ok(packet.to_vec())
     }
@@ -326,15 +351,25 @@ impl QuicE2EEndpoint {
     fn process_ack(&self, acked_packet: u64) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = self.state.lock().unwrap();
 
-        if let Some(send_time) = state.loss_recovery.outstanding_packets.remove(&acked_packet) {
+        if let Some(send_time) = state
+            .loss_recovery
+            .outstanding_packets
+            .remove(&acked_packet)
+        {
             let rtt = Instant::now().duration_since(send_time);
             state.rtt_measurements.push(rtt);
             state.loss_recovery.acked_packets.push(acked_packet);
 
-            self.log_event("recovery", "packet_acked", hashmap! {
-                "packet_number".to_string() => serde_json::Value::Number(acked_packet.into()),
-                "rtt_us".to_string() => serde_json::Value::Number(rtt.as_micros().into()),
-            });
+            self.log_event(
+                "recovery",
+                "packet_acked",
+                hashmap! {
+                    "packet_number".to_string() => serde_json::Value::Number(acked_packet.into()),
+                    "rtt_us".to_string() => serde_json::Value::Number(
+                        u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX).into()
+                    ),
+                },
+            );
         }
 
         Ok(())
@@ -355,7 +390,12 @@ impl QuicE2EEndpoint {
     }
 
     /// Log event to qlog
-    fn log_event(&self, category: &str, event_type: &str, data: HashMap<String, serde_json::Value>) {
+    fn log_event(
+        &self,
+        category: &str,
+        event_type: &str,
+        data: HashMap<String, serde_json::Value>,
+    ) {
         let mut logger = self.logger.lock().unwrap();
         logger.log_event(category, event_type, data);
     }
@@ -365,7 +405,8 @@ impl QuicE2EEndpoint {
         let state = self.state.lock().unwrap();
         let duration = state.start_time.elapsed();
 
-        let throughput_mbps = (state.bytes_sent as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
+        let throughput_mbps =
+            (state.bytes_sent as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
         let avg_rtt = if !state.rtt_measurements.is_empty() {
             state.rtt_measurements.iter().sum::<Duration>() / state.rtt_measurements.len() as u32
         } else {
@@ -380,10 +421,15 @@ impl QuicE2EEndpoint {
         println!("Bytes received: {}", state.bytes_received);
         println!("Throughput: {:.2} Mbps", throughput_mbps);
         println!("Average RTT: {:?}", avg_rtt);
-        println!("Outstanding packets: {}", state.loss_recovery.outstanding_packets.len());
+        println!(
+            "Outstanding packets: {}",
+            state.loss_recovery.outstanding_packets.len()
+        );
 
         self.log_event("transport", "connection_closed", hashmap! {
-            "duration_ms".to_string() => serde_json::Value::Number(duration.as_millis().into()),
+            "duration_ms".to_string() => serde_json::Value::Number(
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).into()
+            ),
             "throughput_mbps".to_string() => serde_json::Value::Number(serde_json::Number::from_f64(throughput_mbps).unwrap()),
             "packets_sent".to_string() => serde_json::Value::Number(state.packets_sent.into()),
             "packets_received".to_string() => serde_json::Value::Number(state.packets_received.into()),
@@ -409,7 +455,12 @@ impl E2EEventLogger {
     }
 
     /// Log an event
-    pub fn log_event(&mut self, category: &str, event_type: &str, data: HashMap<String, serde_json::Value>) {
+    pub fn log_event(
+        &mut self,
+        category: &str,
+        event_type: &str,
+        data: HashMap<String, serde_json::Value>,
+    ) {
         let elapsed = SystemTime::now()
             .duration_since(self.start_time)
             .unwrap_or_default();
@@ -448,25 +499,19 @@ impl E2EEventLogger {
     }
 }
 
-/// Macro for creating hashmaps easily
-macro_rules! hashmap {
-    ($($key:expr => $val:expr),*) => {{
-        let mut map = HashMap::new();
-        $(map.insert($key, $val);)*
-        map
-    }}
-}
-
 /// Run complete E2E test scenario
 pub fn run_e2e_test(config: E2EConfig) -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting ATP QUIC E2E test");
-    println!("Server: {}, Client: {}", config.server_addr, config.client_addr);
+    println!(
+        "Server: {}, Client: {}",
+        config.server_addr, config.client_addr
+    );
 
     // Start server in background thread
     let server_config = config.clone();
     let server_handle = thread::spawn(move || {
-        let server = QuicE2EEndpoint::new(server_config).unwrap();
-        server.start_server()
+        let server = QuicE2EEndpoint::new(server_config).map_err(|err| err.to_string())?;
+        server.start_server().map_err(|err| err.to_string())
     });
 
     // Give server time to start
@@ -491,11 +536,9 @@ pub fn run_e2e_test(config: E2EConfig) -> Result<(), Box<dyn std::error::Error>>
         }
         (_, Ok(Err(e))) => {
             println!("Server error: {:?}", e);
-            Err(e)
+            Err(e.into())
         }
-        (_, Err(_)) => {
-            Err("Server thread panicked".into())
-        }
+        (_, Err(_)) => Err("Server thread panicked".into()),
     }
 }
 

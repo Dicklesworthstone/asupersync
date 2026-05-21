@@ -6,8 +6,6 @@
 //! leak unauthorized object graph membership.
 
 use super::ChunkingProfileError;
-use crate::atp::manifest::{ChunkBoundary, ChunkMetadata, ChunkStrategy};
-use crate::bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -380,7 +378,7 @@ impl ChunkCache {
 
     /// Remove chunk from cache.
     fn remove_chunk(&mut self, identity: &ChunkIdentity) {
-        if let Some(chunk) = self.chunks.remove(identity) {
+        if self.chunks.remove(identity).is_some() {
             self.current_size = self.current_size.saturating_sub(identity.size_bytes);
 
             // Update content hash index
@@ -555,6 +553,7 @@ fn hex_hash(hash: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytes::Bytes;
 
     #[test]
     fn test_rolling_hash() {

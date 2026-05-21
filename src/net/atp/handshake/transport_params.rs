@@ -451,6 +451,7 @@ impl Default for TransportParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytes::BufMut;
 
     #[test]
     fn test_transport_params_roundtrip() {

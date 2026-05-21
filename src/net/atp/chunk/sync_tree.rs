@@ -11,11 +11,11 @@
 //! - Similarity scoring for intelligent chunk grouping
 //! - Efficient handling of common code patterns (imports, headers, etc.)
 
-use crate::atp::manifest::{CdcParams, ChunkPlan, ChunkStrategy};
 use super::{
     ChunkBoundary, ChunkMetadata, ChunkingProfileError,
-    profiles::{utils, ChunkingProfile as ChunkingProfileTrait},
+    profiles::{ChunkingProfile as ChunkingProfileTrait, utils},
 };
+use crate::atp::manifest::{CdcParams, ChunkPlan, ChunkStrategy};
 
 /// Sync tree chunking profile implementation.
 pub struct SyncTreeProfile;
@@ -39,10 +39,11 @@ impl ChunkingProfileTrait for SyncTreeProfile {
         }
 
         let chunk_plan = Self::chunk_plan(data.len() as u64);
-        let cdc_params = chunk_plan.cdc_params.as_ref()
-            .ok_or_else(|| ChunkingProfileError::InvalidChunkParameters(
-                "sync tree profile requires CDC parameters".to_string()
-            ))?;
+        let cdc_params = chunk_plan.cdc_params.as_ref().ok_or_else(|| {
+            ChunkingProfileError::InvalidChunkParameters(
+                "sync tree profile requires CDC parameters".to_string(),
+            )
+        })?;
 
         // Use enhanced CDC that considers line structure for source code
         let positions = Self::find_enhanced_cdc_boundaries(
@@ -57,7 +58,7 @@ impl ChunkingProfileTrait for SyncTreeProfile {
             data,
             &positions,
             ChunkStrategy::ContentDefined,
-            |index, offset, _size, chunk_data| {
+            |_index, offset, _size, chunk_data| {
                 let boundary_hash = Self::compute_boundary_hash(chunk_data, offset);
                 let similarity_score = Self::compute_similarity_score(chunk_data);
 
@@ -78,28 +79,30 @@ impl ChunkingProfileTrait for SyncTreeProfile {
         for boundary in boundaries {
             if !matches!(boundary.strategy, ChunkStrategy::ContentDefined) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "sync tree profile requires content-defined chunking".to_string()
+                    "sync tree profile requires content-defined chunking".to_string(),
                 ));
             }
 
             if !matches!(boundary.metadata, Some(ChunkMetadata::SyncTree { .. })) {
                 return Err(ChunkingProfileError::InvalidChunkParameters(
-                    "sync tree profile requires SyncTree metadata".to_string()
+                    "sync tree profile requires SyncTree metadata".to_string(),
                 ));
             }
 
             if boundary.size_bytes < Self::min_chunking_threshold() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} below minimum threshold {}",
-                           boundary.size_bytes, Self::min_chunking_threshold())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} below minimum threshold {}",
+                    boundary.size_bytes,
+                    Self::min_chunking_threshold()
+                )));
             }
 
             if boundary.size_bytes > Self::max_chunk_size() {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("chunk size {} above maximum {}",
-                           boundary.size_bytes, Self::max_chunk_size())
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk size {} above maximum {}",
+                    boundary.size_bytes,
+                    Self::max_chunk_size()
+                )));
             }
         }
 
@@ -161,7 +164,7 @@ impl SyncTreeProfile {
     fn normalization_constant(avg_chunk_size: u64) -> u64 {
         // Use power of 2 based on average chunk size for efficient computation
         let bits = 64 - avg_chunk_size.leading_zeros();
-        1u64 << (bits.min(20).max(8))  // Clamp between 2^8 and 2^20
+        1u64 << (bits.min(20).max(8)) // Clamp between 2^8 and 2^20
     }
 
     /// Enhanced CDC that considers line structure for better source code chunking.
@@ -268,12 +271,12 @@ impl SyncTreeProfile {
 
         // Look for common import/include patterns
         let context_str = std::str::from_utf8(context).unwrap_or("");
-        context_str.contains("import ") ||
-        context_str.contains("include ") ||
-        context_str.contains("use ") ||
-        context_str.contains("from ") ||
-        context_str.contains("#include") ||
-        context_str.contains("require(")
+        context_str.contains("import ")
+            || context_str.contains("include ")
+            || context_str.contains("use ")
+            || context_str.contains("from ")
+            || context_str.contains("#include")
+            || context_str.contains("require(")
     }
 
     /// Compute CDC mask for boundary detection.
@@ -320,7 +323,8 @@ impl SyncTreeProfile {
         score += (line_count * 10).min(1000) as u32;
 
         // Whitespace ratio (indicates structure)
-        let whitespace_count = chunk_data.iter()
+        let whitespace_count = chunk_data
+            .iter()
             .filter(|&&b| b.is_ascii_whitespace())
             .count();
         let whitespace_ratio = whitespace_count as f64 / chunk_data.len() as f64;
@@ -340,7 +344,8 @@ impl SyncTreeProfile {
             return 0.0;
         }
 
-        let text_bytes = data.iter()
+        let text_bytes = data
+            .iter()
             .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
             .count();
 
@@ -351,19 +356,19 @@ impl SyncTreeProfile {
     fn has_code_patterns(data: &[u8]) -> bool {
         if let Ok(text) = std::str::from_utf8(data) {
             // Look for common programming constructs
-            text.contains("function ") ||
-            text.contains("class ") ||
-            text.contains("def ") ||
-            text.contains("fn ") ||
-            text.contains("impl ") ||
-            text.contains("struct ") ||
-            text.contains("enum ") ||
-            text.contains("interface ") ||
-            text.contains("module ") ||
-            text.contains("export ") ||
-            text.contains("const ") ||
-            text.contains("var ") ||
-            text.contains("let ")
+            text.contains("function ")
+                || text.contains("class ")
+                || text.contains("def ")
+                || text.contains("fn ")
+                || text.contains("impl ")
+                || text.contains("struct ")
+                || text.contains("enum ")
+                || text.contains("interface ")
+                || text.contains("module ")
+                || text.contains("export ")
+                || text.contains("const ")
+                || text.contains("var ")
+                || text.contains("let ")
         } else {
             false
         }
@@ -411,7 +416,10 @@ impl SyncTreeProfile {
         let mut unique_chunks = std::collections::HashSet::new();
 
         for boundary in boundaries {
-            if let Some(ChunkMetadata::SyncTree { similarity_score, .. }) = &boundary.metadata {
+            if let Some(ChunkMetadata::SyncTree {
+                similarity_score, ..
+            }) = &boundary.metadata
+            {
                 total_similarity += similarity_score;
                 unique_chunks.insert(boundary.content_hash);
             }
@@ -476,7 +484,10 @@ mod tests {
         let code_with_import = b"import numpy as np\nfrom collections import defaultdict\n";
         // This would be called at position of newline after import
         let pos = code_with_import.iter().position(|&b| b == b'\n').unwrap();
-        assert!(SyncTreeProfile::is_at_import_boundary(code_with_import, pos));
+        assert!(SyncTreeProfile::is_at_import_boundary(
+            code_with_import,
+            pos
+        ));
     }
 
     #[test]
@@ -487,11 +498,14 @@ mod tests {
         assert!(!boundaries.is_empty());
         for boundary in &boundaries {
             assert!(matches!(boundary.strategy, ChunkStrategy::ContentDefined));
-            assert!(matches!(boundary.metadata, Some(ChunkMetadata::SyncTree { .. })));
+            assert!(matches!(
+                boundary.metadata,
+                Some(ChunkMetadata::SyncTree { .. })
+            ));
         }
 
         // Validate coverage
-        let total_size: u64 = boundaries.iter().map(|b| b.size).sum();
+        let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
         assert_eq!(total_size, code_data.len() as u64);
     }
 
@@ -514,14 +528,14 @@ mod tests {
     fn boundary_validation_enforces_cdc() {
         let invalid_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 8192,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 8192,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::FixedSize, // Wrong for sync tree!
-            metadata: ChunkMetadata::SyncTree {
+            metadata: Some(ChunkMetadata::SyncTree {
                 boundary_hash: 12345,
                 similarity_score: 1000,
-            },
+            }),
         };
 
         let result = SyncTreeProfile::validate_boundaries(&[invalid_boundary]);
@@ -545,25 +559,25 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 1000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 1000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::ContentDefined,
-                metadata: ChunkMetadata::SyncTree {
+                metadata: Some(ChunkMetadata::SyncTree {
                     boundary_hash: 123,
                     similarity_score: 3000,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 1000,
-                size: 1000,
-                hash: [1; 32], // Same hash = potential duplication
+                byte_offset: 1000,
+                size_bytes: 1000,
+                content_hash: [1; 32], // Same hash = potential duplication
                 strategy: ChunkStrategy::ContentDefined,
-                metadata: ChunkMetadata::SyncTree {
+                metadata: Some(ChunkMetadata::SyncTree {
                     boundary_hash: 456,
                     similarity_score: 3500,
-                },
+                }),
             },
         ];
 
@@ -594,7 +608,7 @@ mod tests {
         let norm_large = SyncTreeProfile::normalization_constant(32768);
 
         assert!(norm_small < norm_large);
-        assert!(norm_small >= 256);  // At least 2^8
+        assert!(norm_small >= 256); // At least 2^8
         assert!(norm_large <= 1048576); // At most 2^20
     }
 }

@@ -628,36 +628,36 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 2,
-                offset: 8192,
-                size: 4096,
-                hash: [3; 32],
+                byte_offset: 8192,
+                size_bytes: 4096,
+                content_hash: [3; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 2,
                     early_consumption_safe: true,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 4096,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 4096,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 0,
                     early_consumption_safe: true,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 4096,
-                size: 4096,
-                hash: [2; 32],
+                byte_offset: 4096,
+                size_bytes: 4096,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 1,
                     early_consumption_safe: false,
-                },
+                }),
             },
         ];
 
@@ -671,36 +671,36 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 4096,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 4096,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 0,
                     early_consumption_safe: true,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 4096,
-                size: 4096,
-                hash: [2; 32],
+                byte_offset: 4096,
+                size_bytes: 4096,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 1,
                     early_consumption_safe: false,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 2,
-                offset: 8192,
-                size: 4096,
-                hash: [3; 32],
+                byte_offset: 8192,
+                size_bytes: 4096,
+                content_hash: [3; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 2,
                     early_consumption_safe: true,
-                },
+                }),
             },
         ];
 
@@ -712,14 +712,14 @@ mod tests {
     fn rolling_manifest_update_creation() {
         let boundary = ChunkBoundary {
             index: 5,
-            offset: 20480,
-            size: 4096,
-            hash: [5; 32],
+            byte_offset: 20480,
+            size_bytes: 4096,
+            content_hash: [5; 32],
             strategy: ChunkStrategy::FixedSize,
-            metadata: ChunkMetadata::Stream {
+            metadata: Some(ChunkMetadata::Stream {
                 sequence: 5,
                 early_consumption_safe: true,
-            },
+            }),
         };
 
         let update = StreamProfile::create_rolling_manifest_update(&boundary, Some(100_000));
@@ -739,36 +739,36 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 10_000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 10_000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 0,
                     early_consumption_safe: true,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 10_000,
-                size: 10_000,
-                hash: [2; 32],
+                byte_offset: 10_000,
+                size_bytes: 10_000,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 1,
                     early_consumption_safe: true,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 2,
-                offset: 20_000,
-                size: 10_000,
-                hash: [3; 32],
+                byte_offset: 20_000,
+                size_bytes: 10_000,
+                content_hash: [3; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 2,
                     early_consumption_safe: false,
-                },
+                }),
             },
         ];
 
@@ -786,25 +786,25 @@ mod tests {
         let valid_boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 4096,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 4096,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 0,
                     early_consumption_safe: true,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 4096,
-                size: 4096,
-                hash: [2; 32],
+                byte_offset: 4096,
+                size_bytes: 4096,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 1,
                     early_consumption_safe: false,
-                },
+                }),
             },
         ];
 
@@ -814,25 +814,25 @@ mod tests {
         let invalid_boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 4096,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 4096,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 5, // Higher sequence
                     early_consumption_safe: true,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 4096,
-                size: 4096,
-                hash: [2; 32],
+                byte_offset: 4096,
+                size_bytes: 4096,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::FixedSize,
-                metadata: ChunkMetadata::Stream {
+                metadata: Some(ChunkMetadata::Stream {
                     sequence: 1, // Lower sequence!
                     early_consumption_safe: false,
-                },
+                }),
             },
         ];
 
@@ -843,28 +843,28 @@ mod tests {
     fn incremental_processing_validation() {
         let valid_boundaries = vec![ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 100_000, // Reasonable size
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 100_000, // Reasonable size
+            content_hash: [1; 32],
             strategy: ChunkStrategy::FixedSize,
-            metadata: ChunkMetadata::Stream {
+            metadata: Some(ChunkMetadata::Stream {
                 sequence: 0,
                 early_consumption_safe: true,
-            },
+            }),
         }];
 
         assert!(StreamProfile::validate_incremental_processing(&valid_boundaries).is_ok());
 
         let invalid_boundaries = vec![ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 10_000_000, // Too large!
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 10_000_000, // Too large!
+            content_hash: [1; 32],
             strategy: ChunkStrategy::FixedSize,
-            metadata: ChunkMetadata::Stream {
+            metadata: Some(ChunkMetadata::Stream {
                 sequence: 0,
                 early_consumption_safe: true,
-            },
+            }),
         }];
 
         assert!(StreamProfile::validate_incremental_processing(&invalid_boundaries).is_err());
@@ -874,14 +874,14 @@ mod tests {
     fn boundary_validation_enforces_stream_requirements() {
         let invalid_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 100_000,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 100_000,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::ContentDefined, // Wrong strategy!
-            metadata: ChunkMetadata::Stream {
+            metadata: Some(ChunkMetadata::Stream {
                 sequence: 0,
                 early_consumption_safe: true,
-            },
+            }),
         };
 
         let result = StreamProfile::validate_boundaries(&[invalid_boundary]);

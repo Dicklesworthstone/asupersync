@@ -29,8 +29,8 @@
 use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
-use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::types::outcome::Outcome;
+use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -3254,7 +3254,7 @@ mod tests {
 
         assert_eq!(handle.state(), RemoteTaskState::Failed);
         let result = futures_lite::future::block_on(handle.join(&cx));
-        assert!(matches!(result, Err(RemoteError::NodeDown(_))));
+        assert!(matches!(result, Outcome::Err(RemoteError::NodeDown(_))));
         assert_eq!(handle.state(), RemoteTaskState::Failed);
         assert!(handle.is_finished());
     }
@@ -3292,7 +3292,8 @@ mod tests {
         let result = futures_lite::future::block_on(handle.join(&cx));
         assert!(matches!(
             result,
-            Err(RemoteError::Cancelled(reason)) if reason.kind == crate::types::CancelKind::Timeout
+            Outcome::Err(RemoteError::Cancelled(reason))
+                if reason.kind == crate::types::CancelKind::Timeout
         ));
         assert_eq!(handle.state(), RemoteTaskState::Cancelled);
     }
@@ -3427,7 +3428,8 @@ mod tests {
         };
         assert!(matches!(
             outcome,
-            Ok(RemoteOutcome::Cancelled(reason)) if reason == CancelReason::user("closed remotely")
+            Outcome::Ok(RemoteOutcome::Cancelled(reason))
+                if reason == CancelReason::user("closed remotely")
         ));
         assert!(runtime.observe_task_state(remote_task_id).is_none());
 
@@ -3502,7 +3504,8 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            Ok(RemoteOutcome::Cancelled(reason)) if reason == CancelReason::user("closed remotely")
+            Outcome::Ok(RemoteOutcome::Cancelled(reason))
+                if reason == CancelReason::user("closed remotely")
         ));
         assert_eq!(handle.state(), RemoteTaskState::Cancelled);
         assert!(runtime.observe_task_state(remote_task_id).is_none());
@@ -4083,7 +4086,10 @@ mod tests {
         assert_eq!(handle.state(), RemoteTaskState::Completed);
 
         let second = futures_lite::future::block_on(handle.join(&cx));
-        assert!(matches!(second, Err(RemoteError::PolledAfterCompletion)));
+        assert!(matches!(
+            second,
+            Outcome::Err(RemoteError::PolledAfterCompletion)
+        ));
     }
 
     #[test]
@@ -4111,7 +4117,7 @@ mod tests {
         let result = futures_lite::future::block_on(handle.join(&cx));
         assert!(matches!(
             result,
-            Err(RemoteError::Cancelled(reason)) if reason == expected
+            Outcome::Err(RemoteError::Cancelled(reason)) if reason == expected
         ));
         assert_eq!(handle.state(), RemoteTaskState::Running);
         assert!(matches!(handle.try_join(), Ok(None)));

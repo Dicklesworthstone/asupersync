@@ -355,18 +355,18 @@ impl PlatformCapabilities {
         _io_capabilities: &IoCapabilities,
     ) -> PerformanceHints {
         let recommended_prealloc_size = match filesystem.fs_type.as_str() {
-            "ext4" | "xfs" => 64 * 1024 * 1024, // 64MB
-            "btrfs" => 32 * 1024 * 1024,        // 32MB
-            "ntfs" => 16 * 1024 * 1024,         // 16MB
-            "apfs" => 32 * 1024 * 1024,         // 32MB
-            _ => 16 * 1024 * 1024,              // 16MB default
+            FS_TYPE_EXT4 | FS_TYPE_EXT3 | FS_TYPE_EXT2 | FS_TYPE_XFS => 64 * 1024 * 1024, // 64MB
+            FS_TYPE_BTRFS | FS_TYPE_ZFS => 32 * 1024 * 1024,                              // 32MB
+            FS_TYPE_NTFS => 16 * 1024 * 1024,                                             // 16MB
+            FS_TYPE_APFS => 32 * 1024 * 1024,                                             // 32MB
+            _ => 16 * 1024 * 1024, // 16MB default
         };
 
         let recommended_write_batch = filesystem.block_size as u64 * 32;
 
         let prefers_sequential_access = match filesystem.fs_type.as_str() {
-            "ext4" | "xfs" | "ntfs" => true,
-            "btrfs" | "zfs" => false, // COW filesystems
+            FS_TYPE_EXT4 | FS_TYPE_EXT3 | FS_TYPE_EXT2 | FS_TYPE_XFS | FS_TYPE_NTFS => true,
+            FS_TYPE_BTRFS | FS_TYPE_ZFS | FS_TYPE_APFS => false, // COW filesystems
             _ => true,
         };
 
@@ -555,10 +555,10 @@ impl PlatformCapabilities {
             OsType::Linux => {
                 // Typical Linux limits
                 match filesystem.fs_type.as_str() {
-                    "ext4" => 128 * 1024 * 1024,  // 128MB
-                    "xfs" => 1024 * 1024 * 1024,  // 1GB
-                    "btrfs" => 256 * 1024 * 1024, // 256MB
-                    _ => 64 * 1024 * 1024,        // 64MB default
+                    FS_TYPE_EXT4 | FS_TYPE_EXT3 | FS_TYPE_EXT2 => 128 * 1024 * 1024, // 128MB
+                    FS_TYPE_XFS | FS_TYPE_ZFS => 1024 * 1024 * 1024,                 // 1GB
+                    FS_TYPE_BTRFS => 256 * 1024 * 1024,                              // 256MB
+                    _ => 64 * 1024 * 1024,                                           // 64MB default
                 }
             }
             OsType::MacOS => 32 * 1024 * 1024,    // 32MB
@@ -570,19 +570,19 @@ impl PlatformCapabilities {
 
     fn detect_max_file_size(fs_type: &str) -> Option<u64> {
         match fs_type {
-            "ext4" => Some(16 * 1024 * 1024 * 1024 * 1024), // 16TB
-            "xfs" => Some(8 * 1024 * 1024 * 1024 * 1024 * 1024), // 8EB theoretical
-            "btrfs" => Some(16 * 1024 * 1024 * 1024 * 1024), // 16TB practical
-            "ntfs" => Some(256 * 1024 * 1024 * 1024 * 1024), // 256TB
-            "apfs" => Some(8 * 1024 * 1024 * 1024 * 1024 * 1024), // 8EB
-            _ => None,                                      // Unknown
+            FS_TYPE_EXT4 | FS_TYPE_EXT3 | FS_TYPE_EXT2 | FS_TYPE_BTRFS => {
+                Some(16 * 1024 * 1024 * 1024 * 1024)
+            }
+            FS_TYPE_XFS | FS_TYPE_ZFS | FS_TYPE_APFS => Some(8 * 1024 * 1024 * 1024 * 1024 * 1024),
+            FS_TYPE_NTFS => Some(256 * 1024 * 1024 * 1024 * 1024), // 256TB
+            _ => None,                                             // Unknown
         }
     }
 
     fn detect_latency_profile(fs_type: &str) -> LatencyProfile {
         match fs_type {
-            "tmpfs" | "ramfs" => LatencyProfile::LowLatency,
-            "nfs" | "cifs" | "smb" => LatencyProfile::NetworkLatency,
+            FS_TYPE_TMPFS | "ramfs" => LatencyProfile::LowLatency,
+            FS_TYPE_NFS | "cifs" | "smb" => LatencyProfile::NetworkLatency,
             _ => LatencyProfile::Unknown, // Would need runtime detection
         }
     }

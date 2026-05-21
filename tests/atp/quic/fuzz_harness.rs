@@ -3,9 +3,7 @@
 //! Comprehensive fuzzing for QUIC frame codecs, packet parsing,
 //! and protocol state machine transitions.
 
-use asupersync::net::atp::protocol::quic_frames::QuicFrameType;
-use asupersync::bytes::{Bytes, BytesMut, Buf, BufMut};
-use std::collections::HashMap;
+use asupersync::bytes::{Buf, Bytes, BytesCursor};
 use std::time::Instant;
 
 /// Fuzz target for QUIC frame parsing
@@ -67,7 +65,7 @@ impl QuicFrameFuzzer {
 
     /// Fuzz a single QUIC frame input
     pub fn fuzz_frame(&mut self, input: &[u8]) -> FuzzResult {
-        let start_time = Instant::now();
+        let _start_time = Instant::now();
         self.stats.total_runs += 1;
 
         // Update size statistics
@@ -102,12 +100,17 @@ impl QuicFrameFuzzer {
     }
 
     /// Fuzz QUIC frame parsing with input
-    fn fuzz_frame_parsing(&mut self, input: &[u8]) -> Result<FuzzResult, Box<dyn std::error::Error>> {
-        let mut buf = Bytes::copy_from_slice(input);
+    fn fuzz_frame_parsing(
+        &mut self,
+        input: &[u8],
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+        let mut buf = Bytes::copy_from_slice(input).reader();
 
         // Try to parse frame type
         if buf.remaining() < 1 {
-            return Ok(FuzzResult::ParseError("insufficient data for frame type".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient data for frame type".to_string(),
+            ));
         }
 
         let frame_type = buf.get_u8();
@@ -138,28 +141,42 @@ impl QuicFrameFuzzer {
             0x1c => self.fuzz_connection_close_frame(&mut buf),
             0x1d => self.fuzz_connection_close_frame(&mut buf),
             0x1e => self.fuzz_handshake_done_frame(&mut buf),
-            _ => Ok(FuzzResult::ParseError(format!("unknown frame type: 0x{:02x}", frame_type))),
+            _ => Ok(FuzzResult::ParseError(format!(
+                "unknown frame type: 0x{:02x}",
+                frame_type
+            ))),
         }
     }
 
     /// Fuzz PADDING frame
-    fn fuzz_padding_frame(&mut self, _buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_padding_frame(
+        &mut self,
+        _buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // PADDING frames are just 0x00 bytes, nothing to parse
         Ok(FuzzResult::Success)
     }
 
     /// Fuzz PING frame
-    fn fuzz_ping_frame(&mut self, _buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_ping_frame(
+        &mut self,
+        _buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // PING frames have no payload
         Ok(FuzzResult::Success)
     }
 
     /// Fuzz ACK frame
-    fn fuzz_ack_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_ack_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // ACK frame: largest_acked + ack_delay + ack_range_count + ranges
 
         if buf.remaining() < 3 {
-            return Ok(FuzzResult::ParseError("insufficient data for ACK frame".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient data for ACK frame".to_string(),
+            ));
         }
 
         // Parse varint fields (simplified)
@@ -173,7 +190,9 @@ impl QuicFrameFuzzer {
         // Parse additional ranges
         for _ in 0..range_count {
             if buf.remaining() < 2 {
-                return Ok(FuzzResult::ParseError("insufficient data for ACK range".to_string()));
+                return Ok(FuzzResult::ParseError(
+                    "insufficient data for ACK range".to_string(),
+                ));
             }
             let _gap = self.parse_varint_fuzz(buf)?;
             let _range_length = self.parse_varint_fuzz(buf)?;
@@ -183,7 +202,10 @@ impl QuicFrameFuzzer {
     }
 
     /// Fuzz ACK+ECN frame
-    fn fuzz_ack_ecn_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_ack_ecn_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // First parse as regular ACK
         let result = self.fuzz_ack_frame(buf)?;
         if !matches!(result, FuzzResult::Success) {
@@ -193,7 +215,9 @@ impl QuicFrameFuzzer {
         // Then parse ECN counts
         for _ in 0..3 {
             if buf.remaining() == 0 {
-                return Ok(FuzzResult::ParseError("insufficient data for ECN counts".to_string()));
+                return Ok(FuzzResult::ParseError(
+                    "insufficient data for ECN counts".to_string(),
+                ));
             }
             let _ecn_count = self.parse_varint_fuzz(buf)?;
         }
@@ -202,11 +226,16 @@ impl QuicFrameFuzzer {
     }
 
     /// Fuzz RESET_STREAM frame
-    fn fuzz_reset_stream_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_reset_stream_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // RESET_STREAM: stream_id + app_error_code + final_size
         for _ in 0..3 {
             if buf.remaining() == 0 {
-                return Ok(FuzzResult::ParseError("insufficient data for RESET_STREAM".to_string()));
+                return Ok(FuzzResult::ParseError(
+                    "insufficient data for RESET_STREAM".to_string(),
+                ));
             }
             let _field = self.parse_varint_fuzz(buf)?;
         }
@@ -215,11 +244,16 @@ impl QuicFrameFuzzer {
     }
 
     /// Fuzz STOP_SENDING frame
-    fn fuzz_stop_sending_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_stop_sending_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // STOP_SENDING: stream_id + app_error_code
         for _ in 0..2 {
             if buf.remaining() == 0 {
-                return Ok(FuzzResult::ParseError("insufficient data for STOP_SENDING".to_string()));
+                return Ok(FuzzResult::ParseError(
+                    "insufficient data for STOP_SENDING".to_string(),
+                ));
             }
             let _field = self.parse_varint_fuzz(buf)?;
         }
@@ -228,17 +262,24 @@ impl QuicFrameFuzzer {
     }
 
     /// Fuzz CRYPTO frame
-    fn fuzz_crypto_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_crypto_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // CRYPTO: offset + length + data
         if buf.remaining() < 2 {
-            return Ok(FuzzResult::ParseError("insufficient data for CRYPTO".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient data for CRYPTO".to_string(),
+            ));
         }
 
         let _offset = self.parse_varint_fuzz(buf)?;
         let length = self.parse_varint_fuzz(buf)?;
 
         if buf.remaining() < length as usize {
-            return Ok(FuzzResult::ParseError("insufficient crypto data".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient crypto data".to_string(),
+            ));
         }
 
         // Skip crypto data
@@ -248,16 +289,23 @@ impl QuicFrameFuzzer {
     }
 
     /// Fuzz NEW_TOKEN frame
-    fn fuzz_new_token_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_new_token_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // NEW_TOKEN: token_length + token
         if buf.remaining() < 1 {
-            return Ok(FuzzResult::ParseError("insufficient data for NEW_TOKEN".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient data for NEW_TOKEN".to_string(),
+            ));
         }
 
         let length = self.parse_varint_fuzz(buf)?;
 
         if buf.remaining() < length as usize {
-            return Ok(FuzzResult::ParseError("insufficient token data".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient token data".to_string(),
+            ));
         }
 
         buf.advance(length as usize);
@@ -265,7 +313,11 @@ impl QuicFrameFuzzer {
     }
 
     /// Fuzz STREAM frame
-    fn fuzz_stream_frame(&mut self, buf: &mut Bytes, frame_type: u8) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_stream_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+        frame_type: u8,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // STREAM frame: [stream_id] [offset] [length] data
         // Flags in frame_type determine presence of offset/length/fin
 
@@ -284,7 +336,9 @@ impl QuicFrameFuzzer {
         };
 
         if buf.remaining() < data_length as usize {
-            return Ok(FuzzResult::ParseError("insufficient stream data".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient stream data".to_string(),
+            ));
         }
 
         buf.advance(data_length as usize);
@@ -292,44 +346,67 @@ impl QuicFrameFuzzer {
     }
 
     // Additional frame type fuzzing methods (simplified implementations)
-    fn fuzz_max_data_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_max_data_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _max_data = self.parse_varint_fuzz(buf)?;
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_max_stream_data_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_max_stream_data_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _stream_id = self.parse_varint_fuzz(buf)?;
         let _max_data = self.parse_varint_fuzz(buf)?;
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_max_streams_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_max_streams_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _max_streams = self.parse_varint_fuzz(buf)?;
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_data_blocked_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_data_blocked_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _offset = self.parse_varint_fuzz(buf)?;
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_stream_data_blocked_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_stream_data_blocked_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _stream_id = self.parse_varint_fuzz(buf)?;
         let _offset = self.parse_varint_fuzz(buf)?;
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_streams_blocked_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_streams_blocked_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _limit = self.parse_varint_fuzz(buf)?;
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_new_connection_id_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_new_connection_id_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _sequence = self.parse_varint_fuzz(buf)?;
         let _retire_prior_to = self.parse_varint_fuzz(buf)?;
 
         if buf.remaining() < 1 {
-            return Ok(FuzzResult::ParseError("insufficient data for connection ID length".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient data for connection ID length".to_string(),
+            ));
         }
 
         let length = buf.get_u8();
@@ -338,54 +415,77 @@ impl QuicFrameFuzzer {
         }
 
         if buf.remaining() < length as usize + 16 {
-            return Ok(FuzzResult::ParseError("insufficient data for connection ID and token".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient data for connection ID and token".to_string(),
+            ));
         }
 
         buf.advance(length as usize + 16); // connection_id + stateless_reset_token
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_retire_connection_id_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_retire_connection_id_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _sequence = self.parse_varint_fuzz(buf)?;
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_path_challenge_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_path_challenge_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         if buf.remaining() < 8 {
-            return Ok(FuzzResult::ParseError("insufficient data for path challenge".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient data for path challenge".to_string(),
+            ));
         }
         buf.advance(8);
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_path_response_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_path_response_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         if buf.remaining() < 8 {
-            return Ok(FuzzResult::ParseError("insufficient data for path response".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient data for path response".to_string(),
+            ));
         }
         buf.advance(8);
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_connection_close_frame(&mut self, buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_connection_close_frame(
+        &mut self,
+        buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         let _error_code = self.parse_varint_fuzz(buf)?;
         let _frame_type = self.parse_varint_fuzz(buf)?; // only for QUIC close
         let reason_length = self.parse_varint_fuzz(buf)?;
 
         if buf.remaining() < reason_length as usize {
-            return Ok(FuzzResult::ParseError("insufficient reason phrase data".to_string()));
+            return Ok(FuzzResult::ParseError(
+                "insufficient reason phrase data".to_string(),
+            ));
         }
 
         buf.advance(reason_length as usize);
         Ok(FuzzResult::Success)
     }
 
-    fn fuzz_handshake_done_frame(&mut self, _buf: &mut Bytes) -> Result<FuzzResult, Box<dyn std::error::Error>> {
+    fn fuzz_handshake_done_frame(
+        &mut self,
+        _buf: &mut BytesCursor,
+    ) -> Result<FuzzResult, Box<dyn std::error::Error>> {
         // HANDSHAKE_DONE has no payload
         Ok(FuzzResult::Success)
     }
 
     /// Parse varint with fuzzing protection
-    fn parse_varint_fuzz(&self, buf: &mut Bytes) -> Result<u64, Box<dyn std::error::Error>> {
+    fn parse_varint_fuzz(&self, buf: &mut BytesCursor) -> Result<u64, Box<dyn std::error::Error>> {
         if buf.remaining() < 1 {
             return Err("insufficient data for varint".into());
         }
@@ -456,11 +556,11 @@ fn test_quic_frame_fuzz_basic() {
 
     // Basic fuzz test cases
     let test_cases = vec![
-        vec![0x00],                           // PADDING
-        vec![0x01],                           // PING
-        vec![0x02, 0x05, 0x00, 0x00, 0x05],  // ACK frame
+        vec![0x00],                                     // PADDING
+        vec![0x01],                                     // PING
+        vec![0x02, 0x05, 0x00, 0x00, 0x05],             // ACK frame
         vec![0x06, 0x00, 0x04, b'h', b'e', b'l', b'o'], // CRYPTO
-        vec![0x08, 0x00, b'd', b'a', b't', b'a'],        // STREAM
+        vec![0x08, 0x00, b'd', b'a', b't', b'a'],       // STREAM
     ];
 
     for (i, test_case) in test_cases.iter().enumerate() {
@@ -491,7 +591,11 @@ fn test_quic_frame_fuzz_random() {
         }
     }
 
-    println!("Fuzz testing completed: {}/{} successful parses", successes, random_cases.len());
+    println!(
+        "Fuzz testing completed: {}/{} successful parses",
+        successes,
+        random_cases.len()
+    );
     println!("\n{}", fuzzer.stats_report());
 }
 

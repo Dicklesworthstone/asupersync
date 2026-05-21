@@ -994,9 +994,17 @@ mod tests {
     use super::*;
     use crate::atp::actor::{TransferActorId, TransferActorTopology, TransferRegionId};
     use crate::atp::transfer::{PeerCapabilities, TransferManifestRef};
-    use crate::cx::scope;
-    use crate::lab::LabRuntime;
+    use crate::cx::Cx;
+    use crate::types::{Budget, RegionId, TaskId};
     use std::collections::BTreeSet;
+
+    fn test_cx() -> Cx {
+        Cx::new(
+            RegionId::testing_default(),
+            TaskId::testing_default(),
+            Budget::INFINITE,
+        )
+    }
 
     fn registry_actor(transfer_id: TransferId) -> TransferActorHandle {
         Arc::new(ContendedMutex::new(
@@ -1135,10 +1143,11 @@ mod tests {
         assert_eq!(handle.progress_percent(), 100.0);
     }
 
-    #[tokio::test]
-    async fn test_atp_session_lifecycle() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_atp_session_lifecycle() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let config = AtpConfig::default();
 
             // Open session
@@ -1148,15 +1157,14 @@ mod tests {
 
             // Close session
             session.close(cx).await.unwrap();
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_path_diagnostics() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_path_diagnostics() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [1u8; 32];
 
@@ -1164,15 +1172,14 @@ mod tests {
                 Outcome::Err(AtpError::Path(PathError::NoAvailablePaths)) => {}
                 other => panic!("path diagnosis must fail closed without path evidence: {other:?}"),
             }
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_object_verification() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_object_verification() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let object_id = ObjectId::content(crate::atp::object::ContentId::new([1u8; 32]));
 
@@ -1188,29 +1195,27 @@ mod tests {
             assert_eq!(result.object_id, object_id);
             assert!(result.verified);
             assert!(!result.signature_valid);
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_transfer_cancellation() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_transfer_cancellation() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let transfer_id = TransferId::derive([1; 32], [2; 32], [3; 32], [4; 32]);
 
             // Cancel transfer (should not error even if transfer doesn't exist)
             session.cancel_transfer(cx, transfer_id).await.unwrap();
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_streaming_with_manifest_integration() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_streaming_with_manifest_integration() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let data = b"Hello, ATP streaming world!".repeat(100); // ~2800 bytes
             let remote_peer = [2u8; 32];
@@ -1231,20 +1236,18 @@ mod tests {
             let manifest = stream_handle.manifest().unwrap().clone();
             let consumer = session
                 .create_stream_consumer(manifest, ConsumptionPolicy::VerifiedOnly)
-                .await
                 .unwrap();
 
             // Consumer should be ready to consume verified data
             assert!(consumer.data_available());
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_stream_epochs_retrieval() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_stream_epochs_retrieval() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let object_id = ObjectId::content(ContentId::new([1u8; 32]));
 
@@ -1252,15 +1255,14 @@ mod tests {
                 Outcome::Err(AtpError::Manifest(ManifestError::ObjectNotFound)) => {}
                 other => panic!("stream epochs must fail closed without manifest store: {other:?}"),
             }
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_write_buffer_ergonomic_api() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_write_buffer_ergonomic_api() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [3u8; 32];
             let data = b"This is the write(really_big_buffer) test!".repeat(1000);
@@ -1274,15 +1276,14 @@ mod tests {
             // Verify the proof represents the complete transfer
             assert_eq!(proof.total_bytes, data.len() as u64);
             assert!(proof.total_bytes > 0); // Should have transferred bytes
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_create_writer_with_progress() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_create_writer_with_progress() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [4u8; 32];
 
@@ -1293,11 +1294,9 @@ mod tests {
 
             let mut writer = session
                 .create_writer(remote_peer, Some(writer_config))
-                .await
                 .unwrap();
 
             // Set up progress tracking
-            let mut progress_updates = 0;
             writer.set_progress_callback(|_progress| {
                 // In real test, we'd capture these
             });
@@ -1311,19 +1310,18 @@ mod tests {
 
             let proof = writer.finalize(cx).await.unwrap();
             assert_eq!(proof.total_bytes, (chunk1.len() + chunk2.len()) as u64);
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_sink_api() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_sink_api() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [5u8; 32];
 
-            let mut sink = session.create_sink(remote_peer, None).await.unwrap();
+            let mut sink = session.create_sink(remote_peer, None).unwrap();
 
             // Send data through sink
             sink.send(cx, b"Sink data 1").await.unwrap();
@@ -1331,15 +1329,14 @@ mod tests {
 
             let proof = sink.close(cx).await.unwrap();
             assert!(proof.total_bytes >= 22); // "Sink data 1Sink data 2"
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_resume_functionality() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_resume_functionality() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [6u8; 32];
 
@@ -1349,7 +1346,6 @@ mod tests {
 
             let mut writer = session
                 .create_writer(remote_peer, Some(config.clone()))
-                .await
                 .unwrap();
             writer.write_all(cx, b"Partial transfer").await.unwrap();
 
@@ -1364,21 +1360,19 @@ mod tests {
             // Resume with new writer
             let mut resumed_writer = session
                 .resume_writer(resume_token, remote_peer, Some(config))
-                .await
                 .unwrap();
             resumed_writer.write_all(cx, b" completed").await.unwrap();
 
             let proof = resumed_writer.finalize(cx).await.unwrap();
             assert!(proof.total_bytes >= 26); // "Partial transfer completed"
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_stream_writer_unknown_size() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_stream_writer_unknown_size() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [7u8; 32];
 
@@ -1395,15 +1389,14 @@ mod tests {
 
             let proof = writer.finalize(cx).await.unwrap();
             assert!(proof.total_bytes > 0);
-        })
-        .await
-        .unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_object_graph_sending() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_object_graph_sending() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [8u8; 32];
 
@@ -1418,17 +1411,16 @@ mod tests {
                     "object graph send must fail closed until graph store is wired: {other:?}"
                 ),
             }
-        })
-        .await
-        .unwrap();
+        });
     }
 
     /// Test that ensures no mock/fake values are returned in real APIs.
     /// This test specifically checks for the issues mentioned in the bead.
-    #[tokio::test]
-    async fn test_no_mock_values_in_real_implementation() {
-        let lab = LabRuntime::new();
-        scope!(lab.cx(), |cx, scope| async move {
+    #[test]
+    fn test_no_mock_values_in_real_implementation() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [1u8; 32]; // Non-zero peer
             let object_id = ObjectId::content(ContentId::new([1u8; 32])); // Non-zero object
@@ -1446,7 +1438,7 @@ mod tests {
                 .unwrap();
             assert_ne!(
                 handle.transfer_id.as_bytes(),
-                &[0u8; 32],
+                [0u8; 32],
                 "Transfer ID should not be all zeros"
             );
 
@@ -1506,8 +1498,6 @@ mod tests {
                 Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled)) => {}
                 other => panic!("object graph send must not fabricate graph data: {other:?}"),
             }
-        })
-        .await
-        .unwrap();
+        });
     }
 }

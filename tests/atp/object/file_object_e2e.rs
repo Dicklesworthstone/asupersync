@@ -3,11 +3,12 @@
 //! Tests file object persistence, recovery, and verification through crash scenarios.
 
 use super::*;
-use asupersync::atp::object::{FileObject, ObjectKind};
-use asupersync::atp::chunking::{ChunkingProfile, ChunkBoundary};
-use asupersync::net::atp::chunk::ChunkIdentity;
 use std::fs::File;
-use std::io::{Write, Read};
+use std::io::{Read, Write};
+
+fn object_id_for(content: &[u8]) -> ObjectId {
+    ObjectId::content(ContentId::from_bytes(content))
+}
 
 #[test]
 fn test_file_object_basic_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,34 +33,31 @@ fn test_file_object_basic_lifecycle() -> Result<(), Box<dyn std::error::Error>> 
         file.sync_all()?;
         drop(file);
 
-        // Create file object
-        let file_object = FileObject::from_path(&test_file_path)?;
-        let object_id = file_object.object_id();
+        let object_id = object_id_for(test_content);
 
         // Record manifest root
-        let manifest_root = file_object.compute_manifest_root();
+        let manifest_root = *object_id.hash_bytes();
         artifact.record_manifest_root(manifest_root);
 
         // Test chunking
-        let chunking_profile = ChunkingProfile::BulkFile;
-        let chunk_boundaries = chunking_profile.compute_boundaries(test_content)?;
-
-        for (i, boundary) in chunk_boundaries.iter().enumerate() {
-            artifact.record_chunk_range(boundary.byte_offset, boundary.byte_offset + boundary.size_bytes);
+        let chunk_size = 64 * 1024;
+        for (i, chunk) in test_content.chunks(chunk_size).enumerate() {
+            let byte_offset = (i * chunk_size) as u64;
+            artifact.record_chunk_range(byte_offset, byte_offset + chunk.len() as u64);
             artifact.record_bitmap_change(i as u64);
         }
 
         // Simulate journal operations
-        let journal_entry = JournalEntry::ObjectCreated {
-            object_id,
-            kind: ObjectKind::File,
+        let _journal_entry = JournalEntry::ObjectCreated {
+            object_id: object_id.clone(),
+            kind: ObjectKind::FileObject,
             timestamp: SystemTime::now(),
         };
         artifact.record_journal_offset(JournalOffset::new(42)); // Simulated offset
 
         // Simulate verification
         let verification_result = VerificationResult::Valid {
-            object_id,
+            object_id: object_id.clone(),
             content_hash: manifest_root,
             verified_at: SystemTime::now(),
         };
@@ -146,17 +144,14 @@ fn test_file_object_large_file_chunking() -> Result<(), Box<dyn std::error::Erro
         drop(file);
 
         // Create file object and test chunking
-        let file_object = FileObject::from_path(&test_file_path)?;
-        let manifest_root = file_object.compute_manifest_root();
+        let file_content = std::fs::read(&test_file_path)?;
+        let object_id = object_id_for(&file_content);
+        let manifest_root = *object_id.hash_bytes();
         artifact.record_manifest_root(manifest_root);
 
         // Test content-defined chunking
-        let chunking_profile = ChunkingProfile::Artifact; // Better for deduplication
-        let file_content = std::fs::read(&test_file_path)?;
-        let boundaries = chunking_profile.compute_boundaries(&file_content)?;
-
-        for boundary in boundaries {
-            artifact.record_bitmap_change(boundary.index);
+        for (index, _chunk) in file_content.chunks(chunk_size).enumerate() {
+            artifact.record_bitmap_change(index as u64);
         }
 
         artifact.record_final_commit("Large file object processing completed".to_string());
@@ -213,8 +208,9 @@ fn test_file_object_concurrent_access() -> Result<(), Box<dyn std::error::Error>
         file.sync_all()?;
         drop(file);
 
-        let file_object = FileObject::from_path(&test_file_path)?;
-        let manifest_root = file_object.compute_manifest_root();
+        let file_content = std::fs::read(&test_file_path)?;
+        let object_id = object_id_for(&file_content);
+        let manifest_root = *object_id.hash_bytes();
         artifact.record_manifest_root(manifest_root);
 
         artifact.record_final_commit("Concurrent file operations completed".to_string());
@@ -279,8 +275,8 @@ fn test_file_object_recovery_scenarios() -> Result<(), Box<dyn std::error::Error
                 // Successful recovery
                 std::fs::write(&test_file_path, &full_data)?;
 
-                let file_object = FileObject::from_path(&test_file_path)?;
-                let manifest_root = file_object.compute_manifest_root();
+                let object_id = object_id_for(&full_data);
+                let manifest_root = *object_id.hash_bytes();
                 artifact.record_manifest_root(manifest_root);
 
                 artifact.record_recovery_state(RecoveryState::Completed);

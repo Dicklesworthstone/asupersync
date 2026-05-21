@@ -447,6 +447,7 @@ impl std::error::Error for ReplayPointerError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::object::ContentId;
 
     #[test]
     fn replay_pointer_basic_operations() {

@@ -27,7 +27,7 @@ pub use streams::{
     FlowControlError, FlowCredit, QuicStream, QuicStreamError, StreamDirection, StreamId,
     StreamRole, StreamTable, StreamTableError,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 pub use tls::DeterministicQuicCryptoProvider;
 pub use tls::{
     CryptoLevel, HeaderProtectionMask, KeyUpdateEvent, PacketProtectionRequest,

@@ -686,16 +686,16 @@ mod tests {
         let has_sparse = boundaries.iter().any(|b| {
             matches!(
                 b.metadata,
-                ChunkMetadata::SparseImage {
+                Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: true,
                     ..
-                }
+                })
             )
         });
         assert!(has_sparse);
 
         // Validate total coverage
-        let total_size: u64 = boundaries.iter().map(|b| b.size).sum();
+        let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
         assert_eq!(total_size, data.len() as u64);
     }
 
@@ -704,29 +704,29 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 100000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 100000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::SparseImage {
+                metadata: Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: false,
                     hole_metadata: None,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 100000,
-                size: 100000,
-                hash: [2; 32],
+                byte_offset: 100000,
+                size_bytes: 100000,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::SparseImage {
+                metadata: Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: true,
                     hole_metadata: Some(SparseHoleMetadata {
                         hole_size: 100000,
                         hole_type: "zero-filled".to_string(),
                         attributes: BTreeMap::new(),
                     }),
-                },
+                }),
             },
         ];
 
@@ -740,29 +740,29 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 50000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 50000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::SparseImage {
+                metadata: Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: true, // Sparse chunk
                     hole_metadata: Some(SparseHoleMetadata {
                         hole_size: 50000,
                         hole_type: "zero-filled".to_string(),
                         attributes: BTreeMap::new(),
                     }),
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 50000,
-                size: 50000,
-                hash: [2; 32],
+                byte_offset: 50000,
+                size_bytes: 50000,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::SparseImage {
+                metadata: Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: false, // Data chunk
                     hole_metadata: None,
-                },
+                }),
             },
         ];
 
@@ -777,29 +777,29 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 50000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 50000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::SparseImage {
+                metadata: Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: false,
                     hole_metadata: None,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 50000,
-                size: 100000,
-                hash: [2; 32],
+                byte_offset: 50000,
+                size_bytes: 100000,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::SparseImage {
+                metadata: Some(ChunkMetadata::SparseImage {
                     is_sparse_hole: true,
                     hole_metadata: Some(SparseHoleMetadata {
                         hole_size: 100000,
                         hole_type: "zero-filled".to_string(),
                         attributes: BTreeMap::new(),
                     }),
-                },
+                }),
             },
         ];
 
@@ -817,14 +817,14 @@ mod tests {
     fn boundary_validation_enforces_sparse_requirements() {
         let invalid_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 100000,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 100000,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::FixedSize, // Wrong strategy
-            metadata: ChunkMetadata::SparseImage {
+            metadata: Some(ChunkMetadata::SparseImage {
                 is_sparse_hole: false,
                 hole_metadata: None,
-            },
+            }),
         };
 
         let result = SparseImageProfile::validate_boundaries(&[invalid_boundary]);
@@ -833,14 +833,14 @@ mod tests {
         // Sparse hole without metadata
         let invalid_hole_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 100000,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 100000,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::ObjectSpecific,
-            metadata: ChunkMetadata::SparseImage {
+            metadata: Some(ChunkMetadata::SparseImage {
                 is_sparse_hole: true, // Marked as hole
                 hole_metadata: None,  // But no metadata!
-            },
+            }),
         };
 
         let result = SparseImageProfile::validate_boundaries(&[invalid_hole_boundary]);

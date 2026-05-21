@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// ATP failure artifact bundle
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtpFailureArtifact {
     /// Unique artifact ID
     pub artifact_id: String,
@@ -36,7 +36,7 @@ pub struct AtpFailureArtifact {
 }
 
 /// Failure context information
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureContext {
     /// Type of failure
     pub failure_type: String,
@@ -53,7 +53,7 @@ pub struct FailureContext {
 }
 
 /// Information about chunk ranges
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkRangeInfo {
     /// Starting offset
     pub start_offset: u64,
@@ -68,7 +68,7 @@ pub struct ChunkRangeInfo {
 }
 
 /// Journal offset tracking
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalOffsets {
     /// Last written offset
     pub last_written: u64,
@@ -81,7 +81,7 @@ pub struct JournalOffsets {
 }
 
 /// Bitmap change record
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BitmapChange {
     /// Chunk index
     pub chunk_index: u64,
@@ -94,7 +94,7 @@ pub struct BitmapChange {
 }
 
 /// Verifier decision record
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifierDecision {
     /// Verification stage
     pub stage: String,
@@ -109,7 +109,7 @@ pub struct VerifierDecision {
 }
 
 /// Final commit record
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitRecord {
     /// Commit ID
     pub commit_id: String,
@@ -124,7 +124,7 @@ pub struct CommitRecord {
 }
 
 /// Object information
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectInfo {
     /// Object ID
     pub object_id: String,
@@ -137,7 +137,7 @@ pub struct ObjectInfo {
 }
 
 /// System state at failure
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemState {
     /// Available disk space
     pub disk_space_bytes: u64,
@@ -154,7 +154,7 @@ pub struct SystemState {
 }
 
 /// Reproducible test case
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReproducibleTestCase {
     /// Test function name
     pub test_function: String,
@@ -285,13 +285,15 @@ impl AtpForensics {
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "No active capture session"
+                "No active capture session",
             ))
         }
     }
 
     /// Load artifact from file
-    pub fn load_artifact<P: AsRef<Path>>(path: P) -> Result<AtpFailureArtifact, Box<dyn std::error::Error>> {
+    pub fn load_artifact<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<AtpFailureArtifact, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let artifact: AtpFailureArtifact = serde_json::from_str(&content)?;
         Ok(artifact)
@@ -329,7 +331,8 @@ pub struct AtpMinimizer {
 impl AtpMinimizer {
     /// Create new minimizer
     pub fn new(artifact: AtpFailureArtifact) -> Self {
-        let minimized_parameters = artifact.test_case
+        let minimized_parameters = artifact
+            .test_case
             .as_ref()
             .map(|tc| tc.parameters.clone())
             .unwrap_or_default();
@@ -374,8 +377,8 @@ impl AtpMinimizer {
 // Helper functions
 
 fn generate_artifact_id() -> String {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     let timestamp = current_timestamp();
     let mut hasher = DefaultHasher::new();
@@ -410,10 +413,10 @@ fn capture_system_state() -> SystemState {
     use std::process;
 
     SystemState {
-        disk_space_bytes: 0, // Would query actual disk space
+        disk_space_bytes: 0,   // Would query actual disk space
         memory_usage_bytes: 0, // Would query actual memory usage
-        cpu_load: 0.0, // Would query actual CPU load
-        open_fds: 0, // Would query actual open FDs
+        cpu_load: 0.0,         // Would query actual CPU load
+        open_fds: 0,           // Would query actual open FDs
         env_vars: std::env::vars().collect(),
         pid: process::id(),
     }
@@ -485,7 +488,9 @@ mod tests {
             test_case: Some(ReproducibleTestCase {
                 test_function: "test_file_transfer".to_string(),
                 parameters: [("seed".to_string(), serde_json::Value::Number(42.into()))]
-                    .iter().cloned().collect(),
+                    .iter()
+                    .cloned()
+                    .collect(),
                 random_seed: 42,
                 lab_config: None,
                 reproduction_steps: Vec::new(),

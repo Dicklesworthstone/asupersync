@@ -363,13 +363,11 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::object::ObjectId;
-    use crate::atp::path::AtpPath;
 
     #[test]
     fn resource_scope_object_coverage() {
         let object_id = ObjectId::test(1);
-        let scope = ResourceScope::Object(object_id);
+        let scope = ResourceScope::Object(object_id.clone());
 
         assert!(scope.covers_object(&object_id));
         assert!(!scope.covers_object(&ObjectId::test(2)));

@@ -443,11 +443,16 @@ impl RepairReceiver {
 mod tests {
     use super::*;
     use crate::atp::manifest::*;
+    use crate::atp::object::{ContentId, ObjectId};
     use std::collections::BTreeMap;
     use std::time::Duration;
 
+    fn test_object_id(content: &[u8]) -> ObjectId {
+        ObjectId::content(ContentId::from_bytes(content))
+    }
+
     fn create_test_repair_group() -> (RepairGroupId, RepairGroup) {
-        let object_id = ObjectId::content_addressed(&[1, 2, 3, 4]);
+        let object_id = test_object_id(&[1, 2, 3, 4]);
         let group_id = RepairGroupId::new(&object_id, 0, 1024);
 
         let repair_group = RepairGroup {
@@ -492,7 +497,7 @@ mod tests {
                 session_binding: true,
             },
             capability_policy: None,
-            manifest_root: MerkleRoot::from_hash([0u8; 32]),
+            manifest_root: MerkleRoot::new([0u8; 32]),
         };
 
         (group_id, repair_group)
@@ -518,7 +523,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Should fail for unknown group
-        let unknown_group = RepairGroupId::new(&ObjectId::content_addressed(&[5, 6, 7, 8]), 1, 512);
+        let unknown_group = RepairGroupId::new(&test_object_id(&[5, 6, 7, 8]), 1, 512);
         let result = receiver.start_session(
             unknown_group,
             Duration::from_secs(3600),
@@ -544,7 +549,7 @@ mod tests {
 
         // Valid symbol
         let valid_symbol = RaptorQSymbol {
-            source_block: 0,
+            index: 0,
             esi: 500,
             size_bytes: 1024,
             content_hash: [0u8; 32],
@@ -585,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_replay_detection() {
-        let (group_id, repair_group) = create_test_repair_group();
+        let (group_id, _repair_group) = create_test_repair_group();
 
         let mut session = RepairSessionContext::new(
             group_id.clone(),

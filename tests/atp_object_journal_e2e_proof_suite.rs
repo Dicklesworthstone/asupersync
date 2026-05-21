@@ -4,23 +4,20 @@
 //! This suite validates that object graph operations, disk persistence,
 //! journal recovery, and verification work correctly through crash scenarios.
 
-use asupersync::atp::object::{ObjectGraph, ObjectId, ObjectKind, MetadataPolicy};
-use asupersync::atp::manifest::{Manifest, ManifestVersion, HashAlgorithm, MerkleRoot};
-use asupersync::atp::journal::{Journal, JournalEntry, JournalOffset, RecoveryState};
-use asupersync::atp::verifier::{VerificationResult, VerifierPipeline};
-use asupersync::atp::disk::{SparseWriter, AtomicCommit, FsyncPolicy};
-use asupersync::types::outcome::Outcome;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use asupersync::atp::object::{MetadataPolicy, ObjectId, ObjectKind};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 mod atp {
-    pub mod object;
     pub mod journal;
+    pub mod object;
 }
 
-use atp::object::{ObjectGraphTestHarness, ObjectTestConfig, CrashPoint, TestArtifact};
-use atp::journal::{JournalTestHarness, JournalTestConfig, JournalCrashPoint, JournalTestArtifact};
+use atp::journal::{FsyncPolicy, JournalCrashPoint, JournalTestConfig, JournalTestHarness};
+use atp::object::{
+    CrashPoint, JournalEntry, JournalOffset, ObjectGraphTestHarness, ObjectIdTestExt,
+    ObjectTestConfig, RecoveryState, TestArtifact, VerificationResult,
+};
 
 /// Complete ATP E2E proof suite configuration
 #[derive(Debug, Clone)]
@@ -50,7 +47,7 @@ impl Default for AtpE2eProofConfig {
             },
             temp_dir,
             enable_full_crash_matrix: true,
-            verification_policy: MetadataPolicy::Strict,
+            verification_policy: MetadataPolicy::full_preservation(),
             disk_fsync_policy: FsyncPolicy::EveryWrite,
             test_timeout: Duration::from_secs(300), // 5 minutes
             generate_replay_artifacts: true,
@@ -126,31 +123,36 @@ impl AtpE2eProofSuite {
 
         // Create object and journal entries
         let object_id = ObjectId::new();
-        let journal_entry = JournalEntry::ObjectCreated {
-            object_id,
-            kind: ObjectKind::File,
+        let _journal_entry = JournalEntry::ObjectCreated {
+            object_id: object_id.clone(),
+            kind: ObjectKind::FileObject,
             timestamp: SystemTime::now(),
         };
 
         // Test with different crash points
-        for crash_point in &[CrashPoint::JournalAppend, CrashPoint::ChunkWrite, CrashPoint::FinalRename] {
-            let mut artifact = TestArtifact::new("file_journal_test".to_string(), object_id);
+        for crash_point in &[
+            CrashPoint::JournalAppend,
+            CrashPoint::ChunkWrite,
+            CrashPoint::FinalRename,
+        ] {
+            let mut artifact =
+                TestArtifact::new("file_journal_test".to_string(), object_id.clone());
             artifact = artifact.with_crash_point(*crash_point);
 
             // Simulate crash during operation
             match crash_point {
                 CrashPoint::JournalAppend => {
                     // Journal write fails - should quarantine
-                    artifact.record_recovery_state(Some(RecoveryState::Quarantined));
+                    artifact.record_recovery_state(RecoveryState::Quarantined);
                 }
                 CrashPoint::ChunkWrite => {
                     // Partial chunk write - should resume
-                    artifact.record_recovery_state(Some(RecoveryState::Resuming));
+                    artifact.record_recovery_state(RecoveryState::Resuming);
                     artifact.record_chunk_range(0, test_content.len() as u64 / 2);
                 }
                 CrashPoint::FinalRename => {
                     // Final step fails - should retry
-                    artifact.record_recovery_state(Some(RecoveryState::RetryRequired));
+                    artifact.record_recovery_state(RecoveryState::RetryRequired);
                 }
                 _ => {}
             }
@@ -190,20 +192,22 @@ impl AtpE2eProofSuite {
         }
 
         // Verify recovery handles partial state
-        artifact.record_recovery_state(Some(RecoveryState::PartialCompletion));
+        artifact.record_recovery_state(RecoveryState::PartialCompletion);
 
         self.test_results.push(test_result);
         Ok(())
     }
 
-    fn test_stream_object_verifier_integration(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn test_stream_object_verifier_integration(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         println!("Testing Stream Object with Verifier Pipeline...");
 
         let test_result = E2eTestResult::new("stream_object_verifier_integration");
 
         // Test streaming data with verification at each chunk
         let object_id = ObjectId::new();
-        let mut artifact = TestArtifact::new("stream_verifier_test".to_string(), object_id);
+        let mut artifact = TestArtifact::new("stream_verifier_test".to_string(), object_id.clone());
 
         // Simulate streaming chunks with verification
         for chunk_id in 0..20 {
@@ -211,7 +215,7 @@ impl AtpE2eProofSuite {
 
             // Each chunk gets verified
             let verification_result = VerificationResult::Valid {
-                object_id,
+                object_id: object_id.clone(),
                 content_hash: [chunk_id as u8; 32], // Simulated hash
                 verified_at: SystemTime::now(),
             };
@@ -220,7 +224,7 @@ impl AtpE2eProofSuite {
             // Test crash during verification
             if chunk_id == 10 {
                 artifact = artifact.with_crash_point(CrashPoint::VerificationPipeline);
-                artifact.record_recovery_state(Some(RecoveryState::VerificationFailed));
+                artifact.record_recovery_state(RecoveryState::VerificationFailed);
             }
         }
 
@@ -244,7 +248,7 @@ impl AtpE2eProofSuite {
 
         // Test crash during atomic commit
         artifact = artifact.with_crash_point(CrashPoint::AtomicCommit);
-        artifact.record_recovery_state(Some(RecoveryState::CommitFailed));
+        artifact.record_recovery_state(RecoveryState::CommitFailed);
 
         // Verify no partial exposure
         self.verify_no_unverified_exposure(&artifact)?;
@@ -259,7 +263,8 @@ impl AtpE2eProofSuite {
         let test_result = E2eTestResult::new("artifact_bundle_complete_pipeline");
 
         let object_id = ObjectId::new();
-        let mut artifact = TestArtifact::new("artifact_complete_test".to_string(), object_id);
+        let mut artifact =
+            TestArtifact::new("artifact_complete_test".to_string(), object_id.clone());
 
         // Simulate complete pipeline: object -> chunks -> journal -> verification -> commit
 
@@ -274,7 +279,7 @@ impl AtpE2eProofSuite {
 
         // 3. Verification
         let verification_result = VerificationResult::Valid {
-            object_id,
+            object_id: object_id.clone(),
             content_hash: [42; 32], // Test hash
             verified_at: SystemTime::now(),
         };
@@ -295,13 +300,13 @@ impl AtpE2eProofSuite {
 
             match crash_point {
                 CrashPoint::VerificationPipeline => {
-                    crash_artifact.record_recovery_state(Some(RecoveryState::VerificationFailed));
+                    crash_artifact.record_recovery_state(RecoveryState::VerificationFailed);
                 }
                 CrashPoint::FinalCommit => {
-                    crash_artifact.record_recovery_state(Some(RecoveryState::CommitFailed));
+                    crash_artifact.record_recovery_state(RecoveryState::CommitFailed);
                 }
                 _ => {
-                    crash_artifact.record_recovery_state(Some(RecoveryState::Resuming));
+                    crash_artifact.record_recovery_state(RecoveryState::Resuming);
                 }
             }
         }
@@ -326,7 +331,7 @@ impl AtpE2eProofSuite {
 
         // Test complex recovery scenarios
         artifact = artifact.with_crash_point(CrashPoint::BatchCommit);
-        artifact.record_recovery_state(Some(RecoveryState::PartialCompletion));
+        artifact.record_recovery_state(RecoveryState::PartialCompletion);
 
         // Verify recovery consistency
         self.verify_recovery_consistency(&artifact)?;
@@ -344,14 +349,19 @@ impl AtpE2eProofSuite {
         let object_crash_points = CrashPoint::all();
         let journal_crash_points = JournalCrashPoint::all();
 
-        for (obj_crash, journal_crash) in object_crash_points.iter().zip(journal_crash_points.iter()) {
+        for (obj_crash, journal_crash) in
+            object_crash_points.iter().zip(journal_crash_points.iter())
+        {
             let object_id = ObjectId::new();
             let mut artifact = TestArtifact::new("cross_component_test".to_string(), object_id);
 
             artifact = artifact.with_crash_point(*obj_crash);
             // Note: In a real implementation, we'd also set journal crash point
 
-            println!("Testing crash combination: {:?} + {:?}", obj_crash, journal_crash);
+            println!(
+                "Testing crash combination: {:?} + {:?}",
+                obj_crash, journal_crash
+            );
 
             // Verify system handles compound failures correctly
             self.verify_compound_failure_handling(&artifact)?;
@@ -362,7 +372,10 @@ impl AtpE2eProofSuite {
     }
 
     fn verify_no_unverified_exposure(&self, artifact: &TestArtifact) -> Result<(), String> {
-        println!("Verifying no unverified file exposure for: {}", artifact.test_name);
+        println!(
+            "Verifying no unverified file exposure for: {}",
+            artifact.test_name
+        );
 
         // Check that no final files exist without proper verification
         if artifact.final_commit_record.is_some() {
@@ -402,7 +415,10 @@ impl AtpE2eProofSuite {
     }
 
     fn verify_compound_failure_handling(&self, artifact: &TestArtifact) -> Result<(), String> {
-        println!("Verifying compound failure handling for: {}", artifact.test_name);
+        println!(
+            "Verifying compound failure handling for: {}",
+            artifact.test_name
+        );
 
         // Check that compound failures (multiple crash points) are handled correctly
         // In a real system, this would check that cascading failures don't corrupt state
@@ -428,7 +444,11 @@ impl AtpE2eProofSuite {
             total_tests: self.test_results.len(),
             passed_tests: self.test_results.iter().filter(|t| t.passed).count(),
             failed_tests: self.test_results.iter().filter(|t| !t.passed).count(),
-            total_crash_scenarios: self.test_results.iter().map(|t| t.crash_scenarios_tested).sum(),
+            total_crash_scenarios: self
+                .test_results
+                .iter()
+                .map(|t| t.crash_scenarios_tested)
+                .sum(),
             timestamp: SystemTime::now(),
         };
 
@@ -447,7 +467,10 @@ impl AtpE2eProofSuite {
         self.object_harness.generate_lab_compatible_artifacts()?;
         self.journal_harness.generate_lab_artifacts()?;
 
-        println!("Comprehensive report generated in: {}", report_dir.display());
+        println!(
+            "Comprehensive report generated in: {}",
+            report_dir.display()
+        );
         Ok(())
     }
 }
@@ -505,10 +528,17 @@ fn test_atp_e2e_proof_suite_complete() -> Result<(), Box<dyn std::error::Error>>
     let total_tests = suite.test_results.len();
     let passed_tests = suite.test_results.iter().filter(|t| t.passed).count();
 
-    println!("ATP E2E Proof Suite Results: {}/{} tests passed", passed_tests, total_tests);
+    println!(
+        "ATP E2E Proof Suite Results: {}/{} tests passed",
+        passed_tests, total_tests
+    );
 
     if passed_tests != total_tests {
-        return Err(format!("Some E2E proof tests failed: {}/{} passed", passed_tests, total_tests).into());
+        return Err(format!(
+            "Some E2E proof tests failed: {}/{} passed",
+            passed_tests, total_tests
+        )
+        .into());
     }
 
     Ok(())

@@ -167,7 +167,7 @@ fn test_chunk_cache_operations() {
         capability_scope: "test-transfer".to_string(),
         verification: ChunkVerification {
             algorithm: "sha256".to_string(),
-            proof_strength: asupersync::atp::manifest::ProofStrength::Basic,
+            proof_strength: ProofStrength::Basic,
         },
     };
 
@@ -191,7 +191,7 @@ fn test_chunk_cache_operations() {
         capability_scope: "test-transfer".to_string(),
         verification: ChunkVerification {
             algorithm: "sha256".to_string(),
-            proof_strength: asupersync::atp::manifest::ProofStrength::Basic,
+            proof_strength: ProofStrength::Basic,
         },
     };
 
@@ -216,7 +216,7 @@ fn test_corrupted_cached_chunks() {
         capability_scope: "test-transfer".to_string(),
         verification: ChunkVerification {
             algorithm: "sha256".to_string(),
-            proof_strength: asupersync::atp::manifest::ProofStrength::Enhanced,
+            proof_strength: ProofStrength::Enhanced,
         },
     };
 
@@ -237,7 +237,7 @@ fn test_corrupted_cached_chunks() {
 
         let mut hasher = DefaultHasher::new();
         data.hash(&mut hasher);
-        let computed_hash = hasher.finish();
+        let _computed_hash = hasher.finish();
 
         // Should match original or be detected as corruption
         assert!(data == original_data || data != corrupted_data);
@@ -262,7 +262,7 @@ fn test_chunk_reuse_manager_cross_transfer() {
         capability_scope: transfer1_id.to_string(),
         verification: ChunkVerification {
             algorithm: "sha256".to_string(),
-            proof_strength: asupersync::atp::manifest::ProofStrength::Basic,
+            proof_strength: ProofStrength::Basic,
         },
     };
 
@@ -272,7 +272,7 @@ fn test_chunk_reuse_manager_cross_transfer() {
     // Check if chunk can be reused for second transfer
     let reuse_criteria = ChunkReuseCriteria {
         max_age_seconds: 3600,
-        min_proof_strength: asupersync::atp::manifest::ProofStrength::Basic,
+        min_proof_strength: ProofStrength::Basic,
         require_same_algorithm: true,
     };
 
@@ -307,7 +307,7 @@ fn test_chunk_reuse_security_isolation() {
         capability_scope: secure_transfer.to_string(),
         verification: ChunkVerification {
             algorithm: "sha256".to_string(),
-            proof_strength: asupersync::atp::manifest::ProofStrength::Cryptographic,
+            proof_strength: ProofStrength::Cryptographic,
         },
     };
 
@@ -317,7 +317,7 @@ fn test_chunk_reuse_security_isolation() {
     // Public transfer should NOT be able to reuse secure chunks
     let reuse_criteria = ChunkReuseCriteria {
         max_age_seconds: 3600,
-        min_proof_strength: asupersync::atp::manifest::ProofStrength::Basic,
+        min_proof_strength: ProofStrength::Basic,
         require_same_algorithm: true,
     };
 
@@ -325,15 +325,15 @@ fn test_chunk_reuse_security_isolation() {
     assert_eq!(reusable.len(), 0, "Secure chunks should not be reusable by public transfers");
 
     // Same capability scope should allow reuse
-    let another_secure = "another-secure-transfer";
+    let _another_secure = "another-secure-transfer";
     // Simulate same capability scope through matching prefix
-    let same_scope_identity = ChunkIdentity {
+    let _same_scope_identity = ChunkIdentity {
         content_hash: chunk_hash,
         size_bytes: 1024,
         capability_scope: secure_transfer.to_string(), // Same scope
         verification: ChunkVerification {
             algorithm: "sha256".to_string(),
-            proof_strength: asupersync::atp::manifest::ProofStrength::Cryptographic,
+            proof_strength: ProofStrength::Cryptographic,
         },
     };
 
@@ -428,11 +428,7 @@ fn test_chunk_profile_integration() {
     let test_data = b"integration test data for chunking profile".repeat(50);
 
     // Test different chunking profiles
-    let profiles = [
-        ChunkingProfile::BulkFile,
-        ChunkingProfile::Artifact,
-        ChunkingProfile::Stream,
-    ];
+    let profiles = ChunkingProfile::ALL;
 
     for profile in profiles {
         let chunk_plan = profile.recommended_chunk_plan(test_data.len() as u64);
@@ -451,6 +447,10 @@ fn test_chunk_profile_integration() {
                 assert!(cdc_params.window_size > 0);
                 assert!(cdc_params.average_chunk_size > 0);
             }
+            ChunkStrategy::ObjectSpecific => {
+                // Object-specific profiles still produce a concrete chunk plan.
+                assert!(chunk_plan.target_chunk_size > 0);
+            }
         }
 
         // Verify profile properties
@@ -459,6 +459,21 @@ fn test_chunk_profile_integration() {
                 assert!(!profile.supports_streaming());
                 assert!(!profile.optimizes_for_deduplication());
                 assert!(profile.provides_reproducible_chunking());
+            }
+            ChunkingProfile::SyncTree => {
+                assert!(profile.supports_incremental_chunking());
+                assert!(profile.optimizes_for_deduplication());
+                assert!(!profile.supports_streaming());
+            }
+            ChunkingProfile::Media => {
+                assert!(profile.supports_incremental_chunking());
+                assert!(profile.supports_streaming());
+                assert!(!profile.optimizes_for_deduplication());
+            }
+            ChunkingProfile::SparseImage => {
+                assert!(profile.supports_sparse_data());
+                assert!(!profile.supports_streaming());
+                assert!(!profile.optimizes_for_deduplication());
             }
             ChunkingProfile::Artifact => {
                 assert!(profile.supports_incremental_chunking());

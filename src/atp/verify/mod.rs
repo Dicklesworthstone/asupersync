@@ -853,9 +853,10 @@ impl fmt::Display for VerificationStatus {
 mod tests {
     use super::*;
     use crate::atp::object::{ContentId, Object};
+    use crate::atp::proof::serde_types::SerializableContentId;
     use crate::atp::proof::{
-        AtpProofBundle, AtpProofBundleBuilder, AtpProofBundleMetadata, ChunkBitmap,
-        PeerIdentityInfo, ProofStrength, TransferJournal, TransferPathSummary,
+        AtpProofBundle, AtpProofBundleBuilder, ChunkBitmap, PeerIdentityInfo, ProofStrength,
+        TransferJournal, TransferPathSummary,
     };
     use crate::atp::verifier::{VerificationEvidence, VerificationStage};
 
@@ -887,7 +888,7 @@ mod tests {
                 path_switches: 0,
             })
             .journal(TransferJournal {
-                digest: ContentId::from_bytes(b"journal"),
+                digest: SerializableContentId::from(&ContentId::from_bytes(b"journal")),
                 format_version: 1,
                 entry_count: 10,
                 size_bytes: 1024,

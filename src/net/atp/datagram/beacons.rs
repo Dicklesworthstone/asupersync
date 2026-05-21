@@ -560,7 +560,7 @@ mod tests {
         stats.record_response(Duration::from_millis(60));
 
         assert_eq!(stats.response_count, 2);
-        assert_eq!(stats.avg_rtt(), Some(Duration::from_millis(55)));
+        assert_eq!(stats.avg_rtt, Some(Duration::from_millis(55)));
         assert_eq!(stats.loss_rate, 0.0); // 2 responses / 2 sent = 0% loss
     }
 

@@ -549,7 +549,11 @@ impl AtpRecoveryManager {
         self.cancel_pto_timer_with_reason(space, None);
     }
 
-    fn cancel_pto_timer_with_reason(&mut self, space: PacketNumberSpace, reason: Option<CancelReason>) {
+    fn cancel_pto_timer_with_reason(
+        &mut self,
+        space: PacketNumberSpace,
+        reason: Option<CancelReason>,
+    ) {
         let timer_id = format!("pto_{}_{:?}", self.connection_id, space);
         if let Some(timer) = self.timers.get_mut(&timer_id) {
             timer.is_active = false;
@@ -877,7 +881,7 @@ mod tests {
     #[test]
     fn recovery_manager_lifecycle() {
         let mut manager = AtpRecoveryManager::new("test_conn".to_string());
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
 
         // Begin handshake
         let result = manager.begin_handshake(&cx);
@@ -987,10 +991,7 @@ mod tests {
                 )),
                 _ => None,
             });
-        assert!(
-            loss_event.is_some(),
-            "expected loss event in recovery log"
-        );
+        assert!(loss_event.is_some(), "expected loss event in recovery log");
         let Some(loss_event) = loss_event else {
             return;
         };
@@ -1069,10 +1070,7 @@ mod tests {
             .recovery_log()
             .iter()
             .find(|event| matches!(event.event_type, RecoveryEventType::AckReceived { .. }));
-        assert!(
-            ack_event.is_some(),
-            "expected ack event in recovery log"
-        );
+        assert!(ack_event.is_some(), "expected ack event in recovery log");
         let Some(ack_event) = ack_event else {
             return;
         };

@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use asupersync::atp::verifier::VerificationStage;
+
 /// Fault injection point in ATP operations
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum FaultPoint {
@@ -75,7 +77,7 @@ pub enum CorruptionType {
 pub struct FaultConfig {
     pub point: FaultPoint,
     pub fault_type: FaultType,
-    pub probability: f64, // 0.0 to 1.0
+    pub probability: f64,             // 0.0 to 1.0
     pub trigger_count: Option<usize>, // Trigger after N occurrences
 }
 
@@ -145,7 +147,11 @@ impl FaultInjector {
     }
 
     /// Execute operation with potential fault injection
-    pub fn with_injection<T, F>(&self, point: FaultPoint, operation: F) -> Result<T, FaultInjectionError>
+    pub fn with_injection<T, F>(
+        &self,
+        point: FaultPoint,
+        operation: F,
+    ) -> Result<T, FaultInjectionError>
     where
         F: FnOnce() -> Result<T, Box<dyn std::error::Error>>,
     {
@@ -159,15 +165,15 @@ impl FaultInjector {
     }
 
     /// Inject verifier stage crash
-    pub fn inject_verifier_stage_crash(&self, stage: crate::atp::verifier::VerificationStage) {
+    pub fn inject_verifier_stage_crash(&self, stage: VerificationStage) {
         let point = match stage {
-            crate::atp::verifier::VerificationStage::ChunkHash => FaultPoint::VerifyChunkHash,
-            crate::atp::verifier::VerificationStage::ObjectContent => FaultPoint::VerifyObjectContent,
-            crate::atp::verifier::VerificationStage::GraphMerkle => FaultPoint::VerifyGraphMerkle,
-            crate::atp::verifier::VerificationStage::Manifest => FaultPoint::VerifyManifest,
-            crate::atp::verifier::VerificationStage::Commit => FaultPoint::VerifyCommit,
-            crate::atp::verifier::VerificationStage::ProofBundle => FaultPoint::VerifyProofBundle,
-            crate::atp::verifier::VerificationStage::Finalizer => FaultPoint::VerifyFinalizer,
+            VerificationStage::ChunkHash => FaultPoint::VerifyChunkHash,
+            VerificationStage::ObjectContent => FaultPoint::VerifyObjectContent,
+            VerificationStage::GraphMerkle => FaultPoint::VerifyGraphMerkle,
+            VerificationStage::Manifest => FaultPoint::VerifyManifest,
+            VerificationStage::Commit => FaultPoint::VerifyCommit,
+            VerificationStage::ProofBundle => FaultPoint::VerifyProofBundle,
+            VerificationStage::Finalizer => FaultPoint::VerifyFinalizer,
             _ => return, // Unknown stage
         };
 

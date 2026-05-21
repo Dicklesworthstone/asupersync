@@ -335,7 +335,7 @@ mod tests {
 
         let mut event = AtpEvent {
             timestamp: "2026-05-20T12:00:00Z".to_string(),
-            level: crate::observability::level::Level::Info,
+            level: super::super::Level::Info,
             subsystem: super::super::AtpSubsystem::Security,
             event_type: "key_generated".to_string(),
             data: json!({
@@ -373,7 +373,7 @@ mod tests {
 
         let mut event = AtpEvent {
             timestamp: "2026-05-20T12:00:00Z".to_string(),
-            level: crate::observability::level::Level::Info,
+            level: super::super::Level::Info,
             subsystem: super::super::AtpSubsystem::Disk,
             event_type: "file_read_started".to_string(),
             data: json!({

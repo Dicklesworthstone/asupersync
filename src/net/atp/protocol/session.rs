@@ -52,6 +52,16 @@ impl PeerId {
         Self(hasher.finalize().into())
     }
 
+    /// Deterministically derive a peer id for unit tests.
+    #[cfg(test)]
+    #[must_use]
+    pub fn test(id: u64) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ATP-PEER-ID-TEST-V1\x00");
+        hasher.update(id.to_be_bytes());
+        Self(hasher.finalize().into())
+    }
+
     /// Borrow the canonical peer-id bytes.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {

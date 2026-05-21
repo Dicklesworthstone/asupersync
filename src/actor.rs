@@ -1970,7 +1970,10 @@ mod tests {
         );
         let second_poll = send_fut.as_mut().poll(&mut task_cx);
         assert!(
-            matches!(second_poll, Poll::Ready(Err(SendError::Disconnected(2)))),
+            matches!(
+                second_poll,
+                Poll::Ready(Outcome::Err(SendError::Disconnected(2)))
+            ),
             "pending sender must fail fast once stop seals the mailbox"
         );
 
@@ -2452,7 +2455,7 @@ mod tests {
             futures_lite::future::block_on(futures_lite::future::poll_once(&mut delay));
 
         match first_poll {
-            Some(Err(JoinError::Cancelled(reason))) => {
+            Some(Outcome::Err(JoinError::Cancelled(reason))) => {
                 assert_eq!(reason.kind, crate::types::CancelKind::User);
             }
             other => panic!("expected immediate cancellation, got {other:?}"),

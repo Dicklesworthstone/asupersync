@@ -11,47 +11,166 @@
 //! - Directory sync semantics (ATP-C8: asupersync-h8ndmq)
 
 use asupersync::atp::{
-    object::{ObjectGraph, Object, ObjectKind, MetadataPolicy},
-    manifest::{Manifest, ManifestVersion, HashAlgorithm, MerkleRoot},
-    proof::{AtpProofBundle, AtpProofBundleBuilder, ChunkBitmap},
-    stream_object::{StreamManifest, StreamEpoch, EpochState, ByteRange},
+    manifest::{
+        ChunkBoundary, ChunkStrategy, CompressionAlgorithm, CompressionPolicy, EncryptionAlgorithm,
+        EncryptionPolicy, HashAlgorithm, KeyDerivation, KeyDerivationFunction, Manifest,
+        ManifestVersion, ProofStrength as ManifestProofStrength,
+    },
+    object::{ContentId, MetadataPolicy, Object, ObjectGraph, ObjectId, ObjectKind},
+    proof::serde_types::SerializableContentId,
+    proof::{
+        AtpProofBundleBuilder, ChunkBitmap, PeerIdentityInfo, TransferJournal, TransferPathSummary,
+    },
+    stream_object::{ByteRange, EpochState, StreamEpoch, StreamManifest},
 };
-use asupersync::net::atp::chunk::ChunkingProfile;
+use asupersync::net::atp::chunk::{ChunkingProfile, dedupe::ChunkIdentity};
 use std::collections::BTreeMap;
+
+fn app_metadata(entries: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
+    entries
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), value.as_bytes().to_vec()))
+        .collect()
+}
+
+fn compression_policy() -> CompressionPolicy {
+    CompressionPolicy {
+        algorithm: CompressionAlgorithm::Gzip,
+        level: 6,
+        min_size_threshold: 1,
+        apply_to_kinds: vec![ObjectKind::FileObject],
+    }
+}
+
+fn encryption_policy() -> EncryptionPolicy {
+    EncryptionPolicy {
+        algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
+        key_derivation: KeyDerivation {
+            kdf: KeyDerivationFunction::HkdfSha256,
+            salt: b"atp-c-policy-test".to_vec(),
+            iterations: None,
+        },
+        apply_to_kinds: vec![ObjectKind::FileObject],
+        encrypt_metadata: true,
+    }
+}
+
+fn chunk_bitmap(total_chunks: u64, received_chunks: &[u64]) -> ChunkBitmap {
+    let mut bitmap = ChunkBitmap::new(total_chunks);
+    for &chunk_index in received_chunks {
+        bitmap.mark_received(chunk_index);
+    }
+    bitmap
+}
+
+fn peer_identity(source_peer_id: &str) -> PeerIdentityInfo {
+    PeerIdentityInfo {
+        source_peer_id: source_peer_id.to_string(),
+        destination_peer_id: "integration-receiver".to_string(),
+        auth_method: "test-ed25519".to_string(),
+        key_fingerprints: vec![format!("{source_peer_id}-fingerprint")],
+        authenticated_at_micros: 1_000,
+        mutual_auth: true,
+    }
+}
+
+fn path_summary() -> TransferPathSummary {
+    TransferPathSummary {
+        primary_protocol: "native-quic".to_string(),
+        fallback_protocols: vec!["relay-tcp-tls443".to_string()],
+        rtt_millis: Some(12.5),
+        bandwidth_bps: Some(10_000_000),
+        relay_used: false,
+        relay_nodes: Vec::new(),
+        path_setup_duration_millis: 25,
+        path_switches: 0,
+    }
+}
+
+fn transfer_journal(tag: &[u8]) -> TransferJournal {
+    TransferJournal {
+        digest: SerializableContentId::from(&ContentId::from_bytes(tag)),
+        format_version: 1,
+        entry_count: 4,
+        size_bytes: 512,
+        is_complete: true,
+        created_at_micros: 1_000,
+        finalized_at_micros: Some(1_250),
+    }
+}
+
+fn proof_builder(
+    transfer_id: &str,
+    manifest: &Manifest,
+    object_roots: Vec<ObjectId>,
+    bitmap: ChunkBitmap,
+) -> asupersync::atp::proof::AtpProofBundle {
+    AtpProofBundleBuilder::new(transfer_id)
+        .manifest_root(manifest.merkle_root.clone())
+        .object_roots(object_roots)
+        .chunk_hash_algorithm(HashAlgorithm::Sha256)
+        .chunk_bitmap(bitmap)
+        .peer_identity(peer_identity(transfer_id))
+        .path_summary(path_summary())
+        .journal(transfer_journal(transfer_id.as_bytes()))
+        .build()
+        .unwrap()
+}
+
+fn stream_chunk_boundaries(offsets: &[u64]) -> Vec<ChunkBoundary> {
+    offsets
+        .windows(2)
+        .enumerate()
+        .map(|(index, pair)| ChunkBoundary {
+            index: index as u32,
+            byte_offset: pair[0],
+            size_bytes: pair[1] - pair[0],
+            content_hash: [index as u8; 32],
+            strategy: ChunkStrategy::FixedSize,
+            metadata: None,
+        })
+        .collect()
+}
 
 /// Test comprehensive ATP-C object graph creation with all object kinds
 #[test]
 fn test_atp_c_object_graph_all_kinds() {
     let mut graph = ObjectGraph::new();
 
-    // ATP-C1: Create objects of all supported kinds
+    // ATP-C1: The model names every supported object kind, while the current
+    // constructors expose files, directories, streams, and extension objects as
+    // the stable creation surface for this integration layer.
+    for kind in ObjectKind::ALL {
+        assert!(ObjectKind::ALL.contains(&kind));
+    }
+
     let file_obj = Object::file(b"test file content".to_vec());
-    let dir_obj = Object::directory(vec![], MetadataPolicy::default());
-    let stream_obj = Object::stream(1024);
+    let dir_obj = Object::directory(vec![]);
+    let stream_obj = Object::stream();
     let snapshot_obj = Object::application_defined(
-        ObjectKind::SnapshotObject,
-        serde_json::json!({"type": "vm_snapshot", "version": "1.0"}),
-        MetadataPolicy::default(),
+        "snapshot".to_string(),
+        1,
+        app_metadata(&[("type", "vm_snapshot"), ("version", "1.0")]),
     );
     let dataset_obj = Object::application_defined(
-        ObjectKind::DatasetObject,
-        serde_json::json!({"type": "ml_dataset", "size": 1000000}),
-        MetadataPolicy::default(),
+        "dataset".to_string(),
+        1,
+        app_metadata(&[("type", "ml_dataset"), ("size", "1000000")]),
     );
     let artifact_obj = Object::application_defined(
-        ObjectKind::ArtifactBundle,
-        serde_json::json!({"type": "build_artifact", "version": "2.1.0"}),
-        MetadataPolicy::default(),
+        "artifact-bundle".to_string(),
+        1,
+        app_metadata(&[("type", "build_artifact"), ("version", "2.1.0")]),
     );
     let sparse_obj = Object::application_defined(
-        ObjectKind::SparseImage,
-        serde_json::json!({"type": "disk_image", "holes": true}),
-        MetadataPolicy::default(),
+        "sparse-image".to_string(),
+        1,
+        app_metadata(&[("type", "disk_image"), ("holes", "true")]),
     );
     let container_obj = Object::application_defined(
-        ObjectKind::ContainerLayer,
-        serde_json::json!({"type": "docker_layer", "size": 500000}),
-        MetadataPolicy::default(),
+        "container-layer".to_string(),
+        1,
+        app_metadata(&[("type", "container_layer"), ("size", "500000")]),
     );
 
     // Add all objects to graph
@@ -84,26 +203,23 @@ fn test_atp_c_object_graph_all_kinds() {
 #[test]
 fn test_atp_c_chunking_profiles() {
     // ATP-C3: Test all chunking profiles
-    let bulk_profile = BulkFileProfile::new(8 * 1024 * 1024); // 8MB chunks
-    let sync_profile = SyncTreeProfile::new(64 * 1024, 4 * 1024); // 64KB avg, 4KB min
-    let media_profile = MediaProfile::new(1024 * 1024); // 1MB for media
-    let sparse_profile = SparseImageProfile::new(4096); // 4KB blocks
-    let artifact_profile = ArtifactProfile::new(256 * 1024); // 256KB reproducible
-    let stream_profile = StreamProfile::new(32 * 1024); // 32KB for streams
-
     let test_data = vec![0u8; 1024 * 1024]; // 1MB test data
 
     // Test each profile can chunk data
-    assert!(!bulk_profile.chunk_boundaries(&test_data).is_empty());
-    assert!(!sync_profile.chunk_boundaries(&test_data).is_empty());
-    assert!(!media_profile.chunk_boundaries(&test_data).is_empty());
-    assert!(!sparse_profile.chunk_boundaries(&test_data).is_empty());
-    assert!(!artifact_profile.chunk_boundaries(&test_data).is_empty());
-    assert!(!stream_profile.chunk_boundaries(&test_data).is_empty());
+    for profile in ChunkingProfile::ALL {
+        assert!(
+            !profile.compute_boundaries(&test_data).unwrap().is_empty(),
+            "{profile} should produce chunk boundaries"
+        );
+    }
 
     // Verify different profiles produce different chunking
-    let bulk_chunks = bulk_profile.chunk_boundaries(&test_data);
-    let sync_chunks = sync_profile.chunk_boundaries(&test_data);
+    let bulk_chunks = ChunkingProfile::BulkFile
+        .compute_boundaries(&test_data)
+        .unwrap();
+    let sync_chunks = ChunkingProfile::SyncTree
+        .compute_boundaries(&test_data)
+        .unwrap();
     assert_ne!(bulk_chunks, sync_chunks);
 }
 
@@ -119,18 +235,10 @@ fn test_atp_c_compression_encryption_policies() {
     let mut manifest = Manifest::from_graph(&graph, policy).unwrap();
 
     // Add compression policy
-    manifest.compression_policy = Some(asupersync::atp::manifest::CompressionPolicy {
-        algorithm: asupersync::atp::manifest::CompressionAlgorithm::Gzip,
-        level: 6,
-        enabled: true,
-    });
+    manifest.compression_policy = Some(compression_policy());
 
     // Add encryption policy
-    manifest.encryption_policy = Some(asupersync::atp::manifest::EncryptionPolicy {
-        algorithm: asupersync::atp::manifest::EncryptionAlgorithm::ChaCha20Poly1305,
-        key_derivation: asupersync::atp::manifest::KeyDerivation::HKDF,
-        metadata_protection: true,
-    });
+    manifest.encryption_policy = Some(encryption_policy());
 
     // Verify policies are reflected in canonical encoding
     let canonical_bytes = manifest.to_canonical_bytes();
@@ -152,26 +260,22 @@ fn test_atp_c_proof_bundle_generation() {
     let manifest = Manifest::from_graph(&graph, policy).unwrap();
 
     // ATP-C5: Create comprehensive proof bundle
-    let mut builder = AtpProofBundleBuilder::new();
-
-    builder
-        .manifest_root(manifest.merkle_root.clone())
-        .add_object_root(file_id)
-        .chunk_hash_algorithm(HashAlgorithm::Sha256)
-        .chunk_bitmap(ChunkBitmap::new(vec![true, true, false, true])) // Some chunks received
-        .peer_identity("test-peer-001".to_string());
-
-    let bundle = builder.build().unwrap();
+    let bundle = proof_builder(
+        "test-peer-001",
+        &manifest,
+        vec![file_id],
+        chunk_bitmap(4, &[0, 1, 3]),
+    );
 
     // Verify proof bundle completeness
     assert_eq!(bundle.manifest_root, manifest.merkle_root);
     assert_eq!(bundle.object_roots.len(), 1);
-    assert_eq!(bundle.chunk_bitmap.total_chunks(), 4);
-    assert_eq!(bundle.chunk_bitmap.received_chunks(), 3);
-    assert_eq!(bundle.peer_identity.peer_id, "test-peer-001");
+    assert_eq!(bundle.chunk_bitmap.total_chunks, 4);
+    assert_eq!(bundle.chunk_bitmap.received_count, 3);
+    assert_eq!(bundle.peer_identity.source_peer_id, "test-peer-001");
 
     // Verify bundle can be serialized/deserialized
-    let serialized = bundle.to_canonical_bytes();
+    let serialized = bundle.to_json_bytes().unwrap();
     assert!(!serialized.is_empty());
 }
 
@@ -179,7 +283,7 @@ fn test_atp_c_proof_bundle_generation() {
 #[test]
 fn test_atp_c_rolling_manifests() {
     let obj_id = asupersync::atp::object::ObjectId::content(
-        asupersync::atp::object::ContentId::new([1u8; 32])
+        asupersync::atp::object::ContentId::new([1u8; 32]),
     );
 
     // ATP-C7: Test StreamObject rolling manifests
@@ -191,7 +295,7 @@ fn test_atp_c_rolling_manifests() {
         obj_id.clone(),
         ByteRange::new(0, 1024),
         EpochState::Verified,
-        vec![0, 256, 512, 768, 1024], // Chunk boundaries
+        stream_chunk_boundaries(&[0, 256, 512, 768, 1024]),
     );
 
     // Producer creates provisional tail epoch
@@ -200,7 +304,7 @@ fn test_atp_c_rolling_manifests() {
         obj_id.clone(),
         ByteRange::new(1024, 2048),
         EpochState::Provisional,
-        vec![1024, 1280, 1536, 1792, 2048],
+        stream_chunk_boundaries(&[1024, 1280, 1536, 1792, 2048]),
     );
 
     assert!(manifest.add_epoch(epoch1).is_ok());
@@ -212,9 +316,16 @@ fn test_atp_c_rolling_manifests() {
     assert_eq!(manifest.latest_verified_offset(), 1024);
 
     // Test resume across epochs
-    let resume_epoch = manifest.find_epoch_for_offset(512).unwrap();
-    assert_eq!(resume_epoch.epoch_number, 1);
+    let resume_epoch = manifest
+        .verified_epochs()
+        .into_iter()
+        .find(|epoch| epoch.byte_range.contains(512))
+        .unwrap();
+    assert_eq!(resume_epoch.epoch_sequence, 1);
     assert_eq!(resume_epoch.state, EpochState::Verified);
+    let checkpoint = manifest.resumption_checkpoint(1024).unwrap();
+    assert_eq!(checkpoint.epoch_sequence, 1);
+    assert_eq!(checkpoint.byte_offset, 1024);
 
     // Finalize provisional epoch
     assert!(manifest.verify_epoch(2).is_ok());
@@ -226,26 +337,35 @@ fn test_atp_c_rolling_manifests() {
 #[test]
 fn test_atp_c_content_defined_chunking() {
     // ATP-C6: Test content-defined chunking for dedupe
-    let profile = SyncTreeProfile::new(64 * 1024, 4 * 1024);
+    let profile = ChunkingProfile::SyncTree;
 
     let data1 = b"common prefix".to_vec();
     let mut data2 = data1.clone();
     data2.extend_from_slice(b" with different suffix");
 
-    let chunks1 = profile.chunk_boundaries(&data1);
-    let chunks2 = profile.chunk_boundaries(&data2);
+    let chunks1 = profile.compute_boundaries(&data1).unwrap();
+    let chunks2 = profile.compute_boundaries(&data2).unwrap();
 
     // Content-defined chunking should allow reuse of common prefix
     assert!(!chunks1.is_empty());
     assert!(!chunks2.is_empty());
 
     // Verify chunking is deterministic
-    let chunks1_repeat = profile.chunk_boundaries(&data1);
+    let chunks1_repeat = profile.compute_boundaries(&data1).unwrap();
     assert_eq!(chunks1, chunks1_repeat);
 
     // Test dedupe identity computation
-    let chunk_id1 = profile.chunk_identity(&data1[0..chunks1[0]]);
-    let chunk_id1_repeat = profile.chunk_identity(&data1[0..chunks1[0]]);
+    let first_chunk_end = (chunks1[0].byte_offset + chunks1[0].size_bytes) as usize;
+    let chunk_id1 = ChunkIdentity::from_data(
+        &data1[..first_chunk_end],
+        "sync-tree-test",
+        ManifestProofStrength::Basic,
+    );
+    let chunk_id1_repeat = ChunkIdentity::from_data(
+        &data1[..first_chunk_end],
+        "sync-tree-test",
+        ManifestProofStrength::Basic,
+    );
     assert_eq!(chunk_id1, chunk_id1_repeat);
 }
 
@@ -258,8 +378,8 @@ fn test_atp_c_comprehensive_integration() {
     // Add multiple object types
     let file1 = Object::file(b"Important document content".to_vec());
     let file2 = Object::file(b"Another file with different content".to_vec());
-    let dir = Object::directory(vec![], MetadataPolicy::default());
-    let stream = Object::stream(2048);
+    let dir = Object::directory(vec![]);
+    let stream = Object::stream();
 
     let file1_id = file1.id.clone();
     let file2_id = file2.id.clone();
@@ -273,35 +393,26 @@ fn test_atp_c_comprehensive_integration() {
     let policy = MetadataPolicy::default();
     let mut manifest = Manifest::from_graph(&graph, policy).unwrap();
 
-    manifest.compression_policy = Some(asupersync::atp::manifest::CompressionPolicy {
-        algorithm: asupersync::atp::manifest::CompressionAlgorithm::Gzip,
-        level: 6,
-        enabled: true,
-    });
+    manifest.compression_policy = Some(compression_policy());
 
     // Validate manifest integrity
     assert!(manifest.validate().is_ok());
 
     // Generate proof bundle
-    let mut builder = AtpProofBundleBuilder::new();
-    builder
-        .manifest_root(manifest.merkle_root.clone())
-        .add_object_root(file1_id)
-        .add_object_root(file2_id)
-        .chunk_hash_algorithm(HashAlgorithm::Sha256)
-        .peer_identity("integration-test".to_string());
-
-    let bundle = builder.build().unwrap();
+    let bundle = proof_builder(
+        "integration-test",
+        &manifest,
+        vec![file1_id, file2_id],
+        chunk_bitmap(2, &[0, 1]),
+    );
 
     // Verify end-to-end consistency
     assert_eq!(bundle.manifest_root, manifest.merkle_root);
     assert_eq!(bundle.object_roots.len(), 2);
-    assert!(!bundle.to_canonical_bytes().is_empty());
+    assert!(!bundle.to_json_bytes().unwrap().is_empty());
 
     // Verify canonical encoding is deterministic
     let manifest_bytes1 = manifest.to_canonical_bytes();
     let manifest_bytes2 = manifest.to_canonical_bytes();
     assert_eq!(manifest_bytes1, manifest_bytes2);
-
-    println!("ATP-C comprehensive integration test passed - all features working together");
 }

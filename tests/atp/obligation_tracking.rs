@@ -3,8 +3,8 @@
 //! Ensures no obligation leaks occur during crash-resume testing
 //! and validates region quiescence after failures.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 /// Obligation types tracked in ATP testing
@@ -103,7 +103,11 @@ impl AtpObligationTracker {
 
         self.notify_watchers(&info);
 
-        tracing::debug!("Created obligation: {} ({:?})", obligation_id, info.obligation_type);
+        tracing::debug!(
+            "Created obligation: {} ({:?})",
+            obligation_id,
+            info.obligation_type
+        );
         obligation_id
     }
 
@@ -118,7 +122,9 @@ impl AtpObligationTracker {
 
             tracing::debug!(
                 "Obligation {} state changed: {:?} -> {:?}",
-                obligation_id, old_state, new_state
+                obligation_id,
+                old_state,
+                new_state
             );
 
             let info_clone = info.clone();
@@ -127,14 +133,20 @@ impl AtpObligationTracker {
             self.notify_watchers(&info_clone);
 
             // Remove fulfilled or cancelled obligations
-            if matches!(new_state, ObligationState::Fulfilled | ObligationState::Cancelled) {
+            if matches!(
+                new_state,
+                ObligationState::Fulfilled | ObligationState::Cancelled
+            ) {
                 let mut obligations = self.obligations.lock().unwrap();
                 obligations.remove(obligation_id);
             }
 
             true
         } else {
-            tracing::warn!("Attempted to update non-existent obligation: {}", obligation_id);
+            tracing::warn!(
+                "Attempted to update non-existent obligation: {}",
+                obligation_id
+            );
             false
         }
     }
@@ -162,10 +174,17 @@ impl AtpObligationTracker {
         for (_, info) in obligations.iter() {
             let age = now.duration_since(info.created_at);
 
-            if age > max_age && matches!(info.state, ObligationState::Active | ObligationState::Fulfilling) {
+            if age > max_age
+                && matches!(
+                    info.state,
+                    ObligationState::Active | ObligationState::Fulfilling
+                )
+            {
                 tracing::error!(
                     "Obligation leak detected: {} ({:?}) - age: {:?}",
-                    info.obligation_id, info.obligation_type, age
+                    info.obligation_id,
+                    info.obligation_type,
+                    age
                 );
 
                 let mut leaked_info = info.clone();
@@ -206,7 +225,12 @@ impl AtpObligationTracker {
             .lock()
             .unwrap()
             .values()
-            .filter(|info| matches!(info.state, ObligationState::Active | ObligationState::Fulfilling))
+            .filter(|info| {
+                matches!(
+                    info.state,
+                    ObligationState::Active | ObligationState::Fulfilling
+                )
+            })
             .cloned()
             .collect()
     }
@@ -387,14 +411,22 @@ impl TestObligationWatcher {
 
 impl ObligationWatcher for TestObligationWatcher {
     fn on_obligation_changed(&self, info: &ObligationInfo) {
-        tracing::debug!("[{}] Obligation changed: {} -> {:?}",
-                       self.name, info.obligation_id, info.state);
+        tracing::debug!(
+            "[{}] Obligation changed: {} -> {:?}",
+            self.name,
+            info.obligation_id,
+            info.state
+        );
         self.changes.lock().unwrap().push(info.clone());
     }
 
     fn on_leak_detected(&self, info: &ObligationInfo) {
-        tracing::error!("[{}] Leak detected: {} ({:?})",
-                       self.name, info.obligation_id, info.obligation_type);
+        tracing::error!(
+            "[{}] Leak detected: {} ({:?})",
+            self.name,
+            info.obligation_id,
+            info.obligation_type
+        );
         self.leaks.lock().unwrap().push(info.clone());
     }
 }
@@ -410,17 +442,13 @@ fn generate_obligation_id() -> String {
 }
 
 /// Global obligation tracker for testing
-static mut GLOBAL_TRACKER: Option<Arc<AtpObligationTracker>> = None;
-static TRACKER_INIT: std::sync::Once = std::sync::Once::new();
+static GLOBAL_TRACKER: OnceLock<Arc<AtpObligationTracker>> = OnceLock::new();
 
 /// Get global obligation tracker
 pub fn global_obligation_tracker() -> Arc<AtpObligationTracker> {
-    unsafe {
-        TRACKER_INIT.call_once(|| {
-            GLOBAL_TRACKER = Some(Arc::new(AtpObligationTracker::new()));
-        });
-        GLOBAL_TRACKER.as_ref().unwrap().clone()
-    }
+    GLOBAL_TRACKER
+        .get_or_init(|| Arc::new(AtpObligationTracker::new()))
+        .clone()
 }
 
 /// Macro for creating obligation guards

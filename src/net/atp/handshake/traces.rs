@@ -531,8 +531,7 @@ impl TraceAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::atp::handshake::state_machine::HandshakeError;
-    use std::time::Duration;
+    use crate::net::atp::handshake::state_machine::EndpointRole;
 
     #[test]
     fn test_tracer_creation() {

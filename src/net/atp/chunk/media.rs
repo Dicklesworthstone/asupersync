@@ -643,7 +643,7 @@ mod tests {
         }
 
         // Validate total coverage
-        let total_size: u64 = boundaries.iter().map(|b| b.size).sum();
+        let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
         assert_eq!(total_size, video_data.len() as u64);
     }
 
@@ -652,36 +652,36 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 1000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 1000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::Media {
+                metadata: Some(ChunkMetadata::Media {
                     is_keyframe_boundary: true,
                     decoding_priority: 100,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 1000,
-                size: 1000,
-                hash: [2; 32],
+                byte_offset: 1000,
+                size_bytes: 1000,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::Media {
+                metadata: Some(ChunkMetadata::Media {
                     is_keyframe_boundary: false,
                     decoding_priority: 50,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 2,
-                offset: 2000,
-                size: 1000,
-                hash: [3; 32],
+                byte_offset: 2000,
+                size_bytes: 1000,
+                content_hash: [3; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::Media {
+                metadata: Some(ChunkMetadata::Media {
                     is_keyframe_boundary: false,
                     decoding_priority: 75,
-                },
+                }),
             },
         ];
 
@@ -696,25 +696,25 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 100_000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 100_000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::Media {
+                metadata: Some(ChunkMetadata::Media {
                     is_keyframe_boundary: true,
                     decoding_priority: 100,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 100_000,
-                size: 200_000,
-                hash: [2; 32],
+                byte_offset: 100_000,
+                size_bytes: 200_000,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::Media {
+                metadata: Some(ChunkMetadata::Media {
                     is_keyframe_boundary: false,
                     decoding_priority: 80,
-                },
+                }),
             },
         ];
 
@@ -727,14 +727,14 @@ mod tests {
     fn boundary_validation_enforces_media_requirements() {
         let invalid_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 1000,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 1000,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::FixedSize, // Wrong strategy
-            metadata: ChunkMetadata::Media {
+            metadata: Some(ChunkMetadata::Media {
                 is_keyframe_boundary: false,
                 decoding_priority: 50,
-            },
+            }),
         };
 
         let result = MediaProfile::validate_boundaries(&[invalid_boundary]);
@@ -743,14 +743,14 @@ mod tests {
         // Priority out of range
         let invalid_priority_boundary = ChunkBoundary {
             index: 0,
-            offset: 0,
-            size: 100_000,
-            hash: [1; 32],
+            byte_offset: 0,
+            size_bytes: 100_000,
+            content_hash: [1; 32],
             strategy: ChunkStrategy::ObjectSpecific,
-            metadata: ChunkMetadata::Media {
+            metadata: Some(ChunkMetadata::Media {
                 is_keyframe_boundary: false,
                 decoding_priority: 150, // Invalid priority > 100
-            },
+            }),
         };
 
         let result = MediaProfile::validate_boundaries(&[invalid_priority_boundary]);
@@ -769,43 +769,46 @@ mod tests {
         let boundaries = vec![
             ChunkBoundary {
                 index: 0,
-                offset: 0,
-                size: 50_000,
-                hash: [1; 32],
+                byte_offset: 0,
+                size_bytes: 50_000,
+                content_hash: [1; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::Media {
+                metadata: Some(ChunkMetadata::Media {
                     is_keyframe_boundary: true,
                     decoding_priority: 100,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 1,
-                offset: 50_000,
-                size: 100_000,
-                hash: [2; 32],
+                byte_offset: 50_000,
+                size_bytes: 100_000,
+                content_hash: [2; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::Media {
+                metadata: Some(ChunkMetadata::Media {
                     is_keyframe_boundary: false,
                     decoding_priority: 90,
-                },
+                }),
             },
             ChunkBoundary {
                 index: 2,
-                offset: 150_000,
-                size: 200_000,
-                hash: [3; 32],
+                byte_offset: 150_000,
+                size_bytes: 200_000,
+                content_hash: [3; 32],
                 strategy: ChunkStrategy::ObjectSpecific,
-                metadata: ChunkMetadata::Media {
+                metadata: Some(ChunkMetadata::Media {
                     is_keyframe_boundary: false,
                     decoding_priority: 80,
-                },
+                }),
             },
         ];
 
         let startup_set = MediaProfile::get_startup_chunk_set(&boundaries);
 
         // Should include enough chunks for 256KB threshold
-        let startup_bytes: u64 = startup_set.iter().map(|&idx| boundaries[idx].size).sum();
+        let startup_bytes: u64 = startup_set
+            .iter()
+            .map(|&idx| boundaries[idx].size_bytes)
+            .sum();
         assert!(startup_bytes >= 256 * 1024);
     }
 }

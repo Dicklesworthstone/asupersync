@@ -3,7 +3,7 @@
 use crate::atp::manifest::MerkleRoot;
 use crate::atp::object::{ContentId, ManifestId, ObjectId};
 use crate::cx::Cx;
-use crate::security::{AuthenticationTag, AuthKey};
+use crate::security::{AuthKey, AuthenticationTag};
 use crate::types::outcome::Outcome;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -202,42 +202,164 @@ impl JournalRecord {
 
         // Return a new record with the computed auth_tag
         match self {
-            Self::Offer { transfer_id, object_id, manifest_root, total_size, timestamp, .. } => {
-                Self::Offer { transfer_id, object_id, manifest_root, total_size, timestamp, auth_tag }
-            }
-            Self::Accept { transfer_id, peer_id, timestamp, .. } => {
-                Self::Accept { transfer_id, peer_id, timestamp, auth_tag }
-            }
-            Self::ChunkReceived { transfer_id, chunk_offset, chunk_size, chunk_hash, timestamp, .. } => {
-                Self::ChunkReceived { transfer_id, chunk_offset, chunk_size, chunk_hash, timestamp, auth_tag }
-            }
-            Self::ChunkVerified { transfer_id, chunk_offset, chunk_size, verified_hash, timestamp, .. } => {
-                Self::ChunkVerified { transfer_id, chunk_offset, chunk_size, verified_hash, timestamp, auth_tag }
-            }
-            Self::ChunkWritten { transfer_id, chunk_offset, chunk_size, file_path, timestamp, .. } => {
-                Self::ChunkWritten { transfer_id, chunk_offset, chunk_size, file_path, timestamp, auth_tag }
-            }
-            Self::RepairDecode { transfer_id, chunk_offset, chunk_size, source_chunks, timestamp, .. } => {
-                Self::RepairDecode { transfer_id, chunk_offset, chunk_size, source_chunks, timestamp, auth_tag }
-            }
-            Self::CommitIntent { transfer_id, final_manifest_root, timestamp, .. } => {
-                Self::CommitIntent { transfer_id, final_manifest_root, timestamp, auth_tag }
-            }
-            Self::CommitComplete { transfer_id, final_path, committed_size, timestamp, .. } => {
-                Self::CommitComplete { transfer_id, final_path, committed_size, timestamp, auth_tag }
-            }
-            Self::Cancellation { transfer_id, reason, timestamp, .. } => {
-                Self::Cancellation { transfer_id, reason, timestamp, auth_tag }
-            }
-            Self::Rollback { transfer_id, rollback_reason, checkpoint_sequence, timestamp, .. } => {
-                Self::Rollback { transfer_id, rollback_reason, checkpoint_sequence, timestamp, auth_tag }
-            }
-            Self::CompactionBoundary { generation, compacted_up_to_sequence, timestamp, .. } => {
-                Self::CompactionBoundary { generation, compacted_up_to_sequence, timestamp, auth_tag }
-            }
-            Self::ProofDigest { transfer_id, proof_type, digest, timestamp, .. } => {
-                Self::ProofDigest { transfer_id, proof_type, digest, timestamp, auth_tag }
-            }
+            Self::Offer {
+                transfer_id,
+                object_id,
+                manifest_root,
+                total_size,
+                timestamp,
+                ..
+            } => Self::Offer {
+                transfer_id,
+                object_id,
+                manifest_root,
+                total_size,
+                timestamp,
+                auth_tag,
+            },
+            Self::Accept {
+                transfer_id,
+                peer_id,
+                timestamp,
+                ..
+            } => Self::Accept {
+                transfer_id,
+                peer_id,
+                timestamp,
+                auth_tag,
+            },
+            Self::ChunkReceived {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                chunk_hash,
+                timestamp,
+                ..
+            } => Self::ChunkReceived {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                chunk_hash,
+                timestamp,
+                auth_tag,
+            },
+            Self::ChunkVerified {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                verified_hash,
+                timestamp,
+                ..
+            } => Self::ChunkVerified {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                verified_hash,
+                timestamp,
+                auth_tag,
+            },
+            Self::ChunkWritten {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                file_path,
+                timestamp,
+                ..
+            } => Self::ChunkWritten {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                file_path,
+                timestamp,
+                auth_tag,
+            },
+            Self::RepairDecode {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                source_chunks,
+                timestamp,
+                ..
+            } => Self::RepairDecode {
+                transfer_id,
+                chunk_offset,
+                chunk_size,
+                source_chunks,
+                timestamp,
+                auth_tag,
+            },
+            Self::CommitIntent {
+                transfer_id,
+                final_manifest_root,
+                timestamp,
+                ..
+            } => Self::CommitIntent {
+                transfer_id,
+                final_manifest_root,
+                timestamp,
+                auth_tag,
+            },
+            Self::CommitComplete {
+                transfer_id,
+                final_path,
+                committed_size,
+                timestamp,
+                ..
+            } => Self::CommitComplete {
+                transfer_id,
+                final_path,
+                committed_size,
+                timestamp,
+                auth_tag,
+            },
+            Self::Cancellation {
+                transfer_id,
+                reason,
+                timestamp,
+                ..
+            } => Self::Cancellation {
+                transfer_id,
+                reason,
+                timestamp,
+                auth_tag,
+            },
+            Self::Rollback {
+                transfer_id,
+                rollback_reason,
+                checkpoint_sequence,
+                timestamp,
+                ..
+            } => Self::Rollback {
+                transfer_id,
+                rollback_reason,
+                checkpoint_sequence,
+                timestamp,
+                auth_tag,
+            },
+            Self::CompactionBoundary {
+                generation,
+                compacted_up_to_sequence,
+                timestamp,
+                ..
+            } => Self::CompactionBoundary {
+                generation,
+                compacted_up_to_sequence,
+                timestamp,
+                auth_tag,
+            },
+            Self::ProofDigest {
+                transfer_id,
+                proof_type,
+                digest,
+                timestamp,
+                ..
+            } => Self::ProofDigest {
+                transfer_id,
+                proof_type,
+                digest,
+                timestamp,
+                auth_tag,
+            },
         }
     }
 
@@ -975,7 +1097,7 @@ impl AppendJournal {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
-        let entry = JournalEntry::new(self.sequence, record);
+        let entry = JournalEntry::new(self.sequence, record.with_signature(&self.auth_key));
 
         // Serialize the entry
         let serialized = entry.encode();
@@ -1185,7 +1307,8 @@ impl AppendJournal {
                 .unwrap_or_default()
                 .as_secs(),
             auth_tag: AuthenticationTag::zero(), // Temporary placeholder
-        }.with_signature(&self.auth_key);
+        }
+        .with_signature(&self.auth_key);
 
         // Write the boundary record
         match self.append(boundary_record) {
@@ -1438,6 +1561,14 @@ mod tests {
         MerkleRoot::new(hash)
     }
 
+    fn test_auth_key() -> AuthKey {
+        AuthKey::from_seed(42)
+    }
+
+    fn unsigned_tag() -> AuthenticationTag {
+        AuthenticationTag::zero()
+    }
+
     #[test]
     fn test_journal_entry_creation() {
         let record = JournalRecord::Offer {
@@ -1446,7 +1577,9 @@ mod tests {
             manifest_root: test_root(1),
             total_size: 1024,
             timestamp: 1234567890,
-        };
+            auth_tag: unsigned_tag(),
+        }
+        .with_signature(&test_auth_key());
 
         let entry = JournalEntry::new(0, record);
         assert_eq!(entry.sequence, 0);
@@ -1461,12 +1594,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut journal = AppendJournal::new(config).unwrap();
+        let mut journal = AppendJournal::new(config, test_auth_key()).unwrap();
 
         let record = JournalRecord::Accept {
             transfer_id: "test_transfer".to_string(),
             peer_id: "peer123".to_string(),
             timestamp: 1234567890,
+            auth_tag: unsigned_tag(),
         };
 
         let sequence = journal.append(record).unwrap();
@@ -1497,19 +1631,20 @@ mod tests {
             ..Default::default()
         };
 
-        let mut journal = AppendJournal::new(config.clone()).unwrap();
+        let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
         let sequence = journal
             .append(JournalRecord::Accept {
                 transfer_id: "durable_transfer".to_string(),
                 peer_id: "peer123".to_string(),
                 timestamp: 1234567890,
+                auth_tag: unsigned_tag(),
             })
             .unwrap();
 
         assert_eq!(sequence, 0);
         assert_eq!(journal.get_stats().sequence, 1);
 
-        let recovered = AppendJournal::new(config).unwrap();
+        let recovered = AppendJournal::new(config, test_auth_key()).unwrap();
         let recovered_stats = recovered.get_stats();
         assert_eq!(recovered_stats.sequence, 1);
         assert_eq!(recovered_stats.recent_entries_count, 1);
@@ -1527,7 +1662,7 @@ mod tests {
 
         // Create and populate journal
         {
-            let mut journal = AppendJournal::new(config.clone()).unwrap();
+            let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
 
             journal
                 .append(JournalRecord::Offer {
@@ -1536,6 +1671,7 @@ mod tests {
                     manifest_root: test_root(1),
                     total_size: 1024,
                     timestamp: 1000,
+                    auth_tag: unsigned_tag(),
                 })
                 .unwrap();
 
@@ -1544,6 +1680,7 @@ mod tests {
                     transfer_id: "test1".to_string(),
                     peer_id: "peer1".to_string(),
                     timestamp: 1001,
+                    auth_tag: unsigned_tag(),
                 })
                 .unwrap();
 
@@ -1552,7 +1689,7 @@ mod tests {
 
         // Recover and verify
         {
-            let journal = AppendJournal::new(config).unwrap();
+            let journal = AppendJournal::new(config, test_auth_key()).unwrap();
             let stats = journal.get_stats();
             assert_eq!(stats.sequence, 2);
             assert_eq!(stats.recent_entries_count, 2);
@@ -1570,7 +1707,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut journal = AppendJournal::new(config).unwrap();
+        let mut journal = AppendJournal::new(config, test_auth_key()).unwrap();
 
         // Add entries for different transfers
         journal
@@ -1580,6 +1717,7 @@ mod tests {
                 manifest_root: test_root(1),
                 total_size: 1024,
                 timestamp: 1000,
+                auth_tag: unsigned_tag(),
             })
             .unwrap();
 
@@ -1590,6 +1728,7 @@ mod tests {
                 manifest_root: test_root(4),
                 total_size: 2048,
                 timestamp: 1001,
+                auth_tag: unsigned_tag(),
             })
             .unwrap();
 
@@ -1598,6 +1737,7 @@ mod tests {
                 transfer_id: "transfer_a".to_string(),
                 peer_id: "peer1".to_string(),
                 timestamp: 1002,
+                auth_tag: unsigned_tag(),
             })
             .unwrap();
 

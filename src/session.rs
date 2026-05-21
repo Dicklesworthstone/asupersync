@@ -82,8 +82,8 @@
 //! }
 //! ```
 
-use std::marker::PhantomData;
 use crate::types::outcome::Outcome;
+use std::marker::PhantomData;
 
 // ---------- Core session type building blocks ----------
 
@@ -274,11 +274,13 @@ where
         let Self { tx, mut rx, .. } = self;
         let boxed = match rx.recv(cx).await {
             Ok(b) => b,
-            Err(e) => return Outcome::Err(match e {
-                crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
-                crate::channel::mpsc::RecvError::Disconnected
-                | crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
-            }),
+            Err(e) => {
+                return Outcome::Err(match e {
+                    crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
+                    crate::channel::mpsc::RecvError::Disconnected
+                    | crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
+                });
+            }
         };
         let value = match boxed.downcast::<T>() {
             Ok(v) => v,
@@ -345,11 +347,13 @@ impl<A: Session, B: Session> Endpoint<Offer<A, B>> {
         let Self { tx, mut rx, .. } = self;
         let boxed = match rx.recv(cx).await {
             Ok(b) => b,
-            Err(e) => return Outcome::Err(match e {
-                crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
-                crate::channel::mpsc::RecvError::Disconnected
-                | crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
-            }),
+            Err(e) => {
+                return Outcome::Err(match e {
+                    crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
+                    crate::channel::mpsc::RecvError::Disconnected
+                    | crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
+                });
+            }
         };
         let branch = match boxed.downcast::<Branch>() {
             Ok(b) => b,
@@ -783,7 +787,7 @@ mod tests {
         let result = futures_lite::future::block_on(client.send(&cx, 42));
 
         assert!(
-            matches!(result, Err(SessionError::Cancelled)),
+            matches!(result, Outcome::Err(SessionError::Cancelled)),
             "cancelled send should surface SessionError::Cancelled"
         );
 
@@ -800,14 +804,14 @@ mod tests {
         let (left_ep, _left_peer) = channel::<Choose<End, End>>();
         let left_result = futures_lite::future::block_on(left_ep.choose_left(&cx));
         assert!(
-            matches!(left_result, Err(SessionError::Cancelled)),
+            matches!(left_result, Outcome::Err(SessionError::Cancelled)),
             "cancelled choose_left should surface SessionError::Cancelled"
         );
 
         let (right_ep, _right_peer) = channel::<Choose<End, End>>();
         let right_result = futures_lite::future::block_on(right_ep.choose_right(&cx));
         assert!(
-            matches!(right_result, Err(SessionError::Cancelled)),
+            matches!(right_result, Outcome::Err(SessionError::Cancelled)),
             "cancelled choose_right should surface SessionError::Cancelled"
         );
 

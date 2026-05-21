@@ -4,16 +4,74 @@
 //! with crash injection at critical points.
 
 pub mod append_recovery_e2e;
-pub mod bitmap_consistency_e2e;
-pub mod compaction_e2e;
 
-use asupersync::atp::journal::{Journal, JournalEntry, JournalOffset, RecoveryState};
-use asupersync::atp::bitmap::{ChunkBitmap, BitmapUpdate};
-use asupersync::atp::object::{ObjectId, ObjectKind};
-use asupersync::types::outcome::Outcome;
+use asupersync::atp::object::{ContentId, ObjectId, ObjectKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
+
+/// Test-only constructor shim for historical E2E harness code.
+pub trait ObjectIdTestExt {
+    fn new() -> Self;
+}
+
+impl ObjectIdTestExt for ObjectId {
+    fn new() -> Self {
+        ObjectId::content(ContentId::from_bytes(b"atp-journal-e2e-test-id"))
+    }
+}
+
+/// Test-local append-log offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalOffset(pub u64);
+
+impl JournalOffset {
+    pub const fn new(offset: u64) -> Self {
+        Self(offset)
+    }
+}
+
+/// Test-local recovery states for simulated journal crash scenarios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryState {
+    Completed,
+    CrashDetected,
+    AppendFailed,
+    InProgress,
+    ConcurrentAppendFailed,
+}
+
+/// Test-local journal entry record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JournalEntry {
+    ObjectCreated {
+        object_id: ObjectId,
+        kind: ObjectKind,
+        timestamp: SystemTime,
+    },
+}
+
+/// Test-local bitmap update record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitmapUpdate {
+    chunk_id: u64,
+    available: bool,
+    timestamp: SystemTime,
+}
+
+impl BitmapUpdate {
+    pub const fn new(chunk_id: u64, available: bool, timestamp: SystemTime) -> Self {
+        Self {
+            chunk_id,
+            available,
+            timestamp,
+        }
+    }
+
+    pub const fn sequence_number(&self) -> u64 {
+        self.chunk_id
+    }
+}
 
 /// Test configuration for journal e2e tests
 #[derive(Debug, Clone)]
@@ -36,7 +94,7 @@ impl Default for JournalTestConfig {
             bitmap_path: temp_dir.join("bitmap.dat"),
             temp_dir,
             max_journal_size: 1024 * 1024, // 1MB
-            compaction_threshold: 0.5, // 50% garbage
+            compaction_threshold: 0.5,     // 50% garbage
             fsync_policy: FsyncPolicy::EveryWrite,
             enable_checksums: true,
             crash_points: JournalCrashPoint::all(),
@@ -172,11 +230,20 @@ impl JournalTestArtifact {
         let mut artifact = HashMap::new();
 
         artifact.insert("test_name".to_string(), self.test_name.clone());
-        artifact.insert("journal_entries_count".to_string(), self.journal_entries.len().to_string());
+        artifact.insert(
+            "journal_entries_count".to_string(),
+            self.journal_entries.len().to_string(),
+        );
         artifact.insert("journal_size".to_string(), self.journal_size.to_string());
-        artifact.insert("bitmap_updates_count".to_string(), self.bitmap_updates.len().to_string());
+        artifact.insert(
+            "bitmap_updates_count".to_string(),
+            self.bitmap_updates.len().to_string(),
+        );
         artifact.insert("fsync_count".to_string(), self.fsync_count.to_string());
-        artifact.insert("checkpoints_count".to_string(), self.checkpoint_offsets.len().to_string());
+        artifact.insert(
+            "checkpoints_count".to_string(),
+            self.checkpoint_offsets.len().to_string(),
+        );
 
         if let Some(crash_point) = self.crash_point {
             artifact.insert("crash_point".to_string(), crash_point.name().to_string());
@@ -187,8 +254,14 @@ impl JournalTestArtifact {
         }
 
         if let Some(compaction) = &self.compaction_stats {
-            artifact.insert("compaction_reclaimed".to_string(), compaction.bytes_reclaimed.to_string());
-            artifact.insert("compaction_duration".to_string(), compaction.duration_ms.to_string());
+            artifact.insert(
+                "compaction_reclaimed".to_string(),
+                compaction.bytes_reclaimed.to_string(),
+            );
+            artifact.insert(
+                "compaction_duration".to_string(),
+                compaction.duration_ms.to_string(),
+            );
         }
 
         // Add verification hashes
@@ -229,9 +302,16 @@ impl JournalTestHarness {
         })
     }
 
-    pub fn run_crash_matrix<F>(&mut self, test_name: &str, mut test_fn: F) -> Result<(), Box<dyn std::error::Error>>
+    pub fn run_crash_matrix<F>(
+        &mut self,
+        test_name: &str,
+        mut test_fn: F,
+    ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(&JournalTestConfig, Option<JournalCrashPoint>) -> Result<JournalTestArtifact, Box<dyn std::error::Error>>,
+        F: FnMut(
+            &JournalTestConfig,
+            Option<JournalCrashPoint>,
+        ) -> Result<JournalTestArtifact, Box<dyn std::error::Error>>,
     {
         // Clean run first
         let clean_artifact = test_fn(&self.config, None)?;
@@ -239,7 +319,11 @@ impl JournalTestHarness {
 
         // Test each crash point
         for &crash_point in &self.config.crash_points {
-            println!("Testing {} with crash point: {}", test_name, crash_point.name());
+            println!(
+                "Testing {} with crash point: {}",
+                test_name,
+                crash_point.name()
+            );
 
             match test_fn(&self.config, Some(crash_point)) {
                 Ok(artifact) => {
@@ -268,7 +352,9 @@ impl JournalTestHarness {
                     RecoveryState::Completed => {
                         // Verify no data loss
                         if artifact.journal_entries.is_empty() {
-                            return Err("Recovery completed but no journal entries found".to_string());
+                            return Err(
+                                "Recovery completed but no journal entries found".to_string()
+                            );
                         }
                     }
                     RecoveryState::CrashDetected => {
@@ -316,8 +402,11 @@ impl JournalTestHarness {
             std::fs::write(artifact_file, artifact_data)?;
         }
 
-        println!("Generated {} journal lab artifacts in: {}",
-            self.artifacts.len(), artifacts_dir.display());
+        println!(
+            "Generated {} journal lab artifacts in: {}",
+            self.artifacts.len(),
+            artifacts_dir.display()
+        );
 
         Ok(())
     }

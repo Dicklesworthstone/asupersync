@@ -376,7 +376,6 @@ impl QuicHandshakeMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cx::scope::Scope;
 
     #[test]
     fn test_handshake_machine_creation() {
@@ -398,7 +397,7 @@ mod tests {
             Duration::from_secs(30),
         );
 
-        let cx = Cx::root("test-handshake");
+        let cx = Cx::for_testing();
         let result = machine.start(&cx, QuicVersion::V1 as u32);
 
         assert!(result.is_ok());
@@ -414,7 +413,7 @@ mod tests {
             Duration::from_secs(30),
         );
 
-        let cx = Cx::root("test-handshake");
+        let cx = Cx::for_testing();
         let result = machine.start(&cx, 0x12345678);
 
         assert!(result.is_err());

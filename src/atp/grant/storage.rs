@@ -469,6 +469,7 @@ impl Drop for GrantStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::grant::GrantOperation;
     use crate::atp::policy::{
         Capability, CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope,
     };
