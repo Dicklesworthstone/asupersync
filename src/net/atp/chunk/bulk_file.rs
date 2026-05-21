@@ -157,7 +157,11 @@ impl BulkFileProfile {
 
     /// Determine throughput tier for a chunk based on its characteristics.
     fn determine_throughput_tier(chunk_size: u64, total_size: u64) -> ThroughputTier {
-        let chunk_ratio = chunk_size as f64 / total_size as f64;
+        let chunk_ratio = if total_size == 0 {
+            0.0
+        } else {
+            chunk_size as f64 / total_size as f64
+        };
 
         if chunk_size < 256 * 1024 || chunk_ratio < 0.01 {
             // Small chunks or small relative to total
@@ -185,13 +189,11 @@ impl BulkFileProfile {
         let base_plan = Self::chunk_plan(object_size_bytes);
 
         // Adjust for network characteristics
-        let latency_factor = (latency_ms as f64 / 50.0).max(0.5).min(4.0); // 50ms baseline
-        let bandwidth_factor = (bandwidth_mbps as f64 / 100.0).max(0.1).min(10.0); // 100Mbps baseline
+        let latency_factor = (latency_ms as f64 / 50.0).clamp(0.5, 4.0); // 50ms baseline
+        let bandwidth_factor = (bandwidth_mbps as f64 / 100.0).clamp(0.1, 10.0); // 100Mbps baseline
 
         // Higher latency or lower bandwidth benefits from larger chunks
-        let size_multiplier = (latency_factor * (2.0 / bandwidth_factor))
-            .max(0.5)
-            .min(4.0);
+        let size_multiplier = (latency_factor * (2.0 / bandwidth_factor)).clamp(0.5, 4.0);
 
         let adjusted_target = (base_plan.target_chunk_size as f64 * size_multiplier) as u64;
         let adjusted_min = (base_plan.min_chunk_size as f64 * size_multiplier.min(2.0)) as u64;
@@ -213,10 +215,10 @@ impl BulkFileProfile {
         bandwidth_mbps: u64,
         latency_ms: u64,
     ) -> std::time::Duration {
-        let num_chunks =
-            (object_size_bytes + chunk_plan.target_chunk_size - 1) / chunk_plan.target_chunk_size;
+        let safe_target = chunk_plan.target_chunk_size.max(1);
+        let num_chunks = (object_size_bytes + safe_target - 1) / safe_target;
 
-        let transfer_time_ms = (object_size_bytes as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
+        let transfer_time_ms = (object_size_bytes as f64 * 8.0) / (bandwidth_mbps.max(1) as f64 * 1000.0);
         let latency_overhead_ms = num_chunks as f64 * latency_ms as f64;
 
         let total_ms = transfer_time_ms + latency_overhead_ms;

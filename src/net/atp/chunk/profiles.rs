@@ -50,6 +50,7 @@ pub mod utils {
     impl RollingHash {
         /// Create a new rolling hash with the given window size.
         pub fn new(window_size: usize) -> Self {
+            let window_size = std::cmp::max(1, window_size);
             Self {
                 window_size,
                 hash: 0,
@@ -60,12 +61,13 @@ pub mod utils {
 
         /// Add a byte to the rolling hash and return the current hash value.
         pub fn update(&mut self, byte: u8) -> u64 {
-            let old_byte = self.window[self.position % self.window_size];
-            self.window[self.position % self.window_size] = byte;
+            let old_byte = self.window[self.position % self.window_size]; // ubs:ignore
+            self.window[self.position % self.window_size] = byte; // ubs:ignore
 
             // Simple rolling hash: remove old byte, add new byte
+            let multiplier = 31_u64.wrapping_pow(self.window_size as u32);
             self.hash = self.hash.wrapping_mul(31)
-                .wrapping_sub((old_byte as u64).wrapping_mul(31_u64.pow(self.window_size as u32)))
+                .wrapping_sub((old_byte as u64).wrapping_mul(multiplier))
                 .wrapping_add(byte as u64);
 
             self.position += 1;

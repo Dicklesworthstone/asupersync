@@ -152,6 +152,7 @@ pub struct RollingHash {
 impl RollingHash {
     /// Create new rolling hash with given window size.
     pub fn new(window_size: usize) -> Self {
+        let window_size = std::cmp::max(1, window_size);
         Self {
             window_size,
             window: vec![0; window_size],
@@ -164,7 +165,7 @@ impl RollingHash {
     /// Add byte to rolling hash (for initial window).
     pub fn update(&mut self, byte: u8) {
         if self.position < self.window_size {
-            self.window[self.position] = byte;
+            self.window[self.position] = byte; // ubs:ignore
             self.hash_a = self.hash_a.wrapping_add(byte as u64);
             self.hash_b = self.hash_b.wrapping_add(self.hash_a);
             self.position += 1;
@@ -180,12 +181,12 @@ impl RollingHash {
             .wrapping_add(new_byte as u64);
         self.hash_b = self
             .hash_b
-            .wrapping_sub(self.window_size as u64 * old_byte as u64)
+            .wrapping_sub((self.window_size as u64).wrapping_mul(old_byte as u64))
             .wrapping_add(self.hash_a);
 
         // Update window
         let idx = self.position % self.window_size;
-        self.window[idx] = new_byte;
+        self.window[idx] = new_byte; // ubs:ignore
         self.position += 1;
     }
 
@@ -210,7 +211,11 @@ pub struct ChunkIdentity {
 
 impl ChunkIdentity {
     /// Create chunk identity directly from data.
-    pub fn from_data(data: &[u8], capability_scope: &str, proof_strength: crate::atp::manifest::ProofStrength) -> Self {
+    pub fn from_data(
+        data: &[u8],
+        capability_scope: &str,
+        proof_strength: crate::atp::manifest::ProofStrength,
+    ) -> Self {
         let content_hash = Self::compute_content_hash(data);
         let size_bytes = data.len() as u64;
         Self {
@@ -234,10 +239,7 @@ impl ChunkIdentity {
     /// Get identity string for deduplication keys.
     pub fn identity_string(&self) -> String {
         let hash_hex = hex_hash(&self.content_hash);
-        format!(
-            "{}:{}:{}",
-            hash_hex, self.size_bytes, self.capability_scope
-        )
+        format!("{}:{}:{}", hash_hex, self.size_bytes, self.capability_scope)
     }
 }
 
@@ -289,10 +291,21 @@ impl ChunkCache {
         identity: &ChunkIdentity,
         data: &[u8],
     ) -> Result<(), ChunkingProfileError> {
+        let data_len = u64::try_from(data.len()).map_err(|_| {
+            ChunkingProfileError::InvalidChunkParameters(
+                "chunk data length exceeds supported size".to_string(),
+            )
+        })?;
+
         // Validate chunk data matches identity
-        if data.len() != identity.size_bytes as usize {
+        if data_len != identity.size_bytes {
             return Err(ChunkingProfileError::InvalidChunkParameters(
                 "chunk data size doesn't match identity".to_string(),
+            ));
+        }
+        if data_len > self.max_size {
+            return Err(ChunkingProfileError::InvalidChunkParameters(
+                "chunk data exceeds cache size limit".to_string(),
             ));
         }
 
@@ -303,8 +316,12 @@ impl ChunkCache {
             ));
         }
 
+        // Replacement must not double-count the same identity.
+        self.remove_chunk(identity);
+
         // Make space if needed
-        while self.current_size + data.len() as u64 > self.max_size && !self.chunks.is_empty() {
+        let target_size = self.max_size.saturating_sub(data_len);
+        while self.current_size > target_size && !self.chunks.is_empty() {
             self.evict_least_recently_used();
         }
 
@@ -316,7 +333,7 @@ impl ChunkCache {
             source_object: None,
         };
 
-        self.current_size += identity.size_bytes;
+        self.current_size += data_len;
 
         // Update content hash index
         self.content_hash_index
@@ -343,7 +360,10 @@ impl ChunkCache {
     }
 
     /// Retrieve chunk by identity.
-    pub fn retrieve_chunk(&mut self, identity: &ChunkIdentity) -> Result<Option<Vec<u8>>, ChunkingProfileError> {
+    pub fn retrieve_chunk(
+        &mut self,
+        identity: &ChunkIdentity,
+    ) -> Result<Option<Vec<u8>>, ChunkingProfileError> {
         Ok(self.lookup_chunk(identity))
     }
 
@@ -405,7 +425,11 @@ impl ChunkCache {
             current_size: self.current_size,
             max_size: self.max_size,
             total_reuse_count,
-            utilization: self.current_size as f64 / self.max_size as f64,
+            utilization: if self.max_size == 0 {
+                0.0
+            } else {
+                self.current_size as f64 / self.max_size as f64
+            },
             cache_hits: self.cache_hits,
             cache_misses: self.cache_misses,
         }
@@ -472,22 +496,46 @@ impl ChunkReuseManager {
         Ok(())
     }
 
+    /// Lookup the dedupe capability scope for a transfer.
+    fn capability_scope_for_transfer(&self, transfer_id: &str) -> Option<String> {
+        let Some(identities) = self.transfer_chunks.get(transfer_id) else {
+            return Some(transfer_scope(transfer_id));
+        };
+
+        let mut registered_scope = None;
+        for identity in identities {
+            if identity.capability_scope.is_empty() {
+                continue;
+            }
+
+            match &registered_scope {
+                Some(scope) if scope != &identity.capability_scope => return None,
+                Some(_) => {}
+                None => registered_scope = Some(identity.capability_scope.clone()),
+            }
+        }
+
+        registered_scope.or_else(|| Some(String::new()))
+    }
+
     /// Find reusable chunks for a transfer.
     pub fn find_reusable_chunks(
         &self,
-        _transfer_id: &str,
+        transfer_id: &str,
         content_hashes: &[[u8; 32]],
         _criteria: &ChunkReuseCriteria,
     ) -> Vec<ChunkIdentity> {
         let mut reusable = Vec::new();
 
-        // Find chunks with matching content hashes across all transfers
+        let requesting_scope = self
+            .capability_scope_for_transfer(transfer_id)
+            .unwrap_or_default();
+
         for &hash in content_hashes {
-            for chunks in self.transfer_chunks.values() {
-                for chunk in chunks {
-                    if chunk.content_hash == hash {
-                        reusable.push(chunk.clone());
-                    }
+            let similar = self.cache.find_similar_chunks(hash);
+            for chunk in similar {
+                if self.cache.can_reuse_chunk(chunk, &requesting_scope) {
+                    reusable.push(chunk.clone());
                 }
             }
         }
@@ -502,7 +550,8 @@ impl ChunkReuseManager {
         identity: &ChunkIdentity,
         _source_transfer_id: &str,
     ) -> Result<(), ChunkingProfileError> {
-        let stats = self.transfer_stats
+        let stats = self
+            .transfer_stats
             .entry(transfer_id.to_string())
             .or_insert_with(|| TransferReuseStats {
                 total_chunks_reused: 0,
@@ -514,7 +563,8 @@ impl ChunkReuseManager {
         stats.bytes_saved += identity.size_bytes;
 
         // Update deduplication ratio (simple approximation)
-        stats.deduplication_ratio = stats.bytes_saved as f64 / (stats.bytes_saved as f64 + 1000000.0);
+        stats.deduplication_ratio =
+            stats.bytes_saved as f64 / (stats.bytes_saved as f64 + 1_000_000.0);
 
         Ok(())
     }
@@ -532,8 +582,8 @@ impl ChunkReuseManager {
     ) -> Result<ChunkIdentity, ChunkingProfileError> {
         let identity = ChunkIdentity::from_data(
             chunk_data,
-            &format!("transfer-{}", transfer_id),
-            crate::atp::manifest::ProofStrength::Basic
+            &transfer_scope(transfer_id),
+            crate::atp::manifest::ProofStrength::Basic,
         );
 
         self.cache.store_chunk(&identity, chunk_data)?;
@@ -546,6 +596,116 @@ impl ChunkReuseManager {
 /// Convert hash to hex string.
 fn hex_hash(hash: &[u8; 32]) -> String {
     hash.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn transfer_scope(transfer_id: &str) -> String {
+    format!("transfer-{transfer_id}")
+}
+
+#[cfg(test)]
+mod active_tests {
+    use super::*;
+    use crate::atp::manifest::ProofStrength;
+
+    fn criteria() -> ChunkReuseCriteria {
+        ChunkReuseCriteria {
+            max_age_seconds: 3600,
+            min_proof_strength: ProofStrength::Basic,
+            require_same_algorithm: true,
+        }
+    }
+
+    #[test]
+    fn same_transfer_reuses_own_scoped_chunk() {
+        let mut manager = ChunkReuseManager::new();
+        let identity = manager
+            .store_chunk_for_reuse(b"chunk-data", "transfer-a")
+            .unwrap();
+
+        let reusable =
+            manager.find_reusable_chunks("transfer-a", &[identity.content_hash], &criteria());
+
+        assert_eq!(reusable, vec![identity]);
+    }
+
+    #[test]
+    fn different_transfer_cannot_reuse_private_scope() {
+        let mut manager = ChunkReuseManager::new();
+        let identity = manager
+            .store_chunk_for_reuse(b"chunk-data", "transfer-a")
+            .unwrap();
+
+        let reusable =
+            manager.find_reusable_chunks("transfer-b", &[identity.content_hash], &criteria());
+
+        assert!(reusable.is_empty());
+    }
+
+    #[test]
+    fn conflicting_registered_scopes_fail_closed_to_global_only_reuse() {
+        let mut manager = ChunkReuseManager::new();
+        let private_a = ChunkIdentity::from_data(b"aaa", "scope-a", ProofStrength::Basic);
+        let private_b = ChunkIdentity::from_data(b"bbb", "scope-b", ProofStrength::Basic);
+        let global = ChunkIdentity::from_data(b"ccc", "", ProofStrength::Basic);
+
+        manager
+            .register_transfer_chunk("mixed", &private_a)
+            .unwrap();
+        manager
+            .register_transfer_chunk("mixed", &private_b)
+            .unwrap();
+        manager.cache.store_chunk(&private_a, b"aaa").unwrap();
+        manager.cache.store_chunk(&private_b, b"bbb").unwrap();
+        manager.cache.store_chunk(&global, b"ccc").unwrap();
+
+        let reusable = manager.find_reusable_chunks(
+            "mixed",
+            &[
+                private_a.content_hash,
+                private_b.content_hash,
+                global.content_hash,
+            ],
+            &criteria(),
+        );
+
+        assert_eq!(reusable, vec![global]);
+    }
+
+    #[test]
+    fn replacing_same_identity_does_not_inflate_cache_size() {
+        let data = b"repeat";
+        let identity = ChunkIdentity::from_data(data, "scope-a", ProofStrength::Basic);
+        let mut cache = ChunkCache::new(1024);
+
+        cache.store_chunk(&identity, data).unwrap();
+        cache.store_chunk(&identity, data).unwrap();
+
+        let stats = cache.get_statistics();
+        assert_eq!(stats.total_chunks, 1);
+        assert_eq!(stats.current_size, data.len() as u64);
+    }
+
+    #[test]
+    fn oversized_chunk_is_rejected_without_cache_growth() {
+        let data = b"too-large";
+        let identity = ChunkIdentity::from_data(data, "scope-a", ProofStrength::Basic);
+        let mut cache = ChunkCache::new(1);
+
+        let err = cache.store_chunk(&identity, data).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ChunkingProfileError::InvalidChunkParameters(_)
+        ));
+        assert_eq!(cache.get_statistics().current_size, 0);
+    }
+
+    #[test]
+    fn zero_sized_cache_reports_zero_utilization() {
+        let cache = ChunkCache::new(0);
+
+        assert_eq!(cache.get_statistics().utilization, 0.0);
+    }
 }
 
 // TODO: Update tests to match new API

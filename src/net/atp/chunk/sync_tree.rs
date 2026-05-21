@@ -233,7 +233,7 @@ impl SyncTreeProfile {
                 // End of line followed by newline
                 (b'\n', _) => true,
                 // End of function/class/block
-                (b'}', b'\n') | (b'}', b' ') | (b'}', b'\t') => true,
+                (b'}', b'\n' | b' ' | b'\t') => true,
                 // Import/include statements
                 _ if Self::is_at_import_boundary(data, position) => true,
                 _ => false,
@@ -327,7 +327,11 @@ impl SyncTreeProfile {
             .iter()
             .filter(|&&b| b.is_ascii_whitespace())
             .count();
-        let whitespace_ratio = whitespace_count as f64 / chunk_data.len() as f64;
+        let whitespace_ratio = if chunk_data.is_empty() {
+            0.0
+        } else {
+            whitespace_count as f64 / chunk_data.len() as f64
+        };
         score += (whitespace_ratio * 500.0) as u32;
 
         // Code pattern detection
@@ -442,11 +446,13 @@ mod tests {
     fn chunk_sizes_favor_deduplication() {
         // Small file should use small chunks
         let (target, min, max) = SyncTreeProfile::compute_chunk_sizes(16_384);
+        assert!(min >= 256);
         assert!(target <= 8 * 1024);
         assert!(max <= 32 * 1024);
 
         // Large file should still keep chunks reasonable for dedup
         let (target, min, max) = SyncTreeProfile::compute_chunk_sizes(100_000_000);
+        assert!(min >= 4 * 1024);
         assert!(target <= 32 * 1024);
         assert!(max <= 128 * 1024);
     }

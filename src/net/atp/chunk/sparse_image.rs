@@ -200,16 +200,19 @@ impl SparseImageProfile {
 
             let region = Self::analyze_region_type(scan_data, i as u64);
 
+            let next_start = region.start as usize;
+            let next_end = region.end as usize;
+
             // Only create regions for significant sparse areas
             if region.region_type != SparseRegionType::DataFilled
                 && (region.end - region.start) >= min_hole_size as u64
             {
-                regions.push(region.clone());
+                regions.push(region);
             }
 
             // Move to next region
-            i = region.end as usize;
-            if i == (region.start as usize) {
+            i = next_end;
+            if i == next_start {
                 // Prevent infinite loop - advance by at least 4KB
                 i += min_hole_size;
             }
@@ -482,7 +485,10 @@ impl SparseImageProfile {
         } else {
             // Compression ratio = original_size / compressed_size
             // Sparse regions compress to nearly nothing
-            let effective_size = total_size - sparse_size + (sparse_size / 1000); // Sparse metadata overhead
+            let mut effective_size = total_size - sparse_size + (sparse_size / 1000); // Sparse metadata overhead
+            if effective_size == 0 {
+                effective_size = 1;
+            }
             total_size as f64 / effective_size as f64
         }
     }
@@ -546,11 +552,13 @@ mod tests {
     fn chunk_sizes_optimize_for_sparse_detection() {
         // Small files should use smaller chunks for hole granularity
         let (target, min, max) = SparseImageProfile::compute_chunk_sizes(1_000_000);
+        assert!(min <= target);
         assert!(target >= 64 * 1024);
         assert!(max <= 2 * 1024 * 1024);
 
         // Large files should use bigger chunks for efficiency
         let (target, min, max) = SparseImageProfile::compute_chunk_sizes(10_000_000_000);
+        assert!(min <= target);
         assert!(target >= 4 * 1024 * 1024);
         assert_eq!(max, 8 * 1024 * 1024);
     }

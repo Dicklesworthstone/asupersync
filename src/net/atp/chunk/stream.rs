@@ -403,14 +403,15 @@ impl StreamProfile {
 
         // First chunk latency
         let first_chunk_size = boundaries[0].size_bytes;
+        let safe_bw = bandwidth_mbps.max(1) as f64;
         let first_chunk_transfer_ms =
-            (first_chunk_size as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
+            (first_chunk_size as f64 * 8.0) / (safe_bw * 1000.0);
         let first_chunk_latency =
             std::time::Duration::from_millis((first_chunk_transfer_ms + latency_ms as f64) as u64);
 
         // Full stream latency
         let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
-        let total_transfer_ms = (total_size as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
+        let total_transfer_ms = (total_size as f64 * 8.0) / (safe_bw * 1000.0);
         let total_latency_overhead_ms = boundaries.len() as f64 * latency_ms as f64;
         let full_stream_latency = std::time::Duration::from_millis(
             (total_transfer_ms + total_latency_overhead_ms) as u64,
@@ -423,7 +424,7 @@ impl StreamProfile {
             .map(|&idx| boundaries[idx].size_bytes)
             .sum();
         let early_transfer_ms =
-            (early_consumption_size as f64 * 8.0) / (bandwidth_mbps as f64 * 1000.0);
+            (early_consumption_size as f64 * 8.0) / (safe_bw * 1000.0);
         let early_latency_overhead_ms = early_chunks.len() as f64 * latency_ms as f64;
         let early_consumption_latency = std::time::Duration::from_millis(
             (early_transfer_ms + early_latency_overhead_ms) as u64,
@@ -516,6 +517,7 @@ mod tests {
 
         // Large streams should use bigger chunks for efficiency
         let (target, min, max) = StreamProfile::compute_chunk_sizes(2_000_000_000);
+        assert!(min <= target);
         assert_eq!(target, 1024 * 1024);
         assert_eq!(max, 1024 * 1024);
     }

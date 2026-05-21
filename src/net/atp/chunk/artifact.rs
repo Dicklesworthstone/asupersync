@@ -204,9 +204,11 @@ impl ArtifactProfile {
             let current_pos = i
                 .checked_add(1)
                 .and_then(|v| u64::try_from(v).ok())
-                .unwrap_or_else(|| {
-                    panic!("Position overflow in boundary detection at index {}", i)
-                });
+                .ok_or_else(|| {
+                    ChunkingProfileError::InvalidChunkParameters(format!(
+                        "position overflow in boundary detection at index {i}"
+                    ))
+                })?;
             let chunk_size_since_last = current_pos - last_boundary;
 
             let is_boundary = if chunk_size_since_last < min_chunk_size {
@@ -523,6 +525,10 @@ impl ArtifactProfile {
 
     /// Check for string tables (common in executables).
     fn has_string_tables(data: &[u8]) -> bool {
+        if data.is_empty() {
+            return false;
+        }
+        
         // Simple heuristic: look for null-terminated strings
         let null_count = data.iter().filter(|&&b| b == 0).count();
         let null_ratio = null_count as f64 / data.len() as f64;
@@ -648,7 +654,11 @@ impl ArtifactProfile {
             }
         }
 
-        let unique_ratio = unique_hashes.len() as f64 / boundaries.len() as f64;
+        let unique_ratio = if boundaries.is_empty() {
+            0.0
+        } else {
+            unique_hashes.len() as f64 / boundaries.len() as f64
+        };
         let deduplication_potential = 1.0 - unique_ratio;
 
         DeduplicationMetrics {
@@ -803,11 +813,13 @@ mod tests {
     fn chunk_sizes_optimize_for_deduplication() {
         // Small artifacts should use fine-grained chunking
         let (target, min, max) = ArtifactProfile::compute_chunk_sizes(32_768);
+        assert!(min <= target);
         assert_eq!(target, 4 * 1024);
         assert!(max <= 32 * 1024);
 
         // Large artifacts should balance dedup and efficiency
         let (target, min, max) = ArtifactProfile::compute_chunk_sizes(50_000_000);
+        assert!(min <= target);
         assert_eq!(target, 128 * 1024);
         assert_eq!(max, 512 * 1024);
     }
