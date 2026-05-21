@@ -218,6 +218,8 @@ rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 sha2 = "0.11"
 # HMAC for Macaroon capability token verification (bd-2lqyk.2)
 hmac = "0.13"
+# Constant-time equality for authentication tags.
+subtle = "2.6"
 # HKDF for QUIC key derivation (RFC 9001)
 hkdf = "0.12"
 # CRC32 for Kafka RecordBatch v2 format validation (KIP-98)

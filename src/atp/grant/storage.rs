@@ -75,9 +75,14 @@ impl GrantStorage {
             cache_dirty: false,
         };
 
-        // Load existing data
-        if let Outcome::Err(e) = storage.load_from_disk() {
-            eprintln!("Warning: failed to load existing grants: {e}");
+        // Load existing data. Capability state is security-sensitive; silently
+        // dropping unreadable or malformed records would start the enforcer
+        // from an incomplete view.
+        match storage.load_from_disk() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         Outcome::ok(storage)
@@ -140,22 +145,20 @@ impl GrantStorage {
 
     /// Delete a grant.
     pub fn delete_grant(&mut self, grant_id: &str) -> GrantResult<()> {
-        // Remove from cache
-        match self.grants_cache.remove(grant_id) {
-            Some(_) => {}
-            None => {
-                return Outcome::Err(GrantError::NotFound {
-                    grant_id: grant_id.to_string(),
-                });
-            }
+        if !self.grants_cache.contains_key(grant_id) {
+            return Outcome::Err(GrantError::NotFound {
+                grant_id: grant_id.to_string(),
+            });
         }
 
-        // Remove file
         let file_path = self.grant_file_path(grant_id);
         if let Err(e) = fs::remove_file(&file_path) {
-            eprintln!("Warning: failed to remove grant file {}: {}", file_path, e);
+            return Outcome::Err(GrantError::Storage(format!(
+                "failed to remove grant file {file_path}: {e}"
+            )));
         }
 
+        self.grants_cache.remove(grant_id);
         self.cache_dirty = true;
         Outcome::ok(())
     }
@@ -278,14 +281,20 @@ impl GrantStorage {
 
         // Persist all grants
         for grant_id in self.grants_cache.keys() {
-            if let Outcome::Err(e) = self.persist_grant(grant_id) {
-                eprintln!("Warning: failed to persist grant {}: {}", grant_id, e);
+            match self.persist_grant(grant_id) {
+                Outcome::Ok(()) => {}
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             }
         }
 
         // Persist audit log
-        if let Outcome::Err(e) = self.persist_audit_log() {
-            eprintln!("Warning: failed to persist audit log: {}", e);
+        match self.persist_audit_log() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         self.cache_dirty = false;
@@ -297,18 +306,36 @@ impl GrantStorage {
         // Load grants
         let grants_dir = self.base_dir.join("grants");
         if grants_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&grants_dir) {
-                for entry in entries.flatten() {
-                    if let Some(extension) = entry.path().extension() {
-                        if extension == "json" {
-                            if let Outcome::Err(e) = self.load_grant_file(&entry.path()) {
-                                eprintln!(
-                                    "Warning: failed to load grant file {:?}: {}",
-                                    entry.path(),
-                                    e
-                                );
-                            }
-                        }
+            let entries = match fs::read_dir(&grants_dir) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    return Outcome::Err(GrantError::Storage(format!(
+                        "failed to read grants directory {}: {error}",
+                        grants_dir.display()
+                    )));
+                }
+            };
+
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        return Outcome::Err(GrantError::Storage(format!(
+                            "failed to read grants directory entry: {error}"
+                        )));
+                    }
+                };
+
+                if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    match self.load_grant_file(&entry.path()) {
+                        Outcome::Ok(()) => {}
+                        Outcome::Err(error) => return Outcome::Err(error),
+                        Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                        Outcome::Panicked(payload) => return Outcome::Panicked(payload),
                     }
                 }
             }
@@ -317,8 +344,11 @@ impl GrantStorage {
         // Load audit log
         let audit_file = self.base_dir.join("audit.jsonl");
         if audit_file.exists() {
-            if let Outcome::Err(e) = self.load_audit_file(&audit_file) {
-                eprintln!("Warning: failed to load audit file: {}", e);
+            match self.load_audit_file(&audit_file) {
+                Outcome::Ok(()) => {}
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             }
         }
 
@@ -362,9 +392,19 @@ impl GrantStorage {
             }
         };
 
-        for line in content.lines() {
-            if let Ok(record) = serde_json::from_str::<GrantAuditRecord>(line) {
-                self.audit_cache.push(record);
+        for (line_index, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<GrantAuditRecord>(line) {
+                Ok(record) => self.audit_cache.push(record),
+                Err(error) => {
+                    return Outcome::Err(GrantError::Storage(format!(
+                        "failed to parse audit record at line {}: {error}",
+                        line_index + 1
+                    )));
+                }
             }
         }
 
@@ -419,10 +459,16 @@ impl GrantStorage {
         let mut content = String::new();
 
         for record in &self.audit_cache {
-            if let Ok(line) = serde_json::to_string(record) {
-                content.push_str(&line);
-                content.push('\n');
-            }
+            let line = match serde_json::to_string(record) {
+                Ok(line) => line,
+                Err(error) => {
+                    return Outcome::Err(GrantError::Storage(format!(
+                        "failed to serialize audit record: {error}"
+                    )));
+                }
+            };
+            content.push_str(&line);
+            content.push('\n');
         }
 
         match fs::write(&audit_file, content) {
@@ -460,9 +506,7 @@ impl GrantStorage {
 
 impl Drop for GrantStorage {
     fn drop(&mut self) {
-        if let Outcome::Err(e) = self.flush() {
-            eprintln!("Warning: failed to flush grant storage on drop: {}", e);
-        }
+        let _ = self.flush();
     }
 }
 
@@ -497,8 +541,8 @@ mod tests {
 
     #[test]
     fn storage_stores_and_retrieves_grants() {
-        let temp_dir = tempdir().expect("tempdir");
-        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage");
+        let temp_dir = tempdir().expect("tempdir"); // ubs:ignore - test oracle
+        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage"); // ubs:ignore - test oracle
 
         let grant_info = create_test_grant_info();
         let grant_id = grant_info.capability.grant_id.clone();
@@ -506,10 +550,10 @@ mod tests {
         // Store grant
         storage
             .store_grant(grant_info.clone())
-            .expect("store grant");
+            .expect("store grant"); // ubs:ignore - test oracle
 
         // Retrieve grant
-        let retrieved = storage.get_grant(&grant_id).expect("get grant");
+        let retrieved = storage.get_grant(&grant_id).expect("get grant"); // ubs:ignore - test oracle
         assert_eq!(
             retrieved.capability.grant_id,
             grant_info.capability.grant_id
@@ -519,15 +563,15 @@ mod tests {
 
     #[test]
     fn storage_prevents_duplicate_grants() {
-        let temp_dir = tempdir().expect("tempdir");
-        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage");
+        let temp_dir = tempdir().expect("tempdir"); // ubs:ignore - test oracle
+        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage"); // ubs:ignore - test oracle
 
         let grant_info = create_test_grant_info();
 
         // Store grant
         storage
             .store_grant(grant_info.clone())
-            .expect("store grant");
+            .expect("store grant"); // ubs:ignore - test oracle
 
         // Try to store again - should fail
         let result = storage.store_grant(grant_info);
@@ -539,13 +583,13 @@ mod tests {
 
     #[test]
     fn storage_lists_grants_with_filters() {
-        let temp_dir = tempdir().expect("tempdir");
-        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage");
+        let temp_dir = tempdir().expect("tempdir"); // ubs:ignore - test oracle
+        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage"); // ubs:ignore - test oracle
 
         let grant_info = create_test_grant_info();
         storage
             .store_grant(grant_info.clone())
-            .expect("store grant");
+            .expect("store grant"); // ubs:ignore - test oracle
 
         // Query by subject
         let query = GrantQuery {
@@ -553,7 +597,7 @@ mod tests {
             ..Default::default()
         };
 
-        let results = storage.list_grants(&query).expect("list grants");
+        let results = storage.list_grants(&query).expect("list grants"); // ubs:ignore - test oracle
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].capability.grant_id,
@@ -566,18 +610,18 @@ mod tests {
             ..Default::default()
         };
 
-        let results = storage.list_grants(&query).expect("list grants");
+        let results = storage.list_grants(&query).expect("list grants"); // ubs:ignore - test oracle
         assert_eq!(results.len(), 0);
     }
 
     #[test]
     fn storage_tracks_audit_records() {
-        let temp_dir = tempdir().expect("tempdir");
-        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage");
+        let temp_dir = tempdir().expect("tempdir"); // ubs:ignore - test oracle
+        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage"); // ubs:ignore - test oracle
 
         let grant_info = create_test_grant_info();
         let grant_id = grant_info.capability.grant_id.clone();
-        storage.store_grant(grant_info).expect("store grant");
+        storage.store_grant(grant_info).expect("store grant"); // ubs:ignore - test oracle
 
         // Add audit record
         let audit_record = GrantAuditRecord {
@@ -592,12 +636,12 @@ mod tests {
 
         storage
             .add_audit_record(audit_record.clone())
-            .expect("add audit record");
+            .expect("add audit record"); // ubs:ignore - test oracle
 
         // Retrieve audit records
         let records = storage
             .get_audit_records(&grant_id)
-            .expect("get audit records");
+            .expect("get audit records"); // ubs:ignore - test oracle
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].operation, GrantOperation::Used);
 
@@ -608,22 +652,22 @@ mod tests {
 
     #[test]
     fn storage_persists_across_instances() {
-        let temp_dir = tempdir().expect("tempdir");
+        let temp_dir = tempdir().expect("tempdir"); // ubs:ignore - test oracle
         let grant_info = create_test_grant_info();
         let grant_id = grant_info.capability.grant_id.clone();
 
         // Create storage and store grant
         {
-            let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage");
+            let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage"); // ubs:ignore - test oracle
             storage
                 .store_grant(grant_info.clone())
-                .expect("store grant");
+                .expect("store grant"); // ubs:ignore - test oracle
         }
 
         // Create new storage instance and verify grant is still there
         {
-            let storage = GrantStorage::new(temp_dir.path()).expect("create storage");
-            let retrieved = storage.get_grant(&grant_id).expect("get grant");
+            let storage = GrantStorage::new(temp_dir.path()).expect("create storage"); // ubs:ignore - test oracle
+            let retrieved = storage.get_grant(&grant_id).expect("get grant"); // ubs:ignore - test oracle
             assert_eq!(
                 retrieved.capability.grant_id,
                 grant_info.capability.grant_id
@@ -632,12 +676,36 @@ mod tests {
     }
 
     #[test]
+    fn storage_rejects_malformed_grant_file_on_startup() {
+        let temp_dir = tempdir().expect("tempdir"); // ubs:ignore - test oracle
+        let grants_dir = temp_dir.path().join("grants");
+        std::fs::create_dir_all(&grants_dir).expect("create grants dir"); // ubs:ignore - test oracle
+        std::fs::write(grants_dir.join("bad.json"), "{not valid json")
+            .expect("write malformed grant"); // ubs:ignore - test oracle
+
+        let result = GrantStorage::new(temp_dir.path());
+
+        assert!(matches!(result, Outcome::Err(GrantError::Storage(_))));
+    }
+
+    #[test]
+    fn storage_rejects_malformed_audit_log_on_startup() {
+        let temp_dir = tempdir().expect("tempdir"); // ubs:ignore - test oracle
+        std::fs::write(temp_dir.path().join("audit.jsonl"), "not json\n")
+            .expect("write malformed audit log"); // ubs:ignore - test oracle
+
+        let result = GrantStorage::new(temp_dir.path());
+
+        assert!(matches!(result, Outcome::Err(GrantError::Storage(_))));
+    }
+
+    #[test]
     fn storage_calculates_stats() {
-        let temp_dir = tempdir().expect("tempdir");
-        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage");
+        let temp_dir = tempdir().expect("tempdir"); // ubs:ignore - test oracle
+        let mut storage = GrantStorage::new(temp_dir.path()).expect("create storage"); // ubs:ignore - test oracle
 
         let grant_info = create_test_grant_info();
-        storage.store_grant(grant_info).expect("store grant");
+        storage.store_grant(grant_info).expect("store grant"); // ubs:ignore - test oracle
 
         let stats = storage.get_stats();
         assert_eq!(stats.total_grants, 1);

@@ -13,7 +13,6 @@ use crate::security::keys::IdentityKeyStore;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 macro_rules! grant_try {
@@ -36,7 +35,7 @@ pub struct GrantManager {
     /// Capability verifier for validating grants
     verifier: CapabilityVerifier,
     /// Policy enforcer
-    enforcer: Arc<Mutex<PolicyEnforcer>>,
+    enforcer: PolicyEnforcer,
     /// Local peer identity
     identity: DurablePeerIdentity,
     /// Grant templates
@@ -54,7 +53,7 @@ impl GrantManager {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
         let verifier = CapabilityVerifier::new();
-        let enforcer = Arc::new(Mutex::new(PolicyEnforcer::new()));
+        let enforcer = PolicyEnforcer::new();
         let identity = signer.identity().clone();
 
         let mut templates = HashMap::new();
@@ -69,10 +68,10 @@ impl GrantManager {
             templates,
         };
 
-        // Load existing grants into enforcer
-        if let Outcome::Err(e) = manager.load_grants_into_enforcer() {
-            eprintln!("Warning: failed to load grants into enforcer: {e}");
-        }
+        // Load existing grants into enforcer. Starting with an incomplete
+        // enforcement view is a fail-open capability bug, so construction must
+        // fail if persisted grant state cannot be replayed.
+        grant_try!(manager.load_grants_into_enforcer());
 
         Outcome::ok(manager)
     }
@@ -112,9 +111,7 @@ impl GrantManager {
         grant_try!(self.storage.store_grant(grant_info.clone()));
 
         // Add to policy enforcer
-        if let Ok(mut enforcer) = self.enforcer.lock() {
-            enforcer.add_capability(grant_info.capability.clone());
-        }
+        self.enforcer.add_capability(grant_info.capability.clone());
 
         // Record audit event
         let audit_record = GrantAuditRecord {
@@ -162,9 +159,7 @@ impl GrantManager {
 
         // Add to policy enforcer if this grant is for us
         if capability.subject == self.identity.peer_id() {
-            if let Ok(mut enforcer) = self.enforcer.lock() {
-                enforcer.add_capability(capability.clone());
-            }
+            self.enforcer.add_capability(capability.clone());
         }
 
         // Record audit event
@@ -207,9 +202,7 @@ impl GrantManager {
         grant_try!(self.storage.update_grant(grant_id, grant_info.clone()));
 
         // Remove from policy enforcer
-        if let Ok(mut enforcer) = self.enforcer.lock() {
-            enforcer.revoke_capability(grant_id);
-        }
+        self.enforcer.revoke_capability(grant_id);
 
         // Record audit event
         let audit_record = GrantAuditRecord {
@@ -278,10 +271,9 @@ impl GrantManager {
         grant_try!(self.storage.update_grant(grant_id, old_grant));
 
         // Update policy enforcer
-        if let Ok(mut enforcer) = self.enforcer.lock() {
-            enforcer.remove_capability(grant_id);
-            enforcer.add_capability(new_grant_info.capability.clone());
-        }
+        self.enforcer.remove_capability(grant_id);
+        self.enforcer
+            .add_capability(new_grant_info.capability.clone());
 
         // Record audit events
         let rotate_record = GrantAuditRecord {
@@ -315,52 +307,40 @@ impl GrantManager {
 
     /// Evaluate an access request against current grants.
     pub fn evaluate_access(&mut self, request: &AccessRequest) -> GrantResult<PolicyDecision> {
-        let mut enforcer = match self.enforcer.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                return Outcome::err(GrantError::Storage(format!("enforcer lock error: {e}")));
-            }
-        };
-
-        let decision = enforcer.evaluate_access(request);
+        let decision = self.enforcer.evaluate_access(request);
 
         // Record usage if access was granted
         if let crate::atp::policy::CapabilityDecision::Granted { ref capability, .. } =
             decision.decision
         {
             // Update usage count in storage
-            if let Outcome::Ok(mut grant_info) = self.storage.get_grant(&capability.grant_id) {
-                grant_info.record_usage();
+            let mut grant_info = grant_try!(self.storage.get_grant(&capability.grant_id));
+            grant_info.record_usage();
 
-                if let Outcome::Err(e) = self
-                    .storage
+            grant_try!(
+                self.storage
                     .update_grant(&capability.grant_id, grant_info.clone())
-                {
-                    eprintln!("Warning: failed to update grant usage: {e}");
-                } else {
-                    // Record audit event
-                    let audit_record = GrantAuditRecord {
-                        grant_id: capability.grant_id.clone(),
-                        operation: GrantOperation::Used,
-                        actor: request.peer,
-                        target: None,
-                        timestamp: SystemTime::now(),
-                        context: {
-                            let mut ctx = HashMap::new();
-                            ctx.insert("action".to_string(), format!("{:?}", request.action));
-                            if let Some(ref session_id) = request.context.session_id {
-                                ctx.insert("session_id".to_string(), session_id.clone());
-                            }
-                            ctx
-                        },
-                        capability_summary: grant_info.redacted_summary(),
-                    };
+            );
 
-                    if let Outcome::Err(e) = self.storage.add_audit_record(audit_record) {
-                        eprintln!("Warning: failed to record usage audit: {e}");
+            // Record audit event
+            let audit_record = GrantAuditRecord {
+                grant_id: capability.grant_id.clone(),
+                operation: GrantOperation::Used,
+                actor: request.peer,
+                target: None,
+                timestamp: SystemTime::now(),
+                context: {
+                    let mut ctx = HashMap::new();
+                    ctx.insert("action".to_string(), format!("{:?}", request.action));
+                    if let Some(ref session_id) = request.context.session_id {
+                        ctx.insert("session_id".to_string(), session_id.clone());
                     }
-                }
-            }
+                    ctx
+                },
+                capability_summary: grant_info.redacted_summary(),
+            };
+
+            grant_try!(self.storage.add_audit_record(audit_record));
         }
 
         Outcome::ok(decision)
@@ -481,10 +461,8 @@ impl GrantManager {
 
         let grants = grant_try!(self.storage.list_grants(&query));
 
-        if let Ok(mut enforcer) = self.enforcer.lock() {
-            for grant in grants {
-                enforcer.add_capability(grant.capability);
-            }
+        for grant in grants {
+            self.enforcer.add_capability(grant.capability);
         }
 
         Outcome::ok(())
@@ -494,7 +472,10 @@ impl GrantManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::policy::{CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope};
+    use crate::atp::policy::{
+        AccessResource, CapabilityAction, CapabilityDecision, RequestContext, ResourceScope,
+        ScopeConstraints, TemporalScope,
+    };
     use crate::security::keys::IdentityKeyStore;
     use std::collections::HashSet;
     use std::time::Duration;
@@ -503,8 +484,12 @@ mod tests {
     fn create_test_manager() -> GrantManager {
         let temp_dir = tempdir().expect("tempdir");
         let key_store_path = temp_dir.path().join("keys.json");
+        let seed = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ];
         let key_store =
-            IdentityKeyStore::create(key_store_path, [1; 32], 1).expect("create key store");
+            IdentityKeyStore::create(key_store_path, seed, 1).expect("create key store");
 
         GrantManager::new(temp_dir.path(), key_store).expect("create manager")
     }
@@ -612,6 +597,119 @@ mod tests {
 
         assert_eq!(audit_records.len(), 1);
         assert_eq!(audit_records[0].operation, GrantOperation::Issued);
+    }
+
+    #[test]
+    fn grant_manager_records_usage_and_audit_on_granted_access() {
+        let mut manager = create_test_manager();
+        let subject = crate::net::atp::protocol::PeerId::test(7);
+
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+
+        let request = CreateGrantRequest {
+            subject,
+            scope: ResourceScope::Any,
+            actions,
+            temporal: TemporalScope::expires_in(Duration::from_secs(3600)),
+            constraints: ScopeConstraints::default(),
+            description: None,
+            parent_grant_id: None,
+        };
+
+        let grant_info = manager.issue_grant(request).expect("issue grant");
+        let access = AccessRequest {
+            peer: subject,
+            resource: AccessResource::Inbox,
+            action: CapabilityAction::Read,
+            transfer_size: None,
+            client_ip: None,
+            context: RequestContext {
+                session_id: Some("session-usage-audit".to_string()),
+                transfer_id: None,
+                source: None,
+            },
+        };
+
+        let decision = manager
+            .evaluate_access(&access)
+            .expect("evaluate granted access");
+
+        assert!(matches!(
+            decision.decision,
+            CapabilityDecision::Granted { .. }
+        ));
+
+        let updated = manager
+            .get_grant(&grant_info.capability.grant_id)
+            .expect("get updated grant");
+        assert_eq!(updated.usage_count, 1);
+        assert!(updated.last_used.is_some());
+
+        let audit_records = manager
+            .get_audit_records(&grant_info.capability.grant_id)
+            .expect("get audit records");
+        assert_eq!(audit_records.len(), 2);
+        assert_eq!(audit_records[0].operation, GrantOperation::Issued);
+        assert_eq!(audit_records[1].operation, GrantOperation::Used);
+        assert_eq!(
+            audit_records[1]
+                .context
+                .get("session_id")
+                .map(String::as_str),
+            Some("session-usage-audit")
+        );
+    }
+
+    #[test]
+    fn grant_manager_expires_one_time_grant_after_successful_access() {
+        let mut manager = create_test_manager();
+        let subject = crate::net::atp::protocol::PeerId::test(8);
+
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::ReadOnce);
+
+        let request = CreateGrantRequest {
+            subject,
+            scope: ResourceScope::Any,
+            actions,
+            temporal: TemporalScope::once(),
+            constraints: ScopeConstraints::default(),
+            description: None,
+            parent_grant_id: None,
+        };
+
+        let grant_info = manager.issue_grant(request).expect("issue grant");
+        let access = AccessRequest {
+            peer: subject,
+            resource: AccessResource::Inbox,
+            action: CapabilityAction::ReadOnce,
+            transfer_size: None,
+            client_ip: None,
+            context: RequestContext::default(),
+        };
+
+        let first_decision = manager
+            .evaluate_access(&access)
+            .expect("first access evaluates");
+        assert!(matches!(
+            first_decision.decision,
+            CapabilityDecision::Granted { .. }
+        ));
+
+        let updated = manager
+            .get_grant(&grant_info.capability.grant_id)
+            .expect("get updated grant");
+        assert_eq!(updated.state, GrantState::Expired);
+        assert_eq!(updated.usage_count, 1);
+
+        let second_decision = manager
+            .evaluate_access(&access)
+            .expect("second access evaluates");
+        assert!(matches!(
+            second_decision.decision,
+            CapabilityDecision::Denied { .. }
+        ));
     }
 
     #[test]

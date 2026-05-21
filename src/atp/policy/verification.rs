@@ -370,7 +370,7 @@ mod tests {
         // Sign the capability
         signer
             .sign_capability(&mut capability)
-            .expect("sign capability");
+            .expect("sign capability"); // ubs:ignore - test oracle
         assert!(!capability.signature.is_empty());
 
         // Create verifier and add trusted peer
@@ -380,7 +380,7 @@ mod tests {
         // Verify the capability
         let valid = verifier
             .verify_capability(&capability)
-            .expect("verify capability");
+            .expect("verify capability"); // ubs:ignore - test oracle
         assert!(valid);
     }
 
@@ -394,7 +394,7 @@ mod tests {
 
         signer
             .sign_capability(&mut capability)
-            .expect("sign capability");
+            .expect("sign capability"); // ubs:ignore - test oracle
 
         let mut verifier = CapabilityVerifier::new();
         verifier.add_trusted_peer(signer.identity().clone());
@@ -417,7 +417,7 @@ mod tests {
 
         signer
             .sign_capability(&mut capability)
-            .expect("sign capability");
+            .expect("sign capability"); // ubs:ignore - test oracle
 
         let mut verifier = CapabilityVerifier::new();
         verifier.add_trusted_peer(signer.identity().clone());
@@ -435,7 +435,7 @@ mod tests {
         let mut capability = create_test_capability(&signer);
         signer
             .sign_capability(&mut capability)
-            .expect("sign capability");
+            .expect("sign capability"); // ubs:ignore - test oracle
 
         // Create verifier without adding the trusted peer
         let verifier = CapabilityVerifier::new();

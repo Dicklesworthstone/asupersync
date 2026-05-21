@@ -8,6 +8,7 @@ use crate::types::{Symbol, SymbolKind};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::fmt;
+use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -128,7 +129,10 @@ impl AuthenticationTag {
     /// Construction:
     /// `HMAC-SHA256(key, journal_domain || record_type || record_payload_bytes)`.
     #[must_use]
-    pub fn compute_for_journal_record(key: &AuthKey, record: &crate::atp::journal::JournalRecord) -> Self {
+    pub fn compute_for_journal_record(
+        key: &AuthKey,
+        record: &crate::atp::journal::JournalRecord,
+    ) -> Self {
         use crate::atp::journal::JournalRecord;
 
         const JOURNAL_DOMAIN: &[u8] = b"asupersync::security::AuthenticationTag::journal::v1";
@@ -167,11 +171,7 @@ impl AuthenticationTag {
 
 impl PartialEq for AuthenticationTag {
     fn eq(&self, other: &Self) -> bool {
-        let mut diff = 0u8;
-        for (lhs, rhs) in self.bytes.iter().zip(other.bytes.iter()) {
-            diff |= lhs ^ rhs;
-        }
-        core::hint::black_box(diff) == 0
+        self.bytes.ct_eq(&other.bytes).into()
     }
 }
 

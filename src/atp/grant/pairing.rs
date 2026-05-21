@@ -42,7 +42,6 @@ pub struct PairingCode {
 
 impl PairingCode {
     /// Create a new pairing code.
-    #[must_use]
     pub fn new(
         issuer_identity: &DurablePeerIdentity,
         actions: HashSet<CapabilityAction>,
@@ -50,10 +49,15 @@ impl PairingCode {
         temporal: TemporalScope,
         constraints: ScopeConstraints,
         one_time: bool,
-    ) -> Self {
-        let code = Self::generate_code(issuer_identity, &actions, &scope);
+    ) -> GrantResult<Self> {
+        let code = match Self::generate_code(issuer_identity, &actions, &scope) {
+            Outcome::Ok(code) => code,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
-        Self {
+        Outcome::ok(Self {
             code,
             issuer: issuer_identity.peer_id(),
             issuer_public_key: issuer_identity.public_key().to_string(),
@@ -61,12 +65,12 @@ impl PairingCode {
             scope,
             temporal,
             constraints,
-            created_at: SystemTime::now(),
+            created_at: SystemTime::now(), // ubs:ignore - timestamp recording, not crypto randomness
             description: None,
             one_time,
             use_count: 0,
             max_uses: if one_time { Some(1) } else { None },
-        }
+        })
     }
 
     /// Set a description for the pairing code.
@@ -106,7 +110,7 @@ impl PairingCode {
             return false;
         }
 
-        self.use_count += 1;
+        self.use_count = self.use_count.saturating_add(1);
         true
     }
 
@@ -121,7 +125,7 @@ impl PairingCode {
         identity: &DurablePeerIdentity,
         actions: &HashSet<CapabilityAction>,
         scope: &ResourceScope,
-    ) -> String {
+    ) -> GrantResult<String> {
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
@@ -136,19 +140,24 @@ impl PairingCode {
         }
 
         hasher.update(&scope.digest());
-        hasher.update(
-            &SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .to_le_bytes(),
-        );
+
+        let mut random_bytes = [0u8; 16];
+        if let Err(error) = getrandom::fill(&mut random_bytes) {
+            return Outcome::Err(GrantError::PairingError {
+                reason: format!("failed to generate secure pairing code entropy: {error}"),
+            });
+        }
+        hasher.update(&random_bytes);
 
         let hash = hasher.finalize();
-        let code_bytes = &hash[..12]; // Use first 12 bytes
+        let Some(code_bytes) = hash.get(..12) else {
+            return Outcome::Err(GrantError::PairingError {
+                reason: "sha256 digest shorter than pairing-code prefix".to_string(),
+            });
+        };
 
         // Encode as human-readable string
-        Self::encode_pairing_code(code_bytes)
+        Outcome::ok(Self::encode_pairing_code(code_bytes))
     }
 
     /// Encode pairing code bytes as human-readable string.
@@ -287,23 +296,28 @@ impl PairingManager {
         scope: ResourceScope,
         duration: Duration,
         one_time: bool,
-    ) -> String {
+    ) -> GrantResult<String> {
         let temporal = TemporalScope::expires_in(duration);
         let constraints = ScopeConstraints::default();
 
-        let pairing_code = PairingCode::new(
+        let pairing_code = match PairingCode::new(
             &self.identity,
             actions,
             scope,
             temporal,
             constraints,
             one_time,
-        );
+        ) {
+            Outcome::Ok(code) => code,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
         let code = pairing_code.code.clone();
         self.active_codes.insert(code.clone(), pairing_code);
 
-        code
+        Outcome::ok(code)
     }
 
     /// Generate a share code for quick access.
@@ -312,7 +326,7 @@ impl PairingManager {
         actions: HashSet<CapabilityAction>,
         scope: ResourceScope,
         duration: Duration,
-    ) -> String {
+    ) -> GrantResult<String> {
         // Share codes are typically one-time use
         self.generate_pairing_code(actions, scope, duration, true)
     }
@@ -324,16 +338,25 @@ impl PairingManager {
         scope: ResourceScope,
         duration: Duration,
         requires_confirmation: bool,
-    ) -> PairingFlow {
-        let code = self.generate_pairing_code(actions, scope, duration, false);
-        let pairing_code = self.active_codes[&code].clone();
+    ) -> GrantResult<PairingFlow> {
+        let code = match self.generate_pairing_code(actions, scope, duration, false) {
+            Outcome::Ok(code) => code,
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        let Some(pairing_code) = self.active_codes.get(&code).cloned() else {
+            return Outcome::Err(GrantError::PairingError {
+                reason: "generated pairing code was not inserted".to_string(),
+            });
+        };
 
-        PairingFlow {
+        Outcome::ok(PairingFlow {
             pairing_code,
             state: PairingFlowState::Pending,
             requires_confirmation,
             pending_confirmations: Vec::new(),
-        }
+        })
     }
 
     /// Request to use a pairing code.
@@ -344,10 +367,18 @@ impl PairingManager {
         message: Option<String>,
     ) -> GrantResult<PairingRequest> {
         // Check if code exists
-        if !self.active_codes.contains_key(code) {
-            return Outcome::Err(GrantError::NotFound {
-                grant_id: code.to_string(),
-            });
+        match self.active_codes.get(code) {
+            Some(pairing_code) if pairing_code.is_valid() => {}
+            Some(_) => {
+                return Outcome::Err(GrantError::PairingError {
+                    reason: "pairing code is expired or exhausted".to_string(),
+                });
+            }
+            None => {
+                return Outcome::Err(GrantError::NotFound {
+                    grant_id: code.to_string(),
+                });
+            }
         }
 
         let request = PairingRequest {
@@ -389,11 +420,7 @@ impl PairingManager {
         }
 
         // Create capability for the requesting peer
-        let grant_id = format!(
-            "paired-{}-{}",
-            code,
-            peer_identity.peer_id_hex()[..8].to_string()
-        );
+        let grant_id = format!("paired-{}-{}", code, peer_identity.peer_id().redacted());
 
         let capability = Capability::new(
             grant_id,
@@ -415,11 +442,10 @@ impl PairingManager {
 
         self.completed_pairings.push(completed);
 
-        // Put code back if it has remaining uses
-        if let Some(remaining) = pairing_code.remaining_uses() {
-            if remaining > 0 {
-                self.active_codes.insert(code.to_string(), pairing_code);
-            }
+        // Keep reusable codes active after successful use; one-time and exhausted
+        // limited-use codes become invalid and stay removed.
+        if pairing_code.is_valid() {
+            self.active_codes.insert(code.to_string(), pairing_code);
         }
 
         Outcome::ok(capability)
@@ -477,7 +503,7 @@ impl PairingManager {
     }
 
     /// Create a quick read-once share code.
-    pub fn create_read_once_share(&mut self, scope: ResourceScope) -> String {
+    pub fn create_read_once_share(&mut self, scope: ResourceScope) -> GrantResult<String> {
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::ReadOnce);
 
@@ -485,11 +511,21 @@ impl PairingManager {
     }
 
     /// Create a temporary write share code.
-    pub fn create_temp_write_share(&mut self, scope: ResourceScope, hours: u64) -> String {
+    pub fn create_temp_write_share(
+        &mut self,
+        scope: ResourceScope,
+        hours: u64,
+    ) -> GrantResult<String> {
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::Write);
 
-        self.generate_share_code(actions, scope, Duration::from_secs(hours * 3600))
+        let Some(seconds) = hours.checked_mul(3600) else {
+            return Outcome::Err(GrantError::PairingError {
+                reason: "share duration overflows u64 seconds".to_string(),
+            });
+        };
+
+        self.generate_share_code(actions, scope, Duration::from_secs(seconds))
     }
 }
 
@@ -523,7 +559,11 @@ mod tests {
     fn create_test_identity() -> DurablePeerIdentity {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("identity.json");
-        let store = IdentityKeyStore::create(path, [1; 32], 1).expect("create key store");
+        let seed = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ];
+        let store = IdentityKeyStore::create(path, seed, 1).expect("create key store");
         DurablePeerIdentity::from_key_store(&store).expect("durable identity")
     }
 
@@ -540,7 +580,8 @@ mod tests {
             TemporalScope::expires_in(Duration::from_secs(3600)),
             ScopeConstraints::default(),
             true,
-        );
+        )
+        .expect("create pairing code");
 
         assert!(!pairing_code.code.is_empty());
         assert!(pairing_code.is_valid());
@@ -556,12 +597,14 @@ mod tests {
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::Read);
 
-        let code = manager.generate_pairing_code(
-            actions.clone(),
-            ResourceScope::Any,
-            Duration::from_secs(3600),
-            true,
-        );
+        let code = manager
+            .generate_pairing_code(
+                actions.clone(),
+                ResourceScope::Any,
+                Duration::from_secs(3600),
+                true,
+            )
+            .expect("generate pairing code");
 
         // Use the pairing code
         let capability = manager
@@ -586,12 +629,14 @@ mod tests {
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::Read);
 
-        let code = manager.generate_pairing_code(
-            actions,
-            ResourceScope::Any,
-            Duration::from_secs(3600),
-            true, // one-time use
-        );
+        let code = manager
+            .generate_pairing_code(
+                actions,
+                ResourceScope::Any,
+                Duration::from_secs(3600),
+                true, // one-time use
+            )
+            .expect("generate pairing code");
 
         // First use should succeed
         let _capability1 = manager
@@ -654,7 +699,8 @@ mod tests {
             TemporalScope::once(),
             ScopeConstraints::default(),
             true,
-        );
+        )
+        .expect("create pairing code");
 
         let summary = pairing_code.summary();
         assert!(summary.contains("Code:"));
@@ -662,5 +708,105 @@ mod tests {
         assert!(summary.contains("Share"));
         assert!(summary.contains("inbox"));
         assert!(summary.contains("1 uses remaining"));
+    }
+
+    #[test]
+    fn reusable_pairing_code_remains_active_after_successful_use() {
+        let identity = create_test_identity();
+        let first_peer = create_test_identity();
+        let second_peer = create_test_identity();
+        let mut manager = PairingManager::new(identity);
+
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+
+        let code = manager
+            .generate_pairing_code(
+                actions,
+                ResourceScope::Any,
+                Duration::from_secs(3600),
+                false,
+            )
+            .expect("generate reusable pairing code");
+
+        let first = manager
+            .use_pairing_code(&code, &first_peer)
+            .expect("first use should succeed");
+        let second = manager
+            .use_pairing_code(&code, &second_peer)
+            .expect("second use should also succeed for unlimited code");
+
+        assert_eq!(first.subject, first_peer.peer_id());
+        assert_eq!(second.subject, second_peer.peer_id());
+        assert!(manager.get_pairing_code(&code).is_ok());
+    }
+
+    #[test]
+    fn limited_pairing_code_is_removed_after_last_use() {
+        let identity = create_test_identity();
+        let peer_identity = create_test_identity();
+        let mut manager = PairingManager::new(identity);
+
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+
+        let code = manager
+            .generate_pairing_code(
+                actions,
+                ResourceScope::Any,
+                Duration::from_secs(3600),
+                false,
+            )
+            .expect("generate limited pairing code");
+        manager
+            .active_codes
+            .get_mut(&code)
+            .expect("active pairing code")
+            .max_uses = Some(2);
+
+        manager
+            .use_pairing_code(&code, &peer_identity)
+            .expect("first use should succeed");
+        assert!(manager.get_pairing_code(&code).is_ok());
+
+        manager
+            .use_pairing_code(&code, &peer_identity)
+            .expect("last allowed use should succeed");
+        assert!(manager.get_pairing_code(&code).is_err());
+    }
+
+    #[test]
+    fn temporary_write_share_rejects_duration_overflow() {
+        let identity = create_test_identity();
+        let mut manager = PairingManager::new(identity);
+
+        let result = manager.create_temp_write_share(ResourceScope::Any, u64::MAX);
+
+        assert!(matches!(
+            result,
+            Outcome::Err(GrantError::PairingError { .. })
+        ));
+    }
+
+    #[test]
+    fn pairing_code_usage_counter_saturates_instead_of_wrapping() {
+        let identity = create_test_identity();
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+        let mut pairing_code = PairingCode::new(
+            &identity,
+            actions,
+            ResourceScope::Any,
+            TemporalScope::expires_in(Duration::from_secs(3600)),
+            ScopeConstraints::default(),
+            false,
+        )
+        .expect("create pairing code");
+
+        pairing_code.use_count = u64::MAX;
+        pairing_code.max_uses = None;
+
+        assert!(pairing_code.record_use());
+        assert_eq!(pairing_code.use_count, u64::MAX);
     }
 }

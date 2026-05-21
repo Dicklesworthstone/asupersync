@@ -361,7 +361,7 @@ impl PolicyEnforcer {
         capabilities
             .iter()
             .min_by_key(|cap| self.capability_scope_breadth(&cap.scope))
-            .unwrap_or(&capabilities[0])
+            .unwrap() // ubs:ignore - capabilities slice is guaranteed non-empty by caller
     }
 
     /// Get a rough measure of capability scope breadth (lower = more restrictive).
@@ -511,7 +511,7 @@ mod tests {
                 reason: DenialReason::NoCapability,
                 ..
             } => {}
-            other => panic!("Expected NoCapability denial after revocation, got {other:?}"),
+            other => panic!("Expected NoCapability denial after revocation, got {other:?}"), // ubs:ignore - test oracle
         }
     }
 

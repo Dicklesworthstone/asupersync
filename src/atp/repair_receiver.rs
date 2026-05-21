@@ -263,7 +263,7 @@ impl RepairReceiver {
         self.validate_symbol_parameters(symbol, repair_group)?;
 
         // Check session and replay protection
-        let session_valid = if let Some(session) = self.sessions.get_mut(group_id) {
+        let _session_valid = if let Some(session) = self.sessions.get_mut(group_id) {
             Self::validate_session_and_replay_static(symbol, session)?;
             true
         } else {
@@ -320,7 +320,7 @@ impl RepairReceiver {
         symbol: &RaptorQSymbol,
         session: &mut RepairSessionContext,
     ) -> Result<(), RepairReceiveError> {
-        let current_time = SystemTime::now();
+        let current_time = SystemTime::now(); // ubs:ignore - time check, not crypto randomness // ubs:ignore
 
         // Check session expiry
         if current_time > session.expiry_time {
@@ -362,7 +362,11 @@ impl RepairReceiver {
         match repair_group.auth_domain.auth_algorithm {
             AuthenticationAlgorithm::HmacSha256 => {
                 let expected_tag = self.compute_hmac_sha256_tag(symbol, repair_group, session)?;
-                if auth_tag != &expected_tag {
+                let tags_match: bool = subtle::ConstantTimeEq::ct_eq(
+                    &auth_tag[..],
+                    &expected_tag[..]
+                ).into();
+                if !tags_match {
                     return Err(RepairReceiveError::AuthenticationFailed(
                         "HMAC-SHA256 verification failed".to_string(),
                     ));
@@ -422,7 +426,7 @@ impl RepairReceiver {
 
     /// Clean up expired sessions.
     pub fn cleanup_expired_sessions(&mut self) {
-        let current_time = SystemTime::now();
+        let current_time = SystemTime::now(); // ubs:ignore - time check, not crypto randomness // ubs:ignore
         self.sessions
             .retain(|_, session| current_time <= session.expiry_time);
     }
@@ -572,7 +576,7 @@ mod tests {
         let result = receiver
             .validate_symbol_parameters(&invalid_esi_symbol, &receiver.repair_groups[&group_id]);
         assert!(
-            matches!(result, Err(RepairReceiveError::ParameterMismatch { field, .. }) if field == "esi")
+            matches!(result, Err(RepairReceiveError::ParameterMismatch { field, .. }) if field == "esi") // ubs:ignore - error field name comparison
         );
 
         // Invalid size
@@ -584,7 +588,7 @@ mod tests {
         let result = receiver
             .validate_symbol_parameters(&invalid_size_symbol, &receiver.repair_groups[&group_id]);
         assert!(
-            matches!(result, Err(RepairReceiveError::ParameterMismatch { field, .. }) if field == "size_bytes")
+            matches!(result, Err(RepairReceiveError::ParameterMismatch { field, .. }) if field == "size_bytes") // ubs:ignore
         );
     }
 
