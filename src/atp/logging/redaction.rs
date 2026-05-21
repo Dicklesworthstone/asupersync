@@ -149,8 +149,24 @@ fn field_matches_pattern(field_path: &str, pattern: &str) -> bool {
         return field_path.ends_with(&suffix);
     }
 
-    // Substring match for simple patterns
-    field_path.contains(pattern)
+    if pattern
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return field_path
+            .split('.')
+            .any(|segment| segment_matches_simple_pattern(segment, pattern));
+    }
+
+    false
+}
+
+fn segment_matches_simple_pattern(segment: &str, pattern: &str) -> bool {
+    let base_segment = segment.split_once('[').map_or(segment, |(base, _)| base);
+    base_segment == pattern
+        || base_segment
+            .strip_suffix(pattern)
+            .is_some_and(|prefix| prefix.ends_with('_'))
 }
 
 /// Redact patterns within string values
@@ -191,7 +207,7 @@ fn redact_string_patterns(text: &str, rules: &[RedactionRule], field_path: &str)
             }
             RedactionType::Custom(pattern) => {
                 if string_matches_pattern(text, pattern) {
-                    result = rule.replacement.clone();
+                    result.clone_from(&rule.replacement);
                     modified = true;
                 }
             }
@@ -393,7 +409,26 @@ mod tests {
 
         apply_redaction(&mut event, &[rule]);
 
-        let redacted_path = event.data["file_path"].as_str().unwrap();
-        assert_eq!(redacted_path, "[REDACTED_PATH]");
+        assert_eq!(event.data["file_path"], "[REDACTED_PATH]");
+    }
+
+    #[test]
+    fn path_rule_does_not_redact_path_id_metadata() {
+        let mut value = json!({
+            "file_path": "/home/user/project.log",
+            "path_id": "direct-1",
+            "path": "/home/user/.ssh/id_ed25519"
+        });
+
+        let redacted =
+            redact_json_value(&mut value, &super::super::default_redaction_rules(), "data");
+
+        assert_eq!(value["file_path"], "[REDACTED_PATH]");
+        assert_eq!(value["path_id"], "direct-1");
+        assert_eq!(value["path"], "[REDACTED_PATH]");
+        assert_eq!(
+            redacted,
+            vec!["data.file_path".to_string(), "data.path".to_string()]
+        );
     }
 }

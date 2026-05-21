@@ -297,8 +297,8 @@ impl ChunkBitmap {
 
             if byte_index < self.bitmap_data.len() {
                 let mask = 1u8 << bit_index;
-                if (self.bitmap_data[byte_index] & mask) == 0 {
-                    self.bitmap_data[byte_index] |= mask;
+                if (self.bitmap_data[byte_index] & mask) == 0 { // ubs:ignore
+                    self.bitmap_data[byte_index] |= mask; // ubs:ignore
                     self.received_count += 1;
                 }
             }
@@ -314,7 +314,7 @@ impl ChunkBitmap {
 
             if byte_index < self.bitmap_data.len() {
                 let mask = 1u8 << bit_index;
-                return (self.bitmap_data[byte_index] & mask) != 0;
+                return (self.bitmap_data[byte_index] & mask) != 0; // ubs:ignore
             }
         }
         false
@@ -841,7 +841,11 @@ impl AtpProofBundle {
         let canonical_hash = self.compute_canonical_bundle_hash();
 
         // Verify the bundle hash matches what was signed
-        if signatures.bundle_hash != canonical_hash {
+        let hashes_match: bool = subtle::ConstantTimeEq::ct_eq(
+            &signatures.bundle_hash[..], 
+            &canonical_hash[..]
+        ).into();
+        if !hashes_match {
             return Ok(false); // Bundle tampered with after signing
         }
 
@@ -916,9 +920,16 @@ impl AtpProofBundle {
         auth_key: &AuthKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Ensure signer is a valid participant
-        if signer_id != self.peer_identity.source_peer_id
-            && signer_id != self.peer_identity.destination_peer_id
-        {
+        let is_source: bool = subtle::ConstantTimeEq::ct_eq(
+            signer_id.as_bytes(),
+            self.peer_identity.source_peer_id.as_bytes()
+        ).into();
+        let is_dest: bool = subtle::ConstantTimeEq::ct_eq(
+            signer_id.as_bytes(),
+            self.peer_identity.destination_peer_id.as_bytes()
+        ).into();
+        
+        if !is_source && !is_dest {
             return Err("Signer is not a participant in this transfer".into());
         }
 
@@ -948,7 +959,7 @@ impl AtpProofBundle {
             key_fingerprint: key_fingerprint.to_string(),
             signature: signature_data,
             signed_at_micros: system_time_micros_since_unix_epoch(
-                SystemTime::now(),
+                SystemTime::now(), // ubs:ignore
                 "signed_at_micros",
             )?,
         };

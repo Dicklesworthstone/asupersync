@@ -1827,19 +1827,19 @@ impl Manifest {
         bytes.extend_from_slice(self.merkle_root.hash());
 
         // Hash algorithms
-        bytes.extend_from_slice(&(self.hash_algorithms.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(self.hash_algorithms.len()).expect("length exceeds u32 limit").to_be_bytes());
         for algo in &self.hash_algorithms {
             bytes.push(*algo as u8);
         }
 
         // Root object IDs
-        bytes.extend_from_slice(&(self.roots.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(self.roots.len()).expect("length exceeds u32 limit").to_be_bytes());
         for root in &self.roots {
             bytes.extend_from_slice(root.hash_bytes());
         }
 
         // Objects in deterministic order
-        bytes.extend_from_slice(&(self.objects.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(self.objects.len()).expect("length exceeds u32 limit").to_be_bytes());
         for (id, obj) in &self.objects {
             // Object ID and basic metadata
             bytes.extend_from_slice(id.hash_bytes());
@@ -1862,14 +1862,14 @@ impl Manifest {
             }
 
             // Children in sorted order
-            bytes.extend_from_slice(&(obj.children.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&u32::try_from(obj.children.len()).expect("length exceeds u32 limit").to_be_bytes());
             for (name, child_id) in &obj.children {
                 Self::write_string(&mut bytes, name);
                 bytes.extend_from_slice(child_id.hash_bytes());
             }
 
             // Chunk boundaries
-            bytes.extend_from_slice(&(obj.chunk_boundaries.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&u32::try_from(obj.chunk_boundaries.len()).expect("length exceeds u32 limit").to_be_bytes());
             for chunk in &obj.chunk_boundaries {
                 bytes.extend_from_slice(&chunk.index.to_be_bytes());
                 bytes.extend_from_slice(&chunk.byte_offset.to_be_bytes());
@@ -1879,7 +1879,7 @@ impl Manifest {
             }
 
             // RaptorQ symbols
-            bytes.extend_from_slice(&(obj.raptorq_symbols.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&u32::try_from(obj.raptorq_symbols.len()).expect("length exceeds u32 limit").to_be_bytes());
             for symbol in &obj.raptorq_symbols {
                 bytes.extend_from_slice(&symbol.index.to_be_bytes());
                 bytes.extend_from_slice(&symbol.esi.to_be_bytes());
@@ -1917,7 +1917,7 @@ impl Manifest {
             bytes.extend_from_slice(&layout.symbol_size.to_be_bytes());
             bytes.extend_from_slice(&deterministic_f32_be_bytes(layout.overhead_ratio));
 
-            bytes.extend_from_slice(&(layout.sub_blocks.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&u32::try_from(layout.sub_blocks.len()).expect("length exceeds u32 limit").to_be_bytes());
             for sub_block in &layout.sub_blocks {
                 bytes.extend_from_slice(&sub_block.index.to_be_bytes());
                 bytes.extend_from_slice(&sub_block.source_symbols.to_be_bytes());
@@ -1934,7 +1934,7 @@ impl Manifest {
             bytes.push(comp.algorithm as u8);
             bytes.push(comp.level);
             bytes.extend_from_slice(&comp.min_size_threshold.to_be_bytes());
-            bytes.extend_from_slice(&(comp.apply_to_kinds.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&u32::try_from(comp.apply_to_kinds.len()).expect("length exceeds u32 limit").to_be_bytes());
             for kind in &comp.apply_to_kinds {
                 bytes.push(*kind as u8);
             }
@@ -1955,7 +1955,7 @@ impl Manifest {
                 bytes.push(0);
             }
             bytes.push(u8::from(enc.encrypt_metadata));
-            bytes.extend_from_slice(&(enc.apply_to_kinds.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&u32::try_from(enc.apply_to_kinds.len()).expect("length exceeds u32 limit").to_be_bytes());
             for kind in &enc.apply_to_kinds {
                 bytes.push(*kind as u8);
             }
@@ -1977,17 +1977,17 @@ impl Manifest {
     }
 
     fn write_string(bytes: &mut Vec<u8>, s: &str) {
-        bytes.extend_from_slice(&(s.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(s.len()).expect("length exceeds u32 limit").to_be_bytes());
         bytes.extend_from_slice(s.as_bytes());
     }
 
     fn write_bytes(bytes: &mut Vec<u8>, data: &[u8]) {
-        bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(data.len()).expect("length exceeds u32 limit").to_be_bytes());
         bytes.extend_from_slice(data);
     }
 
     fn write_string_vec(bytes: &mut Vec<u8>, strings: &[String]) {
-        bytes.extend_from_slice(&(strings.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(strings.len()).expect("length exceeds u32 limit").to_be_bytes());
         for s in strings {
             Self::write_string(bytes, s);
         }

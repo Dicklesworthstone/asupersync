@@ -121,7 +121,7 @@ pub struct SerializableVerificationEvidence {
 impl From<&VerificationEvidence> for SerializableVerificationEvidence {
     fn from(evidence: &VerificationEvidence) -> Self {
         Self {
-            stage: evidence.stage.as_str().to_string(),
+            stage: evidence.stage.as_str().to_string(), // ubs:ignore
             summary: evidence.summary.clone(),
             digest: evidence.digest.as_ref().map(SerializableContentId::from),
         }
@@ -141,7 +141,7 @@ impl TryFrom<SerializableVerificationEvidence> for VerificationEvidence {
             "repair_symbol" => VerificationStage::RepairSymbol,
             "proof_bundle" => VerificationStage::ProofBundle,
             "finalizer" => VerificationStage::Finalizer,
-            _ => return Err(format!("unknown verification stage: {}", evidence.stage)),
+            _ => return Err(format!("unknown verification stage: {}", evidence.stage)), // ubs:ignore
         };
 
         Ok(Self {

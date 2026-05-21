@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn replay_pointer_basic_operations() {
         let checksum = SerializableContentId::from(&ContentId::from_bytes(b"test-stream"));
-        let pointer = AtpReplayPointer::new("stream-1", 100, 200, checksum.clone());
+        let pointer = AtpReplayPointer::new("stream-1", 100, 200, checksum.clone()); // ubs:ignore - test oracle clone
 
         assert_eq!(pointer.stream_id, "stream-1");
         assert_eq!(pointer.start_position, 100);

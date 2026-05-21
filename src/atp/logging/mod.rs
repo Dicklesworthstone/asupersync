@@ -488,11 +488,11 @@ macro_rules! atp_log {
     ($subsystem:expr, $event_type:expr, $level:expr, $data:expr, $context:expr) => {
         if let Some(logger) = $crate::atp::logging::atp_logger() {
             let mut event = $crate::atp::logging::AtpEvent {
-                timestamp: current_timestamp(),
+                timestamp: $crate::atp::logging::current_timestamp(),
                 level: $level,
                 subsystem: $subsystem,
                 event_type: $event_type.to_string(),
-                data: serde_json::to_value($data).unwrap_or_default(),
+                data: $crate::atp::logging::atp_log_data_value($data),
                 context: $context,
                 redacted_fields: Vec::new(),
             };
@@ -501,16 +501,54 @@ macro_rules! atp_log {
     };
 }
 
-/// Get current timestamp in RFC3339 format using std::time
+#[doc(hidden)]
+pub fn atp_log_data_value<T: Serialize>(data: T) -> serde_json::Value {
+    serde_json::to_value(data).unwrap_or_default()
+}
+
+/// Get the current observability timestamp in RFC3339 UTC format.
 pub fn current_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    format_system_time_rfc3339(crate::observability::replayable_system_time())
+}
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
+fn format_system_time_rfc3339(time: std::time::SystemTime) -> String {
+    let seconds_since_epoch = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    format_unix_seconds_rfc3339(seconds_since_epoch)
+}
 
-    // Simple RFC3339-like timestamp using system time
-    format!("2026-05-20T{}Z", now.as_secs())
+fn format_unix_seconds_rfc3339(seconds_since_epoch: u64) -> String {
+    const SECONDS_PER_DAY: u64 = 86_400;
+
+    let days = seconds_since_epoch / SECONDS_PER_DAY;
+    let seconds_of_day = seconds_since_epoch % SECONDS_PER_DAY;
+    let (year, month, day) = civil_from_unix_days(days);
+
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_unix_days(days_since_epoch: u64) -> (i64, i64, i64) {
+    let days = i64::try_from(days_since_epoch).unwrap_or(i64::MAX - 719_468);
+    let z = days.saturating_add(719_468);
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+
+    (year, month, day)
 }
 
 mod log_level_serde {

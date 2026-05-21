@@ -592,7 +592,12 @@ pub fn save_bundle(
     let dir =
         output_dir.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let filename = format!("{}.json", bundle.metadata.bundle_id);
+    // Sanitize the filename to prevent path traversal
+    let sanitized_id = bundle
+        .metadata
+        .bundle_id
+        .replace(&['/', '\\', '.', ':'][..], "_");
+    let filename = format!("{}.json", sanitized_id);
     let filepath = dir.join(filename);
 
     let json = serde_json::to_string_pretty(bundle)?;
@@ -628,8 +633,8 @@ mod tests {
         let config = AtpLoggerConfig::default();
         let bundle = create_bundle("Test error", json!({}), &config);
 
-        let serialized = serde_json::to_string(&bundle).unwrap();
-        let deserialized: FailureBundle = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&bundle).unwrap(); // ubs:ignore - test oracle
+        let deserialized: FailureBundle = serde_json::from_str(&serialized).unwrap(); // ubs:ignore - test oracle
 
         assert_eq!(bundle.metadata.bundle_id, deserialized.metadata.bundle_id);
     }
@@ -647,7 +652,7 @@ mod tests {
             &config,
         );
 
-        let serialized = serde_json::to_string(&bundle).unwrap();
+        let serialized = serde_json::to_string(&bundle).unwrap(); // ubs:ignore - test oracle
         assert!(!serialized.contains("super-secret"));
         assert!(!serialized.contains("/home/alice"));
         assert!(serialized.contains("[REDACTED_CAPABILITY]"));

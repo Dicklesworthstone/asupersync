@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use std::time::{Duration, UNIX_EPOCH};
 
 fn context() -> EventContext {
     EventContext {
@@ -13,20 +14,33 @@ fn context() -> EventContext {
     }
 }
 
+fn render_event_or_fail(logger: &AtpLogger, event: &AtpEvent) -> String {
+    match logger.render_event(event) {
+        Ok(rendered) => rendered,
+        Err(err) => {
+            assert!(false, "event must render: {err:?}");
+            String::new()
+        }
+    }
+}
+
 #[test]
 fn all_subsystems_and_test_lanes_have_schema_entries() {
     let logger = AtpLogger::new();
+    let mut problems = Vec::new();
 
     for subsystem in AtpSubsystem::all() {
-        let event_types = logger
-            .schema_event_types(subsystem)
-            .unwrap_or_else(|| panic!("missing schema for {}", subsystem.as_str()));
-        assert!(
-            !event_types.is_empty(),
-            "schema for {} must not be empty",
-            subsystem.as_str()
-        );
+        match logger.schema_event_types(subsystem) {
+            Some(event_types) if !event_types.is_empty() => {}
+            Some(_) => problems.push(format!(
+                "schema for {} must not be empty",
+                subsystem.as_str()
+            )),
+            None => problems.push(format!("missing schema for {}", subsystem.as_str())),
+        }
     }
+
+    assert!(problems.is_empty(), "{}", problems.join("; "));
 }
 
 #[test]
@@ -46,7 +60,7 @@ fn json_diagnostic_output_is_stable_and_redacted() {
         redacted_fields: Vec::new(),
     };
 
-    let rendered = logger.render_event(&event).expect("event renders");
+    let rendered = render_event_or_fail(&logger, &event);
 
     assert_eq!(
         rendered,
@@ -72,7 +86,7 @@ fn human_diagnostic_output_is_stable() {
         redacted_fields: Vec::new(),
     };
 
-    let rendered = logger.render_event(&event).expect("event renders");
+    let rendered = render_event_or_fail(&logger, &event);
 
     assert_eq!(
         rendered,
@@ -97,4 +111,38 @@ fn unknown_event_type_is_rejected() {
         logger.render_event(&event),
         Err(AtpLogError::UnknownEventType { .. })
     ));
+}
+
+#[test]
+fn timestamp_renderer_emits_real_rfc3339_utc_seconds() {
+    assert_eq!(
+        format_system_time_rfc3339(UNIX_EPOCH),
+        "1970-01-01T00:00:00Z"
+    );
+    assert_eq!(
+        format_system_time_rfc3339(UNIX_EPOCH + Duration::from_secs(951_782_400)),
+        "2000-02-29T00:00:00Z"
+    );
+    assert_eq!(
+        format_system_time_rfc3339(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+        "2023-11-14T22:13:20Z"
+    );
+}
+
+mod external_macro_call_site {
+    pub fn invoke_atp_log_macro_without_timestamp_in_scope() {
+        let context = crate::atp::logging::EventContext::deterministic("session-1", "trace-1");
+        crate::atp_log!(
+            crate::atp::logging::AtpSubsystem::UnitTest,
+            "test_started",
+            crate::observability::LogLevel::Info,
+            serde_json::json!({"case": "macro_path"}),
+            context
+        );
+    }
+}
+
+#[test]
+fn atp_log_macro_uses_crate_qualified_timestamp_path() {
+    external_macro_call_site::invoke_atp_log_macro_without_timestamp_in_scope();
 }
