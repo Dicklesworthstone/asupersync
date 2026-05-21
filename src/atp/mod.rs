@@ -54,3 +54,4 @@ pub use quota::{
     QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaLimit, QuotaRow, QuotaUsage,
     RetentionClock, RetentionPolicy, RetentionRecord, RetentionRule,
 };
+pub use manifest::{ChunkStrategy, ProofStrength};
