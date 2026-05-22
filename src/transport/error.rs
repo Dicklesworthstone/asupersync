@@ -138,6 +138,47 @@ mod tests {
     }
 
     #[test]
+    fn stream_error_io_preserves_error_source_chain() {
+        let stream_err = StreamError::from(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "stream reset by peer",
+        ));
+
+        let source = std::error::Error::source(&stream_err)
+            .expect("stream I/O errors must expose their underlying source");
+        let io_source = source
+            .downcast_ref::<io::Error>()
+            .expect("stream source must stay typed as std::io::Error");
+
+        assert_eq!(io_source.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(io_source.to_string(), "stream reset by peer");
+    }
+
+    #[test]
+    fn stream_error_non_io_variants_have_no_error_source() {
+        let variants = [
+            StreamError::Closed,
+            StreamError::PolledAfterCompletion,
+            StreamError::Reset,
+            StreamError::Timeout,
+            StreamError::AuthenticationFailed {
+                reason: "bad tag".into(),
+            },
+            StreamError::ProtocolError {
+                details: "bad frame".into(),
+            },
+            StreamError::Cancelled,
+        ];
+
+        for err in variants {
+            assert!(
+                std::error::Error::source(&err).is_none(),
+                "non-I/O stream error should not expose a synthetic source: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn sink_error_debug_display() {
         let closed = SinkError::Closed;
         assert!(format!("{closed:?}").contains("Closed"));
@@ -164,5 +205,42 @@ mod tests {
         let sink_err: SinkError = io_err.into();
         assert!(format!("{sink_err}").contains("refused"));
         assert!(matches!(sink_err, SinkError::Io { .. }));
+    }
+
+    #[test]
+    fn sink_error_io_preserves_error_source_chain() {
+        let sink_err = SinkError::from(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "sink pipe closed",
+        ));
+
+        let source = std::error::Error::source(&sink_err)
+            .expect("sink I/O errors must expose their underlying source");
+        let io_source = source
+            .downcast_ref::<io::Error>()
+            .expect("sink source must stay typed as std::io::Error");
+
+        assert_eq!(io_source.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(io_source.to_string(), "sink pipe closed");
+    }
+
+    #[test]
+    fn sink_error_non_io_variants_have_no_error_source() {
+        let variants = [
+            SinkError::Closed,
+            SinkError::PolledAfterCompletion,
+            SinkError::BufferFull,
+            SinkError::SendFailed {
+                reason: "queue overflow".into(),
+            },
+            SinkError::Cancelled,
+        ];
+
+        for err in variants {
+            assert!(
+                std::error::Error::source(&err).is_none(),
+                "non-I/O sink error should not expose a synthetic source: {err}"
+            );
+        }
     }
 }
