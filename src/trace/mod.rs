@@ -52,6 +52,8 @@ pub mod delta_debug;
 pub mod distributed;
 pub mod divergence;
 pub mod dpor;
+#[cfg(test)]
+mod dpor_metamorphic_tests;
 pub mod event;
 pub mod event_structure;
 pub mod file;
