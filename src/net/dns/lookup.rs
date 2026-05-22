@@ -658,4 +658,47 @@ mod tests {
         );
         crate::test_complete!("lookup_mx_new_sorts_by_preference");
     }
+
+    #[test]
+    fn lookup_mx_sorting_is_permutation_invariant() {
+        init_test("lookup_mx_sorting_is_permutation_invariant");
+        let records = vec![
+            MxRecord {
+                preference: 20,
+                exchange: "mx-b.example".to_string(),
+            },
+            MxRecord {
+                preference: 10,
+                exchange: "mx-c.example".to_string(),
+            },
+            MxRecord {
+                preference: 10,
+                exchange: "mx-a.example".to_string(),
+            },
+            MxRecord {
+                preference: 30,
+                exchange: "mx-d.example".to_string(),
+            },
+        ];
+
+        let reversed = records.iter().cloned().rev().collect::<Vec<_>>();
+        let rotated = vec![
+            records[2].clone(),
+            records[0].clone(),
+            records[3].clone(),
+            records[1].clone(),
+        ];
+
+        let sorted = |records: Vec<MxRecord>| {
+            LookupMx::new(records)
+                .records()
+                .map(|record| (record.preference, record.exchange.as_str().to_owned()))
+                .collect::<Vec<_>>()
+        };
+
+        let expected = sorted(records);
+        assert_eq!(sorted(reversed), expected);
+        assert_eq!(sorted(rotated), expected);
+        crate::test_complete!("lookup_mx_sorting_is_permutation_invariant");
+    }
 }
