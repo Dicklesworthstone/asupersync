@@ -551,14 +551,24 @@ mod tests {
     #[test]
     fn test_cancellation_during_receive() {
         run_test_with_cx(|cx| async move {
-            cx.set_cancel_requested(true);
-
             let config = QuicUdpEndpointConfig::default();
             let mut endpoint = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config)
                 .await
                 .expect("bind endpoint");
 
+            cx.set_cancel_requested(true);
             let result = endpoint.receive_batch(&cx, 1).await;
+            assert!(matches!(result, Err(QuicUdpEndpointError::Cancelled)));
+        });
+    }
+
+    #[test]
+    fn test_cancellation_before_bind_fails_closed() {
+        run_test_with_cx(|cx| async move {
+            cx.set_cancel_requested(true);
+
+            let config = QuicUdpEndpointConfig::default();
+            let result = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config).await;
             assert!(matches!(result, Err(QuicUdpEndpointError::Cancelled)));
         });
     }
