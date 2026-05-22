@@ -736,6 +736,35 @@ mod tests {
     }
 
     #[test]
+    fn distribute_repairs_preserves_budget_and_front_loads_remainder() {
+        for blocks in 1..=8 {
+            for total in 0..=25 {
+                let repairs = distribute_repairs(total, blocks);
+
+                assert_eq!(repairs.len(), blocks);
+                assert_eq!(repairs.iter().sum::<usize>(), total);
+
+                let base = total / blocks;
+                let remainder = total % blocks;
+                for (block, &count) in repairs.iter().enumerate() {
+                    let expected = base + usize::from(block < remainder);
+                    assert_eq!(
+                        count, expected,
+                        "block {block} should receive the deterministic remainder distribution"
+                    );
+                }
+
+                let min = repairs.iter().copied().min().unwrap_or(0);
+                let max = repairs.iter().copied().max().unwrap_or(0);
+                assert!(
+                    max - min <= 1,
+                    "repair distribution must stay balanced, got {repairs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn encode_creates_correct_symbol_count() {
         let config = EncodingConfig {
             symbol_size: 128,
