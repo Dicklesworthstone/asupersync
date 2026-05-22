@@ -234,6 +234,73 @@ mod tests {
     }
 
     #[test]
+    fn mr_map_identity_preserves_items_across_lengths() {
+        init_test("mr_map_identity_preserves_items_across_lengths");
+        for len in 0..=16usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 8).collect();
+            let mut stream = Map::new(iter(values.clone()), |x: i32| x);
+
+            assert_eq!(
+                collect_ready(&mut stream),
+                values,
+                "mapping identity must preserve order and contents for len {len}",
+            );
+        }
+        crate::test_complete!("mr_map_identity_preserves_items_across_lengths");
+    }
+
+    #[test]
+    fn mr_map_composition_matches_single_pass_for_affine_transforms() {
+        init_test("mr_map_composition_matches_single_pass_for_affine_transforms");
+        for len in 0..=12usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 2 - 11).collect();
+            for scale in [-3, -1, 0, 2, 5] {
+                for offset in [-7, 0, 4] {
+                    let mut two_stage = Map::new(
+                        Map::new(iter(values.clone()), move |x: i32| x * scale),
+                        move |x| x + offset,
+                    );
+                    let mut one_stage =
+                        Map::new(iter(values.clone()), move |x: i32| (x * scale) + offset);
+
+                    assert_eq!(
+                        collect_ready(&mut two_stage),
+                        collect_ready(&mut one_stage),
+                        "map composition must match fused transform for len {len}, scale {scale}, offset {offset}",
+                    );
+                }
+            }
+        }
+        crate::test_complete!("mr_map_composition_matches_single_pass_for_affine_transforms");
+    }
+
+    #[test]
+    fn mr_map_preserves_cardinality_and_size_hint() {
+        init_test("mr_map_preserves_cardinality_and_size_hint");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for len in 0..=10usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 3).collect();
+            let mut stream = Map::new(iter(values), |x: i32| (x * 3) - 1);
+
+            assert_eq!(stream.size_hint(), (len, Some(len)));
+            for consumed in 0..len {
+                assert!(matches!(
+                    Pin::new(&mut stream).poll_next(&mut cx),
+                    Poll::Ready(Some(_))
+                ));
+                let remaining = len - consumed - 1;
+                assert_eq!(stream.size_hint(), (remaining, Some(remaining)));
+            }
+
+            assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+            assert_eq!(stream.size_hint(), (0, Some(0)));
+        }
+        crate::test_complete!("mr_map_preserves_cardinality_and_size_hint");
+    }
+
+    #[test]
     fn map_debug() {
         fn double(x: i32) -> i32 {
             x * 2
