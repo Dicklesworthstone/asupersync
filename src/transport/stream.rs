@@ -1607,6 +1607,56 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_stream_resumes_to_first_match_after_rejection_budget() {
+        init_test("test_filter_stream_resumes_to_first_match_after_rejection_budget");
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let total = FILTER_REJECTION_BUDGET + 1;
+        let accepted_esi = FILTER_REJECTION_BUDGET as u32;
+        let stream = AlwaysReadySymbolStream::new(total, Arc::clone(&emitted));
+        let mut filtered = stream.filter(move |symbol| symbol.symbol().id().esi() == accepted_esi);
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(Arc::clone(&woke));
+        let mut context = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut filtered).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields after rejection budget",
+            true,
+            matches!(first, Poll::Pending)
+        );
+        crate::assert_with_log!(
+            emitted.load(Ordering::SeqCst) == FILTER_REJECTION_BUDGET,
+            "rejected symbols drained up to budget",
+            FILTER_REJECTION_BUDGET,
+            emitted.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "budget yield self-wakes for continuation",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut filtered).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(&second, Poll::Ready(Some(Ok(symbol))) if symbol.symbol().id().esi() == accepted_esi),
+            "next poll resumes and returns first accepted symbol",
+            true,
+            &second
+        );
+        crate::assert_with_log!(
+            emitted.load(Ordering::SeqCst) == total,
+            "accepted symbol consumed exactly once",
+            total,
+            emitted.load(Ordering::SeqCst)
+        );
+
+        crate::test_complete!("test_filter_stream_resumes_to_first_match_after_rejection_budget");
+    }
+
+    #[test]
     fn test_merged_stream_round_robin_and_drop_exhausted() {
         init_test("test_merged_stream_round_robin_and_drop_exhausted");
         let s1 = VecStream::new(vec![create_symbol(1), create_symbol(3)]);
