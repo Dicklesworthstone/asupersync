@@ -18,6 +18,9 @@ pub const MAX_FRAME_SIZE: u32 = 16_777_215;
 /// Minimum allowed max frame size setting.
 pub const MIN_MAX_FRAME_SIZE: u32 = 16_384;
 
+/// Maximum allowed initial window size setting (2^31 - 1).
+const MAX_INITIAL_WINDOW_SIZE: u32 = 0x7fff_ffff;
+
 /// Maximum WINDOW_UPDATE increment (2^31 - 1).
 const MAX_WINDOW_UPDATE_INCREMENT: u32 = 0x7fff_ffff;
 
@@ -729,7 +732,7 @@ impl SettingsFrame {
             }
 
             // RFC 7540 Section 6.5.2: SETTINGS_INITIAL_WINDOW_SIZE MUST be <= 2^31-1
-            if id == 0x4 && value > 0x7fff_ffff {
+            if id == 0x4 && value > MAX_INITIAL_WINDOW_SIZE {
                 return Err(H2Error::flow_control(
                     "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum",
                 ));
@@ -760,6 +763,10 @@ impl SettingsFrame {
         // RFC 9113 §6.5.3: a SETTINGS ACK frame MUST have zero-length payload.
         let encoded_settings: &[Setting] = if self.ack { &[] } else { &self.settings };
 
+        for setting in encoded_settings {
+            validate_setting_for_encode(*setting)?;
+        }
+
         let header = FrameHeader {
             length: checked_frame_length_product(encoded_settings.len(), 6)?,
             frame_type: FrameType::Settings as u8,
@@ -773,6 +780,18 @@ impl SettingsFrame {
             dst.put_u32(setting.value());
         }
         Ok(())
+    }
+}
+
+fn validate_setting_for_encode(setting: Setting) -> Result<(), H2Error> {
+    match setting {
+        Setting::InitialWindowSize(value) if value > MAX_INITIAL_WINDOW_SIZE => Err(
+            H2Error::flow_control("SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum"),
+        ),
+        Setting::MaxFrameSize(value) if !(MIN_MAX_FRAME_SIZE..=MAX_FRAME_SIZE).contains(&value) => {
+            Err(H2Error::protocol("SETTINGS_MAX_FRAME_SIZE out of bounds"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -2313,6 +2332,35 @@ mod tests {
     }
 
     #[test]
+    fn settings_frame_encode_rejects_invalid_wire_bounds_without_partial_write() {
+        let cases = [
+            (
+                Setting::InitialWindowSize(MAX_INITIAL_WINDOW_SIZE + 1),
+                ErrorCode::FlowControlError,
+            ),
+            (
+                Setting::MaxFrameSize(MIN_MAX_FRAME_SIZE - 1),
+                ErrorCode::ProtocolError,
+            ),
+            (
+                Setting::MaxFrameSize(MAX_FRAME_SIZE + 1),
+                ErrorCode::ProtocolError,
+            ),
+        ];
+
+        for (setting, expected_code) in cases {
+            let mut buf = BytesMut::new();
+
+            let err = SettingsFrame::new(vec![setting])
+                .encode(&mut buf)
+                .expect_err("invalid setting must not encode");
+
+            assert_eq!(err.code, expected_code, "setting={setting:?}");
+            assert!(buf.is_empty(), "invalid setting must not partially encode");
+        }
+    }
+
+    #[test]
     fn settings_frame_accepts_wire_bounds() {
         let header = FrameHeader {
             length: 12,
@@ -2322,7 +2370,7 @@ mod tests {
         };
         let mut payload = BytesMut::with_capacity(12);
         payload.put_u16(0x04);
-        payload.put_u32(0x7fff_ffff);
+        payload.put_u32(MAX_INITIAL_WINDOW_SIZE);
         payload.put_u16(0x05);
         payload.put_u32(MAX_FRAME_SIZE);
 
@@ -2330,7 +2378,7 @@ mod tests {
         assert_eq!(
             parsed.settings,
             vec![
-                Setting::InitialWindowSize(0x7fff_ffff),
+                Setting::InitialWindowSize(MAX_INITIAL_WINDOW_SIZE),
                 Setting::MaxFrameSize(MAX_FRAME_SIZE)
             ]
         );
