@@ -4357,6 +4357,41 @@ mod tests {
     }
 
     #[test]
+    fn quality_score_clamps_finite_loss_rate_bounds() {
+        init_test("quality_score_clamps_finite_loss_rate_bounds");
+        let no_loss = PathCharacteristics {
+            loss_rate: 0.0,
+            ..Default::default()
+        };
+        let negative_loss = PathCharacteristics {
+            loss_rate: -0.75,
+            ..Default::default()
+        };
+        let total_loss = PathCharacteristics {
+            loss_rate: 1.0,
+            ..Default::default()
+        };
+        let excessive_loss = PathCharacteristics {
+            loss_rate: 2.5,
+            ..Default::default()
+        };
+
+        assert!(
+            (negative_loss.quality_score() - no_loss.quality_score()).abs() < f64::EPSILON,
+            "negative finite loss rates must clamp to no-loss scoring"
+        );
+        assert!(
+            (excessive_loss.quality_score() - total_loss.quality_score()).abs() < f64::EPSILON,
+            "loss rates above one must clamp to total-loss scoring"
+        );
+        assert!(
+            no_loss.quality_score() > total_loss.quality_score(),
+            "bounded finite loss should preserve lower-loss preference"
+        );
+        crate::test_complete!("quality_score_clamps_finite_loss_rate_bounds");
+    }
+
+    #[test]
     fn transport_aggregator_comprehensive_report_format_golden_snapshot() {
         init_test("transport_aggregator_comprehensive_report_format_golden_snapshot");
 
