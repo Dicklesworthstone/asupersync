@@ -3214,4 +3214,255 @@ mod tests {
 
         crate::test_complete!("audit_once_cell_wait_cancellation_behavior");
     }
+
+    /// Metamorphic Relation: Type Independence
+    /// OnceCell behavior should be equivalent across isomorphic types.
+    /// MR: f_cell<T>(transform(x)) ≡ transform(f_cell<U>(x)) for isomorphic T,U
+    #[test]
+    fn mr_type_independence_preserves_behavior() {
+        init_test("mr_type_independence_preserves_behavior");
+
+        // Test equivalent behavior between u32 and String representations
+        let value = 42u32;
+        let string_value = value.to_string();
+
+        // Path 1: Initialize u32 cell, then transform
+        let u32_cell = OnceCell::new();
+        let u32_result = u32_cell.get_or_init_blocking(|| value);
+        let u32_to_string = u32_result.to_string();
+
+        // Path 2: Initialize String cell directly
+        let string_cell = OnceCell::new();
+        let string_result = string_cell.get_or_init_blocking(|| string_value.clone());
+
+        // MR: Both paths should yield equivalent observable results
+        assert_eq!(
+            u32_to_string, *string_result,
+            "Type-independent paths should yield equivalent results"
+        );
+        assert_eq!(
+            u32_cell.is_initialized(),
+            string_cell.is_initialized(),
+            "Initialization state should be equivalent across types"
+        );
+
+        // Test with async paths
+        let async_u32_cell = OnceCell::new();
+        let async_string_cell = OnceCell::new();
+
+        let async_u32 = block_on(async_u32_cell.get_or_init(|| async { value }));
+        let async_string = block_on(async_string_cell.get_or_init(|| async { string_value }));
+
+        assert_eq!(
+            async_u32.to_string(),
+            *async_string,
+            "Async initialization should preserve type equivalence"
+        );
+
+        crate::test_complete!("mr_type_independence_preserves_behavior");
+    }
+
+    /// Metamorphic Relation: Observation Consistency
+    /// Multiple ways of observing OnceCell state should always be consistent.
+    /// MR: get().is_some() ≡ is_initialized() AND get().is_some() ≡ (get() == get())
+    proptest! {
+        #[test]
+        fn mr_observation_consistency_across_access_methods(
+            value in any::<i64>(),
+            use_async in any::<bool>(),
+        ) {
+            let cell = OnceCell::new();
+
+            // Initialize the cell using either sync or async method
+            if use_async {
+                let _ = block_on(cell.get_or_init(|| async { value }));
+            } else {
+                let _ = cell.get_or_init_blocking(|| value);
+            }
+
+            // MR1: get().is_some() ≡ is_initialized()
+            prop_assert_eq!(cell.get().is_some(), cell.is_initialized(),
+                "get() availability must match is_initialized() state");
+
+            // MR2: Multiple get() calls must return identical results
+            let first_get = cell.get();
+            let second_get = cell.get();
+            prop_assert_eq!(first_get, second_get,
+                "Multiple get() calls must return identical results");
+
+            // MR3: get() result must match get_or_init result (no init function called)
+            let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter_clone = Arc::clone(&counter);
+            let get_or_init_result = cell.get_or_init_blocking(|| {
+                counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                value + 1 // Different value to detect if erroneously called
+            });
+
+            prop_assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 0,
+                "get_or_init should not call init function on initialized cell");
+            prop_assert_eq!(cell.get().unwrap(), get_or_init_result,
+                "get() and get_or_init() results must be identical for initialized cell");
+        }
+    }
+
+    /// Metamorphic Relation: Concurrent Access Equivalence
+    /// Concurrent readers should observe identical state regardless of timing.
+    /// MR: concurrent_reads(cell) → all identical results
+    #[test]
+    fn mr_concurrent_access_equivalence() {
+        init_test("mr_concurrent_access_equivalence");
+
+        let cell = Arc::new(OnceCell::new());
+        let init_value = 123u64;
+
+        // Initialize the cell
+        let _ = cell.get_or_init_blocking(|| init_value);
+
+        // Spawn multiple concurrent readers
+        let num_readers = 10;
+        let barrier = Arc::new(std::sync::Barrier::new(num_readers));
+        let results = Arc::new(StdMutex::new(Vec::new()));
+
+        let handles: Vec<_> = (0..num_readers)
+            .map(|_| {
+                let cell = Arc::clone(&cell);
+                let barrier = Arc::clone(&barrier);
+                let results = Arc::clone(&results);
+
+                thread::spawn(move || {
+                    // Wait for all readers to be ready
+                    barrier.wait();
+
+                    // All readers access simultaneously
+                    let observed = cell.get().copied();
+                    let is_init = cell.is_initialized();
+
+                    results.lock().unwrap().push((observed, is_init));
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let results = results.lock().unwrap();
+
+        // MR: All concurrent readers must observe identical state
+        let first_result = &results[0];
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(
+                result, first_result,
+                "Reader {} observed different state than reader 0: {:?} vs {:?}",
+                i, result, first_result
+            );
+        }
+
+        assert_eq!(
+            first_result.0,
+            Some(init_value),
+            "All readers should observe the initialized value"
+        );
+        assert!(
+            first_result.1,
+            "All readers should observe initialized state"
+        );
+
+        crate::test_complete!("mr_concurrent_access_equivalence");
+    }
+
+    /// Metamorphic Relation: Initialization Function Independence
+    /// Different functions producing equivalent values should yield equivalent cells.
+    /// MR: OnceCell.init(f) ≡ OnceCell.init(g) when f() = g()
+    proptest! {
+        #[test]
+        fn mr_initialization_function_independence(value in any::<u32>()) {
+            // Create equivalent functions that produce the same value
+            let func1 = || value;
+            let func2 = || { let v = value; v };
+            let func3 = || value.clone();
+
+            let cell1 = OnceCell::new();
+            let cell2 = OnceCell::new();
+            let cell3 = OnceCell::new();
+
+            let result1 = cell1.get_or_init_blocking(func1);
+            let result2 = cell2.get_or_init_blocking(func2);
+            let result3 = cell3.get_or_init_blocking(func3);
+
+            // MR: All cells should have equivalent observable state
+            prop_assert_eq!(*result1, *result2,
+                "Equivalent functions should produce equivalent cell values");
+            prop_assert_eq!(*result2, *result3,
+                "Equivalent functions should produce equivalent cell values");
+
+            prop_assert_eq!(cell1.is_initialized(), cell2.is_initialized(),
+                "Equivalent functions should produce equivalent initialization state");
+            prop_assert_eq!(cell2.is_initialized(), cell3.is_initialized(),
+                "Equivalent functions should produce equivalent initialization state");
+
+            prop_assert_eq!(cell1.get(), cell2.get(),
+                "get() results should be equivalent across equivalent init functions");
+            prop_assert_eq!(cell2.get(), cell3.get(),
+                "get() results should be equivalent across equivalent init functions");
+        }
+    }
+
+    /// Metamorphic Relation: Clone State Preservation
+    /// Cloned cells should maintain all observable properties of the original.
+    /// MR: clone(cell) exhibits identical behavior to cell
+    proptest! {
+        #[test]
+        fn mr_clone_preserves_all_observable_properties(
+            value in any::<i32>(),
+            init_method in 0u8..4,
+        ) {
+            let original = OnceCell::new();
+
+            // Initialize using different methods
+            match init_method {
+                0 => { let _ = original.set(value); },
+                1 => { let _ = original.get_or_init_blocking(|| value); },
+                2 => { let _ = block_on(original.get_or_init(|| async { value })); },
+                _ => { /* Test uninitialized case */ },
+            }
+
+            let cloned = original.clone();
+
+            // MR: All observable properties must be preserved
+            prop_assert_eq!(original.is_initialized(), cloned.is_initialized(),
+                "Clone must preserve initialization state");
+
+            prop_assert_eq!(original.get(), cloned.get(),
+                "Clone must preserve value accessibility");
+
+            if original.is_initialized() {
+                prop_assert_eq!(original.get().unwrap(), cloned.get().unwrap(),
+                    "Clone must preserve exact value when initialized");
+            }
+
+            // Test that both behave identically to further operations
+            let probe_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+            let probe1 = Arc::clone(&probe_counter);
+            let original_probe = original.get_or_init_blocking(|| {
+                probe1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                value + 100
+            });
+
+            let probe2 = Arc::clone(&probe_counter);
+            let cloned_probe = cloned.get_or_init_blocking(|| {
+                probe2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                value + 200
+            });
+
+            prop_assert_eq!(*original_probe, *cloned_probe,
+                "Clone and original should respond identically to get_or_init");
+
+            let expected_probe_count = if init_method == 3 { 2 } else { 0 };
+            prop_assert_eq!(probe_counter.load(std::sync::atomic::Ordering::SeqCst),
+                expected_probe_count,
+                "Clone and original should call init functions consistently");
+        }
+    }
 }
