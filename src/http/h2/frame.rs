@@ -616,6 +616,17 @@ impl PriorityFrame {
     /// Encode this frame.
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
+        if self.stream_id == 0 {
+            return Err(H2Error::protocol("PRIORITY frame with stream ID 0"));
+        }
+        if self.priority.dependency & 0x7fff_ffff == self.stream_id {
+            return Err(H2Error::stream(
+                self.stream_id,
+                ErrorCode::ProtocolError,
+                "stream cannot depend on itself",
+            ));
+        }
+
         let header = FrameHeader {
             length: 5,
             frame_type: FrameType::Priority as u8,
@@ -678,6 +689,10 @@ impl RstStreamFrame {
     /// Encode this frame.
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
+        if self.stream_id == 0 {
+            return Err(H2Error::protocol("RST_STREAM frame with stream ID 0"));
+        }
+
         let header = FrameHeader {
             length: 4,
             frame_type: FrameType::RstStream as u8,
@@ -1809,6 +1824,54 @@ mod tests {
     }
 
     #[test]
+    fn priority_frame_encode_rejects_stream_id_zero_without_partial_write() {
+        let frame = PriorityFrame {
+            stream_id: 0,
+            priority: PrioritySpec {
+                exclusive: false,
+                dependency: 1,
+                weight: 16,
+            },
+        };
+        let mut buf = BytesMut::new();
+
+        let err = frame
+            .encode(&mut buf)
+            .expect_err("invalid PRIORITY stream id must not encode");
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, None);
+        assert!(
+            buf.is_empty(),
+            "invalid PRIORITY frame must not partially encode"
+        );
+    }
+
+    #[test]
+    fn priority_frame_encode_rejects_self_dependency_without_partial_write() {
+        let frame = PriorityFrame {
+            stream_id: 5,
+            priority: PrioritySpec {
+                exclusive: true,
+                dependency: 5,
+                weight: 16,
+            },
+        };
+        let mut buf = BytesMut::new();
+
+        let err = frame
+            .encode(&mut buf)
+            .expect_err("self-dependent PRIORITY frame must not encode");
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, Some(5));
+        assert!(
+            buf.is_empty(),
+            "invalid PRIORITY frame must not partially encode"
+        );
+    }
+
+    #[test]
     fn test_priority_frame_wrong_size() {
         let header = FrameHeader {
             length: 4,
@@ -1836,6 +1899,23 @@ mod tests {
 
         let err = RstStreamFrame::parse(&header, &payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn rst_stream_encode_rejects_stream_id_zero_without_partial_write() {
+        let frame = RstStreamFrame::new(0, ErrorCode::Cancel);
+        let mut buf = BytesMut::new();
+
+        let err = frame
+            .encode(&mut buf)
+            .expect_err("invalid RST_STREAM stream id must not encode");
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, None);
+        assert!(
+            buf.is_empty(),
+            "invalid RST_STREAM frame must not partially encode"
+        );
     }
 
     #[test]
