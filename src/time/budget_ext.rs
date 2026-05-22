@@ -109,6 +109,7 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use crate::types::{Budget, RegionId, TaskId};
     use crate::util::ArenaIndex;
+    use proptest::prelude::*;
     use std::future::{pending, ready};
     use std::time::Duration;
 
@@ -168,6 +169,47 @@ mod tests {
             Time::from_secs(12)
         ));
         crate::test_complete!("budget_time_ext_deadline_boundaries");
+    }
+
+    proptest! {
+        #[test]
+        fn budget_remaining_duration_metamorphic_monotonic_as_now_advances(
+            deadline_nanos in 0u64..1_000_000_000_000,
+            first_now_nanos in 0u64..1_000_000_000_000,
+            second_now_nanos in 0u64..1_000_000_000_000,
+        ) {
+            let budget = Budget::new().with_deadline(Time::from_nanos(deadline_nanos));
+            let earlier_now_nanos = first_now_nanos.min(second_now_nanos);
+            let later_now_nanos = first_now_nanos.max(second_now_nanos);
+
+            let earlier_remaining = BudgetTimeExt::remaining_duration(
+                &budget,
+                Time::from_nanos(earlier_now_nanos),
+            )
+            .expect("budget has a deadline");
+            let later_remaining = BudgetTimeExt::remaining_duration(
+                &budget,
+                Time::from_nanos(later_now_nanos),
+            )
+            .expect("budget has a deadline");
+            let elapsed_between_reads =
+                Duration::from_nanos(later_now_nanos - earlier_now_nanos);
+
+            prop_assert!(
+                later_remaining <= earlier_remaining,
+                "remaining duration must not increase as now advances",
+            );
+            prop_assert_eq!(
+                later_remaining,
+                earlier_remaining.saturating_sub(elapsed_between_reads),
+                "advancing now must reduce remaining duration by the elapsed interval, floored at zero",
+            );
+            prop_assert_eq!(
+                BudgetTimeExt::deadline_elapsed(&budget, Time::from_nanos(later_now_nanos)),
+                later_now_nanos >= deadline_nanos,
+                "deadline_elapsed must agree with remaining_duration's zero boundary",
+            );
+        }
     }
 
     #[test]
