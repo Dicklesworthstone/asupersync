@@ -868,6 +868,55 @@ mod tests {
         crate::test_complete!("skip_aligns_correctly");
     }
 
+    #[test]
+    fn tick_and_poll_tick_ready_paths_match_state_transition() {
+        init_test("tick_and_poll_tick_ready_paths_match_state_transition");
+
+        let cases = [
+            (MissedTickBehavior::Burst, Time::from_millis(100)),
+            (MissedTickBehavior::Burst, Time::from_millis(350)),
+            (MissedTickBehavior::Delay, Time::from_millis(100)),
+            (MissedTickBehavior::Delay, Time::from_millis(350)),
+            (MissedTickBehavior::Skip, Time::from_millis(100)),
+            (MissedTickBehavior::Skip, Time::from_millis(350)),
+        ];
+
+        for (behavior, now) in cases {
+            let mut poll_interval = Interval::new(Time::ZERO, Duration::from_millis(100));
+            poll_interval.set_missed_tick_behavior(behavior);
+            let first_poll = poll_interval.poll_tick(Time::ZERO);
+
+            let mut tick_interval = Interval::new(Time::ZERO, Duration::from_millis(100));
+            tick_interval.set_missed_tick_behavior(behavior);
+            let first_tick = tick_interval.tick(Time::ZERO);
+
+            crate::assert_with_log!(
+                first_poll == Some(first_tick),
+                "initial tick relation",
+                Some(first_tick),
+                first_poll
+            );
+
+            let polled = poll_interval.poll_tick(now);
+            let ticked = tick_interval.tick(now);
+
+            crate::assert_with_log!(
+                polled == Some(ticked),
+                "ready tick output relation",
+                Some(ticked),
+                polled
+            );
+            crate::assert_with_log!(
+                poll_interval.deadline() == tick_interval.deadline(),
+                "ready tick deadline transition",
+                tick_interval.deadline(),
+                poll_interval.deadline()
+            );
+        }
+
+        crate::test_complete!("tick_and_poll_tick_ready_paths_match_state_transition");
+    }
+
     // =========================================================================
     // Reset Tests
     // =========================================================================
