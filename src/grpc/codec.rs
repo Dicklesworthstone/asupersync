@@ -810,6 +810,32 @@ mod tests {
     }
 
     #[test]
+    fn grpc_codec_rejects_oversized_declared_frame_before_payload() {
+        init_test("grpc_codec_rejects_oversized_declared_frame_before_payload");
+        let mut codec = GrpcCodec::with_max_size(3);
+        let mut buf = BytesMut::new();
+
+        buf.put_u8(0);
+        buf.put_u32(4);
+
+        let result = codec.decode(&mut buf);
+        let rejected = matches!(result, Err(GrpcError::MessageTooLarge));
+        crate::assert_with_log!(
+            rejected,
+            "oversized declared frame is rejected before payload buffering",
+            true,
+            rejected
+        );
+        crate::assert_with_log!(
+            buf.len() == MESSAGE_HEADER_SIZE,
+            "oversized header remains available for connection-level error handling",
+            MESSAGE_HEADER_SIZE,
+            buf.len()
+        );
+        crate::test_complete!("grpc_codec_rejects_oversized_declared_frame_before_payload");
+    }
+
+    #[test]
     fn test_grpc_go_max_receive_boundary_accepts_exact_limit_then_rejects_next_byte() {
         init_test("test_grpc_go_max_receive_boundary_accepts_exact_limit_then_rejects_next_byte");
 
