@@ -139,10 +139,15 @@ impl PathCharacteristics {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn quality_score(&self) -> f64 {
+        if !self.loss_rate.is_finite() {
+            return 0.0;
+        }
+
         let latency_score = 1000.0 / (f64::from(self.latency_ms) + 1.0);
         // Guard against log10(0) = -inf: treat zero bandwidth as minimal positive value.
         let bandwidth_score = (self.bandwidth_bps.max(1) as f64).log10();
-        let loss_score = 1.0 - self.loss_rate.clamp(0.0, 1.0);
+        let bounded_loss = self.loss_rate.clamp(0.0, 1.0);
+        let loss_score = 1.0 - bounded_loss;
         let jitter_score = 100.0 / (f64::from(self.jitter_ms) + 1.0);
 
         // Weighted combination
@@ -2020,6 +2025,42 @@ mod tests {
         );
 
         crate::test_complete!("test_path_set_best_quality_tie_breaks_by_path_id");
+    }
+
+    #[test]
+    fn test_path_set_best_quality_penalizes_nan_loss_rate() {
+        init_test("test_path_set_best_quality_penalizes_nan_loss_rate");
+        let set = PathSet::new(PathSelectionPolicy::BestQuality { count: 1 });
+
+        let invalid_loss = PathCharacteristics {
+            latency_ms: 1,
+            bandwidth_bps: u64::MAX,
+            loss_rate: f64::NAN,
+            jitter_ms: 0,
+            is_primary: false,
+            priority: 1,
+        };
+        let invalid_score = invalid_loss.quality_score();
+        crate::assert_with_log!(
+            invalid_score.is_finite(),
+            "invalid loss rate produces finite quality score",
+            true,
+            invalid_score.is_finite()
+        );
+
+        set.register(test_path(1).with_characteristics(invalid_loss));
+        set.register(test_path(2).with_characteristics(PathCharacteristics::high_quality()));
+
+        let selected = set.select_paths();
+        let ids: Vec<PathId> = selected.iter().map(|path| path.id).collect();
+        crate::assert_with_log!(
+            ids == vec![PathId(2)],
+            "best-quality penalizes non-finite loss rate",
+            vec![PathId(2)],
+            ids
+        );
+
+        crate::test_complete!("test_path_set_best_quality_penalizes_nan_loss_rate");
     }
 
     // Test 5.1: PathSet selection - ByPriority
