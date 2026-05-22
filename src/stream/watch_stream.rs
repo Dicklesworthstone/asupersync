@@ -141,6 +141,31 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn collect_closed_stream(mut stream: WatchStream<i32>) -> Vec<i32> {
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut out = Vec::new();
+
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut task_cx) {
+                Poll::Ready(Some(item)) => out.push(item),
+                Poll::Ready(None) => return out,
+                Poll::Pending => panic!("closed watch stream unexpectedly returned Pending"),
+            }
+        }
+    }
+
+    fn collect_new_after_sends(initial: i32, sends: &[i32]) -> Vec<i32> {
+        let cx: Cx = Cx::for_testing();
+        let (tx, rx) = watch::channel(initial);
+        for &value in sends {
+            tx.send(value)
+                .expect("watch send before stream construction");
+        }
+        drop(tx);
+        collect_closed_stream(WatchStream::new(cx, rx))
+    }
+
     #[test]
     fn watch_stream_none_is_terminal_after_cancel() {
         init_test("watch_stream_none_is_terminal_after_cancel");
@@ -199,6 +224,70 @@ mod tests {
         crate::test_complete!(
             "watch_stream_new_none_is_terminal_after_cancel_before_initial_snapshot"
         );
+    }
+
+    #[test]
+    fn mr_watch_stream_preconstruction_split_sends_coalesce_to_latest() {
+        init_test("mr_watch_stream_preconstruction_split_sends_coalesce_to_latest");
+        let sends = vec![1, 2, 3, 5, 8];
+        let expected = collect_new_after_sends(0, &sends);
+
+        for split in 0..=sends.len() {
+            let mut split_sends = sends[..split].to_vec();
+            split_sends.extend_from_slice(&sends[split..]);
+            let actual = collect_new_after_sends(0, &split_sends);
+
+            crate::assert_with_log!(
+                actual == expected,
+                format!("preconstruction split at {split}"),
+                expected.clone(),
+                actual
+            );
+        }
+
+        crate::test_complete!("mr_watch_stream_preconstruction_split_sends_coalesce_to_latest");
+    }
+
+    #[test]
+    fn mr_watch_stream_from_changes_output_is_prehistory_invariant() {
+        init_test("mr_watch_stream_from_changes_output_is_prehistory_invariant");
+        let future_change = 99;
+        let prehistories: &[&[i32]] = &[&[], &[1], &[1, 2, 3], &[5, 8, 13, 21]];
+
+        for &prehistory in prehistories {
+            let cx: Cx = Cx::for_testing();
+            let (tx, rx) = watch::channel(0);
+            for &value in prehistory {
+                tx.send(value).expect("watch prehistory send");
+            }
+
+            let mut stream = WatchStream::from_changes(cx, rx);
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let first = Pin::new(&mut stream).poll_next(&mut task_cx);
+            crate::assert_with_log!(
+                first.is_pending(),
+                format!("prehistory length {} is skipped", prehistory.len()),
+                true,
+                first.is_pending()
+            );
+
+            tx.send(future_change).expect("watch future send");
+            drop(tx);
+            let actual = collect_closed_stream(stream);
+
+            crate::assert_with_log!(
+                actual == vec![future_change],
+                format!(
+                    "prehistory length {} yields only future change",
+                    prehistory.len()
+                ),
+                vec![future_change],
+                actual
+            );
+        }
+
+        crate::test_complete!("mr_watch_stream_from_changes_output_is_prehistory_invariant");
     }
 
     #[test]
