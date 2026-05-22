@@ -467,4 +467,101 @@ mod tests {
 
         crate::test_complete!("zip_into_inner_preserves_buffered_items");
     }
+
+    fn drain_ready_i32_zip<S1, S2>(mut stream: Zip<S1, S2>) -> Vec<(i32, i32)>
+    where
+        S1: Stream<Item = i32> + Unpin,
+        S2: Stream<Item = i32> + Unpin,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut out = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(pair)) => out.push(pair),
+                Poll::Ready(None) => return out,
+                Poll::Pending => panic!("unexpected Pending from ready zip stream"),
+            }
+        }
+    }
+
+    #[test]
+    fn mr_zip_length_and_projections_follow_shorter_input() {
+        init_test("mr_zip_length_and_projections_follow_shorter_input");
+        for left_len in 0..=8usize {
+            for right_len in 0..=8usize {
+                let left: Vec<i32> = (0..left_len).map(|n| 100 + n as i32).collect();
+                let right: Vec<i32> = (0..right_len).map(|n| -10 - n as i32).collect();
+                let pairs = drain_ready_i32_zip(Zip::new(iter(left.clone()), iter(right.clone())));
+                let expected_len = left_len.min(right_len);
+
+                assert_eq!(
+                    pairs.len(),
+                    expected_len,
+                    "zip length must be min(left_len, right_len)"
+                );
+                assert_eq!(
+                    pairs.iter().map(|(left, _)| *left).collect::<Vec<_>>(),
+                    left[..expected_len],
+                    "left projection must equal the left prefix"
+                );
+                assert_eq!(
+                    pairs.iter().map(|(_, right)| *right).collect::<Vec<_>>(),
+                    right[..expected_len],
+                    "right projection must equal the right prefix"
+                );
+            }
+        }
+        crate::test_complete!("mr_zip_length_and_projections_follow_shorter_input");
+    }
+
+    #[test]
+    fn mr_zip_swapping_inputs_swaps_output_components() {
+        init_test("mr_zip_swapping_inputs_swaps_output_components");
+        for left_len in 0..=8usize {
+            for right_len in 0..=8usize {
+                let left: Vec<i32> = (0..left_len).map(|n| 2 * n as i32 + 1).collect();
+                let right: Vec<i32> = (0..right_len).map(|n| 1000 - n as i32).collect();
+
+                let forward =
+                    drain_ready_i32_zip(Zip::new(iter(left.clone()), iter(right.clone())));
+                let swapped = drain_ready_i32_zip(Zip::new(iter(right), iter(left)))
+                    .into_iter()
+                    .map(|(right, left)| (left, right))
+                    .collect::<Vec<_>>();
+
+                assert_eq!(
+                    forward, swapped,
+                    "zip(a, b) must match zip(b, a) with each output pair swapped"
+                );
+            }
+        }
+        crate::test_complete!("mr_zip_swapping_inputs_swaps_output_components");
+    }
+
+    #[test]
+    fn mr_zip_pending_left_preserves_queued_right_item() {
+        init_test("mr_zip_pending_left_preserves_queued_right_item");
+        let mut stream = Zip::new(PendingOnceThenIter::new(vec![1, 2]), iter(vec![10, 20]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Pin::new(&mut stream).poll_next(&mut cx).is_pending());
+        assert_eq!(
+            stream.size_hint(),
+            (2, Some(2)),
+            "right item queued during a left-side pending poll must still count toward pairs"
+        );
+
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some((1, 10)))
+        );
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some((2, 20)))
+        );
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("mr_zip_pending_left_preserves_queued_right_item");
+    }
 }
