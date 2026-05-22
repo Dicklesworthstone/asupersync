@@ -90,7 +90,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::stream::iter;
+    use crate::stream::{Chain, iter};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
@@ -165,6 +165,29 @@ mod tests {
         assert_eq!(items.len(), 100);
         assert_eq!(items[0], (0, 0));
         assert_eq!(items[99], (99, 99));
+    }
+
+    #[test]
+    fn test_enumerate_chain_matches_offset_parts() {
+        let left_items = vec!["a", "b", "c"];
+        let right_items = vec!["d", "e"];
+
+        let mut chained = Enumerate::new(Chain::new(
+            iter(left_items.clone()),
+            iter(right_items.clone()),
+        ));
+        let chained_items = collect_enum(&mut chained);
+
+        let mut expected = Enumerate::new(iter(left_items.clone()));
+        let mut expected_items = collect_enum(&mut expected);
+        expected_items.extend(
+            right_items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| (index + left_items.len(), item)),
+        );
+
+        assert_eq!(chained_items, expected_items);
     }
 
     #[test]
