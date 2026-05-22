@@ -406,6 +406,9 @@ impl BoundedLoadDecision {
     /// Stable identifier for the decision surface.
     pub const DECISION_ID: &'static str = "transport.bounded-load-hash.v1";
 
+    /// Stable identifier for the bounded-load fairness policy.
+    pub const FAIRNESS_POLICY_ID: &'static str = "hrw-bounded-load";
+
     /// Stable identifier for the rebalance reason.
     #[must_use]
     pub const fn reason_id(&self) -> &'static str {
@@ -463,6 +466,21 @@ impl BoundedLoadDecision {
             .join("|")
     }
 
+    fn format_fairness_state(
+        &self,
+        rejected_endpoint_count: usize,
+        overloaded_endpoint_count: usize,
+        within_capacity_endpoint_count: usize,
+    ) -> String {
+        let primary_endpoint_id = Self::format_optional_endpoint_id(self.primary);
+        let selected_endpoint_id = Self::format_optional_endpoint_id(self.selected);
+        let available_endpoint_count = self.endpoints.len();
+        format!(
+            "policy={};primary={primary_endpoint_id};selected={selected_endpoint_id};available={available_endpoint_count};rejected={rejected_endpoint_count};overloaded={overloaded_endpoint_count};within_capacity={within_capacity_endpoint_count}",
+            Self::FAIRNESS_POLICY_ID
+        )
+    }
+
     /// Serializes the decision into stable key/value fields for logs or artifacts.
     #[must_use]
     pub fn log_fields(&self) -> BTreeMap<String, String> {
@@ -473,8 +491,21 @@ impl BoundedLoadDecision {
             .iter()
             .filter(|endpoint| !endpoint.within_capacity)
             .count();
+        let within_capacity_endpoint_count = self.endpoints.len() - overloaded_endpoint_count;
 
         fields.insert("decision_id".to_owned(), Self::DECISION_ID.to_owned());
+        fields.insert(
+            "fairness_policy_id".to_owned(),
+            Self::FAIRNESS_POLICY_ID.to_owned(),
+        );
+        fields.insert(
+            "fairness_state".to_owned(),
+            self.format_fairness_state(
+                rejected_endpoint_ids.len(),
+                overloaded_endpoint_count,
+                within_capacity_endpoint_count,
+            ),
+        );
         fields.insert("strategy_id".to_owned(), "bounded-load-hash".to_owned());
         fields.insert(
             "selected_endpoint_id".to_owned(),
@@ -504,7 +535,7 @@ impl BoundedLoadDecision {
         );
         fields.insert(
             "within_capacity_endpoint_count".to_owned(),
-            (self.endpoints.len() - overloaded_endpoint_count).to_string(),
+            within_capacity_endpoint_count.to_string(),
         );
         fields.insert(
             "rejected_endpoint_ids".to_owned(),
@@ -3381,6 +3412,8 @@ mod tests {
             "available_endpoint_count",
             "decision_id",
             "endpoint_pressure_snapshot",
+            "fairness_policy_id",
+            "fairness_state",
             "overloaded_endpoint_count",
             "primary_endpoint_id",
             "rebalance_reason",
@@ -3450,6 +3483,10 @@ mod tests {
             Some("bounded-load-hash")
         );
         assert_eq!(
+            fields.get("fairness_policy_id").map(String::as_str),
+            Some(BoundedLoadDecision::FAIRNESS_POLICY_ID)
+        );
+        assert_eq!(
             fields.get("primary_endpoint_id").map(String::as_str),
             Some("Endpoint(1)")
         );
@@ -3483,6 +3520,21 @@ mod tests {
                 .map(String::as_str),
             Some("2")
         );
+        let fairness_state = fields
+            .get("fairness_state")
+            .map(String::as_str)
+            .expect("bounded-load logs carry fairness_state");
+        assert!(fairness_state.contains("policy=hrw-bounded-load"));
+        assert!(fairness_state.contains("primary=Endpoint(1)"));
+        assert!(fairness_state.contains("available=4"));
+        assert!(fairness_state.contains("rejected=3"));
+        assert!(fairness_state.contains("overloaded=2"));
+        assert!(fairness_state.contains("within_capacity=2"));
+        let selected_endpoint_id = fields
+            .get("selected_endpoint_id")
+            .map(String::as_str)
+            .expect("bounded-load logs carry selected_endpoint_id");
+        assert!(fairness_state.contains(&format!("selected={selected_endpoint_id}")));
         assert_eq!(
             rejected_ids.len(),
             3,
@@ -3529,6 +3581,12 @@ mod tests {
             Some("")
         );
         assert_eq!(
+            missing_key_fields.get("fairness_state").map(String::as_str),
+            Some(
+                "policy=hrw-bounded-load;primary=;selected=;available=2;rejected=2;overloaded=0;within_capacity=2"
+            )
+        );
+        assert_eq!(
             missing_key_fields
                 .get("rejected_endpoint_count")
                 .map(String::as_str),
@@ -3563,6 +3621,12 @@ mod tests {
                 .get("endpoint_pressure_snapshot")
                 .map(String::as_str),
             Some("")
+        );
+        assert_eq!(
+            no_healthy_fields.get("fairness_state").map(String::as_str),
+            Some(
+                "policy=hrw-bounded-load;primary=;selected=;available=0;rejected=0;overloaded=0;within_capacity=0"
+            )
         );
     }
 
