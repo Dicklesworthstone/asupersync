@@ -712,6 +712,9 @@ fn derive_caveats(probes: &[&CapabilityProbe]) -> Vec<String> {
 fn derive_recovery_commands(probes: &[&CapabilityProbe]) -> Vec<String> {
     let mut commands = Vec::new();
     for probe in probes {
+        if probe.status.is_full_support() {
+            continue;
+        }
         if let Some(command) = &probe.suggested_recovery_command {
             if !commands.contains(command) {
                 commands.push(command.clone());
@@ -907,6 +910,24 @@ mod tests {
             vec!["enable IPv6 loopback/networking on this host".to_string()]
         );
         crate::test_complete!("failed_probes_select_conservative_degradation");
+    }
+
+    #[test]
+    fn supported_probe_recovery_commands_are_ignored() {
+        init_test("supported_probe_recovery_commands_are_ignored");
+        let mut provider = FakePlatformCapabilityProvider::fully_supported();
+        provider.preallocation = CapabilityProbe::new(
+            "preallocation",
+            CapabilityStatus::Supported,
+            ProbeSource::Measured,
+            "preallocation supported",
+        )
+        .with_recovery_command("do not suggest this for supported probes");
+
+        let report = build_platform_capability_report(&provider);
+
+        assert!(report.suggested_recovery_commands.is_empty());
+        crate::test_complete!("supported_probe_recovery_commands_are_ignored");
     }
 
     #[test]
