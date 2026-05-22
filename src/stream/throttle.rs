@@ -174,6 +174,24 @@ mod tests {
         Time::from_nanos(TEST_NOW_NANOS.load(Ordering::SeqCst))
     }
 
+    fn collect_throttled(input: &[i32], period: Duration, now_nanos: u64) -> Vec<i32> {
+        set_test_time(now_nanos);
+        let mut stream = Throttle::with_time_getter(iter(input.to_vec()), period, test_time);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut out = Vec::new();
+
+        for _ in 0..=input.len() + 2 {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => out.push(item),
+                Poll::Ready(None) => return out,
+                Poll::Pending => {}
+            }
+        }
+
+        panic!("throttle did not finish draining finite input");
+    }
+
     #[test]
     fn throttle_zero_duration_passes_all() {
         init_test("throttle_zero_duration_passes_all");
@@ -195,6 +213,51 @@ mod tests {
         );
         assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
         crate::test_complete!("throttle_zero_duration_passes_all");
+    }
+
+    #[test]
+    fn mr_throttle_zero_duration_split_matches_unsplit_identity() {
+        init_test("mr_throttle_zero_duration_split_matches_unsplit_identity");
+        let input = vec![4, 1, 4, 2, 1, 3];
+        let expected = collect_throttled(&input, Duration::ZERO, 10);
+
+        for split in 0..=input.len() {
+            let mut split_input = input[..split].to_vec();
+            split_input.extend_from_slice(&input[split..]);
+            let actual = collect_throttled(&split_input, Duration::ZERO, 10);
+
+            crate::assert_with_log!(
+                actual == expected,
+                format!("zero-duration split at {split}"),
+                expected.clone(),
+                actual
+            );
+        }
+
+        crate::test_complete!("mr_throttle_zero_duration_split_matches_unsplit_identity");
+    }
+
+    #[test]
+    fn mr_throttle_constant_time_nonzero_period_is_suffix_invariant() {
+        init_test("mr_throttle_constant_time_nonzero_period_is_suffix_invariant");
+        let prefix = vec![9];
+        let suffixes = [Vec::new(), vec![1], vec![1, 2, 3], vec![1, 2, 3, 5, 8, 13]];
+        let expected = collect_throttled(&prefix, Duration::from_secs(1), 20);
+
+        for suffix in suffixes {
+            let mut input = prefix.clone();
+            input.extend_from_slice(&suffix);
+            let actual = collect_throttled(&input, Duration::from_secs(1), 20);
+
+            crate::assert_with_log!(
+                actual == expected,
+                format!("constant-time suffix length {}", suffix.len()),
+                expected.clone(),
+                actual
+            );
+        }
+
+        crate::test_complete!("mr_throttle_constant_time_nonzero_period_is_suffix_invariant");
     }
 
     #[test]
