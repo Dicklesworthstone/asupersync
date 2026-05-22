@@ -2,7 +2,7 @@
 //!
 //! AUDIT FINDING: FIXED - Push frames now isolated from command responses
 //!
-//! When a Redis command response is mid-stream and a server-pushed >>4 message
+//! When a Redis command response is mid-stream and a server-pushed `>N` message
 //! arrives, the implementation now skips the push frame and continues reading for
 //! the actual command response, preventing protocol desynchronization. A separate
 //! delivery buffer/API is still required before client tracking or monitoring
@@ -12,7 +12,7 @@
 
 use super::RespValue;
 
-const REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_redis_resp3_push_interleaving_audit cargo test -p asupersync --lib redis_resp3_push_interleaving --features test-internals -- --nocapture";
+const REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_pane6_grpc_redis_resp3_push_interleaving_audit cargo test -p asupersync --lib redis_resp3_push_interleaving --features test-internals -- --nocapture";
 const STALE_REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND: &str = "rch exec -- cargo test -p asupersync --lib redis_resp3_push_interleaving --features test-internals -- --nocapture";
 
 fn init_test(name: &str) {
