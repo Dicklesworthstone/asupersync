@@ -247,6 +247,36 @@ mod tests {
             prop_assert_eq!(first_then_second.region_id(), test_region());
             prop_assert_eq!(second_then_first.region_id(), test_region());
         }
+
+        #[test]
+        fn with_timeout_metamorphic_matches_explicit_saturating_deadline(
+            now_nanos in any::<u64>(),
+            timeout_nanos in any::<u64>(),
+            existing_deadline_nanos in any::<u64>(),
+        ) {
+            let budget = Budget::INFINITE.with_deadline(Time::from_nanos(existing_deadline_nanos));
+            let scope = Scope::<FailFast>::new(test_region(), budget);
+            let now = Time::from_nanos(now_nanos);
+            let timeout = Duration::from_nanos(timeout_nanos);
+            let computed_deadline = now.saturating_add_nanos(timeout_nanos);
+
+            let via_timeout = with_timeout(&scope, timeout, now);
+            let via_explicit_deadline = with_deadline(&scope, computed_deadline);
+            let expected = Time::from_nanos(existing_deadline_nanos).min(computed_deadline);
+
+            prop_assert_eq!(
+                via_timeout.budget().deadline,
+                Some(expected),
+                "with_timeout must keep the earlier of the existing and computed deadlines",
+            );
+            prop_assert_eq!(
+                via_timeout.budget().deadline,
+                via_explicit_deadline.budget().deadline,
+                "with_timeout must match with_deadline using the computed absolute deadline",
+            );
+            prop_assert_eq!(via_timeout.region_id(), test_region());
+            prop_assert_eq!(via_explicit_deadline.region_id(), test_region());
+        }
     }
 
     #[test]
