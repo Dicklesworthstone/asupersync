@@ -340,6 +340,39 @@ fn mr_extra_repair_symbols_do_not_reduce_success_on_fixed_fixture() {
     );
 }
 
+#[test]
+fn mr_duplicate_repair_backed_symbols_preserve_payload_on_fixed_fixture() {
+    let (data, k, symbol_size, symbols) = encode_symbols(1280, 0x0D15_EA5E, 2.2);
+    let subset = repair_backed_subset(&symbols, k, symbol_size, &data);
+    let baseline_payload =
+        decode_payload(&subset, k, symbol_size, data.len()).expect("baseline subset should decode");
+
+    let mut duplicated = subset.clone();
+    let source_duplicate = subset
+        .iter()
+        .find(|symbol| matches!(symbol.symbol().kind(), crate::types::SymbolKind::Source))
+        .expect("repair-backed subset should include source symbols")
+        .clone();
+    let repair_duplicate = subset
+        .iter()
+        .find(|symbol| matches!(symbol.symbol().kind(), crate::types::SymbolKind::Repair))
+        .expect("repair-backed subset should include repair symbols")
+        .clone();
+    duplicated.push(source_duplicate);
+    duplicated.push(repair_duplicate);
+
+    let duplicate_payload = decode_payload(&duplicated, k, symbol_size, data.len())
+        .expect("duplicate symbols must not break repair-backed decode");
+    assert_eq!(
+        duplicate_payload, baseline_payload,
+        "duplicating received source and repair symbols must preserve decoded payload"
+    );
+    assert_eq!(
+        duplicate_payload, data,
+        "duplicate-symbol relation must preserve identity"
+    );
+}
+
 /// MR1: Encode-Decode Identity (Invertive)
 /// Property: decode(encode(data)) = data
 /// Catches: Symbol corruption, decode algorithm bugs, precision loss
