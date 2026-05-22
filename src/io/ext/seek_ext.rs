@@ -132,6 +132,49 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum SeekStep {
+        Pending,
+        Ready(u64),
+    }
+
+    #[derive(Debug)]
+    struct ScriptedSeeker {
+        steps: std::collections::VecDeque<SeekStep>,
+        positions: Vec<SeekFrom>,
+        polls: usize,
+        expected_waker: Waker,
+        saw_expected_waker: bool,
+    }
+
+    impl ScriptedSeeker {
+        fn new(expected_waker: Waker, steps: impl IntoIterator<Item = SeekStep>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                positions: Vec::new(),
+                polls: 0,
+                expected_waker,
+                saw_expected_waker: false,
+            }
+        }
+    }
+
+    impl AsyncSeek for ScriptedSeeker {
+        fn poll_seek(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            pos: SeekFrom,
+        ) -> Poll<io::Result<u64>> {
+            self.polls += 1;
+            self.positions.push(pos);
+            self.saw_expected_waker = cx.waker().will_wake(&self.expected_waker);
+            match self.steps.pop_front().expect("script exhausted") {
+                SeekStep::Pending => Poll::Pending,
+                SeekStep::Ready(position) => Poll::Ready(Ok(position)),
+            }
+        }
+    }
+
     #[test]
     fn seek_start() {
         init_test("seek_start");
@@ -200,5 +243,80 @@ mod tests {
         };
         crate::assert_with_log!(pos == 75, "stream_position", 75u64, pos);
         crate::test_complete!("stream_position_returns_current");
+    }
+
+    #[test]
+    fn seek_future_retries_same_position_after_pending() {
+        init_test("seek_future_retries_same_position_after_pending");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut seeker =
+            ScriptedSeeker::new(waker.clone(), [SeekStep::Pending, SeekStep::Ready(64)]);
+
+        {
+            let mut fut = seeker.seek(SeekFrom::Start(64));
+            let first = Pin::new(&mut fut).poll(&mut cx);
+            crate::assert_with_log!(
+                matches!(first, Poll::Pending),
+                "first poll pending",
+                true,
+                matches!(first, Poll::Pending)
+            );
+
+            let second = Pin::new(&mut fut).poll(&mut cx);
+            let ready = matches!(second, Poll::Ready(Ok(64)));
+            crate::assert_with_log!(ready, "second poll ready", true, ready);
+        }
+
+        crate::assert_with_log!(seeker.polls == 2, "two inner polls", 2, seeker.polls);
+        crate::assert_with_log!(
+            seeker.positions == vec![SeekFrom::Start(64), SeekFrom::Start(64)],
+            "same position retried",
+            vec![SeekFrom::Start(64), SeekFrom::Start(64)],
+            seeker.positions.clone()
+        );
+        crate::assert_with_log!(
+            seeker.saw_expected_waker,
+            "context forwarded",
+            true,
+            seeker.saw_expected_waker
+        );
+        crate::test_complete!("seek_future_retries_same_position_after_pending");
+    }
+
+    #[test]
+    fn seek_future_is_single_use_after_ready() {
+        init_test("seek_future_is_single_use_after_ready");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut seeker = ScriptedSeeker::new(waker.clone(), [SeekStep::Ready(9)]);
+
+        {
+            let mut fut = seeker.seek(SeekFrom::Current(4));
+            let first = Pin::new(&mut fut).poll(&mut cx);
+            let ready = matches!(first, Poll::Ready(Ok(9)));
+            crate::assert_with_log!(ready, "first poll ready", true, ready);
+
+            let second = Pin::new(&mut fut).poll(&mut cx);
+            let err = match second {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected post-completion error, got {other:?}"),
+            };
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::Other,
+                "post-completion error kind",
+                io::ErrorKind::Other,
+                err.kind()
+            );
+        }
+
+        crate::assert_with_log!(seeker.polls == 1, "one inner poll", 1, seeker.polls);
+        crate::assert_with_log!(
+            seeker.positions == vec![SeekFrom::Current(4)],
+            "position polled once",
+            vec![SeekFrom::Current(4)],
+            seeker.positions.clone()
+        );
+        crate::test_complete!("seek_future_is_single_use_after_ready");
     }
 }
