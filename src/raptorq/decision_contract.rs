@@ -78,6 +78,10 @@ pub struct GovernanceEvidenceContributor {
 /// Deterministic runtime output for a single G7 decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GovernanceTelemetry {
+    /// Unique deterministic identifier for this governance decision.
+    pub decision_id: DecisionId,
+    /// Trace identifier for correlating the decision with replay evidence.
+    pub trace_id: TraceId,
     /// Posterior over G7 states in permille order `[healthy, degraded, regression, unknown]`.
     pub state_posterior_permille: [u16; state::COUNT],
     /// Expected-loss terms for actions `[continue, canary_hold, rollback, fallback]`.
@@ -245,6 +249,8 @@ impl RaptorQDecisionContract {
             Ok(o) => o,
             Err(_) => {
                 return GovernanceTelemetry {
+                    decision_id: ctx.decision_id,
+                    trace_id: ctx.trace_id,
                     state_posterior_permille: posterior_permille,
                     expected_loss_terms,
                     chosen_action: action_label(action::FALLBACK),
@@ -266,6 +272,8 @@ impl RaptorQDecisionContract {
             };
 
         GovernanceTelemetry {
+            decision_id: ctx.decision_id,
+            trace_id: ctx.trace_id,
             state_posterior_permille: posterior_permille,
             expected_loss_terms,
             chosen_action: action_label(outcome.action_index),
@@ -379,15 +387,19 @@ impl DecisionContract for RaptorQDecisionContract {
 impl GovernanceTelemetry {
     /// Format as a single-line structured log entry for forensic replay.
     ///
-    /// Output format: `g7_decision: state_posterior=[h,d,r,u] expected_loss=[c,ch,rb,fb]
-    /// action=<chosen> confidence=<n> uncertainty=<n> fallback=<bool> reason=<str>
-    /// replay=<ref> top=[name1:w1,name2:w2,name3:w3]`
+    /// Output format: `g7_decision: decision_id=<hex> trace_id=<hex>
+    /// state_posterior=[h,d,r,u] expected_loss=[c,ch,rb,fb] action=<chosen>
+    /// confidence=<n> uncertainty=<n> fallback=<bool> reason=<str> replay=<ref>
+    /// top=[name1:w1,name2:w2,name3:w3]`
     #[must_use]
     pub fn to_structured_log(&self) -> String {
         format!(
-            "g7_decision: state_posterior=[{},{},{},{}] expected_loss=[{},{},{},{}] \
+            "g7_decision: decision_id={} trace_id={} \
+             state_posterior=[{},{},{},{}] expected_loss=[{},{},{},{}] \
              action={} confidence={} uncertainty={} fallback={} reason={} \
              replay={} top=[{}:{},{}:{},{}:{}]",
+            self.decision_id,
+            self.trace_id,
             self.state_posterior_permille[state::HEALTHY],
             self.state_posterior_permille[state::DEGRADED],
             self.state_posterior_permille[state::REGRESSION],
@@ -1199,6 +1211,8 @@ mod tests {
             log.starts_with("g7_decision:"),
             "log must start with g7_decision prefix"
         );
+        assert!(log.contains("decision_id="), "log must include decision id");
+        assert!(log.contains("trace_id="), "log must include trace id");
         assert!(
             log.contains("state_posterior="),
             "log must include state_posterior"
@@ -1222,6 +1236,14 @@ mod tests {
         assert!(
             log.contains("top="),
             "log must include top evidence contributors"
+        );
+        assert!(
+            log.contains(&format!("decision_id={}", telemetry.decision_id)),
+            "log decision id must match telemetry"
+        );
+        assert!(
+            log.contains(&format!("trace_id={}", telemetry.trace_id)),
+            "log trace id must match telemetry"
         );
     }
 
