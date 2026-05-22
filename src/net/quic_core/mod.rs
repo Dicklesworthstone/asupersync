@@ -982,6 +982,25 @@ mod tests {
     }
 
     #[test]
+    fn rfc9000_varint_decode_accepts_non_minimal_encodings() {
+        // RFC 9000 §16 permits integer values to be encoded on a wider
+        // length than strictly necessary. Encoding remains shortest-form.
+        let mut shortest = Vec::new();
+        encode_varint(37, &mut shortest).expect("encode shortest form");
+        assert_eq!(shortest, vec![0x25]);
+
+        for wire in [
+            &[0x40, 0x25][..],
+            &[0x80, 0x00, 0x00, 0x25][..],
+            &[0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25][..],
+        ] {
+            let (decoded, consumed) = decode_varint(wire).expect("decode non-minimal varint");
+            assert_eq!(decoded, 37);
+            assert_eq!(consumed, wire.len());
+        }
+    }
+
+    #[test]
     fn connection_id_bounds() {
         assert!(ConnectionId::new(&[0u8; 20]).is_ok());
         let err = ConnectionId::new(&[0u8; 21]).expect_err("should fail");
