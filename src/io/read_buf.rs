@@ -115,6 +115,58 @@ mod tests {
     }
 
     #[test]
+    fn read_buf_zero_capacity_accepts_empty_progress_only() {
+        init_test("read_buf_zero_capacity_accepts_empty_progress_only");
+        let mut buf = [];
+        let mut read_buf = ReadBuf::new(&mut buf);
+
+        let remaining = read_buf.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        let filled_empty = read_buf.filled().is_empty();
+        crate::assert_with_log!(filled_empty, "filled empty", true, filled_empty);
+        let unfilled_empty = read_buf.unfilled().is_empty();
+        crate::assert_with_log!(unfilled_empty, "unfilled empty", true, unfilled_empty);
+
+        read_buf.put_slice(&[]);
+        read_buf.advance(0);
+
+        let remaining = read_buf.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        let filled_empty = read_buf.filled().is_empty();
+        crate::assert_with_log!(filled_empty, "filled empty", true, filled_empty);
+
+        let panic = panic::catch_unwind(AssertUnwindSafe(|| {
+            read_buf.put_slice(&[1]);
+        }))
+        .expect_err("zero-capacity ReadBuf must reject non-empty put_slice");
+        let message = panic_message(panic.as_ref());
+        crate::assert_with_log!(
+            message.contains("ReadBuf overflow"),
+            "put_slice panic message",
+            true,
+            message.contains("ReadBuf overflow")
+        );
+
+        let panic = panic::catch_unwind(AssertUnwindSafe(|| {
+            read_buf.advance(1);
+        }))
+        .expect_err("zero-capacity ReadBuf must reject non-zero advance");
+        let message = panic_message(panic.as_ref());
+        crate::assert_with_log!(
+            message.contains("ReadBuf overflow"),
+            "advance panic message",
+            true,
+            message.contains("ReadBuf overflow")
+        );
+
+        let remaining = read_buf.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        let filled_empty = read_buf.filled().is_empty();
+        crate::assert_with_log!(filled_empty, "filled empty", true, filled_empty);
+        crate::test_complete!("read_buf_zero_capacity_accepts_empty_progress_only");
+    }
+
+    #[test]
     fn read_buf_advance_rejects_oversized_step_without_wrapping() {
         init_test("read_buf_advance_rejects_oversized_step_without_wrapping");
         let mut buf = [0u8; 8];
