@@ -509,6 +509,67 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_outcomes_quorum_counts_are_permutation_invariant() {
+        let replicas = create_test_replicas(5);
+        let encoded = create_test_encoded_state();
+        let baseline = vec![
+            Outcome::Ok(make_ack("r0", 10)),
+            Outcome::Err(make_failure("r1")),
+            Outcome::Ok(make_ack("r2", 10)),
+            Outcome::Err(make_failure("r3")),
+            Outcome::Ok(make_ack("r4", 10)),
+        ];
+        let permuted = vec![
+            Outcome::Err(make_failure("r3")),
+            Outcome::Ok(make_ack("r4", 10)),
+            Outcome::Ok(make_ack("r0", 10)),
+            Outcome::Ok(make_ack("r2", 10)),
+            Outcome::Err(make_failure("r1")),
+        ];
+
+        let mut baseline_distributor = SymbolDistributor::new(DistributionConfig::default());
+        let baseline_result = baseline_distributor.evaluate_outcomes(
+            &encoded,
+            &replicas,
+            baseline,
+            Duration::from_millis(50),
+        );
+        let mut permuted_distributor = SymbolDistributor::new(DistributionConfig::default());
+        let permuted_result = permuted_distributor.evaluate_outcomes(
+            &encoded,
+            &replicas,
+            permuted,
+            Duration::from_millis(50),
+        );
+
+        assert_eq!(
+            baseline_result.quorum_achieved,
+            permuted_result.quorum_achieved
+        );
+        assert_eq!(baseline_result.acks.len(), permuted_result.acks.len());
+        assert_eq!(
+            baseline_result.failures.len(),
+            permuted_result.failures.len()
+        );
+        assert_eq!(
+            baseline_result.symbols_distributed,
+            permuted_result.symbols_distributed
+        );
+        assert_eq!(
+            baseline_distributor.metrics.distributions_successful,
+            permuted_distributor.metrics.distributions_successful
+        );
+        assert_eq!(
+            baseline_distributor.metrics.distributions_failed,
+            permuted_distributor.metrics.distributions_failed
+        );
+        assert_eq!(
+            baseline_distributor.metrics.acks_received_total,
+            permuted_distributor.metrics.acks_received_total
+        );
+    }
+
+    #[test]
     fn distribution_metrics_updated() {
         let config = DistributionConfig::default();
         let mut distributor = SymbolDistributor::new(config);
