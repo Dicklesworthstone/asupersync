@@ -344,6 +344,25 @@ mod tests {
     }
 
     #[test]
+    fn test_take_set_limit_to_zero_closes_window_without_advancing_inner() {
+        init_test("test_take_set_limit_to_zero_closes_window_without_advancing_inner");
+        let buf: &[u8] = &[1, 2, 3, 4, 5];
+        let mut take = Take::new(buf, 4);
+
+        take.advance(1);
+        take.set_limit(0);
+
+        let remaining = take.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        let chunk = take.chunk();
+        crate::assert_with_log!(chunk.is_empty(), "chunk empty", true, chunk.is_empty());
+
+        let inner = take.into_inner();
+        crate::assert_with_log!(inner == [2, 3, 4, 5], "inner", &[2, 3, 4, 5], inner);
+        crate::test_complete!("test_take_set_limit_to_zero_closes_window_without_advancing_inner");
+    }
+
+    #[test]
     fn test_take_into_inner() {
         init_test("test_take_into_inner");
         let buf: &[u8] = &[1, 2, 3, 4, 5];
