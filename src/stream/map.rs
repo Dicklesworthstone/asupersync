@@ -104,6 +104,16 @@ mod tests {
         std::task::Waker::noop().clone()
     }
 
+    fn collect_ready<S: Stream + Unpin>(stream: &mut S) -> Vec<S::Item> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut items = Vec::new();
+        while let Poll::Ready(Some(item)) = Pin::new(&mut *stream).poll_next(&mut cx) {
+            items.push(item);
+        }
+        items
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -207,6 +217,20 @@ mod tests {
         crate::assert_with_log!(got_1, "into_inner preserves items", true, got_1);
 
         crate::test_complete!("map_accessors");
+    }
+
+    #[test]
+    fn map_composition_matches_single_pass_map() {
+        init_test("map_composition_matches_single_pass_map");
+        let values = vec![-3i32, -1, 0, 2, 5, 8];
+
+        let mut two_stage = Map::new(Map::new(iter(values.clone()), |x: i32| x * 2 + 1), |x| {
+            x - 4
+        });
+        let mut one_stage = Map::new(iter(values), |x: i32| (x * 2 + 1) - 4);
+
+        assert_eq!(collect_ready(&mut two_stage), collect_ready(&mut one_stage));
+        crate::test_complete!("map_composition_matches_single_pass_map");
     }
 
     #[test]
