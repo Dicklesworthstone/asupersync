@@ -612,6 +612,26 @@ mod tests {
     }
 
     #[test]
+    fn test_buf_cursor_position_past_end_is_empty_and_stable() {
+        init_test("test_buf_cursor_position_past_end_is_empty_and_stable");
+        let data: &[u8] = &[1, 2, 3];
+        let mut cursor = std::io::Cursor::new(data);
+        cursor.set_position(9);
+
+        let remaining = cursor.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        let chunk_empty = cursor.chunk().is_empty();
+        crate::assert_with_log!(chunk_empty, "chunk empty", true, chunk_empty);
+        let has_remaining = cursor.has_remaining();
+        crate::assert_with_log!(!has_remaining, "has remaining", false, has_remaining);
+
+        cursor.advance(0);
+        let position = cursor.position();
+        crate::assert_with_log!(position == 9, "position", 9, position);
+        crate::test_complete!("test_buf_cursor_position_past_end_is_empty_and_stable");
+    }
+
+    #[test]
     fn test_roundtrip_all_integers() {
         init_test("test_roundtrip_all_integers");
         // Write all types
