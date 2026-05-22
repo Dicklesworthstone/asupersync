@@ -16,7 +16,7 @@ use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
 use parking_lot::RwLock;
 use smallvec::{SmallVec, smallvec};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -350,6 +350,20 @@ pub enum BoundedLoadRebalanceReason {
     AllEndpointsOverCapacityFallback,
 }
 
+impl BoundedLoadRebalanceReason {
+    /// Stable identifier for structured routing decision logs.
+    #[must_use]
+    pub const fn reason_id(self) -> &'static str {
+        match self {
+            Self::NoHealthyEndpoints => "no-healthy-endpoints",
+            Self::NoObjectIdFallback => "no-object-id-fallback",
+            Self::PrimaryWithinCapacity => "primary-within-capacity",
+            Self::PrimaryOverCapacityRebalanced => "primary-over-capacity-rebalanced",
+            Self::AllEndpointsOverCapacityFallback => "all-endpoints-over-capacity-fallback",
+        }
+    }
+}
+
 /// Per-endpoint bounded-load telemetry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundedLoadEndpointTelemetry {
@@ -386,6 +400,122 @@ pub struct BoundedLoadDecision {
 
     /// Per-node load/capacity facts sorted by endpoint id.
     pub endpoints: Vec<BoundedLoadEndpointTelemetry>,
+}
+
+impl BoundedLoadDecision {
+    /// Stable identifier for the decision surface.
+    pub const DECISION_ID: &'static str = "transport.bounded-load-hash.v1";
+
+    /// Stable identifier for the rebalance reason.
+    #[must_use]
+    pub const fn reason_id(&self) -> &'static str {
+        self.reason.reason_id()
+    }
+
+    /// Endpoint alternatives that were considered but not selected.
+    #[must_use]
+    pub fn rejected_endpoint_ids(&self) -> SmallVec<[EndpointId; 16]> {
+        self.endpoints
+            .iter()
+            .filter(|endpoint| !endpoint.is_selected)
+            .map(|endpoint| endpoint.endpoint_id)
+            .collect()
+    }
+
+    fn format_optional_endpoint_id(endpoint_id: Option<EndpointId>) -> String {
+        endpoint_id.map_or_else(String::new, |endpoint_id| endpoint_id.to_string())
+    }
+
+    fn format_endpoint_ids(endpoint_ids: &[EndpointId]) -> String {
+        endpoint_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn format_endpoint_pressure(endpoints: &[BoundedLoadEndpointTelemetry]) -> String {
+        endpoints
+            .iter()
+            .map(|endpoint| {
+                let capacity_state = if endpoint.within_capacity {
+                    "within"
+                } else {
+                    "over"
+                };
+                let primary = if endpoint.is_primary { ":primary" } else { "" };
+                let selected = if endpoint.is_selected {
+                    ":selected"
+                } else {
+                    ""
+                };
+                format!(
+                    "{}:{}/{}:{}{}{}",
+                    endpoint.endpoint_id,
+                    endpoint.actual_load,
+                    endpoint.capacity,
+                    capacity_state,
+                    primary,
+                    selected
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    /// Serializes the decision into stable key/value fields for logs or artifacts.
+    #[must_use]
+    pub fn log_fields(&self) -> BTreeMap<String, String> {
+        let mut fields = BTreeMap::new();
+        let rejected_endpoint_ids = self.rejected_endpoint_ids();
+        let overloaded_endpoint_count = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| !endpoint.within_capacity)
+            .count();
+
+        fields.insert("decision_id".to_owned(), Self::DECISION_ID.to_owned());
+        fields.insert("strategy_id".to_owned(), "bounded-load-hash".to_owned());
+        fields.insert(
+            "selected_endpoint_id".to_owned(),
+            Self::format_optional_endpoint_id(self.selected),
+        );
+        fields.insert(
+            "primary_endpoint_id".to_owned(),
+            Self::format_optional_endpoint_id(self.primary),
+        );
+        fields.insert("rebalance_reason".to_owned(), self.reason_id().to_owned());
+        fields.insert("rebalance_reasons".to_owned(), self.reason_id().to_owned());
+        fields.insert(
+            "available_endpoint_count".to_owned(),
+            self.endpoints.len().to_string(),
+        );
+        fields.insert(
+            "selected_endpoint_count".to_owned(),
+            usize::from(self.selected.is_some()).to_string(),
+        );
+        fields.insert(
+            "rejected_endpoint_count".to_owned(),
+            rejected_endpoint_ids.len().to_string(),
+        );
+        fields.insert(
+            "overloaded_endpoint_count".to_owned(),
+            overloaded_endpoint_count.to_string(),
+        );
+        fields.insert(
+            "within_capacity_endpoint_count".to_owned(),
+            (self.endpoints.len() - overloaded_endpoint_count).to_string(),
+        );
+        fields.insert(
+            "rejected_endpoint_ids".to_owned(),
+            Self::format_endpoint_ids(rejected_endpoint_ids.as_slice()),
+        );
+        fields.insert(
+            "endpoint_pressure_snapshot".to_owned(),
+            Self::format_endpoint_pressure(self.endpoints.as_slice()),
+        );
+        fields
+    }
 }
 
 /// State for load balancer.
@@ -3244,6 +3374,196 @@ mod tests {
         assert!(decision.endpoints.iter().any(|endpoint| {
             endpoint.is_selected && endpoint.within_capacity && endpoint.endpoint_id != primary_id
         }));
+    }
+
+    fn assert_bounded_load_log_keyset(fields: &BTreeMap<String, String>) {
+        let expected = [
+            "available_endpoint_count",
+            "decision_id",
+            "endpoint_pressure_snapshot",
+            "overloaded_endpoint_count",
+            "primary_endpoint_id",
+            "rebalance_reason",
+            "rebalance_reasons",
+            "rejected_endpoint_count",
+            "rejected_endpoint_ids",
+            "selected_endpoint_count",
+            "selected_endpoint_id",
+            "strategy_id",
+            "within_capacity_endpoint_count",
+        ];
+        let actual = fields.keys().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_bounded_load_rebalance_reason_ids_are_stable() {
+        assert_eq!(
+            BoundedLoadRebalanceReason::NoHealthyEndpoints.reason_id(),
+            "no-healthy-endpoints"
+        );
+        assert_eq!(
+            BoundedLoadRebalanceReason::NoObjectIdFallback.reason_id(),
+            "no-object-id-fallback"
+        );
+        assert_eq!(
+            BoundedLoadRebalanceReason::PrimaryWithinCapacity.reason_id(),
+            "primary-within-capacity"
+        );
+        assert_eq!(
+            BoundedLoadRebalanceReason::PrimaryOverCapacityRebalanced.reason_id(),
+            "primary-over-capacity-rebalanced"
+        );
+        assert_eq!(
+            BoundedLoadRebalanceReason::AllEndpointsOverCapacityFallback.reason_id(),
+            "all-endpoints-over-capacity-fallback"
+        );
+    }
+
+    #[test]
+    fn test_bounded_load_decision_log_fields_capture_rejected_pressure() {
+        let seed = 0x51A0_B0A7_u64;
+        let config = BoundedLoadConfig::new(0, 1, 1);
+        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+            .with_bounded_load_config(config);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=4)
+            .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
+            .collect();
+        let primary_id = EndpointId::new(1);
+        let object_id = object_id_for_hash_primary(seed, &endpoints, primary_id);
+        endpoints[0].active_connections.store(3, Ordering::Relaxed);
+        endpoints[1].active_connections.store(0, Ordering::Relaxed);
+        endpoints[2].active_connections.store(1, Ordering::Relaxed);
+        endpoints[3].active_connections.store(0, Ordering::Relaxed);
+
+        let decision = bounded_lb.bounded_load_decision(&endpoints, Some(object_id));
+        let fields = decision.log_fields();
+        let rejected_ids = decision.rejected_endpoint_ids();
+
+        assert_bounded_load_log_keyset(&fields);
+        assert_eq!(
+            fields.get("decision_id").map(String::as_str),
+            Some(BoundedLoadDecision::DECISION_ID)
+        );
+        assert_eq!(
+            fields.get("strategy_id").map(String::as_str),
+            Some("bounded-load-hash")
+        );
+        assert_eq!(
+            fields.get("primary_endpoint_id").map(String::as_str),
+            Some("Endpoint(1)")
+        );
+        assert_eq!(
+            fields.get("rebalance_reason").map(String::as_str),
+            Some("primary-over-capacity-rebalanced")
+        );
+        assert_eq!(
+            fields.get("rebalance_reasons").map(String::as_str),
+            Some("primary-over-capacity-rebalanced")
+        );
+        assert_ne!(
+            fields.get("selected_endpoint_id").map(String::as_str),
+            Some("Endpoint(1)")
+        );
+        assert_eq!(
+            fields.get("available_endpoint_count").map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            fields.get("selected_endpoint_count").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            fields.get("rejected_endpoint_count").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            fields
+                .get("within_capacity_endpoint_count")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            rejected_ids.len(),
+            3,
+            "selected endpoint must be omitted from rejected alternatives"
+        );
+        assert!(
+            fields
+                .get("rejected_endpoint_ids")
+                .is_some_and(|ids| ids.contains("Endpoint(1)"))
+        );
+        assert!(
+            fields
+                .get("endpoint_pressure_snapshot")
+                .is_some_and(|snapshot| snapshot.contains("Endpoint(1):3/1:over:primary"))
+        );
+        assert!(
+            fields
+                .get("endpoint_pressure_snapshot")
+                .is_some_and(|snapshot| snapshot.contains(":selected"))
+        );
+    }
+
+    #[test]
+    fn test_bounded_load_decision_log_fields_cover_no_selection_edges() {
+        let seed = 0xB011_D1ED_u64;
+        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=2)
+            .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
+            .collect();
+
+        let missing_key_decision = bounded_lb.bounded_load_decision(&endpoints, None);
+        let missing_key_fields = missing_key_decision.log_fields();
+        assert_bounded_load_log_keyset(&missing_key_fields);
+        assert_eq!(
+            missing_key_fields
+                .get("rebalance_reason")
+                .map(String::as_str),
+            Some("no-object-id-fallback")
+        );
+        assert_eq!(
+            missing_key_fields
+                .get("selected_endpoint_id")
+                .map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            missing_key_fields
+                .get("rejected_endpoint_count")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            missing_key_decision.rejected_endpoint_ids().as_slice(),
+            &[EndpointId::new(1), EndpointId::new(2)]
+        );
+
+        for endpoint in &endpoints {
+            endpoint.set_state(EndpointState::Unhealthy);
+        }
+        let no_healthy_decision =
+            bounded_lb.bounded_load_decision(&endpoints, Some(ObjectId::new_for_test(7)));
+        let no_healthy_fields = no_healthy_decision.log_fields();
+        assert_bounded_load_log_keyset(&no_healthy_fields);
+        assert_eq!(
+            no_healthy_fields
+                .get("rebalance_reason")
+                .map(String::as_str),
+            Some("no-healthy-endpoints")
+        );
+        assert_eq!(
+            no_healthy_fields
+                .get("available_endpoint_count")
+                .map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            no_healthy_fields
+                .get("endpoint_pressure_snapshot")
+                .map(String::as_str),
+            Some("")
+        );
     }
 
     #[test]
