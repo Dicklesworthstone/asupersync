@@ -485,6 +485,37 @@ mod tests {
         crate::test_complete!("unix_vfs_rename_copy_remove");
     }
 
+    #[test]
+    fn unix_vfs_hard_link_shares_file_contents() {
+        init_test("unix_vfs_hard_link_shares_file_contents");
+        futures_lite::future::block_on(async {
+            let vfs = UnixVfs::new();
+            let dir = tempdir().unwrap();
+            let original = dir.path().join("original.txt");
+            let linked = dir.path().join("linked.txt");
+
+            vfs.write(&original, b"before").await.unwrap();
+            vfs.hard_link(&original, &linked).await.unwrap();
+            let linked_contents = vfs.read(&linked).await.unwrap();
+            crate::assert_with_log!(
+                linked_contents == b"before",
+                "linked initial contents",
+                b"before",
+                linked_contents
+            );
+
+            vfs.write(&original, b"after").await.unwrap();
+            let linked_contents = vfs.read(&linked).await.unwrap();
+            crate::assert_with_log!(
+                linked_contents == b"after",
+                "linked updated contents",
+                b"after",
+                linked_contents
+            );
+        });
+        crate::test_complete!("unix_vfs_hard_link_shares_file_contents");
+    }
+
     // -- VfsFile: seek --
 
     #[test]
@@ -587,6 +618,41 @@ mod tests {
             crate::assert_with_log!(meta.is_symlink(), "is_symlink", true, meta.is_symlink());
         });
         crate::test_complete!("unix_vfs_symlink_metadata");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_vfs_canonicalize_and_read_link() {
+        init_test("unix_vfs_canonicalize_and_read_link");
+        futures_lite::future::block_on(async {
+            let vfs = UnixVfs::new();
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("target.txt");
+            let link = dir.path().join("link");
+
+            vfs.write(&target, b"content").await.unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+
+            let read_target = vfs.read_link(&link).await.unwrap();
+            let expected_target = target.display().to_string();
+            let actual_target = read_target.display().to_string();
+            crate::assert_with_log!(
+                read_target == target,
+                "read_link target",
+                expected_target,
+                actual_target
+            );
+
+            let canonical_target = vfs.canonicalize(&target).await.unwrap();
+            let canonical_link = vfs.canonicalize(&link).await.unwrap();
+            crate::assert_with_log!(
+                canonical_link == canonical_target,
+                "canonical link target",
+                canonical_target,
+                canonical_link
+            );
+        });
+        crate::test_complete!("unix_vfs_canonicalize_and_read_link");
     }
 
     // --- wave 80 trait coverage ---
