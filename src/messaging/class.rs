@@ -372,6 +372,46 @@ mod tests {
     }
 
     #[test]
+    fn provider_policy_selection_is_invariant_under_duplicate_permutation() {
+        let canonical = DeliveryClassPolicy::new(
+            DeliveryClass::ObligationBacked,
+            [
+                DeliveryClass::DurableOrdered,
+                DeliveryClass::ObligationBacked,
+                DeliveryClass::MobilitySafe,
+            ],
+        )
+        .expect("canonical policy");
+        let permuted_with_duplicates = DeliveryClassPolicy::new(
+            DeliveryClass::ObligationBacked,
+            [
+                DeliveryClass::MobilitySafe,
+                DeliveryClass::ObligationBacked,
+                DeliveryClass::DurableOrdered,
+                DeliveryClass::MobilitySafe,
+                DeliveryClass::DurableOrdered,
+            ],
+        )
+        .expect("permuted policy");
+
+        assert_eq!(permuted_with_duplicates, canonical);
+        for requested in [
+            None,
+            Some(DeliveryClass::DurableOrdered),
+            Some(DeliveryClass::ObligationBacked),
+            Some(DeliveryClass::MobilitySafe),
+            Some(DeliveryClass::EphemeralInteractive),
+            Some(DeliveryClass::ForensicReplayable),
+        ] {
+            assert_eq!(
+                permuted_with_duplicates.select_for_caller(requested),
+                canonical.select_for_caller(requested),
+                "caller selection changed for request {requested:?}"
+            );
+        }
+    }
+
+    #[test]
     fn provider_policy_uses_default_when_caller_omits_request() {
         let policy = DeliveryClassPolicy::new(
             DeliveryClass::DurableOrdered,
