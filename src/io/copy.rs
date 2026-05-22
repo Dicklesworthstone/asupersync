@@ -1116,6 +1116,26 @@ mod tests {
         }
     }
 
+    struct ZeroWriter;
+
+    impl AsyncWrite for ZeroWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(0))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[test]
     fn copy_rejects_overreported_writer_progress() {
         init_test("copy_rejects_overreported_writer_progress");
@@ -1157,6 +1177,27 @@ mod tests {
         crate::assert_with_log!(reader == b"abc", "reader not consumed", b"abc", reader);
         crate::assert_with_log!(writer.written == b"abc", "written", b"abc", writer.written);
         crate::test_complete!("copy_buf_rejects_overreported_writer_before_consuming_reader");
+    }
+
+    #[test]
+    fn copy_buf_rejects_zero_write_before_consuming_reader() {
+        init_test("copy_buf_rejects_zero_write_before_consuming_reader");
+        let mut reader: &[u8] = b"abc";
+        let mut writer = ZeroWriter;
+        let mut fut = copy_buf(&mut reader, &mut writer);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect_err("zero-byte write with pending data must fail closed");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::WriteZero,
+            "error kind",
+            io::ErrorKind::WriteZero,
+            err.kind()
+        );
+        crate::assert_with_log!(reader == b"abc", "reader not consumed", b"abc", reader);
+        crate::test_complete!("copy_buf_rejects_zero_write_before_consuming_reader");
     }
 
     #[test]
