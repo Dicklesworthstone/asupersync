@@ -562,6 +562,55 @@ mod tests {
     }
 
     #[test]
+    fn display_sanitizes_peer_controlled_fields_across_variants() {
+        let peer_text = "peer\r\nvalue\twith\x00controls\x7f";
+        let cases = [
+            TlsError::InvalidDnsName(peer_text.to_string()),
+            TlsError::Handshake(peer_text.to_string()),
+            TlsError::Certificate(peer_text.to_string()),
+            TlsError::CertificateExpired {
+                expired_at: 42,
+                description: peer_text.to_string(),
+            },
+            TlsError::CertificateNotYetValid {
+                valid_from: 43,
+                description: peer_text.to_string(),
+            },
+            TlsError::ChainValidation(peer_text.to_string()),
+            TlsError::PinMismatch {
+                expected: vec![peer_text.to_string()],
+                actual: peer_text.to_string(),
+            },
+            TlsError::Io(io::Error::other(peer_text)),
+        ];
+
+        for err in cases {
+            let display = err.to_string();
+
+            assert!(
+                !display.contains('\r'),
+                "Display must strip CR for {display:?}"
+            );
+            assert!(
+                !display.contains('\n'),
+                "Display must strip LF for {display:?}"
+            );
+            assert!(
+                !display.contains('\t'),
+                "Display must strip tabs for {display:?}"
+            );
+            assert!(
+                !display.chars().any(|ch| ch < ' ' || ch == '\u{7f}'),
+                "Display must strip remaining ASCII controls for {display:?}"
+            );
+            assert!(
+                display.contains("peer  value with?controls?"),
+                "sanitized peer text should remain visible in one log line: {display:?}"
+            );
+        }
+    }
+
+    #[test]
     fn display_handshake_with_log_injection_attempt_sanitized() {
         // Peer-controlled handshake error containing a forged log line
         // splice attempt. Post-fix Display must NOT contain the
