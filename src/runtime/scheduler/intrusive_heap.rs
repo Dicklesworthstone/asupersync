@@ -859,4 +859,349 @@ mod tests {
         heap.clear(&mut arena);
         assert_eq!(heap.next_generation, 0);
     }
+
+    /// Comprehensive metamorphic testing module for intrusive heap.
+    mod metamorphic {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::HashMap;
+
+        fn extract_priorities(
+            tasks: &[TaskId],
+            arena: &Arena<TaskRecord>,
+        ) -> Vec<u8> {
+            tasks
+                .iter()
+                .map(|&task_id| {
+                    arena
+                        .get(task_id.arena_index())
+                        .map_or(0, |record| record.sched_priority)
+                })
+                .collect()
+        }
+
+        /// MR1: Priority Offset Additivity
+        /// f(tasks + uniform_offset) should preserve relative ordering
+        /// Category: Additive (f(x + c) = permute(f(x)))
+        #[test]
+        fn mr_priority_offset_preserves_relative_ordering() {
+            let fixtures = [
+                (0, 10), (1, 30), (2, 20), (3, 50), (4, 40)
+            ];
+            let offset = 100u8;
+
+            // Build baseline heap
+            let mut baseline_arena = setup_arena(fixtures.len() as u32);
+            let mut baseline_heap = IntrusivePriorityHeap::new();
+            for &(task_id, priority) in &fixtures {
+                baseline_heap.push(task(task_id), priority, &mut baseline_arena);
+            }
+            let baseline_popped = pop_all(&mut baseline_heap, &mut baseline_arena);
+            let baseline_priorities = extract_priorities(&baseline_popped, &baseline_arena);
+
+            // Build offset heap (all priorities shifted by constant)
+            let mut offset_arena = setup_arena(fixtures.len() as u32);
+            let mut offset_heap = IntrusivePriorityHeap::new();
+            for &(task_id, priority) in &fixtures {
+                let new_priority = priority.saturating_add(offset);
+                offset_heap.push(task(task_id), new_priority, &mut offset_arena);
+            }
+            let offset_popped = pop_all(&mut offset_heap, &mut offset_arena);
+
+            assert_eq!(
+                baseline_popped, offset_popped,
+                "uniform priority offset must preserve task ordering"
+            );
+
+            // Verify the priorities were actually shifted
+            let offset_priorities = extract_priorities(&offset_popped, &offset_arena);
+            for (baseline_prio, offset_prio) in baseline_priorities.iter().zip(&offset_priorities) {
+                assert_eq!(
+                    *offset_prio, baseline_prio.saturating_add(offset),
+                    "each priority should be shifted by exactly {offset}"
+                );
+            }
+        }
+
+        /// MR2: Push-Pop Roundtrip Invertibility
+        /// push(x); pop() should return x for single-element heaps
+        /// Category: Invertive (f(T(T(x))) = f(x))
+        #[test]
+        fn mr_push_pop_roundtrip_invertibility() {
+            proptest!(|(task_id: u32, priority: u8)| {
+                let task_id = task_id % 100; // Bound to reasonable range
+                let mut arena = setup_arena(100);
+                let mut heap = IntrusivePriorityHeap::new();
+
+                // Push then immediately pop
+                heap.push(task(task_id), priority, &mut arena);
+                let popped = heap.pop(&mut arena);
+
+                prop_assert_eq!(popped, Some(task(task_id)),
+                    "single push-pop must be invertible");
+                prop_assert!(heap.is_empty(),
+                    "heap must be empty after pop in single-element case");
+            });
+        }
+
+        /// MR3: Subset Monotonicity
+        /// Removing tasks should never increase the priority of any remaining pop
+        /// Category: Inclusive (subset input → subset-compatible output)
+        #[test]
+        fn mr_subset_monotonicity_preserves_priority_bounds() {
+            let all_fixtures = [
+                (0, 10), (1, 60), (2, 20), (3, 80), (4, 30), (5, 70), (6, 40), (7, 50)
+            ];
+            let subset_fixtures = [
+                (1, 60), (3, 80), (5, 70), (7, 50) // Remove lower-priority items
+            ];
+
+            // Build full heap
+            let mut full_arena = setup_arena(all_fixtures.len() as u32);
+            let mut full_heap = IntrusivePriorityHeap::new();
+            for &(task_id, priority) in &all_fixtures {
+                full_heap.push(task(task_id), priority, &mut full_arena);
+            }
+            let full_popped = pop_all(&mut full_heap, &mut full_arena);
+            let full_priorities = extract_priorities(&full_popped, &full_arena);
+
+            // Build subset heap (removing some items)
+            let mut subset_arena = setup_arena(all_fixtures.len() as u32);
+            let mut subset_heap = IntrusivePriorityHeap::new();
+            for &(task_id, priority) in &subset_fixtures {
+                subset_heap.push(task(task_id), priority, &mut subset_arena);
+            }
+            let subset_popped = pop_all(&mut subset_heap, &mut subset_arena);
+            let subset_priorities = extract_priorities(&subset_popped, &subset_arena);
+
+            // Every priority in subset should exist in full (monotonicity)
+            for &subset_prio in &subset_priorities {
+                assert!(
+                    full_priorities.contains(&subset_prio),
+                    "subset priority {subset_prio} must exist in full heap"
+                );
+            }
+
+            // Subset priorities should be non-increasing (heap property preserved)
+            for window in subset_priorities.windows(2) {
+                assert!(
+                    window[0] >= window[1],
+                    "subset must maintain descending priority order: {} >= {}",
+                    window[0], window[1]
+                );
+            }
+
+            // Expected subset order: task(3)=80, task(5)=70, task(1)=60, task(7)=50
+            assert_eq!(subset_popped, vec![task(3), task(5), task(1), task(7)]);
+        }
+
+        /// MR4: Clear-Rebuild Equivalence
+        /// clear() + rebuild should equal building from scratch
+        /// Category: Invertive (different paths to same state)
+        #[test]
+        fn mr_clear_rebuild_equivalence() {
+            let fixtures = [
+                (0, 25), (1, 75), (2, 50), (3, 100), (4, 10)
+            ];
+
+            // Build fresh heap
+            let mut fresh_arena = setup_arena(fixtures.len() as u32);
+            let mut fresh_heap = IntrusivePriorityHeap::new();
+            for &(task_id, priority) in &fixtures {
+                fresh_heap.push(task(task_id), priority, &mut fresh_arena);
+            }
+            let fresh_popped = pop_all(&mut fresh_heap, &mut fresh_arena);
+
+            // Build heap, then clear and rebuild
+            let mut rebuild_arena = setup_arena(fixtures.len() as u32);
+            let mut rebuild_heap = IntrusivePriorityHeap::new();
+
+            // Initial build with different items
+            rebuild_heap.push(task(10), 1, &mut rebuild_arena);
+            rebuild_heap.push(task(11), 2, &mut rebuild_arena);
+
+            // Clear and rebuild with target items
+            rebuild_heap.clear(&mut rebuild_arena);
+            for &(task_id, priority) in &fixtures {
+                rebuild_heap.push(task(task_id), priority, &mut rebuild_arena);
+            }
+            let rebuild_popped = pop_all(&mut rebuild_heap, &mut rebuild_arena);
+
+            assert_eq!(
+                fresh_popped, rebuild_popped,
+                "clear-rebuild must be equivalent to fresh construction"
+            );
+        }
+
+        /// MR5: FIFO Preservation Under Priority Band Isolation
+        /// Adding different-priority items shouldn't affect FIFO within a priority band
+        /// Category: Equivalence (transformation preserves core property)
+        #[test]
+        fn mr_fifo_preservation_under_priority_band_isolation() {
+            let same_priority = 50u8;
+            let fifo_tasks = [task(10), task(11), task(12), task(13)];
+            let noise_items = [(20, 30), (21, 70), (22, 10), (23, 90)];
+
+            // Baseline: just the FIFO band
+            let mut baseline_arena = setup_arena(30);
+            let mut baseline_heap = IntrusivePriorityHeap::new();
+            for &task_id in &fifo_tasks {
+                baseline_heap.push(task_id, same_priority, &mut baseline_arena);
+            }
+
+            // Extract just the same-priority items in pop order
+            let mut baseline_fifo = Vec::new();
+            while let Some(popped) = baseline_heap.pop(&mut baseline_arena) {
+                if let Some(record) = baseline_arena.get(popped.arena_index()) {
+                    if record.sched_priority == same_priority {
+                        baseline_fifo.push(popped);
+                    }
+                }
+            }
+
+            // Noisy version: interleave different priorities
+            let mut noisy_arena = setup_arena(30);
+            let mut noisy_heap = IntrusivePriorityHeap::new();
+
+            noisy_heap.push(fifo_tasks[0], same_priority, &mut noisy_arena);
+            noisy_heap.push(task(noise_items[0].0), noise_items[0].1, &mut noisy_arena);
+            noisy_heap.push(fifo_tasks[1], same_priority, &mut noisy_arena);
+            noisy_heap.push(task(noise_items[1].0), noise_items[1].1, &mut noisy_arena);
+            noisy_heap.push(fifo_tasks[2], same_priority, &mut noisy_arena);
+            noisy_heap.push(task(noise_items[2].0), noise_items[2].1, &mut noisy_arena);
+            noisy_heap.push(fifo_tasks[3], same_priority, &mut noisy_arena);
+            noisy_heap.push(task(noise_items[3].0), noise_items[3].1, &mut noisy_arena);
+
+            // Extract same-priority items from noisy heap
+            let mut noisy_fifo = Vec::new();
+            while let Some(popped) = noisy_heap.pop(&mut noisy_arena) {
+                if let Some(record) = noisy_arena.get(popped.arena_index()) {
+                    if record.sched_priority == same_priority {
+                        noisy_fifo.push(popped);
+                    }
+                }
+            }
+
+            assert_eq!(
+                baseline_fifo, noisy_fifo,
+                "different-priority noise must not disrupt FIFO ordering within priority band"
+            );
+            assert_eq!(
+                baseline_fifo, fifo_tasks.to_vec(),
+                "same-priority items must pop in FIFO order"
+            );
+        }
+
+        /// MR6: Removal Non-Interference
+        /// Removing items outside priority band shouldn't affect ordering within band
+        /// Category: Exclusive (disjoint operations preserve properties)
+        #[test]
+        fn mr_removal_non_interference_with_priority_bands() {
+            let target_band_priority = 60u8;
+            let target_tasks = [task(5), task(6), task(7)];
+            let removal_candidates = [(task(1), 20), (task(2), 40), (task(3), 80), (task(4), 100)];
+
+            // Build baseline with only target band
+            let mut baseline_arena = setup_arena(20);
+            let mut baseline_heap = IntrusivePriorityHeap::new();
+            for &task_id in &target_tasks {
+                baseline_heap.push(task_id, target_band_priority, &mut baseline_arena);
+            }
+            let baseline_popped = pop_all(&mut baseline_heap, &mut baseline_arena);
+
+            // Build full heap with target + removal candidates
+            let mut full_arena = setup_arena(20);
+            let mut full_heap = IntrusivePriorityHeap::new();
+            for &task_id in &target_tasks {
+                full_heap.push(task_id, target_band_priority, &mut full_arena);
+            }
+            for &(task_id, priority) in &removal_candidates {
+                full_heap.push(task_id, priority, &mut full_arena);
+            }
+
+            // Remove the candidates (different priorities)
+            for &(task_id, _) in &removal_candidates {
+                let removed = full_heap.remove(task_id, &mut full_arena);
+                assert!(removed, "removal candidate {task_id:?} should be removable");
+            }
+
+            let full_popped = pop_all(&mut full_heap, &mut full_arena);
+
+            assert_eq!(
+                baseline_popped, full_popped,
+                "removing different-priority items must not affect target band ordering"
+            );
+        }
+
+        /// MR7: Priority Scaling Linearity
+        /// Scaling all priorities by constant factor preserves relative ordering
+        /// Category: Multiplicative (f(k·x) = h(k)·f(x))
+        #[test]
+        fn mr_priority_scaling_preserves_relative_ordering() {
+            let base_fixtures = [(0, 2), (1, 6), (2, 4), (3, 10), (4, 8)];
+            let scale_factor = 10u8;
+
+            // Build baseline heap
+            let mut baseline_arena = setup_arena(base_fixtures.len() as u32);
+            let mut baseline_heap = IntrusivePriorityHeap::new();
+            for &(task_id, priority) in &base_fixtures {
+                baseline_heap.push(task(task_id), priority, &mut baseline_arena);
+            }
+            let baseline_popped = pop_all(&mut baseline_heap, &mut baseline_arena);
+
+            // Build scaled heap (all priorities multiplied by factor)
+            let mut scaled_arena = setup_arena(base_fixtures.len() as u32);
+            let mut scaled_heap = IntrusivePriorityHeap::new();
+            for &(task_id, priority) in &base_fixtures {
+                let scaled_priority = priority.saturating_mul(scale_factor);
+                scaled_heap.push(task(task_id), scaled_priority, &mut scaled_arena);
+            }
+            let scaled_popped = pop_all(&mut scaled_heap, &mut scaled_arena);
+
+            assert_eq!(
+                baseline_popped, scaled_popped,
+                "priority scaling must preserve task ordering"
+            );
+
+            // Verify scaling actually happened
+            let baseline_priorities = extract_priorities(&baseline_popped, &baseline_arena);
+            let scaled_priorities = extract_priorities(&scaled_popped, &scaled_arena);
+            for (baseline_prio, scaled_prio) in baseline_priorities.iter().zip(&scaled_priorities) {
+                assert_eq!(
+                    *scaled_prio, baseline_prio.saturating_mul(scale_factor),
+                    "each priority should be scaled by factor {scale_factor}"
+                );
+            }
+        }
+
+        /// Property-Based MR: Heap Property Preservation Under Random Operations
+        proptest! {
+            #[test]
+            fn property_heap_invariant_preserved_under_random_operations(
+                operations in prop::collection::vec(
+                    prop::strategy::Union::new([
+                        (0..50u32, 0..255u8).prop_map(|(id, prio)| ("push", id, prio)).boxed(),
+                        (0..50u32, 0u8).prop_map(|(id, _)| ("pop", id, 0)).boxed(),
+                        (0..50u32, 0u8).prop_map(|(id, _)| ("remove", id, 0)).boxed(),
+                    ]), 1..20
+                )
+            ) {
+                let mut arena = setup_arena(50);
+                let mut heap = IntrusivePriorityHeap::new();
+
+                for (op, task_id, priority) in operations {
+                    match op.as_str() {
+                        "push" => heap.push(task(task_id), priority, &mut arena),
+                        "pop" => { heap.pop(&mut arena); },
+                        "remove" => { heap.remove(task(task_id), &mut arena); },
+                        _ => unreachable!(),
+                    }
+
+                    // Invariant: heap property must hold after every operation
+                    prop_assert!(heap.verify_invariants_for_test(&arena),
+                        "heap invariants violated after {op} operation");
+                }
+            }
+        }
+    }
 }
