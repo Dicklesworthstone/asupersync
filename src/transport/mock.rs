@@ -1074,6 +1074,64 @@ mod tests {
         assert!(count1 < 100);
     }
 
+    fn collect_batched_delivery_esis(symbols: &[AuthenticatedSymbol]) -> Vec<u32> {
+        let (mut sink, mut stream) = sim_channel(SimTransportConfig {
+            capacity: symbols.len().max(1),
+            ..SimTransportConfig::reliable()
+        });
+
+        future::block_on(async {
+            for symbol in symbols {
+                sink.send(symbol.clone()).await.unwrap();
+            }
+            sink.close().await.unwrap();
+
+            let mut delivered = Vec::new();
+            while let Some(item) = stream.next().await {
+                delivered.push(item.unwrap().symbol().id().esi());
+            }
+            delivered
+        })
+    }
+
+    fn collect_interleaved_delivery_esis(symbols: &[AuthenticatedSymbol]) -> Vec<u32> {
+        let (mut sink, mut stream) = sim_channel(SimTransportConfig {
+            capacity: 1,
+            ..SimTransportConfig::reliable()
+        });
+
+        future::block_on(async {
+            let mut delivered = Vec::new();
+            for symbol in symbols {
+                sink.send(symbol.clone()).await.unwrap();
+                let item = stream
+                    .next()
+                    .await
+                    .expect("reliable channel should deliver one symbol per send")
+                    .expect("reliable channel should not fail");
+                delivered.push(item.symbol().id().esi());
+            }
+            sink.close().await.unwrap();
+            assert!(stream.next().await.is_none());
+            delivered
+        })
+    }
+
+    #[test]
+    fn metamorphic_reliable_delivery_invariant_to_send_drain_schedule() {
+        let symbols: Vec<_> = (0..16).map(create_symbol).collect();
+        let expected: Vec<_> = (0..16).collect();
+
+        let batched = collect_batched_delivery_esis(&symbols);
+        let interleaved = collect_interleaved_delivery_esis(&symbols);
+
+        assert_eq!(batched, expected);
+        assert_eq!(
+            interleaved, batched,
+            "reliable simulator delivery must be invariant to batching versus interleaving sends and receives"
+        );
+    }
+
     #[test]
     fn test_sim_channel_duplication() {
         let config = SimTransportConfig {
