@@ -238,6 +238,16 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_chain_advance_panics_when_count_exceeds_total_remaining() {
+        let a: &[u8] = &[1, 2];
+        let b: &[u8] = &[3];
+        let mut chain = Chain::new(a, b);
+
+        chain.advance(4);
+    }
+
+    #[test]
     fn test_chain_copy_to_slice() {
         init_test("test_chain_copy_to_slice");
         let a: &[u8] = &[1, 2, 3];
