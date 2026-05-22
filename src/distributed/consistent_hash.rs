@@ -813,6 +813,45 @@ mod tests {
         );
     }
 
+    /// Metamorphic relation: duplicate adds and missing-node removals are
+    /// semantic no-ops. They must not perturb membership, vnode placement, or
+    /// key assignment for an already-built ring.
+    #[test]
+    fn mr_noop_membership_mutations_preserve_assignments() {
+        let keys: Vec<u64> = (0..2048u64).collect();
+        let mut ring = HashRing::new(32, 0x5eed_cafe);
+        for node in ["alpha", "beta", "gamma", "delta"] {
+            assert!(ring.add_node(node), "fixture node should be unique");
+        }
+
+        let assignments = |ring: &HashRing| {
+            keys.iter()
+                .map(|key| ring.node_for_key(key).expect("ring should assign key"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        let baseline_nodes = ring.nodes().map(str::to_owned).collect::<Vec<_>>();
+        let baseline_vnode_count = ring.vnode_count();
+        let baseline_assignments = assignments(&ring);
+
+        assert!(!ring.add_node("alpha"));
+        assert_eq!(ring.remove_node("missing"), 0);
+        assert!(!ring.add_node("delta"));
+        assert_eq!(ring.remove_node("absent"), 0);
+
+        assert_eq!(
+            ring.nodes().map(str::to_owned).collect::<Vec<_>>(),
+            baseline_nodes
+        );
+        assert_eq!(ring.vnode_count(), baseline_vnode_count);
+        assert_eq!(
+            assignments(&ring),
+            baseline_assignments,
+            "no-op membership mutations changed consistent-hash assignments"
+        );
+    }
+
     #[test]
     fn nodes_iterator_is_sorted() {
         let mut ring = HashRing::new(8, 0);
