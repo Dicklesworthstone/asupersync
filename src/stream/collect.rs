@@ -175,6 +175,30 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn poll_collect_to_completion<S, C>(future: &mut Collect<S, C>) -> (C, usize)
+    where
+        Collect<S, C>: Unpin,
+        S: Stream + Unpin,
+        C: Default + Extend<S::Item>,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pending_polls = 0usize;
+
+        loop {
+            match Pin::new(&mut *future).poll(&mut cx) {
+                Poll::Ready(collected) => return (collected, pending_polls),
+                Poll::Pending => {
+                    pending_polls += 1;
+                    assert!(
+                        pending_polls <= 8,
+                        "collect future did not complete after {pending_polls} pending polls",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn collect_to_vec() {
         init_test("collect_to_vec");
@@ -249,6 +273,120 @@ mod tests {
             Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("collect_to_string");
+    }
+
+    #[test]
+    fn mr_collect_vec_is_identity_for_finite_streams() {
+        for len in 0..=64usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 5 - 23).collect();
+            let mut future = Collect::new(iter(values.clone()), Vec::new());
+            let (collected, pending_polls): (Vec<i32>, usize) =
+                poll_collect_to_completion(&mut future);
+
+            assert_eq!(
+                collected, values,
+                "collect::<Vec<_>> must preserve item order for len {len}",
+            );
+            assert_eq!(
+                pending_polls, 0,
+                "small iter-backed collect should complete without cooperative yield for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_collect_vec_chain_matches_concatenation() {
+        for left_len in 0..=16usize {
+            for right_len in 0..=16usize {
+                let left: Vec<i32> = (0..left_len).map(|item| item as i32 - 11).collect();
+                let right: Vec<i32> = (0..right_len).map(|item| item as i32 * 3 + 7).collect();
+                let mut future = Collect::new(
+                    crate::stream::Chain::new(iter(left.clone()), iter(right.clone())),
+                    Vec::new(),
+                );
+                let (collected, _): (Vec<i32>, usize) = poll_collect_to_completion(&mut future);
+                let expected: Vec<i32> = left.into_iter().chain(right).collect();
+
+                assert_eq!(
+                    collected, expected,
+                    "collect(chain(left, right)) must equal concatenated inputs for lengths {left_len}, {right_len}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mr_collect_hashset_ignores_duplicate_injection() {
+        for len in 0..=32usize {
+            let unique: Vec<i32> = (0..len).map(|item| item as i32 - 9).collect();
+            let duplicated: Vec<i32> = unique
+                .iter()
+                .flat_map(|item| [*item, *item, *item])
+                .collect();
+            let mut unique_future = Collect::new(iter(unique), HashSet::new());
+            let mut duplicated_future = Collect::new(iter(duplicated), HashSet::new());
+            let (unique_set, _): (HashSet<i32>, usize) =
+                poll_collect_to_completion(&mut unique_future);
+            let (duplicated_set, _): (HashSet<i32>, usize) =
+                poll_collect_to_completion(&mut duplicated_future);
+
+            assert_eq!(
+                duplicated_set, unique_set,
+                "collect::<HashSet<_>> must be invariant under duplicate injection for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_collect_string_chain_matches_string_concatenation() {
+        let cases: &[(&[char], &[char])] = &[
+            (&[], &[]),
+            (&['a'], &[]),
+            (&[], &['z']),
+            (&['r', 'u', 's', 't'], &['2', '0', '2', '4']),
+            (&['A', 's', 'u', 'p', 'e', 'r'], &['s', 'y', 'n', 'c']),
+        ];
+
+        for (left, right) in cases {
+            let mut future = Collect::new(
+                crate::stream::Chain::new(iter(left.to_vec()), iter(right.to_vec())),
+                String::new(),
+            );
+            let (collected, _): (String, usize) = poll_collect_to_completion(&mut future);
+            let expected: String = left.iter().chain(right.iter()).collect();
+
+            assert_eq!(
+                collected, expected,
+                "collect::<String> over chained chars must concatenate segments",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_collect_cooperative_yields_preserve_complete_vec() {
+        for len in [
+            0usize,
+            1,
+            COLLECT_COOPERATIVE_BUDGET - 1,
+            COLLECT_COOPERATIVE_BUDGET,
+            COLLECT_COOPERATIVE_BUDGET + 1,
+            COLLECT_COOPERATIVE_BUDGET * 2 + 3,
+        ] {
+            let mut future = Collect::new(AlwaysReadyCounter::new(len), Vec::new());
+            let (collected, pending_polls): (Vec<usize>, usize) =
+                poll_collect_to_completion(&mut future);
+            let expected: Vec<usize> = (0..len).collect();
+
+            assert_eq!(
+                collected, expected,
+                "cooperative collect must preserve all items for len {len}",
+            );
+            assert_eq!(
+                pending_polls,
+                len / COLLECT_COOPERATIVE_BUDGET,
+                "collect should yield once per full cooperative budget block for len {len}",
+            );
+        }
     }
 
     #[test]
