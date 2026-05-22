@@ -925,6 +925,15 @@ impl PushPromiseFrame {
     /// Encode this frame.
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
+        if self.stream_id == 0 {
+            return Err(H2Error::protocol("PUSH_PROMISE frame with stream ID 0"));
+        }
+        if self.promised_stream_id & 0x7fff_ffff == 0 {
+            return Err(H2Error::protocol(
+                "PUSH_PROMISE frame with promised stream ID 0",
+            ));
+        }
+
         let mut flags = 0u8;
         if self.end_headers {
             flags |= headers_flags::END_HEADERS;
@@ -1847,6 +1856,45 @@ mod tests {
 
         let err = PushPromiseFrame::parse(&header, payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn push_promise_encode_rejects_invalid_stream_ids_without_partial_write() {
+        let cases = [
+            PushPromiseFrame {
+                stream_id: 0,
+                promised_stream_id: 2,
+                header_block: Bytes::from_static(b"hdr"),
+                end_headers: true,
+            },
+            PushPromiseFrame {
+                stream_id: 1,
+                promised_stream_id: 0,
+                header_block: Bytes::from_static(b"hdr"),
+                end_headers: true,
+            },
+            PushPromiseFrame {
+                stream_id: 1,
+                promised_stream_id: 0x8000_0000,
+                header_block: Bytes::from_static(b"hdr"),
+                end_headers: true,
+            },
+        ];
+
+        for frame in cases {
+            let mut buf = BytesMut::new();
+
+            let err = frame
+                .encode(&mut buf)
+                .expect_err("invalid PUSH_PROMISE ids must not encode");
+
+            assert_eq!(err.code, ErrorCode::ProtocolError);
+            assert_eq!(err.stream_id, None);
+            assert!(
+                buf.is_empty(),
+                "invalid PUSH_PROMISE must not partially encode"
+            );
+        }
     }
 
     #[test]
