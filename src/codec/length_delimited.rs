@@ -892,6 +892,62 @@ mod tests {
     }
 
     #[test]
+    fn builder_length_field_length_3_endianness_round_trips_exact_wire_prefix() {
+        let payload = vec![0xA5; 0x0102];
+
+        let mut be_encoded = BytesMut::new();
+        LengthDelimitedCodec::builder()
+            .length_field_length(3)
+            .new_codec()
+            .encode(BytesMut::from(payload.as_slice()), &mut be_encoded)
+            .expect("big-endian u24 encode must succeed");
+        assert_eq!(
+            &be_encoded[..3],
+            &[0x00, 0x01, 0x02],
+            "big-endian 3-byte length must write the most-significant byte first",
+        );
+
+        let mut le_encoded = BytesMut::new();
+        LengthDelimitedCodec::builder()
+            .length_field_length(3)
+            .little_endian()
+            .new_codec()
+            .encode(BytesMut::from(payload.as_slice()), &mut le_encoded)
+            .expect("little-endian u24 encode must succeed");
+        assert_eq!(
+            &le_encoded[..3],
+            &[0x02, 0x01, 0x00],
+            "little-endian 3-byte length must write the least-significant byte first",
+        );
+        assert_ne!(
+            &be_encoded[..3],
+            &le_encoded[..3],
+            "3-byte endianness must produce distinct wire prefixes",
+        );
+
+        let mut be_decoder = LengthDelimitedCodec::builder()
+            .length_field_length(3)
+            .new_codec();
+        let be_frame = be_decoder
+            .decode(&mut be_encoded)
+            .expect("big-endian u24 decode must succeed")
+            .expect("big-endian frame must be ready");
+        assert_eq!(be_frame.as_ref(), payload.as_slice());
+        assert!(be_encoded.is_empty());
+
+        let mut le_decoder = LengthDelimitedCodec::builder()
+            .length_field_length(3)
+            .little_endian()
+            .new_codec();
+        let le_frame = le_decoder
+            .decode(&mut le_encoded)
+            .expect("little-endian u24 decode must succeed")
+            .expect("little-endian frame must be ready");
+        assert_eq!(le_frame.as_ref(), payload.as_slice());
+        assert!(le_encoded.is_empty());
+    }
+
+    #[test]
     fn builder_length_field_offset() {
         let mut codec = LengthDelimitedCodec::builder()
             .length_field_offset(2)
