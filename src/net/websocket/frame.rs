@@ -1125,6 +1125,34 @@ mod tests {
     }
 
     #[test]
+    fn websocket_binary_length_prefix_boundaries_match_rfc6455() {
+        let cases: &[(usize, &[u8])] = &[
+            (0, &[0x82, 0x00]),
+            (125, &[0x82, 0x7d]),
+            (126, &[0x82, 0x7e, 0x00, 0x7e]),
+            (65_535, &[0x82, 0x7e, 0xff, 0xff]),
+            (65_536, &[0x82, 0x7f, 0, 0, 0, 0, 0, 1, 0, 0]),
+        ];
+
+        for &(payload_len, expected_prefix) in cases {
+            let payload = vec![0x5a; payload_len];
+            let mut encoded = BytesMut::new();
+
+            FrameCodec::server()
+                .encode(Frame::binary(Bytes::from(payload.clone())), &mut encoded)
+                .unwrap();
+
+            assert_eq!(
+                &encoded[..expected_prefix.len()],
+                expected_prefix,
+                "RFC 6455 length prefix mismatch for payload length {payload_len}"
+            );
+            assert_eq!(encoded.len(), expected_prefix.len() + payload_len);
+            assert_eq!(&encoded[expected_prefix.len()..], payload.as_slice());
+        }
+    }
+
+    #[test]
     fn test_client_masking() {
         let mut client_codec = FrameCodec::client();
         let mut server_codec = FrameCodec::server();
