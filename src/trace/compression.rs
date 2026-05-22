@@ -277,3 +277,6 @@ mod tests {
         assert!(dbg.contains("CompressedTrace"), "{dbg}");
     }
 }
+
+#[cfg(test)]
+mod compression_metamorphic_tests;
