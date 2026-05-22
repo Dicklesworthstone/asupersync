@@ -62,6 +62,17 @@ impl PathState {
         matches!(self, Self::Active | Self::Degraded)
     }
 
+    /// Stable lowercase identifier for logs and replay artifacts.
+    #[must_use]
+    pub const fn state_id(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Closed => "closed",
+        }
+    }
+
     /// Converts from a raw `u8` value.
     fn from_u8(v: u8) -> Self {
         match v {
@@ -469,6 +480,9 @@ pub struct PathSelectionDecision {
     /// Conservative fallback paths the caller may use if the requested policy cannot be honored.
     pub fallback: SmallVec<[Arc<TransportPath>; 4]>,
 
+    /// Usable paths considered by the effective policy but not selected.
+    pub rejected: SmallVec<[Arc<TransportPath>; 4]>,
+
     /// Conservative fallback policy associated with `fallback`.
     pub fallback_policy: Option<PathSelectionPolicy>,
 
@@ -485,6 +499,7 @@ impl PathSelectionDecision {
             available_path_count: 0,
             selected: SmallVec::new(),
             fallback: SmallVec::new(),
+            rejected: SmallVec::new(),
             fallback_policy: None,
             downgrade_reason: None,
         }
@@ -520,6 +535,12 @@ impl PathSelectionDecision {
         self.fallback.len()
     }
 
+    /// Number of usable paths rejected by the effective policy.
+    #[must_use]
+    pub fn rejected_path_count(&self) -> usize {
+        self.rejected.len()
+    }
+
     /// Stable identifier for the fallback policy, if any.
     #[must_use]
     pub fn fallback_policy_id(&self) -> Option<&'static str> {
@@ -543,6 +564,12 @@ impl PathSelectionDecision {
     #[must_use]
     pub fn fallback_ids(&self) -> SmallVec<[PathId; 4]> {
         self.fallback.iter().map(|path| path.id).collect()
+    }
+
+    /// Rejected path identifiers in deterministic base path order.
+    #[must_use]
+    pub fn rejected_ids(&self) -> SmallVec<[PathId; 4]> {
+        self.rejected.iter().map(|path| path.id).collect()
     }
 }
 
@@ -578,11 +605,76 @@ pub struct TransportExperimentDecision {
 }
 
 impl TransportExperimentDecision {
+    const FAIRNESS_POLICY_ID: &'static str = "transport-multipath-fairness-v1";
+
     fn format_path_ids(ids: &[PathId]) -> String {
         ids.iter()
             .map(|id| id.0.to_string())
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    fn path_role(
+        path: &TransportPath,
+        selected_ids: &[PathId],
+        fallback_ids: &[PathId],
+    ) -> &'static str {
+        if selected_ids.contains(&path.id) {
+            "selected"
+        } else if fallback_ids.contains(&path.id) {
+            "fallback"
+        } else {
+            "rejected"
+        }
+    }
+
+    fn format_pressure_snapshot(&self) -> String {
+        let selected_ids = self.path_decision.selected_ids();
+        let fallback_ids = self.path_decision.fallback_ids();
+        let mut paths = BTreeMap::new();
+        for path in self
+            .path_decision
+            .selected
+            .iter()
+            .chain(self.path_decision.fallback.iter())
+            .chain(self.path_decision.rejected.iter())
+        {
+            paths.entry(path.id).or_insert(path.as_ref());
+        }
+
+        paths
+            .values()
+            .map(|path| {
+                let role =
+                    Self::path_role(path, selected_ids.as_slice(), fallback_ids.as_slice());
+                let state = path.state().state_id();
+                let loss_rate = if path.characteristics.loss_rate.is_finite() {
+                    path.characteristics.loss_rate.clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let latency_ms = path.characteristics.latency_ms;
+                let bandwidth_bps = path.characteristics.bandwidth_bps;
+                let priority = path.characteristics.priority;
+                format!(
+                    "{}:{state}:latency_ms={latency_ms}:bandwidth_bps={bandwidth_bps}:loss_rate={loss_rate:.6}:priority={priority}:role={role}",
+                    path.id.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    fn fairness_state(&self) -> String {
+        let requested_policy = self.path_policy_id();
+        let effective_policy = self.effective_path_policy_id();
+        let available = self.path_decision.available_path_count();
+        let selected = self.path_decision.selected_path_count();
+        let rejected = self.path_decision.rejected_path_count();
+        let fallback = self.path_decision.fallback_path_count();
+        format!(
+            "requested_policy={requested_policy};effective_policy={effective_policy};available={available};selected={selected};rejected={rejected};fallback={fallback}"
+        )
     }
 
     fn format_downgrade_reasons(reasons: &[ExperimentalTransportDowngradeReason]) -> String {
@@ -651,6 +743,7 @@ impl TransportExperimentDecision {
         let mut fields = BTreeMap::new();
         let selected_ids = self.path_decision.selected_ids();
         let fallback_ids = self.path_decision.fallback_ids();
+        let rejected_ids = self.path_decision.rejected_ids();
 
         fields.insert("workload_id".to_owned(), self.context.workload_id.clone());
         fields.insert(
@@ -684,6 +777,10 @@ impl TransportExperimentDecision {
             self.path_decision.fallback_path_count().to_string(),
         );
         fields.insert(
+            "rejected_path_count".to_owned(),
+            self.path_decision.rejected_path_count().to_string(),
+        );
+        fields.insert(
             "selected_path_ids".to_owned(),
             Self::format_path_ids(selected_ids.as_slice()),
         );
@@ -691,6 +788,19 @@ impl TransportExperimentDecision {
             "fallback_path_ids".to_owned(),
             Self::format_path_ids(fallback_ids.as_slice()),
         );
+        fields.insert(
+            "rejected_path_ids".to_owned(),
+            Self::format_path_ids(rejected_ids.as_slice()),
+        );
+        fields.insert(
+            "path_pressure_snapshot".to_owned(),
+            self.format_pressure_snapshot(),
+        );
+        fields.insert(
+            "fairness_policy_id".to_owned(),
+            Self::FAIRNESS_POLICY_ID.to_owned(),
+        );
+        fields.insert("fairness_state".to_owned(), self.fairness_state());
         fields.insert(
             "fallback_policy_id".to_owned(),
             self.path_decision
@@ -857,7 +967,7 @@ impl PathSet {
                 if usable.is_empty() {
                     decision.downgrade_reason = Some(PathSelectionDowngradeReason::NoUsablePaths);
                 } else {
-                    decision.selected = usable.into_iter().collect();
+                    decision.selected = usable.iter().cloned().collect();
                 }
             }
 
@@ -918,6 +1028,16 @@ impl PathSet {
             }
         }
 
+        decision.rejected = usable
+            .iter()
+            .filter(|path| {
+                !decision
+                    .selected
+                    .iter()
+                    .any(|selected| selected.id == path.id)
+            })
+            .cloned()
+            .collect();
         decision
     }
 
@@ -2571,10 +2691,27 @@ mod tests {
             log_fields.get("fallback_path_ids").map(String::as_str)
         );
         crate::assert_with_log!(
+            log_fields.get("rejected_path_ids").map(String::as_str) == Some("1,3"),
+            "rejected path ids preserve the request-level alternatives",
+            Some("1,3"),
+            log_fields.get("rejected_path_ids").map(String::as_str)
+        );
+        crate::assert_with_log!(
             log_fields.get("path_downgrade_reason").map(String::as_str) == Some("no-primary-path"),
             "path downgrade reason logged",
             Some("no-primary-path"),
             log_fields.get("path_downgrade_reason").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("fairness_state").map(String::as_str)
+                == Some(
+                    "requested_policy=primary-only;effective_policy=primary-only;available=2;selected=0;rejected=2;fallback=1",
+                ),
+            "fairness state captures rejected and fallback counts",
+            Some(
+                "requested_policy=primary-only;effective_policy=primary-only;available=2;selected=0;rejected=2;fallback=1",
+            ),
+            log_fields.get("fairness_state").map(String::as_str)
         );
 
         crate::test_complete!("test_experimental_transport_decision_logs_fallback_inventory");
@@ -2592,8 +2729,13 @@ mod tests {
             "path_count",
             "selected_path_count",
             "fallback_path_count",
+            "rejected_path_count",
             "selected_path_ids",
             "fallback_path_ids",
+            "rejected_path_ids",
+            "path_pressure_snapshot",
+            "fairness_policy_id",
+            "fairness_state",
             "fallback_policy_id",
             "path_downgrade_reason",
             "downgrade_reason",
@@ -2668,6 +2810,28 @@ mod tests {
             Some("1"),
             gate_disabled_fields
                 .get("selected_path_count")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            gate_disabled_fields
+                .get("rejected_path_ids")
+                .map(String::as_str)
+                == Some("2,3"),
+            "gate-disabled preview logs round-robin rejected alternatives",
+            Some("2,3"),
+            gate_disabled_fields
+                .get("rejected_path_ids")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            gate_disabled_fields
+                .get("fairness_policy_id")
+                .map(String::as_str)
+                == Some("transport-multipath-fairness-v1"),
+            "fairness policy id is stable",
+            Some("transport-multipath-fairness-v1"),
+            gate_disabled_fields
+                .get("fairness_policy_id")
                 .map(String::as_str)
         );
         crate::assert_with_log!(
@@ -2754,6 +2918,39 @@ mod tests {
             bounded_preview_fields
                 .get("fallback_path_ids")
                 .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            bounded_preview_fields
+                .get("rejected_path_count")
+                .map(String::as_str)
+                == Some("1"),
+            "bounded preview logs rejected alternative count",
+            Some("1"),
+            bounded_preview_fields
+                .get("rejected_path_count")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            bounded_preview_fields
+                .get("rejected_path_ids")
+                .map(String::as_str)
+                == Some("3"),
+            "bounded preview logs deterministic rejected alternative ids",
+            Some("3"),
+            bounded_preview_fields
+                .get("rejected_path_ids")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            bounded_preview_fields
+                .get("path_pressure_snapshot")
+                .map(|snapshot| snapshot.contains("3:active:"))
+                == Some(true),
+            "pressure snapshot includes rejected active path evidence",
+            Some(true),
+            bounded_preview_fields
+                .get("path_pressure_snapshot")
+                .map(|snapshot| snapshot.contains("3:active:"))
         );
         crate::assert_with_log!(
             bounded_preview_fields
