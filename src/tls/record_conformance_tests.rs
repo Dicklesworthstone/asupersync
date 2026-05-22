@@ -284,6 +284,39 @@ mod tests {
         crate::test_complete!("test_tls_ciphertext_header_matches_rfc8446_wire_image");
     }
 
+    /// RFC 8446 §5.1 - TLSCiphertext length is encoded as a 16-bit big-endian field.
+    #[test]
+    fn test_tls_ciphertext_header_length_boundary_golden_vectors() {
+        init_test_logging();
+        crate::test_phase!("test_tls_ciphertext_header_length_boundary_golden_vectors");
+
+        let cases: &[(usize, [u8; TLS_RECORD_HEADER_LEN])] = &[
+            (0, [TLS_13_RECORD_TYPE, 0x03, 0x03, 0x00, 0x00]),
+            (1, [TLS_13_RECORD_TYPE, 0x03, 0x03, 0x00, 0x01]),
+            (255, [TLS_13_RECORD_TYPE, 0x03, 0x03, 0x00, 0xff]),
+            (256, [TLS_13_RECORD_TYPE, 0x03, 0x03, 0x01, 0x00]),
+            (
+                MAX_ENCRYPTED_RECORD_LENGTH as usize,
+                [TLS_13_RECORD_TYPE, 0x03, 0x03, 0x41, 0x00],
+            ),
+        ];
+
+        for &(payload_len, expected_header) in cases {
+            let payload = vec![0xa5; payload_len];
+            let bytes = TlsRecord::application_data(payload.clone()).to_bytes();
+
+            assert_eq!(
+                &bytes[..TLS_RECORD_HEADER_LEN],
+                expected_header.as_slice(),
+                "TLSCiphertext header golden mismatch for payload length {payload_len}"
+            );
+            assert_eq!(bytes.len(), TLS_RECORD_HEADER_LEN + payload_len);
+            assert_eq!(&bytes[TLS_RECORD_HEADER_LEN..], payload.as_slice());
+        }
+
+        crate::test_complete!("test_tls_ciphertext_header_length_boundary_golden_vectors");
+    }
+
     // ---- Test 2: TLSInnerPlaintext opaque type validation ----
 
     /// RFC 8446 §5.4 - Test TLSInnerPlaintext content types 0x17/0x16/0x15
