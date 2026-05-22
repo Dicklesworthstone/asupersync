@@ -67,6 +67,7 @@ mod tests {
     use super::*;
     use crate::codec::FramedWrite;
     use crate::io::AsyncWrite;
+    use proptest::prelude::*;
     use std::collections::VecDeque;
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
@@ -116,6 +117,59 @@ mod tests {
 
         codec.encode(vec![1, 2, 3], &mut buf).unwrap();
         assert_eq!(&buf[..], &[1, 2, 3]);
+    }
+
+    proptest! {
+        #[test]
+        fn bytes_codec_metamorphic_segmented_encode_matches_concatenated_payload(
+            chunks in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..64), 0..16),
+        ) {
+            let expected = chunks
+                .iter()
+                .flat_map(|chunk| chunk.iter().copied())
+                .collect::<Vec<_>>();
+
+            let mut segmented_codec = BytesCodec::new();
+            let mut segmented = BytesMut::new();
+            for chunk in &chunks {
+                segmented_codec
+                    .encode(chunk.clone(), &mut segmented)
+                    .expect("BytesCodec encode should be infallible");
+            }
+
+            let mut one_shot_codec = BytesCodec::new();
+            let mut one_shot = BytesMut::new();
+            one_shot_codec
+                .encode(Bytes::copy_from_slice(&expected), &mut one_shot)
+                .expect("BytesCodec encode should be infallible");
+
+            prop_assert_eq!(
+                segmented.as_ref(),
+                one_shot.as_ref(),
+                "segmented encodes must have the same wire image as one concatenated encode",
+            );
+
+            let decoded = segmented_codec
+                .decode(&mut segmented)
+                .expect("BytesCodec decode should be infallible");
+            if expected.is_empty() {
+                prop_assert!(decoded.is_none(), "empty wire image should not yield a frame");
+            } else {
+                prop_assert_eq!(
+                    decoded.expect("non-empty wire image should decode").as_ref(),
+                    expected.as_slice(),
+                    "decoded segmented payload must match concatenated input",
+                );
+            }
+            prop_assert!(segmented.is_empty(), "decode must drain the segmented buffer");
+            prop_assert!(
+                segmented_codec
+                    .decode(&mut segmented)
+                    .expect("second decode should be infallible")
+                    .is_none(),
+                "second decode after a drain should be empty",
+            );
+        }
     }
 
     // =========================================================================
