@@ -2201,6 +2201,26 @@ mod tests {
     }
 
     #[test]
+    fn goaway_parse_ignores_reserved_last_stream_id_bit() {
+        let header = FrameHeader {
+            length: 8,
+            frame_type: FrameType::GoAway as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+
+        for payload in [
+            Bytes::from_static(&[0x00, 0x00, 0x00, 0x09, 0, 0, 0, 0]),
+            Bytes::from_static(&[0x80, 0x00, 0x00, 0x09, 0, 0, 0, 0]),
+        ] {
+            let parsed = GoAwayFrame::parse(&header, &payload).unwrap();
+            assert_eq!(parsed.last_stream_id, 9);
+            assert_eq!(parsed.error_code, ErrorCode::NoError);
+            assert!(parsed.debug_data.is_empty());
+        }
+    }
+
+    #[test]
     fn test_window_update_wrong_size() {
         let header = FrameHeader {
             length: 3,
