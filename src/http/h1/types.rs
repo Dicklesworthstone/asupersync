@@ -1269,6 +1269,61 @@ mod tests {
     }
 
     #[test]
+    fn method_from_bytes_accepts_rfc9110_tchar_extension_tokens() {
+        let token =
+            b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+        let parsed = Method::from_bytes(token);
+
+        assert_eq!(
+            parsed,
+            Some(Method::Extension(
+                "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                    .to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn method_from_bytes_rejects_separator_and_control_tokens() {
+        for invalid in [
+            b"" as &[u8],
+            b"GET POST",
+            b"GET\tPOST",
+            b"GET\r\nPOST",
+            b"(GET)",
+            b"<GET>",
+            b"GET@POST",
+            b"GET,POST",
+            b"GET;POST",
+            b"GET:POST",
+            b"GET\\POST",
+            b"GET\"POST",
+            b"GET/POST",
+            b"GET[POST]",
+            b"GET?POST",
+            b"GET=POST",
+            b"GET{POST}",
+            b"\0GET",
+            b"GET\x7f",
+        ] {
+            assert!(
+                Method::from_bytes(invalid).is_none(),
+                "invalid method token must be rejected: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn method_from_bytes_is_case_sensitive_for_registered_methods() {
+        assert_eq!(Method::from_bytes(b"GET"), Some(Method::Get));
+        assert_eq!(
+            Method::from_bytes(b"get"),
+            Some(Method::Extension("get".to_string()))
+        );
+    }
+
+    #[test]
     fn method_inequality() {
         assert_ne!(Method::Get, Method::Post);
         assert_ne!(Method::Get, Method::Extension("GET".into()));
