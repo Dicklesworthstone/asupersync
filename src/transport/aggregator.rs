@@ -3450,6 +3450,78 @@ mod tests {
         crate::test_complete!("test_path_set_stats");
     }
 
+    #[test]
+    fn path_set_stats_aggregate_bandwidth_counts_only_usable_paths() {
+        init_test("path_set_stats_aggregate_bandwidth_counts_only_usable_paths");
+        let set = PathSet::new(PathSelectionPolicy::UseAll);
+
+        let active = set.create_path(
+            "active",
+            "active.example:8080",
+            PathCharacteristics {
+                bandwidth_bps: 1_000_000,
+                ..Default::default()
+            },
+        );
+        let degraded = set.create_path(
+            "degraded",
+            "degraded.example:8080",
+            PathCharacteristics {
+                bandwidth_bps: 2_000_000,
+                ..Default::default()
+            },
+        );
+        let unavailable = set.create_path(
+            "unavailable",
+            "unavailable.example:8080",
+            PathCharacteristics {
+                bandwidth_bps: 4_000_000,
+                ..Default::default()
+            },
+        );
+        let closed = set.create_path(
+            "closed",
+            "closed.example:8080",
+            PathCharacteristics {
+                bandwidth_bps: 8_000_000,
+                ..Default::default()
+            },
+        );
+
+        set.set_state(degraded, PathState::Degraded);
+        set.set_state(unavailable, PathState::Unavailable);
+        set.set_state(closed, PathState::Closed);
+
+        if let Some(path) = set.get(active) {
+            path.symbols_received.store(10, Ordering::Relaxed);
+        }
+        if let Some(path) = set.get(unavailable) {
+            path.symbols_received.store(99, Ordering::Relaxed);
+        }
+
+        let stats = set.stats();
+        crate::assert_with_log!(stats.path_count == 4, "path_count", 4, stats.path_count);
+        crate::assert_with_log!(
+            stats.usable_count == 2,
+            "active + degraded are usable",
+            2,
+            stats.usable_count
+        );
+        crate::assert_with_log!(
+            stats.aggregate_bandwidth_bps == 3_000_000,
+            "aggregate bandwidth excludes unavailable and closed paths",
+            3_000_000,
+            stats.aggregate_bandwidth_bps
+        );
+        crate::assert_with_log!(
+            stats.total_received == 109,
+            "symbol counters remain state-independent",
+            109,
+            stats.total_received
+        );
+        crate::test_complete!("path_set_stats_aggregate_bandwidth_counts_only_usable_paths");
+    }
+
     // Test 14: Immediate delivery mode
     #[test]
     fn test_immediate_delivery() {
