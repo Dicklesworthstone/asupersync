@@ -2384,6 +2384,83 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_unusable_decoy_paths_do_not_affect_bounded_selection() {
+        init_test("metamorphic_unusable_decoy_paths_do_not_affect_bounded_selection");
+
+        fn bounded_selection_signature(
+            policy: PathSelectionPolicy,
+            include_unusable_decoy: bool,
+        ) -> (
+            Vec<PathId>,
+            Vec<PathId>,
+            usize,
+            Option<PathSelectionDowngradeReason>,
+        ) {
+            let set = PathSet::new(policy);
+
+            set.register(test_path(2).with_characteristics(PathCharacteristics {
+                latency_ms: 10,
+                bandwidth_bps: 10_000_000,
+                loss_rate: 0.001,
+                jitter_ms: 2,
+                is_primary: true,
+                priority: 10,
+            }));
+            set.register(test_path(5).with_characteristics(PathCharacteristics {
+                latency_ms: 40,
+                bandwidth_bps: 3_000_000,
+                loss_rate: 0.02,
+                jitter_ms: 8,
+                is_primary: false,
+                priority: 30,
+            }));
+            set.register(test_path(8).with_characteristics(PathCharacteristics {
+                latency_ms: 120,
+                bandwidth_bps: 500_000,
+                loss_rate: 0.08,
+                jitter_ms: 20,
+                is_primary: false,
+                priority: 80,
+            }));
+
+            if include_unusable_decoy {
+                let decoy = test_path(1).with_characteristics(PathCharacteristics {
+                    latency_ms: 1,
+                    bandwidth_bps: u64::MAX,
+                    loss_rate: 0.0,
+                    jitter_ms: 0,
+                    is_primary: true,
+                    priority: 0,
+                });
+                decoy.set_state(PathState::Unavailable);
+                set.register(decoy);
+            }
+
+            let decision = set.select_paths_with_decision();
+            (
+                decision.selected_ids().into_vec(),
+                decision.rejected_ids().into_vec(),
+                decision.available_path_count(),
+                decision.downgrade_reason,
+            )
+        }
+
+        for policy in [
+            PathSelectionPolicy::BestQuality { count: 2 },
+            PathSelectionPolicy::ByPriority { count: 2 },
+        ] {
+            let baseline = bounded_selection_signature(policy, false);
+            let with_decoy = bounded_selection_signature(policy, true);
+            assert_eq!(
+                baseline, with_decoy,
+                "{policy:?} must ignore unusable paths before ranking candidates"
+            );
+        }
+
+        crate::test_complete!("metamorphic_unusable_decoy_paths_do_not_affect_bounded_selection");
+    }
+
+    #[test]
     fn test_experimental_transport_decision_gate_disabled_falls_back_to_round_robin() {
         init_test("test_experimental_transport_decision_gate_disabled_falls_back_to_round_robin");
 
