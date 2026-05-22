@@ -436,6 +436,25 @@ mod tests {
         assert_eq!(counts, vec![2, 0]);
     }
 
+    #[test]
+    fn weighted_handles_near_u32_max_existing_symbol_counts() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
+        let symbols = create_test_symbols(3);
+        let replicas = create_test_replicas_with_symbol_counts(&[u32::MAX, u32::MAX - 1]);
+
+        let assignments = assigner.assign(&symbols, &replicas, 2);
+
+        assert_eq!(assignments[0].symbol_indices, vec![1]);
+        assert_eq!(assignments[1].symbol_indices, vec![0, 2]);
+
+        let mut assigned_once: Vec<_> = assignments
+            .iter()
+            .flat_map(|assignment| assignment.symbol_indices.iter().copied())
+            .collect();
+        assigned_once.sort_unstable();
+        assert_eq!(assigned_once, vec![0, 1, 2]);
+    }
+
     // ========== Edge case tests (bd-3k9o) ==========
 
     #[test]
