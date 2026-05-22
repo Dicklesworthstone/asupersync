@@ -380,8 +380,8 @@ fn validate_request_target(method: &Method, uri: &str) -> Result<(), HttpError> 
             return Err(HttpError::BadRequestLine);
         }
         // Authority-form must be host:port
-        let (host, port) = uri.split_once(':').ok_or(HttpError::BadRequestLine)?;
-        if host.is_empty() || port.is_empty() {
+        let (host, port) = uri.rsplit_once(':').ok_or(HttpError::BadRequestLine)?;
+        if host.is_empty() || port.is_empty() || !port.as_bytes().iter().all(u8::is_ascii_digit) {
             return Err(HttpError::BadRequestLine);
         }
         return Ok(());
@@ -1734,6 +1734,38 @@ mod tests {
         for line in ok {
             let parsed = parse_request_line_bytes(line.as_bytes());
             assert!(parsed.is_ok(), "expected Ok for {line:?}, got {parsed:?}");
+        }
+    }
+
+    /// RFC 9112 §3.2.3: CONNECT requests use authority-form, specifically
+    /// `host:port`. The port delimiter is not enough; the port token must be
+    /// numeric so invalid authority values cannot slide through as paths.
+    #[test]
+    fn parse_request_line_connect_authority_requires_numeric_port() {
+        let ok = [
+            "CONNECT example.com:443 HTTP/1.1",
+            "CONNECT localhost:8080 HTTP/1.1",
+            "CONNECT [2001:db8::1]:443 HTTP/1.1",
+        ];
+        for line in ok {
+            let parsed = parse_request_line_bytes(line.as_bytes());
+            assert!(parsed.is_ok(), "expected Ok for {line:?}, got {parsed:?}");
+        }
+
+        let invalid = [
+            "CONNECT example.com:http HTTP/1.1",
+            "CONNECT example.com:443x HTTP/1.1",
+            "CONNECT example.com: HTTP/1.1",
+            "CONNECT :443 HTTP/1.1",
+        ];
+        for line in invalid {
+            assert!(
+                matches!(
+                    parse_request_line_bytes(line.as_bytes()),
+                    Err(HttpError::BadRequestLine)
+                ),
+                "expected BadRequestLine for {line:?}"
+            );
         }
     }
 
