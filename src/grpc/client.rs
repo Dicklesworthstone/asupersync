@@ -168,8 +168,8 @@ pub struct ChannelBuilder {
 impl ChannelBuilder {
     /// Create a new channel builder for the given URI.
     ///
-    /// The current client transport is loopback-only, so successful connects
-    /// require the URI host to be `loopback`.
+    /// The current client transport accepts only in-memory loopback and
+    /// localhost targets.
     #[must_use]
     pub fn new(uri: impl Into<String>) -> Self {
         Self {
@@ -272,7 +272,7 @@ impl ChannelBuilder {
     }
 }
 
-/// A gRPC channel representing the current loopback-only client transport.
+/// A gRPC channel representing the current localhost-bounded client transport.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// The target URI.
@@ -2319,12 +2319,26 @@ mod tests {
     }
 
     #[test]
-    fn channel_connect_rejects_non_loopback_host() {
-        let error = futures_lite::future::block_on(Channel::connect("http://localhost:50051"))
-            .expect_err("non-loopback target should fail closed");
+    fn channel_connect_accepts_loopback_and_localhost_hosts() {
+        for uri in [
+            "http://loopback:50051",
+            "http://localhost:50051",
+            "https://LOCALHOST:50051/service",
+            "http://127.0.0.1:50051",
+        ] {
+            let channel = futures_lite::future::block_on(Channel::connect(uri))
+                .expect("loopback and localhost targets should connect");
+            assert_eq!(channel.uri(), uri);
+        }
+    }
+
+    #[test]
+    fn channel_connect_rejects_non_localhost_host() {
+        let error = futures_lite::future::block_on(Channel::connect("http://example.com:50051"))
+            .expect_err("non-localhost target should fail closed");
         match error {
             GrpcError::Transport(_kind, message) => {
-                assert!(message.contains("loopback-only"));
+                assert!(message.contains("loopback and localhost only"));
             }
             other => panic!("expected transport error, got: {other:?}"),
         }
@@ -2344,8 +2358,8 @@ mod tests {
             match error {
                 GrpcError::Transport(_kind, msg) => {
                     assert!(
-                        msg.contains("loopback-only"),
-                        "expected loopback-only error for {uri}, got: {msg}"
+                        msg.contains("loopback and localhost only"),
+                        "expected loopback/localhost-only error for {uri}, got: {msg}"
                     );
                 }
                 other => panic!("expected transport error for {uri}, got: {other:?}"),
