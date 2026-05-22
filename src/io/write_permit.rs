@@ -242,6 +242,31 @@ mod tests {
     }
 
     #[test]
+    fn clear_allows_restage_before_commit() {
+        init_test("clear_allows_restage_before_commit");
+        let mut output = Vec::new();
+        let result = {
+            let mut permit = WritePermit::new(&mut output);
+            permit.stage(b"discarded");
+            permit.clear();
+            permit.stage(b"kept");
+
+            let staged_len = permit.staged_len();
+            crate::assert_with_log!(staged_len == 4, "staged_len", 4, staged_len);
+            let empty = permit.is_empty();
+            crate::assert_with_log!(!empty, "not empty", false, empty);
+
+            let mut fut = Box::pin(permit.commit());
+            poll_ready(fut.as_mut())
+        };
+
+        let ok = result.is_ok();
+        crate::assert_with_log!(ok, "commit ok", true, ok);
+        crate::assert_with_log!(output == b"kept", "output", b"kept", output);
+        crate::test_complete!("clear_allows_restage_before_commit");
+    }
+
+    #[test]
     fn with_capacity_preallocates() {
         init_test("with_capacity_preallocates");
         let mut output = Vec::new();
