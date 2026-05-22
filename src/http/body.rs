@@ -325,12 +325,23 @@ impl SizeHint {
 
     /// Sets the lower bound.
     pub fn set_lower(&mut self, lower: u64) {
+        assert!(
+            self.upper.is_none_or(|upper| lower <= upper),
+            "lower bound exceeds upper bound"
+        );
         self.lower = lower;
     }
 
     /// Sets the upper bound.
     pub fn set_upper(&mut self, upper: u64) {
+        assert!(upper >= self.lower, "upper bound is below lower bound");
         self.upper = Some(upper);
+    }
+
+    /// Sets both bounds to the same exact value.
+    pub fn set_exact(&mut self, exact: u64) {
+        self.lower = exact;
+        self.upper = Some(exact);
     }
 }
 
@@ -1172,6 +1183,43 @@ mod tests {
         assert_eq!(hint.lower(), 10);
         assert_eq!(hint.upper(), Some(100));
         assert_eq!(hint.exact(), None); // lower != upper
+    }
+
+    #[test]
+    fn size_hint_set_lower_allows_unknown_upper() {
+        let mut hint = SizeHint::new();
+        hint.set_lower(u64::MAX);
+
+        assert_eq!(hint.lower(), u64::MAX);
+        assert_eq!(hint.upper(), None);
+        assert_eq!(hint.exact(), None);
+    }
+
+    #[test]
+    fn size_hint_set_exact_updates_both_bounds() {
+        let mut hint = SizeHint::new();
+        hint.set_lower(5);
+        hint.set_exact(42);
+
+        assert_eq!(hint.lower(), 42);
+        assert_eq!(hint.upper(), Some(42));
+        assert_eq!(hint.exact(), Some(42));
+    }
+
+    #[test]
+    #[should_panic(expected = "lower bound exceeds upper bound")]
+    fn size_hint_set_lower_above_existing_upper_panics() {
+        let mut hint = SizeHint::new();
+        hint.set_upper(10);
+        hint.set_lower(11);
+    }
+
+    #[test]
+    #[should_panic(expected = "upper bound is below lower bound")]
+    fn size_hint_set_upper_below_lower_panics() {
+        let mut hint = SizeHint::new();
+        hint.set_lower(11);
+        hint.set_upper(10);
     }
 
     #[test]
