@@ -1105,6 +1105,37 @@ mod tests {
     }
 
     #[test]
+    fn header_map_insert_replaces_duplicates_without_orphaned_iter_entries() {
+        let mut hm = HeaderMap::new();
+        let a = HeaderName::from_static("a");
+        let b = HeaderName::from_static("b");
+        let c = HeaderName::from_static("c");
+
+        hm.append(a.clone(), HeaderValue::from_static("a1"));
+        hm.append(b.clone(), HeaderValue::from_static("b1"));
+        hm.append(a.clone(), HeaderValue::from_static("a2"));
+        hm.append(c.clone(), HeaderValue::from_static("c1"));
+
+        hm.insert(a.clone(), HeaderValue::from_static("a3"));
+
+        let observed: Vec<_> = hm
+            .iter()
+            .map(|(name, value)| (name.as_str().to_owned(), value.to_str().unwrap().to_owned()))
+            .collect();
+
+        assert_eq!(
+            observed,
+            vec![
+                ("b".to_string(), "b1".to_string()),
+                ("c".to_string(), "c1".to_string()),
+                ("a".to_string(), "a3".to_string()),
+            ]
+        );
+        assert_eq!(hm.get(&a).unwrap().to_str().unwrap(), "a3");
+        assert_eq!(hm.iter().filter(|(name, _)| **name == a).count(), 1);
+    }
+
+    #[test]
     fn header_map_debug_clone_default() {
         let hm = HeaderMap::default();
         assert!(hm.is_empty());
