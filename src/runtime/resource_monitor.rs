@@ -5865,3 +5865,6 @@ mod tests {
         crate::test_complete!("cohort_admission_steering_smoke_contract_emits_report");
     }
 }
+
+#[cfg(test)]
+mod resource_monitor_metamorphic;
