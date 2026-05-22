@@ -19,7 +19,7 @@ use std::collections::HashMap;
 fn headers_to_map(headers: Vec<Header>) -> HeaderMap {
     let mut map = HeaderMap::new();
     for header in headers {
-        map.insert(
+        map.append(
             HeaderName::from_string(&header.name),
             HeaderValue::from_bytes(header.value.as_bytes()),
         );
@@ -31,9 +31,12 @@ fn headers_to_map(headers: Vec<Header>) -> HeaderMap {
 fn create_h1_equivalent_map(headers: &[(&str, &str)]) -> HeaderMap {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
-        map.insert(
-            HeaderName::from_string(&name.to_lowercase()),
-            HeaderValue::from_string(value.to_string()),
+        let line = format!("{name}: {value}");
+        let (parsed_name, parsed_value) =
+            crate::http::h1::parse_header_line(&line).expect("H1-equivalent header must parse");
+        map.append(
+            HeaderName::from_string(&parsed_name),
+            HeaderValue::from_string(parsed_value),
         );
     }
     map
@@ -164,9 +167,49 @@ mod h1_h2_conformance_tests {
         assert!(h2_result.is_ok(), "H2 decode should succeed");
         let h2_map = headers_to_map(h2_result.unwrap());
 
+        assert_eq!(h1_equivalent.len(), 2, "H1 duplicate headers are retained");
+        assert_eq!(h2_map.len(), 2, "H2 duplicate headers are retained");
         assert!(
             headers_equivalent(&h1_equivalent, &h2_map),
             "Multiple headers with same name should be equivalent"
+        );
+    }
+
+    #[test]
+    fn h2_rejects_uppercase_header_name_that_h1_accepts() {
+        let h1_header = crate::http::h1::parse_header_line("Content-Type: text/html")
+            .expect("H1 accepts tchar uppercase");
+        assert_eq!(
+            h1_header,
+            ("Content-Type".to_string(), "text/html".to_string())
+        );
+
+        let wire_bytes = encode_literal_header("Content-Type", "text/html");
+        let mut decoder = HpackDecoder::new();
+        let mut h2_bytes = Bytes::from(wire_bytes);
+
+        let h2_result = decoder.decode(&mut h2_bytes);
+        assert!(
+            h2_result.is_err(),
+            "HTTP/2 must reject uppercase regular header names"
+        );
+    }
+
+    #[test]
+    fn h1_and_h2_reject_crlf_in_header_values() {
+        assert!(
+            crate::http::h1::parse_header_line("x-test: ok\r\nInjected: nope").is_err(),
+            "H1 must reject CRLF header value injection"
+        );
+
+        let wire_bytes = encode_literal_header("x-test", "ok\r\nInjected: nope");
+        let mut decoder = HpackDecoder::new();
+        let mut h2_bytes = Bytes::from(wire_bytes);
+
+        let h2_result = decoder.decode(&mut h2_bytes);
+        assert!(
+            h2_result.is_err(),
+            "H2 must reject CRLF header value injection"
         );
     }
 
