@@ -210,6 +210,30 @@ mod tests {
     }
 
     #[test]
+    fn seek_before_start_fails_without_moving_position() {
+        init_test("seek_before_start_fails_without_moving_position");
+        let mut seeker = MemSeeker::new(100);
+        seeker.pos = 3;
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = seeker.seek(SeekFrom::Current(-4));
+        let err = match Pin::new(&mut fut).poll(&mut cx) {
+            Poll::Ready(Err(err)) => err,
+            other => panic!("expected seek-before-start error, got {other:?}"),
+        };
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidInput,
+            "error kind",
+            io::ErrorKind::InvalidInput,
+            err.kind()
+        );
+        drop(fut);
+        crate::assert_with_log!(seeker.pos == 3, "position unchanged", 3u64, seeker.pos);
+        crate::test_complete!("seek_before_start_fails_without_moving_position");
+    }
+
+    #[test]
     fn rewind_goes_to_zero() {
         init_test("rewind_goes_to_zero");
         let mut seeker = MemSeeker::new(100);
