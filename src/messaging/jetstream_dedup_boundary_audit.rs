@@ -1,10 +1,12 @@
 //! JetStream deduplication window boundary condition audit test.
 //!
-//! AUDIT FINDING: Tests JetStream client compliance with deduplication window
-//! boundary behavior. Per JetStream specification, the dedup window boundary
-//! should be INCLUSIVE - messages arriving exactly N nanoseconds after the
-//! previous submission (where N == dedup_window_ns) should be considered
-//! duplicates, not new messages.
+//! AUDIT FINDING: FIXED - this harness previously claimed exact-boundary
+//! server deduplication semantics that the client-side code cannot prove. It
+//! now pins the client-owned contract: stream configs encode
+//! `duplicate_window` in nanoseconds, `Nats-Msg-Id` is the dedup header, and
+//! PubAck parsing preserves the server's `duplicate` flag. Exact expiration
+//! behavior remains server-owned and belongs in a live JetStream conformance
+//! harness.
 
 #![cfg(test)]
 
@@ -12,27 +14,23 @@ use super::{JetStreamContext, StorageType, StreamConfig};
 use std::time::Duration;
 
 fn init_test(name: &str) {
-    println!("[jetstream-dedup-boundary] START {name}");
+    crate::test_utils::init_test_logging();
+    crate::test_phase!(name);
 }
 
 fn test_complete(name: &str) {
-    println!("[jetstream-dedup-boundary] PASS {name}");
+    crate::test_complete!(name);
 }
 
-/// AUDIT: Test deduplication window boundary inclusivity
+/// AUDIT: Test deduplication window duration encoding
 ///
-/// This test verifies that when a message arrives with Nats-Msg-Id exactly
-/// N nanoseconds after the last submission (where N == dedup_window_ns),
-/// the JetStream server correctly treats it as a duplicate per the specification.
-///
-/// Expected behavior (CORRECT):
-/// - Messages at exactly the window boundary should be duplicates (inclusive)
-///
-/// Incorrect behavior would be:
-/// - Messages at exactly the window boundary treated as new (exclusive)
+/// This test verifies the client-owned part of duplicate-window behavior: a
+/// configured `duplicate_window` is serialized in the nanosecond JSON field the
+/// JetStream API expects. The server decides whether a given publish timestamp
+/// still falls inside the rolling deduplication window.
 #[test]
-fn audit_jetstream_dedup_window_boundary_inclusive() {
-    init_test("audit_jetstream_dedup_window_boundary_inclusive");
+fn audit_jetstream_dedup_window_serializes_nanoseconds() {
+    init_test("audit_jetstream_dedup_window_serializes_nanoseconds");
 
     // AUDIT: Verify our client sends dedup window correctly
     let dedup_window = Duration::from_secs(10); // 10 second window for testing
@@ -58,7 +56,7 @@ fn audit_jetstream_dedup_window_boundary_inclusive() {
         "10 second window should be exactly 10 billion nanoseconds"
     );
 
-    test_complete("audit_jetstream_dedup_window_boundary_inclusive");
+    test_complete("audit_jetstream_dedup_window_serializes_nanoseconds");
 }
 
 /// AUDIT: Test message ID header format compliance
@@ -214,56 +212,58 @@ fn audit_jetstream_dedup_window_edge_cases() {
     test_complete("audit_jetstream_dedup_window_edge_cases");
 }
 
-/// AUDIT: Test boundary condition specification compliance
+/// AUDIT: Test boundary condition model scope
 ///
-/// Documents the expected behavior for the exact boundary case per JetStream spec.
-/// This test ensures our understanding and implementation aligns with the specification.
+/// Documents the client/server ownership boundary. The client can model
+/// offsets that are strictly inside the configured duplicate window and can
+/// encode the window value. It cannot prove what a live server will do at the
+/// exact expiration instant without an integration harness because expiration
+/// is controlled by server time and server-side dedupe state.
 #[test]
-fn audit_jetstream_boundary_specification_compliance() {
-    init_test("audit_jetstream_boundary_specification_compliance");
+fn audit_jetstream_boundary_model_is_server_owned() {
+    init_test("audit_jetstream_boundary_model_is_server_owned");
 
-    // AUDIT DOCUMENTATION: JetStream specification requirement
+    // AUDIT DOCUMENTATION: JetStream client/server ownership
     //
-    // Per JetStream specification, the deduplication window is INCLUSIVE:
-    // - Messages with same Nats-Msg-Id arriving within [0, N] nanoseconds
-    //   of the previous submission should be considered duplicates
-    // - Message arriving at exactly N nanoseconds should be duplicate (inclusive)
-    // - Message arriving at N+1 nanoseconds should be new (outside window)
+    // The client owns two facts:
+    // - Same-message publishes use the Nats-Msg-Id header.
+    // - Stream configuration sends duplicate_window in nanoseconds.
+    //
+    // The server owns the exact expiry comparison for an ID already present in
+    // the stream's dedupe state. Do not infer an inclusive/exclusive boundary
+    // here from a client-only test.
 
     let window_duration = Duration::from_millis(100); // 100ms = 100,000,000 ns
 
     // AUDIT: Document the exact boundary cases
     let boundary_nanoseconds = window_duration.as_nanos();
 
-    // Test scenarios that should be considered (per spec):
+    // Test scenarios that are strictly inside the configured window.
     let scenarios = vec![
-        (0, "immediate resubmission", true), // 0 ns - duplicate
-        (boundary_nanoseconds / 2, "mid window", true), // 50ms - duplicate
-        (boundary_nanoseconds - 1, "just before boundary", true), // 99,999,999 ns - duplicate
-        (boundary_nanoseconds, "exact boundary", true), // 100,000,000 ns - duplicate (INCLUSIVE)
-                                             // Note: boundary + 1 would be new, but we can't test server behavior here
+        (0, "immediate resubmission"),
+        (boundary_nanoseconds / 2, "mid window"),
+        (boundary_nanoseconds - 1, "just before boundary"),
     ];
 
-    for (offset_ns, description, should_be_duplicate) in scenarios {
+    for (offset_ns, description) in scenarios {
         // AUDIT: Document expected behavior for each scenario
-        if should_be_duplicate {
-            assert!(
-                offset_ns <= boundary_nanoseconds,
-                "Scenario '{}' at {}ns should be within inclusive boundary of {}ns",
-                description,
-                offset_ns,
-                boundary_nanoseconds
-            );
-        }
+        assert!(
+            offset_ns < boundary_nanoseconds,
+            "Scenario '{}' at {}ns should be strictly inside the configured {}ns window",
+            description,
+            offset_ns,
+            boundary_nanoseconds
+        );
     }
 
-    // AUDIT: Critical boundary condition
+    // AUDIT: Critical boundary value is still serialized exactly; live server
+    // tests own the equality comparison at this timestamp.
     assert_eq!(
         boundary_nanoseconds, 100_000_000,
         "100ms window must be exactly 100,000,000 nanoseconds"
     );
 
-    test_complete("audit_jetstream_boundary_specification_compliance");
+    test_complete("audit_jetstream_boundary_model_is_server_owned");
 }
 
 /// AUDIT: Integration test structure for real JetStream boundary testing
@@ -277,12 +277,12 @@ fn audit_jetstream_real_server_boundary_behavior() {
     // This test would connect to a real NATS server and verify:
     // 1. Create stream with small dedup window (e.g., 100ms)
     // 2. Publish message with ID "test-boundary-msg"
-    // 3. Wait exactly 100ms (the boundary)
+    // 3. Wait exactly 100ms (the configured window expiration point)
     // 4. Publish same message ID again
-    // 5. Verify server returns duplicate=true (inclusive boundary)
-    // 6. Wait 1ms more (101ms total)
+    // 5. Record whether the server returns duplicate=true or false at expiry
+    // 6. Wait 1ms more (outside the configured window)
     // 7. Publish same message ID again
-    // 8. Verify server returns duplicate=false (outside window)
+    // 8. Verify server returns duplicate=false outside the configured window
 
     init_test("audit_jetstream_real_server_boundary_behavior");
 
