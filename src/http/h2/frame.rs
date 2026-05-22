@@ -2239,6 +2239,54 @@ mod tests {
     }
 
     #[test]
+    fn settings_frame_rejects_invalid_wire_bounds() {
+        let header = FrameHeader {
+            length: 6,
+            frame_type: FrameType::Settings as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let cases = [
+            (0x04_u16, 0x8000_0000_u32, ErrorCode::FlowControlError),
+            (0x05, MIN_MAX_FRAME_SIZE - 1, ErrorCode::ProtocolError),
+            (0x05, MAX_FRAME_SIZE + 1, ErrorCode::ProtocolError),
+        ];
+
+        for (id, value, expected_code) in cases {
+            let mut payload = BytesMut::with_capacity(6);
+            payload.put_u16(id);
+            payload.put_u32(value);
+
+            let err = SettingsFrame::parse(&header, &payload.freeze()).unwrap_err();
+            assert_eq!(err.code, expected_code, "id={id:#x} value={value}");
+        }
+    }
+
+    #[test]
+    fn settings_frame_accepts_wire_bounds() {
+        let header = FrameHeader {
+            length: 12,
+            frame_type: FrameType::Settings as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let mut payload = BytesMut::with_capacity(12);
+        payload.put_u16(0x04);
+        payload.put_u32(0x7fff_ffff);
+        payload.put_u16(0x05);
+        payload.put_u32(MAX_FRAME_SIZE);
+
+        let parsed = SettingsFrame::parse(&header, &payload.freeze()).unwrap();
+        assert_eq!(
+            parsed.settings,
+            vec![
+                Setting::InitialWindowSize(0x7fff_ffff),
+                Setting::MaxFrameSize(MAX_FRAME_SIZE)
+            ]
+        );
+    }
+
+    #[test]
     fn test_setting_id_and_value() {
         let settings = vec![
             Setting::HeaderTableSize(4096),
