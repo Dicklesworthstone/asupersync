@@ -1199,6 +1199,10 @@ impl ContinuationFrame {
     /// Encode this frame.
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
+        if self.stream_id == 0 {
+            return Err(H2Error::protocol("CONTINUATION frame with stream ID 0"));
+        }
+
         let mut flags = 0u8;
         if self.end_headers {
             flags |= continuation_flags::END_HEADERS;
@@ -2105,6 +2109,27 @@ mod tests {
 
         let err = ContinuationFrame::parse(&header, payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn continuation_encode_rejects_stream_id_zero_without_partial_write() {
+        let frame = ContinuationFrame {
+            stream_id: 0,
+            header_block: Bytes::from_static(b"hdr"),
+            end_headers: true,
+        };
+        let mut buf = BytesMut::new();
+
+        let err = frame
+            .encode(&mut buf)
+            .expect_err("invalid CONTINUATION stream id must not encode");
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, None);
+        assert!(
+            buf.is_empty(),
+            "invalid CONTINUATION must not partially encode"
+        );
     }
 
     #[test]
