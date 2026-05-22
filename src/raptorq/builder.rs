@@ -359,6 +359,47 @@ mod tests {
     }
 
     #[test]
+    fn mr_builder_config_setter_order_invariant() {
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 512;
+        config.encoding.repair_overhead = 1.125;
+        let expected = format!("{config:?}");
+
+        let sender_config_first = RaptorQSenderBuilder::new()
+            .config(config.clone())
+            .transport(NoopSink)
+            .build()
+            .unwrap();
+        let sender_transport_first = RaptorQSenderBuilder::new()
+            .transport(NoopSink)
+            .config(config.clone())
+            .build()
+            .unwrap();
+
+        assert_eq!(format!("{:?}", sender_config_first.config()), expected);
+        assert_eq!(
+            format!("{:?}", sender_config_first.config()),
+            format!("{:?}", sender_transport_first.config())
+        );
+
+        let receiver_config_first = RaptorQReceiverBuilder::new()
+            .config(config.clone())
+            .source(NoopStream)
+            .build()
+            .unwrap();
+        let receiver_source_first = RaptorQReceiverBuilder::new()
+            .source(NoopStream)
+            .config(config)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            format!("{:?}", receiver_config_first.config()),
+            format!("{:?}", receiver_source_first.config())
+        );
+    }
+
+    #[test]
     fn test_receiver_builder_accepts_security_and_metrics() {
         let security = SecurityContext::for_testing(7);
         let metrics = Metrics::new();
