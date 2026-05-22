@@ -765,6 +765,42 @@ mod tests {
     }
 
     #[test]
+    fn encode_rejects_zero_sized_config_bounds() {
+        let snapshot = create_test_snapshot();
+        let cases = [
+            (
+                EncodingConfig {
+                    symbol_size: 0,
+                    ..Default::default()
+                },
+                "symbol_size must be non-zero",
+                100,
+            ),
+            (
+                EncodingConfig {
+                    max_source_blocks: 0,
+                    ..Default::default()
+                },
+                "max_source_blocks must be non-zero",
+                101,
+            ),
+        ];
+
+        for (config, expected_reason, seed) in cases {
+            let mut encoder = StateEncoder::new(config, DetRng::new(seed));
+
+            let err = encoder
+                .encode(&snapshot, Time::ZERO)
+                .expect_err("zero-sized encoding config bound must be rejected");
+
+            assert!(
+                matches!(err, EncodingError::InvalidConfig { ref reason } if reason == expected_reason),
+                "unexpected error for {expected_reason}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn encode_creates_correct_symbol_count() {
         let config = EncodingConfig {
             symbol_size: 128,
