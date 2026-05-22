@@ -409,11 +409,40 @@ comm -23 <(find src -name '*.rs' | sort) <(jq -Rr 'fromjson? | objects | .file? 
 
 ### Adding entries
 
-After completing an audit batch, append entries:
+After completing an audit batch, append entries with the append helper rather
+than an ad-hoc shell redirect:
 
 ```bash
-echo '{"file":"src/foo/bar.rs","lines":500,"batch":378,"date":"2026-03-15","agent":"YourName","verdict":"SOUND","bugs":0,"notes":""}' >> audit_index.jsonl
+python3 scripts/audit_index_append.py \
+  --file src/foo/bar.rs \
+  --lines 500 \
+  --batch 378 \
+  --date 2026-03-15 \
+  --agent YourName \
+  --verdict SOUND \
+  --bugs 0 \
+  --notes ""
 ```
+
+`audit_index.jsonl` is append-only NDJSON. Do not sort it, reformat it, load and
+rewrite the whole file, or hold an exclusive reservation on it for the entire
+audit. The lock-light protocol is:
+
+1. Reserve and audit the code files you are actually inspecting.
+2. Build exactly one audit row per inspected file.
+3. Run `python3 scripts/audit_index_append.py --dry-run ...` if you want to
+   inspect the canonical row before writing.
+4. Append with `scripts/audit_index_append.py`; the helper validates the row,
+   refuses malformed/off-contract data, and appends one physical line without
+   rewriting existing bytes.
+5. If another agent is actively committing the index, do not wait with a long
+   exclusive reservation. Either retry the one-line append after they finish or
+   stage the same validated row in the agreed bead sidecar and send Agent Mail
+   so the row can be merged later without blocking unrelated audits.
+
+The helper intentionally fails when the target file is nonempty but lacks a
+trailing newline, because fixing that would mutate the previous row and violate
+the append-only invariant.
 
 **Fields:**
 | Field | Description |
