@@ -105,6 +105,29 @@ mod tests {
     }
 
     #[test]
+    fn const_accessors_work_in_const_contexts() {
+        init_test("const_accessors_work_in_const_contexts");
+
+        const ELAPSED: Elapsed = Elapsed::new(Time::from_secs(3));
+        const DEADLINE: Time = ELAPSED.deadline();
+        const DEADLINE_NANOS: u64 = ELAPSED.deadline_nanos();
+
+        crate::assert_with_log!(
+            DEADLINE == Time::from_secs(3),
+            "const deadline",
+            Time::from_secs(3),
+            DEADLINE
+        );
+        crate::assert_with_log!(
+            DEADLINE_NANOS == 3_000_000_000,
+            "const deadline nanos",
+            3_000_000_000u64,
+            DEADLINE_NANOS
+        );
+        crate::test_complete!("const_accessors_work_in_const_contexts");
+    }
+
+    #[test]
     fn display_format() {
         init_test("display_format");
         let elapsed = Elapsed::new(Time::from_secs(5));
