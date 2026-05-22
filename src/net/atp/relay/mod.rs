@@ -789,6 +789,7 @@ impl RelayService {
             primary_transport,
             fallback_transport,
             cancelled: false,
+            expired: false,
         };
 
         self.push_event(RelayEventDraft {
@@ -858,19 +859,8 @@ impl RelayService {
         if state.cancelled {
             return Err(RelayError::ReservationCancelled);
         }
-        if state.grant.expires_at_micros <= now_micros {
-            self.push_event(RelayEventDraft {
-                kind: RelayEventKind::ReservationExpired,
-                reservation_id: Some(reservation_id),
-                transfer_nonce: Some(state.grant.transfer_nonce),
-                path_id: Some(state.path_id.clone()),
-                from_peer: Some(from_peer_id),
-                to_peer: Some(to_peer_id),
-                transport: Some(packet.transport),
-                opaque_bytes: 0,
-                quota_decision: "reservation_expired",
-                fallback_reason: packet.transport.fallback_reason(),
-            });
+        if state.expired || state.grant.expires_at_micros <= now_micros {
+            self.expire_reservation(reservation_id)?;
             return Err(RelayError::ExpiredReservation);
         }
 
@@ -973,6 +963,32 @@ impl RelayService {
         Ok(())
     }
 
+    /// Expire every live reservation whose grant is no longer valid.
+    ///
+    /// Expiration is a lifecycle transition, not just a forward-time rejection:
+    /// queued packets are drained, drop counters are updated, and restart
+    /// snapshots stop retaining the expired reservation.
+    #[must_use]
+    pub fn expire_reservations(&mut self, now_micros: u64) -> usize {
+        let expired_ids = self
+            .reservations
+            .iter()
+            .filter(|(_, state)| {
+                !state.cancelled && !state.expired && state.grant.expires_at_micros <= now_micros
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        let mut expired_count = 0;
+
+        for reservation_id in expired_ids {
+            if self.expire_reservation(reservation_id).is_ok() {
+                expired_count += 1;
+            }
+        }
+
+        expired_count
+    }
+
     /// Record a packet loss summary for diagnostics.
     ///
     /// # Errors
@@ -1030,15 +1046,39 @@ impl RelayService {
     #[must_use]
     pub fn snapshot(&self) -> RelayRestartSnapshot {
         let (reservations, usage, queues) = if self.config.retain_state_on_restart {
+            let retained_reservation_ids = self
+                .reservations
+                .iter()
+                .filter(|(_, state)| !state.cancelled && !state.expired)
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<_>>();
             (
                 self.reservations
                     .iter()
+                    .filter(|(id, _)| retained_reservation_ids.contains(*id))
                     .map(|(id, state)| (*id, state.clone()))
                     .collect(),
-                self.usage.iter().map(|(id, usage)| (*id, *usage)).collect(),
+                self.usage
+                    .iter()
+                    .filter(|(id, _)| retained_reservation_ids.contains(*id))
+                    .map(|(id, usage)| (*id, *usage))
+                    .collect(),
                 self.queues
                     .iter()
-                    .map(|(peer, queue)| (*peer, queue.iter().cloned().collect()))
+                    .filter_map(|(peer, queue)| {
+                        let retained_packets = queue
+                            .iter()
+                            .filter(|packet| {
+                                retained_reservation_ids.contains(&packet.reservation_id)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if retained_packets.is_empty() {
+                            None
+                        } else {
+                            Some((*peer, retained_packets))
+                        }
+                    })
                     .collect(),
             )
         } else {
@@ -1127,7 +1167,9 @@ impl RelayService {
     fn active_reservation_count(&self, now_micros: u64) -> usize {
         self.reservations
             .values()
-            .filter(|state| !state.cancelled && state.grant.expires_at_micros > now_micros)
+            .filter(|state| {
+                !state.cancelled && !state.expired && state.grant.expires_at_micros > now_micros
+            })
             .count()
     }
 
@@ -1156,6 +1198,52 @@ impl RelayService {
         } else {
             None
         }
+    }
+
+    fn expire_reservation(&mut self, reservation_id: RelayReservationId) -> Result<(), RelayError> {
+        let already_expired_or_cancelled = {
+            let state = self
+                .reservations
+                .get(&reservation_id)
+                .ok_or(RelayError::UnknownReservation)?;
+            state.expired || state.cancelled
+        };
+        if already_expired_or_cancelled {
+            return Ok(());
+        }
+
+        let (dropped_queued_packets, dropped_queued_bytes) =
+            self.drain_queued_packets_for_reservation(reservation_id);
+        if let Some(usage) = self.usage.get_mut(&reservation_id) {
+            usage.dropped_packets = usage.dropped_packets.saturating_add(dropped_queued_packets);
+        }
+
+        let event = {
+            let state = self
+                .reservations
+                .get_mut(&reservation_id)
+                .ok_or(RelayError::UnknownReservation)?;
+            state.expired = true;
+            let usage_snapshot = self.usage.get(&reservation_id).copied().unwrap_or_default();
+            RelayEventDraft {
+                kind: RelayEventKind::ReservationExpired,
+                reservation_id: Some(reservation_id),
+                transfer_nonce: Some(state.grant.transfer_nonce),
+                path_id: Some(state.path_id.clone()),
+                from_peer: Some(state.grant.source_peer_id),
+                to_peer: Some(state.grant.destination_peer_id),
+                transport: Some(state.primary_transport),
+                opaque_bytes: dropped_queued_bytes,
+                quota_decision: if dropped_queued_packets == 0 {
+                    "reservation_expired"
+                } else {
+                    "reservation_expired_queued_packets_drained"
+                },
+                fallback_reason: Self::fallback_reason_for_usage(state, usage_snapshot),
+            }
+        };
+        self.push_event(event);
+        Ok(())
     }
 
     fn transport_available(&self, transport: RelayTransport) -> bool {
@@ -1296,6 +1384,7 @@ struct RelayReservationState {
     primary_transport: RelayTransport,
     fallback_transport: Option<RelayTransport>,
     cancelled: bool,
+    expired: bool,
 }
 
 #[derive(Debug)]
@@ -1985,6 +2074,118 @@ mod tests {
             .expect("expired reservation should not occupy the only active slot");
 
         assert_eq!(candidate.reservation_id(), reservation_id(14));
+    }
+
+    #[test]
+    fn forwarding_after_expiry_drains_queued_packets_and_blocks_restart_retention() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(26),
+                "path-relay-26",
+                grant(30, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(26),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("queued before expiry");
+
+        assert_eq!(
+            service
+                .forward(
+                    31,
+                    reservation_id(26),
+                    peer(1),
+                    packet(RelayTransport::Udp, b"late", 2),
+                )
+                .expect_err("expired forward"),
+            RelayError::ExpiredReservation
+        );
+
+        assert_eq!(service.dequeue_for_peer(peer(2)), None);
+        let usage = service.usage(reservation_id(26)).expect("usage");
+        assert_eq!(usage.forwarded_packets, 1);
+        assert_eq!(usage.dropped_packets, 1);
+
+        let event = service.events().last().expect("expiry event");
+        assert_eq!(event.kind, RelayEventKind::ReservationExpired);
+        assert_eq!(
+            event.quota_decision,
+            "reservation_expired_queued_packets_drained"
+        );
+        assert_eq!(event.opaque_bytes, 10);
+        assert_eq!(service.snapshot().reservation_count(), 0);
+    }
+
+    #[test]
+    fn expire_reservations_drains_only_expired_queues() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(27),
+                "path-relay-27",
+                grant(30, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("expired candidate");
+        service
+            .reserve(
+                10,
+                reservation_id(28),
+                "path-relay-28",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("active candidate");
+        service
+            .forward(
+                20,
+                reservation_id(27),
+                peer(1),
+                packet(RelayTransport::Udp, b"expired", 1),
+            )
+            .expect("expired queued before cutoff");
+        let active_packet = service
+            .forward(
+                20,
+                reservation_id(28),
+                peer(1),
+                packet(RelayTransport::Udp, b"active", 2),
+            )
+            .expect("active queued");
+
+        assert_eq!(service.expire_reservations(31), 1);
+        assert_eq!(service.active_reservation_count(20), 1);
+        assert_eq!(
+            service.dequeue_for_peer(peer(2)).expect("active packet"),
+            active_packet
+        );
+        assert_eq!(service.dequeue_for_peer(peer(2)), None);
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(27))
+                .expect("expired proof remains auditable")
+                .packets_forwarded,
+            1
+        );
+        assert_eq!(service.snapshot().reservation_count(), 1);
+        assert_eq!(
+            service
+                .snapshot()
+                .reservations
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![reservation_id(28)]
+        );
     }
 
     #[test]
