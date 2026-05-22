@@ -677,10 +677,14 @@ mod tests {
     }
 
     #[test]
-    fn zero_vnodes_yields_empty_ring() {
+    fn zero_vnodes_constructor_clamps_to_single_vnode_until_removed() {
         let mut ring = HashRing::new(0, 0);
         ring.add_node("a");
-        assert_eq!(ring.vnode_count(), 0);
+        assert_eq!(ring.vnode_count(), 1);
+        for key in ["alpha", "beta", "gamma"] {
+            assert_eq!(ring.node_for_key(&key), Some("a"));
+        }
+        assert_eq!(ring.remove_node("a"), 1);
         assert!(ring.node_for_key(&"key").is_none());
     }
 
@@ -946,6 +950,94 @@ mod tests {
         assert!(
             heavy_wins > light_wins,
             "weights must influence HRW selection"
+        );
+    }
+
+    #[test]
+    fn mr_top_k_hrw_prefix_is_invariant_to_candidate_order() {
+        let orders = [
+            [
+                ("node-a", 1_u32),
+                ("node-b", 3),
+                ("node-c", 2),
+                ("node-d", 5),
+                ("zero-weight", 0),
+            ],
+            [
+                ("zero-weight", 0_u32),
+                ("node-d", 5),
+                ("node-b", 3),
+                ("node-a", 1),
+                ("node-c", 2),
+            ],
+            [
+                ("node-c", 2_u32),
+                ("node-a", 1),
+                ("node-d", 5),
+                ("zero-weight", 0),
+                ("node-b", 3),
+            ],
+        ];
+
+        let top3_for = |order: &[(&str, u32)]| {
+            select_top_k_hrw(
+                order.iter(),
+                3,
+                &"tenant:acme/orders/42",
+                0x5eed_f00d,
+                |candidate| &candidate.0,
+                |candidate| candidate.1,
+            )
+            .into_iter()
+            .map(|candidate| candidate.0)
+            .collect::<Vec<_>>()
+        };
+
+        let baseline = top3_for(&orders[0]);
+        for order in orders.iter().skip(1) {
+            assert_eq!(
+                top3_for(order),
+                baseline,
+                "HRW top-k winner order changed after candidate-order permutation"
+            );
+        }
+
+        let top1 = select_top_k_hrw(
+            orders[0].iter(),
+            1,
+            &"tenant:acme/orders/42",
+            0x5eed_f00d,
+            |candidate| &candidate.0,
+            |candidate| candidate.1,
+        )
+        .into_iter()
+        .map(|candidate| candidate.0)
+        .collect::<Vec<_>>();
+        let single_winner = select_hrw(
+            orders[0].iter(),
+            &"tenant:acme/orders/42",
+            0x5eed_f00d,
+            |candidate| &candidate.0,
+            |candidate| candidate.1,
+        )
+        .expect("positive-weight candidates should yield a winner")
+        .0;
+        assert_eq!(top1, vec![single_winner]);
+
+        let all_positive = select_top_k_hrw(
+            orders[0].iter(),
+            10,
+            &"tenant:acme/orders/42",
+            0x5eed_f00d,
+            |candidate| &candidate.0,
+            |candidate| candidate.1,
+        );
+        assert_eq!(all_positive.len(), 4);
+        assert!(
+            all_positive
+                .iter()
+                .all(|candidate| candidate.0 != "zero-weight"),
+            "zero-weight candidates must remain excluded even when limit exceeds positive candidates"
         );
     }
 
