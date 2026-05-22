@@ -372,6 +372,80 @@ mod tests {
     }
 
     #[test]
+    fn mr_filter_idempotent_for_pure_predicate() {
+        init_test("mr_filter_idempotent_for_pure_predicate");
+        for len in 0..=18usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 9).collect();
+            for threshold in -10..=10 {
+                let mut once = Filter::new(iter(values.clone()), move |item: &i32| {
+                    item.rem_euclid(3) != 1 && *item >= threshold
+                });
+                let mut twice = Filter::new(
+                    Filter::new(iter(values.clone()), move |item: &i32| {
+                        item.rem_euclid(3) != 1 && *item >= threshold
+                    }),
+                    move |item: &i32| item.rem_euclid(3) != 1 && *item >= threshold,
+                );
+
+                assert_eq!(
+                    collect_ready(&mut once),
+                    collect_ready(&mut twice),
+                    "filtering twice with the same pure predicate must be idempotent for len {len}, threshold {threshold}",
+                );
+            }
+        }
+        crate::test_complete!("mr_filter_idempotent_for_pure_predicate");
+    }
+
+    #[test]
+    fn mr_filter_predicate_order_commutes_for_conjunction() {
+        init_test("mr_filter_predicate_order_commutes_for_conjunction");
+        for len in 0..=18usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 9).collect();
+            for threshold in -10..=10 {
+                let mut low_then_high = Filter::new(
+                    Filter::new(iter(values.clone()), move |item: &i32| *item >= threshold),
+                    |item: &i32| item.rem_euclid(4) <= 1,
+                );
+                let mut high_then_low = Filter::new(
+                    Filter::new(iter(values.clone()), |item: &i32| item.rem_euclid(4) <= 1),
+                    move |item: &i32| *item >= threshold,
+                );
+
+                assert_eq!(
+                    collect_ready(&mut low_then_high),
+                    collect_ready(&mut high_then_low),
+                    "pure filter predicates should commute under conjunction for len {len}, threshold {threshold}",
+                );
+            }
+        }
+        crate::test_complete!("mr_filter_predicate_order_commutes_for_conjunction");
+    }
+
+    #[test]
+    fn mr_filter_map_matches_filter_then_map() {
+        init_test("mr_filter_map_matches_filter_then_map");
+        for len in 0..=18usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 9).collect();
+            for threshold in -10..=10 {
+                let mut filter_map = FilterMap::new(iter(values.clone()), move |item: i32| {
+                    (item >= threshold && item.rem_euclid(3) == 0).then_some(item * 7 + 1)
+                });
+                let mut filter_then_map = iter(values.clone())
+                    .filter(move |item: &i32| *item >= threshold && item.rem_euclid(3) == 0)
+                    .map(|item| item * 7 + 1);
+
+                assert_eq!(
+                    collect_ready(&mut filter_map),
+                    collect_ready(&mut filter_then_map),
+                    "filter_map should match filter().map() for len {len}, threshold {threshold}",
+                );
+            }
+        }
+        crate::test_complete!("mr_filter_map_matches_filter_then_map");
+    }
+
+    #[test]
     fn filter_empty_stream() {
         init_test("filter_empty_stream");
         let mut stream = Filter::new(iter(Vec::<i32>::new()), |_: &i32| true);
