@@ -2092,6 +2092,69 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_row_scaling_and_permutation_preserve_solution() {
+        fn scale_row(coefficients: [u8; 3], rhs: [u8; 2], factor: Gf256) -> ([u8; 3], [u8; 2]) {
+            let mut scaled_coefficients = [0; 3];
+            let mut scaled_rhs = [0; 2];
+
+            for (dst, src) in scaled_coefficients.iter_mut().zip(coefficients) {
+                *dst = (Gf256::new(src) * factor).raw();
+            }
+            for (dst, src) in scaled_rhs.iter_mut().zip(rhs) {
+                *dst = (Gf256::new(src) * factor).raw();
+            }
+
+            (scaled_coefficients, scaled_rhs)
+        }
+
+        fn build_solver(rows: &[([u8; 3], [u8; 2])]) -> GaussianSolver {
+            let mut solver = GaussianSolver::new(rows.len(), 3);
+            for (row, (coefficients, rhs)) in rows.iter().enumerate() {
+                solver.set_row(row, coefficients, DenseRow::new(rhs.to_vec()));
+            }
+            solver
+        }
+
+        fn solve_basic(rows: &[([u8; 3], [u8; 2])]) -> Vec<DenseRow> {
+            let mut solver = build_solver(rows);
+            match solver.solve() {
+                GaussianResult::Solved(solution) => solution,
+                other => panic!("basic solver should solve metamorphic fixture, got {other:?}"),
+            }
+        }
+
+        fn solve_markowitz(rows: &[([u8; 3], [u8; 2])]) -> Vec<DenseRow> {
+            let mut solver = build_solver(rows);
+            match solver.solve_markowitz() {
+                GaussianResult::Solved(solution) => solution,
+                other => panic!("markowitz solver should solve metamorphic fixture, got {other:?}"),
+            }
+        }
+
+        let base_rows = [
+            ([2, 1, 0], [0x10, 0x20]),
+            ([0, 3, 1], [0x30, 0x40]),
+            ([0, 0, 5], [0x50, 0x60]),
+        ];
+        let transformed_rows = [
+            base_rows[2],
+            scale_row(base_rows[1].0, base_rows[1].1, Gf256::new(0x53)),
+            base_rows[0],
+        ];
+
+        assert_eq!(
+            solve_basic(&base_rows),
+            solve_basic(&transformed_rows),
+            "basic Gaussian elimination should preserve the solution when equations are scaled by nonzero factors and row order is permuted"
+        );
+        assert_eq!(
+            solve_markowitz(&base_rows),
+            solve_markowitz(&transformed_rows),
+            "Markowitz Gaussian elimination should preserve the solution when equations are scaled by nonzero factors and row order is permuted"
+        );
+    }
+
+    #[test]
     fn gaussian_stats_tracked() {
         let mut solver = GaussianSolver::new(2, 2);
         solver.set_row(0, &[0, 1], DenseRow::new(vec![5])); // Needs swap
