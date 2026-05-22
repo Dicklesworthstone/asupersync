@@ -225,6 +225,43 @@ mod tests {
     }
 
     #[test]
+    fn transport_io_error_conversions_preserve_source_details() {
+        let cases = [
+            (io::ErrorKind::BrokenPipe, "pipe failed"),
+            (io::ErrorKind::ConnectionReset, "peer reset"),
+            (io::ErrorKind::TimedOut, "deadline elapsed"),
+        ];
+
+        for (kind, message) in cases {
+            let stream_io = io::Error::new(kind, message);
+            let stream_err = StreamError::from(stream_io);
+            assert_io_source_details(&stream_err, kind, message);
+
+            let sink_io = io::Error::new(kind, message);
+            let sink_err = SinkError::from(sink_io);
+            assert_io_source_details(&sink_err, kind, message);
+        }
+    }
+
+    fn assert_io_source_details<E>(err: &E, kind: io::ErrorKind, message: &str)
+    where
+        E: std::error::Error + std::fmt::Display,
+    {
+        let source = std::error::Error::source(err)
+            .expect("transport I/O errors must expose their underlying source");
+        let io_source = source
+            .downcast_ref::<io::Error>()
+            .expect("transport source must stay typed as std::io::Error");
+
+        assert_eq!(io_source.kind(), kind);
+        assert_eq!(io_source.to_string(), message);
+        assert!(
+            err.to_string().contains(message),
+            "transport display must include the underlying I/O message: {err}"
+        );
+    }
+
+    #[test]
     fn sink_error_non_io_variants_have_no_error_source() {
         let variants = [
             SinkError::Closed,
