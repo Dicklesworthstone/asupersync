@@ -220,7 +220,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::task::{Poll, Waker};
+    use std::task::{Context, Poll, Waker};
 
     thread_local! {
         static TEST_NOW_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -254,6 +254,44 @@ mod tests {
 
     fn test_time() -> Time {
         Time::from_nanos(TEST_NOW_NANOS.with(std::cell::Cell::get))
+    }
+
+    fn poll_seeded_pending(
+        period_nanos: u64,
+        received_at_nanos: u64,
+        now_nanos: u64,
+    ) -> (Poll<Option<i32>>, bool, bool) {
+        set_test_time(now_nanos);
+        let mut stream = Debounce::with_time_getter(
+            PendingStream,
+            Duration::from_nanos(period_nanos),
+            test_time,
+        );
+        stream.pending = Some((99, Time::from_nanos(received_at_nanos)));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let still_buffered = stream.pending.is_some();
+        let timer_armed = stream.timer.is_some();
+        (poll, still_buffered, timer_armed)
+    }
+
+    fn debounce_flush_values(input: Vec<i32>) -> Vec<i32> {
+        let mut stream = Debounce::new(iter(input), Duration::from_secs(999));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut items = Vec::new();
+
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("synchronous debounce input should flush on stream end"),
+            }
+        }
+
+        items
     }
 
     #[test]
@@ -316,6 +354,25 @@ mod tests {
         );
         assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
         crate::test_complete!("debounce_single_item_flushes");
+    }
+
+    #[test]
+    fn mr_debounce_synchronous_burst_prefix_keeps_latest_item() {
+        init_test("mr_debounce_synchronous_burst_prefix_keeps_latest_item");
+        let baseline = debounce_flush_values(vec![7]);
+        let cases = vec![vec![1, 7], vec![1, 2, 3, 7], vec![7, 7, 7]];
+
+        for input in cases {
+            let actual = debounce_flush_values(input);
+            crate::assert_with_log!(
+                actual == baseline,
+                "prefix burst preserves latest flush",
+                baseline.clone(),
+                actual
+            );
+        }
+
+        crate::test_complete!("mr_debounce_synchronous_burst_prefix_keeps_latest_item");
     }
 
     #[test]
@@ -441,6 +498,44 @@ mod tests {
         assert!(stream.pending.is_none(), "pending item should be emitted");
         assert!(stream.timer.is_none(), "timer should be cleared after emit");
         crate::test_complete!("debounce_respects_custom_time_getter_without_sleeping");
+    }
+
+    #[test]
+    fn mr_debounce_time_scaling_preserves_ready_boundary() {
+        init_test("mr_debounce_time_scaling_preserves_ready_boundary");
+        let before_base = poll_seeded_pending(20, 10, 29);
+        let before_scaled = poll_seeded_pending(200, 100, 290);
+        let expected_before = (Poll::Pending, true, true);
+        crate::assert_with_log!(
+            before_base == expected_before,
+            "base before boundary",
+            expected_before.clone(),
+            before_base.clone()
+        );
+        crate::assert_with_log!(
+            before_scaled == expected_before,
+            "scaled before boundary",
+            expected_before.clone(),
+            before_scaled.clone()
+        );
+
+        let ready_base = poll_seeded_pending(20, 10, 30);
+        let ready_scaled = poll_seeded_pending(200, 100, 300);
+        let expected_ready = (Poll::Ready(Some(99)), false, false);
+        crate::assert_with_log!(
+            ready_base == expected_ready,
+            "base at boundary",
+            expected_ready.clone(),
+            ready_base.clone()
+        );
+        crate::assert_with_log!(
+            ready_scaled == expected_ready,
+            "scaled at boundary",
+            expected_ready,
+            ready_scaled
+        );
+
+        crate::test_complete!("mr_debounce_time_scaling_preserves_ready_boundary");
     }
 
     #[test]
