@@ -138,6 +138,31 @@ mod tests {
     }
 
     #[test]
+    fn read_buf_filled_mut_changes_only_filled_prefix() {
+        init_test("read_buf_filled_mut_changes_only_filled_prefix");
+        let mut buf = [0u8; 6];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        read_buf.put_slice(&[1, 2, 3]);
+
+        {
+            let filled = read_buf.filled_mut();
+            crate::assert_with_log!(filled.len() == 3, "filled len", 3, filled.len());
+            filled[1] = 9;
+        }
+
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == [1, 9, 3], "filled", &[1, 9, 3], filled);
+        let remaining = read_buf.remaining();
+        crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
+
+        {
+            let unfilled = read_buf.unfilled();
+            crate::assert_with_log!(unfilled == [0, 0, 0], "unfilled", &[0, 0, 0], unfilled);
+        }
+        crate::test_complete!("read_buf_filled_mut_changes_only_filled_prefix");
+    }
+
+    #[test]
     fn read_buf_put_slice_rejects_overflow_without_advancing() {
         init_test("read_buf_put_slice_rejects_overflow_without_advancing");
         let mut buf = [0u8; 4];
