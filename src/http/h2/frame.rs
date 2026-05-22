@@ -501,6 +501,20 @@ impl HeadersFrame {
     /// Encode this frame.
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
+        if self.stream_id == 0 {
+            return Err(H2Error::protocol("HEADERS frame with stream ID 0"));
+        }
+        if self
+            .priority
+            .is_some_and(|priority| priority.dependency & 0x7fff_ffff == self.stream_id)
+        {
+            return Err(H2Error::stream(
+                self.stream_id,
+                ErrorCode::ProtocolError,
+                "stream cannot depend on itself",
+            ));
+        }
+
         let mut flags = 0u8;
         if self.end_stream {
             flags |= headers_flags::END_STREAM;
@@ -1626,6 +1640,45 @@ mod tests {
 
         let err = HeadersFrame::parse(&header, payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn headers_frame_encode_rejects_stream_id_zero_without_partial_write() {
+        let frame = HeadersFrame::new(0, Bytes::from_static(b"hdr"), false, true);
+        let mut buf = BytesMut::new();
+
+        let err = frame
+            .encode(&mut buf)
+            .expect_err("invalid HEADERS stream id must not encode");
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, None);
+        assert!(
+            buf.is_empty(),
+            "invalid HEADERS frame must not partially encode"
+        );
+    }
+
+    #[test]
+    fn headers_frame_encode_rejects_self_dependency_without_partial_write() {
+        let mut frame = HeadersFrame::new(3, Bytes::from_static(b"hdr"), false, true);
+        frame.priority = Some(PrioritySpec {
+            exclusive: false,
+            dependency: 3,
+            weight: 16,
+        });
+        let mut buf = BytesMut::new();
+
+        let err = frame
+            .encode(&mut buf)
+            .expect_err("self-dependent HEADERS frame must not encode");
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, Some(3));
+        assert!(
+            buf.is_empty(),
+            "invalid HEADERS frame must not partially encode"
+        );
     }
 
     /// br-asupersync-ujytci: HEADERS PADDED+PRIORITY with BOTH a self-
