@@ -130,6 +130,29 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn collect_closed_stream<T>(mut stream: ReceiverStream<T>) -> Vec<T> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut out = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => out.push(item),
+                Poll::Ready(None) => return out,
+                Poll::Pending => panic!("closed receiver stream unexpectedly returned Pending"),
+            }
+        }
+    }
+
+    fn collect_prefilled_input(input: &[i32]) -> Vec<i32> {
+        let cx_recv: Cx = Cx::for_testing();
+        let (tx, rx) = mpsc::channel(input.len().max(1));
+        for &item in input {
+            tx.try_send(item).expect("prefill send");
+        }
+        drop(tx);
+        collect_closed_stream(ReceiverStream::new(cx_recv, rx))
+    }
+
     #[test]
     fn receiver_stream_reads_messages() {
         init_test("receiver_stream_reads_messages");
@@ -296,5 +319,78 @@ mod tests {
         crate::assert_with_log!(got_7, "recovered receiver still receives", true, got_7);
 
         crate::test_complete!("receiver_stream_into_inner_clears_pending_waker_registration");
+    }
+
+    #[test]
+    fn mr_receiver_stream_split_sends_match_unsplit_fifo_order() {
+        init_test("mr_receiver_stream_split_sends_match_unsplit_fifo_order");
+        let input = vec![3, 1, 4, 1, 5, 9, 2, 6];
+        let expected = collect_prefilled_input(&input);
+
+        for split in 0..=input.len() {
+            let cx_recv: Cx = Cx::for_testing();
+            let (tx, rx) = mpsc::channel(input.len().max(1));
+            for &item in &input[..split] {
+                tx.try_send(item).expect("left split send");
+            }
+            for &item in &input[split..] {
+                tx.try_send(item).expect("right split send");
+            }
+            drop(tx);
+
+            let actual = collect_closed_stream(ReceiverStream::new(cx_recv, rx));
+            crate::assert_with_log!(
+                actual == expected,
+                format!("split at {split}"),
+                expected.clone(),
+                actual
+            );
+        }
+        crate::test_complete!("mr_receiver_stream_split_sends_match_unsplit_fifo_order");
+    }
+
+    #[test]
+    fn mr_receiver_stream_pending_then_send_matches_prefilled_single_item() {
+        init_test("mr_receiver_stream_pending_then_send_matches_prefilled_single_item");
+        let expected = collect_prefilled_input(&[21]);
+
+        let cx_recv: Cx = Cx::for_testing();
+        let (tx, rx) = mpsc::channel::<i32>(1);
+        let mut stream = ReceiverStream::new(cx_recv, rx);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wake_count));
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut task_cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "empty live receiver is pending",
+            true,
+            first.is_pending()
+        );
+        crate::assert_with_log!(
+            wake_count.load(Ordering::SeqCst) == 0,
+            "no wake before send",
+            0usize,
+            wake_count.load(Ordering::SeqCst)
+        );
+
+        tx.try_send(21).expect("send after pending poll");
+        drop(tx);
+        crate::assert_with_log!(
+            wake_count.load(Ordering::SeqCst) == 1,
+            "pending waiter wakes exactly once",
+            1usize,
+            wake_count.load(Ordering::SeqCst)
+        );
+
+        let actual = collect_closed_stream(stream);
+        crate::assert_with_log!(
+            actual == expected,
+            "pending-then-send output matches prefilled output",
+            expected,
+            actual
+        );
+        crate::test_complete!("mr_receiver_stream_pending_then_send_matches_prefilled_single_item");
     }
 }
