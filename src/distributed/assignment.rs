@@ -537,6 +537,53 @@ mod tests {
     }
 
     #[test]
+    fn striped_assignment_preserves_existing_residue_classes_when_symbols_extend() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Striped);
+        let replicas = create_test_replicas(4);
+        let base_symbols = create_test_symbols(11);
+        let extended_symbols = create_test_symbols(base_symbols.len() + replicas.len() * 2);
+
+        let base_plan = assigner.assign(&base_symbols, &replicas, 99);
+        let extended_plan = assigner.assign(&extended_symbols, &replicas, 99);
+
+        assert_eq!(base_plan.len(), extended_plan.len());
+        for (replica_idx, (base, extended)) in base_plan.iter().zip(&extended_plan).enumerate() {
+            assert_eq!(base.replica_id, extended.replica_id);
+
+            let preserved_indices: Vec<_> = extended
+                .symbol_indices
+                .iter()
+                .copied()
+                .filter(|&idx| idx < base_symbols.len())
+                .collect();
+            assert_eq!(
+                preserved_indices, base.symbol_indices,
+                "extending symbols must not reshuffle existing striped assignments"
+            );
+
+            let appended_indices: Vec<_> = extended
+                .symbol_indices
+                .iter()
+                .copied()
+                .filter(|&idx| idx >= base_symbols.len())
+                .collect();
+            assert_eq!(
+                appended_indices.len(),
+                2,
+                "two complete replica periods should add two symbols per replica"
+            );
+
+            for idx in &extended.symbol_indices {
+                assert_eq!(
+                    idx % replicas.len(),
+                    replica_idx,
+                    "striped assignment must keep replica residue classes stable"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn minimum_k_single_replica() {
         // Single replica should get at least K symbols
         let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
@@ -624,6 +671,93 @@ mod tests {
 
         for a in &assignments {
             assert!(a.can_decode);
+        }
+    }
+
+    #[test]
+    fn assignment_strategy_conformance_matrix() {
+        let symbols = create_test_symbols(8);
+        let replicas = create_test_replicas(3);
+        let expected_all_indices: Vec<_> = (0..symbols.len()).collect();
+
+        for strategy in [
+            AssignmentStrategy::Full,
+            AssignmentStrategy::Striped,
+            AssignmentStrategy::MinimumK,
+            AssignmentStrategy::Weighted,
+        ] {
+            let plan = SymbolAssigner::new(strategy).assign(&symbols, &replicas, 4);
+            assert_eq!(
+                plan.len(),
+                replicas.len(),
+                "{strategy:?}: one assignment per replica"
+            );
+
+            for assignment in &plan {
+                assert!(
+                    assignment
+                        .symbol_indices
+                        .iter()
+                        .all(|&idx| idx < symbols.len()),
+                    "{strategy:?}: assigned indices must stay within the symbol set"
+                );
+
+                let mut per_replica = assignment.symbol_indices.clone();
+                per_replica.sort_unstable();
+                per_replica.dedup();
+                assert_eq!(
+                    per_replica.len(),
+                    assignment.symbol_indices.len(),
+                    "{strategy:?}: per-replica assignments must not duplicate indices"
+                );
+            }
+
+            match strategy {
+                AssignmentStrategy::Full => {
+                    for assignment in &plan {
+                        assert_eq!(assignment.symbol_indices, expected_all_indices);
+                        assert!(
+                            assignment.can_decode,
+                            "full replication with 8 symbols and k=4 must decode everywhere"
+                        );
+                    }
+                }
+                AssignmentStrategy::Striped => {
+                    let mut assigned_once: Vec<_> = plan
+                        .iter()
+                        .flat_map(|assignment| assignment.symbol_indices.iter().copied())
+                        .collect();
+                    assigned_once.sort_unstable();
+                    assert_eq!(
+                        assigned_once, expected_all_indices,
+                        "striping must assign every symbol exactly once"
+                    );
+                    assert!(
+                        plan.iter().all(|assignment| !assignment.can_decode),
+                        "8 symbols striped over 3 replicas stays below k=4 per replica"
+                    );
+                }
+                AssignmentStrategy::MinimumK => {
+                    for assignment in &plan {
+                        assert_eq!(assignment.symbol_indices.len(), 4);
+                        assert!(
+                            assignment.can_decode,
+                            "minimum-k must provide k symbols per replica"
+                        );
+                    }
+                }
+                AssignmentStrategy::Weighted => {
+                    let mut assigned_once: Vec<_> = plan
+                        .iter()
+                        .flat_map(|assignment| assignment.symbol_indices.iter().copied())
+                        .collect();
+                    assigned_once.sort_unstable();
+                    assert_eq!(
+                        assigned_once, expected_all_indices,
+                        "weighted assignment must assign every symbol exactly once"
+                    );
+                }
+            }
         }
     }
 
