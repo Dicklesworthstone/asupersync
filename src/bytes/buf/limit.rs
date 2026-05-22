@@ -160,6 +160,34 @@ mod tests {
         crate::test_complete!("test_limit_put_slice");
     }
 
+    #[test]
+    fn test_limit_zero_limit_exposes_no_direct_space_without_advancing_inner() {
+        init_test("test_limit_zero_limit_exposes_no_direct_space_without_advancing_inner");
+        let mut data = [0u8; 4];
+        {
+            let buf: &mut [u8] = &mut data;
+            let mut limit = Limit::new(buf, 0);
+
+            let remaining = limit.remaining_mut();
+            crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+
+            let chunk = limit.chunk_mut();
+            crate::assert_with_log!(chunk.is_empty(), "chunk empty", true, chunk.is_empty());
+
+            limit.advance_mut(0);
+            limit.put_slice(&[]);
+
+            let inner = limit.into_inner();
+            let inner_len = inner.len();
+            crate::assert_with_log!(inner_len == 4, "inner len", 4, inner_len);
+        }
+
+        crate::assert_with_log!(data == [0, 0, 0, 0], "data", [0, 0, 0, 0], data);
+        crate::test_complete!(
+            "test_limit_zero_limit_exposes_no_direct_space_without_advancing_inner"
+        );
+    }
+
     proptest! {
         #[test]
         fn limit_metamorphic_chunked_put_matches_single_put(
