@@ -1542,6 +1542,25 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_masked_server_frame_rejected() {
+        // Client codec must reject masked frames from server (RFC 6455 §5.1).
+        let mut codec = FrameCodec::client();
+        let mask_key = [0x37, 0xfa, 0x21, 0x3d];
+        let mut payload = b"Hello".to_vec();
+        apply_mask(&mut payload, mask_key);
+
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Text → 0x81; MASK=1, len=5 → 0x85.
+        buf.put_u8(0x81);
+        buf.put_u8(0x80 | payload.len() as u8);
+        buf.put_slice(&mask_key);
+        buf.put_slice(&payload);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::MaskedServerFrame)));
+    }
+
+    #[test]
     fn test_decode_fragmented_control_rejected() {
         // Control frames must not be fragmented (FIN must be set, RFC 6455 §5.5).
         let mut codec = FrameCodec::client();
