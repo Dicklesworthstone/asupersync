@@ -112,6 +112,32 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn collect_scan_to_completion<S, St, F, B>(stream: Scan<S, St, F>) -> (Vec<B>, usize)
+    where
+        S: Stream,
+        F: FnMut(&mut St, S::Item) -> Option<B>,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut items = Vec::new();
+        let mut pending_polls = 0usize;
+        let mut stream = Box::pin(stream);
+
+        loop {
+            match stream.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => return (items, pending_polls),
+                Poll::Pending => {
+                    pending_polls += 1;
+                    assert!(
+                        pending_polls <= 16,
+                        "scan stream did not complete after {pending_polls} pending polls",
+                    );
+                }
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct EmptyThenPanics {
         completed: bool,
@@ -133,6 +159,48 @@ mod tests {
             );
             self.completed = true;
             Poll::Ready(None)
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingBeforeEach {
+        items: Vec<i32>,
+        next: usize,
+        pending_next: bool,
+    }
+
+    impl PendingBeforeEach {
+        fn new(items: Vec<i32>) -> Self {
+            Self {
+                items,
+                next: 0,
+                pending_next: true,
+            }
+        }
+    }
+
+    impl Stream for PendingBeforeEach {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.items.len() {
+                return Poll::Ready(None);
+            }
+
+            if self.pending_next {
+                self.pending_next = false;
+                return Poll::Pending;
+            }
+
+            let item = self.items[self.next];
+            self.next += 1;
+            self.pending_next = true;
+            Poll::Ready(Some(item))
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = self.items.len().saturating_sub(self.next);
+            (remaining, Some(remaining))
         }
     }
 
@@ -228,6 +296,105 @@ mod tests {
 
         assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
         crate::test_complete!("scan_empty_stream");
+    }
+
+    #[test]
+    fn mr_scan_identity_preserves_sequence() {
+        init_test("mr_scan_identity_preserves_sequence");
+        let input = vec![5i32, -2, 0, 11, -7];
+
+        let (items, pending_polls) =
+            collect_scan_to_completion(Scan::new(iter(input.clone()), (), |_: &mut (), item| {
+                Some(item)
+            }));
+
+        assert_eq!(items, input);
+        assert_eq!(pending_polls, 0);
+        crate::test_complete!("mr_scan_identity_preserves_sequence");
+    }
+
+    #[test]
+    fn mr_scan_running_sum_partition_matches_seeded_suffix() {
+        init_test("mr_scan_running_sum_partition_matches_seeded_suffix");
+        let prefix = vec![4i32, -7, 12, 3];
+        let suffix = vec![9i32, -2, 5];
+        let mut combined = prefix.clone();
+        combined.extend(suffix.iter().copied());
+
+        let scan_sum = |acc: &mut i32, item: i32| {
+            *acc += item;
+            Some(*acc)
+        };
+        let (combined_items, combined_pending) =
+            collect_scan_to_completion(Scan::new(iter(combined), 17i32, scan_sum));
+        let (mut partitioned_items, prefix_pending) =
+            collect_scan_to_completion(Scan::new(iter(prefix), 17i32, scan_sum));
+        let suffix_seed = *partitioned_items.last().expect("prefix has running sums");
+        let (suffix_items, suffix_pending) =
+            collect_scan_to_completion(Scan::new(iter(suffix), suffix_seed, scan_sum));
+        partitioned_items.extend(suffix_items);
+
+        assert_eq!(combined_items, partitioned_items);
+        assert_eq!(combined_pending + prefix_pending + suffix_pending, 0);
+        crate::test_complete!("mr_scan_running_sum_partition_matches_seeded_suffix");
+    }
+
+    #[test]
+    fn mr_scan_running_sum_scaled_inputs_scale_deltas() {
+        init_test("mr_scan_running_sum_scaled_inputs_scale_deltas");
+        let input = vec![6i32, -4, 10, 3, -1];
+        let scaled: Vec<_> = input.iter().map(|item| item * 3).collect();
+        let scan_sum = |acc: &mut i32, item: i32| {
+            *acc += item;
+            Some(*acc)
+        };
+
+        let (base_items, _) = collect_scan_to_completion(Scan::new(iter(input), 0i32, scan_sum));
+        let (scaled_items, _) = collect_scan_to_completion(Scan::new(iter(scaled), 0i32, scan_sum));
+        let expected_scaled: Vec<_> = base_items.iter().map(|item| item * 3).collect();
+
+        assert_eq!(scaled_items, expected_scaled);
+        crate::test_complete!("mr_scan_running_sum_scaled_inputs_scale_deltas");
+    }
+
+    #[test]
+    fn mr_scan_termination_ignores_tail_after_cutoff() {
+        init_test("mr_scan_termination_ignores_tail_after_cutoff");
+        let prefix = vec![1i32, 2, 3];
+        let mut with_tail = prefix.clone();
+        with_tail.extend([100, 200, 300]);
+        let until_over_five = |acc: &mut i32, item: i32| {
+            *acc += item;
+            (*acc <= 5).then_some(*acc)
+        };
+
+        let (prefix_items, _) =
+            collect_scan_to_completion(Scan::new(iter(prefix), 0i32, until_over_five));
+        let (tail_items, _) =
+            collect_scan_to_completion(Scan::new(iter(with_tail), 0i32, until_over_five));
+
+        assert_eq!(tail_items, prefix_items);
+        crate::test_complete!("mr_scan_termination_ignores_tail_after_cutoff");
+    }
+
+    #[test]
+    fn mr_scan_pending_before_items_preserves_stateful_outputs() {
+        init_test("mr_scan_pending_before_items_preserves_stateful_outputs");
+        let input = vec![2i32, 4, -1, 6];
+        let scan_sum = |acc: &mut i32, item: i32| {
+            *acc += item;
+            Some(*acc)
+        };
+
+        let (always_ready_items, always_ready_pending) =
+            collect_scan_to_completion(Scan::new(iter(input.clone()), 0i32, scan_sum));
+        let (pending_items, pending_polls) =
+            collect_scan_to_completion(Scan::new(PendingBeforeEach::new(input), 0i32, scan_sum));
+
+        assert_eq!(pending_items, always_ready_items);
+        assert_eq!(always_ready_pending, 0);
+        assert_eq!(pending_polls, pending_items.len());
+        crate::test_complete!("mr_scan_pending_before_items_preserves_stateful_outputs");
     }
 
     #[test]
