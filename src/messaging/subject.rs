@@ -1845,6 +1845,48 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_patterns_share_a_concrete_witness_subject() {
+        let cases = [
+            ("tenant.orders.*", "tenant.orders.eu", "tenant.orders.eu"),
+            ("tenant.orders.*", "tenant.orders.*", "tenant.orders.eu"),
+            (
+                "tenant.orders.>",
+                "tenant.orders.*.*",
+                "tenant.orders.eu.created",
+            ),
+            (
+                "tenant.*.created",
+                "tenant.orders.*",
+                "tenant.orders.created",
+            ),
+            (">", "tenant.orders.*", "tenant.orders.eu"),
+        ];
+
+        for (left_raw, right_raw, witness_raw) in cases {
+            let left = SubjectPattern::parse(left_raw).expect("left pattern");
+            let right = SubjectPattern::parse(right_raw).expect("right pattern");
+            let witness = Subject::parse(witness_raw).expect("witness subject");
+
+            assert!(
+                left.overlaps(&right),
+                "expected {left_raw} to overlap {right_raw}"
+            );
+            assert!(
+                right.overlaps(&left),
+                "overlap must be symmetric for {right_raw} vs {left_raw}"
+            );
+            assert!(
+                left.matches(&witness),
+                "left pattern {left_raw} did not match witness {witness_raw}"
+            );
+            assert!(
+                right.matches(&witness),
+                "right pattern {right_raw} did not match witness {witness_raw}"
+            );
+        }
+    }
+
+    #[test]
     fn pattern_from_tokens_and_subject_conversion_preserve_canonical_literals() {
         let pattern =
             SubjectPattern::from_tokens(vec![lit("tenant"), SubjectToken::One, lit("reply")])
