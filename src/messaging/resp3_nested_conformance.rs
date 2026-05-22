@@ -135,15 +135,25 @@ mod tests {
         let empty_map = RespValue::Map(vec![]);
         let encoded = empty_map.encode();
         assert_eq!(encoded, b"%0\r\n");
-        let (decoded, _) = RespValue::try_decode(&encoded).unwrap().unwrap();
+        let (decoded, consumed) = RespValue::try_decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, empty_map);
+        assert_eq!(
+            consumed,
+            encoded.len(),
+            "empty map must consume entire input"
+        );
 
         // Empty Set
         let empty_set = RespValue::Set(vec![]);
         let encoded = empty_set.encode();
         assert_eq!(encoded, b"~0\r\n");
-        let (decoded, _) = RespValue::try_decode(&encoded).unwrap().unwrap();
+        let (decoded, consumed) = RespValue::try_decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, empty_set);
+        assert_eq!(
+            consumed,
+            encoded.len(),
+            "empty set must consume entire input"
+        );
 
         // Single element Map
         let single_map = RespValue::Map(vec![(
@@ -151,13 +161,23 @@ mod tests {
             RespValue::Integer(42),
         )]);
         let encoded = single_map.encode();
-        let (decoded, _) = RespValue::try_decode(&encoded).unwrap().unwrap();
+        let (decoded, consumed) = RespValue::try_decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, single_map);
+        assert_eq!(
+            consumed,
+            encoded.len(),
+            "single-element map must consume entire input"
+        );
 
         // Single element Set
         let single_set = RespValue::Set(vec![RespValue::Integer(42)]);
         let encoded = single_set.encode();
-        let (decoded, _) = RespValue::try_decode(&encoded).unwrap().unwrap();
+        let (decoded, consumed) = RespValue::try_decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, single_set);
+        assert_eq!(
+            consumed,
+            encoded.len(),
+            "single-element set must consume entire input"
+        );
     }
 }
