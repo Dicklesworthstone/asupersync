@@ -384,6 +384,13 @@ impl<S: SymbolSink + Unpin> BufferedSink<S> {
 impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
+        if this.capacity == 0 {
+            return this
+                .poll_inner_terminal_error(cx)
+                .map_or(Poll::Ready(Err(SinkError::BufferFull)), |err| {
+                    Poll::Ready(Err(err))
+                });
+        }
         if this.buffer.len() < this.capacity && this.staged_symbols.is_empty() {
             this.poll_inner_terminal_error(cx)
                 .map_or(Poll::Ready(Ok(())), |err| Poll::Ready(Err(err)))
@@ -404,6 +411,10 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
         // even if we have local buffer capacity.
         if let Some(err) = this.poll_inner_terminal_error(cx) {
             return Poll::Ready(Err(err));
+        }
+
+        if this.capacity == 0 {
+            return Poll::Ready(Err(SinkError::BufferFull));
         }
 
         if this.buffer.len() >= this.capacity || !this.staged_symbols.is_empty() {
@@ -1830,6 +1841,43 @@ mod tests {
             buffered.inner.symbols.len()
         );
         crate::test_complete!("test_buffered_sink_defers_send_until_flush");
+    }
+
+    #[test]
+    fn test_buffered_sink_zero_capacity_fails_without_staging() {
+        init_test("test_buffered_sink_zero_capacity_fails_without_staging");
+        let mut buffered = BufferedSink::new(CollectingSink::new(), 0);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let ready = Pin::new(&mut buffered).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(ready, Poll::Ready(Err(SinkError::BufferFull))),
+            "zero-capacity buffered sink reports no local capacity",
+            true,
+            matches!(ready, Poll::Ready(Err(SinkError::BufferFull)))
+        );
+
+        let sent = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(99));
+        crate::assert_with_log!(
+            matches!(sent, Poll::Ready(Err(SinkError::BufferFull))),
+            "zero-capacity buffered sink rejects sends instead of staging forever",
+            true,
+            matches!(sent, Poll::Ready(Err(SinkError::BufferFull)))
+        );
+        crate::assert_with_log!(
+            buffered.buffer.is_empty() && buffered.staged_symbols.is_empty(),
+            "rejected symbol is not retained in undrainable local queues",
+            true,
+            buffered.buffer.is_empty() && buffered.staged_symbols.is_empty()
+        );
+        crate::assert_with_log!(
+            buffered.inner.symbols().is_empty(),
+            "rejected symbol is not delivered to the inner sink",
+            true,
+            buffered.inner.symbols().is_empty()
+        );
+        crate::test_complete!("test_buffered_sink_zero_capacity_fails_without_staging");
     }
 
     #[test]
