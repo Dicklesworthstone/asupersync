@@ -25,6 +25,14 @@ use std::task::{Context, Poll};
 pub const UDP_MIN_SOCKET_BUFFER_BYTES: usize = 8 * 1024;
 /// Largest UDP socket buffer requested by the tuning helper.
 pub const UDP_MAX_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+/// Bytes carried by a UDP rendezvous anti-replay nonce.
+pub const UDP_RENDEZVOUS_NONCE_BYTES: usize = 16;
+/// Maximum peer or signing-key id length accepted by UDP rendezvous metadata.
+pub const UDP_RENDEZVOUS_MAX_ID_BYTES: usize = 128;
+/// Maximum candidate count accepted from one UDP rendezvous exchange.
+pub const UDP_RENDEZVOUS_MAX_CANDIDATES: usize = 16;
+/// Maximum bounded probe-attempt budget accepted from one UDP rendezvous exchange.
+pub const UDP_RENDEZVOUS_MAX_ATTEMPTS: u8 = 32;
 
 /// Platform family backing the UDP socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +146,235 @@ pub struct UdpSocketCapabilities {
     pub observed_recv_buffer_bytes: Option<usize>,
     /// Observed send buffer size, if the platform reports it.
     pub observed_send_buffer_bytes: Option<usize>,
+}
+
+/// UDP rendezvous candidate type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpRendezvousCandidateKind {
+    /// Local LAN or directly bound UDP endpoint.
+    LocalUdp,
+    /// Public UDP endpoint observed by a rendezvous/STUN-like service.
+    ObservedUdp,
+    /// Relay UDP endpoint offered as a fallback candidate.
+    RelayUdp,
+}
+
+/// One signed UDP rendezvous candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpRendezvousCandidate {
+    /// Candidate endpoint.
+    pub endpoint: SocketAddr,
+    /// Candidate source/type.
+    pub kind: UdpRendezvousCandidateKind,
+    /// Higher values are preferred when other path facts are equal.
+    pub priority: u16,
+    /// Candidate expiry in caller-defined monotonic milliseconds.
+    pub expires_at_millis: u64,
+}
+
+impl UdpRendezvousCandidate {
+    /// Construct a UDP rendezvous candidate.
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        endpoint: SocketAddr,
+        kind: UdpRendezvousCandidateKind,
+        priority: u16,
+        expires_at_millis: u64,
+    ) -> Self {
+        Self {
+            endpoint,
+            kind,
+            priority,
+            expires_at_millis,
+        }
+    }
+}
+
+/// Detached signature metadata for a UDP rendezvous candidate set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpRendezvousSignature {
+    /// Signing key or device id.
+    pub key_id: String,
+    /// Detached signature bytes supplied by the caller's identity layer.
+    pub bytes: Vec<u8>,
+}
+
+impl UdpRendezvousSignature {
+    /// Construct detached UDP rendezvous signature metadata.
+    #[inline]
+    #[must_use]
+    pub fn new(key_id: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            key_id: key_id.into(),
+            bytes: bytes.into(),
+        }
+    }
+}
+
+/// Signed UDP rendezvous candidate set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpRendezvousCandidateSet {
+    /// Peer id that owns the candidate set.
+    pub peer_id: String,
+    /// Transfer/session nonce used for replay protection.
+    pub nonce: [u8; UDP_RENDEZVOUS_NONCE_BYTES],
+    /// Offer expiry in caller-defined monotonic milliseconds.
+    pub expires_at_millis: u64,
+    /// Bounded number of coordinated probe attempts permitted by this offer.
+    pub attempt_budget: u8,
+    /// Candidate endpoints.
+    pub candidates: Vec<UdpRendezvousCandidate>,
+    /// Detached signature metadata supplied by the identity layer.
+    pub signature: Option<UdpRendezvousSignature>,
+}
+
+impl UdpRendezvousCandidateSet {
+    /// Construct a UDP rendezvous candidate set.
+    #[inline]
+    #[must_use]
+    pub fn new(
+        peer_id: impl Into<String>,
+        nonce: [u8; UDP_RENDEZVOUS_NONCE_BYTES],
+        expires_at_millis: u64,
+        attempt_budget: u8,
+        candidates: Vec<UdpRendezvousCandidate>,
+        signature: Option<UdpRendezvousSignature>,
+    ) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            nonce,
+            expires_at_millis,
+            attempt_budget,
+            candidates,
+            signature,
+        }
+    }
+}
+
+/// UDP rendezvous candidate validation error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpRendezvousValidationError {
+    /// Peer id is empty.
+    EmptyPeerId,
+    /// Peer id exceeds the bounded metadata length.
+    PeerIdTooLong,
+    /// Peer id contains a byte outside the stable portable id grammar.
+    InvalidPeerId,
+    /// Nonce is all zero bytes.
+    ZeroNonce,
+    /// Nonce was already seen by the caller.
+    ReplayedNonce,
+    /// The whole candidate set is expired.
+    ExpiredOffer,
+    /// No candidates were supplied.
+    EmptyCandidates,
+    /// Candidate count exceeds the bounded quota.
+    TooManyCandidates,
+    /// Attempt budget is zero.
+    EmptyAttemptBudget,
+    /// Attempt budget exceeds the bounded quota.
+    AttemptBudgetTooLarge,
+    /// Candidate endpoint is unspecified or has port zero.
+    InvalidCandidateEndpoint,
+    /// Candidate is already expired.
+    ExpiredCandidate,
+    /// Candidate expiry exceeds the signed offer expiry.
+    CandidateOutlivesOffer,
+    /// Detached signature metadata is missing.
+    MissingSignature,
+    /// Signature key id is empty, too long, or malformed.
+    InvalidSignatureKeyId,
+    /// Signature bytes are empty or all zero.
+    InvalidSignatureBytes,
+}
+
+/// Validate a signed UDP rendezvous candidate set before path racing.
+///
+/// This is intentionally a structural validation boundary. Cryptographic
+/// signature verification belongs to the caller's identity layer; this function
+/// rejects unsigned, expired, replayed, malformed, and unbounded metadata before
+/// any socket probes are scheduled.
+pub fn validate_udp_rendezvous_candidates(
+    set: &UdpRendezvousCandidateSet,
+    now_millis: u64,
+    seen_nonces: &[[u8; UDP_RENDEZVOUS_NONCE_BYTES]],
+) -> Result<(), UdpRendezvousValidationError> {
+    validate_rendezvous_peer_id(&set.peer_id)?;
+    if set.nonce.iter().all(|byte| *byte == 0) {
+        return Err(UdpRendezvousValidationError::ZeroNonce);
+    }
+    if seen_nonces.iter().any(|nonce| nonce == &set.nonce) {
+        return Err(UdpRendezvousValidationError::ReplayedNonce);
+    }
+    if set.expires_at_millis <= now_millis {
+        return Err(UdpRendezvousValidationError::ExpiredOffer);
+    }
+    if set.candidates.is_empty() {
+        return Err(UdpRendezvousValidationError::EmptyCandidates);
+    }
+    if set.candidates.len() > UDP_RENDEZVOUS_MAX_CANDIDATES {
+        return Err(UdpRendezvousValidationError::TooManyCandidates);
+    }
+    if set.attempt_budget == 0 {
+        return Err(UdpRendezvousValidationError::EmptyAttemptBudget);
+    }
+    if set.attempt_budget > UDP_RENDEZVOUS_MAX_ATTEMPTS {
+        return Err(UdpRendezvousValidationError::AttemptBudgetTooLarge);
+    }
+    validate_rendezvous_signature(set.signature.as_ref())?;
+
+    for candidate in &set.candidates {
+        if candidate.endpoint.port() == 0 || candidate.endpoint.ip().is_unspecified() {
+            return Err(UdpRendezvousValidationError::InvalidCandidateEndpoint);
+        }
+        if candidate.expires_at_millis <= now_millis {
+            return Err(UdpRendezvousValidationError::ExpiredCandidate);
+        }
+        if candidate.expires_at_millis > set.expires_at_millis {
+            return Err(UdpRendezvousValidationError::CandidateOutlivesOffer);
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_rendezvous_signature(
+    signature: Option<&UdpRendezvousSignature>,
+) -> Result<(), UdpRendezvousValidationError> {
+    let Some(signature) = signature else {
+        return Err(UdpRendezvousValidationError::MissingSignature);
+    };
+    if !rendezvous_id_is_valid(&signature.key_id) {
+        return Err(UdpRendezvousValidationError::InvalidSignatureKeyId);
+    }
+    if signature.bytes.is_empty() || signature.bytes.iter().all(|byte| *byte == 0) {
+        return Err(UdpRendezvousValidationError::InvalidSignatureBytes);
+    }
+    Ok(())
+}
+
+fn validate_rendezvous_peer_id(peer_id: &str) -> Result<(), UdpRendezvousValidationError> {
+    if peer_id.is_empty() {
+        return Err(UdpRendezvousValidationError::EmptyPeerId);
+    }
+    if peer_id.len() > UDP_RENDEZVOUS_MAX_ID_BYTES {
+        return Err(UdpRendezvousValidationError::PeerIdTooLong);
+    }
+    if !peer_id.bytes().all(rendezvous_id_byte_is_valid) {
+        return Err(UdpRendezvousValidationError::InvalidPeerId);
+    }
+    Ok(())
+}
+
+fn rendezvous_id_is_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= UDP_RENDEZVOUS_MAX_ID_BYTES
+        && id.bytes().all(rendezvous_id_byte_is_valid)
+}
+
+fn rendezvous_id_byte_is_valid(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'@')
 }
 
 /// UDP NAT/path shape inferred from endpoint observations.
@@ -1281,6 +1518,129 @@ mod tests {
 
     fn socket_addr(value: &str) -> SocketAddr {
         value.parse().expect("valid socket addr")
+    }
+
+    fn rendezvous_candidate() -> UdpRendezvousCandidate {
+        UdpRendezvousCandidate::new(
+            socket_addr("198.51.100.20:62000"),
+            UdpRendezvousCandidateKind::ObservedUdp,
+            100,
+            2_000,
+        )
+    }
+
+    fn rendezvous_signature() -> UdpRendezvousSignature {
+        UdpRendezvousSignature::new("device-1", vec![7; 64])
+    }
+
+    fn rendezvous_set() -> UdpRendezvousCandidateSet {
+        UdpRendezvousCandidateSet::new(
+            "peer.alpha",
+            [1; UDP_RENDEZVOUS_NONCE_BYTES],
+            2_000,
+            4,
+            vec![rendezvous_candidate()],
+            Some(rendezvous_signature()),
+        )
+    }
+
+    #[test]
+    fn udp_rendezvous_validation_accepts_signed_bounded_candidates() {
+        let set = rendezvous_set();
+
+        let result = validate_udp_rendezvous_candidates(&set, 1_000, &[]);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn udp_rendezvous_validation_rejects_malformed_peer_id() {
+        let mut set = rendezvous_set();
+        set.peer_id = "peer with spaces".to_string();
+
+        let result = validate_udp_rendezvous_candidates(&set, 1_000, &[]);
+
+        assert_eq!(result, Err(UdpRendezvousValidationError::InvalidPeerId));
+    }
+
+    #[test]
+    fn udp_rendezvous_validation_rejects_replayed_nonce() {
+        let set = rendezvous_set();
+
+        let result = validate_udp_rendezvous_candidates(&set, 1_000, &[set.nonce]);
+
+        assert_eq!(result, Err(UdpRendezvousValidationError::ReplayedNonce));
+    }
+
+    #[test]
+    fn udp_rendezvous_validation_rejects_expired_offer_and_candidate() {
+        let mut expired_offer = rendezvous_set();
+        expired_offer.expires_at_millis = 1_000;
+
+        let offer_result = validate_udp_rendezvous_candidates(&expired_offer, 1_000, &[]);
+
+        assert_eq!(
+            offer_result,
+            Err(UdpRendezvousValidationError::ExpiredOffer)
+        );
+
+        let mut expired_candidate = rendezvous_set();
+        expired_candidate.candidates[0].expires_at_millis = 1_000;
+
+        let candidate_result = validate_udp_rendezvous_candidates(&expired_candidate, 1_000, &[]);
+
+        assert_eq!(
+            candidate_result,
+            Err(UdpRendezvousValidationError::ExpiredCandidate)
+        );
+    }
+
+    #[test]
+    fn udp_rendezvous_validation_rejects_unbounded_candidate_and_attempt_budgets() {
+        let mut too_many_candidates = rendezvous_set();
+        too_many_candidates.candidates =
+            vec![rendezvous_candidate(); UDP_RENDEZVOUS_MAX_CANDIDATES + 1];
+
+        let candidates_result =
+            validate_udp_rendezvous_candidates(&too_many_candidates, 1_000, &[]);
+
+        assert_eq!(
+            candidates_result,
+            Err(UdpRendezvousValidationError::TooManyCandidates)
+        );
+
+        let mut too_many_attempts = rendezvous_set();
+        too_many_attempts.attempt_budget = UDP_RENDEZVOUS_MAX_ATTEMPTS + 1;
+
+        let attempts_result = validate_udp_rendezvous_candidates(&too_many_attempts, 1_000, &[]);
+
+        assert_eq!(
+            attempts_result,
+            Err(UdpRendezvousValidationError::AttemptBudgetTooLarge)
+        );
+    }
+
+    #[test]
+    fn udp_rendezvous_validation_rejects_unsigned_or_zero_signature() {
+        let mut unsigned = rendezvous_set();
+        unsigned.signature = None;
+
+        let unsigned_result = validate_udp_rendezvous_candidates(&unsigned, 1_000, &[]);
+
+        assert_eq!(
+            unsigned_result,
+            Err(UdpRendezvousValidationError::MissingSignature)
+        );
+
+        let mut zero_signature = rendezvous_set();
+        zero_signature.signature = Some(UdpRendezvousSignature::new("device-1", vec![0; 64]));
+
+        let zero_result = validate_udp_rendezvous_candidates(&zero_signature, 1_000, &[]);
+
+        assert_eq!(
+            zero_result,
+            Err(UdpRendezvousValidationError::InvalidSignatureBytes)
+        );
     }
 
     #[test]
