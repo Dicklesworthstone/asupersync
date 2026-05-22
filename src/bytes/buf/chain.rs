@@ -148,6 +148,12 @@ mod tests {
         }
     }
 
+    fn drain_to_vec(mut buf: impl Buf) -> Vec<u8> {
+        let mut out = vec![0u8; buf.remaining()];
+        buf.copy_to_slice(&mut out);
+        out
+    }
+
     #[test]
     fn test_chain_remaining() {
         init_test("test_chain_remaining");
@@ -329,6 +335,58 @@ mod tests {
             prop_assert_eq!(observed.as_slice(), expected.as_slice());
             prop_assert_eq!(left_nested.remaining(), 0);
             prop_assert_eq!(right_nested.remaining(), 0);
+        }
+
+        #[test]
+        fn chain_metamorphic_segmented_advance_matches_single_advance(
+            a in prop::collection::vec(any::<u8>(), 0..64),
+            b in prop::collection::vec(any::<u8>(), 0..64),
+            advance_steps in prop::collection::vec(0usize..96, 0..64),
+        ) {
+            let mut expected = Vec::with_capacity(a.len() + b.len());
+            expected.extend_from_slice(&a);
+            expected.extend_from_slice(&b);
+
+            let mut segmented = Chain::new(a.as_slice(), b.as_slice());
+            let mut total_advanced = 0usize;
+            for raw_step in advance_steps {
+                if !segmented.has_remaining() {
+                    break;
+                }
+
+                let step = raw_step % (segmented.remaining() + 1);
+                segmented.advance(step);
+                total_advanced += step;
+                prop_assert_eq!(
+                    segmented.remaining(),
+                    expected.len() - total_advanced,
+                    "segmented advances must reduce remaining by exactly the advanced count",
+                );
+            }
+
+            let mut single = Chain::new(a.as_slice(), b.as_slice());
+            single.advance(total_advanced);
+
+            prop_assert_eq!(
+                segmented.remaining(),
+                single.remaining(),
+                "many advances and one equivalent advance must leave the same remaining length",
+            );
+            prop_assert_eq!(
+                segmented.chunk(),
+                single.chunk(),
+                "many advances and one equivalent advance must expose the same next chunk",
+            );
+            prop_assert_eq!(
+                drain_to_vec(segmented).as_slice(),
+                &expected[total_advanced..],
+                "segmented advances must leave the expected concatenated suffix",
+            );
+            prop_assert_eq!(
+                drain_to_vec(single).as_slice(),
+                &expected[total_advanced..],
+                "single advance must leave the expected concatenated suffix",
+            );
         }
     }
 
