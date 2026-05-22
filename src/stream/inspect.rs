@@ -86,6 +86,8 @@ mod tests {
     )]
     use super::*;
     use crate::stream::iter;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
@@ -164,6 +166,99 @@ mod tests {
         let mut stream = Inspect::new(iter(vec!['a', 'b', 'c']), |c: &char| order.push(*c));
         let _ = collect_inspect(&mut stream);
         assert_eq!(order, vec!['a', 'b', 'c']);
+    }
+
+    #[test]
+    fn mr_inspect_is_identity_for_items() {
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 3 - 11).collect();
+            let mut stream = Inspect::new(iter(values.clone()), |_: &i32| {});
+
+            assert_eq!(
+                collect_inspect(&mut stream),
+                values,
+                "inspect must yield the original item sequence for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_inspect_observes_each_item_once_in_order() {
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 5 - 17).collect();
+            let seen = Rc::new(RefCell::new(Vec::new()));
+            let seen_by_closure = Rc::clone(&seen);
+            let mut stream = Inspect::new(iter(values.clone()), move |item: &i32| {
+                seen_by_closure.borrow_mut().push(*item);
+            });
+
+            assert_eq!(
+                collect_inspect(&mut stream),
+                values,
+                "inspect output must stay unchanged for len {len}",
+            );
+            assert_eq!(
+                seen.borrow().as_slice(),
+                values.as_slice(),
+                "inspect side effects must observe each item once in order for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_composed_inspect_observers_see_same_sequence() {
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 13).collect();
+            let first_seen = Rc::new(RefCell::new(Vec::new()));
+            let second_seen = Rc::new(RefCell::new(Vec::new()));
+            let first_by_closure = Rc::clone(&first_seen);
+            let second_by_closure = Rc::clone(&second_seen);
+            let mut stream = Inspect::new(
+                Inspect::new(iter(values.clone()), move |item: &i32| {
+                    first_by_closure.borrow_mut().push(*item);
+                }),
+                move |item: &i32| {
+                    second_by_closure.borrow_mut().push(*item);
+                },
+            );
+
+            assert_eq!(
+                collect_inspect(&mut stream),
+                values,
+                "composed inspect output must stay unchanged for len {len}",
+            );
+            assert_eq!(
+                first_seen.borrow().as_slice(),
+                values.as_slice(),
+                "first inspect observer must see each item for len {len}",
+            );
+            assert_eq!(
+                second_seen.borrow().as_slice(),
+                values.as_slice(),
+                "second inspect observer must see each item for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_inspect_preserves_size_hint_until_exhaustion() {
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 + 7).collect();
+            let mut stream = Inspect::new(iter(values), |_: &i32| {});
+            assert_eq!(
+                stream.size_hint(),
+                (len, Some(len)),
+                "inspect must preserve upstream size hint before polling for len {len}",
+            );
+
+            let collected = collect_inspect(&mut stream);
+            assert_eq!(collected.len(), len);
+            assert_eq!(
+                stream.size_hint(),
+                (0, Some(0)),
+                "inspect size hint must be exhausted after collection for len {len}",
+            );
+        }
     }
 
     #[test]
