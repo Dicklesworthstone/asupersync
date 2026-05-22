@@ -524,6 +524,44 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_for_log_is_idempotent_after_replacement_and_truncation() {
+        let cases = [
+            "clean peer error",
+            "line1\r\nline2\tfield",
+            "nul\x00bell\x07escape\x1bdel\x7f",
+            "A very long ASCII peer error: ",
+            "unicode peer error ✓ 漢字",
+        ];
+
+        for raw in cases {
+            let long_input;
+            let input = if raw.starts_with('A') {
+                long_input = raw.repeat(20);
+                long_input.as_str()
+            } else {
+                raw
+            };
+            let once = sanitize_for_log(input);
+            let twice = sanitize_for_log(&once);
+
+            assert_eq!(twice, once, "sanitization must be idempotent for {raw:?}");
+            assert!(
+                !twice.contains('\r'),
+                "sanitized output must not contain CR"
+            );
+            assert!(
+                !twice.contains('\n'),
+                "sanitized output must not contain LF"
+            );
+            assert!(
+                !twice.contains('\t'),
+                "sanitized output must not contain tab"
+            );
+            assert!(!twice.chars().any(|ch| ch < ' ' || ch == '\u{7f}'));
+        }
+    }
+
+    #[test]
     fn display_handshake_with_log_injection_attempt_sanitized() {
         // Peer-controlled handshake error containing a forged log line
         // splice attempt. Post-fix Display must NOT contain the
