@@ -225,9 +225,81 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct PendingOnceThenItems<T> {
+        items: Vec<T>,
+        index: usize,
+        pending_first: bool,
+    }
+
+    impl<T> PendingOnceThenItems<T> {
+        fn new(items: Vec<T>) -> Self {
+            Self {
+                items,
+                index: 0,
+                pending_first: true,
+            }
+        }
+    }
+
+    impl<T: Clone + Unpin> Stream for PendingOnceThenItems<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.pending_first {
+                self.pending_first = false;
+                return Poll::Pending;
+            }
+            if self.index >= self.items.len() {
+                return Poll::Ready(None);
+            }
+
+            let item = self.items[self.index].clone();
+            self.index += 1;
+            Poll::Ready(Some(item))
+        }
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn poll_unit_future_to_completion<F>(future: &mut F)
+    where
+        F: std::future::Future<Output = ()> + Unpin,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            match Pin::new(&mut *future).poll(&mut cx) {
+                Poll::Ready(()) => return,
+                Poll::Pending => {}
+            }
+        }
+    }
+
+    fn for_each_side_effects(input: Vec<i32>) -> Vec<i32> {
+        let results = RefCell::new(Vec::new());
+        let mut future = ForEach::new(iter(input), |item| {
+            results.borrow_mut().push(item);
+        });
+        poll_unit_future_to_completion(&mut future);
+        drop(future);
+        results.into_inner()
+    }
+
+    fn for_each_async_side_effects(input: Vec<i32>) -> Vec<i32> {
+        let results = RefCell::new(Vec::new());
+        let mut future = ForEachAsync::new(iter(input), |item| {
+            let results = &results;
+            Box::pin(async move {
+                results.borrow_mut().push(item);
+            })
+        });
+        poll_unit_future_to_completion(&mut future);
+        drop(future);
+        results.into_inner()
     }
 
     #[test]
@@ -522,6 +594,92 @@ mod tests {
         );
         crate::test_complete!(
             "for_each_async_repoll_after_completion_fails_closed_without_repolling_upstream"
+        );
+    }
+
+    #[test]
+    fn mr_for_each_partitioned_inputs_match_unsplit_side_effects() {
+        init_test("mr_for_each_partitioned_inputs_match_unsplit_side_effects");
+        let input = vec![-3, -1, 0, 1, 2, 5, 8];
+        let expected = for_each_side_effects(input.clone());
+
+        for split in 0..=input.len() {
+            let mut partitioned = for_each_side_effects(input[..split].to_vec());
+            partitioned.extend(for_each_side_effects(input[split..].to_vec()));
+            crate::assert_with_log!(
+                partitioned == expected,
+                format!("split at {split}"),
+                expected.clone(),
+                partitioned
+            );
+        }
+        crate::test_complete!("mr_for_each_partitioned_inputs_match_unsplit_side_effects");
+    }
+
+    #[test]
+    fn mr_for_each_async_immediate_matches_sync_side_effects() {
+        init_test("mr_for_each_async_immediate_matches_sync_side_effects");
+        for input in [
+            Vec::new(),
+            vec![1],
+            vec![1, 1, 2, 3, 5, 8],
+            vec![-10, 0, 10, 20],
+        ] {
+            let sync = for_each_side_effects(input.clone());
+            let async_immediate = for_each_async_side_effects(input.clone());
+            crate::assert_with_log!(
+                async_immediate == sync,
+                format!("input {input:?}"),
+                sync,
+                async_immediate
+            );
+        }
+        crate::test_complete!("mr_for_each_async_immediate_matches_sync_side_effects");
+    }
+
+    #[test]
+    fn mr_for_each_pending_cancellation_before_first_item_has_no_side_effects() {
+        init_test("mr_for_each_pending_cancellation_before_first_item_has_no_side_effects");
+        let input = vec![4, 8, 15, 16, 23, 42];
+        let results = RefCell::new(Vec::new());
+        let mut future = ForEach::new(PendingOnceThenItems::new(input.clone()), |item| {
+            results.borrow_mut().push(item);
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first_poll = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first_poll, Poll::Pending),
+            "first poll is pending",
+            "Poll::Pending",
+            first_poll
+        );
+        crate::assert_with_log!(
+            results.borrow().is_empty(),
+            "no side effects before first item is ready",
+            true,
+            results.borrow().is_empty()
+        );
+
+        drop(future);
+        let cancelled_effects = results.into_inner();
+        crate::assert_with_log!(
+            cancelled_effects.is_empty(),
+            "cancellation before first ready item has no effects",
+            Vec::<i32>::new(),
+            cancelled_effects
+        );
+
+        let fresh = for_each_side_effects(input.clone());
+        crate::assert_with_log!(
+            fresh == input,
+            "fresh equivalent run still observes all items",
+            input,
+            fresh
+        );
+        crate::test_complete!(
+            "mr_for_each_pending_cancellation_before_first_item_has_no_side_effects"
         );
     }
 }
