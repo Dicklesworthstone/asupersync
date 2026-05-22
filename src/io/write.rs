@@ -373,6 +373,121 @@ mod tests {
         crate::test_complete!("flush_and_shutdown_vec");
     }
 
+    #[derive(Default)]
+    struct DefaultVectoredWriter {
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl AsyncWrite for DefaultVectoredWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            this.writes.push(buf.to_vec());
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn default_write_vectored_uses_first_non_empty_buffer() {
+        init_test("default_write_vectored_uses_first_non_empty_buffer");
+        let mut writer = DefaultVectoredWriter::default();
+        let bufs = [
+            IoSlice::new(b""),
+            IoSlice::new(b"alpha"),
+            IoSlice::new(b"omega"),
+        ];
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut writer).poll_write_vectored(&mut cx, &bufs);
+        let wrote_first = matches!(poll, Poll::Ready(Ok(5)));
+
+        crate::assert_with_log!(
+            wrote_first,
+            "first non-empty buffer length",
+            true,
+            wrote_first
+        );
+        let expected_writes = vec![b"alpha".to_vec()];
+        crate::assert_with_log!(
+            writer.writes == expected_writes,
+            "only first non-empty buffer written",
+            expected_writes,
+            writer.writes.clone()
+        );
+        crate::assert_with_log!(
+            !writer.is_write_vectored(),
+            "default vectored capability flag",
+            false,
+            writer.is_write_vectored()
+        );
+        crate::test_complete!("default_write_vectored_uses_first_non_empty_buffer");
+    }
+
+    #[test]
+    fn default_write_vectored_empty_buffers_make_no_write_call() {
+        init_test("default_write_vectored_empty_buffers_make_no_write_call");
+        let mut writer = DefaultVectoredWriter::default();
+        let bufs = [IoSlice::new(b""), IoSlice::new(b"")];
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut writer).poll_write_vectored(&mut cx, &bufs);
+        let returned_zero = matches!(poll, Poll::Ready(Ok(0)));
+
+        crate::assert_with_log!(
+            returned_zero,
+            "empty vectored write returns zero",
+            true,
+            returned_zero
+        );
+        crate::assert_with_log!(
+            writer.writes.is_empty(),
+            "no scalar write for empty buffers",
+            true,
+            writer.writes.is_empty()
+        );
+        crate::test_complete!("default_write_vectored_empty_buffers_make_no_write_call");
+    }
+
+    #[test]
+    fn vec_write_vectored_appends_all_buffers_and_reports_total() {
+        init_test("vec_write_vectored_appends_all_buffers_and_reports_total");
+        let mut output = Vec::new();
+        let bufs = [IoSlice::new(b"ab"), IoSlice::new(b""), IoSlice::new(b"cd")];
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut output).poll_write_vectored(&mut cx, &bufs);
+        let wrote_four = matches!(poll, Poll::Ready(Ok(4)));
+
+        crate::assert_with_log!(wrote_four, "vectored byte count", true, wrote_four);
+        crate::assert_with_log!(
+            output == b"abcd",
+            "vectored output",
+            b"abcd",
+            output.as_slice()
+        );
+        crate::assert_with_log!(
+            output.is_write_vectored(),
+            "vec advertises vectored writes",
+            true,
+            output.is_write_vectored()
+        );
+        crate::test_complete!("vec_write_vectored_appends_all_buffers_and_reports_total");
+    }
+
     #[test]
     fn write_via_ref() {
         init_test("write_via_ref");
