@@ -95,6 +95,27 @@ mod tests {
         items
     }
 
+    #[derive(Debug)]
+    struct EndsThenPanics {
+        yielded: bool,
+        ended: bool,
+    }
+
+    impl Stream for EndsThenPanics {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(!self.ended, "inner stream polled after termination");
+            if self.yielded {
+                self.ended = true;
+                return Poll::Ready(None);
+            }
+
+            self.yielded = true;
+            Poll::Ready(Some(7))
+        }
+    }
+
     #[test]
     fn test_fuse_yields_all_items() {
         let mut fused = Fuse::new(iter(vec![1, 2, 3]));
@@ -121,6 +142,30 @@ mod tests {
             Pin::new(&mut fused).poll_next(&mut cx),
             Poll::Ready(None)
         ));
+        assert!(matches!(
+            Pin::new(&mut fused).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn test_fuse_does_not_repoll_inner_after_termination() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fused = Fuse::new(EndsThenPanics {
+            yielded: false,
+            ended: false,
+        });
+
+        assert!(matches!(
+            Pin::new(&mut fused).poll_next(&mut cx),
+            Poll::Ready(Some(7))
+        ));
+        assert!(matches!(
+            Pin::new(&mut fused).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        assert!(fused.get_ref().is_none());
         assert!(matches!(
             Pin::new(&mut fused).poll_next(&mut cx),
             Poll::Ready(None)
