@@ -136,4 +136,55 @@ mod tests {
         crate::assert_with_log!(len == 3, "filled len", 3, len);
         crate::test_complete!("read_buf_advance_rejects_oversized_step_without_wrapping");
     }
+
+    #[test]
+    fn read_buf_put_slice_rejects_overflow_without_advancing() {
+        init_test("read_buf_put_slice_rejects_overflow_without_advancing");
+        let mut buf = [0u8; 4];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        read_buf.put_slice(&[1, 2]);
+
+        let panic = panic::catch_unwind(AssertUnwindSafe(|| {
+            read_buf.put_slice(&[3, 4, 5]);
+        }))
+        .expect_err("put_slice must fail closed when source exceeds remaining capacity");
+        let message = panic_message(panic.as_ref());
+        crate::assert_with_log!(
+            message.contains("ReadBuf overflow"),
+            "panic message",
+            true,
+            message.contains("ReadBuf overflow")
+        );
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == [1, 2], "filled preserved", &[1, 2], filled);
+        let remaining = read_buf.remaining();
+        crate::assert_with_log!(remaining == 2, "remaining preserved", 2, remaining);
+        crate::test_complete!("read_buf_put_slice_rejects_overflow_without_advancing");
+    }
+
+    #[test]
+    fn read_buf_unfilled_tracks_remaining_tail() {
+        init_test("read_buf_unfilled_tracks_remaining_tail");
+        let mut buf = [0u8; 6];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        read_buf.put_slice(&[1, 2]);
+
+        {
+            let unfilled = read_buf.unfilled();
+            crate::assert_with_log!(unfilled.len() == 4, "unfilled len", 4, unfilled.len());
+            unfilled[0] = 9;
+        }
+
+        read_buf.advance(1);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(
+            filled == [1, 2, 9],
+            "advanced unfilled byte",
+            &[1, 2, 9],
+            filled
+        );
+        let remaining = read_buf.remaining();
+        crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
+        crate::test_complete!("read_buf_unfilled_tracks_remaining_tail");
+    }
 }
