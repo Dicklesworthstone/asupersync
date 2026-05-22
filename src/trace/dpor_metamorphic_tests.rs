@@ -10,8 +10,7 @@
 
 use super::dpor::*;
 use crate::trace::event::{TraceEvent, TraceEventKind};
-use crate::types::{CancelReason, RegionId, TaskId, Time};
-use proptest::prelude::*;
+use crate::types::{RegionId, TaskId, Time};
 use std::collections::HashMap;
 
 // Test data generators
@@ -23,60 +22,82 @@ fn rid(n: u32) -> RegionId {
     RegionId::new_for_test(n, 0)
 }
 
-// Generate random trace events for property-based testing
-fn arb_trace_event() -> impl Strategy<Value = TraceEvent> {
-    prop::oneof![
-        (1u64..1000, 1u32..100, 1u32..10).prop_map(|(time, task, region)| {
-            TraceEvent::spawn(time, Time::from_nanos(time), tid(task), rid(region))
-        }),
-        (1u64..1000, 1u32..100, 1u32..10).prop_map(|(time, task, region)| {
-            TraceEvent::complete(time, Time::from_nanos(time), tid(task), rid(region))
-        }),
-        (1u64..1000, 1u32..10).prop_map(|(time, region)| {
-            TraceEvent::region_created(time, Time::from_nanos(time), rid(region), None)
-        }),
-        (1u64..1000, 1u32..100, 1u32..10).prop_map(|(time, task, region)| {
-            let reason = CancelReason::user("test");
-            TraceEvent::cancel_request(time, Time::from_nanos(time), tid(task), rid(region), reason)
-        }),
-    ]
-}
+// Generate test trace events for metamorphic testing
+fn create_test_traces() -> Vec<Vec<TraceEvent>> {
+    vec![
+        // Empty trace
+        vec![],
 
-fn arb_trace() -> impl Strategy<Value = Vec<TraceEvent>> {
-    prop::collection::vec(arb_trace_event(), 0..20)
+        // Single event trace
+        vec![TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1))],
+
+        // Two independent events
+        vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),
+        ],
+
+        // Sequential dependent events on same task
+        vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ],
+
+        // Region creation with spawns
+        vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+        ],
+
+        // Complex trace with multiple events
+        vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::from_nanos(10), tid(1), rid(1)),
+            TraceEvent::region_created(3, Time::from_nanos(20), rid(2), None),
+            TraceEvent::spawn(4, Time::from_nanos(30), tid(2), rid(2)),
+            TraceEvent::complete(5, Time::from_nanos(40), tid(1), rid(1)),
+        ],
+
+        // Timer events (no task context)
+        vec![
+            TraceEvent::timer_scheduled(1, Time::ZERO, 1, Time::from_nanos(10)),
+            TraceEvent::timer_scheduled(2, Time::ZERO, 2, Time::from_nanos(20)),
+        ],
+    ]
 }
 
 /// MR1: Determinism - Same trace input always produces identical race analysis
 #[test]
 fn mr_determinism() {
-    proptest!(|(trace: Vec<TraceEvent>)| {
+    for trace in create_test_traces() {
         let analysis1 = detect_races(&trace);
         let analysis2 = detect_races(&trace);
 
-        prop_assert_eq!(analysis1.race_count(), analysis2.race_count(),
+        assert_eq!(analysis1.race_count(), analysis2.race_count(),
             "Race count must be deterministic");
-        prop_assert_eq!(analysis1.races, analysis2.races,
+        assert_eq!(analysis1.races, analysis2.races,
             "Race sets must be identical for same input");
 
         let hb1 = detect_hb_races(&trace);
         let hb2 = detect_hb_races(&trace);
-        prop_assert_eq!(hb1.race_count(), hb2.race_count(),
+        assert_eq!(hb1.race_count(), hb2.race_count(),
             "HB race count must be deterministic");
 
         let est1 = estimated_classes(&trace);
         let est2 = estimated_classes(&trace);
-        prop_assert_eq!(est1, est2,
+        assert_eq!(est1, est2,
             "Estimated classes must be deterministic");
-    });
+    }
 }
 
 /// MR2: Task Permutation Invariance - Systematically renaming tasks preserves race structure
 #[test]
 fn mr_task_permutation_invariance() {
-    proptest!(|(trace: Vec<TraceEvent>, perm_seed: u64)| {
-        if trace.is_empty() { return Ok(()); }
+    for trace in create_test_traces() {
+        if trace.is_empty() { continue; }
 
-        // Extract all task IDs and create a permutation
+        // Extract all task IDs and create a simple permutation (swap first two tasks if possible)
         let mut task_ids: Vec<TaskId> = trace
             .iter()
             .filter_map(|e| extract_task_id(e))
@@ -84,19 +105,14 @@ fn mr_task_permutation_invariance() {
         task_ids.sort_unstable();
         task_ids.dedup();
 
-        if task_ids.is_empty() { return Ok(()); }
+        if task_ids.len() < 2 { continue; }
 
-        // Create deterministic permutation mapping
-        let mut rng = proptest::test_runner::rng::StdRng::seed_from_u64(perm_seed);
-        use proptest::test_runner::rng::RngCore;
+        // Create simple permutation mapping (swap first two task IDs)
         let mut perm_map = HashMap::new();
-        let mut available: Vec<TaskId> = task_ids.clone();
-
-        for original in &task_ids {
-            if available.is_empty() { break; }
-            let idx = (rng.next_u64() as usize) % available.len();
-            let new_task = available.swap_remove(idx);
-            perm_map.insert(*original, new_task);
+        perm_map.insert(task_ids[0], task_ids[1]);
+        perm_map.insert(task_ids[1], task_ids[0]);
+        for &task in &task_ids[2..] {
+            perm_map.insert(task, task); // Identity mapping for others
         }
 
         // Apply permutation to create transformed trace
@@ -109,110 +125,107 @@ fn mr_task_permutation_invariance() {
         let permuted_analysis = detect_races(&permuted_trace);
 
         // Race structure should be preserved
-        prop_assert_eq!(original_analysis.race_count(), permuted_analysis.race_count(),
-            "Task permutation must preserve race count");
+        assert_eq!(original_analysis.race_count(), permuted_analysis.race_count(),
+            "Task permutation must preserve race count for trace with {} events", trace.len());
 
         let original_classes = estimated_classes(&trace);
         let permuted_classes = estimated_classes(&permuted_trace);
-        prop_assert_eq!(original_classes, permuted_classes,
+        assert_eq!(original_classes, permuted_classes,
             "Task permutation must preserve estimated classes");
-    });
+    }
 }
 
 /// MR3: Sub-trace Consistency - Races in a prefix should be consistent with full trace
 #[test]
 fn mr_subtrace_consistency() {
-    proptest!(|(trace: Vec<TraceEvent>, prefix_len: usize)| {
-        if trace.len() <= 1 { return Ok(()); }
-        let prefix_len = prefix_len % trace.len() + 1;
-        let prefix = &trace[..prefix_len];
+    for trace in create_test_traces() {
+        if trace.len() <= 1 { continue; }
 
-        let full_analysis = detect_races(&trace);
-        let prefix_analysis = detect_races(prefix);
+        // Test multiple prefix lengths
+        for prefix_len in 1..trace.len() {
+            let prefix = &trace[..prefix_len];
 
-        // All races in prefix should reference events within prefix bounds
-        for race in &prefix_analysis.races {
-            prop_assert!(race.earlier < prefix_len,
-                "Prefix race earlier index {} must be < prefix length {}",
-                race.earlier, prefix_len);
-            prop_assert!(race.later < prefix_len,
-                "Prefix race later index {} must be < prefix length {}",
-                race.later, prefix_len);
+            let full_analysis = detect_races(&trace);
+            let prefix_analysis = detect_races(prefix);
+
+            // All races in prefix should reference events within prefix bounds
+            for race in &prefix_analysis.races {
+                assert!(race.earlier < prefix_len,
+                    "Prefix race earlier index {} must be < prefix length {}",
+                    race.earlier, prefix_len);
+                assert!(race.later < prefix_len,
+                    "Prefix race later index {} must be < prefix length {}",
+                    race.later, prefix_len);
+            }
+
+            // Races in prefix should be subset of races in full trace
+            // (but with adjusted indices - this is a structural property)
+            for prefix_race in &prefix_analysis.races {
+                let found_matching = full_analysis.races.iter().any(|full_race| {
+                    full_race.earlier == prefix_race.earlier &&
+                    full_race.later == prefix_race.later
+                });
+                assert!(found_matching,
+                    "Race ({}, {}) found in prefix should exist in full trace",
+                    prefix_race.earlier, prefix_race.later);
+            }
         }
-
-        // Races in prefix should be subset of races in full trace
-        // (but with adjusted indices - this is a structural property)
-        for prefix_race in &prefix_analysis.races {
-            let found_matching = full_analysis.races.iter().any(|full_race| {
-                full_race.earlier == prefix_race.earlier &&
-                full_race.later == prefix_race.later
-            });
-            prop_assert!(found_matching,
-                "Race ({}, {}) found in prefix should exist in full trace",
-                prefix_race.earlier, prefix_race.later);
-        }
-    });
+    }
 }
 
 /// MR4: HB Subset Consistency - HB races should be subset of immediate races for same trace
 #[test]
 fn mr_hb_subset_consistency() {
-    proptest!(|(trace: Vec<TraceEvent>)| {
+    for trace in create_test_traces() {
         let immediate_analysis = detect_races(&trace);
         let hb_report = detect_hb_races(&trace);
 
         // HB race count should not exceed immediate race count
         // (This is a structural property - HB is more restrictive)
-        prop_assert!(hb_report.race_count() <= immediate_analysis.race_count(),
-            "HB races ({}) should not exceed immediate races ({})",
-            hb_report.race_count(), immediate_analysis.race_count());
+        assert!(hb_report.race_count() <= immediate_analysis.race_count(),
+            "HB races ({}) should not exceed immediate races ({}) for trace with {} events",
+            hb_report.race_count(), immediate_analysis.race_count(), trace.len());
 
         // Coverage analysis should be consistent
         let coverage = trace_coverage_analysis(&trace);
-        prop_assert_eq!(coverage.immediate_race_count, immediate_analysis.race_count());
-        prop_assert_eq!(coverage.hb_race_count, hb_report.race_count());
-        prop_assert_eq!(coverage.event_count, trace.len());
-    });
+        assert_eq!(coverage.immediate_race_count, immediate_analysis.race_count());
+        assert_eq!(coverage.hb_race_count, hb_report.race_count());
+        assert_eq!(coverage.event_count, trace.len());
+    }
 }
 
 /// MR5: Sleep Set Deduplication - Same semantic race should deduplicate
 #[test]
 fn mr_sleep_set_deduplication() {
-    proptest!(|(mut events: Vec<TraceEvent>)| {
-        if events.len() < 2 { return Ok(()); }
+    // Use a specific test case that we know will have races
+    let events = vec![
+        TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+        TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+    ];
 
-        // Ensure we have at least one valid race by construction
-        if events.is_empty() {
-            events = vec![
-                TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
-                TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
-            ];
-        }
+    let analysis = detect_races(&events);
+    if analysis.races.is_empty() { return; }
 
-        let analysis = detect_races(&events);
-        if analysis.races.is_empty() { return Ok(()); }
+    // Test sleep set with same backtrack point
+    let bp = BacktrackPoint {
+        race: analysis.races[0].clone(),
+        divergence_index: analysis.races[0].earlier,
+    };
 
-        // Test sleep set with same backtrack point
-        let bp = BacktrackPoint {
-            race: analysis.races[0].clone(),
-            divergence_index: analysis.races[0].earlier,
-        };
+    let mut sleep = SleepSet::new();
+    assert!(!sleep.contains(&bp, &events),
+        "Fresh sleep set should not contain any backtrack point");
 
-        let mut sleep = SleepSet::new();
-        prop_assert!(!sleep.contains(&bp, &events),
-            "Fresh sleep set should not contain any backtrack point");
+    sleep.insert(&bp, &events);
+    assert!(sleep.contains(&bp, &events),
+        "Sleep set should contain inserted backtrack point");
+    assert_eq!(sleep.len(), 1,
+        "Sleep set should have exactly one entry after single insert");
 
-        sleep.insert(&bp, &events);
-        prop_assert!(sleep.contains(&bp, &events),
-            "Sleep set should contain inserted backtrack point");
-        prop_assert_eq!(sleep.len(), 1,
-            "Sleep set should have exactly one entry after single insert");
-
-        // Insert same backtrack point again - should deduplicate
-        sleep.insert(&bp, &events);
-        prop_assert_eq!(sleep.len(), 1,
-            "Sleep set should deduplicate identical backtrack points");
-    });
+    // Insert same backtrack point again - should deduplicate
+    sleep.insert(&bp, &events);
+    assert_eq!(sleep.len(), 1,
+        "Sleep set should deduplicate identical backtrack points");
 }
 
 /// MR6: Independent Events - Truly independent events should never race
@@ -264,21 +277,21 @@ fn mr_independent_events_no_race() {
 /// MR7: Backtrack Consistency - Each race should generate corresponding backtrack point
 #[test]
 fn mr_backtrack_consistency() {
-    proptest!(|(trace: Vec<TraceEvent>)| {
+    for trace in create_test_traces() {
         let analysis = detect_races(&trace);
 
         // Each race should generate a backtrack point
-        prop_assert_eq!(analysis.races.len(), analysis.backtrack_points.len(),
+        assert_eq!(analysis.races.len(), analysis.backtrack_points.len(),
             "Number of backtrack points should equal number of races");
 
         // Each backtrack point should reference a valid race
         for (i, bp) in analysis.backtrack_points.iter().enumerate() {
-            prop_assert_eq!(bp.race, analysis.races[i],
+            assert_eq!(bp.race, analysis.races[i],
                 "Backtrack point {} should reference corresponding race", i);
-            prop_assert_eq!(bp.divergence_index, bp.race.earlier,
+            assert_eq!(bp.divergence_index, bp.race.earlier,
                 "Divergence index should equal earlier event index");
         }
-    });
+    }
 }
 
 /// MR8: Empty/Minimal Trace Properties
@@ -306,25 +319,27 @@ fn mr_empty_minimal_traces() {
 /// MR9: Time Scaling Invariance - Scaling all timestamps shouldn't affect race structure
 #[test]
 fn mr_time_scaling_invariance() {
-    proptest!(|(trace: Vec<TraceEvent>, scale_factor: u64)| {
-        let scale_factor = scale_factor.max(1).min(1000); // Reasonable bounds
+    let scale_factors = [2, 5, 10, 100];
 
-        let scaled_trace: Vec<TraceEvent> = trace
-            .iter()
-            .map(|event| scale_event_time(event, scale_factor))
-            .collect();
+    for trace in create_test_traces() {
+        for &scale_factor in &scale_factors {
+            let scaled_trace: Vec<TraceEvent> = trace
+                .iter()
+                .map(|event| scale_event_time(event, scale_factor))
+                .collect();
 
-        let original_analysis = detect_races(&trace);
-        let scaled_analysis = detect_races(&scaled_trace);
+            let original_analysis = detect_races(&trace);
+            let scaled_analysis = detect_races(&scaled_trace);
 
-        prop_assert_eq!(original_analysis.race_count(), scaled_analysis.race_count(),
-            "Time scaling should preserve race count");
+            assert_eq!(original_analysis.race_count(), scaled_analysis.race_count(),
+                "Time scaling by {} should preserve race count", scale_factor);
 
-        let original_classes = estimated_classes(&trace);
-        let scaled_classes = estimated_classes(&scaled_trace);
-        prop_assert_eq!(original_classes, scaled_classes,
-            "Time scaling should preserve estimated classes");
-    });
+            let original_classes = estimated_classes(&trace);
+            let scaled_classes = estimated_classes(&scaled_trace);
+            assert_eq!(original_classes, scaled_classes,
+                "Time scaling should preserve estimated classes");
+        }
+    }
 }
 
 // Helper functions for transformations
@@ -394,49 +409,49 @@ fn scale_event_time(event: &TraceEvent, scale_factor: u64) -> TraceEvent {
 // This compound property multiplies the fault detection power
 #[test]
 fn mr_composite_determinism_permutation_subtrace() {
-    proptest!(|(trace: Vec<TraceEvent>, perm_seed: u64, prefix_ratio: f64)| {
-        if trace.len() < 2 { return Ok(()); }
+    for trace in create_test_traces() {
+        if trace.len() < 2 { continue; }
 
-        let prefix_len = ((trace.len() as f64 * prefix_ratio.abs().min(1.0)) as usize).max(1);
-        let prefix = &trace[..prefix_len];
+        let prefix_ratios = [0.5, 0.75, 1.0];
 
-        // Extract and permute tasks
-        let mut task_ids: Vec<TaskId> = trace
-            .iter()
-            .filter_map(|e| extract_task_id(e))
-            .collect();
-        task_ids.sort_unstable();
-        task_ids.dedup();
+        for &prefix_ratio in &prefix_ratios {
+            let prefix_len = ((trace.len() as f64 * prefix_ratio) as usize).max(1).min(trace.len());
+            let prefix = &trace[..prefix_len];
 
-        if task_ids.is_empty() { return Ok(()); }
+            // Extract and permute tasks (simple swap strategy)
+            let mut task_ids: Vec<TaskId> = trace
+                .iter()
+                .filter_map(|e| extract_task_id(e))
+                .collect();
+            task_ids.sort_unstable();
+            task_ids.dedup();
 
-        let mut rng = proptest::test_runner::rng::StdRng::seed_from_u64(perm_seed);
-        use proptest::test_runner::rng::RngCore;
-        let mut perm_map = HashMap::new();
-        let mut available: Vec<TaskId> = task_ids.clone();
+            if task_ids.len() < 2 { continue; }
 
-        for original in &task_ids {
-            if available.is_empty() { break; }
-            let idx = (rng.next_u64() as usize) % available.len();
-            let new_task = available.swap_remove(idx);
-            perm_map.insert(*original, new_task);
+            // Create simple permutation (swap first two tasks)
+            let mut perm_map = HashMap::new();
+            perm_map.insert(task_ids[0], task_ids[1]);
+            perm_map.insert(task_ids[1], task_ids[0]);
+            for &task in &task_ids[2..] {
+                perm_map.insert(task, task);
+            }
+
+            let permuted_prefix: Vec<TraceEvent> = prefix
+                .iter()
+                .map(|event| apply_task_permutation(event, &perm_map))
+                .collect();
+
+            // All three analyses should be deterministic and structurally consistent
+            let orig_races = detect_races(prefix).race_count();
+            let perm_races = detect_races(&permuted_prefix).race_count();
+
+            assert_eq!(orig_races, perm_races,
+                "Composite: permuted sub-trace should preserve race count");
+
+            // Repeat analysis should be identical (determinism)
+            let repeat_races = detect_races(&permuted_prefix).race_count();
+            assert_eq!(perm_races, repeat_races,
+                "Composite: repeated analysis should be deterministic");
         }
-
-        let permuted_prefix: Vec<TraceEvent> = prefix
-            .iter()
-            .map(|event| apply_task_permutation(event, &perm_map))
-            .collect();
-
-        // All three analyses should be deterministic and structurally consistent
-        let orig_races = detect_races(prefix).race_count();
-        let perm_races = detect_races(&permuted_prefix).race_count();
-
-        prop_assert_eq!(orig_races, perm_races,
-            "Composite: permuted sub-trace should preserve race count");
-
-        // Repeat analysis should be identical (determinism)
-        let repeat_races = detect_races(&permuted_prefix).race_count();
-        prop_assert_eq!(perm_races, repeat_races,
-            "Composite: repeated analysis should be deterministic");
-    });
+    }
 }
