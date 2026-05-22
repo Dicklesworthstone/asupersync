@@ -422,6 +422,25 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_weighted_equal_loads_match_striped_assignment() {
+        let weighted = SymbolAssigner::new(AssignmentStrategy::Weighted);
+        let striped = SymbolAssigner::new(AssignmentStrategy::Striped);
+        let replicas = create_test_replicas_with_symbol_counts(&[7, 7, 7, 7]);
+
+        for symbol_count in [1_usize, 2, 3, 4, 7, 11, 17] {
+            let symbols = create_test_symbols(symbol_count);
+            let weighted_plan = weighted.assign(&symbols, &replicas, 99);
+            let striped_plan = striped.assign(&symbols, &replicas, 99);
+
+            assert_eq!(
+                weighted_plan, striped_plan,
+                "with equal existing loads, weighted assignment should reduce to striped \
+                 round-robin for {symbol_count} symbols"
+            );
+        }
+    }
+
+    #[test]
     fn weighted_avoids_heavier_replica_until_projected_loads_match() {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
         let symbols = create_test_symbols(2);
