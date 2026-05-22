@@ -8,9 +8,87 @@
 
 #![cfg(test)]
 
-use super::{PgConnectOptions, PgConnection, PgError};
+use super::{
+    DEFAULT_MAX_PREPARED_STATEMENTS, DEFAULT_MAX_RESULT_ROWS, PgConnectOptions, PgConnection,
+    PgConnectionInner, PgError, PgStream, PreparedStatementCache, SslMode,
+};
 use crate::cx::Cx;
 use crate::security::SecretString;
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{ErrorKind, Read};
+
+fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+    let (peer_stream, _) = listener.accept().expect("accept");
+    let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
+    (
+        PgConnection {
+            inner: PgConnectionInner {
+                stream: PgStream::Plain(stream),
+                process_id: 0,
+                secret_key: 0,
+                cancel_target: super::test_cancel_target(),
+                parameters: BTreeMap::new(),
+                transaction_status: b'I',
+                closed: false,
+                needs_rollback: false,
+                needs_discard: false,
+                next_stmt_id: 0,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
+                deallocate_retry_queue: VecDeque::new(),
+                consecutive_deallocate_failures: 0,
+                unhealthy: false,
+            },
+        },
+        peer_stream,
+    )
+}
+
+fn backend_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
+    let len = i32::try_from(body.len() + 4).expect("test backend message length fits");
+    let mut msg = Vec::with_capacity(1 + 4 + body.len());
+    msg.push(msg_type);
+    msg.extend_from_slice(&len.to_be_bytes());
+    msg.extend_from_slice(body);
+    msg
+}
+
+fn auth_request(auth_type: i32, tail: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(4 + tail.len());
+    body.extend_from_slice(&auth_type.to_be_bytes());
+    body.extend_from_slice(tail);
+    backend_message(b'R', &body)
+}
+
+fn options_with_password() -> PgConnectOptions {
+    PgConnectOptions {
+        host: "localhost".to_string(),
+        port: 5432,
+        database: "testdb".to_string(),
+        user: "postgres".to_string(),
+        password: Some(SecretString::new("secret")),
+        application_name: None,
+        connect_timeout: None,
+        ssl_mode: SslMode::Disable,
+    }
+}
+
+fn assert_no_password_frame_written(peer: &mut std::net::TcpStream) {
+    peer.set_nonblocking(true).expect("set peer nonblocking");
+    let mut leaked = [0_u8; 64];
+    match peer.read(&mut leaked) {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        Ok(0) => {}
+        Ok(n) => panic!(
+            "auth rejection leaked {n} password-frame bytes: {:?}",
+            &leaked[..n]
+        ),
+        Err(err) => panic!("unexpected peer read error while checking auth leakage: {err}"),
+    }
+}
 
 /// AUDIT: Test authentication method downgrade attack prevention
 ///
@@ -62,6 +140,22 @@ fn audit_auth_method_downgrade_attack_prevention() {
     // ✅ GUIDANCE: Error message directs to secure alternative
     // ✅ CONSISTENCY: Same pattern as MD5 authentication rejection
 
+    let (mut conn, mut peer) = make_test_connection_with_peer();
+    std::io::Write::write_all(&mut peer, &auth_request(3, &[])).unwrap();
+
+    let cx = Cx::for_testing();
+    let err = super::run(conn.authenticate(&cx, &options_with_password()))
+        .expect_err("cleartext auth must be rejected");
+
+    match err {
+        PgError::UnsupportedAuth(message) => {
+            assert!(message.contains("Cleartext password"), "got: {message}");
+            assert!(message.contains("SCRAM-SHA-256"), "got: {message}");
+        }
+        other => panic!("expected UnsupportedAuth for cleartext downgrade, got: {other:?}"),
+    }
+
+    assert_no_password_frame_written(&mut peer);
     crate::test_complete!("audit_auth_method_downgrade_attack_prevention");
 }
 
@@ -91,6 +185,22 @@ fn audit_md5_auth_rejection_reference_pattern() {
     //
     // RECOMMENDATION: Apply the same pattern to cleartext authentication
 
+    let (mut conn, mut peer) = make_test_connection_with_peer();
+    std::io::Write::write_all(&mut peer, &auth_request(5, b"salt")).unwrap();
+
+    let cx = Cx::for_testing();
+    let err = super::run(conn.authenticate(&cx, &options_with_password()))
+        .expect_err("MD5 auth must be rejected");
+
+    match err {
+        PgError::UnsupportedAuth(message) => {
+            assert!(message.contains("MD5"), "got: {message}");
+            assert!(message.contains("SCRAM-SHA-256"), "got: {message}");
+        }
+        other => panic!("expected UnsupportedAuth for MD5 downgrade, got: {other:?}"),
+    }
+
+    assert_no_password_frame_written(&mut peer);
     crate::test_complete!("audit_md5_auth_rejection_reference_pattern");
 }
 
