@@ -1833,6 +1833,83 @@ mod tests {
     }
 
     #[test]
+    fn test_buffered_sink_close_flushes_buffer_before_closing_inner() {
+        init_test("test_buffered_sink_close_flushes_buffer_before_closing_inner");
+        let inner = TrackingSink::new(TrackingSinkState::new());
+        let state = inner.state();
+        let mut buffered = BufferedSink::new(inner, 3);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        for esi in [21_u32, 22_u32] {
+            let sent = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(esi));
+            crate::assert_with_log!(
+                matches!(sent, Poll::Ready(Ok(()))),
+                "symbol accepted into the local buffer before close",
+                true,
+                matches!(sent, Poll::Ready(Ok(())))
+            );
+        }
+
+        let sent_before_close = {
+            let state = state.lock();
+            state.sent.len()
+        };
+        crate::assert_with_log!(
+            sent_before_close == 0,
+            "buffered symbols are not emitted until flush or close",
+            0usize,
+            sent_before_close
+        );
+
+        let closed = Pin::new(&mut buffered).poll_close(&mut context);
+        crate::assert_with_log!(
+            matches!(closed, Poll::Ready(Ok(()))),
+            "close completes after flushing buffered symbols",
+            true,
+            matches!(closed, Poll::Ready(Ok(())))
+        );
+
+        let (sent_ids, flush_count, inner_closed) = {
+            let state = state.lock();
+            (
+                state
+                    .sent
+                    .iter()
+                    .map(|symbol| symbol.symbol().id().esi())
+                    .collect::<Vec<_>>(),
+                state.flush_count,
+                state.closed,
+            )
+        };
+        crate::assert_with_log!(
+            sent_ids == vec![21, 22],
+            "close flushes buffered symbols in FIFO order",
+            vec![21_u32, 22_u32],
+            sent_ids
+        );
+        crate::assert_with_log!(
+            flush_count == 1,
+            "close invokes the inner flush before closing",
+            1usize,
+            flush_count
+        );
+        crate::assert_with_log!(
+            inner_closed,
+            "inner sink is closed after the buffered flush",
+            true,
+            inner_closed
+        );
+        crate::assert_with_log!(
+            buffered.buffer.is_empty() && buffered.staged_symbols.is_empty(),
+            "all buffered state is drained by close",
+            true,
+            buffered.buffer.is_empty() && buffered.staged_symbols.is_empty()
+        );
+        crate::test_complete!("test_buffered_sink_close_flushes_buffer_before_closing_inner");
+    }
+
+    #[test]
     fn test_buffered_sink_ready_pending_when_inner_not_ready() {
         init_test("test_buffered_sink_ready_pending_when_inner_not_ready");
         let inner = TrackingSink::new({
