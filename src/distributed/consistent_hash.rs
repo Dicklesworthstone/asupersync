@@ -989,7 +989,7 @@ mod tests {
                 |candidate| candidate.1,
             )
             .into_iter()
-            .map(|candidate| candidate.0)
+            .map(|candidate| candidate.0.to_string())
             .collect::<Vec<_>>()
         };
 
