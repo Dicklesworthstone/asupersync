@@ -143,6 +143,32 @@ mod tests {
     }
 
     #[test]
+    fn chain_empty_first_buffer_reads_second_without_consuming() {
+        init_test("chain_empty_first_buffer_reads_second_without_consuming");
+        let a: &[u8] = &[];
+        let b: &[u8] = &[7, 8, 9];
+        let mut chain = Chain::new(a, b);
+
+        let remaining = chain.remaining();
+        crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
+        let chunk = chain.chunk();
+        crate::assert_with_log!(chunk == [7, 8, 9], "chunk", &[7, 8, 9], chunk);
+
+        chain.advance(0);
+        let remaining = chain.remaining();
+        crate::assert_with_log!(remaining == 3, "remaining after zero", 3, remaining);
+        let chunk = chain.chunk();
+        crate::assert_with_log!(chunk == [7, 8, 9], "chunk after zero", &[7, 8, 9], chunk);
+
+        chain.advance(3);
+        let remaining = chain.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining after drain", 0, remaining);
+        let chunk = chain.chunk();
+        crate::assert_with_log!(chunk.is_empty(), "empty chunk", true, chunk.is_empty());
+        crate::test_complete!("chain_empty_first_buffer_reads_second_without_consuming");
+    }
+
+    #[test]
     fn test_chain_advance() {
         init_test("test_chain_advance");
         let a: &[u8] = &[1, 2, 3];
