@@ -4,6 +4,7 @@
   "description": "Forensic structured log schema for native QUIC/H3 E2E test scenarios. Aligns with repro-manifest.v1, trace-event.v1, and NDJSON event envelope conventions.",
   "generated_at": "2026-02-19T14:18:00Z",
   "owner_bead": "asupersync-3narc.5.3.1",
+  "proof_suite_bead": "asupersync-prl0wp",
 
   "envelope": {
     "description": "Each NDJSON line follows the existing NdjsonEvent envelope format.",
@@ -281,12 +282,48 @@
     }
   },
 
+  "qlog_export": {
+    "description": "Qlog-style JSON export for native QUIC/H3 forensic events. The export preserves the typed event payloads while wrapping them in traces[].events[] so packet, ACK, loss, PTO, stream, path, migration, close, cancellation, seed, and replay metadata survive failure triage.",
+    "format": "qlog-style-json",
+    "file_pattern": "{artifacts_dir}/{scenario_id}/0x{SEED:016X}/scenario.qlog.json",
+    "writer": "QuicH3ForensicLogger::write_qlog_json",
+    "source_markers": [
+      "pub fn to_qlog_json(&self) -> serde_json::Value",
+      "pub fn write_qlog_json(&self, path: &Path) -> std::io::Result<()>",
+      "\"qlog_version\": \"0.3\"",
+      "\"replay_command\": replay_command",
+      "fn qlog_category(category: &str) -> &'static str"
+    ],
+    "required_common_fields": [
+      "protocol_type",
+      "scenario_id",
+      "seed",
+      "test_id",
+      "replay_command",
+      "time_format"
+    ],
+    "required_event_evidence": [
+      "packet_sent",
+      "ack_received",
+      "loss_detected",
+      "pto_fired",
+      "stream_opened",
+      "path_validation_started",
+      "path_validation_completed",
+      "migration_observed",
+      "close_initiated",
+      "cancel_requested",
+      "scenario_completed"
+    ]
+  },
+
   "artifact_bundle_layout": {
     "description": "Directory structure for per-scenario artifacts, following existing ASUPERSYNC_TEST_ARTIFACTS_DIR convention.",
     "structure": {
       "{artifacts_dir}/{scenario_id}/0x{SEED:016X}/": {
         "manifest.json": "Scenario manifest (quic-h3-forensic-manifest.v1).",
         "events.ndjson": "NDJSON event log with all structured events.",
+        "scenario.qlog.json": "Qlog-style JSON event log preserving seed, replay command, packet, path, migration, close, and cancellation evidence.",
         "transport_state.json": "Final transport machine state snapshot.",
         "stream_state.json": "Final stream manager state snapshot.",
         "h3_state.json": "Final H3 connection state snapshot.",
@@ -316,6 +353,71 @@
       { "id": "inv.h3.frame_roundtrip_identity", "description": "encode(frame) |> decode == original frame." }
     ]
   },
+
+  "proof_commands": [
+    {
+      "id": "focused_forensic_logger",
+      "covers": [
+        "qlog_export",
+        "scenario_manifest",
+        "seed_and_replay_command",
+        "failure_fingerprint"
+      ],
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_h3_forensic_logger cargo test -p asupersync --lib net::quic_native::forensic_log --features test-internals -- --nocapture"
+    },
+    {
+      "id": "rfc9000_conformance",
+      "covers": [
+        "retry_initial_migration_hooks"
+      ],
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_rfc9000_conformance cargo test -p asupersync --test conformance --features quic,test-internals -- quic --nocapture"
+    },
+    {
+      "id": "stream_id_conformance",
+      "covers": [
+        "stream_ids",
+        "stream_state_transitions",
+        "reset_stop_sending"
+      ],
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_stream_id_conformance cargo test -p asupersync --test conformance_quic_stream_rfc9000 --features test-internals -- --nocapture"
+    },
+    {
+      "id": "native_transport_conformance",
+      "covers": [
+        "transport_parameters",
+        "packet_numbers",
+        "ack_loss",
+        "pto",
+        "congestion_summary"
+      ],
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_native_transport_conformance cargo test -p asupersync --lib net::quic_native::transport_conformance_tests --features quic,test-internals -- --nocapture"
+    },
+    {
+      "id": "forensic_fuzz_smoke",
+      "covers": [
+        "malformed_forensic_log_inputs",
+        "manifest_json_malformed_inputs",
+        "qlog_event_payload_boundaries"
+      ],
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_forensic_fuzz cargo fuzz run quic_forensic_log -- -runs=256"
+    },
+    {
+      "id": "packet_number_fuzz_smoke",
+      "covers": [
+        "malformed_packet_number_inputs",
+        "packet_number_reconstruction_boundaries"
+      ],
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_packet_number_fuzz cargo fuzz run quic_packet_number -- -runs=256"
+    },
+    {
+      "id": "transport_params_fuzz_smoke",
+      "covers": [
+        "malformed_transport_parameter_tlv_inputs",
+        "transport_parameter_length_boundaries"
+      ],
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_transport_params_fuzz cargo fuzz run quic_transport_params_tlv -- -runs=256"
+    }
+  ],
 
   "replay_catalog_entry": {
     "description": "Format for entries in the QUIC/H3 replay catalog, aligned with raptorq_replay_catalog_v1.",

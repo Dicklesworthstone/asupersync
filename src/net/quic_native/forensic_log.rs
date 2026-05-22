@@ -1268,6 +1268,138 @@ mod tests {
     }
 
     #[test]
+    fn qlog_export_preserves_ack_loss_pto_close_and_failure_context() {
+        init_test("qlog_export_preserves_ack_loss_pto_close_and_failure_context");
+
+        let logger = QuicH3ForensicLogger::new(
+            "QH3-QLOG-FAILURE",
+            0xA9,
+            "qlog_export_preserves_ack_loss_pto_close_and_failure_context",
+        );
+
+        logger.log(
+            10,
+            "quic_transport",
+            QuicH3Event::AckReceived {
+                pn_space: "application".into(),
+                acked_ranges: vec![(4, 8), (12, 12)],
+                ack_delay_us: 25,
+                acked_packets: 6,
+                acked_bytes: 7200,
+            },
+        );
+        logger.log(
+            20,
+            "quic_transport",
+            QuicH3Event::LossDetected {
+                pn_space: "application".into(),
+                lost_packets: 2,
+                lost_bytes: 2400,
+                detection_method: "packet_threshold".into(),
+            },
+        );
+        logger.log(
+            30,
+            "quic_transport",
+            QuicH3Event::PtoFired {
+                pto_count: 2,
+                backoff_multiplier: 4,
+                deadline_us: 50_000,
+                probe_space: "application".into(),
+            },
+        );
+        logger.log(
+            40,
+            "quic_connection",
+            QuicH3Event::CloseInitiated {
+                close_code: 0x100,
+                close_method: "cancelled".into(),
+                drain_timeout_us: 2_000_000,
+            },
+        );
+        logger.log(
+            50,
+            "test_harness",
+            QuicH3Event::ScenarioCompleted {
+                scenario_id: "QH3-QLOG-FAILURE".into(),
+                seed: 0xA9,
+                passed: false,
+                duration_us: 50,
+                event_count: 5,
+                failure_class: "assertion_failure".into(),
+            },
+        );
+
+        let qlog = logger.to_qlog_json();
+        assert_eq!(
+            qlog["traces"][0]["common_fields"]["seed"],
+            "0x00000000000000A9"
+        );
+        assert!(
+            qlog["traces"][0]["common_fields"]["replay_command"]
+                .as_str()
+                .unwrap()
+                .contains("ASUPERSYNC_SEED=0xA9")
+        );
+
+        let events = qlog["traces"][0]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 5);
+        assert!(events.iter().any(|event| {
+            qlog_event_matches(event, "transport", "ack_received")
+                && event
+                    .get(3)
+                    .and_then(|data| data.get("acked_packets"))
+                    .and_then(Value::as_u64)
+                    .is_some_and(|acked_packets| acked_packets == 6)
+        }));
+        assert!(events.iter().any(|event| {
+            qlog_event_matches(event, "transport", "loss_detected")
+                && event
+                    .get(3)
+                    .and_then(|data| data.get("detection_method"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|method| "packet_threshold".eq(method))
+        }));
+        assert!(events.iter().any(|event| {
+            qlog_event_matches(event, "transport", "pto_fired")
+                && event
+                    .get(3)
+                    .and_then(|data| data.get("backoff_multiplier"))
+                    .and_then(Value::as_u64)
+                    .is_some_and(|backoff| backoff == 4)
+        }));
+        assert!(events.iter().any(|event| qlog_event_matches(
+            event,
+            "connectivity",
+            "close_initiated"
+        )));
+        assert!(events.iter().any(|event| qlog_event_matches(
+            event,
+            "simulation",
+            "scenario_completed"
+        )));
+
+        let manifest = QuicH3ScenarioManifest::from_logger(&logger, false, 50);
+        assert_eq!(manifest.failure_class, "assertion_failure");
+        assert!(manifest.replay_command.contains("ASUPERSYNC_SEED=0xA9"));
+        let failure = manifest
+            .failure_fingerprint
+            .as_ref()
+            .expect("failure manifest should include last event context");
+        assert_eq!(failure.bucket, "assertion_failure");
+        assert_eq!(
+            failure
+                .last_event_before_failure
+                .as_ref()
+                .and_then(|event| event.get("event_count"))
+                .and_then(Value::as_u64),
+            Some(5)
+        );
+
+        crate::test_complete!("qlog_export_preserves_ack_loss_pto_close_and_failure_context");
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn test_manifest_from_logger() {
         init_test("test_manifest_from_logger");

@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const CONTRACT_PATH: &str = "artifacts/atp_native_quic_endpoint_contract_v1.json";
+const FORENSIC_SCHEMA_PATH: &str = "artifacts/quic_h3_forensic_log_schema_v1.json";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -22,8 +23,12 @@ fn read_repo_file(relative: &str) -> String {
 }
 
 fn load_contract() -> Value {
-    let text = read_repo_file(CONTRACT_PATH);
-    serde_json::from_str(&text).expect("ATP native QUIC endpoint contract must be valid JSON")
+    load_json(CONTRACT_PATH, "ATP native QUIC endpoint contract")
+}
+
+fn load_json(relative: &str, _label: &str) -> Value {
+    let text = read_repo_file(relative);
+    serde_json::from_str(&text).expect("contract artifact must be valid JSON")
 }
 
 fn nonempty_str<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -211,6 +216,109 @@ fn source_inventory_and_markers_exist() {
         referenced_files.contains("src/net/udp.rs"),
         "contract must cover UDP endpoint substrate"
     );
+}
+
+#[test]
+fn forensic_schema_documents_qlog_artifact_and_release_proof_lanes() {
+    let schema = load_json(FORENSIC_SCHEMA_PATH, "QUIC/H3 forensic log schema");
+    assert_eq!(
+        nonempty_str(&schema, "schema_id"),
+        "quic-h3-forensic-log.v1"
+    );
+    assert_eq!(schema["schema_version"], 1);
+    assert_eq!(
+        nonempty_str(&schema, "proof_suite_bead"),
+        "asupersync-prl0wp"
+    );
+
+    let qlog = &schema["qlog_export"];
+    assert_eq!(nonempty_str(qlog, "format"), "qlog-style-json");
+    assert_eq!(
+        nonempty_str(qlog, "writer"),
+        "QuicH3ForensicLogger::write_qlog_json"
+    );
+
+    let artifact_dir = schema["artifact_bundle_layout"]["structure"]
+        ["{artifacts_dir}/{scenario_id}/0x{SEED:016X}/"]
+        .as_object()
+        .expect("forensic artifact bundle directory must be an object");
+    assert!(
+        artifact_dir.contains_key("scenario.qlog.json"),
+        "artifact bundle must document the qlog JSON file"
+    );
+
+    let source = read_repo_file("src/net/quic_native/forensic_log.rs");
+    for marker in nonempty_array(qlog, "source_markers") {
+        let marker = marker
+            .as_str()
+            .expect("qlog source markers must be strings");
+        assert!(
+            source.contains(marker),
+            "qlog source marker {marker:?} missing from forensic logger"
+        );
+    }
+
+    for common_field in nonempty_array(qlog, "required_common_fields") {
+        let common_field = common_field
+            .as_str()
+            .expect("qlog common fields must be strings");
+        assert!(
+            source.contains(common_field),
+            "qlog common field {common_field:?} missing from qlog export"
+        );
+    }
+
+    let required_events = string_set(qlog, "required_event_evidence");
+    for expected in [
+        "packet_sent",
+        "ack_received",
+        "loss_detected",
+        "pto_fired",
+        "stream_opened",
+        "path_validation_started",
+        "path_validation_completed",
+        "migration_observed",
+        "close_initiated",
+        "cancel_requested",
+        "scenario_completed",
+    ] {
+        assert!(
+            required_events.contains(expected),
+            "qlog required event evidence missing {expected}"
+        );
+    }
+
+    let commands = nonempty_array(&schema, "proof_commands");
+    let command_ids = commands
+        .iter()
+        .map(|entry| nonempty_str(entry, "id").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        command_ids,
+        BTreeSet::from([
+            "focused_forensic_logger".to_string(),
+            "forensic_fuzz_smoke".to_string(),
+            "native_transport_conformance".to_string(),
+            "packet_number_fuzz_smoke".to_string(),
+            "rfc9000_conformance".to_string(),
+            "stream_id_conformance".to_string(),
+            "transport_params_fuzz_smoke".to_string(),
+        ])
+    );
+
+    for command in commands {
+        let id = nonempty_str(command, "id");
+        let proof = nonempty_str(command, "command");
+        assert!(
+            proof.starts_with("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_"),
+            "{id} proof command must route Cargo through rch with a QUIC target dir"
+        );
+        assert!(
+            proof.contains(" cargo "),
+            "{id} proof command must invoke cargo under the rch env wrapper"
+        );
+        nonempty_array(command, "covers");
+    }
 }
 
 #[test]
