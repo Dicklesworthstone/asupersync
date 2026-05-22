@@ -572,12 +572,23 @@ pub struct TransportExperimentDecision {
 
     /// Preview downgrade reason, when the requested experimental path could not be honored.
     pub downgrade_reason: Option<ExperimentalTransportDowngradeReason>,
+
+    /// Full preview downgrade reason vector in deterministic decision order.
+    pub downgrade_reasons: SmallVec<[ExperimentalTransportDowngradeReason; 2]>,
 }
 
 impl TransportExperimentDecision {
     fn format_path_ids(ids: &[PathId]) -> String {
         ids.iter()
             .map(|id| id.0.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn format_downgrade_reasons(reasons: &[ExperimentalTransportDowngradeReason]) -> String {
+        reasons
+            .iter()
+            .map(|reason| reason.reason_id())
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -623,6 +634,15 @@ impl TransportExperimentDecision {
     pub fn downgrade_reason_id(&self) -> Option<&'static str> {
         self.downgrade_reason
             .map(ExperimentalTransportDowngradeReason::reason_id)
+    }
+
+    /// Stable identifiers for every preview downgrade reason, in decision order.
+    #[must_use]
+    pub fn downgrade_reason_ids(&self) -> SmallVec<[&'static str; 2]> {
+        self.downgrade_reasons
+            .iter()
+            .map(|reason| reason.reason_id())
+            .collect()
     }
 
     /// Serializes the decision into stable key/value fields for structured logs or artifacts.
@@ -688,6 +708,10 @@ impl TransportExperimentDecision {
         fields.insert(
             "downgrade_reason".to_owned(),
             self.downgrade_reason_id().unwrap_or("").to_owned(),
+        );
+        fields.insert(
+            "downgrade_reasons".to_owned(),
+            Self::format_downgrade_reasons(self.downgrade_reasons.as_slice()),
         );
         fields.insert(
             "coding_policy_id".to_owned(),
@@ -1660,6 +1684,15 @@ impl MultipathAggregator {
             ),
         };
 
+        let mut downgrade_reasons = SmallVec::<[ExperimentalTransportDowngradeReason; 2]>::new();
+        if let Some(reason) = gate_downgrade_reason {
+            downgrade_reasons.push(reason);
+        }
+        if let Some(reason) = coding_downgrade_reason {
+            downgrade_reasons.push(reason);
+        }
+        let downgrade_reason = downgrade_reasons.first().copied();
+
         TransportExperimentDecision {
             context,
             gate: self.config.experiment_gate,
@@ -1668,7 +1701,8 @@ impl MultipathAggregator {
             path_decision,
             requested_coding_policy,
             effective_coding_policy,
-            downgrade_reason: gate_downgrade_reason.or(coding_downgrade_reason),
+            downgrade_reason,
+            downgrade_reasons,
         }
     }
 
@@ -2429,6 +2463,60 @@ mod tests {
     }
 
     #[test]
+    fn test_experimental_transport_decision_logs_combined_downgrade_reason_vector() {
+        init_test("test_experimental_transport_decision_logs_combined_downgrade_reason_vector");
+
+        let aggregator = MultipathAggregator::new(AggregatorConfig {
+            path_policy: PathSelectionPolicy::UseAll,
+            experiment_gate: ExperimentalTransportGate::Disabled,
+            coding_policy: TransportCodingPolicy::RaptorQFecPreview,
+            ..AggregatorConfig::default()
+        });
+
+        aggregator.paths().register(test_path(1));
+
+        let decision = aggregator.experimental_transport_decision(TransportExperimentContext::new(
+            "TW-CODED-MULTIPATH",
+            "aa08-combined-downgrade-001",
+        ));
+        let reason_ids = decision.downgrade_reason_ids();
+        let expected_reasons = ["experimental-gate-disabled", "raptorq-closure-pending"];
+
+        crate::assert_with_log!(
+            decision.downgrade_reason_id() == Some("experimental-gate-disabled"),
+            "single downgrade reason remains the first reason",
+            Some("experimental-gate-disabled"),
+            decision.downgrade_reason_id()
+        );
+        crate::assert_with_log!(
+            reason_ids.as_slice() == expected_reasons.as_slice(),
+            "combined downgrade reason vector preserves all fallbacks in deterministic order",
+            expected_reasons.as_slice(),
+            reason_ids.as_slice()
+        );
+
+        let log_fields = decision.log_fields();
+        crate::assert_with_log!(
+            log_fields.get("downgrade_reason").map(String::as_str)
+                == Some("experimental-gate-disabled"),
+            "first downgrade reason remains logged",
+            Some("experimental-gate-disabled"),
+            log_fields.get("downgrade_reason").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("downgrade_reasons").map(String::as_str)
+                == Some("experimental-gate-disabled,raptorq-closure-pending"),
+            "full downgrade reason vector logged",
+            Some("experimental-gate-disabled,raptorq-closure-pending"),
+            log_fields.get("downgrade_reasons").map(String::as_str)
+        );
+
+        crate::test_complete!(
+            "test_experimental_transport_decision_logs_combined_downgrade_reason_vector"
+        );
+    }
+
+    #[test]
     fn test_experimental_transport_decision_logs_fallback_inventory() {
         init_test("test_experimental_transport_decision_logs_fallback_inventory");
 
@@ -2509,6 +2597,7 @@ mod tests {
             "fallback_policy_id",
             "path_downgrade_reason",
             "downgrade_reason",
+            "downgrade_reasons",
             "coding_policy_id",
             "effective_coding_policy_id",
         ]
