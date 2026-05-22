@@ -9,7 +9,10 @@
 
 #![cfg(test)]
 
-use super::{MySqlConnection, MySqlConnectionInner, MySqlError, capability, run};
+use super::{
+    Handshake, MySqlConnectOptions, MySqlConnection, MySqlConnectionInner, MySqlError, capability,
+    run,
+};
 use crate::cx::Cx;
 use crate::types::Outcome;
 use std::io::{Read, Write};
@@ -58,6 +61,26 @@ impl PacketBuffer {
 
 struct MySqlPacket {
     bytes: Vec<u8>,
+}
+
+fn make_test_connection(stream: crate::net::TcpStream, sequence: u8) -> MySqlConnection {
+    MySqlConnection {
+        inner: MySqlConnectionInner {
+            stream,
+            connection_id: 0,
+            capabilities: 0,
+            charset: 0,
+            status_flags: 0,
+            sequence,
+            closed: false,
+            server_version: String::new(),
+            needs_rollback: false,
+            max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
+            prepared_statement_epoch: 0,
+            query_in_flight: AtomicBool::new(false),
+        },
+        options: None,
+    }
 }
 
 /// AUDIT: Test that client does not advertise LOCAL INFILE capability by default
@@ -131,21 +154,23 @@ fn audit_handshake_does_not_advertise_local_infile_capability() {
             .expect("connect to test server")
     });
 
-    // Trigger the handshake by creating a connection
-    let _conn = MySqlConnection {
-        inner: MySqlConnectionInner {
-            stream,
-            closed: false,
-            in_transaction: false,
-            server_version: String::new(),
-            needs_rollback: false,
-            max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
-            prepared_statement_epoch: 0,
-            query_in_flight: AtomicBool::new(false),
-        },
-        options: None,
+    let mut conn = make_test_connection(stream, 1);
+    let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/testdb")
+        .expect("parse mysql options");
+    let handshake = Handshake {
+        server_version: "8.0.0-test".to_string(),
+        connection_id: 99,
+        auth_plugin_data: b"01234567890123456789".to_vec(),
+        capabilities: capability::CLIENT_PROTOCOL_41
+            | capability::CLIENT_SECURE_CONNECTION
+            | capability::CLIENT_PLUGIN_AUTH
+            | capability::CLIENT_LOCAL_FILES,
+        charset: 45,
+        status_flags: 0,
+        auth_plugin_name: "caching_sha2_password".to_string(),
     };
 
+    run(conn.send_handshake_response(&options, &handshake)).expect("send handshake response");
     server.join().expect("server thread join");
 
     // AUDIT COMPLETE: Client properly excludes LOCAL INFILE capability
@@ -205,19 +230,7 @@ fn audit_server_local_infile_request_rejection() {
             .expect("connect client")
     });
 
-    let mut conn = MySqlConnection {
-        inner: MySqlConnectionInner {
-            stream,
-            closed: false,
-            in_transaction: false,
-            server_version: String::new(),
-            needs_rollback: false,
-            max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
-            prepared_statement_epoch: 0,
-            query_in_flight: AtomicBool::new(false),
-        },
-        options: None,
-    };
+    let mut conn = make_test_connection(stream, 0);
 
     let cx = Cx::for_testing();
 
@@ -315,19 +328,7 @@ fn audit_local_infile_rejection_comprehensive_paths() {
                 .expect("connect client")
         });
 
-        let mut conn = MySqlConnection {
-            inner: MySqlConnectionInner {
-                stream,
-                closed: false,
-                in_transaction: false,
-                server_version: String::new(),
-                needs_rollback: false,
-                max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
-                prepared_statement_epoch: 0,
-                query_in_flight: AtomicBool::new(false),
-            },
-            options: None,
-        };
+        let mut conn = make_test_connection(stream, 0);
 
         let cx = Cx::for_testing();
         let outcome = super::run(conn.query_unchecked(&cx, "SELECT 1"));
