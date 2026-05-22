@@ -2869,14 +2869,26 @@ mod tests {
     // Test 1: Endpoint state predicates
     #[test]
     fn test_endpoint_state() {
-        assert!(EndpointState::Healthy.can_receive());
-        assert!(EndpointState::Degraded.can_receive());
-        assert!(!EndpointState::Unhealthy.can_receive());
-        assert!(!EndpointState::Draining.can_receive());
-        assert!(!EndpointState::Removed.can_receive());
+        let conformance = [
+            (EndpointState::Healthy, true, true),
+            (EndpointState::Degraded, true, true),
+            (EndpointState::Unhealthy, false, true),
+            (EndpointState::Draining, false, true),
+            (EndpointState::Removed, false, false),
+        ];
 
-        assert!(EndpointState::Healthy.is_available());
-        assert!(!EndpointState::Removed.is_available());
+        for (state, can_receive, is_available) in conformance {
+            assert_eq!(
+                state.can_receive(),
+                can_receive,
+                "{state:?} dispatchability changed"
+            );
+            assert_eq!(
+                state.is_available(),
+                is_available,
+                "{state:?} availability changed"
+            );
+        }
     }
 
     // Test 2: Endpoint statistics
@@ -4343,6 +4355,9 @@ mod tests {
         let healthy = table.register_endpoint(test_endpoint(1).with_state(EndpointState::Healthy));
         let _unhealthy =
             table.register_endpoint(test_endpoint(2).with_state(EndpointState::Unhealthy));
+        let _draining =
+            table.register_endpoint(test_endpoint(4).with_state(EndpointState::Draining));
+        let _removed = table.register_endpoint(test_endpoint(5).with_state(EndpointState::Removed));
 
         let ids: Vec<_> = table
             .dispatchable_endpoints()
