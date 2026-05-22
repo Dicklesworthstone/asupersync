@@ -771,6 +771,22 @@ mod tests {
     }
 
     #[test]
+    fn read_to_string_appends_and_counts_only_new_bytes() {
+        init_test("read_to_string_appends_and_counts_only_new_bytes");
+        let mut reader: &[u8] = b"tail";
+        let mut buf = String::from("head:");
+        let mut fut = reader.read_to_string(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+
+        let n = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(n == 4, "bytes read", 4, n);
+        crate::assert_with_log!(buf == "head:tail", "buf", "head:tail", buf);
+        crate::test_complete!("read_to_string_appends_and_counts_only_new_bytes");
+    }
+
+    #[test]
     fn read_to_string_invalid_utf8_errors() {
         init_test("read_to_string_invalid_utf8_errors");
         let mut reader: &[u8] = &[0xff, 0xfe];
