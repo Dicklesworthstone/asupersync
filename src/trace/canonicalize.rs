@@ -1461,4 +1461,267 @@ mod tests {
         set.insert(k);
         assert!(set.contains(&k2));
     }
+
+    /// Metamorphic tests for the Foata normal form: commutation invariance,
+    /// dependency preservation, the `trace_fingerprint`/`canonicalize`
+    /// equivalence, and the `TraceMonoid` algebraic laws.
+    mod metamorphic {
+        use super::*;
+
+        /// SplitMix64 — deterministic shuffles so failures reproduce by seed.
+        struct Rng(u64);
+        impl Rng {
+            fn new(seed: u64) -> Self {
+                Self(seed.wrapping_add(0x9E37_79B9_7F4A_7C15))
+            }
+            fn next_u64(&mut self) -> u64 {
+                self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = self.0;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            }
+            fn below(&mut self, n: usize) -> usize {
+                (self.next_u64() % n as u64) as usize
+            }
+        }
+
+        fn task(n: u32) -> TaskId {
+            TaskId::new_for_test(n, 0)
+        }
+        fn region(n: u32) -> RegionId {
+            RegionId::new_for_test(n, 0)
+        }
+
+        /// `n` pairwise-independent events: spawns on distinct task+region, so
+        /// every footprint is disjoint and the whole set commutes freely.
+        fn independent_set(n: u32) -> Vec<TraceEvent> {
+            (1..=n)
+                .map(|k| TraceEvent::spawn(u64::from(k), Time::ZERO, task(k), region(k)))
+                .collect()
+        }
+
+        /// A chain of mutually dependent events — every event writes Task(1).
+        fn dependent_chain(n: u64) -> Vec<TraceEvent> {
+            (0..n)
+                .map(|k| {
+                    let t = Time::from_nanos(k);
+                    match k % 4 {
+                        0 => TraceEvent::spawn(k, t, task(1), region(1)),
+                        1 => TraceEvent::schedule(k, t, task(1), region(1)),
+                        2 => TraceEvent::poll(k, t, task(1), region(1)),
+                        _ => TraceEvent::complete(k, t, task(1), region(1)),
+                    }
+                })
+                .collect()
+        }
+
+        fn shuffled(items: &[TraceEvent], rng: &mut Rng) -> Vec<TraceEvent> {
+            let mut v = items.to_vec();
+            for i in (1..v.len()).rev() {
+                let j = rng.below(i + 1);
+                v.swap(i, j);
+            }
+            v
+        }
+
+        fn canonical_seqs(events: &[TraceEvent]) -> Vec<u64> {
+            canonicalize(events).flatten().iter().map(|e| e.seq).collect()
+        }
+
+        #[test]
+        fn canonicalize_and_fingerprint_are_deterministic() {
+            for n in [0u64, 1, 2, 5, 9, 16] {
+                let trace = dependent_chain(n);
+                assert_eq!(
+                    trace_fingerprint(&trace),
+                    trace_fingerprint(&trace),
+                    "trace_fingerprint non-deterministic (n={n})"
+                );
+                assert_eq!(
+                    canonical_seqs(&trace),
+                    canonical_seqs(&trace),
+                    "canonicalize non-deterministic (n={n})"
+                );
+            }
+        }
+
+        #[test]
+        fn trace_fingerprint_equals_canonicalize_fingerprint() {
+            // Documented equivalence: trace_fingerprint is the allocation-free
+            // form of canonicalize(events).fingerprint().
+            let mixed = {
+                let z = Time::ZERO;
+                vec![
+                    TraceEvent::spawn(1, z, task(1), region(1)),
+                    TraceEvent::spawn(2, z, task(2), region(2)),
+                    TraceEvent::complete(3, z, task(1), region(1)),
+                    TraceEvent::complete(4, z, task(2), region(2)),
+                ]
+            };
+            let cases = [
+                Vec::new(),
+                independent_set(1),
+                independent_set(6),
+                dependent_chain(7),
+                mixed,
+            ];
+            for trace in cases {
+                assert_eq!(
+                    trace_fingerprint(&trace),
+                    canonicalize(&trace).fingerprint(),
+                    "trace_fingerprint diverged from canonicalize().fingerprint()"
+                );
+            }
+        }
+
+        #[test]
+        fn permuting_fully_independent_events_yields_one_identical_layer() {
+            // Pairwise-independent events commute freely: every permutation
+            // canonicalizes to the same single layer with the same fingerprint.
+            for n in [2u32, 3, 5, 8, 13] {
+                let base = independent_set(n);
+                let baseline = canonicalize(&base);
+                assert_eq!(baseline.depth(), 1, "independent events must collapse to one layer");
+                let baseline_fp = baseline.fingerprint();
+
+                for seed in 0..16u64 {
+                    let mut rng = Rng::new(seed ^ u64::from(n) << 8);
+                    let permuted = shuffled(&base, &mut rng);
+                    let canon = canonicalize(&permuted);
+                    assert_eq!(
+                        canon.fingerprint(),
+                        baseline_fp,
+                        "independent permutation changed the fingerprint (n={n}, seed={seed})"
+                    );
+                    assert_eq!(canon.depth(), 1);
+                    assert_eq!(trace_fingerprint(&permuted), baseline_fp);
+                }
+            }
+        }
+
+        #[test]
+        fn swapping_an_adjacent_independent_pair_preserves_the_canonical_form() {
+            // Indices 1 and 2 are spawns on disjoint task+region: independent,
+            // so swapping them must not change the equivalence class.
+            let z = Time::ZERO;
+            let original = vec![
+                TraceEvent::spawn(1, z, task(1), region(1)),
+                TraceEvent::spawn(2, z, task(2), region(2)),
+                TraceEvent::spawn(3, z, task(3), region(3)),
+                TraceEvent::complete(4, z, task(1), region(1)),
+            ];
+            let mut swapped = original.clone();
+            swapped.swap(1, 2);
+            assert_eq!(
+                trace_fingerprint(&original),
+                trace_fingerprint(&swapped),
+                "swapping an adjacent independent pair changed the class"
+            );
+            assert_eq!(
+                canonicalize(&original).fingerprint(),
+                canonicalize(&swapped).fingerprint()
+            );
+        }
+
+        #[test]
+        fn a_dependent_chain_keeps_one_event_per_layer() {
+            // Every event writes Task(1): the canonical form is fully
+            // sequential — depth == length, every layer width 1.
+            for n in 1u64..=12 {
+                let canon = canonicalize(&dependent_chain(n));
+                assert_eq!(canon.depth(), n as usize, "chain of {n} needs {n} layers");
+                for layer in canon.layers() {
+                    assert_eq!(layer.len(), 1, "dependent-chain layer holds one event");
+                }
+            }
+        }
+
+        #[test]
+        fn flatten_preserves_the_event_count() {
+            for n in [0u64, 1, 4, 10] {
+                let dep = dependent_chain(n);
+                assert_eq!(canonicalize(&dep).flatten().len(), dep.len());
+            }
+            for n in [1u32, 5, 11] {
+                let ind = independent_set(n);
+                assert_eq!(canonicalize(&ind).flatten().len(), ind.len());
+            }
+        }
+
+        #[test]
+        fn monoid_identity_is_empty_and_neutral() {
+            let identity = TraceMonoid::identity();
+            assert!(identity.is_identity());
+            assert!(identity.is_empty());
+            assert_eq!(identity.len(), 0);
+
+            let m = TraceMonoid::from_events(&dependent_chain(5));
+            assert_eq!(identity.concat(&m), m, "left identity law");
+            assert_eq!(m.concat(&identity), m, "right identity law");
+        }
+
+        #[test]
+        fn monoid_concat_is_associative() {
+            let a = TraceMonoid::from_events(&independent_set(3));
+            let b = TraceMonoid::from_events(&dependent_chain(4));
+            let c = TraceMonoid::from_events(&independent_set(2));
+            assert_eq!(
+                a.concat(&b).concat(&c),
+                a.concat(&b.concat(&c)),
+                "concat must be associative"
+            );
+        }
+
+        #[test]
+        fn monoid_groups_independent_reorderings_into_one_class() {
+            let base = independent_set(7);
+            let mut rng = Rng::new(0xC0FFEE);
+            let permuted = shuffled(&base, &mut rng);
+            let m1 = TraceMonoid::from_events(&base);
+            let m2 = TraceMonoid::from_events(&permuted);
+            assert!(m1.equivalent(&m2), "independent reorderings are one class");
+            assert_eq!(m1, m2, "and structurally equal");
+        }
+
+        #[test]
+        fn monoid_equivalence_is_reflexive() {
+            for trace in [independent_set(6), dependent_chain(8)] {
+                let m = TraceMonoid::from_events(&trace);
+                assert!(m.equivalent(&m), "equivalence must be reflexive");
+                assert!(m.equivalent_exact(&m), "exact equivalence must be reflexive");
+                let again = TraceMonoid::from_events(&trace);
+                assert_eq!(m, again, "PartialEq must be reflexive");
+                assert_eq!(m.class_fingerprint(), canonicalize(&trace).fingerprint());
+            }
+        }
+
+        #[test]
+        fn critical_path_and_parallelism_track_the_canonical_shape() {
+            let ind = TraceMonoid::from_events(&independent_set(9));
+            assert_eq!(ind.critical_path_length(), 1);
+            assert_eq!(ind.max_parallelism(), 9);
+
+            let dep = TraceMonoid::from_events(&dependent_chain(6));
+            assert_eq!(dep.critical_path_length(), 6);
+            assert_eq!(dep.max_parallelism(), 1);
+
+            let empty = TraceMonoid::identity();
+            assert_eq!(empty.critical_path_length(), 0);
+            assert_eq!(empty.max_parallelism(), 0);
+        }
+
+        #[test]
+        fn empty_trace_canonicalizes_to_zero_layers() {
+            let canon = canonicalize(&[]);
+            assert_eq!(canon.depth(), 0);
+            assert!(canon.is_empty());
+            assert!(canon.flatten().is_empty());
+            assert_eq!(canon.layers().len(), 0);
+            assert_eq!(trace_fingerprint(&[]), canon.fingerprint());
+        }
+    }
 }
+
+#[cfg(test)]
+mod canonicalize_metamorphic_tests;
