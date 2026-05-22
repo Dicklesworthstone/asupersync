@@ -2217,6 +2217,37 @@ mod tests {
     }
 
     #[test]
+    fn gaussian_zero_variable_empty_system_solves_empty_solution() {
+        let mut basic = GaussianSolver::new(0, 0);
+        let mut markowitz = GaussianSolver::new(0, 0);
+
+        assert_eq!(basic.solve(), GaussianResult::Solved(Vec::new()));
+        assert_eq!(
+            markowitz.solve_markowitz(),
+            GaussianResult::Solved(Vec::new())
+        );
+        assert_eq!(basic.stats().pivot_selections, 0);
+        assert_eq!(markowitz.stats().pivot_selections, 0);
+    }
+
+    #[test]
+    fn gaussian_zero_variable_nonzero_rhs_is_inconsistent() {
+        let mut basic = GaussianSolver::new(1, 0);
+        basic.set_row(0, &[], DenseRow::new(vec![0xA5]));
+
+        let mut markowitz = GaussianSolver::new(1, 0);
+        markowitz.set_row(0, &[], DenseRow::new(vec![0xA5]));
+
+        assert_eq!(basic.solve(), GaussianResult::Inconsistent { row: 0 });
+        assert_eq!(
+            markowitz.solve_markowitz(),
+            GaussianResult::Inconsistent { row: 0 }
+        );
+        assert_eq!(basic.stats().pivot_selections, 0);
+        assert_eq!(markowitz.stats().pivot_selections, 0);
+    }
+
+    #[test]
     #[should_panic(expected = "row out of bounds")]
     fn gaussian_set_row_rejects_out_of_range_row() {
         let mut solver = GaussianSolver::new(2, 2);
