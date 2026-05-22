@@ -2167,6 +2167,44 @@ mod tests {
     }
 
     #[test]
+    fn test_timeout_stream_zero_duration_times_out_immediately() {
+        static NOW: AtomicU64 = AtomicU64::new(0);
+        fn test_now() -> Time {
+            Time::from_nanos(NOW.load(Ordering::SeqCst))
+        }
+
+        init_test("test_timeout_stream_zero_duration_times_out_immediately");
+        NOW.store(42, Ordering::SeqCst);
+
+        let inner = PendingStream;
+        let mut timed = TimeoutStream::with_time_getter(inner, Duration::ZERO, test_now);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut timed).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Some(Err(StreamError::Timeout)))),
+            "zero-duration timeout fires on the first pending poll",
+            true,
+            matches!(first, Poll::Ready(Some(Err(StreamError::Timeout))))
+        );
+        crate::assert_with_log!(
+            !timed.is_exhausted(),
+            "timeout errors do not exhaust a still-pending stream",
+            false,
+            timed.is_exhausted()
+        );
+        crate::assert_with_log!(
+            timed.sleep.deadline() == Time::from_nanos(42),
+            "zero-duration reset keeps the deadline at the current virtual instant",
+            Time::from_nanos(42),
+            timed.sleep.deadline()
+        );
+
+        crate::test_complete!("test_timeout_stream_zero_duration_times_out_immediately");
+    }
+
+    #[test]
     fn test_timeout_stream_tracks_exhaustion_without_repolling_inner() {
         init_test("test_timeout_stream_tracks_exhaustion_without_repolling_inner");
         let polls = Arc::new(AtomicUsize::new(0));
