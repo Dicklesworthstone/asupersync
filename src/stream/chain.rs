@@ -422,6 +422,76 @@ mod tests {
     }
 
     #[test]
+    fn mr_chain_empty_stream_is_identity() {
+        init_test("mr_chain_empty_stream_is_identity");
+        for len in 0..=12usize {
+            let items: Vec<i32> = (0..len).map(|item| item as i32 - 4).collect();
+            let mut left_identity = Chain::new(iter(Vec::<i32>::new()), iter(items.clone()));
+            let mut right_identity = Chain::new(iter(items.clone()), iter(Vec::<i32>::new()));
+
+            assert_eq!(
+                collect_ready(&mut left_identity),
+                items,
+                "empty chain prefix must not change the stream"
+            );
+            assert_eq!(
+                collect_ready(&mut right_identity),
+                items,
+                "empty chain suffix must not change the stream"
+            );
+        }
+        crate::test_complete!("mr_chain_empty_stream_is_identity");
+    }
+
+    #[test]
+    fn mr_chain_split_matches_unsplit_input() {
+        init_test("mr_chain_split_matches_unsplit_input");
+        for len in 0..=16usize {
+            let items: Vec<i32> = (0..len).map(|item| item as i32 * 3 - 7).collect();
+            for split_at in 0..=len {
+                let left = items[..split_at].to_vec();
+                let right = items[split_at..].to_vec();
+                let mut chained = Chain::new(iter(left), iter(right));
+
+                assert_eq!(
+                    collect_ready(&mut chained),
+                    items,
+                    "splitting input at {split_at} then chaining must reconstruct the original stream",
+                );
+            }
+        }
+        crate::test_complete!("mr_chain_split_matches_unsplit_input");
+    }
+
+    #[test]
+    fn mr_chain_associativity_across_lengths() {
+        init_test("mr_chain_associativity_across_lengths");
+        for left_len in 0..=5usize {
+            for middle_len in 0..=5usize {
+                for right_len in 0..=5usize {
+                    let left: Vec<i32> = (0..left_len).map(|item| item as i32).collect();
+                    let middle: Vec<i32> = (0..middle_len).map(|item| 10 + item as i32).collect();
+                    let right: Vec<i32> = (0..right_len).map(|item| 100 + item as i32).collect();
+
+                    let mut left_grouped = Chain::new(
+                        Chain::new(iter(left.clone()), iter(middle.clone())),
+                        iter(right.clone()),
+                    );
+                    let mut right_grouped =
+                        Chain::new(iter(left), Chain::new(iter(middle), iter(right)));
+
+                    assert_eq!(
+                        collect_ready(&mut left_grouped),
+                        collect_ready(&mut right_grouped),
+                        "chain associativity must preserve item order for lengths ({left_len}, {middle_len}, {right_len})",
+                    );
+                }
+            }
+        }
+        crate::test_complete!("mr_chain_associativity_across_lengths");
+    }
+
+    #[test]
     fn chain_does_not_repoll_exhausted_second_stream() {
         init_test("chain_does_not_repoll_exhausted_second_stream");
         let polls = Arc::new(AtomicUsize::new(0));
