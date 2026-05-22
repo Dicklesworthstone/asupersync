@@ -424,7 +424,7 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let poll = Pin::new(&mut writer).poll_write_vectored(&mut cx, &bufs);
+        let poll = AsyncWrite::poll_write_vectored(Pin::new(&mut writer), &mut cx, &bufs);
         let wrote_first = matches!(poll, Poll::Ready(Ok(5)));
 
         crate::assert_with_log!(
@@ -441,10 +441,10 @@ mod tests {
             writer.writes.clone()
         );
         crate::assert_with_log!(
-            !writer.is_write_vectored(),
+            !AsyncWrite::is_write_vectored(&writer),
             "default vectored capability flag",
             false,
-            writer.is_write_vectored()
+            AsyncWrite::is_write_vectored(&writer)
         );
         crate::test_complete!("default_write_vectored_uses_first_non_empty_buffer");
     }
@@ -457,7 +457,7 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let poll = Pin::new(&mut writer).poll_write_vectored(&mut cx, &bufs);
+        let poll = AsyncWrite::poll_write_vectored(Pin::new(&mut writer), &mut cx, &bufs);
         let returned_zero = matches!(poll, Poll::Ready(Ok(0)));
 
         crate::assert_with_log!(
@@ -483,7 +483,7 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let poll = Pin::new(&mut output).poll_write_vectored(&mut cx, &bufs);
+        let poll = AsyncWrite::poll_write_vectored(Pin::new(&mut output), &mut cx, &bufs);
         let wrote_four = matches!(poll, Poll::Ready(Ok(4)));
 
         crate::assert_with_log!(wrote_four, "vectored byte count", true, wrote_four);
@@ -494,10 +494,10 @@ mod tests {
             output.as_slice()
         );
         crate::assert_with_log!(
-            output.is_write_vectored(),
+            AsyncWrite::is_write_vectored(&output),
             "vec advertises vectored writes",
             true,
-            output.is_write_vectored()
+            AsyncWrite::is_write_vectored(&output)
         );
         crate::test_complete!("vec_write_vectored_appends_all_buffers_and_reports_total");
     }
