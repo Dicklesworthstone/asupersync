@@ -1201,6 +1201,56 @@ mod tests {
     }
 
     #[test]
+    fn retry_policy_builders_clamp_out_of_range_values() {
+        let policy = RetryPolicy::new()
+            .with_max_attempts(0)
+            .with_multiplier(0.25)
+            .with_jitter(-1.0);
+
+        assert_eq!(policy.max_attempts, 1);
+        assert_eq!(policy.multiplier, 1.0);
+        assert_eq!(policy.jitter, 0.0);
+
+        let policy = RetryPolicy::new().with_jitter(2.0);
+        assert_eq!(policy.jitter, 1.0);
+    }
+
+    #[test]
+    fn mr_retry_state_total_delay_matches_calculated_retry_prefixes() {
+        let policy = RetryPolicy::new()
+            .with_max_attempts(5)
+            .with_initial_delay(Duration::from_millis(10))
+            .with_multiplier(3.0)
+            .with_max_delay(Duration::from_millis(100))
+            .no_jitter();
+        let mut state = RetryState::new(policy.clone());
+        let mut expected_total = Duration::ZERO;
+
+        for attempt in 1..=policy.max_attempts {
+            let observed_delay = state
+                .next_attempt(None)
+                .expect("attempt should be available before max_attempts");
+            let expected_delay = if attempt == 1 {
+                Duration::ZERO
+            } else {
+                calculate_delay(&policy, attempt - 1, None)
+            };
+
+            expected_total = expected_total.saturating_add(expected_delay);
+            assert_eq!(
+                observed_delay, expected_delay,
+                "retry attempt {attempt} returned an unexpected delay"
+            );
+            assert_eq!(
+                state.total_delay, expected_total,
+                "retry total delay should equal the calculated prefix sum after attempt {attempt}",
+            );
+        }
+
+        assert!(state.next_attempt(None).is_none());
+    }
+
+    #[test]
     fn retry_state_cancel() {
         let policy = RetryPolicy::new().with_max_attempts(3);
         let mut state = RetryState::new(policy);
