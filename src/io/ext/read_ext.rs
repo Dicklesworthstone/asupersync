@@ -626,6 +626,18 @@ mod tests {
         std::task::Waker::noop().clone()
     }
 
+    struct PanicOnUseReader;
+
+    impl AsyncRead for PanicOnUseReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            panic!("empty read_exact must not poll the reader")
+        }
+    }
+
     fn poll_ready<F: Future>(fut: &mut Pin<&mut F>) -> Option<F::Output> {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -677,6 +689,19 @@ mod tests {
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::assert_with_log!(&buf == b"abcd", "buf", b"abcd", buf);
         crate::test_complete!("read_exact_ok");
+    }
+
+    #[test]
+    fn read_exact_empty_returns_without_polling_reader() {
+        init_test("read_exact_empty_returns_without_polling_reader");
+        let mut reader = PanicOnUseReader;
+        let mut buf = [];
+        let mut fut = reader.read_exact(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+
+        let result = poll_ready(&mut fut).expect("future did not resolve");
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        crate::test_complete!("read_exact_empty_returns_without_polling_reader");
     }
 
     #[test]
