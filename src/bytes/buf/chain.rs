@@ -120,6 +120,34 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    #[derive(Debug)]
+    struct VirtualBuf {
+        remaining: usize,
+        chunk: &'static [u8],
+    }
+
+    impl VirtualBuf {
+        fn new(remaining: usize, chunk: &'static [u8]) -> Self {
+            Self { remaining, chunk }
+        }
+    }
+
+    impl Buf for VirtualBuf {
+        fn remaining(&self) -> usize {
+            self.remaining
+        }
+
+        fn chunk(&self) -> &[u8] {
+            let visible = self.remaining.min(self.chunk.len());
+            &self.chunk[..visible]
+        }
+
+        fn advance(&mut self, cnt: usize) {
+            assert!(cnt <= self.remaining, "advanced past end of virtual buffer");
+            self.remaining -= cnt;
+        }
+    }
+
     #[test]
     fn test_chain_remaining() {
         init_test("test_chain_remaining");
@@ -129,6 +157,20 @@ mod tests {
         let remaining = chain.remaining();
         crate::assert_with_log!(remaining == 6, "remaining", 6, remaining);
         crate::test_complete!("test_chain_remaining");
+    }
+
+    #[test]
+    fn chain_remaining_saturates_when_segments_exceed_usize_max() {
+        init_test("chain_remaining_saturates_when_segments_exceed_usize_max");
+        let a = VirtualBuf::new(usize::MAX - 2, b"a");
+        let b = VirtualBuf::new(7, b"b");
+        let chain = Chain::new(a, b);
+
+        let remaining = chain.remaining();
+        crate::assert_with_log!(remaining == usize::MAX, "remaining", usize::MAX, remaining);
+        let chunk = chain.chunk();
+        crate::assert_with_log!(chunk == b"a", "chunk", b"a", chunk);
+        crate::test_complete!("chain_remaining_saturates_when_segments_exceed_usize_max");
     }
 
     #[test]
