@@ -656,6 +656,60 @@ mod tests {
     }
 
     #[test]
+    fn first_ok_to_result_panic_precedes_cancel_and_errors() {
+        let result: FirstOkResult<i32, &str> = FirstOkResult::failure(
+            vec![
+                (0, FirstOkFailure::Error("e0")),
+                (1, FirstOkFailure::Cancelled(CancelReason::timeout())),
+                (2, FirstOkFailure::Panicked(PanicPayload::new("boom"))),
+            ],
+            3,
+        );
+
+        let value = first_ok_to_result(result);
+        assert!(matches!(value, Err(FirstOkError::Panicked(_))));
+    }
+
+    #[test]
+    fn mr_first_ok_cancel_aggregation_ignores_later_errors() {
+        let labels = ["e0", "e1", "e2", "e3"];
+
+        for cancel_pos in 0..=labels.len() {
+            let mut failures = Vec::new();
+            for (index, label) in labels.iter().take(cancel_pos).enumerate() {
+                failures.push((index, FirstOkFailure::Error(*label)));
+            }
+            failures.push((
+                cancel_pos,
+                FirstOkFailure::Cancelled(CancelReason::timeout()),
+            ));
+            for (offset, label) in labels.iter().skip(cancel_pos).enumerate() {
+                failures.push((cancel_pos + 1 + offset, FirstOkFailure::Error(*label)));
+            }
+
+            let result: FirstOkResult<i32, &str> =
+                FirstOkResult::failure(failures, labels.len() + 1);
+            let value = first_ok_to_result(result);
+
+            match value {
+                Err(FirstOkError::Cancelled {
+                    errors_before_cancel,
+                    attempted_before_cancel,
+                    ..
+                }) => {
+                    assert_eq!(attempted_before_cancel, cancel_pos);
+                    assert_eq!(
+                        errors_before_cancel,
+                        labels[..cancel_pos],
+                        "only errors before cancellation should be aggregated"
+                    );
+                }
+                other => panic!("expected cancellation aggregate, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn first_ok_to_result_empty() {
         let outcomes: Vec<Outcome<i32, &str>> = vec![];
         let result = first_ok_outcomes(outcomes);
