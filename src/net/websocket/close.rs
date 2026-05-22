@@ -700,6 +700,47 @@ mod tests {
     }
 
     #[test]
+    fn close_reason_encode_and_frame_payload_are_equivalent() {
+        let overlong_text = "a".repeat(MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES + 1);
+        let cases = [
+            ("empty", CloseReason::empty()),
+            ("normal", CloseReason::normal()),
+            (
+                "normal with text",
+                CloseReason::with_text(CloseCode::Normal, "goodbye"),
+            ),
+            (
+                "custom sendable",
+                CloseReason::parse(&3001u16.to_be_bytes()).unwrap(),
+            ),
+            (
+                "receive-only unassigned",
+                CloseReason::parse(&2000u16.to_be_bytes()).unwrap(),
+            ),
+            (
+                "text without code",
+                CloseReason {
+                    code: None,
+                    raw_code: None,
+                    text: Some("ignored".to_string()),
+                },
+            ),
+            (
+                "overlong text",
+                CloseReason::with_text(CloseCode::Normal, &overlong_text),
+            ),
+        ];
+
+        for (case, reason) in cases {
+            let encoded = reason.encode();
+            let frame = reason.to_frame();
+
+            assert_eq!(frame.opcode, Opcode::Close, "{case}");
+            assert_eq!(encoded.as_ref(), frame.payload.as_ref(), "{case}");
+        }
+    }
+
+    #[test]
     fn close_reason_unsendable_received_code_encodes_as_empty_close() {
         let payload = 2000u16.to_be_bytes();
         let reason = CloseReason::parse(&payload).unwrap();
