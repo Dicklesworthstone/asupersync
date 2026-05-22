@@ -1398,6 +1398,81 @@ mod tests {
         assert!(src.is_empty());
     }
 
+    #[test]
+    fn metamorphic_num_skip_zero_returns_wire_header_plus_payload() {
+        let cases: &[(usize, bool, &[u8])] = &[
+            (1, true, b""),
+            (1, false, b"A"),
+            (2, true, b"hello"),
+            (3, false, b"frame"),
+            (4, true, b"payload"),
+            (8, false, b"wide"),
+        ];
+
+        for &(length_field_length, big_endian, payload) in cases {
+            let mut encoder_builder =
+                LengthDelimitedCodec::builder().length_field_length(length_field_length);
+            encoder_builder = if big_endian {
+                encoder_builder.big_endian()
+            } else {
+                encoder_builder.little_endian()
+            };
+
+            let mut encoder = encoder_builder.new_codec();
+            let mut wire = BytesMut::new();
+            encoder
+                .encode(BytesMut::from(payload), &mut wire)
+                .expect("test payload should encode");
+            let header = BytesMut::from(&wire[..length_field_length]);
+
+            let mut payload_decoder_builder =
+                LengthDelimitedCodec::builder().length_field_length(length_field_length);
+            payload_decoder_builder = if big_endian {
+                payload_decoder_builder.big_endian()
+            } else {
+                payload_decoder_builder.little_endian()
+            };
+            let mut payload_decoder = payload_decoder_builder.new_codec();
+            let mut payload_wire = wire.clone();
+            let payload_frame = payload_decoder
+                .decode(&mut payload_wire)
+                .expect("payload decode should succeed")
+                .expect("payload frame should be ready");
+
+            let mut wire_decoder_builder = LengthDelimitedCodec::builder()
+                .length_field_length(length_field_length)
+                .num_skip(0);
+            wire_decoder_builder = if big_endian {
+                wire_decoder_builder.big_endian()
+            } else {
+                wire_decoder_builder.little_endian()
+            };
+            let mut wire_decoder = wire_decoder_builder.new_codec();
+            let mut full_wire = wire;
+            let full_frame = wire_decoder
+                .decode(&mut full_wire)
+                .expect("wire-retaining decode should succeed")
+                .expect("wire-retaining frame should be ready");
+
+            let mut expected_full_frame = header;
+            expected_full_frame.extend_from_slice(payload);
+
+            assert_eq!(payload_frame.as_ref(), payload);
+            assert!(
+                payload_wire.is_empty(),
+                "default skip decoder should drain the input"
+            );
+            assert_eq!(
+                full_frame, expected_full_frame,
+                "retaining zero skipped bytes should expose the exact wire header before the payload"
+            );
+            assert!(
+                full_wire.is_empty(),
+                "wire-retaining decoder should drain the input"
+            );
+        }
+    }
+
     // ================================================================================
     // METAMORPHIC TESTING SUITE
     // ================================================================================
