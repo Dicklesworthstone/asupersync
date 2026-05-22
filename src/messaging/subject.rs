@@ -55,6 +55,9 @@ pub enum SubjectPatternError {
     /// A literal segment embedded wildcard characters rather than being a pure token.
     #[error("literal segment `{0}` embeds wildcard characters")]
     EmbeddedWildcard(String),
+    /// A literal segment embedded the `.` subject separator.
+    #[error("literal segment `{0}` embeds the subject separator `.`")]
+    EmbeddedSeparator(String),
     /// Prefix morphisms only permit exact literal segment rewrites.
     #[error("pattern `{0}` must contain only literal segments for prefix morphisms")]
     LiteralOnlyPatternRequired(String),
@@ -273,20 +276,13 @@ fn parse_pattern_tokens(raw: &str) -> Result<Vec<SubjectToken>, SubjectPatternEr
 
     let mut segments = Vec::new();
     for segment in normalized.split('.') {
-        if segment.is_empty() {
-            return Err(SubjectPatternError::EmptySegment);
-        }
-        if segment.chars().any(char::is_whitespace) {
-            return Err(SubjectPatternError::WhitespaceInSegment(segment.to_owned()));
-        }
-
         let token = match segment {
             "*" => SubjectToken::One,
             ">" => SubjectToken::Tail,
-            literal if literal.contains('*') || literal.contains('>') => {
-                return Err(SubjectPatternError::EmbeddedWildcard(literal.to_owned()));
+            literal => {
+                validate_literal_segment(literal)?;
+                SubjectToken::Literal(literal.to_owned())
             }
-            literal => SubjectToken::Literal(literal.to_owned()),
         };
         segments.push(token);
     }
@@ -298,6 +294,12 @@ fn parse_pattern_tokens(raw: &str) -> Result<Vec<SubjectToken>, SubjectPatternEr
 fn validate_pattern_tokens(segments: &[SubjectToken]) -> Result<(), SubjectPatternError> {
     if segments.is_empty() {
         return Err(SubjectPatternError::EmptyPattern);
+    }
+
+    for segment in segments {
+        if let SubjectToken::Literal(literal) = segment {
+            validate_literal_segment(literal)?;
+        }
     }
 
     let tail_count = segments
@@ -316,6 +318,22 @@ fn validate_pattern_tokens(segments: &[SubjectToken]) -> Result<(), SubjectPatte
         return Err(SubjectPatternError::TailWildcardMustBeTerminal);
     }
 
+    Ok(())
+}
+
+fn validate_literal_segment(segment: &str) -> Result<(), SubjectPatternError> {
+    if segment.is_empty() {
+        return Err(SubjectPatternError::EmptySegment);
+    }
+    if segment.chars().any(char::is_whitespace) {
+        return Err(SubjectPatternError::WhitespaceInSegment(segment.to_owned()));
+    }
+    if segment.contains('*') || segment.contains('>') {
+        return Err(SubjectPatternError::EmbeddedWildcard(segment.to_owned()));
+    }
+    if segment.contains('.') {
+        return Err(SubjectPatternError::EmbeddedSeparator(segment.to_owned()));
+    }
     Ok(())
 }
 
@@ -1850,6 +1868,35 @@ mod tests {
             &[lit("tenant"), lit("orders"), lit("reply")]
         );
         assert!(!subject_pattern.has_wildcards());
+    }
+
+    #[test]
+    fn pattern_from_tokens_rejects_non_canonical_literal_segments() {
+        let invalid_cases = [
+            (
+                SubjectToken::Literal(String::new()),
+                SubjectPatternError::EmptySegment,
+            ),
+            (
+                SubjectToken::Literal("tenant orders".to_owned()),
+                SubjectPatternError::WhitespaceInSegment("tenant orders".to_owned()),
+            ),
+            (
+                SubjectToken::Literal("tenant*orders".to_owned()),
+                SubjectPatternError::EmbeddedWildcard("tenant*orders".to_owned()),
+            ),
+            (
+                SubjectToken::Literal("tenant.orders".to_owned()),
+                SubjectPatternError::EmbeddedSeparator("tenant.orders".to_owned()),
+            ),
+        ];
+
+        for (segment, expected_error) in invalid_cases {
+            assert_eq!(
+                SubjectPattern::from_tokens(vec![segment]),
+                Err(expected_error)
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
