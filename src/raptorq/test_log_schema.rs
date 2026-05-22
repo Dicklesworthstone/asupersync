@@ -1260,12 +1260,15 @@ fn validate_governance_string_field_in(
     let key = field.rsplit('.').next().unwrap_or(field);
     if let Some(value) = map.get(key) {
         match value {
-            serde_json::Value::String(text) if !text.trim().is_empty() => {}
+            serde_json::Value::String(text) if text.trim().is_empty() => violations.push(format!(
+                "decode_stats.governance.{field} must be a non-empty string"
+            )),
+            serde_json::Value::String(text) if text != text.trim() => violations.push(format!(
+                "decode_stats.governance.{field} must not have leading or trailing whitespace"
+            )),
+            serde_json::Value::String(_) => {}
             serde_json::Value::Null => violations.push(format!(
                 "decode_stats.governance.{field} is missing or null"
-            )),
-            serde_json::Value::String(_) => violations.push(format!(
-                "decode_stats.governance.{field} must be a non-empty string"
             )),
             _ => violations.push(format!("decode_stats.governance.{field} must be a string")),
         }
@@ -2334,6 +2337,46 @@ mod tests {
                 .iter()
                 .any(|v| { v.contains("decode_stats.governance.chosen_action must be one of") }),
             "should reject whitespace-padded governance chosen_action: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_whitespace_padded_governance_strings() {
+        let mut entry = valid_unit_log_value_with_governance();
+        entry["decode_stats"]["governance"]["replay_ref"] =
+            json!(" replay:rq-g7-structured-governance-v1 ");
+        entry["decode_stats"]["governance"]["top_evidence_contributors"][0]["name"] =
+            json!(" density ");
+        entry["decode_stats"]["governance"]["chosen_action"] = json!("fallback");
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["fired"] =
+            json!(true);
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["reason"] =
+            json!(" policy_budget_exhausted ");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.replay_ref must not have leading or trailing whitespace",
+                )
+            }),
+            "should reject whitespace-padded governance replay_ref: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.top_evidence_contributors[0].name must not have leading or trailing whitespace",
+                )
+            }),
+            "should reject whitespace-padded governance contributor name: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.deterministic_fallback_trigger.reason must not have leading or trailing whitespace",
+                )
+            }),
+            "should reject whitespace-padded governance fallback reason: {violations:?}"
         );
     }
 
