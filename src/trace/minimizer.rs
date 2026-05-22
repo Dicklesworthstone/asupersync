@@ -518,6 +518,14 @@ fn ddmin(
         for i in 0..chunks {
             let lo = i * chunk_sz;
             let hi = ((i + 1) * chunk_sz).min(current.len());
+            // `chunk_sz` is rounded up, so a trailing chunk can start at or
+            // past `current.len()` (`lo >= hi`). Such a chunk is empty: its
+            // complement is the whole set, which is not a reduction. Skipping
+            // it avoids both the `hi - lo` underflow below and a non-progress
+            // loop where `current = complement` never shrinks `current`.
+            if lo >= hi {
+                continue;
+            }
             let complement: Vec<usize> = current
                 .iter()
                 .enumerate()
