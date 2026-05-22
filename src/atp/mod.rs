@@ -7,7 +7,6 @@
 //! before endpoint, CLI, daemon, or relay code depends on it.
 
 pub mod actor;
-pub mod cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
 pub mod grant;
@@ -33,10 +32,6 @@ pub mod verifier;
 pub mod verify;
 pub mod writer;
 
-pub use cache::{
-    CacheDiagnostics, CacheEntry, CacheEntryState, CacheError, CacheGrant, CacheMutation,
-    CacheSeedRequest, ObjectCache, PrivacyClass, SeedReceipt,
-};
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};
 pub use inbox::{
@@ -47,6 +42,7 @@ pub use logging::{
     AtpEvent, AtpLogger, AtpLoggerConfig, AtpSubsystem, EventContext, LogFormat, atp_logger,
     init_atp_logger,
 };
+pub use manifest::{ChunkStrategy, ProofStrength};
 pub use policy::{
     Capability, CapabilityAction, PolicyDecision, PolicyEnforcer, ResourceScope, TemporalScope,
 };
@@ -54,4 +50,3 @@ pub use quota::{
     QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaLimit, QuotaRow, QuotaUsage,
     RetentionClock, RetentionPolicy, RetentionRecord, RetentionRule,
 };
-pub use manifest::{ChunkStrategy, ProofStrength};
