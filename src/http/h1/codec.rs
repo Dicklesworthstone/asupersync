@@ -1519,6 +1519,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_chunk_size_line_accepts_only_bare_hex_digits() {
+        let accepted: &[(&[u8], usize)] = &[
+            (b"0", 0),
+            (b"000f", 15),
+            (b"10", 16),
+            (b"A;ext=1", 10),
+            (b"a;name=value", 10),
+        ];
+        for &(line, expected) in accepted {
+            assert_eq!(
+                parse_chunk_size_line(line).unwrap(),
+                expected,
+                "expected chunk size {expected} for {line:?}",
+            );
+        }
+
+        let rejected: &[&[u8]] = &[
+            b"",
+            b";ext=1",
+            b"+1",
+            b"-1",
+            b" 1",
+            b"1 ",
+            b"1\t",
+            b"0x10",
+            b"g",
+            b"1\0",
+            &[0xff],
+            b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+        ];
+        for line in rejected {
+            assert!(
+                matches!(
+                    parse_chunk_size_line(line),
+                    Err(HttpError::BadChunkedEncoding)
+                ),
+                "expected BadChunkedEncoding for {line:?}",
+            );
+        }
+    }
+
+    #[test]
     fn decode_chunked_with_trailers() {
         let mut codec = Http1Codec::new();
         let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
