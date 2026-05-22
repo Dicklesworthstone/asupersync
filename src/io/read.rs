@@ -472,6 +472,24 @@ mod tests {
     }
 
     #[test]
+    fn read_from_slice_zero_capacity_does_not_consume() {
+        init_test("read_from_slice_zero_capacity_does_not_consume");
+        let mut input: &[u8] = b"hello";
+        let mut buf = [0u8; 0];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut input).poll_read(&mut cx, &mut read_buf);
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
+        let filled_empty = read_buf.filled().is_empty();
+        crate::assert_with_log!(filled_empty, "filled empty", true, filled_empty);
+        crate::assert_with_log!(input == b"hello", "remaining", b"hello", input);
+        crate::test_complete!("read_from_slice_zero_capacity_does_not_consume");
+    }
+
+    #[test]
     fn default_read_vectored_uses_first_non_empty_buffer() {
         init_test("default_read_vectored_uses_first_non_empty_buffer");
         let mut reader = DefaultVectoredProbe::new(b"abcdef");
