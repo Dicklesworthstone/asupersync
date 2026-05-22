@@ -237,6 +237,42 @@ mod tests {
                 "Limit must not write past the admitted payload prefix",
             );
         }
+
+        #[test]
+        fn limit_metamorphic_set_limit_after_prefix_matches_fresh_suffix_limit(
+            prefix in prop::collection::vec(any::<u8>(), 0..96),
+            suffix in prop::collection::vec(any::<u8>(), 0..96),
+            initial_limit in 0usize..96,
+            suffix_limit in 0usize..96,
+        ) {
+            let prefix_len = prefix.len().min(initial_limit);
+            let suffix_len = suffix.len().min(suffix_limit);
+
+            let mut staged = Limit::new(Vec::new(), initial_limit);
+            staged.put_slice(&prefix[..prefix_len]);
+            staged.set_limit(suffix_limit);
+            staged.put_slice(&suffix[..suffix_len]);
+            let staged_remaining = staged.remaining_mut();
+            let staged = staged.into_inner();
+
+            let mut suffix_only = Limit::new(Vec::new(), suffix_limit);
+            suffix_only.put_slice(&suffix[..suffix_len]);
+            let suffix_remaining = suffix_only.remaining_mut();
+
+            let mut expected = prefix[..prefix_len].to_vec();
+            expected.extend_from_slice(&suffix_only.into_inner());
+
+            prop_assert_eq!(
+                staged,
+                expected,
+                "resetting Limit after a prefix write must only constrain later suffix writes",
+            );
+            prop_assert_eq!(
+                staged_remaining,
+                suffix_remaining,
+                "remaining capacity after reset must match a fresh suffix-limited buffer",
+            );
+        }
     }
 
     #[test]
