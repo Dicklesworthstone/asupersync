@@ -195,6 +195,19 @@ mod tests {
         std::task::Waker::noop().clone()
     }
 
+    fn collect_ready<S: Stream + Unpin>(stream: &mut S) -> Vec<S::Item> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut items = Vec::new();
+        loop {
+            match Pin::new(&mut *stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => return items,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct PollCountingEmptyStream {
         polls: Arc<AtomicUsize>,
@@ -361,6 +374,74 @@ mod tests {
         let hint = stream.size_hint();
         crate::assert_with_log!(hint == (0, Some(4)), "size_hint", (0, Some(4)), hint);
         crate::test_complete!("test_take_while_size_hint");
+    }
+
+    #[test]
+    fn mr_take_prefix_matches_slice_truncation() {
+        init_test("mr_take_prefix_matches_slice_truncation");
+        for len in 0..=12usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 5).collect();
+            for limit in 0..=16usize {
+                let mut stream = Take::new(iter(values.clone()), limit);
+                let expected: Vec<i32> = values.iter().copied().take(limit).collect();
+
+                assert_eq!(
+                    collect_ready(&mut stream),
+                    expected,
+                    "take({limit}) must match vector prefix truncation for len {len}",
+                );
+            }
+        }
+        crate::test_complete!("mr_take_prefix_matches_slice_truncation");
+    }
+
+    #[test]
+    fn mr_nested_take_collapses_to_minimum_limit() {
+        init_test("mr_nested_take_collapses_to_minimum_limit");
+        for len in 0..=10usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 3 - 9).collect();
+            for first_limit in 0..=12usize {
+                for second_limit in 0..=12usize {
+                    let mut nested =
+                        Take::new(Take::new(iter(values.clone()), first_limit), second_limit);
+                    let mut collapsed =
+                        Take::new(iter(values.clone()), first_limit.min(second_limit));
+
+                    assert_eq!(
+                        collect_ready(&mut nested),
+                        collect_ready(&mut collapsed),
+                        "take({first_limit}).take({second_limit}) must equal take(min) for len {len}",
+                    );
+                }
+            }
+        }
+        crate::test_complete!("mr_nested_take_collapses_to_minimum_limit");
+    }
+
+    #[test]
+    fn mr_take_while_looser_threshold_extends_stricter_prefix() {
+        init_test("mr_take_while_looser_threshold_extends_stricter_prefix");
+        for len in 0..=14usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 6).collect();
+            for strict_threshold in -8..=8 {
+                for loose_threshold in strict_threshold..=10 {
+                    let mut strict = TakeWhile::new(iter(values.clone()), move |item: &i32| {
+                        *item < strict_threshold
+                    });
+                    let mut loose = TakeWhile::new(iter(values.clone()), move |item: &i32| {
+                        *item < loose_threshold
+                    });
+
+                    let strict_items = collect_ready(&mut strict);
+                    let loose_items = collect_ready(&mut loose);
+                    assert!(
+                        loose_items.starts_with(&strict_items),
+                        "loosening take_while threshold from {strict_threshold} to {loose_threshold} must extend the accepted prefix",
+                    );
+                }
+            }
+        }
+        crate::test_complete!("mr_take_while_looser_threshold_extends_stricter_prefix");
     }
 
     #[test]
