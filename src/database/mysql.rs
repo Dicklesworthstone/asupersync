@@ -1433,7 +1433,7 @@ impl MySqlConnectOptions {
         // Split database
         let (auth_host, database) = auth_host
             .rsplit_once('/')
-            .map(|(ah, db)| (ah, Some(db.to_string())))
+            .map(|(ah, db)| (ah, Some(percent_decode(db))))
             .unwrap_or((auth_host, None));
 
         // Split auth@host
@@ -6452,6 +6452,13 @@ mod tests {
     fn test_connect_options_percent_encoded_user() {
         let opts = MySqlConnectOptions::parse("mysql://user%40domain:pass@localhost/db").unwrap();
         assert_eq!(opts.user, "user@domain");
+    }
+
+    #[test]
+    fn test_connect_options_percent_encoded_database() {
+        let opts =
+            MySqlConnectOptions::parse("mysql://user@localhost/app%2Dtenant%2Fprimary").unwrap();
+        assert_eq!(opts.database.as_deref(), Some("app-tenant/primary"));
     }
 
     #[test]
