@@ -409,6 +409,52 @@ mod tests {
     }
 
     #[test]
+    fn resp_adapter_decode_is_prefix_stable_under_pipelined_frames() {
+        let adapter = RespProtocolAdapter::default();
+        let first = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"PING".to_vec())),
+            RespValue::BulkString(Some(b"one".to_vec())),
+        ]));
+        let second = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"ECHO".to_vec())),
+            RespValue::BulkString(Some(b"two".to_vec())),
+        ]));
+
+        let mut first_frame = Vec::new();
+        adapter
+            .encode_message(&first, &mut first_frame)
+            .expect("first frame encode succeeds");
+
+        let mut second_frame = Vec::new();
+        adapter
+            .encode_message(&second, &mut second_frame)
+            .expect("second frame encode succeeds");
+
+        let baseline = adapter
+            .try_decode_message(&first_frame)
+            .expect("baseline decode succeeds")
+            .expect("baseline frame available");
+
+        let mut pipelined = first_frame.clone();
+        pipelined.extend_from_slice(&second_frame);
+        let pipelined_first = adapter
+            .try_decode_message(&pipelined)
+            .expect("pipelined decode succeeds")
+            .expect("first pipelined frame available");
+
+        assert_eq!(pipelined_first.message, baseline.message);
+        assert_eq!(pipelined_first.consumed, first_frame.len());
+
+        let pipelined_second = adapter
+            .try_decode_message(&pipelined[pipelined_first.consumed..])
+            .expect("second pipelined decode succeeds")
+            .expect("second pipelined frame available");
+
+        assert_eq!(pipelined_second.message, second);
+        assert_eq!(pipelined_second.consumed, second_frame.len());
+    }
+
+    #[test]
     fn resp_adapter_reports_partial_frames_without_consumption() {
         let adapter = RespProtocolAdapter::default();
 
