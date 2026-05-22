@@ -474,6 +474,33 @@ mod tests {
     }
 
     #[test]
+    fn happy_eyeballs_from_lookup_ignores_cross_family_interleaving() {
+        init_test("happy_eyeballs_from_lookup_ignores_cross_family_interleaving");
+        let v6_a: IpAddr = "2001:db8::1".parse().unwrap();
+        let v6_b: IpAddr = "2001:db8::2".parse().unwrap();
+        let v6_c: IpAddr = "2001:db8::3".parse().unwrap();
+        let v4_a: IpAddr = "192.0.2.1".parse().unwrap();
+        let v4_b: IpAddr = "192.0.2.2".parse().unwrap();
+        let v4_c: IpAddr = "192.0.2.3".parse().unwrap();
+
+        let interleaved = LookupIp::new(
+            vec![v4_a, v6_a, v4_b, v6_b, v6_c, v4_c],
+            Duration::from_secs(60),
+        );
+        let partitioned = LookupIp::new(
+            vec![v6_a, v6_b, v6_c, v4_a, v4_b, v4_c],
+            Duration::from_secs(60),
+        );
+
+        let from_interleaved: Vec<_> = HappyEyeballs::from_lookup(&interleaved).collect();
+        let from_partitioned: Vec<_> = HappyEyeballs::from_lookup(&partitioned).collect();
+
+        assert_eq!(from_interleaved, from_partitioned);
+        assert_eq!(from_interleaved, vec![v6_a, v4_a, v6_b, v4_b, v6_c, v4_c]);
+        crate::test_complete!("happy_eyeballs_from_lookup_ignores_cross_family_interleaving");
+    }
+
+    #[test]
     fn happy_eyeballs_v4_only() {
         init_test("happy_eyeballs_v4_only");
         let he = HappyEyeballs::new(
