@@ -239,6 +239,37 @@ mod tests {
     }
 
     #[test]
+    fn error_code_from_u32_covers_rfc7540_section_7_registry() {
+        let cases = [
+            (0x0, ErrorCode::NoError, "NO_ERROR"),
+            (0x1, ErrorCode::ProtocolError, "PROTOCOL_ERROR"),
+            (0x2, ErrorCode::InternalError, "INTERNAL_ERROR"),
+            (0x3, ErrorCode::FlowControlError, "FLOW_CONTROL_ERROR"),
+            (0x4, ErrorCode::SettingsTimeout, "SETTINGS_TIMEOUT"),
+            (0x5, ErrorCode::StreamClosed, "STREAM_CLOSED"),
+            (0x6, ErrorCode::FrameSizeError, "FRAME_SIZE_ERROR"),
+            (0x7, ErrorCode::RefusedStream, "REFUSED_STREAM"),
+            (0x8, ErrorCode::Cancel, "CANCEL"),
+            (0x9, ErrorCode::CompressionError, "COMPRESSION_ERROR"),
+            (0xa, ErrorCode::ConnectError, "CONNECT_ERROR"),
+            (0xb, ErrorCode::EnhanceYourCalm, "ENHANCE_YOUR_CALM"),
+            (0xc, ErrorCode::InadequateSecurity, "INADEQUATE_SECURITY"),
+            (0xd, ErrorCode::Http11Required, "HTTP_1_1_REQUIRED"),
+        ];
+
+        for (wire_value, expected_code, display_token) in cases {
+            let parsed = ErrorCode::from_u32(wire_value);
+            assert_eq!(parsed, expected_code, "wire value {wire_value:#x}");
+            assert_eq!(u32::from(parsed), wire_value);
+            assert_eq!(parsed.to_string(), display_token);
+        }
+
+        for unknown in [0x0e, 0x10, 0xffff_ffff] {
+            assert_eq!(ErrorCode::from_u32(unknown), ErrorCode::InternalError);
+        }
+    }
+
+    #[test]
     fn test_error_code_u32_roundtrip() {
         init_test("test_error_code_u32_roundtrip");
         let code = ErrorCode::FrameSizeError;
