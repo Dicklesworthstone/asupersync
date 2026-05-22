@@ -187,6 +187,61 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_chunked_staging_matches_single_stage_commit() {
+        init_test("metamorphic_chunked_staging_matches_single_stage_commit");
+        let payload = b"alpha\nbeta\0gamma delta";
+
+        let mut single_output = Vec::new();
+        let single_result = {
+            let mut permit = WritePermit::new(&mut single_output);
+            permit.stage(payload);
+
+            let staged_len = permit.staged_len();
+            crate::assert_with_log!(
+                staged_len == payload.len(),
+                "single staged_len",
+                payload.len(),
+                staged_len
+            );
+
+            let mut fut = Box::pin(permit.commit());
+            poll_ready(fut.as_mut())
+        };
+        let single_ok = single_result.is_ok();
+        crate::assert_with_log!(single_ok, "single commit ok", true, single_ok);
+
+        for split_at in 0..=payload.len() {
+            let mut chunked_output = Vec::new();
+            let chunked_result = {
+                let mut permit = WritePermit::new(&mut chunked_output);
+                permit.stage(&payload[..split_at]);
+                permit.stage(&payload[split_at..]);
+
+                let staged_len = permit.staged_len();
+                crate::assert_with_log!(
+                    staged_len == payload.len(),
+                    "chunked staged_len",
+                    payload.len(),
+                    staged_len
+                );
+
+                let mut fut = Box::pin(permit.commit());
+                poll_ready(fut.as_mut())
+            };
+            let chunked_ok = chunked_result.is_ok();
+            crate::assert_with_log!(chunked_ok, "chunked commit ok", true, chunked_ok);
+            crate::assert_with_log!(
+                chunked_output == single_output,
+                "chunked output matches single-stage output",
+                single_output.as_slice(),
+                chunked_output.as_slice()
+            );
+        }
+
+        crate::test_complete!("metamorphic_chunked_staging_matches_single_stage_commit");
+    }
+
+    #[test]
     fn abort_discards_data() {
         init_test("abort_discards_data");
         let mut output = Vec::new();
