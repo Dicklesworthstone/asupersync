@@ -1318,6 +1318,29 @@ mod tests {
     }
 
     #[test]
+    fn frame_header_reserved_stream_id_bit_is_ignored_on_parse_and_write() {
+        // RFC 9113 Section 4.1: the leading stream identifier bit is reserved
+        // and must be ignored by receivers. Writers must keep it clear.
+        let mut wire = BytesMut::from(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x01][..]);
+
+        let parsed = FrameHeader::parse(&mut wire).expect("reserved bit is not part of stream id");
+
+        assert_eq!(parsed.stream_id, 1);
+        assert!(wire.is_empty());
+
+        let mut encoded = BytesMut::new();
+        FrameHeader {
+            length: 0,
+            frame_type: FrameType::Data as u8,
+            flags: 0,
+            stream_id: 0x8000_0001,
+        }
+        .write(&mut encoded);
+
+        assert_eq!(&encoded[5..9], &[0x00, 0x00, 0x00, 0x01]);
+    }
+
+    #[test]
     fn test_frame_header_parse_insufficient_bytes() {
         let mut buf = BytesMut::from(&b"\x00\x00\x00\x00\x00\x00\x00\x00"[..]);
         let err = FrameHeader::parse(&mut buf).unwrap_err();
