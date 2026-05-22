@@ -1815,25 +1815,35 @@ mod tests {
         assert_eq!(result.unwrap_err(), SnapshotError::UnexpectedEof);
     }
 
-    #[test]
-    fn snapshot_invalid_budget_presence_flag() {
-        let mut bytes = RegionSnapshot::empty(RegionId::new_for_test(9, 0)).to_bytes();
-        // Layout for empty snapshot:
-        // header(5) + region_id(8) + state(1) + timestamp(8) + sequence(8)
-        // + task_count(4) + child_count(4) + finalizer_count(4) = 42
-        // Next byte is budget.deadline presence flag.
-        bytes[42] = 2;
-        let result = RegionSnapshot::from_bytes(&bytes);
-        assert_eq!(result.unwrap_err(), SnapshotError::InvalidPresenceFlag(2));
+    fn empty_snapshot_optional_presence_offsets() -> [(&'static str, usize); 5] {
+        let fixed_prefix = 4 + 1 + 8 + 1 + 8 + 8 + 8 + 8 + 4 + 4 + 4;
+        [
+            ("budget.deadline_nanos", fixed_prefix),
+            ("budget.polls_remaining", fixed_prefix + 1),
+            ("budget.cost_remaining", fixed_prefix + 2),
+            ("cancel_reason", fixed_prefix + 3),
+            ("parent", fixed_prefix + 4),
+        ]
     }
 
     #[test]
-    fn snapshot_invalid_parent_presence_flag() {
-        let mut bytes = RegionSnapshot::empty(RegionId::new_for_test(9, 0)).to_bytes();
-        // In empty snapshot, parent presence flag is at offset 46.
-        bytes[46] = 2;
-        let result = RegionSnapshot::from_bytes(&bytes);
-        assert_eq!(result.unwrap_err(), SnapshotError::InvalidPresenceFlag(2));
+    fn snapshot_invalid_optional_presence_flags() {
+        for (field, offset) in empty_snapshot_optional_presence_offsets() {
+            let mut bytes = RegionSnapshot::empty(RegionId::new_for_test(9, 0)).to_bytes();
+            assert_eq!(
+                bytes[offset], 0,
+                "empty snapshot test fixture should have absent {field} flag"
+            );
+
+            bytes[offset] = 2;
+            let result = RegionSnapshot::from_bytes(&bytes);
+
+            assert_eq!(
+                result.unwrap_err(),
+                SnapshotError::InvalidPresenceFlag(2),
+                "{field} must reject non-boolean presence flags"
+            );
+        }
     }
 
     #[test]
