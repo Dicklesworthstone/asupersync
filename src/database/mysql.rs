@@ -5864,6 +5864,34 @@ mod tests {
     }
 
     #[test]
+    fn stmt_execute_params_optional_unsigned_null_keeps_static_type_metadata() {
+        let null_u32: Option<u32> = None;
+        let some_u32 = Some(u32::MAX);
+        let mut buf = PacketBuffer::new();
+
+        write_stmt_execute_params(&mut buf, &[&null_u32, &some_u32])
+            .expect("encode statement parameters");
+
+        assert_eq!(buf.buf[0], 0b0000_0001, "first parameter is NULL");
+        assert_eq!(buf.buf[1], 0x01, "new-params-bound flag must be set");
+        assert_eq!(
+            &buf.buf[2..6],
+            &[
+                mysql_type::MYSQL_TYPE_LONG,
+                0x80,
+                mysql_type::MYSQL_TYPE_LONG,
+                0x80
+            ],
+            "Option<u32> must preserve unsigned metadata whether None or Some"
+        );
+        assert_eq!(
+            &buf.buf[6..],
+            &u32::MAX.to_le_bytes(),
+            "NULL value bytes must be omitted without shifting the non-NULL value"
+        );
+    }
+
+    #[test]
     fn stmt_execute_params_uses_lsb_first_null_bitmap_across_bytes() {
         let params = [
             None,
