@@ -344,6 +344,40 @@ mod tests {
         });
     }
 
+    #[test]
+    fn mr2_cancelled_reserve_closes_receiver_without_delivery() {
+        let cx = test_cx();
+        let cancelled_cx = test_cx();
+        cancelled_cx.set_cancel_requested(true);
+
+        let message = UniqueMessage::new(77, "cancelled_reserve");
+        let (tx, mut rx) = oneshot::channel();
+
+        let send_result = tx.send(&cancelled_cx, message.clone());
+        match send_result {
+            Err(SendError::Cancelled(returned)) => {
+                assert_eq!(returned, message);
+                assert!(returned.validate());
+            }
+            other => panic!("cancelled reserve should return the original value: {other:?}"),
+        }
+
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Closed)),
+            "cancelled reserve must close without a queued value"
+        );
+        assert!(
+            matches!(block_on(rx.recv(&cx)), Err(RecvError::Closed)),
+            "async receive after cancelled reserve must observe closure"
+        );
+
+        let counter = DeliveryCounter::default();
+        assert!(
+            counter.exactly_once_invariant().is_ok(),
+            "cancelled reserve should leave zero sends and zero receives"
+        );
+    }
+
     /// **MR3: Receive Exhaustion (State Transition, Score: 8.5)**
     ///
     /// Property: After one successful receive, the channel is exhausted.
