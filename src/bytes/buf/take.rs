@@ -147,6 +147,23 @@ mod tests {
     }
 
     #[test]
+    fn take_zero_limit_hides_inner_without_advancing() {
+        init_test("take_zero_limit_hides_inner_without_advancing");
+        let buf: &[u8] = &[1, 2, 3];
+        let mut take = Take::new(buf, 0);
+
+        let remaining = take.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        let chunk = take.chunk();
+        crate::assert_with_log!(chunk.is_empty(), "chunk empty", true, chunk.is_empty());
+
+        take.advance(0);
+        let inner = take.into_inner();
+        crate::assert_with_log!(inner == [1, 2, 3], "inner", &[1, 2, 3], inner);
+        crate::test_complete!("take_zero_limit_hides_inner_without_advancing");
+    }
+
+    #[test]
     fn test_take_advance() {
         init_test("test_take_advance");
         let buf: &[u8] = &[1, 2, 3, 4, 5];
