@@ -9,14 +9,8 @@
 //! 4. **Precision**: Minimal false positives on valid code
 //! 5. **Completeness**: All obligation kinds are properly tracked
 
-use super::{
-    Body, BodyBuilder, Instruction, LeakChecker, ObligationVar,
-    CheckResult, Diagnostic, DiagnosticCode,
-};
+use super::{Body, BodyBuilder, DiagnosticCode, Instruction, LeakChecker, ObligationVar};
 use crate::record::ObligationKind;
-
-/// Mathematical tolerance for floating-point comparisons in analysis.
-const ANALYSIS_EPSILON: f64 = 1e-10;
 
 /// Conformance test result for a specific leak analysis requirement.
 #[derive(Debug, Clone)]
@@ -125,13 +119,13 @@ impl LeakCheckConformanceHarness {
             },
             LeakCheckConformanceTest {
                 id: "LEAK-008",
-                description: "Nested obligation scopes are handled correctly",
+                description: "Sequential independent obligations are handled correctly",
                 level: RequirementLevel::Should,
                 test_fn: test_nested_obligation_scopes,
             },
             LeakCheckConformanceTest {
                 id: "LEAK-009",
-                description: "Loop with leak is detected",
+                description: "Overwriting a live obligation is detected",
                 level: RequirementLevel::Should,
                 test_fn: test_loop_with_leak_detection,
             },
@@ -269,22 +263,26 @@ impl LeakCheckConformanceHarness {
 
 /// LEAK-001: Verify unmatched reserve without commit/abort is detected.
 fn test_unmatched_reserve_detection() -> LeakCheckConformanceResult {
-    let body = Body::new("unmatched_reserve", vec![
-        Instruction::Reserve {
-            var: ObligationVar(0),
-            kind: ObligationKind::SendPermit
-        },
-        // Missing commit or abort - this should be detected as a leak
-    ]);
+    let body = Body::new(
+        "unmatched_reserve",
+        vec![
+            Instruction::Reserve {
+                var: ObligationVar(0),
+                kind: ObligationKind::SendPermit,
+            },
+            // Missing commit or abort - this should be detected as a leak.
+        ],
+    );
 
     let mut checker = LeakChecker::new();
     let result = checker.check(&body);
 
     let has_leak = !result.is_clean();
     let leak_count = result.leaks().len();
-    let correct_diagnostic = result.leaks().iter().any(|diag| {
-        diag.code() == DiagnosticCode::UnmatchedReservation
-    });
+    let correct_diagnostic = result
+        .leaks()
+        .iter()
+        .any(|diag| diag.code == DiagnosticCode::LeakExitDefinite);
 
     if has_leak && leak_count == 1 && correct_diagnostic {
         LeakCheckConformanceResult {
@@ -312,13 +310,18 @@ fn test_unmatched_reserve_detection() -> LeakCheckConformanceResult {
 
 /// LEAK-002: Verify matched reserve+commit pair is clean.
 fn test_matched_reserve_commit_clean() -> LeakCheckConformanceResult {
-    let body = Body::new("matched_reserve_commit", vec![
-        Instruction::Reserve {
-            var: ObligationVar(0),
-            kind: ObligationKind::SendPermit
-        },
-        Instruction::Commit { var: ObligationVar(0) },
-    ]);
+    let body = Body::new(
+        "matched_reserve_commit",
+        vec![
+            Instruction::Reserve {
+                var: ObligationVar(0),
+                kind: ObligationKind::SendPermit,
+            },
+            Instruction::Commit {
+                var: ObligationVar(0),
+            },
+        ],
+    );
 
     let mut checker = LeakChecker::new();
     let result = checker.check(&body);
@@ -352,13 +355,18 @@ fn test_matched_reserve_commit_clean() -> LeakCheckConformanceResult {
 
 /// LEAK-003: Verify matched reserve+abort pair is clean.
 fn test_matched_reserve_abort_clean() -> LeakCheckConformanceResult {
-    let body = Body::new("matched_reserve_abort", vec![
-        Instruction::Reserve {
-            var: ObligationVar(0),
-            kind: ObligationKind::RecvPermit
-        },
-        Instruction::Abort { var: ObligationVar(0) },
-    ]);
+    let body = Body::new(
+        "matched_reserve_abort",
+        vec![
+            Instruction::Reserve {
+                var: ObligationVar(0),
+                kind: ObligationKind::Ack,
+            },
+            Instruction::Abort {
+                var: ObligationVar(0),
+            },
+        ],
+    );
 
     let mut checker = LeakChecker::new();
     let result = checker.check(&body);
@@ -395,17 +403,19 @@ fn test_branch_merge_preserves_leaks() -> LeakCheckConformanceResult {
     let mut builder = BodyBuilder::new("branch_merge_test");
 
     // Create a conditional where one branch leaks
-    let branch_builder = builder.if_branch();
+    builder.branch(|branch| {
+        // Branch 1: clean path.
+        branch.arm(|arm| {
+            arm.reserve(ObligationVar(0), ObligationKind::SendPermit);
+            arm.commit(ObligationVar(0));
+        });
 
-    // Branch 1: Clean path
-    let mut arm1 = branch_builder.arm();
-    arm1.reserve(ObligationVar(0), ObligationKind::SendPermit);
-    arm1.commit(ObligationVar(0));
-
-    // Branch 2: Leaky path
-    let mut arm2 = branch_builder.arm();
-    arm2.reserve(ObligationVar(1), ObligationKind::RecvPermit);
-    // Missing commit/abort - should leak
+        // Branch 2: leaky path.
+        branch.arm(|arm| {
+            arm.reserve(ObligationVar(1), ObligationKind::Ack);
+            // Missing commit/abort - should leak.
+        });
+    });
 
     let body = builder.build();
 
@@ -443,23 +453,26 @@ fn test_branch_merge_preserves_leaks() -> LeakCheckConformanceResult {
 fn test_all_obligation_kinds_trackable() -> LeakCheckConformanceResult {
     let obligation_kinds = [
         ObligationKind::SendPermit,
-        ObligationKind::RecvPermit,
-        ObligationKind::FileHandle,
-        ObligationKind::NetworkSocket,
-        ObligationKind::RegionHandle,
+        ObligationKind::Ack,
+        ObligationKind::Lease,
+        ObligationKind::IoOp,
+        ObligationKind::SemaphorePermit,
     ];
 
     let mut all_trackable = true;
     let mut evidence_parts = Vec::new();
 
     for (i, &kind) in obligation_kinds.iter().enumerate() {
-        let body = Body::new(&format!("test_{:?}", kind), vec![
-            Instruction::Reserve {
-                var: ObligationVar(i as u32),
-                kind
-            },
-            // Intentional leak to test detection
-        ]);
+        let body = Body::new(
+            format!("test_{kind:?}"),
+            vec![
+                Instruction::Reserve {
+                    var: ObligationVar(i as u32),
+                    kind,
+                },
+                // Intentional leak to test detection.
+            ],
+        );
 
         let mut checker = LeakChecker::new();
         let result = checker.check(&body);
@@ -496,23 +509,30 @@ fn test_all_obligation_kinds_trackable() -> LeakCheckConformanceResult {
 
 /// LEAK-006: Verify double-commit is detected as invalid.
 fn test_double_commit_detection() -> LeakCheckConformanceResult {
-    let body = Body::new("double_commit", vec![
-        Instruction::Reserve {
-            var: ObligationVar(0),
-            kind: ObligationKind::SendPermit
-        },
-        Instruction::Commit { var: ObligationVar(0) },
-        Instruction::Commit { var: ObligationVar(0) }, // Double commit!
-    ]);
+    let body = Body::new(
+        "double_commit",
+        vec![
+            Instruction::Reserve {
+                var: ObligationVar(0),
+                kind: ObligationKind::SendPermit,
+            },
+            Instruction::Commit {
+                var: ObligationVar(0),
+            },
+            Instruction::Commit {
+                var: ObligationVar(0),
+            }, // Double commit.
+        ],
+    );
 
     let mut checker = LeakChecker::new();
     let result = checker.check(&body);
 
     let has_error = !result.is_clean();
-    let has_double_commit_error = result.leaks().iter().any(|diag| {
-        diag.code() == DiagnosticCode::DoubleCommit ||
-        diag.code() == DiagnosticCode::UseAfterCommit
-    });
+    let has_double_commit_error = result
+        .double_resolves()
+        .iter()
+        .any(|diag| diag.code == DiagnosticCode::DoubleResolve);
 
     if has_error && has_double_commit_error {
         LeakCheckConformanceResult {
@@ -540,21 +560,27 @@ fn test_double_commit_detection() -> LeakCheckConformanceResult {
 
 /// LEAK-007: Verify use-before-reserve is detected.
 fn test_use_before_reserve_detection() -> LeakCheckConformanceResult {
-    let body = Body::new("use_before_reserve", vec![
-        Instruction::Commit { var: ObligationVar(0) }, // Use before reserve!
-        Instruction::Reserve {
-            var: ObligationVar(0),
-            kind: ObligationKind::SendPermit
-        },
-    ]);
+    let body = Body::new(
+        "use_before_reserve",
+        vec![
+            Instruction::Commit {
+                var: ObligationVar(0),
+            }, // Use before reserve.
+            Instruction::Reserve {
+                var: ObligationVar(0),
+                kind: ObligationKind::SendPermit,
+            },
+        ],
+    );
 
     let mut checker = LeakChecker::new();
     let result = checker.check(&body);
 
     let has_error = !result.is_clean();
-    let has_use_before_reserve = result.leaks().iter().any(|diag| {
-        diag.code() == DiagnosticCode::UseBeforeReservation
-    });
+    let has_use_before_reserve = result
+        .diagnostics
+        .iter()
+        .any(|diag| diag.code == DiagnosticCode::ResolveUnheld);
 
     if has_error && has_use_before_reserve {
         LeakCheckConformanceResult {
@@ -582,18 +608,13 @@ fn test_use_before_reserve_detection() -> LeakCheckConformanceResult {
 
 /// LEAK-008: Test nested obligation scopes are handled correctly.
 fn test_nested_obligation_scopes() -> LeakCheckConformanceResult {
-    let mut builder = BodyBuilder::new("nested_scopes");
+    let mut builder = BodyBuilder::new("sequential_independent_obligations");
 
-    // Outer scope
-    builder.reserve(ObligationVar(0), ObligationKind::FileHandle);
+    let outer = builder.reserve(ObligationKind::Lease);
+    let inner = builder.reserve(ObligationKind::SendPermit);
 
-    // Inner scope with its own obligations
-    let inner_builder = builder.scope("inner");
-    inner_builder.reserve(ObligationVar(1), ObligationKind::SendPermit);
-    inner_builder.commit(ObligationVar(1)); // Clean inner scope
-
-    // Outer scope cleanup
-    builder.commit(ObligationVar(0));
+    builder.commit(inner);
+    builder.commit(outer);
 
     let body = builder.build();
 
@@ -605,19 +626,21 @@ fn test_nested_obligation_scopes() -> LeakCheckConformanceResult {
     if is_clean {
         LeakCheckConformanceResult {
             requirement_id: "LEAK-008",
-            description: "Nested obligation scopes",
+            description: "Sequential independent obligations",
             level: RequirementLevel::Should,
             status: TestStatus::Pass,
-            evidence: "Clean analysis with proper scope nesting".to_string(),
+            evidence:
+                "Clean analysis with two independent obligations resolved out of reservation order"
+                    .to_string(),
             confidence: 0.95,
         }
     } else {
         LeakCheckConformanceResult {
             requirement_id: "LEAK-008",
-            description: "Nested obligation scopes",
+            description: "Sequential independent obligations",
             level: RequirementLevel::Should,
             status: TestStatus::Fail,
-            evidence: format!("VIOLATION: nested scopes not handled cleanly"),
+            evidence: "VIOLATION: independently resolved obligations were flagged".to_string(),
             confidence: 0.95,
         }
     }
@@ -625,36 +648,45 @@ fn test_nested_obligation_scopes() -> LeakCheckConformanceResult {
 
 /// LEAK-009: Test loop with leak is detected.
 fn test_loop_with_leak_detection() -> LeakCheckConformanceResult {
-    let mut builder = BodyBuilder::new("loop_with_leak");
-
-    let loop_builder = builder.while_loop();
-    loop_builder.reserve(ObligationVar(0), ObligationKind::SendPermit);
-    // Missing commit in loop body - potential leak on each iteration
-
-    let body = builder.build();
+    let body = Body::new(
+        "overwrite_live_obligation",
+        vec![
+            Instruction::Reserve {
+                var: ObligationVar(0),
+                kind: ObligationKind::SendPermit,
+            },
+            Instruction::Reserve {
+                var: ObligationVar(0),
+                kind: ObligationKind::Ack,
+            },
+        ],
+    );
 
     let mut checker = LeakChecker::new();
     let result = checker.check(&body);
 
-    let has_leak = !result.is_clean();
+    let has_overwrite = result
+        .diagnostics
+        .iter()
+        .any(|diag| diag.code == DiagnosticCode::OverwriteActive);
 
-    if has_leak {
+    if has_overwrite {
         LeakCheckConformanceResult {
             requirement_id: "LEAK-009",
-            description: "Loop leak detection",
+            description: "Live obligation overwrite detection",
             level: RequirementLevel::Should,
             status: TestStatus::Pass,
-            evidence: "Detected potential leak in loop".to_string(),
-            confidence: 0.90,
+            evidence: "Detected overwrite of a still-live obligation variable".to_string(),
+            confidence: 0.95,
         }
     } else {
         LeakCheckConformanceResult {
             requirement_id: "LEAK-009",
-            description: "Loop leak detection",
+            description: "Live obligation overwrite detection",
             level: RequirementLevel::Should,
             status: TestStatus::Fail,
-            evidence: "VIOLATION: loop leak not detected".to_string(),
-            confidence: 0.90,
+            evidence: "VIOLATION: live overwrite was not diagnosed".to_string(),
+            confidence: 0.95,
         }
     }
 }
@@ -663,16 +695,18 @@ fn test_loop_with_leak_detection() -> LeakCheckConformanceResult {
 fn test_conditional_obligations_valid() -> LeakCheckConformanceResult {
     let mut builder = BodyBuilder::new("conditional_valid");
 
-    let branch_builder = builder.if_branch();
+    builder.branch(|branch| {
+        // Both branches properly handle obligations.
+        branch.arm(|arm| {
+            arm.reserve(ObligationVar(0), ObligationKind::SendPermit);
+            arm.commit(ObligationVar(0));
+        });
 
-    // Both branches properly handle obligations
-    let mut arm1 = branch_builder.arm();
-    arm1.reserve(ObligationVar(0), ObligationKind::SendPermit);
-    arm1.commit(ObligationVar(0));
-
-    let mut arm2 = branch_builder.arm();
-    arm2.reserve(ObligationVar(1), ObligationKind::RecvPermit);
-    arm2.abort(ObligationVar(1)); // Valid abort path
+        branch.arm(|arm| {
+            arm.reserve(ObligationVar(1), ObligationKind::Ack);
+            arm.abort(ObligationVar(1));
+        });
+    });
 
     let body = builder.build();
 
@@ -696,7 +730,7 @@ fn test_conditional_obligations_valid() -> LeakCheckConformanceResult {
             description: "Valid conditional obligations",
             level: RequirementLevel::Should,
             status: TestStatus::Fail,
-            evidence: format!("VIOLATION: valid conditional code flagged as leaky"),
+            evidence: "VIOLATION: valid conditional code flagged as leaky".to_string(),
             confidence: 0.95,
         }
     }

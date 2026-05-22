@@ -54,7 +54,6 @@
 
 use std::fmt;
 
-#[cfg(test)]
 pub mod conformance;
 
 /// Configuration for the leak monitor.

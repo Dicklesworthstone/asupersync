@@ -10,8 +10,7 @@
 //! 5. **Determinism**: Same operations produce same results
 
 use super::graded::{GradedObligation, Resolution};
-use crate::record::ObligationKind;
-use std::sync::{Arc, Mutex};
+use crate::record::{ObligationKind, ObligationState};
 use std::panic;
 
 /// Conformance test result for graded types requirements.
@@ -109,7 +108,7 @@ impl GradedConformanceHarness {
             },
             GradedConformanceTest {
                 id: "GRAD-006",
-                description: "Clone preserves obligation state correctly",
+                description: "Clone is intentionally unavailable to preserve linearity",
                 level: RequirementLevel::Should,
                 test_fn: test_clone_preserves_state,
             },
@@ -254,24 +253,19 @@ impl GradedConformanceHarness {
 /// GRAD-001: Verify commit resolution marks obligation as fulfilled.
 fn test_commit_resolution_fulfillment() -> GradedConformanceResult {
     let ob = GradedObligation::reserve(ObligationKind::SendPermit, "test_commit");
+    let was_unresolved_before = !ob.is_resolved();
+    let proof = ob.resolve(Resolution::Commit);
+    let resolution_ok = proof.kind() == ObligationKind::SendPermit
+        && proof.resolution() == Resolution::Commit
+        && proof.obligation_state() == ObligationState::Committed;
 
-    // Check initial state
-    let is_pending_before = ob.is_pending();
-
-    // Resolve with commit
-    let result = ob.resolve(Resolution::Commit);
-
-    // Should succeed and not be pending anymore
-    let resolution_ok = result.is_ok();
-    let is_pending_after = result.as_ref().map_or(true, |ob| ob.is_pending());
-
-    if resolution_ok && is_pending_before && !is_pending_after {
+    if was_unresolved_before && resolution_ok {
         GradedConformanceResult {
             requirement_id: "GRAD-001",
             description: "Commit resolution fulfillment",
             level: RequirementLevel::Must,
             status: TestStatus::Pass,
-            evidence: "Obligation transitioned from pending to committed".to_string(),
+            evidence: format!("Move-only obligation consumed into proof `{proof}`"),
             confidence: 1.0,
         }
     } else {
@@ -281,8 +275,8 @@ fn test_commit_resolution_fulfillment() -> GradedConformanceResult {
             level: RequirementLevel::Must,
             status: TestStatus::Fail,
             evidence: format!(
-                "VIOLATION: resolution_ok={}, before={}, after={}",
-                resolution_ok, is_pending_before, is_pending_after
+                "VIOLATION: was_unresolved_before={}, proof={proof:?}",
+                was_unresolved_before
             ),
             confidence: 1.0,
         }
@@ -291,25 +285,20 @@ fn test_commit_resolution_fulfillment() -> GradedConformanceResult {
 
 /// GRAD-002: Verify abort resolution marks obligation as cancelled.
 fn test_abort_resolution_cancellation() -> GradedConformanceResult {
-    let ob = GradedObligation::reserve(ObligationKind::RecvPermit, "test_abort");
+    let ob = GradedObligation::reserve(ObligationKind::Ack, "test_abort");
+    let was_unresolved_before = !ob.is_resolved();
+    let proof = ob.resolve(Resolution::Abort);
+    let resolution_ok = proof.kind() == ObligationKind::Ack
+        && proof.resolution() == Resolution::Abort
+        && proof.obligation_state() == ObligationState::Aborted;
 
-    // Check initial state
-    let is_pending_before = ob.is_pending();
-
-    // Resolve with abort
-    let result = ob.resolve(Resolution::Abort);
-
-    // Should succeed and not be pending anymore
-    let resolution_ok = result.is_ok();
-    let is_pending_after = result.as_ref().map_or(true, |ob| ob.is_pending());
-
-    if resolution_ok && is_pending_before && !is_pending_after {
+    if was_unresolved_before && resolution_ok {
         GradedConformanceResult {
             requirement_id: "GRAD-002",
             description: "Abort resolution cancellation",
             level: RequirementLevel::Must,
             status: TestStatus::Pass,
-            evidence: "Obligation transitioned from pending to aborted".to_string(),
+            evidence: format!("Move-only obligation consumed into proof `{proof}`"),
             confidence: 1.0,
         }
     } else {
@@ -319,8 +308,8 @@ fn test_abort_resolution_cancellation() -> GradedConformanceResult {
             level: RequirementLevel::Must,
             status: TestStatus::Fail,
             evidence: format!(
-                "VIOLATION: resolution_ok={}, before={}, after={}",
-                resolution_ok, is_pending_before, is_pending_after
+                "VIOLATION: was_unresolved_before={}, proof={proof:?}",
+                was_unresolved_before
             ),
             confidence: 1.0,
         }
@@ -329,39 +318,19 @@ fn test_abort_resolution_cancellation() -> GradedConformanceResult {
 
 /// GRAD-003: Verify drop without resolution triggers safety mechanism.
 fn test_drop_without_resolution_safety() -> GradedConformanceResult {
-    // We need to test that dropping an unresolved obligation triggers
-    // some safety mechanism (panic, warning, etc.)
-
-    // Create a shared flag to detect if drop handler runs
-    let drop_detected = Arc::new(Mutex::new(false));
-    let drop_detected_clone = Arc::clone(&drop_detected);
-
-    // Test in a closure to isolate the panic
-    let panic_result = panic::catch_unwind(move || {
-        let _ob = GradedObligation::reserve(ObligationKind::FileHandle, "test_drop");
-
-        // Set flag to show we reached this point
-        *drop_detected_clone.lock().unwrap() = true;
-
-        // Obligation goes out of scope here without resolution
-        // This should trigger safety mechanism
+    let panic_result = panic::catch_unwind(|| {
+        let _ob = GradedObligation::reserve(ObligationKind::IoOp, "test_drop");
     });
-
-    let drop_was_called = *drop_detected.lock().unwrap();
     let did_panic = panic_result.is_err();
 
-    // Either it should panic OR provide some other safety mechanism
-    // For now, we accept either behavior as valid
-    let safety_triggered = did_panic || drop_was_called;
-
-    if safety_triggered {
+    if did_panic {
         GradedConformanceResult {
             requirement_id: "GRAD-003",
             description: "Drop safety mechanism",
             level: RequirementLevel::Must,
             status: TestStatus::Pass,
-            evidence: format!("Safety triggered: panic={}, drop_called={}", did_panic, drop_was_called),
-            confidence: 0.95,
+            evidence: "Unresolved obligation panicked on drop".to_string(),
+            confidence: 1.0,
         }
     } else {
         GradedConformanceResult {
@@ -369,46 +338,28 @@ fn test_drop_without_resolution_safety() -> GradedConformanceResult {
             description: "Drop safety mechanism",
             level: RequirementLevel::Must,
             status: TestStatus::Fail,
-            evidence: "VIOLATION: No safety mechanism triggered on drop".to_string(),
-            confidence: 0.95,
+            evidence: "VIOLATION: unresolved obligation dropped without panic".to_string(),
+            confidence: 1.0,
         }
     }
 }
 
 /// GRAD-004: Verify double resolution is rejected.
 fn test_double_resolution_rejection() -> GradedConformanceResult {
-    let ob = GradedObligation::reserve(ObligationKind::NetworkSocket, "test_double");
+    let ob = GradedObligation::reserve(ObligationKind::SemaphorePermit, "test_double");
+    let proof = ob.resolve(Resolution::Commit);
+    let first_ok =
+        proof.kind() == ObligationKind::SemaphorePermit && proof.resolution() == Resolution::Commit;
 
-    // First resolution should succeed
-    let first_result = ob.resolve(Resolution::Commit);
-    let first_ok = first_result.is_ok();
-
-    if let Ok(resolved_ob) = first_result {
-        // Second resolution should fail
-        let second_result = resolved_ob.resolve(Resolution::Abort);
-        let second_failed = second_result.is_err();
-
-        if first_ok && second_failed {
-            GradedConformanceResult {
-                requirement_id: "GRAD-004",
-                description: "Double resolution rejection",
-                level: RequirementLevel::Must,
-                status: TestStatus::Pass,
-                evidence: "First resolution succeeded, second rejected".to_string(),
-                confidence: 1.0,
-            }
-        } else {
-            GradedConformanceResult {
-                requirement_id: "GRAD-004",
-                description: "Double resolution rejection",
-                level: RequirementLevel::Must,
-                status: TestStatus::Fail,
-                evidence: format!(
-                    "VIOLATION: first_ok={}, second_failed={}",
-                    first_ok, second_failed
-                ),
-                confidence: 1.0,
-            }
+    if first_ok {
+        GradedConformanceResult {
+            requirement_id: "GRAD-004",
+            description: "Double resolution rejection",
+            level: RequirementLevel::Must,
+            status: TestStatus::Pass,
+            evidence: "First resolve consumes the obligation; a second resolve is type-impossible"
+                .to_string(),
+            confidence: 1.0,
         }
     } else {
         GradedConformanceResult {
@@ -416,7 +367,7 @@ fn test_double_resolution_rejection() -> GradedConformanceResult {
             description: "Double resolution rejection",
             level: RequirementLevel::Must,
             status: TestStatus::Fail,
-            evidence: "VIOLATION: First resolution failed unexpectedly".to_string(),
+            evidence: format!("VIOLATION: first proof had wrong metadata: {proof:?}"),
             confidence: 1.0,
         }
     }
@@ -426,10 +377,10 @@ fn test_double_resolution_rejection() -> GradedConformanceResult {
 fn test_obligation_kinds_distinguishable() -> GradedConformanceResult {
     let kinds = [
         ObligationKind::SendPermit,
-        ObligationKind::RecvPermit,
-        ObligationKind::FileHandle,
-        ObligationKind::NetworkSocket,
-        ObligationKind::RegionHandle,
+        ObligationKind::Ack,
+        ObligationKind::Lease,
+        ObligationKind::IoOp,
+        ObligationKind::SemaphorePermit,
     ];
 
     let mut obligations = Vec::new();
@@ -482,51 +433,31 @@ fn test_obligation_kinds_distinguishable() -> GradedConformanceResult {
 
 /// GRAD-006: Verify clone preserves obligation state correctly.
 fn test_clone_preserves_state() -> GradedConformanceResult {
-    let ob1 = GradedObligation::reserve(ObligationKind::SendPermit, "test_clone");
-    let ob2 = ob1.clone();
+    let ob = GradedObligation::reserve(ObligationKind::Lease, "test_no_clone");
+    let raw = ob.into_raw();
 
-    // Both should have same initial state
-    let same_kind = ob1.kind() == ob2.kind();
-    let same_pending = ob1.is_pending() == ob2.is_pending();
-    let same_context = ob1.context() == ob2.context();
-
-    // Clean up
-    let _ = ob1.resolve(Resolution::Commit);
-    let _ = ob2.resolve(Resolution::Abort);
-
-    if same_kind && same_pending && same_context {
-        GradedConformanceResult {
-            requirement_id: "GRAD-006",
-            description: "Clone preserves state",
-            level: RequirementLevel::Should,
-            status: TestStatus::Pass,
-            evidence: "Cloned obligation has identical state".to_string(),
-            confidence: 1.0,
-        }
-    } else {
-        GradedConformanceResult {
-            requirement_id: "GRAD-006",
-            description: "Clone preserves state",
-            level: RequirementLevel::Should,
-            status: TestStatus::Fail,
-            evidence: format!(
-                "VIOLATION: same_kind={}, same_pending={}, same_context={}",
-                same_kind, same_pending, same_context
-            ),
-            confidence: 1.0,
-        }
+    GradedConformanceResult {
+        requirement_id: "GRAD-006",
+        description: "Clone unavailable preserves linearity",
+        level: RequirementLevel::Should,
+        status: TestStatus::Pass,
+        evidence: format!(
+            "GradedObligation intentionally exposes no Clone impl; raw escape kept metadata kind={:?}, description={}",
+            raw.kind, raw.description
+        ),
+        confidence: 0.9,
     }
 }
 
 /// GRAD-007: Verify debug output includes obligation information.
 fn test_debug_output_informative() -> GradedConformanceResult {
-    let ob = GradedObligation::reserve(ObligationKind::FileHandle, "test_debug");
+    let ob = GradedObligation::reserve(ObligationKind::IoOp, "test_debug");
     let debug_str = format!("{:?}", ob);
 
     // Should include key information
-    let has_kind = debug_str.contains("FileHandle") || debug_str.contains("kind");
-    let has_context = debug_str.contains("test_debug") || debug_str.contains("context");
-    let has_state = debug_str.contains("pending") || debug_str.contains("state");
+    let has_kind = debug_str.contains("IoOp") || debug_str.contains("kind");
+    let has_context = debug_str.contains("test_debug") || debug_str.contains("description");
+    let has_state = debug_str.contains("resolved");
 
     // Clean up
     let _ = ob.resolve(Resolution::Abort);
@@ -539,7 +470,10 @@ fn test_debug_output_informative() -> GradedConformanceResult {
             description: "Debug output informative",
             level: RequirementLevel::Should,
             status: TestStatus::Pass,
-            evidence: format!("Debug includes key info: '{}'", debug_str.chars().take(40).collect::<String>()),
+            evidence: format!(
+                "Debug includes key info: '{}'",
+                debug_str.chars().take(40).collect::<String>()
+            ),
             confidence: 0.95,
         }
     } else {

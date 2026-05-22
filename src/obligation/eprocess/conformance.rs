@@ -10,7 +10,6 @@
 //! 5. **Numerical Stability**: No overflow/underflow in realistic scenarios
 
 use super::{LeakMonitor, MonitorConfig};
-use std::f64;
 
 /// Mathematical tolerance for floating-point comparisons.
 const MATH_EPSILON: f64 = 1e-10;
