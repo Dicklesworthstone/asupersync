@@ -1230,6 +1230,12 @@ impl SymbolDeduplicator {
             return true;
         }
 
+        if self.config.max_symbols_per_object == 0 {
+            drop(objects);
+            self.unique_symbols.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
         // Get or create object state
         let state = objects
             .entry(object_id)
@@ -3923,6 +3929,55 @@ mod tests {
         );
 
         crate::test_complete!("dedup_enforces_max_symbols_per_object");
+    }
+
+    #[test]
+    fn dedup_zero_symbol_capacity_does_not_track_empty_objects() {
+        init_test("dedup_zero_symbol_capacity_does_not_track_empty_objects");
+        let config = DeduplicatorConfig {
+            max_symbols_per_object: 0,
+            ..Default::default()
+        };
+        let dedup = SymbolDeduplicator::new(config);
+        let path = PathId(1);
+        let symbol = Symbol::new_for_test(1, 0, 0, &[1]);
+
+        let first = dedup.check_and_record(&symbol, path, Time::ZERO);
+        let second = dedup.check_and_record(&symbol, path, Time::ZERO);
+
+        crate::assert_with_log!(
+            first && second,
+            "zero symbol capacity treats every arrival as untracked unique",
+            true,
+            first && second
+        );
+        let stats = dedup.stats();
+        crate::assert_with_log!(
+            stats.objects_tracked == 0,
+            "zero symbol capacity must not leave empty per-object state",
+            0,
+            stats.objects_tracked
+        );
+        crate::assert_with_log!(
+            stats.symbols_tracked == 0,
+            "zero symbol capacity must not track symbol ids",
+            0,
+            stats.symbols_tracked
+        );
+        crate::assert_with_log!(
+            stats.unique_symbols == 2,
+            "untracked arrivals are still counted as unique attempts",
+            2,
+            stats.unique_symbols
+        );
+        crate::assert_with_log!(
+            stats.duplicates_detected == 0,
+            "untracked arrivals cannot be classified as duplicates",
+            0,
+            stats.duplicates_detected
+        );
+
+        crate::test_complete!("dedup_zero_symbol_capacity_does_not_track_empty_objects");
     }
 
     #[test]
