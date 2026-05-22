@@ -197,6 +197,73 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct PendingBeforeEach {
+        items: Vec<i32>,
+        next: usize,
+        pending_next: bool,
+    }
+
+    impl PendingBeforeEach {
+        fn new(items: Vec<i32>) -> Self {
+            Self {
+                items,
+                next: 0,
+                pending_next: true,
+            }
+        }
+    }
+
+    impl Stream for PendingBeforeEach {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.items.len() {
+                return Poll::Ready(None);
+            }
+
+            if self.pending_next {
+                self.pending_next = false;
+                return Poll::Pending;
+            }
+
+            let item = self.items[self.next];
+            self.next += 1;
+            self.pending_next = true;
+            Poll::Ready(Some(item))
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = self.items.len().saturating_sub(self.next);
+            (remaining, Some(remaining))
+        }
+    }
+
+    fn collect_stream_to_vec<S>(stream: S) -> (Vec<i32>, usize)
+    where
+        S: Stream<Item = i32>,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut stream = Box::pin(stream);
+        let mut items = Vec::new();
+        let mut pending_polls = 0usize;
+
+        loop {
+            match stream.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => return (items, pending_polls),
+                Poll::Pending => {
+                    pending_polls += 1;
+                    assert!(
+                        pending_polls <= 16,
+                        "stream did not complete after {pending_polls} pending polls",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn peek_then_consume() {
         init_test("peek_then_consume");
@@ -399,5 +466,95 @@ mod tests {
         assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(Some(7)));
         assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
         crate::test_complete!("peekable_accepts_pinned_non_unpin_streams");
+    }
+
+    #[test]
+    fn mr_peekable_redundant_peeks_preserve_consumption() {
+        init_test("mr_peekable_redundant_peeks_preserve_consumption");
+        let input = vec![8, 13, 21, 34, 55];
+        let (direct_items, direct_pending) = collect_stream_to_vec(iter(input.clone()));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut stream = Peekable::new(iter(input.clone()));
+        let mut peeked_items = Vec::new();
+
+        for (index, expected) in input.iter().copied().enumerate() {
+            let remaining = input.len() - index;
+            assert_eq!(stream.size_hint(), (remaining, Some(remaining)));
+
+            for _ in 0..3 {
+                let peeked = Pin::new(&mut stream)
+                    .poll_peek(&mut cx)
+                    .map(|item| item.copied());
+                assert_eq!(peeked, Poll::Ready(Some(expected)));
+                assert_eq!(stream.peek_cached(), Some(&expected));
+                assert_eq!(stream.size_hint(), (remaining, Some(remaining)));
+            }
+
+            let next = Pin::new(&mut stream).poll_next(&mut cx);
+            assert_eq!(next, Poll::Ready(Some(expected)));
+            peeked_items.push(expected);
+        }
+
+        assert_eq!(Pin::new(&mut stream).poll_peek(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        assert_eq!(peeked_items, direct_items);
+        assert_eq!(direct_pending, 0);
+        crate::test_complete!("mr_peekable_redundant_peeks_preserve_consumption");
+    }
+
+    #[test]
+    fn mr_peekable_pending_peeks_do_not_consume_or_cache() {
+        init_test("mr_peekable_pending_peeks_do_not_consume_or_cache");
+        let input = vec![3, 5, -8, 13];
+        let (always_ready_items, always_ready_pending) = collect_stream_to_vec(iter(input.clone()));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut stream = Peekable::new(PendingBeforeEach::new(input));
+        let mut pending_items = Vec::new();
+        let mut pending_polls = 0usize;
+
+        for expected in always_ready_items.iter().copied() {
+            assert_eq!(Pin::new(&mut stream).poll_peek(&mut cx), Poll::Pending);
+            pending_polls += 1;
+            assert!(stream.peek_cached().is_none());
+
+            let peeked = Pin::new(&mut stream)
+                .poll_peek(&mut cx)
+                .map(|item| item.copied());
+            assert_eq!(peeked, Poll::Ready(Some(expected)));
+            assert_eq!(stream.peek_cached(), Some(&expected));
+            assert_eq!(
+                Pin::new(&mut stream).poll_next(&mut cx),
+                Poll::Ready(Some(expected)),
+            );
+            pending_items.push(expected);
+        }
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(pending_items, always_ready_items);
+        assert_eq!(pending_polls, pending_items.len());
+        assert_eq!(always_ready_pending, 0);
+        crate::test_complete!("mr_peekable_pending_peeks_do_not_consume_or_cache");
+    }
+
+    #[test]
+    fn mr_peekable_into_inner_after_peek_matches_drop_first() {
+        init_test("mr_peekable_into_inner_after_peek_matches_drop_first");
+        let input = vec![10, 20, 30, 40];
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut stream = Peekable::new(iter(input.clone()));
+
+        let peeked = Pin::new(&mut stream)
+            .poll_peek(&mut cx)
+            .map(|item| item.copied());
+        assert_eq!(peeked, Poll::Ready(Some(input[0])));
+
+        let (remaining_items, pending_polls) = collect_stream_to_vec(stream.into_inner());
+        assert_eq!(remaining_items, input[1..]);
+        assert_eq!(pending_polls, 0);
+        crate::test_complete!("mr_peekable_into_inner_after_peek_matches_drop_first");
     }
 }
