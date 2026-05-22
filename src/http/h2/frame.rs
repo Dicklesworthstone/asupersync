@@ -2669,6 +2669,25 @@ mod tests {
     }
 
     #[test]
+    fn window_update_parse_ignores_reserved_increment_bit() {
+        let header = FrameHeader {
+            length: 4,
+            frame_type: FrameType::WindowUpdate as u8,
+            flags: 0,
+            stream_id: 7,
+        };
+
+        for payload in [
+            Bytes::from_static(&[0x00, 0x00, 0x04, 0x00]),
+            Bytes::from_static(&[0x80, 0x00, 0x04, 0x00]),
+        ] {
+            let parsed = WindowUpdateFrame::parse(&header, &payload).unwrap();
+            assert_eq!(parsed.stream_id, 7);
+            assert_eq!(parsed.increment, 1024);
+        }
+    }
+
+    #[test]
     fn test_error_code_all_variants() {
         // Test all error codes can be parsed and converted
         let codes = [
