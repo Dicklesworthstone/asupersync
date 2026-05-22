@@ -79,6 +79,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
     use std::panic::{self, AssertUnwindSafe};
 
     fn init_test(name: &str) {
@@ -187,6 +188,56 @@ mod tests {
         let len = read_buf.filled().len();
         crate::assert_with_log!(len == 3, "filled len", 3, len);
         crate::test_complete!("read_buf_advance_rejects_oversized_step_without_wrapping");
+    }
+
+    proptest! {
+        #[test]
+        fn read_buf_metamorphic_chunked_put_matches_single_put(
+            payload in prop::collection::vec(any::<u8>(), 0..96),
+            capacity in 0usize..96,
+            split_at in 0usize..96,
+        ) {
+            let write_len = payload.len().min(capacity);
+            let payload = &payload[..write_len];
+
+            let mut single_storage = vec![0xAA; capacity];
+            let (single_filled, single_remaining) = {
+                let mut single = ReadBuf::new(&mut single_storage);
+                single.put_slice(payload);
+                (single.filled().to_vec(), single.remaining())
+            };
+
+            let mut chunked_storage = vec![0xAA; capacity];
+            let (chunked_filled, chunked_remaining) = {
+                let split_at = split_at.min(write_len);
+                let mut chunked = ReadBuf::new(&mut chunked_storage);
+                chunked.put_slice(&payload[..split_at]);
+                chunked.put_slice(&payload[split_at..]);
+                (chunked.filled().to_vec(), chunked.remaining())
+            };
+
+            prop_assert_eq!(
+                chunked_filled.as_slice(),
+                single_filled.as_slice(),
+                "chunked ReadBuf writes must match one-shot writes",
+            );
+            prop_assert_eq!(
+                chunked_remaining,
+                single_remaining,
+                "chunking must not change remaining capacity",
+            );
+            prop_assert_eq!(single_filled.as_slice(), payload);
+            prop_assert_eq!(&single_storage[..write_len], payload);
+            prop_assert_eq!(&chunked_storage[..write_len], payload);
+            prop_assert!(
+                single_storage[write_len..].iter().all(|byte| *byte == 0xAA),
+                "one-shot write must not touch unwritten tail",
+            );
+            prop_assert!(
+                chunked_storage[write_len..].iter().all(|byte| *byte == 0xAA),
+                "chunked write must not touch unwritten tail",
+            );
+        }
     }
 
     #[test]
