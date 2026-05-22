@@ -362,6 +362,10 @@ impl DataFrame {
     /// Encode this frame.
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
+        if self.stream_id == 0 {
+            return Err(H2Error::protocol("DATA frame with stream ID 0"));
+        }
+
         let mut flags = 0u8;
         if self.end_stream {
             flags |= data_flags::END_STREAM;
@@ -1545,6 +1549,23 @@ mod tests {
 
         let err = DataFrame::parse(&header, payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn data_frame_encode_rejects_stream_id_zero_without_partial_write() {
+        let frame = DataFrame::new(0, Bytes::from_static(b"hello"), true);
+        let mut buf = BytesMut::new();
+
+        let err = frame
+            .encode(&mut buf)
+            .expect_err("invalid DATA stream id must not encode");
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, None);
+        assert!(
+            buf.is_empty(),
+            "invalid DATA frame must not partially encode"
+        );
     }
 
     #[test]
