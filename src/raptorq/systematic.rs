@@ -2311,6 +2311,58 @@ mod tests {
     }
 
     #[test]
+    fn emit_repair_batching_preserves_sequence_and_stats() {
+        let k = 7;
+        let symbol_size = 24;
+        let seed = 0xC0BA_17BA_7C48_5EED;
+        let source = make_source_symbols(k, symbol_size);
+
+        let mut single = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let mut batched = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+
+        let single_symbols = single.emit_repair(12);
+        let mut batched_symbols = Vec::new();
+        batched_symbols.extend(batched.emit_repair(3));
+        batched_symbols.extend(batched.emit_repair(0));
+        batched_symbols.extend(batched.emit_repair(4));
+        batched_symbols.extend(batched.emit_repair(5));
+
+        assert_eq!(
+            batched_symbols.len(),
+            single_symbols.len(),
+            "batched repair emission must produce the same total count"
+        );
+        for (single_symbol, batched_symbol) in single_symbols.iter().zip(&batched_symbols) {
+            assert_eq!(batched_symbol.esi, single_symbol.esi);
+            assert_eq!(batched_symbol.data, single_symbol.data);
+            assert_eq!(batched_symbol.is_source, single_symbol.is_source);
+            assert_eq!(batched_symbol.degree, single_symbol.degree);
+        }
+
+        assert_eq!(batched.next_repair_esi(), single.next_repair_esi());
+        assert_eq!(batched.systematic_emitted(), single.systematic_emitted());
+
+        let single_stats = single.stats();
+        let batched_stats = batched.stats();
+        assert_eq!(
+            batched_stats.repair_symbols_generated,
+            single_stats.repair_symbols_generated
+        );
+        assert_eq!(batched_stats.degree_min, single_stats.degree_min);
+        assert_eq!(batched_stats.degree_max, single_stats.degree_max);
+        assert_eq!(batched_stats.degree_sum, single_stats.degree_sum);
+        assert_eq!(batched_stats.degree_count, single_stats.degree_count);
+        assert_eq!(
+            batched_stats.repair_bytes_emitted,
+            single_stats.repair_bytes_emitted
+        );
+        assert_eq!(
+            batched_stats.systematic_bytes_emitted,
+            single_stats.systematic_bytes_emitted
+        );
+    }
+
+    #[test]
     fn stats_initialized() {
         let k = 8;
         let symbol_size = 64;
