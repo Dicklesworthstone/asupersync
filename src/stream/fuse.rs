@@ -124,6 +124,116 @@ mod tests {
     }
 
     #[test]
+    fn mr_fuse_is_identity_for_finite_streams() {
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 3 - 19).collect();
+            let mut fused = Fuse::new(iter(values.clone()));
+
+            assert_eq!(
+                collect_fused(&mut fused),
+                values,
+                "fuse must preserve the original item sequence for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_fuse_split_polling_matches_unsplit_collection() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for len in 0..=16usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 7).collect();
+            for split in 0..=len {
+                let mut fused = Fuse::new(iter(values.clone()));
+                let mut observed = Vec::new();
+
+                for expected in values.iter().take(split) {
+                    match Pin::new(&mut fused).poll_next(&mut cx) {
+                        Poll::Ready(Some(item)) => {
+                            assert_eq!(
+                                item, *expected,
+                                "prefix poll must match input for len {len}, split {split}",
+                            );
+                            observed.push(item);
+                        }
+                        Poll::Ready(None) => panic!(
+                            "fuse ended before split {split} for len {len}; observed {observed:?}",
+                        ),
+                        Poll::Pending => panic!(
+                            "iter-backed fuse unexpectedly pending for len {len}, split {split}",
+                        ),
+                    }
+                }
+
+                observed.extend(collect_fused(&mut fused));
+                assert_eq!(
+                    observed, values,
+                    "prefix polling plus collection must equal unsplit collection for len {len}, split {split}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mr_fuse_post_exhaustion_is_absorbing() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 5 + 2).collect();
+            let mut fused = Fuse::new(iter(values.clone()));
+
+            assert_eq!(collect_fused(&mut fused), values);
+            assert!(fused.get_ref().is_none());
+            assert_eq!(fused.size_hint(), (0, Some(0)));
+
+            for poll in 0..4 {
+                assert!(
+                    matches!(Pin::new(&mut fused).poll_next(&mut cx), Poll::Ready(None)),
+                    "post-exhaustion poll {poll} must stay terminated for len {len}",
+                );
+                assert_eq!(
+                    fused.size_hint(),
+                    (0, Some(0)),
+                    "post-exhaustion size hint must stay empty for len {len}, poll {poll}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mr_fuse_size_hint_tracks_remaining_items() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 + 11).collect();
+            let mut fused = Fuse::new(iter(values.clone()));
+
+            for (index, expected) in values.iter().enumerate() {
+                let remaining = len - index;
+                assert_eq!(
+                    fused.size_hint(),
+                    (remaining, Some(remaining)),
+                    "fuse must expose remaining upstream size before poll {index} for len {len}",
+                );
+                assert!(matches!(
+                    Pin::new(&mut fused).poll_next(&mut cx),
+                    Poll::Ready(Some(item)) if item == *expected
+                ));
+            }
+
+            assert_eq!(fused.size_hint(), (0, Some(0)));
+            assert!(matches!(
+                Pin::new(&mut fused).poll_next(&mut cx),
+                Poll::Ready(None)
+            ));
+            assert_eq!(fused.size_hint(), (0, Some(0)));
+        }
+    }
+
+    #[test]
     fn test_fuse_returns_none_after_exhaustion() {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
