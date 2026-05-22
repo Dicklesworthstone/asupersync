@@ -242,6 +242,18 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn poll_bool<F>(future: &mut F) -> bool
+    where
+        F: Future<Output = bool> + Unpin,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(future).poll(&mut cx) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("expected Ready"),
+        }
+    }
+
     #[test]
     fn any_found() {
         init_test("any_found");
@@ -336,6 +348,36 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("all_empty");
+    }
+
+    #[test]
+    fn any_all_duality_matches_negated_predicate() {
+        init_test("any_all_duality_matches_negated_predicate");
+
+        let data = vec![-3i32, -1, 0, 2, 5];
+        let mut all_with_no_counterexample = All::new(iter(data.clone()), |&x: &i32| x <= 5);
+        let mut any_counterexample = Any::new(iter(data.clone()), |&x: &i32| x > 5);
+        let all_result = poll_bool(&mut all_with_no_counterexample);
+        let any_negated_result = poll_bool(&mut any_counterexample);
+        crate::assert_with_log!(
+            all_result == !any_negated_result,
+            "all(p) equals !any(!p) when all items satisfy p",
+            true,
+            all_result == !any_negated_result
+        );
+
+        let mut all_with_counterexample = All::new(iter(data.clone()), |&x: &i32| x < 5);
+        let mut any_counterexample = Any::new(iter(data), |&x: &i32| x >= 5);
+        let all_result = poll_bool(&mut all_with_counterexample);
+        let any_negated_result = poll_bool(&mut any_counterexample);
+        crate::assert_with_log!(
+            all_result == !any_negated_result,
+            "all(p) equals !any(!p) when a counterexample exists",
+            true,
+            all_result == !any_negated_result
+        );
+
+        crate::test_complete!("any_all_duality_matches_negated_predicate");
     }
 
     #[test]
