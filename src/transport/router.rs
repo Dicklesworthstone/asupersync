@@ -3108,6 +3108,42 @@ mod tests {
     }
 
     #[test]
+    fn test_bounded_load_hash_select_n_all_over_capacity_falls_back_to_hrw_order() {
+        let seed = 0xB011_D1ED_u64;
+        let config = BoundedLoadConfig::new(0, 1, 1);
+        let hash_lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, seed);
+        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+            .with_bounded_load_config(config);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=5)
+            .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
+            .collect();
+        for endpoint in &endpoints {
+            endpoint
+                .active_connections
+                .store(config.capacity_for(endpoint), Ordering::Relaxed);
+        }
+        let object_id = ObjectId::new_for_test(0xE2);
+
+        let selected = bounded_lb.select_n(&endpoints, 3, Some(object_id));
+        let expected = hash_lb.select_n(&endpoints, 3, Some(object_id));
+        let selected_ids: Vec<_> = selected.iter().map(|endpoint| endpoint.id).collect();
+        let expected_ids: Vec<_> = expected.iter().map(|endpoint| endpoint.id).collect();
+        let unique: HashSet<_> = selected_ids.iter().copied().collect();
+
+        assert_eq!(
+            selected_ids, expected_ids,
+            "all-over-capacity bounded-load fanout must retain deterministic HRW fallback order"
+        );
+        assert_eq!(unique.len(), selected_ids.len());
+        assert!(
+            selected
+                .iter()
+                .all(|endpoint| endpoint.connection_count() >= config.capacity_for(endpoint)),
+            "fixture must exercise the all-over-capacity fallback path"
+        );
+    }
+
+    #[test]
     fn test_bounded_load_hash_preserves_survivors_under_endpoint_removal() {
         let lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, 0x0057_AF1D_u64)
             .with_bounded_load_config(BoundedLoadConfig::new(250, 1, 1));
