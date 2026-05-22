@@ -143,6 +143,19 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn collect_ready<S: Stream + Unpin>(stream: &mut S) -> Vec<S::Item> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut *stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => collected.push(item),
+                Poll::Ready(None) => return collected,
+                Poll::Pending => panic!("unexpected Pending from ready stream"),
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct DropProbe {
         id: usize,
@@ -387,6 +400,25 @@ mod tests {
         }
         assert_eq!(collected, vec![1, 2, 3, 4, 5, 6]);
         crate::test_complete!("chain_multiple_chains");
+    }
+
+    #[test]
+    fn chain_associativity_preserves_item_order() {
+        init_test("chain_associativity_preserves_item_order");
+        let mut left_grouped = Chain::new(
+            Chain::new(iter(vec![1, 2]), iter(vec![3])),
+            iter(vec![4, 5]),
+        );
+        let mut right_grouped = Chain::new(
+            iter(vec![1, 2]),
+            Chain::new(iter(vec![3]), iter(vec![4, 5])),
+        );
+
+        assert_eq!(
+            collect_ready(&mut left_grouped),
+            collect_ready(&mut right_grouped)
+        );
+        crate::test_complete!("chain_associativity_preserves_item_order");
     }
 
     #[test]
