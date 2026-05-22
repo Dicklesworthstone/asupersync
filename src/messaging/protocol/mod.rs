@@ -455,6 +455,41 @@ mod tests {
     }
 
     #[test]
+    fn resp_adapter_decode_ignores_partial_trailing_frame() {
+        let adapter = RespProtocolAdapter::default();
+        let first = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"SET".to_vec())),
+            RespValue::BulkString(Some(b"key".to_vec())),
+            RespValue::BulkString(Some(b"value".to_vec())),
+        ]));
+
+        let mut first_frame = Vec::new();
+        adapter
+            .encode_message(&first, &mut first_frame)
+            .expect("first frame encode succeeds");
+        let baseline = adapter
+            .try_decode_message(&first_frame)
+            .expect("baseline decode succeeds")
+            .expect("baseline frame available");
+
+        let mut with_partial_trailer = first_frame.clone();
+        with_partial_trailer.extend_from_slice(b"$5\r\nhe");
+        let decoded = adapter
+            .try_decode_message(&with_partial_trailer)
+            .expect("complete leading frame should decode")
+            .expect("leading frame available");
+
+        assert_eq!(decoded.message, baseline.message);
+        assert_eq!(decoded.consumed, first_frame.len());
+        assert_eq!(
+            adapter
+                .try_decode_message(&with_partial_trailer[decoded.consumed..])
+                .expect("partial trailing frame is not a protocol error"),
+            None
+        );
+    }
+
+    #[test]
     fn resp_adapter_reports_partial_frames_without_consumption() {
         let adapter = RespProtocolAdapter::default();
 
