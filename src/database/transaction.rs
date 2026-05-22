@@ -997,6 +997,45 @@ mod tests {
     }
 
     #[test]
+    fn retry_policy_delay_is_monotonic_and_cap_stable() {
+        init_test("retry_policy_delay_is_monotonic_and_cap_stable");
+        let policy = RetryPolicy {
+            max_retries: 12,
+            base_delay: Duration::from_millis(125),
+            max_delay: Duration::from_secs(2),
+        };
+
+        let mut previous = Duration::ZERO;
+        let mut capped_attempts = 0usize;
+        for attempt in 0..12 {
+            let delay = policy.delay_for(attempt);
+            assert!(
+                delay >= previous,
+                "retry delay decreased at attempt {attempt}: {delay:?} < {previous:?}"
+            );
+            assert!(
+                delay <= policy.max_delay,
+                "retry delay exceeded max at attempt {attempt}: {delay:?}"
+            );
+            if delay == policy.max_delay {
+                capped_attempts += 1;
+            }
+            previous = delay;
+        }
+
+        assert_eq!(
+            policy.delay_for(4),
+            policy.max_delay,
+            "125ms * 2^4 should reach the configured 2s cap"
+        );
+        assert!(
+            capped_attempts >= 8,
+            "once capped, all later attempts should remain at max_delay"
+        );
+        crate::test_complete!("retry_policy_delay_is_monotonic_and_cap_stable");
+    }
+
+    #[test]
     fn retry_policy_overflow_safe() {
         init_test("retry_policy_overflow_safe");
         let policy = RetryPolicy {
