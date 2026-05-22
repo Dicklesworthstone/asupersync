@@ -3812,6 +3812,51 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_round_robin_ignores_registration_order_and_unusable_decoys() {
+        init_test("metamorphic_round_robin_ignores_registration_order_and_unusable_decoys");
+
+        fn round_robin_sequence(
+            registration_order: &[u64],
+            include_unusable_decoys: bool,
+        ) -> Vec<PathId> {
+            let set = PathSet::new(PathSelectionPolicy::RoundRobin);
+            for id in registration_order {
+                set.register(test_path(*id));
+            }
+
+            if include_unusable_decoys {
+                let low_decoy = test_path(0);
+                low_decoy.set_state(PathState::Unavailable);
+                set.register(low_decoy);
+
+                let high_decoy = test_path(99);
+                high_decoy.set_state(PathState::Closed);
+                set.register(high_decoy);
+            }
+
+            (0..6)
+                .map(|_| {
+                    let selected = set.select_paths();
+                    assert_eq!(selected.len(), 1);
+                    selected[0].id
+                })
+                .collect()
+        }
+
+        let baseline = round_robin_sequence(&[3, 1, 2], false);
+        let permuted_with_decoys = round_robin_sequence(&[2, 3, 1], true);
+
+        assert_eq!(
+            baseline, permuted_with_decoys,
+            "round-robin path cycling must depend on usable PathId membership, not insertion order or unusable paths"
+        );
+
+        crate::test_complete!(
+            "metamorphic_round_robin_ignores_registration_order_and_unusable_decoys"
+        );
+    }
+
+    #[test]
     fn path_set_remove_path() {
         init_test("path_set_remove_path");
         let set = PathSet::new(PathSelectionPolicy::UseAll);
