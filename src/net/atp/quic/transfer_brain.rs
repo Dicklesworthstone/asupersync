@@ -102,8 +102,20 @@ impl Default for TransferPolicy {
 /// Transfer Brain decisions for a transfer operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferDecision {
+    /// Stable decision identifier for trace/proof correlation.
+    pub decision_id: String,
     /// Selected paths for this transfer, ordered by preference.
     pub selected_paths: Vec<String>,
+    /// Structured explanation of the decision.
+    pub reason_vector: Vec<DecisionReason>,
+    /// Candidate paths rejected by the scheduler, ordered deterministically.
+    pub rejected_paths: Vec<RejectedPathEvidence>,
+    /// Pressure snapshot used while making this decision.
+    pub pressure_snapshot: DecisionPressureSnapshot,
+    /// Fairness state used while making this decision.
+    pub fairness_state: DecisionFairnessState,
+    /// Replay pointer for deterministic diagnostics.
+    pub replay_pointer: String,
     /// Recommended congestion control parameters.
     pub congestion_params: CongestionParams,
     /// Whether to enable repair/FEC.
@@ -120,6 +132,93 @@ pub struct TransferDecision {
     pub estimated_completion_time: Duration,
     /// Decision confidence (0.0 - 1.0).
     pub confidence: f64,
+}
+
+/// One machine-readable reason for a transfer decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionReason {
+    /// Stable reason code.
+    pub code: DecisionReasonCode,
+    /// Human-oriented detail suitable for logs.
+    pub detail: String,
+}
+
+/// Stable reason codes emitted by the transfer brain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionReasonCode {
+    /// Path was selected for the transfer.
+    PathSelected,
+    /// Path was rejected before scheduling.
+    PathRejected,
+    /// Selection order used deterministic tie-breaking.
+    DeterministicTieBreak,
+    /// Repair was enabled.
+    RepairEnabled,
+    /// Repair was disabled.
+    RepairDisabled,
+    /// Relay use was enabled.
+    RelayEnabled,
+    /// Relay use was disabled.
+    RelayDisabled,
+}
+
+/// Evidence for a path that was not selected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RejectedPathEvidence {
+    /// Path identifier.
+    pub path_id: String,
+    /// Ranking score observed for the path.
+    pub ranking_score: f64,
+    /// Path doctor class, if one was available.
+    pub performance_class: Option<PathPerformanceClass>,
+    /// Why this path was rejected.
+    pub reason: PathRejectionReason,
+}
+
+/// Reason a path was not eligible for a transfer decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathRejectionReason {
+    /// Ranking score did not meet the configured threshold.
+    BelowQualityThreshold {
+        /// Observed score.
+        score: f64,
+        /// Required score.
+        threshold: f64,
+    },
+    /// Path doctor class is not usable for this transfer.
+    UnschedulablePerformanceClass {
+        /// Observed class, or `None` when no assessment exists.
+        performance_class: Option<PathPerformanceClass>,
+    },
+    /// Path was eligible but not selected because the path limit was reached.
+    PathLimitReached {
+        /// Configured maximum selected paths.
+        max_paths: usize,
+    },
+}
+
+/// Network pressure inputs considered by one transfer decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionPressureSnapshot {
+    /// Number of paths selected.
+    pub selected_path_count: usize,
+    /// Maximum observed loss rate among selected paths.
+    pub max_loss_rate: f64,
+    /// Smallest selected congestion window in bytes.
+    pub min_cwnd_bytes: u64,
+    /// Count of selected paths currently congestion-limited.
+    pub congestion_limited_path_count: usize,
+    /// Count of selected paths limited by anti-amplification.
+    pub anti_amplification_limited_path_count: usize,
+}
+
+/// Fairness inputs considered by one transfer decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionFairnessState {
+    /// Active transfer counts for selected paths.
+    pub active_transfers_by_path: BTreeMap<String, usize>,
 }
 
 /// Recommended congestion control parameters.
@@ -168,6 +267,8 @@ struct DecisionHistory {
     decisions: Vec<HistoricalDecision>,
     /// Decision outcomes for learning.
     outcomes: HashMap<String, DecisionOutcome>,
+    /// Monotonic decision sequence for stable replay identifiers.
+    next_sequence: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +313,7 @@ impl AtpTransferBrain {
             decision_history: DecisionHistory {
                 decisions: Vec::new(),
                 outcomes: HashMap::new(),
+                next_sequence: 0,
             },
             last_update: Instant::now(),
         }
@@ -252,42 +354,93 @@ impl AtpTransferBrain {
         transfer_size: u64,
         priority: TransferPriority,
     ) -> AtpOutcome<TransferDecision> {
-        // Filter paths by quality threshold
-        let candidate_paths: Vec<_> = self
-            .paths
-            .iter()
-            .filter(|(_, state)| {
-                state.ranking_score >= self.policy.min_path_quality
-                    && matches!(
-                        state
-                            .metrics
-                            .path_doctor_assessment
-                            .as_ref()
-                            .map(|a| a.performance_class),
-                        Some(
-                            PathPerformanceClass::Excellent
-                                | PathPerformanceClass::Good
-                                | PathPerformanceClass::Fair
-                        )
-                    )
-            })
-            .collect();
+        let mut reason_vector = Vec::new();
+        let mut rejected_paths = Vec::new();
+        let mut eligible_paths = Vec::new();
 
-        if candidate_paths.is_empty() {
+        for (path_id, state) in &self.paths {
+            let performance_class = state
+                .metrics
+                .path_doctor_assessment
+                .as_ref()
+                .map(|a| a.performance_class);
+            if let Some(reason) = self.path_rejection_reason(state, performance_class) {
+                reason_vector.push(DecisionReason {
+                    code: DecisionReasonCode::PathRejected,
+                    detail: format!(
+                        "rejected {path_id} with ranking_score={:.6}: {}",
+                        state.ranking_score,
+                        describe_rejection_reason(&reason)
+                    ),
+                });
+                rejected_paths.push(RejectedPathEvidence {
+                    path_id: path_id.clone(),
+                    ranking_score: state.ranking_score,
+                    performance_class,
+                    reason,
+                });
+            } else {
+                eligible_paths.push((path_id.clone(), state.ranking_score));
+            }
+        }
+
+        sort_ranked_paths(&mut eligible_paths);
+        sort_rejected_paths(&mut rejected_paths);
+
+        if eligible_paths.is_empty() {
             return AtpOutcome::transport_error(TransportError::NetworkUnreachable);
         }
 
-        // Select paths based on ranking and policy
-        let mut selected_paths = candidate_paths
-            .into_iter()
-            .map(|(path_id, state)| (path_id.clone(), state.ranking_score))
+        let had_score_ties = has_score_ties(&eligible_paths);
+        let mut selected_paths = eligible_paths;
+        let over_limit_paths = selected_paths
+            .iter()
+            .skip(self.policy.max_paths_per_transfer)
+            .cloned()
             .collect::<Vec<_>>();
-
-        selected_paths.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         selected_paths.truncate(self.policy.max_paths_per_transfer);
-
         let selected_path_ids: Vec<String> =
             selected_paths.iter().map(|(id, _)| id.clone()).collect();
+
+        if selected_path_ids.is_empty() {
+            return AtpOutcome::transport_error(TransportError::NetworkUnreachable);
+        }
+
+        let decision_id = self.allocate_decision_id(&transfer_id);
+
+        for (path_id, score) in &selected_paths {
+            reason_vector.push(DecisionReason {
+                code: DecisionReasonCode::PathSelected,
+                detail: format!("selected {path_id} with ranking_score={score:.6}"),
+            });
+        }
+
+        for (path_id, score) in over_limit_paths {
+            let reason = PathRejectionReason::PathLimitReached {
+                max_paths: self.policy.max_paths_per_transfer,
+            };
+            reason_vector.push(DecisionReason {
+                code: DecisionReasonCode::PathRejected,
+                detail: format!(
+                    "rejected {path_id} with ranking_score={score:.6}: {}",
+                    describe_rejection_reason(&reason)
+                ),
+            });
+            rejected_paths.push(RejectedPathEvidence {
+                path_id: path_id.clone(),
+                ranking_score: score,
+                performance_class: self.path_performance_class(&path_id),
+                reason,
+            });
+        }
+        sort_rejected_paths(&mut rejected_paths);
+
+        if had_score_ties {
+            reason_vector.push(DecisionReason {
+                code: DecisionReasonCode::DeterministicTieBreak,
+                detail: "equal ranking scores ordered by path id".to_string(),
+            });
+        }
 
         // Determine if repair should be enabled
         let enable_repair = self.should_enable_repair(&selected_path_ids);
@@ -296,9 +449,31 @@ impl AtpTransferBrain {
         } else {
             None
         };
+        reason_vector.push(DecisionReason {
+            code: if enable_repair {
+                DecisionReasonCode::RepairEnabled
+            } else {
+                DecisionReasonCode::RepairDisabled
+            },
+            detail: format!(
+                "repair={} threshold={:.6} fec_rate={:?}",
+                enable_repair, self.policy.repair_loss_threshold, fec_rate
+            ),
+        });
 
         // Determine if relay should be used
         let use_relay = self.should_use_relay(&selected_path_ids);
+        reason_vector.push(DecisionReason {
+            code: if use_relay {
+                DecisionReasonCode::RelayEnabled
+            } else {
+                DecisionReasonCode::RelayDisabled
+            },
+            detail: format!(
+                "relay={} policy_use_relays_on_poor_paths={}",
+                use_relay, self.policy.use_relays_on_poor_paths
+            ),
+        });
 
         // Calculate congestion parameters
         let congestion_params = self.calculate_congestion_params(&selected_path_ids, transfer_size);
@@ -309,9 +484,18 @@ impl AtpTransferBrain {
 
         // Calculate confidence
         let confidence = self.calculate_decision_confidence(&selected_path_ids);
+        let pressure_snapshot = self.decision_pressure_snapshot(&selected_path_ids);
+        let fairness_state = self.decision_fairness_state(&selected_path_ids);
+        let replay_pointer = format!("atp-transfer-brain:{decision_id}");
 
         let decision = TransferDecision {
+            decision_id,
             selected_paths: selected_path_ids.clone(),
+            reason_vector,
+            rejected_paths,
+            pressure_snapshot,
+            fairness_state,
+            replay_pointer,
             congestion_params,
             enable_repair,
             fec_rate,
@@ -380,9 +564,7 @@ impl AtpTransferBrain {
         }
 
         recommendations.sort_by(|a, b| {
-            b.urgency
-                .partial_cmp(&a.urgency)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            compare_score_desc(a.urgency, b.urgency).then_with(|| a.path_id.cmp(&b.path_id))
         });
         recommendations
     }
@@ -410,16 +592,16 @@ impl AtpTransferBrain {
         };
         let performance_weight = 1.0 - stability_weight;
 
-        performance_score * performance_weight + metrics.path_stability * stability_weight
+        finite_unit(
+            performance_score * performance_weight + metrics.path_stability * stability_weight,
+        )
     }
 
     fn update_path_preferences(&mut self) {
         // Mark top paths as preferred
         let mut paths_by_score: Vec<_> = self.paths.iter_mut().collect();
         paths_by_score.sort_by(|a, b| {
-            b.1.ranking_score
-                .partial_cmp(&a.1.ranking_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            compare_score_desc(a.1.ranking_score, b.1.ranking_score).then_with(|| a.0.cmp(b.0))
         });
 
         for (i, (_, state)) in paths_by_score.iter_mut().enumerate() {
@@ -517,20 +699,21 @@ impl AtpTransferBrain {
             .sum::<f64>()
             / path_ids.len() as f64;
 
-        avg_stability.min(1.0).max(0.0)
+        finite_unit(avg_stability)
     }
 
     fn record_decision(&mut self, transfer_id: String, decision: &TransferDecision) {
-        let decision_id = format!("{}_{}", transfer_id, self.decision_history.decisions.len());
         let historical_decision = HistoricalDecision {
-            decision_id: decision_id.clone(),
+            decision_id: decision.decision_id.clone(),
             transfer_id,
             timestamp: Instant::now(),
             paths_selected: decision.selected_paths.clone(),
-            rationale: format!(
-                "Paths: {:?}, Repair: {}, Relay: {}",
-                decision.selected_paths, decision.enable_repair, decision.use_relay
-            ),
+            rationale: decision
+                .reason_vector
+                .iter()
+                .map(|reason| reason.detail.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
         };
         self.decision_history.decisions.push(historical_decision);
 
@@ -568,6 +751,94 @@ impl AtpTransferBrain {
             PathRecommendation::EnablePathValidation => 0.6,
             PathRecommendation::PerformMtuDiscovery => 0.4,
             PathRecommendation::ConsiderRelay => 0.5,
+        }
+    }
+
+    fn allocate_decision_id(&mut self, transfer_id: &str) -> String {
+        let sequence = self.decision_history.next_sequence;
+        self.decision_history.next_sequence += 1;
+        format!("{transfer_id}_{sequence}")
+    }
+
+    fn path_rejection_reason(
+        &self,
+        state: &PathState,
+        performance_class: Option<PathPerformanceClass>,
+    ) -> Option<PathRejectionReason> {
+        if state.ranking_score < self.policy.min_path_quality {
+            return Some(PathRejectionReason::BelowQualityThreshold {
+                score: state.ranking_score,
+                threshold: self.policy.min_path_quality,
+            });
+        }
+
+        if !matches!(
+            performance_class,
+            Some(
+                PathPerformanceClass::Excellent
+                    | PathPerformanceClass::Good
+                    | PathPerformanceClass::Fair
+            )
+        ) {
+            return Some(PathRejectionReason::UnschedulablePerformanceClass { performance_class });
+        }
+
+        None
+    }
+
+    fn path_performance_class(&self, path_id: &str) -> Option<PathPerformanceClass> {
+        self.paths.get(path_id).and_then(|state| {
+            state
+                .metrics
+                .path_doctor_assessment
+                .as_ref()
+                .map(|assessment| assessment.performance_class)
+        })
+    }
+
+    fn decision_pressure_snapshot(&self, path_ids: &[String]) -> DecisionPressureSnapshot {
+        let mut max_loss_rate = 0.0_f64;
+        let mut min_cwnd_bytes = u64::MAX;
+        let mut congestion_limited_path_count = 0;
+        let mut anti_amplification_limited_path_count = 0;
+
+        for state in path_ids
+            .iter()
+            .filter_map(|path_id| self.paths.get(path_id))
+        {
+            max_loss_rate = max_loss_rate.max(state.metrics.loss_rate);
+            min_cwnd_bytes = min_cwnd_bytes.min(state.metrics.congestion_window_bytes);
+            if state.metrics.congestion_limited {
+                congestion_limited_path_count += 1;
+            }
+            if state.metrics.anti_amplification_limited {
+                anti_amplification_limited_path_count += 1;
+            }
+        }
+
+        DecisionPressureSnapshot {
+            selected_path_count: path_ids.len(),
+            max_loss_rate: finite_unit(max_loss_rate),
+            min_cwnd_bytes: if min_cwnd_bytes == u64::MAX {
+                0
+            } else {
+                min_cwnd_bytes
+            },
+            congestion_limited_path_count,
+            anti_amplification_limited_path_count,
+        }
+    }
+
+    fn decision_fairness_state(&self, path_ids: &[String]) -> DecisionFairnessState {
+        DecisionFairnessState {
+            active_transfers_by_path: path_ids
+                .iter()
+                .filter_map(|path_id| {
+                    self.paths
+                        .get(path_id)
+                        .map(|state| (path_id.clone(), state.active_transfers.len()))
+                })
+                .collect(),
         }
     }
 }
@@ -609,6 +880,50 @@ impl PathHistory {
         // Update average performance (simplified)
         let current_performance = metrics.path_stability * (1.0 - metrics.loss_rate);
         self.avg_performance = self.avg_performance * 0.9 + current_performance * 0.1;
+    }
+}
+
+fn sort_ranked_paths(paths: &mut [(String, f64)]) {
+    paths.sort_by(|a, b| compare_score_desc(a.1, b.1).then_with(|| a.0.cmp(&b.0)));
+}
+
+fn sort_rejected_paths(paths: &mut [RejectedPathEvidence]) {
+    paths.sort_by(|a, b| {
+        compare_score_desc(a.ranking_score, b.ranking_score).then_with(|| a.path_id.cmp(&b.path_id))
+    });
+}
+
+fn compare_score_desc(left: f64, right: f64) -> std::cmp::Ordering {
+    right
+        .partial_cmp(&left)
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+fn has_score_ties(paths: &[(String, f64)]) -> bool {
+    paths
+        .windows(2)
+        .any(|window| window[0].1.total_cmp(&window[1].1) == std::cmp::Ordering::Equal)
+}
+
+fn finite_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn describe_rejection_reason(reason: &PathRejectionReason) -> String {
+    match reason {
+        PathRejectionReason::BelowQualityThreshold { score, threshold } => {
+            format!("quality below threshold score={score:.6} threshold={threshold:.6}")
+        }
+        PathRejectionReason::UnschedulablePerformanceClass { performance_class } => {
+            format!("unschedulable performance_class={performance_class:?}")
+        }
+        PathRejectionReason::PathLimitReached { max_paths } => {
+            format!("path limit reached max_paths={max_paths}")
+        }
     }
 }
 
@@ -686,7 +1001,7 @@ mod tests {
 
         // Add some paths with different qualities
         brain.update_path_metrics(create_test_metrics("good_path", 0.01, 50_000, 0.9));
-        brain.update_path_metrics(create_test_metrics("poor_path", 0.15, 200_000, 0.3));
+        brain.update_path_metrics(create_test_metrics("poor_path", 0.9, 800_000, 0.1));
         brain.update_path_metrics(create_test_metrics("excellent_path", 0.005, 30_000, 0.95));
 
         let decision = brain
@@ -728,7 +1043,7 @@ mod tests {
         let brain = AtpTransferBrain::new();
 
         let good_metrics = create_test_metrics("good", 0.02, 50_000, 0.9);
-        let poor_metrics = create_test_metrics("poor", 0.1, 300_000, 0.4);
+        let poor_metrics = create_test_metrics("poor", 0.9, 800_000, 0.1);
 
         let good_score = brain.calculate_path_ranking(&good_metrics);
         let poor_score = brain.calculate_path_ranking(&poor_metrics);
@@ -755,5 +1070,205 @@ mod tests {
         // Should estimate reasonable completion time (not zero or extremely long)
         assert!(completion_time.as_secs() > 0);
         assert!(completion_time.as_secs() < 3600); // Less than 1 hour
+    }
+
+    #[test]
+    fn equal_scores_use_deterministic_tie_break_and_record_evidence() {
+        let policy = TransferPolicy {
+            max_paths_per_transfer: 1,
+            min_path_quality: 0.0,
+            ..TransferPolicy::default()
+        };
+        let mut brain = AtpTransferBrain::with_policy(policy);
+
+        brain.update_path_metrics(create_test_metrics("z_path", 0.01, 50_000, 0.9));
+        brain.update_path_metrics(create_test_metrics("a_path", 0.01, 50_000, 0.9));
+
+        let decision = brain
+            .make_transfer_decision(
+                "tie_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+
+        assert_eq!(decision.decision_id, "tie_transfer_0");
+        assert_eq!(decision.selected_paths, vec!["a_path"]);
+        assert_eq!(decision.replay_pointer, "atp-transfer-brain:tie_transfer_0");
+        assert_eq!(
+            brain.decision_history.decisions[0].decision_id,
+            decision.decision_id
+        );
+        assert_eq!(decision.rejected_paths.len(), 1);
+        assert_eq!(decision.rejected_paths[0].path_id, "z_path");
+        assert!(matches!(
+            decision.rejected_paths[0].reason,
+            PathRejectionReason::PathLimitReached { max_paths: 1 }
+        ));
+        assert!(
+            decision
+                .reason_vector
+                .iter()
+                .any(|reason| reason.code == DecisionReasonCode::DeterministicTieBreak)
+        );
+        assert_eq!(
+            decision
+                .fairness_state
+                .active_transfers_by_path
+                .get("a_path"),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn zero_path_limit_fails_closed_without_empty_confidence() {
+        let policy = TransferPolicy {
+            max_paths_per_transfer: 0,
+            min_path_quality: 0.0,
+            ..TransferPolicy::default()
+        };
+        let mut brain = AtpTransferBrain::with_policy(policy);
+
+        brain.update_path_metrics(create_test_metrics("good_path", 0.01, 50_000, 0.95));
+
+        let decision = brain.make_transfer_decision(
+            "zero_limit_transfer".to_string(),
+            1_000_000,
+            TransferPriority::Normal,
+        );
+
+        assert!(decision.is_err());
+        assert!(brain.decision_history.decisions.is_empty());
+    }
+
+    #[test]
+    fn rejected_paths_explain_quality_and_class_failures() {
+        let policy = TransferPolicy {
+            min_path_quality: 0.2,
+            ..TransferPolicy::default()
+        };
+        let mut brain = AtpTransferBrain::with_policy(policy);
+
+        brain.update_path_metrics(create_test_metrics("good_path", 0.01, 50_000, 0.95));
+        brain.update_path_metrics(create_test_metrics("low_score_path", 0.15, 200_000, 0.3));
+        brain
+            .paths
+            .get_mut("low_score_path")
+            .expect("low score path should exist")
+            .ranking_score = 0.1;
+
+        let mut unusable = create_test_metrics("unusable_path", 0.01, 50_000, 0.95);
+        unusable
+            .path_doctor_assessment
+            .as_mut()
+            .unwrap()
+            .performance_class = PathPerformanceClass::Unusable;
+        brain.update_path_metrics(unusable);
+
+        let decision = brain
+            .make_transfer_decision(
+                "reject_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+
+        assert_eq!(decision.selected_paths, vec!["good_path"]);
+        assert_eq!(decision.rejected_paths.len(), 2);
+        assert!(decision.rejected_paths.iter().any(|path| {
+            path.path_id == "low_score_path"
+                && matches!(
+                    path.reason,
+                    PathRejectionReason::BelowQualityThreshold { threshold, .. }
+                    if (threshold - 0.2).abs() < f64::EPSILON
+                )
+        }));
+        assert!(decision.rejected_paths.iter().any(|path| {
+            path.path_id == "unusable_path"
+                && matches!(
+                    path.reason,
+                    PathRejectionReason::UnschedulablePerformanceClass {
+                        performance_class: Some(PathPerformanceClass::Unusable)
+                    }
+                )
+        }));
+        assert!(
+            decision
+                .reason_vector
+                .iter()
+                .any(|reason| reason.code == DecisionReasonCode::PathSelected)
+        );
+        assert!(
+            decision
+                .reason_vector
+                .iter()
+                .any(|reason| reason.code == DecisionReasonCode::PathRejected)
+        );
+    }
+
+    #[test]
+    fn pressure_snapshot_records_selected_path_pressure() {
+        let mut brain = AtpTransferBrain::new();
+        let mut metrics = create_test_metrics("limited_path", 0.08, 100_000, 0.8);
+        metrics.congestion_limited = true;
+        metrics.anti_amplification_limited = true;
+        metrics.congestion_window_bytes = 24_000;
+        brain.update_path_metrics(metrics);
+
+        let decision = brain
+            .make_transfer_decision(
+                "pressure_transfer".to_string(),
+                1_000_000,
+                TransferPriority::High,
+            )
+            .expect("decision");
+
+        assert_eq!(decision.pressure_snapshot.selected_path_count, 1);
+        assert_eq!(decision.pressure_snapshot.max_loss_rate, 0.08);
+        assert_eq!(decision.pressure_snapshot.min_cwnd_bytes, 24_000);
+        assert_eq!(decision.pressure_snapshot.congestion_limited_path_count, 1);
+        assert_eq!(
+            decision
+                .pressure_snapshot
+                .anti_amplification_limited_path_count,
+            1
+        );
+        assert!(decision.enable_repair);
+        assert!(
+            decision
+                .reason_vector
+                .iter()
+                .any(|reason| reason.code == DecisionReasonCode::RepairEnabled)
+        );
+    }
+
+    #[test]
+    fn non_finite_path_scores_fail_closed() {
+        let mut brain = AtpTransferBrain::new();
+        let mut non_finite = create_test_metrics("nan_path", 0.01, 50_000, f64::NAN);
+        non_finite.path_stability = f64::NAN;
+        brain.update_path_metrics(non_finite);
+        brain.update_path_metrics(create_test_metrics("good_path", 0.01, 50_000, 0.95));
+
+        let rankings = brain.path_rankings();
+        assert_eq!(rankings.get("nan_path"), Some(&0.0));
+
+        let decision = brain
+            .make_transfer_decision(
+                "finite_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+
+        assert_eq!(decision.selected_paths, vec!["good_path"]);
+        assert!(decision.rejected_paths.iter().any(|path| {
+            path.path_id == "nan_path"
+                && matches!(
+                    path.reason,
+                    PathRejectionReason::BelowQualityThreshold { score, .. }
+                    if score == 0.0
+                )
+        }));
     }
 }
