@@ -169,6 +169,29 @@ mod tests {
         }
     }
 
+    fn poll_count_to_completion<S>(future: &mut Count<S>) -> (usize, usize)
+    where
+        Count<S>: Unpin,
+        S: Stream,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pending_polls = 0usize;
+
+        loop {
+            match Pin::new(&mut *future).poll(&mut cx) {
+                Poll::Ready(count) => return (count, pending_polls),
+                Poll::Pending => {
+                    pending_polls += 1;
+                    assert!(
+                        pending_polls <= 8,
+                        "count future did not complete after {pending_polls} pending polls",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn count_items() {
         init_test("count_items");
@@ -218,6 +241,102 @@ mod tests {
             Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("count_single");
+    }
+
+    #[test]
+    fn mr_count_depends_only_on_cardinality() {
+        for len in 0..=64usize {
+            let ascending: Vec<i32> = (0..len).map(|item| item as i32).collect();
+            let transformed: Vec<i32> = (0..len).map(|item| item as i32 * -7 + 31).collect();
+            let mut first = Count::new(iter(ascending));
+            let mut second = Count::new(iter(transformed));
+
+            assert_eq!(
+                poll_count(&mut first),
+                len,
+                "count must match input cardinality for len {len}",
+            );
+            assert_eq!(
+                poll_count(&mut second),
+                len,
+                "count must ignore item values for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_count_chain_is_additive_across_lengths() {
+        for left_len in 0..=16usize {
+            for right_len in 0..=16usize {
+                let left_items: Vec<i32> = (0..left_len).map(|item| item as i32 - 13).collect();
+                let right_items: Vec<i32> =
+                    (0..right_len).map(|item| item as i32 * 3 + 5).collect();
+                let mut chained = Count::new(Chain::new(
+                    iter(left_items.clone()),
+                    iter(right_items.clone()),
+                ));
+                let mut left = Count::new(iter(left_items));
+                let mut right = Count::new(iter(right_items));
+
+                assert_eq!(
+                    poll_count(&mut chained),
+                    poll_count(&mut left) + poll_count(&mut right),
+                    "count(chain(left, right)) must equal count(left) + count(right) for lengths {left_len}, {right_len}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mr_count_chain_associativity_preserves_total() {
+        for left_len in 0..=6usize {
+            for middle_len in 0..=6usize {
+                for right_len in 0..=6usize {
+                    let left_items: Vec<i32> = (0..left_len).map(|item| item as i32 - 3).collect();
+                    let middle_items: Vec<i32> =
+                        (0..middle_len).map(|item| item as i32 + 17).collect();
+                    let right_items: Vec<i32> =
+                        (0..right_len).map(|item| item as i32 * 2).collect();
+                    let mut left_assoc = Count::new(Chain::new(
+                        Chain::new(iter(left_items.clone()), iter(middle_items.clone())),
+                        iter(right_items.clone()),
+                    ));
+                    let mut right_assoc = Count::new(Chain::new(
+                        iter(left_items),
+                        Chain::new(iter(middle_items), iter(right_items)),
+                    ));
+
+                    assert_eq!(
+                        poll_count(&mut left_assoc),
+                        poll_count(&mut right_assoc),
+                        "count must be stable under chain reassociation for lengths {left_len}, {middle_len}, {right_len}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mr_count_cooperative_yields_match_full_budget_blocks() {
+        for len in [
+            0usize,
+            1,
+            COUNT_COOPERATIVE_BUDGET - 1,
+            COUNT_COOPERATIVE_BUDGET,
+            COUNT_COOPERATIVE_BUDGET + 1,
+            COUNT_COOPERATIVE_BUDGET * 2,
+            COUNT_COOPERATIVE_BUDGET * 2 + 3,
+        ] {
+            let mut future = Count::new(AlwaysReadyCounter::new(len));
+            let (count, pending_polls) = poll_count_to_completion(&mut future);
+
+            assert_eq!(count, len, "count must complete with full length {len}");
+            assert_eq!(
+                pending_polls,
+                len / COUNT_COOPERATIVE_BUDGET,
+                "count should yield once per full cooperative budget block for len {len}",
+            );
+        }
     }
 
     #[test]
