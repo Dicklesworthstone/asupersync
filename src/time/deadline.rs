@@ -52,6 +52,7 @@ mod tests {
     use crate::types::Budget;
     use crate::types::policy::FailFast;
     use crate::util::ArenaIndex;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -214,6 +215,38 @@ mod tests {
             new_scope.budget().deadline
         );
         crate::test_complete!("with_timeout_saturates_when_now_is_near_time_max");
+    }
+
+    proptest! {
+        #[test]
+        fn with_timeout_metamorphic_composition_is_order_independent(
+            now_nanos in 0u64..1_000_000_000,
+            first_timeout_nanos in 0u64..1_000_000_000,
+            second_timeout_nanos in 0u64..1_000_000_000,
+        ) {
+            let scope = Scope::<FailFast>::new(test_region(), Budget::INFINITE);
+            let now = Time::from_nanos(now_nanos);
+            let first_timeout = Duration::from_nanos(first_timeout_nanos);
+            let second_timeout = Duration::from_nanos(second_timeout_nanos);
+
+            let first_then_second =
+                with_timeout(&with_timeout(&scope, first_timeout, now), second_timeout, now);
+            let second_then_first =
+                with_timeout(&with_timeout(&scope, second_timeout, now), first_timeout, now);
+            let expected = now
+                .saturating_add_nanos(first_timeout_nanos)
+                .min(now.saturating_add_nanos(second_timeout_nanos));
+
+            prop_assert_eq!(first_then_second.budget().deadline, Some(expected));
+            prop_assert_eq!(second_then_first.budget().deadline, Some(expected));
+            prop_assert_eq!(
+                first_then_second.budget().deadline,
+                second_then_first.budget().deadline,
+                "timeout composition must keep the earliest deadline regardless of order",
+            );
+            prop_assert_eq!(first_then_second.region_id(), test_region());
+            prop_assert_eq!(second_then_first.region_id(), test_region());
+        }
     }
 
     #[test]
