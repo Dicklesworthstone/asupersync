@@ -205,15 +205,15 @@ impl SimNetwork {
     pub fn ring(n: usize, config: SimTransportConfig) -> Self {
         let mut nodes = HashSet::new();
         let mut links = HashMap::new();
-        if n == 0 {
+        for i in 0..n {
+            nodes.insert(i as NodeId);
+        }
+        if n < 2 {
             return Self {
                 nodes,
                 links,
                 default_config: config,
             };
-        }
-        for i in 0..n {
-            nodes.insert(i as NodeId);
         }
         for i in 0..n {
             let from = i as NodeId;
@@ -1495,6 +1495,18 @@ mod tests {
     fn sim_network_ring_zero_nodes() {
         let net = SimNetwork::ring(0, SimTransportConfig::reliable());
         assert_eq!(net.nodes.len(), 0);
+        assert_eq!(net.links.len(), 0);
+    }
+
+    #[test]
+    fn sim_network_ring_one_node_has_no_self_link() {
+        let net = SimNetwork::ring(1, SimTransportConfig::reliable());
+        assert_eq!(net.nodes.len(), 1);
+        assert!(net.nodes.contains(&0));
+        assert!(
+            !net.links.contains_key(&(0, 0)),
+            "one-node ring must not create a self transport link"
+        );
         assert_eq!(net.links.len(), 0);
     }
 
