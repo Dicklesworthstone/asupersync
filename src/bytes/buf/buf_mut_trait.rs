@@ -512,6 +512,33 @@ mod tests {
     }
 
     #[test]
+    fn test_buf_mut_slice_exact_fill_exhausts_writable_window() {
+        init_test("test_buf_mut_slice_exact_fill_exhausts_writable_window");
+        let mut data = [0u8; 4];
+        {
+            let mut buf: &mut [u8] = &mut data;
+            let remaining = buf.remaining_mut();
+            crate::assert_with_log!(remaining == 4, "remaining", 4, remaining);
+
+            buf.put_slice(&[1, 2, 3, 4]);
+
+            let remaining = buf.remaining_mut();
+            crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+            let chunk_empty = buf.chunk_mut().is_empty();
+            crate::assert_with_log!(chunk_empty, "chunk empty", true, chunk_empty);
+            let has_remaining = buf.has_remaining_mut();
+            crate::assert_with_log!(!has_remaining, "has remaining", false, has_remaining);
+
+            buf.advance_mut(0);
+            let remaining = buf.remaining_mut();
+            crate::assert_with_log!(remaining == 0, "remaining after noop", 0, remaining);
+        }
+
+        crate::assert_with_log!(data == [1, 2, 3, 4], "data", [1, 2, 3, 4], data);
+        crate::test_complete!("test_buf_mut_slice_exact_fill_exhausts_writable_window");
+    }
+
+    #[test]
     fn test_roundtrip_all_types() {
         init_test("test_roundtrip_all_types");
         let mut buf = Vec::new();
