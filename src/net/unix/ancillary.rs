@@ -309,6 +309,48 @@ mod tests {
         crate::test_complete!("test_prepare_for_recv_exposes_full_buffer_len");
     }
 
+    #[test]
+    fn received_scm_rights_iterator_is_ordered_and_one_shot() {
+        init_test("received_scm_rights_iterator_is_ordered_and_one_shot");
+        let mut ancillary = SocketAncillary::new(128);
+        ancillary.push_received_fds(&[7, 8, 9]);
+
+        let mut messages = ancillary.messages();
+        let Some(message) = messages.next() else {
+            crate::assert_with_log!(false, "SCM_RIGHTS message present", true, false);
+            return;
+        };
+        let AncillaryMessage::ScmRights(mut rights) = message;
+
+        crate::assert_with_log!(
+            rights.size_hint() == (3, Some(3)),
+            "exact size hint before iteration",
+            (3, Some(3)),
+            rights.size_hint()
+        );
+        let first = rights.next();
+        crate::assert_with_log!(first == Some(7), "first fd", Some(7), first);
+        let second = rights.next();
+        crate::assert_with_log!(second == Some(8), "second fd", Some(8), second);
+        let third = rights.next();
+        crate::assert_with_log!(third == Some(9), "third fd", Some(9), third);
+        let exhausted = rights.next();
+        crate::assert_with_log!(
+            exhausted.is_none(),
+            "rights exhausted",
+            Option::<RawFd>::None,
+            exhausted
+        );
+        let extra_message = messages.next();
+        crate::assert_with_log!(
+            extra_message.is_none(),
+            "ancillary message iterator yields once",
+            true,
+            extra_message.is_none()
+        );
+        crate::test_complete!("received_scm_rights_iterator_is_ordered_and_one_shot");
+    }
+
     // =========================================================================
     // Wave 57 – pure data-type trait coverage
     // =========================================================================
