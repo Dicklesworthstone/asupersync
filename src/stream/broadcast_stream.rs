@@ -165,6 +165,32 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn collect_closed_stream(
+        mut stream: BroadcastStream<i32>,
+    ) -> Vec<Result<i32, BroadcastStreamRecvError>> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut out = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => out.push(item),
+                Poll::Ready(None) => return out,
+                Poll::Pending => panic!("closed broadcast stream unexpectedly returned Pending"),
+            }
+        }
+    }
+
+    fn collect_sent_sequence(input: &[i32]) -> Vec<Result<i32, BroadcastStreamRecvError>> {
+        let cx_send: Cx = Cx::for_testing();
+        let cx_recv: Cx = Cx::for_testing();
+        let (tx, rx) = broadcast::channel(input.len().max(1) + 1);
+        for &item in input {
+            tx.send(&cx_send, item).expect("send input item");
+        }
+        drop(tx);
+        collect_closed_stream(BroadcastStream::new(cx_recv, rx))
+    }
+
     #[test]
     fn broadcast_stream_none_is_terminal_after_cancel() {
         init_test("broadcast_stream_none_is_terminal_after_cancel");
@@ -329,5 +355,68 @@ mod tests {
         );
 
         crate::test_complete!("broadcast_stream_recv_error_lagged_preserves_count");
+    }
+
+    #[test]
+    fn mr_broadcast_stream_split_sends_match_unsplit_fifo_order() {
+        init_test("mr_broadcast_stream_split_sends_match_unsplit_fifo_order");
+        let input = vec![2, 7, 1, 8, 2, 8];
+        let expected = collect_sent_sequence(&input);
+
+        for split in 0..=input.len() {
+            let cx_send: Cx = Cx::for_testing();
+            let cx_recv: Cx = Cx::for_testing();
+            let (tx, rx) = broadcast::channel(input.len() + 1);
+            for &item in &input[..split] {
+                tx.send(&cx_send, item).expect("left split send");
+            }
+            for &item in &input[split..] {
+                tx.send(&cx_send, item).expect("right split send");
+            }
+            drop(tx);
+
+            let actual = collect_closed_stream(BroadcastStream::new(cx_recv, rx));
+            crate::assert_with_log!(
+                actual == expected,
+                format!("split at {split}"),
+                expected.clone(),
+                actual
+            );
+        }
+
+        crate::test_complete!("mr_broadcast_stream_split_sends_match_unsplit_fifo_order");
+    }
+
+    #[test]
+    fn mr_broadcast_stream_pre_send_subscribers_receive_same_sequence() {
+        init_test("mr_broadcast_stream_pre_send_subscribers_receive_same_sequence");
+        let input = vec![1, 1, 2, 3, 5, 8, 13];
+        let expected = collect_sent_sequence(&input);
+
+        let cx_send: Cx = Cx::for_testing();
+        let (tx, rx_a) = broadcast::channel(input.len() + 1);
+        let rx_b = tx.subscribe();
+        for &item in &input {
+            tx.send(&cx_send, item).expect("send shared input");
+        }
+        drop(tx);
+
+        let actual_a = collect_closed_stream(BroadcastStream::new(Cx::for_testing(), rx_a));
+        let actual_b = collect_closed_stream(BroadcastStream::new(Cx::for_testing(), rx_b));
+
+        crate::assert_with_log!(
+            actual_a == expected,
+            "first receiver matches baseline",
+            expected.clone(),
+            actual_a
+        );
+        crate::assert_with_log!(
+            actual_b == expected,
+            "second receiver matches baseline",
+            expected,
+            actual_b
+        );
+
+        crate::test_complete!("mr_broadcast_stream_pre_send_subscribers_receive_same_sequence");
     }
 }
