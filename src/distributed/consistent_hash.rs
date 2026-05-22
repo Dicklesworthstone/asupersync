@@ -1119,6 +1119,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mr_top_k_hrw_limit_expansion_preserves_prefix() {
+        let candidates = [
+            ("node-a", 1_u32),
+            ("node-b", 3),
+            ("node-c", 2),
+            ("node-d", 5),
+            ("node-e", 4),
+            ("zero-weight", 0),
+        ];
+
+        let winners_for = |limit: usize| {
+            select_top_k_hrw(
+                candidates.iter(),
+                limit,
+                &"tenant:acme/orders/prefix-stability",
+                0x5eed_f00d,
+                |candidate| &candidate.0,
+                |candidate| candidate.1,
+            )
+            .into_iter()
+            .map(|candidate| candidate.0)
+            .collect::<Vec<_>>()
+        };
+
+        let all_winners = winners_for(candidates.len());
+        assert_eq!(
+            all_winners.len(),
+            5,
+            "fixture should include only positive-weight HRW winners"
+        );
+        assert!(
+            all_winners.iter().all(|node| *node != "zero-weight"),
+            "zero-weight candidate must not appear in the complete HRW ranking"
+        );
+        assert!(
+            winners_for(0).is_empty(),
+            "zero limit must return no HRW winners"
+        );
+
+        for limit in 1..=all_winners.len() {
+            assert_eq!(
+                winners_for(limit),
+                all_winners[..limit].to_vec(),
+                "expanding HRW top-k limit must preserve the previous winner prefix"
+            );
+        }
+
+        assert_eq!(
+            winners_for(candidates.len() + 4),
+            all_winners,
+            "limits above positive candidate count must return the complete positive ranking"
+        );
+    }
+
     /// Metamorphic relation: adding a node to a HashRing should cause minimal
     /// key reassignment, preserving the core consistent hashing property of
     /// minimal disruption.
