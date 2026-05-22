@@ -262,6 +262,54 @@ mod tests {
     }
 
     #[test]
+    fn mr_stream_sink_shared_error_classes_preserve_public_semantics() {
+        let shared_displays = [
+            (
+                format!("{}", StreamError::Closed),
+                format!("{}", SinkError::Closed),
+            ),
+            (
+                format!("{}", StreamError::Cancelled),
+                format!("{}", SinkError::Cancelled),
+            ),
+            (
+                format!(
+                    "{}",
+                    StreamError::from(io::Error::new(io::ErrorKind::BrokenPipe, "pipe"))
+                ),
+                format!(
+                    "{}",
+                    SinkError::from(io::Error::new(io::ErrorKind::BrokenPipe, "pipe"))
+                ),
+            ),
+        ];
+
+        for (stream_display, sink_display) in shared_displays {
+            assert_eq!(
+                stream_display, sink_display,
+                "shared stream/sink transport error classes must preserve display semantics"
+            );
+        }
+
+        assert!(std::error::Error::source(&StreamError::Closed).is_none());
+        assert!(std::error::Error::source(&SinkError::Closed).is_none());
+        assert!(std::error::Error::source(&StreamError::Cancelled).is_none());
+        assert!(std::error::Error::source(&SinkError::Cancelled).is_none());
+
+        let stream_io = StreamError::from(io::Error::new(io::ErrorKind::BrokenPipe, "pipe"));
+        let sink_io = SinkError::from(io::Error::new(io::ErrorKind::BrokenPipe, "pipe"));
+        assert_eq!(
+            std::error::Error::source(&stream_io)
+                .and_then(|source| source.downcast_ref::<io::Error>())
+                .map(io::Error::kind),
+            std::error::Error::source(&sink_io)
+                .and_then(|source| source.downcast_ref::<io::Error>())
+                .map(io::Error::kind),
+            "shared stream/sink I/O errors must preserve typed source semantics"
+        );
+    }
+
+    #[test]
     fn sink_error_non_io_variants_have_no_error_source() {
         let variants = [
             SinkError::Closed,
