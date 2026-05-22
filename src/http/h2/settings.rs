@@ -465,6 +465,36 @@ mod tests {
     }
 
     #[test]
+    fn server_settings_serialization_is_invariant_to_enable_push() {
+        let disabled = SettingsBuilder::server()
+            .enable_push(false)
+            .header_table_size(8192)
+            .max_concurrent_streams(32)
+            .initial_window_size(32_768)
+            .max_frame_size(32_768)
+            .max_header_list_size(16_384)
+            .build();
+        let mut enabled = disabled.clone();
+        enabled.enable_push = true;
+
+        assert_eq!(
+            disabled.to_settings_for_role(false),
+            enabled.to_settings_for_role(false),
+            "server SETTINGS serialization must not depend on enable_push"
+        );
+        assert_eq!(
+            disabled.to_settings_minimal_for_role(false),
+            enabled.to_settings_minimal_for_role(false),
+            "minimal server SETTINGS serialization must not depend on enable_push"
+        );
+        assert_ne!(
+            disabled.to_settings_for_role(true),
+            enabled.to_settings_for_role(true),
+            "client serialization still carries enable_push differences"
+        );
+    }
+
+    #[test]
     fn repeated_settings_apply_with_last_value_wins() {
         let mut settings = Settings::default();
         let sequence = [
