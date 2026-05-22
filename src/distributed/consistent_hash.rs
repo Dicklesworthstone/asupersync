@@ -784,6 +784,35 @@ mod tests {
         }
     }
 
+    /// Metamorphic relation: removing a node and then re-adding the same node
+    /// must restore the original key assignment when seed, vnode count, and
+    /// final membership are unchanged.
+    #[test]
+    fn mr_key_assignment_restored_after_remove_readd() {
+        let keys: Vec<u64> = (0..2048u64).collect();
+        let mut ring = HashRing::new(32, 0x5eed_cafe);
+        for node in ["alpha", "beta", "gamma", "delta"] {
+            assert!(ring.add_node(node), "fixture node should be unique");
+        }
+
+        let assignments = |ring: &HashRing| {
+            keys.iter()
+                .map(|key| ring.node_for_key(key).expect("ring should assign key"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        let baseline = assignments(&ring);
+        assert_eq!(ring.remove_node("gamma"), 32);
+        assert!(ring.add_node("gamma"));
+
+        assert_eq!(
+            assignments(&ring),
+            baseline,
+            "remove/readd of the same node changed assignments despite identical final membership"
+        );
+    }
+
     #[test]
     fn nodes_iterator_is_sorted() {
         let mut ring = HashRing::new(8, 0);
