@@ -525,6 +525,29 @@ mod tests {
     }
 
     #[test]
+    fn client_settings_full_serialization_reconstructs_state() {
+        let original = SettingsBuilder::client()
+            .header_table_size(8192)
+            .enable_push(false)
+            .max_concurrent_streams(64)
+            .initial_window_size(32_768)
+            .max_frame_size(32_768)
+            .max_header_list_size(16_384)
+            .continuation_timeout_ms(1234)
+            .build();
+
+        let mut reconstructed = Settings::default();
+        for setting in original.to_settings_for_role(true) {
+            reconstructed
+                .apply(setting)
+                .expect("serialized client setting must be valid");
+        }
+        reconstructed.continuation_timeout_ms = original.continuation_timeout_ms;
+
+        assert_eq!(reconstructed, original);
+    }
+
+    #[test]
     fn invalid_peer_settings_do_not_mutate_existing_state() {
         let mut settings = SettingsBuilder::new()
             .initial_window_size(32_768)
