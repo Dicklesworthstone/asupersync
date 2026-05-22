@@ -518,8 +518,52 @@ mod tests {
     }
 
     #[test]
-    fn resp_adapter_observes_cancellation() {
+    fn resp_adapter_reset_is_terminal_for_frame_operations() {
         let cx = test_cx(4);
+        let mut adapter = RespProtocolAdapter::default();
+        assert_eq!(
+            adapter.on_transport_event(&cx, ProtocolTransportEvent::Reset),
+            Ok(ProtocolConnectionState::Closed)
+        );
+
+        let handshake_err = adapter
+            .begin_handshake(&cx)
+            .expect_err("closed adapter should reject handshake");
+        assert!(matches!(
+            handshake_err,
+            ProtocolAdapterError::Lifecycle { detail, .. }
+                if detail.contains("cannot negotiate after transport close")
+        ));
+
+        let mut encoded = Vec::new();
+        let encode_err = adapter
+            .encode_message(&RespValue::SimpleString("PING".to_string()), &mut encoded)
+            .expect_err("closed adapter should reject encode");
+        assert!(matches!(
+            encode_err,
+            ProtocolAdapterError::Lifecycle { detail, .. }
+                if detail.contains("cannot encode after transport close")
+        ));
+        assert!(encoded.is_empty());
+
+        let decode_err = adapter
+            .try_decode_message(b"+PONG\r\n")
+            .expect_err("closed adapter should reject decode");
+        assert!(matches!(
+            decode_err,
+            ProtocolAdapterError::Lifecycle { detail, .. }
+                if detail.contains("cannot decode after transport close")
+        ));
+
+        let health = adapter.health_check(&cx).expect("closed health");
+        assert_eq!(health.state, ProtocolConnectionState::Closed);
+        assert!(!health.ready);
+        assert_eq!(health.detail, "transport closed");
+    }
+
+    #[test]
+    fn resp_adapter_observes_cancellation() {
+        let cx = test_cx(5);
         cx.set_cancel_requested(true);
 
         let adapter = RespProtocolAdapter::default();
