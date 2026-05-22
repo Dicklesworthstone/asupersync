@@ -409,6 +409,21 @@ mod tests {
     }
 
     #[test]
+    fn to_settings_minimal_omits_rfc_unlimited_settings() {
+        let settings = SettingsBuilder::new()
+            .max_concurrent_streams(u32::MAX)
+            .max_header_list_size(u32::MAX)
+            .build();
+
+        let minimal = settings.to_settings_minimal();
+
+        assert!(
+            minimal.is_empty(),
+            "RFC 7540 defaults are implicit and should not be serialized: {minimal:?}"
+        );
+    }
+
+    #[test]
     fn test_to_settings_for_server_omits_enable_push() {
         let settings = SettingsBuilder::server().enable_push(false).build();
         let serialized = settings.to_settings_for_role(false);
