@@ -639,6 +639,57 @@ mod tests {
     }
 
     #[test]
+    fn cache_negative_ttl_is_capped_by_configured_max_ttl() {
+        init_test("cache_negative_ttl_is_capped_by_configured_max_ttl");
+        set_test_time(0);
+        let config = CacheConfig {
+            min_ttl: Duration::from_millis(1),
+            max_ttl: Duration::from_millis(10),
+            negative_ttl: Duration::from_secs(1),
+            ..Default::default()
+        };
+        let cache = DnsCache::with_time_getter(config, test_time);
+
+        cache.put_negative_ip_no_records("missing.example");
+
+        set_test_time(
+            Duration::from_millis(9)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        let before_ceiling = cache.get_ip_result("missing.example");
+        crate::assert_with_log!(
+            matches!(before_ceiling, Some(Err(DnsError::NoRecords(_)))),
+            "negative entry remains cached before configured ceiling",
+            true,
+            format!("{before_ceiling:?}")
+        );
+
+        set_test_time(
+            Duration::from_millis(11)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        let after_ceiling = cache.get_ip_result("missing.example");
+        crate::assert_with_log!(
+            after_ceiling.is_none(),
+            "negative entry expires at configured max_ttl ceiling",
+            true,
+            after_ceiling.is_none()
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 0, "expired entry evicted", 0, stats.size);
+        crate::assert_with_log!(
+            stats.evictions == 1,
+            "negative ceiling expiry counted once",
+            1,
+            stats.evictions
+        );
+        crate::test_complete!("cache_negative_ttl_is_capped_by_configured_max_ttl");
+    }
+
+    #[test]
     fn cache_expiration() {
         init_test("cache_expiration");
         set_test_time(0);
