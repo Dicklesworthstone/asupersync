@@ -1554,6 +1554,41 @@ mod tests {
     }
 
     #[test]
+    fn status_code_category_predicates_are_boundary_exclusive() {
+        let cases = [
+            (99, [false, false, false, false, false]),
+            (100, [true, false, false, false, false]),
+            (199, [true, false, false, false, false]),
+            (200, [false, true, false, false, false]),
+            (299, [false, true, false, false, false]),
+            (300, [false, false, true, false, false]),
+            (399, [false, false, true, false, false]),
+            (400, [false, false, false, true, false]),
+            (499, [false, false, false, true, false]),
+            (500, [false, false, false, false, true]),
+            (599, [false, false, false, false, true]),
+            (600, [false, false, false, false, false]),
+        ];
+
+        for (raw, expected) in cases {
+            let code = StatusCode(raw);
+            let actual = [
+                code.is_informational(),
+                code.is_success(),
+                code.is_redirection(),
+                code.is_client_error(),
+                code.is_server_error(),
+            ];
+
+            assert_eq!(actual, expected, "status category boundary for {raw}");
+            assert!(
+                actual.into_iter().filter(|matched| *matched).count() <= 1,
+                "status code {raw} matched multiple categories"
+            );
+        }
+    }
+
+    #[test]
     fn status_code_conversion_and_display() {
         let code = StatusCode::from(404u16);
         assert_eq!(code.as_u16(), 404);
