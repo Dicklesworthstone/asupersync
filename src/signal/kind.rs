@@ -273,6 +273,43 @@ mod tests {
         crate::test_complete!("signal_kind_display");
     }
 
+    #[test]
+    fn signal_kind_all_variants_name_and_display_match() {
+        init_test("signal_kind_all_variants_name_and_display_match");
+        let cases = [
+            (SignalKind::interrupt(), "SIGINT"),
+            (SignalKind::terminate(), "SIGTERM"),
+            (SignalKind::hangup(), "SIGHUP"),
+            (SignalKind::quit(), "SIGQUIT"),
+            (SignalKind::user_defined1(), "SIGUSR1"),
+            (SignalKind::user_defined2(), "SIGUSR2"),
+            (SignalKind::child(), "SIGCHLD"),
+            (SignalKind::window_change(), "SIGWINCH"),
+            (SignalKind::pipe(), "SIGPIPE"),
+            (SignalKind::alarm(), "SIGALRM"),
+        ];
+
+        for (kind, expected_name) in cases {
+            let name = kind.name();
+            crate::assert_with_log!(
+                name == expected_name,
+                "name matches expected signal spelling",
+                expected_name,
+                name
+            );
+
+            let display = kind.to_string();
+            crate::assert_with_log!(
+                display == expected_name,
+                "display delegates to name",
+                expected_name,
+                display
+            );
+        }
+
+        crate::test_complete!("signal_kind_all_variants_name_and_display_match");
+    }
+
     #[cfg(unix)]
     #[test]
     fn signal_kind_raw_values() {
