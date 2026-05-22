@@ -455,6 +455,25 @@ mod tests {
         assert_eq!(assigned_once, vec![0, 1, 2]);
     }
 
+    #[test]
+    fn metamorphic_weighted_assignment_invariant_under_uniform_load_shift() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
+        let symbols = create_test_symbols(37);
+
+        let baseline_replicas = create_test_replicas_with_symbol_counts(&[0, 3, 9, 3]);
+        let shifted_replicas =
+            create_test_replicas_with_symbol_counts(&[10_000, 10_003, 10_009, 10_003]);
+
+        let baseline = assigner.assign(&symbols, &baseline_replicas, 4);
+        let shifted = assigner.assign(&symbols, &shifted_replicas, 4);
+
+        assert_eq!(
+            baseline, shifted,
+            "weighted assignment should depend on relative projected load; adding \
+             the same constant to every replica must not change the plan"
+        );
+    }
+
     // ========== Edge case tests (bd-3k9o) ==========
 
     #[test]
