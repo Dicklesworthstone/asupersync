@@ -137,6 +137,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
     use std::future::Future;
     use std::pin::Pin;
 
@@ -319,6 +320,70 @@ mod tests {
         crate::assert_with_log!(ok, "commit ok", true, ok);
         crate::assert_with_log!(output == b"kept", "output", b"kept", output);
         crate::test_complete!("clear_allows_restage_before_commit");
+    }
+
+    proptest! {
+        #[test]
+        fn write_permit_metamorphic_clear_resets_staged_prefix(
+            discarded in prop::collection::vec(any::<u8>(), 0..128),
+            retained in prop::collection::vec(any::<u8>(), 0..128),
+            split_at in 0usize..128,
+        ) {
+            let split_at = split_at.min(retained.len());
+
+            let mut cleared_output = Vec::new();
+            let cleared_result = {
+                let mut permit = WritePermit::new(&mut cleared_output);
+                permit.stage(&discarded);
+                prop_assert_eq!(
+                    permit.staged_len(),
+                    discarded.len(),
+                    "initial staging must account for all discarded bytes",
+                );
+
+                permit.clear();
+                prop_assert!(permit.is_empty(), "clear must empty staged data");
+                prop_assert_eq!(permit.staged_len(), 0, "clear must reset staged length");
+
+                permit.stage(&retained[..split_at]);
+                permit.stage(&retained[split_at..]);
+                prop_assert_eq!(
+                    permit.staged_len(),
+                    retained.len(),
+                    "restaging in chunks after clear must account for retained bytes only",
+                );
+
+                let mut fut = Box::pin(permit.commit());
+                poll_ready(fut.as_mut())
+            };
+            prop_assert!(cleared_result.is_ok(), "cleared permit commit should succeed");
+
+            let mut fresh_output = Vec::new();
+            let fresh_result = {
+                let mut permit = WritePermit::new(&mut fresh_output);
+                permit.stage(&retained);
+                prop_assert_eq!(
+                    permit.staged_len(),
+                    retained.len(),
+                    "fresh permit must account for retained bytes",
+                );
+
+                let mut fut = Box::pin(permit.commit());
+                poll_ready(fut.as_mut())
+            };
+            prop_assert!(fresh_result.is_ok(), "fresh permit commit should succeed");
+
+            prop_assert_eq!(
+                cleared_output,
+                fresh_output,
+                "clear plus restage must commit the same bytes as a fresh permit",
+            );
+            prop_assert_eq!(
+                cleared_output,
+                retained,
+                "discarded staged bytes must not leak into committed output",
+            );
+        }
     }
 
     #[test]
