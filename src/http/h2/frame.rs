@@ -18,6 +18,9 @@ pub const MAX_FRAME_SIZE: u32 = 16_777_215;
 /// Minimum allowed max frame size setting.
 pub const MIN_MAX_FRAME_SIZE: u32 = 16_384;
 
+/// Maximum WINDOW_UPDATE increment (2^31 - 1).
+const MAX_WINDOW_UPDATE_INCREMENT: u32 = 0x7fff_ffff;
+
 /// HTTP/2 frame types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -1089,15 +1092,10 @@ impl WindowUpdateFrame {
         if increment == 0 {
             // RFC 7540 §6.9: zero increment on a stream is a stream error;
             // on the connection (stream 0) it is a connection error.
-            return if header.stream_id == 0 {
-                Err(H2Error::protocol("WINDOW_UPDATE with zero increment"))
-            } else {
-                Err(H2Error::stream(
-                    header.stream_id,
-                    ErrorCode::ProtocolError,
-                    "WINDOW_UPDATE with zero increment",
-                ))
-            };
+            return Err(invalid_window_update_increment_error(
+                header.stream_id,
+                "WINDOW_UPDATE with zero increment",
+            ));
         }
 
         Ok(Self {
@@ -1109,6 +1107,22 @@ impl WindowUpdateFrame {
     /// Encode this frame.
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
+        if self.increment == 0 {
+            return Err(invalid_window_update_increment_error(
+                self.stream_id,
+                "WINDOW_UPDATE with zero increment",
+            ));
+        }
+        if self.increment > MAX_WINDOW_UPDATE_INCREMENT {
+            return Err(invalid_window_update_increment_error(
+                self.stream_id,
+                format!(
+                    "WINDOW_UPDATE increment {} exceeds 31-bit maximum",
+                    self.increment
+                ),
+            ));
+        }
+
         let header = FrameHeader {
             length: 4,
             frame_type: FrameType::WindowUpdate as u8,
@@ -1116,8 +1130,16 @@ impl WindowUpdateFrame {
             stream_id: self.stream_id,
         };
         header.write(dst);
-        dst.put_u32(self.increment & 0x7fff_ffff);
+        dst.put_u32(self.increment);
         Ok(())
+    }
+}
+
+fn invalid_window_update_increment_error(stream_id: u32, message: impl Into<String>) -> H2Error {
+    if stream_id == 0 {
+        H2Error::protocol(message)
+    } else {
+        H2Error::stream(stream_id, ErrorCode::ProtocolError, message)
     }
 }
 
@@ -1974,6 +1996,34 @@ mod tests {
         let err = WindowUpdateFrame::parse(&header, &payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
         assert_eq!(err.stream_id, Some(3)); // stream error, not connection
+    }
+
+    #[test]
+    fn window_update_encode_rejects_invalid_increment_bounds() {
+        let cases = [
+            (WindowUpdateFrame::new(0, 0), None),
+            (WindowUpdateFrame::new(3, 0), Some(3)),
+            (
+                WindowUpdateFrame::new(0, MAX_WINDOW_UPDATE_INCREMENT + 1),
+                None,
+            ),
+            (
+                WindowUpdateFrame::new(3, MAX_WINDOW_UPDATE_INCREMENT + 1),
+                Some(3),
+            ),
+        ];
+
+        for (frame, expected_stream_id) in cases {
+            let mut buf = BytesMut::new();
+
+            let err = frame
+                .encode(&mut buf)
+                .expect_err("invalid increment must not encode");
+
+            assert_eq!(err.code, ErrorCode::ProtocolError);
+            assert_eq!(err.stream_id, expected_stream_id);
+            assert!(buf.is_empty(), "invalid frame must not partially encode");
+        }
     }
 
     #[test]
