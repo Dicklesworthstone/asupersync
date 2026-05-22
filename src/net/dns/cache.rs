@@ -928,6 +928,60 @@ mod tests {
     }
 
     #[test]
+    fn cache_positive_ttl_is_capped_by_configured_max_ttl() {
+        init_test("cache_positive_ttl_is_capped_by_configured_max_ttl");
+        set_test_time(0);
+        let config = CacheConfig {
+            min_ttl: Duration::from_millis(1),
+            max_ttl: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let cache = DnsCache::with_time_getter(config, test_time);
+
+        let lookup = LookupIp::new(
+            vec!["192.0.2.56".parse::<IpAddr>().expect("ip parse")],
+            Duration::from_secs(1),
+        );
+        cache.put_ip("ceiling.example", &lookup);
+
+        set_test_time(
+            Duration::from_millis(9)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        let before_ceiling = cache.get_ip("ceiling.example");
+        crate::assert_with_log!(
+            before_ceiling.is_some(),
+            "positive ttl remains cached before configured ceiling",
+            true,
+            before_ceiling.is_some()
+        );
+
+        set_test_time(
+            Duration::from_millis(11)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        let after_ceiling = cache.get_ip("ceiling.example");
+        crate::assert_with_log!(
+            after_ceiling.is_none(),
+            "positive ttl expires at configured ceiling",
+            true,
+            after_ceiling.is_none()
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 0, "expired entry evicted", 0, stats.size);
+        crate::assert_with_log!(
+            stats.evictions == 1,
+            "positive ceiling expiry counted once",
+            1,
+            stats.evictions
+        );
+        crate::test_complete!("cache_positive_ttl_is_capped_by_configured_max_ttl");
+    }
+
+    #[test]
     fn cache_max_entries_zero_disables_inserts() {
         init_test("cache_max_entries_zero");
         let config = CacheConfig {
