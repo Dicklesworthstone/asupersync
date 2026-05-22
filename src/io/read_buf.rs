@@ -238,6 +238,53 @@ mod tests {
                 "chunked write must not touch unwritten tail",
             );
         }
+
+        #[test]
+        fn read_buf_metamorphic_advance_matches_put_of_preinitialized_tail(
+            initial_storage in prop::collection::vec(any::<u8>(), 0..128),
+            prefix in prop::collection::vec(any::<u8>(), 0..128),
+            advance_len in 0usize..128,
+        ) {
+            let capacity = initial_storage.len();
+            let prefix_len = prefix.len().min(capacity);
+            let advance_len = advance_len.min(capacity - prefix_len);
+            let advanced_tail = &initial_storage[prefix_len..prefix_len + advance_len];
+
+            let mut advanced_storage = initial_storage.clone();
+            let (advanced_filled, advanced_remaining) = {
+                let mut advanced = ReadBuf::new(&mut advanced_storage);
+                advanced.put_slice(&prefix[..prefix_len]);
+                advanced.advance(advance_len);
+                (advanced.filled().to_vec(), advanced.remaining())
+            };
+
+            let mut explicit_storage = initial_storage.clone();
+            let (explicit_filled, explicit_remaining) = {
+                let mut explicit = ReadBuf::new(&mut explicit_storage);
+                explicit.put_slice(&prefix[..prefix_len]);
+                explicit.put_slice(advanced_tail);
+                (explicit.filled().to_vec(), explicit.remaining())
+            };
+
+            let mut expected = prefix[..prefix_len].to_vec();
+            expected.extend_from_slice(advanced_tail);
+
+            prop_assert_eq!(
+                advanced_filled,
+                expected,
+                "advance must expose the preinitialized backing bytes after the written prefix",
+            );
+            prop_assert_eq!(
+                advanced_filled,
+                explicit_filled,
+                "advancing over initialized bytes must match explicitly putting the same bytes",
+            );
+            prop_assert_eq!(
+                advanced_remaining,
+                explicit_remaining,
+                "advance and explicit put must leave identical remaining capacity",
+            );
+        }
     }
 
     #[test]
