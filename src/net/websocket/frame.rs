@@ -835,7 +835,7 @@ fn validate_close_payload(payload: &[u8]) -> Result<(), WsError> {
         1 => Err(WsError::InvalidClosePayload),
         _ => {
             let code = u16::from_be_bytes([payload[0], payload[1]]);
-            if !CloseCode::is_valid_code(code) {
+            if !CloseCode::is_valid_received_code(code) {
                 return Err(WsError::InvalidClosePayload);
             }
             if payload.len() > 2 {
@@ -1096,6 +1096,32 @@ mod tests {
         assert_eq!(code, 1000);
         let reason = std::str::from_utf8(&payload[2..]).unwrap();
         assert_eq!(reason, "goodbye");
+    }
+
+    #[test]
+    fn decoder_accepts_receive_only_close_code_range() {
+        let mut server_decoder = FrameCodec::server();
+        let mut masked_client_close =
+            BytesMut::from(&[0x88, 0x82, 0x00, 0x00, 0x00, 0x00, 0x03, 0xf8][..]);
+
+        let parsed = server_decoder
+            .decode(&mut masked_client_close)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(parsed.opcode, Opcode::Close);
+        assert_eq!(parsed.payload.as_ref(), &1016u16.to_be_bytes());
+
+        let mut client_decoder = FrameCodec::client();
+        let mut unmasked_server_close = BytesMut::from(&[0x88, 0x02, 0x07, 0xd0][..]);
+
+        let parsed = client_decoder
+            .decode(&mut unmasked_server_close)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(parsed.opcode, Opcode::Close);
+        assert_eq!(parsed.payload.as_ref(), &2000u16.to_be_bytes());
     }
 
     #[test]
