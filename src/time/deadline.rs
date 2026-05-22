@@ -144,6 +144,28 @@ mod tests {
     }
 
     #[test]
+    fn with_timeout_zero_duration_sets_deadline_to_now() {
+        init_test("with_timeout_zero_duration_sets_deadline_to_now");
+        let scope = Scope::<FailFast>::new(test_region(), Budget::INFINITE);
+        let now = Time::from_secs(42);
+
+        let new_scope = with_timeout(&scope, Duration::ZERO, now);
+        crate::assert_with_log!(
+            new_scope.budget().deadline == Some(now),
+            "zero timeout deadline",
+            Some(now),
+            new_scope.budget().deadline
+        );
+        crate::assert_with_log!(
+            new_scope.region_id() == test_region(),
+            "region preserved",
+            test_region(),
+            new_scope.region_id()
+        );
+        crate::test_complete!("with_timeout_zero_duration_sets_deadline_to_now");
+    }
+
+    #[test]
     fn with_timeout_respects_existing_tighter_deadline() {
         init_test("with_timeout_respects_existing_tighter_deadline");
         let budget = Budget::INFINITE.with_deadline(Time::from_secs(102));
