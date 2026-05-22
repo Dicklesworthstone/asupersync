@@ -800,6 +800,16 @@ mod tests {
         AuthenticatedSymbol::new_verified(symbol, tag)
     }
 
+    fn collect_esis<S: SymbolStream + Unpin>(stream: &mut S) -> Vec<u32> {
+        future::block_on(async {
+            let mut out = Vec::new();
+            while let Some(item) = stream.next().await {
+                out.push(item.unwrap().symbol().id().esi());
+            }
+            out
+        })
+    }
+
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
@@ -1484,6 +1494,27 @@ mod tests {
         });
 
         crate::test_complete!("test_filter_stream_skips_and_passes");
+    }
+
+    #[test]
+    fn metamorphic_filter_commutes_with_identity_map() {
+        init_test("metamorphic_filter_commutes_with_identity_map");
+
+        let symbols: Vec<_> = (0..8).map(create_symbol).collect();
+        let mut filter_then_map = VecStream::new(symbols.clone())
+            .filter(|symbol| symbol.symbol().id().esi() % 2 == 0)
+            .map(|symbol| symbol);
+        let mut map_then_filter = VecStream::new(symbols)
+            .map(|symbol| symbol)
+            .filter(|symbol| symbol.symbol().id().esi() % 2 == 0);
+
+        assert_eq!(
+            collect_esis(&mut filter_then_map),
+            collect_esis(&mut map_then_filter),
+            "identity map must not perturb filter ordering or membership"
+        );
+
+        crate::test_complete!("metamorphic_filter_commutes_with_identity_map");
     }
 
     #[test]
