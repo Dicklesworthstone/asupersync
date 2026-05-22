@@ -1816,7 +1816,7 @@ impl Default for LabIoCap {
 ///
 /// br-asupersync-jyqjh9: computed once per thread from
 /// `thread::current().id()` and cached. Keeps the hot path to a single
-/// TLS load + masked `fetch_add`.
+/// TLS load plus a masked atomic counter update.
 #[inline]
 fn lab_iocap_shard() -> usize {
     use std::cell::Cell;
@@ -1836,6 +1836,29 @@ fn lab_iocap_shard() -> usize {
         let idx = (hasher.finish() as usize) & LAB_IOCAP_SHARD_MASK;
         cell.set(idx);
         idx
+    })
+}
+
+#[inline]
+fn increment_saturating(counter: &AtomicU64) {
+    let mut current = counter.load(Ordering::Relaxed);
+    while current != u64::MAX {
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[inline]
+fn sum_saturating(shards: &[crate::util::CachePadded<AtomicU64>; LAB_IOCAP_SHARD_COUNT]) -> u64 {
+    shards.iter().fold(0, |total, shard| {
+        total.saturating_add(shard.load(Ordering::Relaxed))
     })
 }
 
@@ -1861,14 +1884,14 @@ impl LabIoCap {
     pub fn record_submit(&self) {
         let idx = lab_iocap_shard();
         // Safe: idx is masked to `[0, LAB_IOCAP_SHARD_COUNT)`.
-        self.submitted_shards[idx].fetch_add(1, Ordering::Relaxed);
+        increment_saturating(&self.submitted_shards[idx]);
     }
 
     /// Records a completed virtual I/O operation.
     #[inline]
     pub fn record_complete(&self) {
         let idx = lab_iocap_shard();
-        self.completed_shards[idx].fetch_add(1, Ordering::Relaxed);
+        increment_saturating(&self.completed_shards[idx]);
     }
 
     /// br-asupersync-jyqjh9 internal helper for benchmarks: sums the
@@ -1878,20 +1901,14 @@ impl LabIoCap {
     #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn submitted_total(&self) -> u64 {
-        self.submitted_shards
-            .iter()
-            .map(|shard| shard.load(Ordering::Relaxed))
-            .sum()
+        sum_saturating(&self.submitted_shards)
     }
 
     /// Companion of [`Self::submitted_total`] for completed events.
     #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn completed_total(&self) -> u64 {
-        self.completed_shards
-            .iter()
-            .map(|shard| shard.load(Ordering::Relaxed))
-            .sum()
+        sum_saturating(&self.completed_shards)
     }
 }
 
@@ -1912,16 +1929,8 @@ impl IoCap for LabIoCap {
         // br-asupersync-jyqjh9: sum across shards. O(SHARD_COUNT) per
         // call. Stats reads are not hot-path; the optimization wins
         // come on the write side (record_submit / record_complete).
-        let submitted: u64 = self
-            .submitted_shards
-            .iter()
-            .map(|shard| shard.load(Ordering::Relaxed))
-            .sum();
-        let completed: u64 = self
-            .completed_shards
-            .iter()
-            .map(|shard| shard.load(Ordering::Relaxed))
-            .sum();
+        let submitted = sum_saturating(&self.submitted_shards);
+        let completed = sum_saturating(&self.completed_shards);
         IoStats {
             submitted,
             completed,
@@ -2397,6 +2406,47 @@ mod tests {
                 completed: 1
             }
         );
+    }
+
+    #[test]
+    fn lab_io_cap_counters_saturate_at_u64_max() {
+        let cap = LabIoCap::new_for_tests();
+        let shard = lab_iocap_shard();
+
+        cap.submitted_shards[shard].store(u64::MAX - 1, Ordering::Relaxed);
+        cap.record_submit();
+        cap.record_submit();
+        assert_eq!(
+            cap.submitted_shards[shard].load(Ordering::Relaxed),
+            u64::MAX
+        );
+
+        cap.completed_shards[shard].store(u64::MAX - 1, Ordering::Relaxed);
+        cap.record_complete();
+        cap.record_complete();
+        assert_eq!(
+            cap.completed_shards[shard].load(Ordering::Relaxed),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn lab_io_cap_stats_saturate_shard_totals() {
+        let cap = LabIoCap::new_for_tests();
+        cap.submitted_shards[0].store(u64::MAX, Ordering::Relaxed);
+        cap.submitted_shards[1].store(1, Ordering::Relaxed);
+        cap.completed_shards[0].store(u64::MAX - 1, Ordering::Relaxed);
+        cap.completed_shards[1].store(3, Ordering::Relaxed);
+
+        assert_eq!(
+            cap.stats(),
+            IoStats {
+                submitted: u64::MAX,
+                completed: u64::MAX
+            }
+        );
+        assert_eq!(cap.submitted_total(), u64::MAX);
+        assert_eq!(cap.completed_total(), u64::MAX);
     }
 
     #[test]
