@@ -430,6 +430,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repeated_settings_apply_with_last_value_wins() {
+        let mut settings = Settings::default();
+        let sequence = [
+            Setting::HeaderTableSize(8192),
+            Setting::HeaderTableSize(16_384),
+            Setting::EnablePush(false),
+            Setting::EnablePush(true),
+            Setting::MaxConcurrentStreams(64),
+            Setting::MaxConcurrentStreams(128),
+            Setting::InitialWindowSize(32_768),
+            Setting::InitialWindowSize(MAX_INITIAL_WINDOW_SIZE),
+            Setting::MaxFrameSize(32_768),
+            Setting::MaxFrameSize(MIN_MAX_FRAME_SIZE),
+            Setting::MaxHeaderListSize(16_384),
+            Setting::MaxHeaderListSize(32_768),
+        ];
+
+        for setting in sequence {
+            settings.apply(setting).expect("valid setting applies");
+        }
+
+        assert_eq!(settings.header_table_size, 16_384);
+        assert!(settings.enable_push);
+        assert_eq!(settings.max_concurrent_streams, 128);
+        assert_eq!(settings.initial_window_size, MAX_INITIAL_WINDOW_SIZE);
+        assert_eq!(settings.max_frame_size, MIN_MAX_FRAME_SIZE);
+        assert_eq!(settings.max_header_list_size, 32_768);
+    }
+
+    #[test]
+    fn invalid_peer_settings_do_not_mutate_existing_state() {
+        let mut settings = SettingsBuilder::new()
+            .initial_window_size(32_768)
+            .max_frame_size(32_768)
+            .build();
+        let before = settings.clone();
+
+        let err = settings
+            .apply(Setting::InitialWindowSize(MAX_INITIAL_WINDOW_SIZE + 1))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::FlowControlError);
+        assert_eq!(settings, before);
+
+        let err = settings
+            .apply(Setting::MaxFrameSize(MIN_MAX_FRAME_SIZE - 1))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(settings, before);
+
+        let err = settings
+            .apply(Setting::MaxFrameSize(MAX_MAX_FRAME_SIZE + 1))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(settings, before);
+    }
+
     // --- wave 77 trait coverage ---
 
     #[test]
