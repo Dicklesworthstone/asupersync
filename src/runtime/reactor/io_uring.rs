@@ -1,21 +1,21 @@
-//! io_uring-based reactor implementation (Linux only, feature-gated).
+//! io_uring-based reactor implementation (Linux/Android only, feature-gated).
 //!
 //! This reactor uses io_uring's PollAdd opcode to provide readiness notifications.
 //! Poll registrations are treated as one-shot, matching the epoll and kqueue
 //! backends: higher layers must explicitly re-arm after they observe
 //! `WouldBlock`.
 //!
-//! This file carries both the real Linux `io-uring` backend and the cfg-off
+//! This file carries both the real Linux/Android `io-uring` backend and the cfg-off
 //! fallback contract. In the live `runtime::reactor` export graph,
-//! `IoUringReactor` is re-exported only on Linux builds. When the `io-uring`
-//! feature is disabled on Linux, the exported symbol intentionally returns
+//! `IoUringReactor` is re-exported only on Linux/Android builds. When the `io-uring`
+//! feature is disabled on Linux/Android, the exported symbol intentionally returns
 //! `Unsupported` from construction and every reactor operation, while
 //! `create_reactor()` falls back to `EpollReactor`.
 //!
 //! NOTE: This module uses unsafe to submit SQEs and manage eventfd FDs.
 //! The safety invariants are documented inline.
 
-#[cfg(all(target_os = "linux", feature = "io-uring"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), feature = "io-uring"))]
 mod imp {
     #![allow(unsafe_code)]
     #![allow(clippy::significant_drop_tightening)]
@@ -1970,15 +1970,15 @@ mod imp {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "io-uring"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), feature = "io-uring"))]
 pub use imp::IoUringReactor;
 
-#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+#[cfg(not(all(any(target_os = "linux", target_os = "android"), feature = "io-uring")))]
 mod imp {
     use super::super::{Events, Interest, Reactor, Source, Token};
     use std::io;
 
-    const UNSUPPORTED_MESSAGE: &str = "IoUringReactor requires Linux with the io-uring feature enabled; use create_reactor() for epoll fallback";
+    const UNSUPPORTED_MESSAGE: &str = "IoUringReactor requires Linux or Android with the io-uring feature enabled; use create_reactor() for epoll fallback";
 
     fn unsupported() -> io::Error {
         io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED_MESSAGE)
@@ -1986,8 +1986,8 @@ mod imp {
 
     /// Unsupported fallback for builds without the live io_uring backend.
     ///
-    /// In the public `runtime::reactor` export graph this matters for Linux
-    /// builds without the `io-uring` feature. Non-Linux targets do not
+    /// In the public `runtime::reactor` export graph this matters for Linux/Android
+    /// builds without the `io-uring` feature. Other targets do not
     /// re-export `IoUringReactor` from `runtime::reactor`.
     #[derive(Debug, Default)]
     pub struct IoUringReactor;
@@ -1997,7 +1997,7 @@ mod imp {
         ///
         /// # Errors
         ///
-        /// Returns `Unsupported` unless the build target is Linux and the
+        /// Returns `Unsupported` unless the build target is Linux or Android and the
         /// `io-uring` feature is enabled.
         pub fn new() -> io::Result<Self> {
             Err(unsupported())
@@ -2106,5 +2106,5 @@ mod imp {
     }
 }
 
-#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+#[cfg(not(all(any(target_os = "linux", target_os = "android"), feature = "io-uring")))]
 pub use imp::IoUringReactor;

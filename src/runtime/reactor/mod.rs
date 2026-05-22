@@ -39,7 +39,7 @@
 //!
 //! | Platform | Backend | Module |
 //! |----------|---------|--------|
-//! | Linux | epoll | `epoll.rs` |
+//! | Linux/Android | epoll | `epoll.rs` |
 //! | macOS/BSD | kqueue | `kqueue.rs` |
 //! | Windows | IOCP | `windows.rs` |
 //! | Browser/wasm32 | BrowserReactor | `browser.rs` |
@@ -51,7 +51,7 @@
 //!
 //! | Target / feature | Public symbols | Live source | Contract |
 //! |------------------|----------------|-------------|----------|
-//! | Linux | `EpollReactor`, `IoUringReactor` | `epoll.rs`, `io_uring.rs` | `EpollReactor` is the always-available Linux backend. `IoUringReactor` is exported on Linux builds; it is real with the `io-uring` feature and intentionally returns `Unsupported` without that feature. |
+//! | Linux/Android | `EpollReactor`, `IoUringReactor` | `epoll.rs`, `io_uring.rs` | `EpollReactor` is the always-available Linux/Android backend. `IoUringReactor` is exported on Linux/Android builds; it is real with the `io-uring` feature and intentionally returns `Unsupported` without that feature. |
 //! | macOS/BSD | `KqueueReactor` | `kqueue.rs` | Live BSD-family backend only. |
 //! | Windows | `IocpReactor` | `windows.rs` | Live Windows backend only. |
 //! | wasm32 | `BrowserReactor` | `browser.rs` | Browser event-loop reactor. |
@@ -117,10 +117,10 @@ mod registration;
 pub mod source;
 pub mod token;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod epoll;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[path = "io_uring.rs"]
 pub mod uring;
 
@@ -145,7 +145,7 @@ pub use registration::Registration;
 pub use source::{Source, SourceId, SourceWrapper, next_source_id};
 pub use token::{SlabToken, TokenSlab};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub use epoll::EpollReactor;
 
 #[cfg(target_os = "windows")]
@@ -163,7 +163,7 @@ pub use kqueue::KqueueReactor;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub use uring::IoUringReactor;
 
 use smallvec::SmallVec;
@@ -577,13 +577,13 @@ pub trait Reactor: Send + Sync {
 /// supported by the build and host environment.
 ///
 /// # Selection Order
-/// - **Linux**: io_uring (if enabled and available), otherwise epoll
+/// - **Linux/Android**: io_uring (if enabled and available), otherwise epoll
 /// - **macOS/BSD**: kqueue
 /// - **Windows**: IOCP
 ///
 /// # Errors
 /// Returns an error if no supported reactor backend can be created.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     #[cfg(feature = "io-uring")]
     {
@@ -621,6 +621,7 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
 
 #[cfg(not(any(
     target_os = "linux",
+    target_os = "android",
     target_os = "macos",
     target_os = "freebsd",
     target_os = "openbsd",
@@ -658,6 +659,7 @@ mod tests {
     #[test]
     #[cfg(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "openbsd",

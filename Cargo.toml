@@ -78,7 +78,7 @@ lock-metrics = []
 # Enable real-time obligation leak detection with stack traces and region boundary checks.
 # Zero cost when disabled. Adds comprehensive tracking and attribution for debugging obligation leaks.
 obligation-leak-detection = []
-# Enable io_uring reactor for Linux modern async I/O (requires kernel 5.1+).
+# Enable io_uring reactor for Linux/Android modern async I/O (requires kernel 5.1+).
 io-uring = ["dep:io-uring"]
 # Enable TLS support via rustls
 tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:ring", "dep:rustls-pemfile", "dep:x509-parser"]
@@ -245,7 +245,7 @@ brotli = { version = "8.0", optional = true }
 crossbeam-deque = "0.8.6"
 prost = "0.14"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 io-uring = { version = "0.7", optional = true }
 
 # Win32 primitives for the signal-poller shutdown event
