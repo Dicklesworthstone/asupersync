@@ -402,6 +402,48 @@ mod tests {
     }
 
     #[test]
+    fn test_prost_codec_size_limit_reports_exact_wire_size() {
+        init_test("test_prost_codec_size_limit_reports_exact_wire_size");
+
+        let message = TestMessage {
+            name: "abcd".to_string(),
+            value: 7,
+        };
+        let encoded_len = message.encoded_len();
+        let limit = encoded_len - 1;
+
+        let mut encode_codec: ProstCodec<TestMessage, TestMessage> =
+            ProstCodec::with_max_size(limit);
+        let encode_err = encode_codec
+            .encode(&message)
+            .expect_err("message should exceed encode limit");
+        assert!(matches!(
+            encode_err,
+            ProtobufError::MessageTooLarge { size, limit: got }
+                if size == encoded_len && got == limit
+        ));
+
+        let mut unbounded_codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
+        let encoded = unbounded_codec
+            .encode(&message)
+            .expect("message should encode with default limit");
+        assert_eq!(encoded.len(), encoded_len);
+
+        let mut decode_codec: ProstCodec<TestMessage, TestMessage> =
+            ProstCodec::with_max_size(limit);
+        let decode_err = decode_codec
+            .decode(&encoded)
+            .expect_err("message should exceed decode limit");
+        assert!(matches!(
+            decode_err,
+            ProtobufError::MessageTooLarge { size, limit: got }
+                if size == encoded_len && got == limit
+        ));
+
+        crate::test_complete!("test_prost_codec_size_limit_reports_exact_wire_size");
+    }
+
+    #[test]
     fn test_prost_codec_invalid_data() {
         init_test("test_prost_codec_invalid_data");
 
