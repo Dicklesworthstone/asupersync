@@ -254,6 +254,28 @@ mod tests {
         }
     }
 
+    fn poll_bool_to_completion<F>(future: &mut F) -> (bool, usize)
+    where
+        F: Future<Output = bool> + Unpin,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pending_polls = 0usize;
+
+        loop {
+            match Pin::new(&mut *future).poll(&mut cx) {
+                Poll::Ready(value) => return (value, pending_polls),
+                Poll::Pending => {
+                    pending_polls += 1;
+                    assert!(
+                        pending_polls <= 8,
+                        "future did not complete after {pending_polls} pending polls",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn any_found() {
         init_test("any_found");
@@ -378,6 +400,98 @@ mod tests {
         );
 
         crate::test_complete!("any_all_duality_matches_negated_predicate");
+    }
+
+    #[test]
+    fn mr_any_all_partition_composition_matches_combined_input() {
+        init_test("mr_any_all_partition_composition_matches_combined_input");
+        let left = vec![-7i32, -2, 0, 3];
+        let right = vec![4i32, 9, 12];
+        let mut combined = left.clone();
+        combined.extend(right.iter().copied());
+
+        let predicate = |&x: &i32| x >= 9;
+        let combined_any = poll_bool(&mut Any::new(iter(combined.clone()), predicate));
+        let left_any = poll_bool(&mut Any::new(iter(left.clone()), predicate));
+        let right_any = poll_bool(&mut Any::new(iter(right.clone()), predicate));
+        assert_eq!(combined_any, left_any || right_any);
+
+        let predicate = |&x: &i32| x >= -7;
+        let combined_all = poll_bool(&mut All::new(iter(combined), predicate));
+        let left_all = poll_bool(&mut All::new(iter(left), predicate));
+        let right_all = poll_bool(&mut All::new(iter(right), predicate));
+        assert_eq!(combined_all, left_all && right_all);
+        crate::test_complete!("mr_any_all_partition_composition_matches_combined_input");
+    }
+
+    #[test]
+    fn mr_any_all_threshold_translation_preserves_truth_values() {
+        init_test("mr_any_all_threshold_translation_preserves_truth_values");
+        let input = vec![-10i32, -3, 0, 7, 14];
+        let offset = 11i32;
+        let shifted: Vec<_> = input.iter().map(|item| item + offset).collect();
+
+        let baseline_any = poll_bool(&mut Any::new(iter(input.clone()), |&x: &i32| x > 6));
+        let shifted_any = poll_bool(&mut Any::new(iter(shifted.clone()), |&x: &i32| {
+            x > 6 + offset
+        }));
+        assert_eq!(shifted_any, baseline_any);
+
+        let baseline_all = poll_bool(&mut All::new(iter(input), |&x: &i32| x < 20));
+        let shifted_all = poll_bool(&mut All::new(iter(shifted), |&x: &i32| x < 20 + offset));
+        assert_eq!(shifted_all, baseline_all);
+        crate::test_complete!("mr_any_all_threshold_translation_preserves_truth_values");
+    }
+
+    #[test]
+    fn mr_any_all_append_monotonicity_respects_witnesses() {
+        init_test("mr_any_all_append_monotonicity_respects_witnesses");
+        let matching_prefix = vec![1i32, 4, 8];
+        let mut matching_with_tail = matching_prefix.clone();
+        matching_with_tail.extend([-100, -200]);
+
+        let prefix_any = poll_bool(&mut Any::new(iter(matching_prefix), |&x: &i32| x >= 8));
+        let tail_any = poll_bool(&mut Any::new(iter(matching_with_tail), |&x: &i32| x >= 8));
+        assert!(prefix_any);
+        assert_eq!(tail_any, prefix_any);
+
+        let all_prefix = vec![2i32, 4, 6];
+        let mut all_with_satisfying_tail = all_prefix.clone();
+        all_with_satisfying_tail.extend([8, 10]);
+        let mut all_with_counterexample_tail = all_prefix.clone();
+        all_with_counterexample_tail.extend([8, 11]);
+
+        let prefix_all = poll_bool(&mut All::new(iter(all_prefix), |&x: &i32| x % 2 == 0));
+        let satisfying_tail_all =
+            poll_bool(&mut All::new(iter(all_with_satisfying_tail), |&x: &i32| {
+                x % 2 == 0
+            }));
+        let counterexample_tail_all = poll_bool(&mut All::new(
+            iter(all_with_counterexample_tail),
+            |&x: &i32| x % 2 == 0,
+        ));
+
+        assert!(prefix_all);
+        assert!(satisfying_tail_all);
+        assert!(!counterexample_tail_all);
+        crate::test_complete!("mr_any_all_append_monotonicity_respects_witnesses");
+    }
+
+    #[test]
+    fn mr_any_all_cooperative_segmentation_preserves_results() {
+        init_test("mr_any_all_cooperative_segmentation_preserves_results");
+        let len = (ANY_ALL_COOPERATIVE_BUDGET * 2) + 17;
+
+        let mut any_future = Any::new(AlwaysReadyCounter::new(len), |&x: &usize| x == len - 1);
+        let (any_result, any_pending) = poll_bool_to_completion(&mut any_future);
+        assert!(any_result);
+        assert_eq!(any_pending, len / ANY_ALL_COOPERATIVE_BUDGET);
+
+        let mut all_future = All::new(AlwaysReadyCounter::new(len), |&x: &usize| x < len);
+        let (all_result, all_pending) = poll_bool_to_completion(&mut all_future);
+        assert!(all_result);
+        assert_eq!(all_pending, len / ANY_ALL_COOPERATIVE_BUDGET);
+        crate::test_complete!("mr_any_all_cooperative_segmentation_preserves_results");
     }
 
     #[test]
