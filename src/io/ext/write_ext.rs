@@ -820,6 +820,80 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum ControlStep {
+        Pending,
+        ReadyOk,
+        ReadyErr(io::ErrorKind),
+    }
+
+    #[derive(Debug)]
+    struct ScriptedControlWriter {
+        flush_steps: std::collections::VecDeque<ControlStep>,
+        shutdown_steps: std::collections::VecDeque<ControlStep>,
+        flush_polls: usize,
+        shutdown_polls: usize,
+        expected_waker: Waker,
+        saw_expected_waker: bool,
+    }
+
+    impl ScriptedControlWriter {
+        fn new(
+            expected_waker: Waker,
+            flush_steps: impl IntoIterator<Item = ControlStep>,
+            shutdown_steps: impl IntoIterator<Item = ControlStep>,
+        ) -> Self {
+            Self {
+                flush_steps: flush_steps.into_iter().collect(),
+                shutdown_steps: shutdown_steps.into_iter().collect(),
+                flush_polls: 0,
+                shutdown_polls: 0,
+                expected_waker,
+                saw_expected_waker: false,
+            }
+        }
+
+        fn poll_control(
+            steps: &mut std::collections::VecDeque<ControlStep>,
+        ) -> Poll<io::Result<()>> {
+            match steps.pop_front().expect("control script exhausted") {
+                ControlStep::Pending => Poll::Pending,
+                ControlStep::ReadyOk => Poll::Ready(Ok(())),
+                ControlStep::ReadyErr(kind) => Poll::Ready(Err(io::Error::from(kind))),
+            }
+        }
+    }
+
+    impl AsyncWrite for ScriptedControlWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(bufs.iter().map(|buf| buf.len()).sum()))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.flush_polls += 1;
+            self.saw_expected_waker = cx.waker().will_wake(&self.expected_waker);
+            Self::poll_control(&mut self.flush_steps)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.shutdown_polls += 1;
+            self.saw_expected_waker = cx.waker().will_wake(&self.expected_waker);
+            Self::poll_control(&mut self.shutdown_steps)
+        }
+    }
+
     fn poll_ready<F: Future>(fut: &mut Pin<&mut F>) -> F::Output {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -1036,6 +1110,100 @@ mod tests {
     }
 
     #[test]
+    fn flush_future_retries_after_pending() {
+        init_test("flush_future_retries_after_pending");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut writer = ScriptedControlWriter::new(
+            waker.clone(),
+            [ControlStep::Pending, ControlStep::ReadyOk],
+            [],
+        );
+
+        {
+            let mut fut = writer.flush();
+            let first = Pin::new(&mut fut).poll(&mut cx);
+            crate::assert_with_log!(
+                matches!(first, Poll::Pending),
+                "first flush pending",
+                true,
+                matches!(first, Poll::Pending)
+            );
+
+            let second = Pin::new(&mut fut).poll(&mut cx);
+            let ready = matches!(second, Poll::Ready(Ok(())));
+            crate::assert_with_log!(ready, "second flush ready", true, ready);
+        }
+
+        crate::assert_with_log!(
+            writer.flush_polls == 2,
+            "flush poll count",
+            2,
+            writer.flush_polls
+        );
+        crate::assert_with_log!(
+            writer.shutdown_polls == 0,
+            "shutdown not polled",
+            0,
+            writer.shutdown_polls
+        );
+        crate::assert_with_log!(
+            writer.saw_expected_waker,
+            "context forwarded",
+            true,
+            writer.saw_expected_waker
+        );
+        crate::test_complete!("flush_future_retries_after_pending");
+    }
+
+    #[test]
+    fn flush_future_error_is_terminal() {
+        init_test("flush_future_error_is_terminal");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut writer = ScriptedControlWriter::new(
+            waker.clone(),
+            [ControlStep::ReadyErr(io::ErrorKind::BrokenPipe)],
+            [],
+        );
+
+        {
+            let mut fut = writer.flush();
+            let first = Pin::new(&mut fut).poll(&mut cx);
+            let err = match first {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected flush error, got {other:?}"),
+            };
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::BrokenPipe,
+                "flush error kind",
+                io::ErrorKind::BrokenPipe,
+                err.kind()
+            );
+
+            let second = Pin::new(&mut fut).poll(&mut cx);
+            let err = match second {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected post-error completion guard, got {other:?}"),
+            };
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::Other,
+                "post-error completion guard",
+                io::ErrorKind::Other,
+                err.kind()
+            );
+        }
+
+        crate::assert_with_log!(
+            writer.flush_polls == 1,
+            "flush poll count",
+            1,
+            writer.flush_polls
+        );
+        crate::test_complete!("flush_future_error_is_terminal");
+    }
+
+    #[test]
     fn shutdown_ok() {
         init_test("shutdown_ok");
         let mut output = Vec::new();
@@ -1044,6 +1212,47 @@ mod tests {
         let result = poll_ready(&mut fut);
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::test_complete!("shutdown_ok");
+    }
+
+    #[test]
+    fn shutdown_future_is_single_use_after_ready() {
+        init_test("shutdown_future_is_single_use_after_ready");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut writer = ScriptedControlWriter::new(waker.clone(), [], [ControlStep::ReadyOk]);
+
+        {
+            let mut fut = writer.shutdown();
+            let first = Pin::new(&mut fut).poll(&mut cx);
+            let ready = matches!(first, Poll::Ready(Ok(())));
+            crate::assert_with_log!(ready, "first shutdown ready", true, ready);
+
+            let second = Pin::new(&mut fut).poll(&mut cx);
+            let err = match second {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected post-completion error, got {other:?}"),
+            };
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::Other,
+                "post-completion error kind",
+                io::ErrorKind::Other,
+                err.kind()
+            );
+        }
+
+        crate::assert_with_log!(
+            writer.shutdown_polls == 1,
+            "shutdown poll count",
+            1,
+            writer.shutdown_polls
+        );
+        crate::assert_with_log!(
+            writer.flush_polls == 0,
+            "flush not polled",
+            0,
+            writer.flush_polls
+        );
+        crate::test_complete!("shutdown_future_is_single_use_after_ready");
     }
 
     #[test]
