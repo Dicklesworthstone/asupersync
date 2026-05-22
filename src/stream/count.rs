@@ -81,7 +81,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::stream::iter;
+    use crate::stream::{Chain, iter};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll, Waker};
@@ -156,6 +156,19 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn poll_count<S>(future: &mut Count<S>) -> usize
+    where
+        Count<S>: Unpin,
+        S: Stream,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(future).poll(&mut cx) {
+            Poll::Ready(count) => count,
+            Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
+        }
+    }
+
     #[test]
     fn count_items() {
         init_test("count_items");
@@ -205,6 +218,30 @@ mod tests {
             Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("count_single");
+    }
+
+    #[test]
+    fn count_chain_matches_sum_of_parts() {
+        init_test("count_chain_matches_sum_of_parts");
+        let left_items = vec![1usize, 2, 3];
+        let right_items = vec![4usize, 5];
+
+        let mut chained = Count::new(Chain::new(
+            iter(left_items.clone()),
+            iter(right_items.clone()),
+        ));
+        let mut left = Count::new(iter(left_items));
+        let mut right = Count::new(iter(right_items));
+
+        let chained_count = poll_count(&mut chained);
+        let summed_count = poll_count(&mut left) + poll_count(&mut right);
+        crate::assert_with_log!(
+            chained_count == summed_count,
+            "count(chain(a, b)) equals count(a) + count(b)",
+            summed_count,
+            chained_count
+        );
+        crate::test_complete!("count_chain_matches_sum_of_parts");
     }
 
     #[test]
