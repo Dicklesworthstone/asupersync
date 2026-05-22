@@ -125,6 +125,54 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn poll_forward_to_ready(input: Vec<i32>, sender: mpsc::Sender<i32>) {
+        let cx: Cx = Cx::for_testing();
+        let stream = iter(input);
+        let mut future = std::pin::pin!(forward(&cx, stream, sender));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = future.as_mut().poll(&mut task_cx);
+        let completed = matches!(poll, std::task::Poll::Ready(Ok(())));
+        crate::assert_with_log!(
+            completed,
+            "forward completes with spare channel capacity",
+            true,
+            completed
+        );
+    }
+
+    fn poll_sink_send_all_to_ready(input: Vec<i32>, sink: &SinkStream<i32>) {
+        let cx: Cx = Cx::for_testing();
+        let stream = iter(input);
+        let mut future = std::pin::pin!(sink.send_all(&cx, stream));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = future.as_mut().poll(&mut task_cx);
+        let completed = matches!(poll, std::task::Poll::Ready(Ok(())));
+        crate::assert_with_log!(
+            completed,
+            "sink send_all completes with spare channel capacity",
+            true,
+            completed
+        );
+    }
+
+    fn drain_receiver(receiver: &mut mpsc::Receiver<i32>) -> Vec<i32> {
+        let mut items = Vec::new();
+        while let Ok(item) = receiver.try_recv() {
+            items.push(item);
+        }
+        items
+    }
+
+    fn forward_collect(input: Vec<i32>) -> Vec<i32> {
+        let (tx, mut rx) = mpsc::channel::<i32>(input.len().saturating_add(1));
+        poll_forward_to_ready(input, tx);
+        drain_receiver(&mut rx)
+    }
+
     /// Invariant: `into_sink` wraps an mpsc::Sender in a SinkStream.
     #[test]
     fn into_sink_creates_sink_stream() {
@@ -164,6 +212,46 @@ mod tests {
         crate::assert_with_log!(ok3, "received 30", true, ok3);
 
         crate::test_complete!("forward_sends_all_items");
+    }
+
+    #[test]
+    fn mr_forward_partitioned_inputs_match_unsplit_fifo_order() {
+        init_test("mr_forward_partitioned_inputs_match_unsplit_fifo_order");
+        let combined = vec![1, 2, 3, 4, 5, 6];
+        let baseline = forward_collect(combined);
+
+        let (tx, mut rx) = mpsc::channel::<i32>(8);
+        poll_forward_to_ready(vec![1, 2], tx.clone());
+        poll_forward_to_ready(vec![3, 4, 5, 6], tx);
+        let partitioned = drain_receiver(&mut rx);
+
+        crate::assert_with_log!(
+            partitioned == baseline,
+            "partitioned forwarding matches combined forwarding",
+            baseline,
+            partitioned
+        );
+        crate::test_complete!("mr_forward_partitioned_inputs_match_unsplit_fifo_order");
+    }
+
+    #[test]
+    fn mr_forward_sink_send_all_matches_direct_forward() {
+        init_test("mr_forward_sink_send_all_matches_direct_forward");
+        let input = vec![9, 8, 7, 6];
+        let baseline = forward_collect(input.clone());
+
+        let (tx, mut rx) = mpsc::channel::<i32>(8);
+        let sink = into_sink(tx);
+        poll_sink_send_all_to_ready(input, &sink);
+        let through_sink = drain_receiver(&mut rx);
+
+        crate::assert_with_log!(
+            through_sink == baseline,
+            "SinkStream::send_all matches direct forward",
+            baseline,
+            through_sink
+        );
+        crate::test_complete!("mr_forward_sink_send_all_matches_direct_forward");
     }
 
     /// Invariant: forwarding an empty stream completes immediately with Ok.
