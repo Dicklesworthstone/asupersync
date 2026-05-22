@@ -330,3 +330,8 @@ mod tests {
         assert!(chain.is_empty());
     }
 }
+
+// Include metamorphic tests
+#[cfg(test)]
+#[path = "waiter_metamorphic_tests.rs"]
+mod metamorphic_tests;
