@@ -400,6 +400,51 @@ mod tests {
     }
 
     #[test]
+    fn mr_builder_last_config_assignment_wins() {
+        let mut first_config = RaptorQConfig::default();
+        first_config.encoding.symbol_size = 384;
+        first_config.encoding.repair_overhead = 1.0625;
+
+        let mut final_config = RaptorQConfig::default();
+        final_config.encoding.symbol_size = 768;
+        final_config.encoding.repair_overhead = 1.25;
+
+        let sender_direct = RaptorQSenderBuilder::new()
+            .config(final_config.clone())
+            .transport(NoopSink)
+            .build()
+            .unwrap();
+        let sender_overridden = RaptorQSenderBuilder::new()
+            .config(first_config.clone())
+            .config(final_config.clone())
+            .transport(NoopSink)
+            .build()
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", sender_overridden.config()),
+            format!("{:?}", sender_direct.config()),
+            "an earlier sender config assignment must not perturb the final config"
+        );
+
+        let receiver_direct = RaptorQReceiverBuilder::new()
+            .config(final_config.clone())
+            .source(NoopStream)
+            .build()
+            .unwrap();
+        let receiver_overridden = RaptorQReceiverBuilder::new()
+            .config(first_config)
+            .config(final_config)
+            .source(NoopStream)
+            .build()
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", receiver_overridden.config()),
+            format!("{:?}", receiver_direct.config()),
+            "an earlier receiver config assignment must not perturb the final config"
+        );
+    }
+
+    #[test]
     fn test_receiver_builder_accepts_security_and_metrics() {
         let security = SecurityContext::for_testing(7);
         let metrics = Metrics::new();
