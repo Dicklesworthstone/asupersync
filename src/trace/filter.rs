@@ -484,7 +484,6 @@ impl TraceFilter {
     /// Performs a sampling decision.
     ///
     /// Uses a simple xorshift for fast, reproducible sampling.
-    #[allow(clippy::cast_precision_loss)]
     fn sample(&mut self) -> bool {
         // xorshift64 — avoid the zero fixed-point
         let mut x = self.sample_state;
@@ -496,8 +495,9 @@ impl TraceFilter {
         x ^= x << 17;
         self.sample_state = x;
 
-        // Convert to [0, 1) range
-        let normalized = (x as f64) / (u64::MAX as f64);
+        // Convert to [0, 1) range without precision loss
+        // Use high 53 bits to avoid f64 precision issues
+        let normalized = ((x >> 11) as f64) / ((1u64 << 53) as f64);
         normalized < self.sample_rate
     }
 
