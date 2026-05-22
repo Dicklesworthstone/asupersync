@@ -360,7 +360,7 @@ mod tests {
         RespProtocolAdapter,
     };
     use crate::cx::Cx;
-    use crate::messaging::redis::RespValue;
+    use crate::messaging::redis::{RedisProtocolLimits, RespValue};
     use crate::types::{Budget, RegionId, TaskId};
 
     fn test_cx(slot: u32) -> Cx {
@@ -406,6 +406,32 @@ mod tests {
 
         assert_eq!(decoded.message, frame);
         assert_eq!(decoded.consumed, encoded.len());
+    }
+
+    #[test]
+    fn resp_adapter_reports_partial_frames_without_consumption() {
+        let adapter = RespProtocolAdapter::default();
+
+        let decoded = adapter
+            .try_decode_message(b"$5\r\nhe")
+            .expect("partial frame should not be a protocol error");
+
+        assert_eq!(decoded, None);
+    }
+
+    #[test]
+    fn resp_adapter_enforces_configured_decode_limits() {
+        let adapter = RespProtocolAdapter::new(RedisProtocolLimits::new().max_bulk_string_len(3));
+
+        let err = adapter
+            .try_decode_message(b"$4\r\nfour\r\n")
+            .expect_err("oversized bulk string should surface as adapter decode error");
+
+        assert!(matches!(
+            err,
+            ProtocolAdapterError::Decode { detail, .. }
+                if detail.contains("bulk string length 4 exceeds maximum 3")
+        ));
     }
 
     #[test]
