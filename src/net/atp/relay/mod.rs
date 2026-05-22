@@ -993,21 +993,28 @@ impl RelayService {
     ///
     /// # Errors
     ///
-    /// Returns an error for unknown reservations or invalid totals.
+    /// Returns an error for unknown reservations, invalid totals, or
+    /// reservations that already reached a terminal lifecycle state.
     pub fn record_packet_loss(
         &mut self,
         reservation_id: RelayReservationId,
         lost_packets: u64,
         total_packets: u64,
     ) -> Result<RelayLossSummary, RelayError> {
-        if total_packets == 0 || lost_packets > total_packets {
-            return Err(RelayError::InvalidLossSummary);
-        }
         let state = self
             .reservations
             .get(&reservation_id)
             .cloned()
             .ok_or(RelayError::UnknownReservation)?;
+        if state.cancelled {
+            return Err(RelayError::ReservationCancelled);
+        }
+        if state.expired {
+            return Err(RelayError::ExpiredReservation);
+        }
+        if total_packets == 0 || lost_packets > total_packets {
+            return Err(RelayError::InvalidLossSummary);
+        }
 
         let loss_ppm_u64 = lost_packets.saturating_mul(1_000_000) / total_packets;
         let loss_ppm = u32::try_from(loss_ppm_u64).map_err(|_| RelayError::InvalidLossSummary)?;
@@ -2235,6 +2242,126 @@ mod tests {
             service.usage(reservation_id(29)).expect("usage"),
             usage_after_expiry
         );
+        assert_eq!(
+            service.events().last().expect("expiry event").kind,
+            RelayEventKind::ReservationExpired
+        );
+    }
+
+    #[test]
+    fn packet_loss_after_cancellation_does_not_mutate_usage_or_proof() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(30),
+                "path-relay-30",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(30),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("forward");
+        service
+            .cancel_reservation(reservation_id(30))
+            .expect("cancel");
+
+        let events_after_cancel = service.events().len();
+        let usage_after_cancel = service.usage(reservation_id(30)).expect("usage");
+        let proof_after_cancel = service
+            .proof_artifact(reservation_id(30))
+            .expect("proof artifact");
+
+        assert_eq!(
+            service
+                .record_packet_loss(reservation_id(30), 1, 10)
+                .expect_err("terminal reservations reject loss summaries"),
+            RelayError::ReservationCancelled
+        );
+        assert_eq!(
+            service
+                .record_packet_loss(reservation_id(30), 1, 0)
+                .expect_err("terminal lifecycle wins over malformed loss summary"),
+            RelayError::ReservationCancelled
+        );
+
+        assert_eq!(service.events().len(), events_after_cancel);
+        assert_eq!(
+            service.usage(reservation_id(30)).expect("usage"),
+            usage_after_cancel
+        );
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(30))
+                .expect("proof artifact"),
+            proof_after_cancel
+        );
+        assert_eq!(usage_after_cancel.loss_summary, None);
+        assert_eq!(
+            service.events().last().expect("cancel event").kind,
+            RelayEventKind::ReservationCancelled
+        );
+    }
+
+    #[test]
+    fn packet_loss_after_expiry_does_not_mutate_usage_or_proof() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(31),
+                "path-relay-31",
+                grant(30, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(31),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("queued before expiry");
+
+        assert_eq!(service.expire_reservations(31), 1);
+        let events_after_expiry = service.events().len();
+        let usage_after_expiry = service.usage(reservation_id(31)).expect("usage");
+        let proof_after_expiry = service
+            .proof_artifact(reservation_id(31))
+            .expect("proof artifact");
+
+        assert_eq!(
+            service
+                .record_packet_loss(reservation_id(31), 1, 10)
+                .expect_err("expired reservations reject loss summaries"),
+            RelayError::ExpiredReservation
+        );
+        assert_eq!(
+            service
+                .record_packet_loss(reservation_id(31), 1, 0)
+                .expect_err("terminal lifecycle wins over malformed loss summary"),
+            RelayError::ExpiredReservation
+        );
+
+        assert_eq!(service.events().len(), events_after_expiry);
+        assert_eq!(
+            service.usage(reservation_id(31)).expect("usage"),
+            usage_after_expiry
+        );
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(31))
+                .expect("proof artifact"),
+            proof_after_expiry
+        );
+        assert_eq!(usage_after_expiry.loss_summary, None);
         assert_eq!(
             service.events().last().expect("expiry event").kind,
             RelayEventKind::ReservationExpired
