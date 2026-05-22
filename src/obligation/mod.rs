@@ -58,12 +58,15 @@
 
 pub mod calm;
 pub mod choreography;
+pub mod conformance_runner;
 pub mod crdt;
 pub mod dialectica;
 pub mod eprocess;
 pub mod graded;
+pub mod graded_conformance;
 pub mod guarded;
 mod leak_check;
+pub mod leak_check_conformance;
 pub mod ledger;
 pub mod lyapunov;
 pub mod marking;
