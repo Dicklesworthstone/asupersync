@@ -740,6 +740,22 @@ mod tests {
     }
 
     #[test]
+    fn read_to_end_appends_and_counts_only_new_bytes() {
+        init_test("read_to_end_appends_and_counts_only_new_bytes");
+        let mut reader: &[u8] = b"tail";
+        let mut buf = b"head:".to_vec();
+        let mut fut = reader.read_to_end(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+
+        let n = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(n == 4, "bytes read", 4, n);
+        crate::assert_with_log!(buf == b"head:tail", "buf", b"head:tail", buf);
+        crate::test_complete!("read_to_end_appends_and_counts_only_new_bytes");
+    }
+
+    #[test]
     fn read_to_string_reads_all() {
         init_test("read_to_string_reads_all");
         let mut reader: &[u8] = b"hi";
