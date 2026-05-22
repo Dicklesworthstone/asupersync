@@ -385,6 +385,61 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn poll_ready<F>(future: &mut F) -> F::Output
+    where
+        F: Future + Unpin,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match Pin::new(future).poll(&mut cx) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("expected immediately-ready try stream future"),
+        }
+    }
+
+    fn ok_items(values: &[i32]) -> Vec<Result<i32, &'static str>> {
+        values
+            .iter()
+            .copied()
+            .map(Ok::<i32, &'static str>)
+            .collect()
+    }
+
+    fn collect_result(
+        items: Vec<Result<i32, &'static str>>,
+    ) -> Result<Vec<i32>, TryStreamError<&'static str>> {
+        let mut future = TryCollect::new(iter(items), Vec::new());
+        poll_ready(&mut future)
+    }
+
+    fn fold_sum(
+        items: Vec<Result<i32, &'static str>>,
+        seed: i32,
+    ) -> Result<i32, TryStreamError<&'static str>> {
+        let mut future = TryFold::new(iter(items), seed, |acc, x| Ok::<i32, &'static str>(acc + x));
+        poll_ready(&mut future)
+    }
+
+    fn for_each_record(
+        items: Vec<i32>,
+        fail_at: Option<i32>,
+    ) -> (Result<(), TryStreamError<&'static str>>, Vec<i32>) {
+        let mut recorded = Vec::new();
+        let output = {
+            let mut future = TryForEach::new(iter(items), |item| {
+                if Some(item) == fail_at {
+                    Err("for_each failure")
+                } else {
+                    recorded.push(item);
+                    Ok(())
+                }
+            });
+            poll_ready(&mut future)
+        };
+        (output, recorded)
+    }
+
     #[test]
     fn try_collect_success() {
         init_test("try_collect_success");
@@ -443,6 +498,68 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("try_collect_empty");
+    }
+
+    #[test]
+    fn mr_try_collect_partition_matches_combined_ok_input() {
+        init_test("mr_try_collect_partition_matches_combined_ok_input");
+        let cases = vec![
+            Vec::new(),
+            vec![5],
+            vec![-3, 0, 8, 13],
+            (0..17).map(|index| index * 2 - 9).collect(),
+        ];
+
+        for values in cases {
+            let combined = collect_result(ok_items(&values));
+            crate::assert_with_log!(
+                combined == Ok(values.clone()),
+                "combined collection is identity",
+                Ok::<Vec<i32>, TryStreamError<&'static str>>(values.clone()),
+                combined.clone()
+            );
+
+            for split in 0..=values.len() {
+                let mut segmented = collect_result(ok_items(&values[..split]))
+                    .expect("left ok partition should collect");
+                segmented.extend(
+                    collect_result(ok_items(&values[split..]))
+                        .expect("right ok partition should collect"),
+                );
+
+                crate::assert_with_log!(
+                    segmented == values,
+                    "segmented collection matches combined input",
+                    values.clone(),
+                    segmented
+                );
+            }
+        }
+        crate::test_complete!("mr_try_collect_partition_matches_combined_ok_input");
+    }
+
+    #[test]
+    fn mr_try_collect_first_error_is_suffix_invariant() {
+        init_test("mr_try_collect_first_error_is_suffix_invariant");
+        let suffixes: Vec<Vec<Result<i32, &'static str>>> = vec![
+            vec![],
+            vec![Ok(99), Ok(100)],
+            vec![Err("later error"), Ok(-1), Err("last error")],
+        ];
+
+        for suffix in suffixes {
+            let mut items = vec![Ok(1), Ok(2), Err("first error")];
+            items.extend(suffix);
+
+            let result = collect_result(items);
+            crate::assert_with_log!(
+                result == Err(TryStreamError::Inner("first error")),
+                "first stream error wins regardless of suffix",
+                Err::<Vec<i32>, TryStreamError<&'static str>>(TryStreamError::Inner("first error")),
+                result
+            );
+        }
+        crate::test_complete!("mr_try_collect_first_error_is_suffix_invariant");
     }
 
     #[test]
@@ -512,6 +629,62 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("try_fold_closure_error");
+    }
+
+    #[test]
+    fn mr_try_fold_partition_matches_seeded_suffix_for_ok_input() {
+        init_test("mr_try_fold_partition_matches_seeded_suffix_for_ok_input");
+        let cases = vec![
+            Vec::new(),
+            vec![7],
+            vec![-4, 2, 9, 11],
+            (0..23).map(|index| index % 5 - 2).collect(),
+        ];
+        let seed = 31;
+
+        for values in cases {
+            let combined =
+                fold_sum(ok_items(&values), seed).expect("combined ok input should fold");
+
+            for split in 0..=values.len() {
+                let left_acc = fold_sum(ok_items(&values[..split]), seed)
+                    .expect("left ok partition should fold");
+                let segmented = fold_sum(ok_items(&values[split..]), left_acc)
+                    .expect("right ok partition should fold");
+
+                crate::assert_with_log!(
+                    segmented == combined,
+                    "fold over partitioned stream matches combined fold",
+                    combined,
+                    segmented
+                );
+            }
+        }
+        crate::test_complete!("mr_try_fold_partition_matches_seeded_suffix_for_ok_input");
+    }
+
+    #[test]
+    fn mr_try_fold_first_error_is_suffix_invariant() {
+        init_test("mr_try_fold_first_error_is_suffix_invariant");
+        let suffixes: Vec<Vec<Result<i32, &'static str>>> = vec![
+            vec![],
+            vec![Ok(10), Ok(20)],
+            vec![Err("later error"), Ok(30), Err("last error")],
+        ];
+
+        for suffix in suffixes {
+            let mut items = vec![Ok(3), Ok(4), Err("first fold error")];
+            items.extend(suffix);
+
+            let result = fold_sum(items, 11);
+            crate::assert_with_log!(
+                result == Err(TryStreamError::Inner("first fold error")),
+                "first fold stream error wins regardless of suffix",
+                Err::<i32, TryStreamError<&'static str>>(TryStreamError::Inner("first fold error")),
+                result
+            );
+        }
+        crate::test_complete!("mr_try_fold_first_error_is_suffix_invariant");
     }
 
     #[test]
@@ -654,6 +827,77 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("try_for_each_error");
+    }
+
+    #[test]
+    fn mr_try_for_each_partition_matches_combined_side_effects() {
+        init_test("mr_try_for_each_partition_matches_combined_side_effects");
+        let cases = vec![
+            Vec::new(),
+            vec![1],
+            vec![-2, 0, 4, 9],
+            (0..19).map(|index| index * 3 - 17).collect(),
+        ];
+
+        for values in cases {
+            let (combined_result, combined_recorded) = for_each_record(values.clone(), None);
+            crate::assert_with_log!(
+                combined_result == Ok(()),
+                "combined for_each succeeds",
+                Ok::<(), TryStreamError<&'static str>>(()),
+                combined_result
+            );
+
+            for split in 0..=values.len() {
+                let (left_result, mut segmented) = for_each_record(values[..split].to_vec(), None);
+                let (right_result, right_recorded) =
+                    for_each_record(values[split..].to_vec(), None);
+                segmented.extend(right_recorded);
+
+                crate::assert_with_log!(
+                    left_result == Ok(()) && right_result == Ok(()),
+                    "partitioned for_each succeeds",
+                    (
+                        Ok::<(), TryStreamError<&'static str>>(()),
+                        Ok::<(), TryStreamError<&'static str>>(())
+                    ),
+                    (left_result, right_result)
+                );
+                crate::assert_with_log!(
+                    segmented == combined_recorded,
+                    "partitioned side effects match combined order",
+                    combined_recorded.clone(),
+                    segmented
+                );
+            }
+        }
+        crate::test_complete!("mr_try_for_each_partition_matches_combined_side_effects");
+    }
+
+    #[test]
+    fn mr_try_for_each_closure_error_is_suffix_invariant() {
+        init_test("mr_try_for_each_closure_error_is_suffix_invariant");
+        let suffixes = vec![vec![], vec![4, 5], vec![9, 3, 10]];
+
+        for suffix in suffixes {
+            let mut items = vec![1, 2, 3];
+            items.extend(suffix);
+
+            let (result, recorded) = for_each_record(items, Some(3));
+            crate::assert_with_log!(
+                result == Err(TryStreamError::Inner("for_each failure")),
+                "first closure error wins regardless of suffix",
+                Err::<(), TryStreamError<&'static str>>(TryStreamError::Inner("for_each failure")),
+                result
+            );
+            crate::assert_with_log!(
+                recorded == vec![1, 2],
+                "side effects stop before failing item and suffix",
+                vec![1, 2],
+                recorded
+            );
+        }
+        crate::test_complete!("mr_try_for_each_closure_error_is_suffix_invariant");
     }
 
     #[test]
