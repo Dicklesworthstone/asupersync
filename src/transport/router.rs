@@ -319,8 +319,8 @@ impl BoundedLoadConfig {
             .weight
             .max(1)
             .saturating_mul(self.capacity_per_weight.max(1));
-        let scaled =
-            (u64::from(base) * (1_000_u64 + u64::from(self.epsilon_milli))).div_ceil(1_000);
+        let scale = 1_000_u64.saturating_add(u64::from(self.epsilon_milli));
+        let scaled = u64::from(base).saturating_mul(scale).div_ceil(1_000);
         let scaled = u32::try_from(scaled).unwrap_or(u32::MAX);
         scaled.max(self.min_capacity.max(1))
     }
@@ -3179,6 +3179,18 @@ mod tests {
         assert_eq!(
             decision.reason,
             BoundedLoadRebalanceReason::PrimaryWithinCapacity
+        );
+    }
+
+    #[test]
+    fn test_bounded_load_capacity_extreme_policy_saturates() {
+        let config = BoundedLoadConfig::new(u32::MAX, 1, u32::MAX);
+        let endpoint = test_endpoint(1).with_weight(u32::MAX);
+
+        assert_eq!(
+            config.capacity_for(&endpoint),
+            u32::MAX,
+            "bounded-load capacity must saturate instead of panicking on extreme valid u32 policy inputs"
         );
     }
 
