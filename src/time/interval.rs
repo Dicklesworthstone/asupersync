@@ -639,6 +639,41 @@ mod tests {
     }
 
     #[test]
+    fn tick_before_deadline_returns_deadline_without_advancing() {
+        init_test("tick_before_deadline_returns_deadline_without_advancing");
+        let mut interval = Interval::new(Time::from_secs(1), Duration::from_millis(100));
+
+        let early = interval.tick(Time::from_millis(500));
+        crate::assert_with_log!(
+            early == Time::from_secs(1),
+            "early tick observes deadline",
+            Time::from_secs(1),
+            early
+        );
+        crate::assert_with_log!(
+            interval.deadline() == Time::from_secs(1),
+            "deadline preserved",
+            Time::from_secs(1),
+            interval.deadline()
+        );
+
+        let first = interval.tick(Time::from_secs(1));
+        crate::assert_with_log!(
+            first == Time::from_secs(1),
+            "first ready tick",
+            Time::from_secs(1),
+            first
+        );
+        crate::assert_with_log!(
+            interval.deadline() == Time::from_millis(1100),
+            "deadline advances only after ready tick",
+            Time::from_millis(1100),
+            interval.deadline()
+        );
+        crate::test_complete!("tick_before_deadline_returns_deadline_without_advancing");
+    }
+
+    #[test]
     fn tick_multiple_periods() {
         init_test("tick_multiple_periods");
         let mut interval = Interval::new(Time::ZERO, Duration::from_secs(1));
