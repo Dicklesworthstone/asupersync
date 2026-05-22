@@ -646,6 +646,22 @@ mod tests {
     }
 
     #[test]
+    fn close_reason_encode_counts_limit_in_utf8_bytes() {
+        let multibyte = "\u{20ac}";
+        let text = multibyte.repeat((MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES) / multibyte.len());
+        let reason = CloseReason::with_text(CloseCode::Normal, &text);
+
+        let encoded = reason.encode();
+        let frame = reason.to_frame();
+
+        assert_eq!(text.len(), MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES);
+        assert_eq!(encoded.len(), MAX_CLOSE_PAYLOAD_BYTES);
+        assert_eq!(frame.payload.len(), MAX_CLOSE_PAYLOAD_BYTES);
+        assert_eq!(&encoded[..CLOSE_CODE_BYTES], &1000u16.to_be_bytes());
+        assert_eq!(&encoded[CLOSE_CODE_BYTES..], text.as_bytes());
+    }
+
+    #[test]
     fn close_reason_encode_drops_overlong_text_without_panicking() {
         let text = "a".repeat(MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES + 1);
         let reason = CloseReason::with_text(CloseCode::Normal, &text);
@@ -653,6 +669,21 @@ mod tests {
         let encoded = reason.encode();
         let frame = reason.to_frame();
 
+        assert_eq!(encoded.as_ref(), &1000u16.to_be_bytes());
+        assert_eq!(frame.payload.as_ref(), &1000u16.to_be_bytes());
+    }
+
+    #[test]
+    fn close_reason_encode_drops_overlong_multibyte_text() {
+        let multibyte = "\u{20ac}";
+        let text =
+            multibyte.repeat((MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES) / multibyte.len() + 1);
+        let reason = CloseReason::with_text(CloseCode::Normal, &text);
+
+        let encoded = reason.encode();
+        let frame = reason.to_frame();
+
+        assert!(text.len() > MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES);
         assert_eq!(encoded.as_ref(), &1000u16.to_be_bytes());
         assert_eq!(frame.payload.as_ref(), &1000u16.to_be_bytes());
     }
