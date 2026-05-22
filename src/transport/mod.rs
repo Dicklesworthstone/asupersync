@@ -240,6 +240,90 @@ mod inline_tests {
     }
 
     #[test]
+    fn mr_shared_channel_close_is_idempotent() {
+        init_test("mr_shared_channel_close_is_idempotent");
+        let shared = SharedChannel::new(2);
+
+        {
+            let mut queue = shared.queue.lock();
+            queue.push_back(create_symbol(7));
+        }
+
+        let send_flag = Arc::new(AtomicBool::new(false));
+        let recv_flag = Arc::new(AtomicBool::new(false));
+        let send_queued = Arc::new(AtomicBool::new(true));
+        let recv_queued = Arc::new(AtomicBool::new(true));
+
+        {
+            let mut send_wakers = shared.send_wakers.lock();
+            send_wakers.push(ChannelWaiter {
+                waker: flagged_waker(Arc::clone(&send_flag)),
+                queued: Arc::clone(&send_queued),
+            });
+        }
+
+        {
+            let mut recv_wakers = shared.recv_wakers.lock();
+            recv_wakers.push(ChannelWaiter {
+                waker: flagged_waker(Arc::clone(&recv_flag)),
+                queued: Arc::clone(&recv_queued),
+            });
+        }
+
+        shared.close();
+        let first_queue = shared.queue.lock().clone();
+        let first_send_waiters = shared.send_wakers.lock().len();
+        let first_recv_waiters = shared.recv_wakers.lock().len();
+
+        shared.close();
+
+        crate::assert_with_log!(
+            shared.closed.load(Ordering::Acquire),
+            "closed flag remains set",
+            true,
+            shared.closed.load(Ordering::Acquire)
+        );
+        crate::assert_with_log!(
+            shared.queue.lock().iter().eq(first_queue.iter()),
+            "queued symbols preserved",
+            true,
+            true
+        );
+        crate::assert_with_log!(
+            first_send_waiters == 0 && shared.send_wakers.lock().is_empty(),
+            "send waiters drained once",
+            true,
+            shared.send_wakers.lock().len()
+        );
+        crate::assert_with_log!(
+            first_recv_waiters == 0 && shared.recv_wakers.lock().is_empty(),
+            "recv waiters drained once",
+            true,
+            shared.recv_wakers.lock().len()
+        );
+        crate::assert_with_log!(
+            !send_queued.load(Ordering::Acquire) && !recv_queued.load(Ordering::Acquire),
+            "queued flags remain cleared",
+            true,
+            (
+                send_queued.load(Ordering::Acquire),
+                recv_queued.load(Ordering::Acquire)
+            )
+        );
+        crate::assert_with_log!(
+            send_flag.load(Ordering::Acquire) && recv_flag.load(Ordering::Acquire),
+            "first close woke both waiter classes",
+            true,
+            (
+                send_flag.load(Ordering::Acquire),
+                recv_flag.load(Ordering::Acquire)
+            )
+        );
+
+        crate::test_complete!("mr_shared_channel_close_is_idempotent");
+    }
+
+    #[test]
     #[should_panic(expected = "transport::channel capacity must be > 0")]
     fn test_channel_zero_capacity_panics() {
         let _ = channel(0);
