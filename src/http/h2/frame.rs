@@ -2049,6 +2049,73 @@ mod tests {
     }
 
     #[test]
+    fn frame_header_parse_masks_inbound_reserved_stream_bit() {
+        for stream_id in [0_u32, 1, 3, 0x7fff_ffff] {
+            let raw_without_reserved = stream_id.to_be_bytes();
+            let mut raw_with_reserved = raw_without_reserved;
+            raw_with_reserved[0] |= 0x80;
+
+            for raw_stream_id in [raw_without_reserved, raw_with_reserved] {
+                let mut buf = BytesMut::from(
+                    &[
+                        0,
+                        0,
+                        5,
+                        FrameType::Headers as u8,
+                        headers_flags::END_HEADERS,
+                        raw_stream_id[0],
+                        raw_stream_id[1],
+                        raw_stream_id[2],
+                        raw_stream_id[3],
+                        b'h',
+                        b'e',
+                        b'l',
+                        b'l',
+                        b'o',
+                    ][..],
+                );
+
+                let parsed = FrameHeader::parse(&mut buf).unwrap();
+
+                assert_eq!(parsed.length, 5);
+                assert_eq!(parsed.frame_type, FrameType::Headers as u8);
+                assert_eq!(parsed.flags, headers_flags::END_HEADERS);
+                assert_eq!(parsed.stream_id, stream_id);
+                assert_eq!(&buf[..], b"hello", "header parse must leave payload bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn frame_header_parse_consumes_exactly_one_header() {
+        let first = FrameHeader {
+            length: 0,
+            frame_type: FrameType::Settings as u8,
+            flags: settings_flags::ACK,
+            stream_id: 0,
+        };
+        let second = FrameHeader {
+            length: 8,
+            frame_type: FrameType::Ping as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+
+        let mut buf = BytesMut::new();
+        first.write(&mut buf);
+        second.write(&mut buf);
+        buf.extend_from_slice(b"12345678");
+
+        let parsed_first = FrameHeader::parse(&mut buf).unwrap();
+        assert_eq!(parsed_first, first);
+        assert_eq!(buf.len(), FRAME_HEADER_SIZE + 8);
+
+        let parsed_second = FrameHeader::parse(&mut buf).unwrap();
+        assert_eq!(parsed_second, second);
+        assert_eq!(&buf[..], b"12345678");
+    }
+
+    #[test]
     fn test_try_frame_length_rejects_above_max() {
         let err = try_frame_length(MAX_FRAME_SIZE as usize + 1).unwrap_err();
         assert_eq!(err.code, ErrorCode::FrameSizeError);
