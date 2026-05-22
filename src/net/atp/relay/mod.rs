@@ -920,12 +920,12 @@ impl RelayService {
         &mut self,
         reservation_id: RelayReservationId,
     ) -> Result<(), RelayError> {
-        let already_cancelled = self
+        let already_terminal = self
             .reservations
             .get(&reservation_id)
             .ok_or(RelayError::UnknownReservation)?
-            .cancelled;
-        if already_cancelled {
+            .is_terminal();
+        if already_terminal {
             return Ok(());
         }
 
@@ -974,7 +974,7 @@ impl RelayService {
             .reservations
             .iter()
             .filter(|(_, state)| {
-                !state.cancelled && !state.expired && state.grant.expires_at_micros <= now_micros
+                !state.is_terminal() && state.grant.expires_at_micros <= now_micros
             })
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
@@ -1049,7 +1049,7 @@ impl RelayService {
             let retained_reservation_ids = self
                 .reservations
                 .iter()
-                .filter(|(_, state)| !state.cancelled && !state.expired)
+                .filter(|(_, state)| !state.is_terminal())
                 .map(|(id, _)| *id)
                 .collect::<BTreeSet<_>>();
             (
@@ -1167,9 +1167,7 @@ impl RelayService {
     fn active_reservation_count(&self, now_micros: u64) -> usize {
         self.reservations
             .values()
-            .filter(|state| {
-                !state.cancelled && !state.expired && state.grant.expires_at_micros > now_micros
-            })
+            .filter(|state| !state.is_terminal() && state.grant.expires_at_micros > now_micros)
             .count()
     }
 
@@ -1206,7 +1204,7 @@ impl RelayService {
                 .reservations
                 .get(&reservation_id)
                 .ok_or(RelayError::UnknownReservation)?;
-            state.expired || state.cancelled
+            state.is_terminal()
         };
         if already_expired_or_cancelled {
             return Ok(());
@@ -1385,6 +1383,12 @@ struct RelayReservationState {
     fallback_transport: Option<RelayTransport>,
     cancelled: bool,
     expired: bool,
+}
+
+impl RelayReservationState {
+    fn is_terminal(&self) -> bool {
+        self.cancelled || self.expired
+    }
 }
 
 #[derive(Debug)]
@@ -2185,6 +2189,55 @@ mod tests {
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>(),
             vec![reservation_id(28)]
+        );
+    }
+
+    #[test]
+    fn cancellation_after_expiry_is_terminal_idempotent() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(29),
+                "path-relay-29",
+                grant(30, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(29),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("queued before expiry");
+        assert_eq!(
+            service
+                .forward(
+                    31,
+                    reservation_id(29),
+                    peer(1),
+                    packet(RelayTransport::Udp, b"late", 2),
+                )
+                .expect_err("expired"),
+            RelayError::ExpiredReservation
+        );
+        let events_after_expiry = service.events().len();
+        let usage_after_expiry = service.usage(reservation_id(29)).expect("usage");
+
+        service
+            .cancel_reservation(reservation_id(29))
+            .expect("cancel after expiry is a no-op");
+
+        assert_eq!(service.events().len(), events_after_expiry);
+        assert_eq!(
+            service.usage(reservation_id(29)).expect("usage"),
+            usage_after_expiry
+        );
+        assert_eq!(
+            service.events().last().expect("expiry event").kind,
+            RelayEventKind::ReservationExpired
         );
     }
 
