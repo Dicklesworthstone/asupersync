@@ -575,6 +575,9 @@ impl SymbolSink for SimSymbolSink {
         if state.closed {
             return Poll::Ready(Err(SinkError::Closed));
         }
+        if this.inner.config.capacity == 0 {
+            return Poll::Ready(Err(SinkError::BufferFull));
+        }
         if in_flight_len(&state) < this.inner.config.capacity {
             // Mark as no longer queued if we had a waiter
             if let Some(waiter) = this.waiter.as_ref() {
@@ -1131,6 +1134,23 @@ mod tests {
         }));
 
         assert!(matches!(poll_result, Some(Poll::Pending)));
+    }
+
+    #[test]
+    fn test_sim_channel_zero_capacity_ready_fails_fast() {
+        let config = SimTransportConfig {
+            capacity: 0,
+            ..SimTransportConfig::default()
+        };
+        let (mut sink, _stream) = sim_channel(config);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let ready = Pin::new(&mut sink).poll_ready(&mut context);
+        assert!(matches!(ready, Poll::Ready(Err(SinkError::BufferFull))));
+
+        let send = Pin::new(&mut sink).poll_send(&mut context, create_symbol(1));
+        assert!(matches!(send, Poll::Ready(Err(SinkError::BufferFull))));
     }
 
     #[test]
