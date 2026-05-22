@@ -141,6 +141,24 @@ pub enum QuicH3Event {
         new_phase: String,
         initiator: String,
     },
+    PathValidationStarted {
+        path_id: String,
+        local_addr: String,
+        remote_addr: String,
+        challenge_len: u32,
+    },
+    PathValidationCompleted {
+        path_id: String,
+        validated: bool,
+        reason: String,
+        new_active_path: bool,
+    },
+    MigrationObserved {
+        from_path_id: String,
+        to_path_id: String,
+        reason: String,
+        stream_state_preserved: bool,
+    },
     CancelRequested {
         scope: String,
         reason: String,
@@ -259,6 +277,9 @@ impl QuicH3Event {
             Self::HandshakeStep { .. } => "handshake_step",
             Self::CloseInitiated { .. } => "close_initiated",
             Self::KeyUpdate { .. } => "key_update",
+            Self::PathValidationStarted { .. } => "path_validation_started",
+            Self::PathValidationCompleted { .. } => "path_validation_completed",
+            Self::MigrationObserved { .. } => "migration_observed",
             Self::CancelRequested { .. } => "cancel_requested",
             Self::RegionStateChanged { .. } => "region_state_changed",
             Self::SettingsExchanged { .. } => "settings_exchanged",
@@ -491,9 +512,76 @@ impl QuicH3ForensicLogger {
         writer.flush()
     }
 
+    /// Return a qlog-style JSON document for native QUIC/H3 forensic events.
+    ///
+    /// The output intentionally keeps the existing event payloads intact while
+    /// wrapping them in a qlog-compatible `traces[].events[]` shape. This gives
+    /// release and failure tooling one artifact that preserves packet evidence,
+    /// path/migration events, cancellation context, seed, and replay metadata.
+    #[must_use]
+    pub fn to_qlog_json(&self) -> serde_json::Value {
+        let records = self.records.lock().clone();
+        let seed_hex = format!("0x{:016X}", self.seed);
+        let replay_command = format!(
+            "ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
+            self.seed, self.test_function
+        );
+        let events = records
+            .iter()
+            .map(|r| {
+                serde_json::json!([
+                    r.ts_us,
+                    qlog_category(&r.category),
+                    r.event.event_name(),
+                    serde_json::to_value(&r.event).unwrap_or(serde_json::Value::Null)
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::json!({
+            "qlog_version": "0.3",
+            "qlog_format": "JSON",
+            "title": self.scenario_id,
+            "traces": [{
+                "vantage_point": {
+                    "type": "endpoint",
+                    "name": SUBSYSTEM
+                },
+                "title": self.scenario_id,
+                "common_fields": {
+                    "protocol_type": "QUIC_HTTP3",
+                    "scenario_id": self.scenario_id,
+                    "seed": seed_hex,
+                    "test_id": self.test_function,
+                    "replay_command": replay_command,
+                    "time_format": "relative_us"
+                },
+                "events": events
+            }]
+        })
+    }
+
+    /// Write a qlog-style JSON document to the given path.
+    pub fn write_qlog_json(&self, path: &Path) -> std::io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &self.to_qlog_json()).map_err(std::io::Error::other)
+    }
+
     /// Returns a snapshot of all recorded events (for building the manifest).
     fn snapshot(&self) -> Vec<ForensicRecord> {
         self.records.lock().clone()
+    }
+}
+
+fn qlog_category(category: &str) -> &'static str {
+    match category {
+        "quic_transport" | "quic_stream" => "transport",
+        "quic_connection" | "quic_path" => "connectivity",
+        "cancel_region" => "recovery",
+        "h3_control" | "h3_request" | "h3_frame" => "http",
+        "test_harness" => "simulation",
+        _ => "generic",
     }
 }
 
@@ -920,6 +1008,18 @@ mod tests {
         value
     }
 
+    fn qlog_event_matches(event: &Value, category: &str, name: &str) -> bool {
+        let category_matches = event
+            .get(1)
+            .and_then(Value::as_str)
+            .is_some_and(|value| category.eq(value));
+        let name_matches = event
+            .get(2)
+            .and_then(Value::as_str)
+            .is_some_and(|value| name.eq(value));
+        category_matches && name_matches
+    }
+
     #[test]
     fn test_logger_records_events() {
         init_test("test_logger_records_events");
@@ -1055,6 +1155,116 @@ mod tests {
         assert_eq!(second["data"]["pn_space"], "handshake");
 
         crate::test_complete!("test_ndjson_roundtrip");
+    }
+
+    #[test]
+    fn qlog_export_preserves_packet_path_cancel_and_replay_context() {
+        init_test("qlog_export_preserves_packet_path_cancel_and_replay_context");
+
+        let logger = QuicH3ForensicLogger::new(
+            "QH3-QLOG-EXPORT",
+            0xCAFE_BABE,
+            "qlog_export_preserves_packet_path_cancel_and_replay_context",
+        );
+
+        logger.log(
+            10,
+            "quic_transport",
+            QuicH3Event::PacketSent {
+                pn_space: "application".into(),
+                packet_number: 7,
+                size_bytes: 1180,
+                ack_eliciting: true,
+                in_flight: true,
+                send_time_us: 10,
+            },
+        );
+        logger.log(
+            20,
+            "quic_path",
+            QuicH3Event::PathValidationStarted {
+                path_id: "path-a".into(),
+                local_addr: "192.0.2.10:4433".into(),
+                remote_addr: "198.51.100.20:4433".into(),
+                challenge_len: 8,
+            },
+        );
+        logger.log(
+            30,
+            "quic_path",
+            QuicH3Event::PathValidationCompleted {
+                path_id: "path-a".into(),
+                validated: true,
+                reason: "path_response_matched".into(),
+                new_active_path: true,
+            },
+        );
+        logger.log(
+            40,
+            "quic_path",
+            QuicH3Event::MigrationObserved {
+                from_path_id: "path-a".into(),
+                to_path_id: "path-b".into(),
+                reason: "nat_rebinding".into(),
+                stream_state_preserved: true,
+            },
+        );
+        logger.log(
+            50,
+            "cancel_region",
+            QuicH3Event::CancelRequested {
+                scope: "connection".into(),
+                reason: "test_shutdown".into(),
+                trigger: "region_close".into(),
+            },
+        );
+
+        let qlog = logger.to_qlog_json();
+        assert_eq!(qlog["qlog_version"], "0.3");
+        assert_eq!(qlog["qlog_format"], "JSON");
+        assert_eq!(
+            qlog["traces"][0]["common_fields"]["seed"],
+            "0x00000000CAFEBABE"
+        );
+        assert!(
+            qlog["traces"][0]["common_fields"]["replay_command"]
+                .as_str()
+                .unwrap()
+                .contains("ASUPERSYNC_SEED=0xCAFEBABE")
+        );
+
+        let events = qlog["traces"][0]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 5);
+        assert!(events.iter().any(|event| {
+            qlog_event_matches(event, "transport", "packet_sent")
+                && event
+                    .get(3)
+                    .and_then(|data| data.get("packet_number"))
+                    .and_then(Value::as_u64)
+                    .is_some_and(|packet_number| packet_number == 7)
+        }));
+        assert!(events.iter().any(|event| {
+            qlog_event_matches(event, "connectivity", "migration_observed")
+                && event
+                    .get(3)
+                    .and_then(|data| data.get("reason"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| "nat_rebinding".eq(reason))
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| { qlog_event_matches(event, "recovery", "cancel_requested") })
+        );
+
+        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let qlog_path = tmp.path().join("scenario.qlog.json");
+        logger.write_qlog_json(&qlog_path).expect("write qlog json");
+        let contents = std::fs::read_to_string(&qlog_path).expect("read qlog json");
+        let parsed: Value = serde_json::from_str(&contents).expect("valid qlog json");
+        assert_eq!(parsed["traces"][0]["events"].as_array().unwrap().len(), 5);
+
+        crate::test_complete!("qlog_export_preserves_packet_path_cancel_and_replay_context");
     }
 
     #[test]
