@@ -820,6 +820,34 @@ mod tests {
         }
     }
 
+    struct PanicOnUseWriter;
+
+    impl AsyncWrite for PanicOnUseWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            panic!("empty write_all must not poll the writer")
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _bufs: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            panic!("empty write_all must not poll vectored writes")
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            panic!("empty write_all must not poll flush")
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            panic!("empty write_all must not poll shutdown")
+        }
+    }
+
     #[derive(Debug, Clone, Copy)]
     enum ControlStep {
         Pending,
@@ -962,6 +990,18 @@ mod tests {
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::assert_with_log!(output == b"hello world", "output", b"hello world", output);
         crate::test_complete!("write_all_ok");
+    }
+
+    #[test]
+    fn write_all_empty_returns_without_polling_writer() {
+        init_test("write_all_empty_returns_without_polling_writer");
+        let mut output = PanicOnUseWriter;
+        let mut fut = output.write_all(b"");
+        let mut fut = Pin::new(&mut fut);
+
+        let result = poll_ready(&mut fut);
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        crate::test_complete!("write_all_empty_returns_without_polling_writer");
     }
 
     #[test]
