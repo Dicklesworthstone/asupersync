@@ -253,6 +253,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_lines_codec_decode() {
@@ -369,6 +370,47 @@ mod tests {
 
         codec.encode("hello".to_string(), &mut buf).unwrap();
         assert_eq!(&buf[..], b"hello\n");
+    }
+
+    proptest! {
+        #[test]
+        fn lines_codec_metamorphic_batched_roundtrip_matches_input_order(
+            lines in proptest::collection::vec("[^\\r\\n]{0,64}", 0..32),
+        ) {
+            let mut encoder = LinesCodec::new();
+            let mut buf = BytesMut::new();
+
+            for line in &lines {
+                encoder
+                    .encode(line.clone(), &mut buf)
+                    .expect("encoding newline-free line should not fail");
+            }
+
+            let mut decoder = LinesCodec::new();
+            let mut decoded = Vec::with_capacity(lines.len());
+            while let Some(line) = decoder
+                .decode(&mut buf)
+                .expect("decoding encoded newline-free line should not fail")
+            {
+                decoded.push(line);
+            }
+
+            prop_assert_eq!(
+                decoded.as_slice(),
+                lines.as_slice(),
+                "batching newline-free lines must preserve order and content",
+            );
+            prop_assert!(
+                buf.is_empty(),
+                "successful batched decode must consume the encoded buffer",
+            );
+            prop_assert_eq!(
+                decoder
+                    .decode_eof(&mut buf)
+                    .expect("EOF after full batch decode should not fail"),
+                None,
+            );
+        }
     }
 
     // =========================================================================
