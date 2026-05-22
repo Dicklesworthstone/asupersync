@@ -90,8 +90,9 @@ pub use tcp::stream::TcpStream;
 pub use tcp::stream::TcpStreamBuilder;
 pub use udp::{
     RecvStream, SendSink, UdpAddressFamily, UdpBatchCapabilities, UdpBatchIoReport,
-    UdpBufferConfig, UdpBufferTuneReport, UdpCapability, UdpInboundDatagram, UdpOutboundDatagram,
-    UdpPlatform, UdpRecvBatch, UdpSocket, UdpSocketCapabilities,
+    UdpBufferConfig, UdpBufferTuneReport, UdpCapability, UdpEndpointObservation, UdpHairpinSupport,
+    UdpInboundDatagram, UdpNatAssessment, UdpNatConfidence, UdpNatKind, UdpOutboundDatagram,
+    UdpPlatform, UdpRecvBatch, UdpSocket, UdpSocketCapabilities, classify_udp_nat,
 };
 #[cfg(unix)]
 pub use unix::{

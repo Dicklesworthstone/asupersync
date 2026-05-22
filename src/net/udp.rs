@@ -140,6 +140,246 @@ pub struct UdpSocketCapabilities {
     pub observed_send_buffer_bytes: Option<usize>,
 }
 
+/// UDP NAT/path shape inferred from endpoint observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpNatKind {
+    /// No successful UDP endpoint observation was recorded.
+    UdpBlocked,
+    /// Observed public IPv6 endpoint matches the local IPv6 endpoint.
+    Ipv6Direct,
+    /// Observed public IPv4 endpoint matches the local IPv4 endpoint.
+    PublicIpv4Direct,
+    /// A stable public mapping was observed, but it differs from the local endpoint.
+    LikelyEasyNat,
+    /// Multiple public mappings were observed for the same local UDP endpoint.
+    HardOrSymmetricNat,
+    /// Observations were insufficient or contradictory.
+    Unknown,
+}
+
+/// Hairpin capability inferred from explicitly measured probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpHairpinSupport {
+    /// Hairpin probes succeeded at least once.
+    Supported,
+    /// Hairpin probes were measured and failed.
+    Unsupported,
+    /// Hairpin behavior was not measured.
+    Unknown,
+}
+
+/// Confidence attached to a UDP NAT/path assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpNatConfidence {
+    /// One or more observations are missing, so callers should treat the result as a hint.
+    Low,
+    /// A single successful observation supports the assessment.
+    Medium,
+    /// Multiple observations or a conclusive blocked/direct result support the assessment.
+    High,
+}
+
+/// One rendezvous/STUN-like UDP endpoint observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpEndpointObservation {
+    /// Local UDP endpoint used for the probe.
+    pub local_addr: SocketAddr,
+    /// Rendezvous server that reported the observed endpoint.
+    pub rendezvous_addr: SocketAddr,
+    /// Public endpoint observed by the rendezvous server.
+    pub observed_addr: Option<SocketAddr>,
+    /// Whether the UDP probe reached the rendezvous server.
+    pub probe_succeeded: bool,
+    /// Optional hairpin result measured for the observed endpoint.
+    pub hairpin_succeeded: Option<bool>,
+}
+
+impl UdpEndpointObservation {
+    /// Construct a successful endpoint observation.
+    #[inline]
+    #[must_use]
+    pub const fn observed(
+        local_addr: SocketAddr,
+        rendezvous_addr: SocketAddr,
+        observed_addr: SocketAddr,
+    ) -> Self {
+        Self {
+            local_addr,
+            rendezvous_addr,
+            observed_addr: Some(observed_addr),
+            probe_succeeded: true,
+            hairpin_succeeded: None,
+        }
+    }
+
+    /// Construct a failed UDP probe observation.
+    #[inline]
+    #[must_use]
+    pub const fn blocked(local_addr: SocketAddr, rendezvous_addr: SocketAddr) -> Self {
+        Self {
+            local_addr,
+            rendezvous_addr,
+            observed_addr: None,
+            probe_succeeded: false,
+            hairpin_succeeded: None,
+        }
+    }
+
+    /// Attach a measured hairpin result to this observation.
+    #[inline]
+    #[must_use]
+    pub const fn with_hairpin_result(mut self, succeeded: bool) -> Self {
+        self.hairpin_succeeded = Some(succeeded);
+        self
+    }
+}
+
+/// NAT/path assessment derived from rendezvous endpoint observations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpNatAssessment {
+    /// Inferred NAT/path kind.
+    pub kind: UdpNatKind,
+    /// Inferred hairpin behavior.
+    pub hairpin: UdpHairpinSupport,
+    /// Confidence in the inferred kind.
+    pub confidence: UdpNatConfidence,
+    /// Stable observed public endpoint, if there is exactly one.
+    pub observed_public_addr: Option<SocketAddr>,
+    /// Stable machine-readable caveat for logs and path-doctor output.
+    pub caveat: &'static str,
+}
+
+/// Classify UDP NAT/path behavior from STUN-like endpoint observations.
+#[must_use]
+pub fn classify_udp_nat(observations: &[UdpEndpointObservation]) -> UdpNatAssessment {
+    if observations.is_empty() {
+        return UdpNatAssessment {
+            kind: UdpNatKind::Unknown,
+            hairpin: UdpHairpinSupport::Unknown,
+            confidence: UdpNatConfidence::Low,
+            observed_public_addr: None,
+            caveat: "missing_endpoint_observation",
+        };
+    }
+
+    let hairpin = classify_udp_hairpin(observations);
+    let successful = observations
+        .iter()
+        .filter(|obs| obs.probe_succeeded)
+        .filter_map(|obs| obs.observed_addr.map(|public_addr| (*obs, public_addr)))
+        .collect::<Vec<_>>();
+
+    if successful.is_empty() {
+        return UdpNatAssessment {
+            kind: UdpNatKind::UdpBlocked,
+            hairpin,
+            confidence: UdpNatConfidence::High,
+            observed_public_addr: None,
+            caveat: "no_udp_probe_reached_rendezvous",
+        };
+    }
+
+    if successful
+        .iter()
+        .all(|(obs, public_addr)| obs.local_addr.is_ipv6() && obs.local_addr == *public_addr)
+    {
+        return UdpNatAssessment {
+            kind: UdpNatKind::Ipv6Direct,
+            hairpin,
+            confidence: confidence_for_success_count(successful.len()),
+            observed_public_addr: successful.first().map(|(_, public_addr)| *public_addr),
+            caveat: "ipv6_endpoint_observed_directly",
+        };
+    }
+
+    let mut unique_observed = Vec::new();
+    for (_, public_addr) in &successful {
+        if !unique_observed.contains(public_addr) {
+            unique_observed.push(*public_addr);
+        }
+    }
+
+    let same_local_endpoint = successful.first().is_some_and(|(first, _)| {
+        successful
+            .iter()
+            .all(|(obs, _)| obs.local_addr == first.local_addr)
+    });
+
+    if unique_observed.len() > 1 && same_local_endpoint {
+        return UdpNatAssessment {
+            kind: UdpNatKind::HardOrSymmetricNat,
+            hairpin,
+            confidence: UdpNatConfidence::High,
+            observed_public_addr: None,
+            caveat: "multiple_public_mappings_observed",
+        };
+    }
+
+    if unique_observed.len() > 1 {
+        return UdpNatAssessment {
+            kind: UdpNatKind::Unknown,
+            hairpin,
+            confidence: UdpNatConfidence::Low,
+            observed_public_addr: None,
+            caveat: "multiple_local_endpoints_observed",
+        };
+    }
+
+    let Some(observed) = unique_observed.first().copied() else {
+        return UdpNatAssessment {
+            kind: UdpNatKind::Unknown,
+            hairpin,
+            confidence: UdpNatConfidence::Low,
+            observed_public_addr: None,
+            caveat: "missing_public_mapping_after_success",
+        };
+    };
+    let direct = successful.iter().any(|(obs, _)| obs.local_addr == observed);
+    let kind = if direct {
+        UdpNatKind::PublicIpv4Direct
+    } else {
+        UdpNatKind::LikelyEasyNat
+    };
+    let caveat = if direct {
+        "ipv4_endpoint_observed_directly"
+    } else {
+        "stable_public_mapping_observed"
+    };
+
+    UdpNatAssessment {
+        kind,
+        hairpin,
+        confidence: confidence_for_success_count(successful.len()),
+        observed_public_addr: Some(observed),
+        caveat,
+    }
+}
+
+fn classify_udp_hairpin(observations: &[UdpEndpointObservation]) -> UdpHairpinSupport {
+    let mut measured_failure = false;
+    for obs in observations {
+        match obs.hairpin_succeeded {
+            Some(true) => return UdpHairpinSupport::Supported,
+            Some(false) => measured_failure = true,
+            None => {}
+        }
+    }
+    if measured_failure {
+        UdpHairpinSupport::Unsupported
+    } else {
+        UdpHairpinSupport::Unknown
+    }
+}
+
+#[inline]
+const fn confidence_for_success_count(count: usize) -> UdpNatConfidence {
+    if count > 1 {
+        UdpNatConfidence::High
+    } else {
+        UdpNatConfidence::Medium
+    }
+}
+
 /// Requested UDP socket buffer sizes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UdpBufferConfig {
@@ -1037,6 +1277,124 @@ mod tests {
             assert!(report.applied_recv_buffer_bytes.is_some());
             assert!(report.applied_send_buffer_bytes.is_some());
         });
+    }
+
+    fn socket_addr(value: &str) -> SocketAddr {
+        value.parse().expect("valid socket addr")
+    }
+
+    #[test]
+    fn udp_nat_classifier_reports_missing_observations_as_unknown() {
+        let assessment = classify_udp_nat(&[]);
+
+        assert_eq!(assessment.kind, UdpNatKind::Unknown);
+        assert_eq!(assessment.hairpin, UdpHairpinSupport::Unknown);
+        assert_eq!(assessment.confidence, UdpNatConfidence::Low);
+        assert_eq!(assessment.observed_public_addr, None);
+        assert_eq!(assessment.caveat, "missing_endpoint_observation");
+    }
+
+    #[test]
+    fn udp_nat_classifier_reports_blocked_when_probes_fail() {
+        let assessment = classify_udp_nat(&[UdpEndpointObservation::blocked(
+            socket_addr("10.0.0.10:49152"),
+            socket_addr("203.0.113.7:3478"),
+        )]);
+
+        assert_eq!(assessment.kind, UdpNatKind::UdpBlocked);
+        assert_eq!(assessment.hairpin, UdpHairpinSupport::Unknown);
+        assert_eq!(assessment.confidence, UdpNatConfidence::High);
+        assert_eq!(assessment.observed_public_addr, None);
+        assert_eq!(assessment.caveat, "no_udp_probe_reached_rendezvous");
+    }
+
+    #[test]
+    fn udp_nat_classifier_distinguishes_ipv6_direct_path() {
+        let local = socket_addr("[2001:db8::10]:49152");
+        let assessment = classify_udp_nat(&[UdpEndpointObservation::observed(
+            local,
+            socket_addr("[2001:db8::1]:3478"),
+            local,
+        )]);
+
+        assert_eq!(assessment.kind, UdpNatKind::Ipv6Direct);
+        assert_eq!(assessment.confidence, UdpNatConfidence::Medium);
+        assert_eq!(assessment.observed_public_addr, Some(local));
+        assert_eq!(assessment.caveat, "ipv6_endpoint_observed_directly");
+    }
+
+    #[test]
+    fn udp_nat_classifier_reports_stable_mapping_as_likely_easy_nat() {
+        let public = socket_addr("198.51.100.20:62000");
+        let observations = [
+            UdpEndpointObservation::observed(
+                socket_addr("10.0.0.10:49152"),
+                socket_addr("203.0.113.7:3478"),
+                public,
+            )
+            .with_hairpin_result(true),
+            UdpEndpointObservation::observed(
+                socket_addr("10.0.0.10:49152"),
+                socket_addr("203.0.113.8:3478"),
+                public,
+            ),
+        ];
+
+        let assessment = classify_udp_nat(&observations);
+
+        assert_eq!(assessment.kind, UdpNatKind::LikelyEasyNat);
+        assert_eq!(assessment.hairpin, UdpHairpinSupport::Supported);
+        assert_eq!(assessment.confidence, UdpNatConfidence::High);
+        assert_eq!(assessment.observed_public_addr, Some(public));
+        assert_eq!(assessment.caveat, "stable_public_mapping_observed");
+    }
+
+    #[test]
+    fn udp_nat_classifier_reports_multiple_mappings_as_hard_or_symmetric_nat() {
+        let observations = [
+            UdpEndpointObservation::observed(
+                socket_addr("10.0.0.10:49152"),
+                socket_addr("203.0.113.7:3478"),
+                socket_addr("198.51.100.20:62000"),
+            )
+            .with_hairpin_result(false),
+            UdpEndpointObservation::observed(
+                socket_addr("10.0.0.10:49152"),
+                socket_addr("203.0.113.8:3478"),
+                socket_addr("198.51.100.21:62001"),
+            ),
+        ];
+
+        let assessment = classify_udp_nat(&observations);
+
+        assert_eq!(assessment.kind, UdpNatKind::HardOrSymmetricNat);
+        assert_eq!(assessment.hairpin, UdpHairpinSupport::Unsupported);
+        assert_eq!(assessment.confidence, UdpNatConfidence::High);
+        assert_eq!(assessment.observed_public_addr, None);
+        assert_eq!(assessment.caveat, "multiple_public_mappings_observed");
+    }
+
+    #[test]
+    fn udp_nat_classifier_treats_multiple_local_endpoints_as_unknown() {
+        let observations = [
+            UdpEndpointObservation::observed(
+                socket_addr("10.0.0.10:49152"),
+                socket_addr("203.0.113.7:3478"),
+                socket_addr("198.51.100.20:62000"),
+            ),
+            UdpEndpointObservation::observed(
+                socket_addr("10.0.0.11:49153"),
+                socket_addr("203.0.113.8:3478"),
+                socket_addr("198.51.100.21:62001"),
+            ),
+        ];
+
+        let assessment = classify_udp_nat(&observations);
+
+        assert_eq!(assessment.kind, UdpNatKind::Unknown);
+        assert_eq!(assessment.confidence, UdpNatConfidence::Low);
+        assert_eq!(assessment.observed_public_addr, None);
+        assert_eq!(assessment.caveat, "multiple_local_endpoints_observed");
     }
 
     #[test]
