@@ -90,7 +90,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::stream::{Chain, iter};
+    use crate::stream::{Chain, Map, iter};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
@@ -188,6 +188,83 @@ mod tests {
         );
 
         assert_eq!(chained_items, expected_items);
+    }
+
+    #[test]
+    fn mr_enumerate_indices_match_input_length() {
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 3 - 11).collect();
+            let mut enumerated = Enumerate::new(iter(values));
+            let items = collect_enum(&mut enumerated);
+
+            let indices: Vec<usize> = items.iter().map(|(index, _)| *index).collect();
+            assert_eq!(
+                indices,
+                (0..len).collect::<Vec<_>>(),
+                "enumerate indices must be exactly 0..len for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_enumerate_projection_preserves_input_order() {
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 5 - 17).collect();
+            let mut enumerated = Enumerate::new(iter(values.clone()));
+            let items = collect_enum(&mut enumerated);
+            let projected: Vec<i32> = items.into_iter().map(|(_, item)| item).collect();
+
+            assert_eq!(
+                projected, values,
+                "dropping enumerate indices must recover the original stream order for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_enumerate_map_preserves_indices_and_maps_values() {
+        for len in 0..=32usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 13).collect();
+            let mut mapped = Enumerate::new(Map::new(iter(values.clone()), |item: i32| {
+                item.wrapping_mul(7).wrapping_add(3)
+            }));
+            let expected: Vec<(usize, i32)> = values
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| (index, item.wrapping_mul(7).wrapping_add(3)))
+                .collect();
+
+            assert_eq!(
+                collect_enum(&mut mapped),
+                expected,
+                "enumerating a mapped stream must preserve indices and map values for len {len}",
+            );
+        }
+    }
+
+    #[test]
+    fn mr_enumerate_chain_offsets_right_indices() {
+        for left_len in 0..=12usize {
+            for right_len in 0..=12usize {
+                let left: Vec<i32> = (0..left_len).map(|item| item as i32 - 20).collect();
+                let right: Vec<i32> = (0..right_len).map(|item| item as i32 + 50).collect();
+                let mut chained =
+                    Enumerate::new(Chain::new(iter(left.clone()), iter(right.clone())));
+                let mut expected: Vec<(usize, i32)> = left.into_iter().enumerate().collect();
+                expected.extend(
+                    right
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, item)| (index + left_len, item)),
+                );
+
+                assert_eq!(
+                    collect_enum(&mut chained),
+                    expected,
+                    "right-hand chain indices must be offset by left length {left_len} for right length {right_len}",
+                );
+            }
+        }
     }
 
     #[test]
