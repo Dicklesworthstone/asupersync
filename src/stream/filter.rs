@@ -276,6 +276,19 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn collect_ready<S: Stream + Unpin>(stream: &mut S) -> Vec<S::Item> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut *stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => return collected,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+    }
+
     #[test]
     fn filter_keeps_matching() {
         init_test("filter_keeps_matching");
@@ -341,6 +354,21 @@ mod tests {
         let ok = hint == (0, Some(3));
         crate::assert_with_log!(ok, "size hint", (0, Some(3)), hint);
         crate::test_complete!("filter_size_hint");
+    }
+
+    #[test]
+    fn filter_composition_matches_conjoined_predicate() {
+        init_test("filter_composition_matches_conjoined_predicate");
+        let values: Vec<i32> = (-8..=12).collect();
+
+        let mut two_stage = Filter::new(
+            Filter::new(iter(values.clone()), |x: &i32| x % 2 == 0),
+            |x: &i32| *x >= -2 && *x <= 8,
+        );
+        let mut one_stage = Filter::new(iter(values), |x: &i32| x % 2 == 0 && *x >= -2 && *x <= 8);
+
+        assert_eq!(collect_ready(&mut two_stage), collect_ready(&mut one_stage));
+        crate::test_complete!("filter_composition_matches_conjoined_predicate");
     }
 
     #[test]
