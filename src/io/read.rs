@@ -390,6 +390,64 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct DefaultVectoredProbe {
+        data: Vec<u8>,
+        pos: usize,
+        scalar_calls: usize,
+    }
+
+    impl DefaultVectoredProbe {
+        fn new(data: &[u8]) -> Self {
+            Self {
+                data: data.to_vec(),
+                pos: 0,
+                scalar_calls: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for DefaultVectoredProbe {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.scalar_calls += 1;
+            if self.pos >= self.data.len() || buf.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+
+            let end = (self.pos + buf.remaining()).min(self.data.len());
+            buf.put_slice(&self.data[self.pos..end]);
+            self.pos = end;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncReadVectored for DefaultVectoredProbe {}
+
+    #[derive(Debug, Default)]
+    struct ErrorReader {
+        scalar_calls: usize,
+    }
+
+    impl AsyncRead for ErrorReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.scalar_calls += 1;
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "injected scalar read failure",
+            )))
+        }
+    }
+
+    impl AsyncReadVectored for ErrorReader {}
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -411,6 +469,98 @@ mod tests {
         crate::assert_with_log!(filled == b"he", "filled", b"he", filled);
         crate::assert_with_log!(input == b"llo", "remaining", b"llo", input);
         crate::test_complete!("read_from_slice_advances");
+    }
+
+    #[test]
+    fn default_read_vectored_uses_first_non_empty_buffer() {
+        init_test("default_read_vectored_uses_first_non_empty_buffer");
+        let mut reader = DefaultVectoredProbe::new(b"abcdef");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut first = [9u8; 0];
+        let mut second = [0u8; 2];
+        let mut third = [7u8; 4];
+
+        let poll = {
+            let mut bufs = [
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut second),
+                IoSliceMut::new(&mut third),
+            ];
+            Pin::new(&mut reader).poll_read_vectored(&mut cx, &mut bufs)
+        };
+        let ready = matches!(poll, Poll::Ready(Ok(2)));
+
+        crate::assert_with_log!(ready, "read first non-empty length", true, ready);
+        crate::assert_with_log!(second == *b"ab", "second buffer", *b"ab", second);
+        crate::assert_with_log!(third == [7u8; 4], "third untouched", [7u8; 4], third);
+        crate::assert_with_log!(
+            reader.scalar_calls == 1,
+            "one scalar read",
+            1,
+            reader.scalar_calls
+        );
+        crate::assert_with_log!(reader.pos == 2, "reader position", 2, reader.pos);
+        crate::test_complete!("default_read_vectored_uses_first_non_empty_buffer");
+    }
+
+    #[test]
+    fn default_read_vectored_empty_buffers_make_no_read_call() {
+        init_test("default_read_vectored_empty_buffers_make_no_read_call");
+        let mut reader = DefaultVectoredProbe::new(b"abc");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut first = [0u8; 0];
+        let mut second = [0u8; 0];
+
+        let poll = {
+            let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+            Pin::new(&mut reader).poll_read_vectored(&mut cx, &mut bufs)
+        };
+        let ready = matches!(poll, Poll::Ready(Ok(0)));
+
+        crate::assert_with_log!(ready, "empty vectored read returns zero", true, ready);
+        crate::assert_with_log!(
+            reader.scalar_calls == 0,
+            "no scalar read",
+            0,
+            reader.scalar_calls
+        );
+        crate::assert_with_log!(reader.pos == 0, "position unchanged", 0, reader.pos);
+        crate::test_complete!("default_read_vectored_empty_buffers_make_no_read_call");
+    }
+
+    #[test]
+    fn default_read_vectored_propagates_scalar_error() {
+        init_test("default_read_vectored_propagates_scalar_error");
+        let mut reader = ErrorReader::default();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut first = [0u8; 0];
+        let mut second = [3u8; 2];
+
+        let err = {
+            let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+            match Pin::new(&mut reader).poll_read_vectored(&mut cx, &mut bufs) {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected scalar read error, got {other:?}"),
+            }
+        };
+
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "error kind",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            reader.scalar_calls == 1,
+            "one scalar read",
+            1,
+            reader.scalar_calls
+        );
+        crate::assert_with_log!(second == [3u8; 2], "buffer unchanged", [3u8; 2], second);
+        crate::test_complete!("default_read_vectored_propagates_scalar_error");
     }
 
     #[test]
