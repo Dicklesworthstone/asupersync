@@ -409,6 +409,37 @@ mod tests {
     }
 
     #[test]
+    fn resp_adapter_encode_is_append_stable_for_prefilled_buffers() {
+        let adapter = RespProtocolAdapter::default();
+        let frame = RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"ECHO".to_vec())),
+            RespValue::BulkString(Some(b"prefixed".to_vec())),
+        ]));
+
+        let mut standalone = Vec::new();
+        adapter
+            .encode_message(&frame, &mut standalone)
+            .expect("standalone encode succeeds");
+
+        let prefix = b"connection-buffer-prefix:";
+        let mut prefilled = prefix.to_vec();
+        adapter
+            .encode_message(&frame, &mut prefilled)
+            .expect("prefilled encode succeeds");
+
+        assert_eq!(&prefilled[..prefix.len()], prefix);
+        assert_eq!(&prefilled[prefix.len()..], standalone.as_slice());
+
+        let decoded = adapter
+            .try_decode_message(&prefilled[prefix.len()..])
+            .expect("prefilled suffix decodes")
+            .expect("full frame available");
+
+        assert_eq!(decoded.message, frame);
+        assert_eq!(decoded.consumed, standalone.len());
+    }
+
+    #[test]
     fn resp_adapter_decode_is_prefix_stable_under_pipelined_frames() {
         let adapter = RespProtocolAdapter::default();
         let first = RespValue::Array(Some(vec![
