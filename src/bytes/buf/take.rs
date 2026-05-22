@@ -278,6 +278,33 @@ mod tests {
     }
 
     #[test]
+    fn test_take_set_limit_reopens_without_rewinding_inner() {
+        init_test("test_take_set_limit_reopens_without_rewinding_inner");
+        let buf: &[u8] = &[1, 2, 3, 4, 5];
+        let mut take = Take::new(buf, 2);
+
+        let mut prefix = [0u8; 2];
+        take.copy_to_slice(&mut prefix);
+        crate::assert_with_log!(prefix == [1, 2], "prefix", [1, 2], prefix);
+        let remaining = take.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+
+        take.set_limit(2);
+        let remaining = take.remaining();
+        crate::assert_with_log!(remaining == 2, "remaining", 2, remaining);
+        let chunk = take.chunk();
+        crate::assert_with_log!(chunk == [3, 4], "chunk", &[3, 4], chunk);
+
+        let mut next = [0u8; 2];
+        take.copy_to_slice(&mut next);
+        crate::assert_with_log!(next == [3, 4], "next", [3, 4], next);
+
+        let inner = take.into_inner();
+        crate::assert_with_log!(inner == [5], "inner", &[5], inner);
+        crate::test_complete!("test_take_set_limit_reopens_without_rewinding_inner");
+    }
+
+    #[test]
     fn test_take_into_inner() {
         init_test("test_take_into_inner");
         let buf: &[u8] = &[1, 2, 3, 4, 5];
