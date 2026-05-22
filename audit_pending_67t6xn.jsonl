@@ -1,0 +1,1 @@
+{"file":"src/fs/platform.rs","lines":947,"batch":"67t6xn","date":"2026-05-22","agent":"TealRaven","verdict":"FIXED","bugs":1,"notes":"derive_recovery_commands included recovery commands from fully supported probes; fixed in 68bcf2862, with current-state re-audit finding no additional issues."}
