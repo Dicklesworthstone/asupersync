@@ -342,6 +342,20 @@ mod tests {
     }
 
     #[test]
+    fn write_empty_to_vec_reports_zero_without_mutation() {
+        init_test("write_empty_to_vec_reports_zero_without_mutation");
+        let mut output = b"prefix".to_vec();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut output).poll_write(&mut cx, b"");
+        let ready = matches!(poll, Poll::Ready(Ok(0)));
+        crate::assert_with_log!(ready, "write 0", true, ready);
+        crate::assert_with_log!(output == b"prefix", "output", b"prefix", output);
+        crate::test_complete!("write_empty_to_vec_reports_zero_without_mutation");
+    }
+
+    #[test]
     fn write_to_cursor() {
         init_test("write_to_cursor");
         let mut buf = [0u8; 8];
