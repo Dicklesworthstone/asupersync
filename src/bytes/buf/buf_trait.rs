@@ -553,6 +553,56 @@ mod tests {
     }
 
     #[test]
+    fn buf_conformance_fragmented_extended_numeric_reads_match_contiguous() {
+        init_test("buf_conformance_fragmented_extended_numeric_reads_match_contiguous");
+        let bytes = [
+            0x80, 0x01, 0x7f, 0x02, 0xaa, 0x55, 0x13, 0x37, 0xde, 0xad, 0xbe, 0xef, 0x42, 0x24,
+            0x00, 0xff,
+        ];
+        macro_rules! assert_fragmented_eq {
+            ($split_at:expr, $getter:ident, $label:literal) => {{
+                let mut contiguous: &[u8] = &bytes;
+                let mut fragmented = bytes[..$split_at].chain(&bytes[$split_at..]);
+                let expected = contiguous.$getter();
+                let actual = fragmented.$getter();
+                crate::assert_with_log!(actual == expected, $label, expected, actual);
+            }};
+        }
+        macro_rules! assert_fragmented_bits_eq {
+            ($split_at:expr, $getter:ident, $label:literal) => {{
+                let mut contiguous: &[u8] = &bytes;
+                let mut fragmented = bytes[..$split_at].chain(&bytes[$split_at..]);
+                let expected = contiguous.$getter().to_bits();
+                let actual = fragmented.$getter().to_bits();
+                crate::assert_with_log!(actual == expected, $label, expected, actual);
+            }};
+        }
+
+        for split_at in 0..=bytes.len() {
+            assert_fragmented_eq!(split_at, get_i16, "fragmented i16 matches contiguous");
+            assert_fragmented_eq!(split_at, get_i16_le, "fragmented i16_le matches contiguous");
+            assert_fragmented_eq!(split_at, get_i32, "fragmented i32 matches contiguous");
+            assert_fragmented_eq!(split_at, get_i32_le, "fragmented i32_le matches contiguous");
+            assert_fragmented_eq!(split_at, get_i64, "fragmented i64 matches contiguous");
+            assert_fragmented_eq!(split_at, get_i64_le, "fragmented i64_le matches contiguous");
+            assert_fragmented_eq!(split_at, get_u128, "fragmented u128 matches contiguous");
+            assert_fragmented_eq!(
+                split_at,
+                get_i128_le,
+                "fragmented i128_le matches contiguous"
+            );
+            assert_fragmented_bits_eq!(split_at, get_f32, "fragmented f32 bits match contiguous");
+            assert_fragmented_bits_eq!(
+                split_at,
+                get_f64_le,
+                "fragmented f64_le bits match contiguous"
+            );
+        }
+
+        crate::test_complete!("buf_conformance_fragmented_extended_numeric_reads_match_contiguous");
+    }
+
+    #[test]
     fn test_buf_copy_to_slice() {
         init_test("test_buf_copy_to_slice");
         let mut buf: &[u8] = &[1, 2, 3, 4, 5];
