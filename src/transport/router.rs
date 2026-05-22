@@ -3886,6 +3886,40 @@ mod tests {
         assert_eq!(selected, vec![heavy.id, light.id]);
     }
 
+    #[test]
+    fn metamorphic_weighted_round_robin_select_n_ignores_unreceivable_and_zero_weight_decoys() {
+        fn weighted_rr_sequence(endpoints: &[Arc<Endpoint>]) -> Vec<Vec<EndpointId>> {
+            let lb = LoadBalancer::with_seed(LoadBalanceStrategy::WeightedRoundRobin, 0x5EED);
+            (0..4)
+                .map(|_| {
+                    lb.select_n(endpoints, 2, None)
+                        .into_iter()
+                        .map(|endpoint| endpoint.id)
+                        .collect()
+                })
+                .collect()
+        }
+
+        let heavy = Arc::new(test_endpoint(1).with_weight(5));
+        let medium = Arc::new(test_endpoint(2).with_weight(1));
+        let light = Arc::new(test_endpoint(3).with_weight(1));
+        let baseline = vec![heavy.clone(), medium.clone(), light.clone()];
+
+        let unreceivable_decoy = Arc::new(
+            test_endpoint(99)
+                .with_weight(u32::MAX)
+                .with_state(EndpointState::Unhealthy),
+        );
+        let zero_weight_decoy = Arc::new(test_endpoint(100).with_weight(0));
+        let with_decoys = vec![zero_weight_decoy, unreceivable_decoy, heavy, medium, light];
+
+        assert_eq!(
+            weighted_rr_sequence(&baseline),
+            weighted_rr_sequence(&with_decoys),
+            "weighted round-robin fanout must ignore endpoints that cannot consume ring slots"
+        );
+    }
+
     // Test 6: Routing table basic operations
     #[test]
     fn test_routing_table_basic() {
