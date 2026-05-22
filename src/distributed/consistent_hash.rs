@@ -983,6 +983,55 @@ mod tests {
     }
 
     #[test]
+    fn mr_hrw_selection_is_invariant_to_zero_weight_candidates() {
+        let positive = [("node-a", 1_u32), ("node-b", 3), ("node-c", 2)];
+        let with_zero = [
+            ("node-a", 1_u32),
+            ("zero-a", 0),
+            ("node-b", 3),
+            ("zero-b", 0),
+            ("node-c", 2),
+        ];
+
+        let single_for = |candidates: &[(&str, u32)]| {
+            select_hrw(
+                candidates.iter(),
+                &"tenant:acme/orders/zero-weight",
+                0x5eed_f00d,
+                |candidate| &candidate.0,
+                |candidate| candidate.1,
+            )
+            .expect("positive-weight candidates should yield a winner")
+            .0
+            .to_owned()
+        };
+        assert_eq!(
+            single_for(&with_zero),
+            single_for(&positive),
+            "zero-weight candidates must not perturb the single HRW winner"
+        );
+
+        let top_for = |candidates: &[(&str, u32)], limit| {
+            select_top_k_hrw(
+                candidates.iter(),
+                limit,
+                &"tenant:acme/orders/zero-weight",
+                0x5eed_f00d,
+                |candidate| &candidate.0,
+                |candidate| candidate.1,
+            )
+            .into_iter()
+            .map(|candidate| candidate.0.to_owned())
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            top_for(&with_zero, with_zero.len()),
+            top_for(&positive, positive.len()),
+            "zero-weight candidates must not perturb positive HRW top-k ordering"
+        );
+    }
+
+    #[test]
     fn mr_top_k_hrw_prefix_is_invariant_to_candidate_order() {
         let orders = [
             [
