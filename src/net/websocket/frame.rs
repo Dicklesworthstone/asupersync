@@ -1335,6 +1335,49 @@ mod tests {
     }
 
     #[test]
+    fn decode_masked_extended_length_frame_across_chunks() {
+        let mut decoder = FrameCodec::server();
+        let mask_key = [0x11, 0x22, 0x33, 0x44];
+        let payload = vec![0x5a; 126];
+        let mut masked_payload = payload.clone();
+        apply_mask(&mut masked_payload, mask_key);
+
+        let mut wire = BytesMut::new();
+        wire.put_u8(0x82); // FIN=1, opcode=Binary.
+        wire.put_u8(0x80 | 0x7e); // MASK=1, 16-bit extended length follows.
+        wire.put_u16(payload.len() as u16);
+        wire.put_slice(&mask_key);
+        wire.put_slice(&masked_payload);
+
+        let mut incoming = BytesMut::new();
+        incoming.put_slice(&wire[..2]);
+        assert!(decoder.decode(&mut incoming).unwrap().is_none());
+        assert!(incoming.is_empty());
+
+        incoming.put_slice(&wire[2..4]);
+        assert!(decoder.decode(&mut incoming).unwrap().is_none());
+        assert!(incoming.is_empty());
+
+        incoming.put_slice(&wire[4..8]);
+        assert!(decoder.decode(&mut incoming).unwrap().is_none());
+        assert!(incoming.is_empty());
+
+        incoming.put_slice(&wire[8..wire.len() - 1]);
+        assert!(decoder.decode(&mut incoming).unwrap().is_none());
+        assert_eq!(incoming.len(), payload.len() - 1);
+
+        incoming.put_u8(wire[wire.len() - 1]);
+        let parsed = decoder.decode(&mut incoming).unwrap().unwrap();
+
+        assert!(incoming.is_empty());
+        assert!(parsed.fin);
+        assert!(parsed.masked);
+        assert_eq!(parsed.mask_key, Some(mask_key));
+        assert_eq!(parsed.opcode, Opcode::Binary);
+        assert_eq!(parsed.payload.as_ref(), payload.as_slice());
+    }
+
+    #[test]
     fn test_empty_payload() {
         let mut encoder = FrameCodec::client();
         let mut decoder = FrameCodec::server();
