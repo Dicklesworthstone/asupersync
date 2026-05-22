@@ -85,19 +85,27 @@ Planted mutations to verify MR fault sensitivity:
 ## Implementation Strategy
 
 ### Test Organization
-- **Primary module:** `watch_borrow_update_shutdown_metamorphic_tests.rs`
-- **Validation module:** `watch_borrow_update_mutation_validation.rs`  
-- **Integration:** Included via `#[path]` directives in `watch.rs`
+- **Primary implementation:** inline `#[cfg(test)]` tests in `watch.rs`
+- **Current test functions:** `mr_borrow_and_update_equivalence_after_shutdown`,
+  `mr_version_monotonicity_after_shutdown`,
+  `mr_receiver_isolation_after_shutdown`, and
+  `mr_state_consistency_borrow_vs_borrow_and_update_after_shutdown`
+- **Integration:** compiled as part of the normal `channel::watch` library test
+  module; there are no separate `#[path]`-included shutdown-MR files
 
 ### Property-Based Input Generation
 - Uses varied channel initial values (0, 42, 100, 200, etc.)
 - Tests with multiple receivers (1-3 per scenario)  
-- Applies concurrent shutdown timing via `thread::spawn` and `thread::sleep`
+- Exercises deterministic shutdown orderings directly in `watch.rs`; timing
+  variants are represented by operation ordering rather than by spawning
+  threads
 
 ### Test Execution
 ```bash
-cargo test --lib channel::watch::watch_borrow_update_shutdown_metamorphic_tests
-cargo test --lib channel::watch::watch_borrow_update_mutation_validation
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_pane5_chan_watch_shutdown_eq" cargo test --lib mr_borrow_and_update_equivalence_after_shutdown
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_pane5_chan_watch_shutdown_version" cargo test --lib mr_version_monotonicity_after_shutdown
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_pane5_chan_watch_shutdown_isolation" cargo test --lib mr_receiver_isolation_after_shutdown
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_pane5_chan_watch_shutdown_state" cargo test --lib mr_state_consistency_borrow_vs_borrow_and_update_after_shutdown
 ```
 
 ## Relationship to Existing Tests
