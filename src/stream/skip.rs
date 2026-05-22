@@ -319,6 +319,71 @@ mod tests {
     }
 
     #[test]
+    fn mr_skip_while_threshold_matches_computed_suffix() {
+        for len in 0..=14usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 6).collect();
+            for threshold in -8..=10 {
+                let mut stream =
+                    SkipWhile::new(iter(values.clone()), move |item: &i32| *item < threshold);
+                let start = values
+                    .iter()
+                    .position(|item| *item >= threshold)
+                    .unwrap_or(values.len());
+                let expected = values[start..].to_vec();
+
+                assert_eq!(
+                    collect(&mut stream),
+                    expected,
+                    "skip_while(< {threshold}) must return the computed suffix for len {len}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mr_skip_while_looser_threshold_returns_suffix_of_stricter_output() {
+        for len in 0..=14usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 - 6).collect();
+            for strict_threshold in -8..=8 {
+                for loose_threshold in strict_threshold..=10 {
+                    let mut strict = SkipWhile::new(iter(values.clone()), move |item: &i32| {
+                        *item < strict_threshold
+                    });
+                    let mut loose = SkipWhile::new(iter(values.clone()), move |item: &i32| {
+                        *item < loose_threshold
+                    });
+
+                    let strict_items = collect(&mut strict);
+                    let loose_items = collect(&mut loose);
+                    assert!(
+                        strict_items.ends_with(&loose_items),
+                        "loosening threshold from {strict_threshold} to {loose_threshold} must only drop more prefix items",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mr_skip_while_false_is_identity_and_true_is_empty() {
+        for len in 0..=16usize {
+            let values: Vec<i32> = (0..len).map(|item| item as i32 * 2 - 9).collect();
+            let mut never_skip = SkipWhile::new(iter(values.clone()), |_: &i32| false);
+            let mut skip_all = SkipWhile::new(iter(values.clone()), |_: &i32| true);
+
+            assert_eq!(
+                collect(&mut never_skip),
+                values,
+                "predicate false must leave the stream unchanged for len {len}",
+            );
+            assert!(
+                collect(&mut skip_all).is_empty(),
+                "predicate true must skip the whole stream for len {len}",
+            );
+        }
+    }
+
+    #[test]
     fn test_skip_yields_after_budget_on_always_ready_stream() {
         let mut s = Skip::new(AlwaysReadyCounter::default(), SKIP_COOPERATIVE_BUDGET + 5);
         let waker = noop_waker();
