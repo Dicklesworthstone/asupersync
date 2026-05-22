@@ -394,6 +394,25 @@ mod tests {
     }
 
     #[test]
+    fn settings_builder_clamps_protocol_bounded_fields() {
+        let settings = SettingsBuilder::new()
+            .initial_window_size(MAX_INITIAL_WINDOW_SIZE + 1)
+            .max_frame_size(MIN_MAX_FRAME_SIZE - 1)
+            .build();
+
+        assert_eq!(settings.initial_window_size, MAX_INITIAL_WINDOW_SIZE);
+        assert_eq!(settings.max_frame_size, MIN_MAX_FRAME_SIZE);
+
+        let settings = SettingsBuilder::new()
+            .initial_window_size(MAX_INITIAL_WINDOW_SIZE)
+            .max_frame_size(MAX_MAX_FRAME_SIZE + 1)
+            .build();
+
+        assert_eq!(settings.initial_window_size, MAX_INITIAL_WINDOW_SIZE);
+        assert_eq!(settings.max_frame_size, MAX_MAX_FRAME_SIZE);
+    }
+
+    #[test]
     fn test_to_settings_minimal() {
         let settings = SettingsBuilder::new()
             .enable_push(false)
