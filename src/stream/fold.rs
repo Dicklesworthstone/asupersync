@@ -158,6 +158,28 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn poll_fold_to_completion<S, F, Acc>(future: &mut Fold<S, F, Acc>) -> (Acc, usize)
+    where
+        Fold<S, F, Acc>: std::future::Future<Output = Acc> + Unpin,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pending_polls = 0usize;
+
+        loop {
+            match Pin::new(&mut *future).poll(&mut cx) {
+                Poll::Ready(value) => return (value, pending_polls),
+                Poll::Pending => {
+                    pending_polls += 1;
+                    assert!(
+                        pending_polls <= 8,
+                        "fold future did not complete after {pending_polls} pending polls",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn fold_sum() {
         init_test("fold_sum");
@@ -231,6 +253,104 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("fold_empty");
+    }
+
+    #[test]
+    fn mr_fold_sum_partition_matches_seeded_suffix() {
+        init_test("mr_fold_sum_partition_matches_seeded_suffix");
+        let prefix = vec![4i32, -7, 12, 3];
+        let suffix = vec![9i32, -2, 5];
+        let mut combined = prefix.clone();
+        combined.extend(suffix.iter().copied());
+
+        let (full, full_pending) =
+            poll_fold_to_completion(&mut Fold::new(iter(combined), 17i32, |acc, item| {
+                acc + item
+            }));
+        let (prefix_result, prefix_pending) =
+            poll_fold_to_completion(&mut Fold::new(iter(prefix), 17i32, |acc, item| acc + item));
+        let (partitioned, suffix_pending) =
+            poll_fold_to_completion(&mut Fold::new(iter(suffix), prefix_result, |acc, item| {
+                acc + item
+            }));
+
+        assert_eq!(full, partitioned);
+        assert_eq!(full_pending, 0);
+        assert_eq!(prefix_pending, 0);
+        assert_eq!(suffix_pending, 0);
+        crate::test_complete!("mr_fold_sum_partition_matches_seeded_suffix");
+    }
+
+    #[test]
+    fn mr_fold_sum_ignores_additive_identity_injection() {
+        init_test("mr_fold_sum_ignores_additive_identity_injection");
+        let base = vec![8i32, -3, 5, 11, -6];
+        let injected = vec![0i32, 8, 0, -3, 5, 0, 11, -6, 0];
+
+        let (base_sum, _) =
+            poll_fold_to_completion(&mut Fold::new(iter(base), 13i32, |acc, item| acc + item));
+        let (injected_sum, _) =
+            poll_fold_to_completion(&mut Fold::new(iter(injected), 13i32, |acc, item| {
+                acc + item
+            }));
+
+        assert_eq!(base_sum, injected_sum);
+        crate::test_complete!("mr_fold_sum_ignores_additive_identity_injection");
+    }
+
+    #[test]
+    fn mr_fold_sum_scaled_inputs_scale_delta_from_seed() {
+        init_test("mr_fold_sum_scaled_inputs_scale_delta_from_seed");
+        let base = vec![6i32, -4, 10, 3, -1];
+        let scaled: Vec<_> = base.iter().map(|item| item * 3).collect();
+        let seed = 23i32;
+
+        let (base_sum, _) =
+            poll_fold_to_completion(&mut Fold::new(iter(base), seed, |acc, item| acc + item));
+        let (scaled_sum, _) =
+            poll_fold_to_completion(&mut Fold::new(iter(scaled), seed, |acc, item| acc + item));
+
+        assert_eq!(scaled_sum - seed, (base_sum - seed) * 3);
+        crate::test_complete!("mr_fold_sum_scaled_inputs_scale_delta_from_seed");
+    }
+
+    #[test]
+    fn mr_fold_string_partition_matches_seeded_suffix() {
+        init_test("mr_fold_string_partition_matches_seeded_suffix");
+        let prefix = vec!["asu", "per"];
+        let suffix = vec!["sync", "-", "runtime"];
+        let mut combined = prefix.clone();
+        combined.extend(suffix.iter().copied());
+
+        let concat = |mut acc: String, item: &str| {
+            acc.push_str(item);
+            acc
+        };
+        let (full, _) = poll_fold_to_completion(&mut Fold::new(
+            iter(combined),
+            String::from("spec:"),
+            concat,
+        ));
+        let (prefix_result, _) =
+            poll_fold_to_completion(&mut Fold::new(iter(prefix), String::from("spec:"), concat));
+        let (partitioned, _) =
+            poll_fold_to_completion(&mut Fold::new(iter(suffix), prefix_result, concat));
+
+        assert_eq!(full, partitioned);
+        crate::test_complete!("mr_fold_string_partition_matches_seeded_suffix");
+    }
+
+    #[test]
+    fn mr_fold_cooperative_yields_preserve_large_stream_sum() {
+        init_test("mr_fold_cooperative_yields_preserve_large_stream_sum");
+        let end = (FOLD_COOPERATIVE_BUDGET * 2) + 17;
+        let mut future = Fold::new(AlwaysReadyCounter::new(end), 0usize, |acc, item| acc + item);
+
+        let (sum, pending_polls) = poll_fold_to_completion(&mut future);
+
+        assert_eq!(sum, (0..end).sum::<usize>());
+        assert_eq!(pending_polls, 2);
+        crate::test_complete!("mr_fold_cooperative_yields_preserve_large_stream_sum");
     }
 
     #[test]
