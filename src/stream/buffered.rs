@@ -442,6 +442,29 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn drain_ready_outputs<S>(mut stream: S) -> Vec<S::Item>
+    where
+        S: Stream + Unpin,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut out = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => out.push(item),
+                Poll::Ready(None) => break,
+                Poll::Pending => break,
+            }
+        }
+        out
+    }
+
+    fn ready_future_stream(
+        input: Vec<usize>,
+    ) -> impl Stream<Item = std::future::Ready<usize>> + Unpin {
+        iter(input.into_iter().map(std::future::ready))
+    }
+
     #[test]
     fn buffered_preserves_order() {
         init_test("buffered_preserves_order");
@@ -470,6 +493,26 @@ mod tests {
     }
 
     #[test]
+    fn mr_buffered_limit_scaling_preserves_ready_order() {
+        init_test("mr_buffered_limit_scaling_preserves_ready_order");
+        let input: Vec<usize> = (0..12).collect();
+        let baseline = drain_ready_outputs(Buffered::new(ready_future_stream(input.clone()), 1));
+
+        for limit in [2usize, 3, 8, 32] {
+            let actual =
+                drain_ready_outputs(Buffered::new(ready_future_stream(input.clone()), limit));
+            crate::assert_with_log!(
+                actual == baseline,
+                "buffered ready-stream output is invariant under larger limits",
+                baseline.clone(),
+                actual
+            );
+        }
+
+        crate::test_complete!("mr_buffered_limit_scaling_preserves_ready_order");
+    }
+
+    #[test]
     fn buffer_unordered_yields_all() {
         init_test("buffer_unordered_yields_all");
         let stream = iter(vec![
@@ -494,6 +537,31 @@ mod tests {
         let ok = items == vec![1, 2, 3];
         crate::assert_with_log!(ok, "items", vec![1, 2, 3], items);
         crate::test_complete!("buffer_unordered_yields_all");
+    }
+
+    #[test]
+    fn mr_buffer_unordered_limit_scaling_preserves_ready_multiset() {
+        init_test("mr_buffer_unordered_limit_scaling_preserves_ready_multiset");
+        let input = vec![5, 1, 5, 3, 2, 8, 2, 13];
+        let mut baseline =
+            drain_ready_outputs(BufferUnordered::new(ready_future_stream(input.clone()), 1));
+        baseline.sort_unstable();
+
+        for limit in [2usize, 4, 16] {
+            let mut actual = drain_ready_outputs(BufferUnordered::new(
+                ready_future_stream(input.clone()),
+                limit,
+            ));
+            actual.sort_unstable();
+            crate::assert_with_log!(
+                actual == baseline,
+                "buffer_unordered ready-stream multiset is invariant under larger limits",
+                baseline.clone(),
+                actual
+            );
+        }
+
+        crate::test_complete!("mr_buffer_unordered_limit_scaling_preserves_ready_multiset");
     }
 
     /// Invariant: `Buffered` never holds more than `limit` futures in flight.
