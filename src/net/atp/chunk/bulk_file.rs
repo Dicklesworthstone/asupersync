@@ -218,7 +218,8 @@ impl BulkFileProfile {
         let safe_target = chunk_plan.target_chunk_size.max(1);
         let num_chunks = (object_size_bytes + safe_target - 1) / safe_target;
 
-        let transfer_time_ms = (object_size_bytes as f64 * 8.0) / (bandwidth_mbps.max(1) as f64 * 1000.0);
+        let transfer_time_ms =
+            (object_size_bytes as f64 * 8.0) / (bandwidth_mbps.max(1) as f64 * 1000.0);
         let latency_overhead_ms = num_chunks as f64 * latency_ms as f64;
 
         let total_ms = transfer_time_ms + latency_overhead_ms;

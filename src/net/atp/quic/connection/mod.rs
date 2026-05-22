@@ -482,7 +482,8 @@ impl AtpQuicConnectionState {
 
         // Basic endpoint check: local same, remote different (original logic)
         if !(candidate_endpoints.local() == active_endpoints.local()
-             && candidate_endpoints.remote() != active_endpoints.remote()) {
+            && candidate_endpoints.remote() != active_endpoints.remote())
+        {
             return Err(AtpQuicConnectionError::NotNatRebinding);
         }
 

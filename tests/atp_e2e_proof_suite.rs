@@ -5,8 +5,8 @@
 mod atp;
 
 use atp::{
-    AtpE2EContext, AtpCrashPoint, AtpForensics, AtpObligationTracker, ObligationType,
-    FaultInjector, FaultPoint, FaultType, FaultConfig,
+    AtpCrashPoint, AtpE2EContext, AtpForensics, AtpObligationTracker, FaultConfig, FaultInjector,
+    FaultPoint, FaultType, ObligationType,
 };
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -28,7 +28,11 @@ fn test_atp_e2e_proof_suite_integration() -> Result<(), Box<dyn std::error::Erro
     });
 
     // Start forensics capture
-    forensics.start_capture("integration_test", "Testing ATP e2e proof suite", "integration");
+    forensics.start_capture(
+        "integration_test",
+        "Testing ATP e2e proof suite",
+        "integration",
+    );
 
     // Create test obligation
     let obligation_id = tracker.create_obligation(
@@ -111,11 +115,7 @@ fn test_atp_forensics_basic() -> Result<(), Box<dyn std::error::Error>> {
     let mut forensics = AtpForensics::new(temp_dir.path())?;
 
     // Start capture
-    forensics.start_capture(
-        "test_failure",
-        "Test forensics capture",
-        "test_operation"
-    );
+    forensics.start_capture("test_failure", "Test forensics capture", "test_operation");
 
     // Record some test data
     forensics.record_manifest_root("test_manifest_root_123");

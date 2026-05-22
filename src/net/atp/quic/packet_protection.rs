@@ -112,7 +112,9 @@ impl AtpPacketProtection {
             #[cfg(not(test))]
             {
                 // SECURITY: Deterministic crypto must never be used in production builds
-                panic!("Deterministic crypto provider requested in production build - this is a security vulnerability");
+                panic!(
+                    "Deterministic crypto provider requested in production build - this is a security vulnerability"
+                );
             }
         } else {
             #[cfg(feature = "tls")]
@@ -147,7 +149,9 @@ impl AtpPacketProtection {
             #[cfg(all(not(feature = "tls"), not(test)))]
             {
                 // SECURITY: Deterministic crypto must never be used in production builds
-                panic!("Deterministic crypto provider requested in production build - this is a security vulnerability");
+                panic!(
+                    "Deterministic crypto provider requested in production build - this is a security vulnerability"
+                );
             }
         };
 

@@ -3,7 +3,7 @@
 //! Provides deterministic packet scenarios for testing loss, reorder,
 //! duplication, truncation, delayed ACK, ACK loss, PTO storms, and migration.
 
-use asupersync::bytes::{Bytes, BytesMut, Buf, BufMut};
+use asupersync::bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -180,74 +180,89 @@ impl QuicPacketLab {
         let mut scenarios = HashMap::new();
 
         // Perfect network
-        scenarios.insert("perfect".to_string(), NetworkScenario {
-            name: "perfect".to_string(),
-            description: "Perfect network with no loss or delay".to_string(),
-            loss_rate: 0.0,
-            reorder_prob: 0.0,
-            duplicate_prob: 0.0,
-            corruption_prob: 0.0,
-            base_rtt: Duration::from_millis(1),
-            rtt_variance: Duration::from_millis(0),
-            bandwidth_limit: None,
-            max_packet_size: 1500,
-        });
+        scenarios.insert(
+            "perfect".to_string(),
+            NetworkScenario {
+                name: "perfect".to_string(),
+                description: "Perfect network with no loss or delay".to_string(),
+                loss_rate: 0.0,
+                reorder_prob: 0.0,
+                duplicate_prob: 0.0,
+                corruption_prob: 0.0,
+                base_rtt: Duration::from_millis(1),
+                rtt_variance: Duration::from_millis(0),
+                bandwidth_limit: None,
+                max_packet_size: 1500,
+            },
+        );
 
         // High loss network
-        scenarios.insert("high_loss".to_string(), NetworkScenario {
-            name: "high_loss".to_string(),
-            description: "High packet loss (10%) network".to_string(),
-            loss_rate: 0.1,
-            reorder_prob: 0.05,
-            duplicate_prob: 0.02,
-            corruption_prob: 0.001,
-            base_rtt: Duration::from_millis(50),
-            rtt_variance: Duration::from_millis(10),
-            bandwidth_limit: Some(1_000_000), // 1 Mbps
-            max_packet_size: 1200,
-        });
+        scenarios.insert(
+            "high_loss".to_string(),
+            NetworkScenario {
+                name: "high_loss".to_string(),
+                description: "High packet loss (10%) network".to_string(),
+                loss_rate: 0.1,
+                reorder_prob: 0.05,
+                duplicate_prob: 0.02,
+                corruption_prob: 0.001,
+                base_rtt: Duration::from_millis(50),
+                rtt_variance: Duration::from_millis(10),
+                bandwidth_limit: Some(1_000_000), // 1 Mbps
+                max_packet_size: 1200,
+            },
+        );
 
         // Reordering network
-        scenarios.insert("reordering".to_string(), NetworkScenario {
-            name: "reordering".to_string(),
-            description: "Network with frequent packet reordering".to_string(),
-            loss_rate: 0.01,
-            reorder_prob: 0.15,
-            duplicate_prob: 0.05,
-            corruption_prob: 0.0,
-            base_rtt: Duration::from_millis(100),
-            rtt_variance: Duration::from_millis(50),
-            bandwidth_limit: Some(10_000_000), // 10 Mbps
-            max_packet_size: 1500,
-        });
+        scenarios.insert(
+            "reordering".to_string(),
+            NetworkScenario {
+                name: "reordering".to_string(),
+                description: "Network with frequent packet reordering".to_string(),
+                loss_rate: 0.01,
+                reorder_prob: 0.15,
+                duplicate_prob: 0.05,
+                corruption_prob: 0.0,
+                base_rtt: Duration::from_millis(100),
+                rtt_variance: Duration::from_millis(50),
+                bandwidth_limit: Some(10_000_000), // 10 Mbps
+                max_packet_size: 1500,
+            },
+        );
 
         // Congested network
-        scenarios.insert("congested".to_string(), NetworkScenario {
-            name: "congested".to_string(),
-            description: "Congested network with limited bandwidth".to_string(),
-            loss_rate: 0.03,
-            reorder_prob: 0.08,
-            duplicate_prob: 0.01,
-            corruption_prob: 0.0,
-            base_rtt: Duration::from_millis(200),
-            rtt_variance: Duration::from_millis(100),
-            bandwidth_limit: Some(100_000), // 100 Kbps
-            max_packet_size: 1200,
-        });
+        scenarios.insert(
+            "congested".to_string(),
+            NetworkScenario {
+                name: "congested".to_string(),
+                description: "Congested network with limited bandwidth".to_string(),
+                loss_rate: 0.03,
+                reorder_prob: 0.08,
+                duplicate_prob: 0.01,
+                corruption_prob: 0.0,
+                base_rtt: Duration::from_millis(200),
+                rtt_variance: Duration::from_millis(100),
+                bandwidth_limit: Some(100_000), // 100 Kbps
+                max_packet_size: 1200,
+            },
+        );
 
         // Mobile network
-        scenarios.insert("mobile".to_string(), NetworkScenario {
-            name: "mobile".to_string(),
-            description: "Mobile network with high latency variation".to_string(),
-            loss_rate: 0.05,
-            reorder_prob: 0.10,
-            duplicate_prob: 0.03,
-            corruption_prob: 0.002,
-            base_rtt: Duration::from_millis(150),
-            rtt_variance: Duration::from_millis(200),
-            bandwidth_limit: Some(5_000_000), // 5 Mbps
-            max_packet_size: 1400,
-        });
+        scenarios.insert(
+            "mobile".to_string(),
+            NetworkScenario {
+                name: "mobile".to_string(),
+                description: "Mobile network with high latency variation".to_string(),
+                loss_rate: 0.05,
+                reorder_prob: 0.10,
+                duplicate_prob: 0.03,
+                corruption_prob: 0.002,
+                base_rtt: Duration::from_millis(150),
+                rtt_variance: Duration::from_millis(200),
+                bandwidth_limit: Some(5_000_000), // 5 Mbps
+                max_packet_size: 1400,
+            },
+        );
 
         scenarios
     }
@@ -271,9 +286,17 @@ impl QuicPacketLab {
     }
 
     /// Send packet through the lab network
-    pub fn send_packet(&mut self, data: Bytes, src: SocketAddr, dst: SocketAddr) -> Result<(), String> {
+    pub fn send_packet(
+        &mut self,
+        data: Bytes,
+        src: SocketAddr,
+        dst: SocketAddr,
+    ) -> Result<(), String> {
         let scenario = match &self.current_scenario {
-            Some(name) => self.scenarios.get(name).ok_or("Current scenario not found")?,
+            Some(name) => self
+                .scenarios
+                .get(name)
+                .ok_or("Current scenario not found")?,
             None => return Err("No scenario set".to_string()),
         };
 
@@ -336,7 +359,9 @@ impl QuicPacketLab {
         self.delivery_queue.push_back(scheduled_packet);
 
         // Sort by delivery time to maintain order
-        self.delivery_queue.make_contiguous().sort_by_key(|p| p.delivery_time);
+        self.delivery_queue
+            .make_contiguous()
+            .sort_by_key(|p| p.delivery_time);
 
         Ok(())
     }
@@ -406,7 +431,11 @@ impl QuicPacketLab {
         base_delay + Duration::from_millis(random_variance)
     }
 
-    fn corrupt_packet(&self, data: &Bytes, _scenario: &NetworkScenario) -> (Bytes, PacketCorruption) {
+    fn corrupt_packet(
+        &self,
+        data: &Bytes,
+        _scenario: &NetworkScenario,
+    ) -> (Bytes, PacketCorruption) {
         // Simple corruption: flip a random bit
         let mut corrupted = data.to_vec();
         if !corrupted.is_empty() {
@@ -414,7 +443,10 @@ impl QuicPacketLab {
             corrupted[pos] ^= 0x01;
         }
 
-        (Bytes::from(corrupted), PacketCorruption::BitFlip(vec![(data.len() / 2, 0x01)]))
+        (
+            Bytes::from(corrupted),
+            PacketCorruption::BitFlip(vec![(data.len() / 2, 0x01)]),
+        )
     }
 
     /// Deterministic pseudo-random number generator
@@ -476,7 +508,8 @@ fn test_packet_lab_scenarios() -> Result<(), Box<dyn std::error::Error>> {
             let delivered = lab.process_deliveries();
 
             for packet in delivered {
-                println!("Delivered packet {} (reordered: {}, duplicate: {}, corrupted: {})",
+                println!(
+                    "Delivered packet {} (reordered: {}, duplicate: {}, corrupted: {})",
                     packet.packet_id,
                     packet.is_reordered,
                     packet.is_duplicate,
@@ -519,16 +552,17 @@ fn test_packet_loss_recovery() -> Result<(), Box<dyn std::error::Error>> {
 
     let stats = lab.get_stats();
     println!("Recovery test results:");
-    println!("  Sent: {}, Delivered: {}, Lost: {} ({:.1}%)",
+    println!(
+        "  Sent: {}, Delivered: {}, Lost: {} ({:.1}%)",
         stats.packets_sent,
         stats.packets_delivered,
         stats.packets_lost,
         stats.loss_rate * 100.0
     );
 
-    println!("  Reordered: {}, Duplicated: {}",
-        stats.packets_reordered,
-        stats.packets_duplicated
+    println!(
+        "  Reordered: {}, Duplicated: {}",
+        stats.packets_reordered, stats.packets_duplicated
     );
 
     Ok(())

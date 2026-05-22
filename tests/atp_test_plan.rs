@@ -72,7 +72,8 @@ fn test_critical_path_modules_have_test_requirements() {
         assert!(
             pipe_count >= 9, // Module | Status | Unit | Property | Metamorphic | Edge | Error | Cancel | Leak | Notes
             "Module '{}' is missing test requirement columns in ledger. Expected 10+ columns, found {}",
-            module, pipe_count + 1
+            module,
+            pipe_count + 1
         );
     }
 }
@@ -139,8 +140,7 @@ fn test_module_test_naming_conventions() {
 #[test]
 fn test_configuration_requirements() {
     // Check that Cargo.toml has appropriate test dependencies
-    let cargo_content = fs::read_to_string("Cargo.toml")
-        .expect("Could not read Cargo.toml");
+    let cargo_content = fs::read_to_string("Cargo.toml").expect("Could not read Cargo.toml");
 
     // Should have dev-dependencies section for test-only crates
     assert!(
@@ -278,7 +278,8 @@ mod test_helpers {
 
         TestStats {
             unit_test_count: content.matches("#[test]").count(),
-            property_test_count: content.matches("proptest!").count() + content.matches("quickcheck!").count(),
+            property_test_count: content.matches("proptest!").count()
+                + content.matches("quickcheck!").count(),
             error_test_count: content.matches("should_panic").count(),
             async_test_count: content.matches("async fn test_").count(),
         }

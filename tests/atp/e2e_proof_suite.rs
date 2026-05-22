@@ -177,7 +177,15 @@ fn test_verifier_stage_crash_recovery() -> Result<(), Box<dyn std::error::Error>
 
     let mut ctx = AtpE2EContext::new()?;
 
-    for stage in ["ChunkHash", "ObjectContent", "GraphMerkle", "Manifest", "Commit", "ProofBundle", "Finalizer"] {
+    for stage in [
+        "ChunkHash",
+        "ObjectContent",
+        "GraphMerkle",
+        "Manifest",
+        "Commit",
+        "ProofBundle",
+        "Finalizer",
+    ] {
         println!("  Testing verifier stage: {}", stage);
         ctx.recover_and_validate()?;
     }

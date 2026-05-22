@@ -15,8 +15,8 @@
 //! - Platform-agnostic with explicit capability detection
 //! - Cx-first APIs with explicit capability boundaries
 
-pub mod handshake;
 pub mod chunk;
+pub mod handshake;
 // TODO: Fix compilation issues in ATP loss module
 // pub mod loss;
 pub mod datagram;

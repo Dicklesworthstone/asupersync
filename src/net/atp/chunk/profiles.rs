@@ -30,7 +30,7 @@ pub trait ChunkingProfile {
 /// Shared utilities for chunk computation across profiles.
 pub mod utils {
     use super::*;
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     /// Compute SHA-256 hash of chunk data.
     pub fn compute_chunk_hash(data: &[u8]) -> [u8; 32] {
@@ -66,7 +66,9 @@ pub mod utils {
 
             // Simple rolling hash: remove old byte, add new byte
             let multiplier = 31_u64.wrapping_pow(self.window_size as u32);
-            self.hash = self.hash.wrapping_mul(31)
+            self.hash = self
+                .hash
+                .wrapping_mul(31)
                 .wrapping_sub((old_byte as u64).wrapping_mul(multiplier))
                 .wrapping_add(byte as u64);
 
@@ -137,7 +139,9 @@ pub mod utils {
     }
 
     /// Validate that chunk boundaries are properly ordered and non-overlapping.
-    pub fn validate_boundary_ordering(boundaries: &[ChunkBoundary]) -> Result<(), ChunkingProfileError> {
+    pub fn validate_boundary_ordering(
+        boundaries: &[ChunkBoundary],
+    ) -> Result<(), ChunkingProfileError> {
         if boundaries.is_empty() {
             return Ok(());
         }
@@ -145,25 +149,24 @@ pub mod utils {
         let mut last_end = 0u64;
         for (i, boundary) in boundaries.iter().enumerate() {
             if boundary.byte_offset != last_end {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!(
-                        "boundary {} has gap: expected offset {}, got {}",
-                        i, last_end, boundary.byte_offset
-                    )
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "boundary {} has gap: expected offset {}, got {}",
+                    i, last_end, boundary.byte_offset
+                )));
             }
 
             if boundary.size_bytes == 0 {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("boundary {} has zero size", i)
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "boundary {} has zero size",
+                    i
+                )));
             }
 
             if boundary.index != i as u32 {
-                return Err(ChunkingProfileError::InvalidChunkParameters(
-                    format!("boundary {} has incorrect index: expected {}, got {}",
-                            i, i, boundary.index)
-                ));
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "boundary {} has incorrect index: expected {}, got {}",
+                    i, i, boundary.index
+                )));
             }
 
             last_end = boundary.byte_offset + boundary.size_bytes;
@@ -239,18 +242,18 @@ pub mod utils {
         fn cdc_boundaries_respect_size_limits() {
             let data = vec![0u8; 10000]; // 10KB of zeros
             let boundaries = find_cdc_boundaries(
-                &data,
-                64,    // window size
-                1024,  // avg chunk size
-                512,   // min chunk size
-                2048,  // max chunk size
+                &data, 64,   // window size
+                1024, // avg chunk size
+                512,  // min chunk size
+                2048, // max chunk size
             );
 
             // Check that all chunks respect size constraints
             let mut last_pos = 0u64;
             for &boundary in &boundaries {
                 let chunk_size = boundary - last_pos;
-                if last_pos > 0 { // Skip first chunk size check
+                if last_pos > 0 {
+                    // Skip first chunk size check
                     assert!(chunk_size >= 512, "Chunk too small: {}", chunk_size);
                 }
                 assert!(chunk_size <= 2048, "Chunk too large: {}", chunk_size);

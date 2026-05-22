@@ -6,10 +6,12 @@
 //! - Corrupted cached chunks
 //! - Cross-transfer chunk reuse
 
-use asupersync::net::atp::chunk::dedupe::{CdcEngine, ChunkCache, ChunkReuseManager};
-use asupersync::net::atp::chunk::dedupe::{ChunkIdentity, CdcParameters, ChunkReuseCriteria, ChunkVerification};
-use asupersync::net::atp::chunk::ChunkingProfile;
 use asupersync::atp::manifest::{ChunkStrategy, ProofStrength};
+use asupersync::net::atp::chunk::ChunkingProfile;
+use asupersync::net::atp::chunk::dedupe::{CdcEngine, ChunkCache, ChunkReuseManager};
+use asupersync::net::atp::chunk::dedupe::{
+    CdcParameters, ChunkIdentity, ChunkReuseCriteria, ChunkVerification,
+};
 use std::collections::HashMap;
 
 #[test]
@@ -47,8 +49,9 @@ fn test_cdc_small_edits_boundary_preservation() {
     for chunk in &modified_chunks {
         total_chunks += 1;
         if let Some(original_chunk) = original_by_offset.get(&chunk.byte_offset) {
-            if original_chunk.content_hash == chunk.content_hash &&
-               original_chunk.size_bytes == chunk.size_bytes {
+            if original_chunk.content_hash == chunk.content_hash
+                && original_chunk.size_bytes == chunk.size_bytes
+            {
                 unchanged_chunks += 1;
             }
         }
@@ -56,10 +59,16 @@ fn test_cdc_small_edits_boundary_preservation() {
 
     // Expect >80% chunks to remain unchanged with small edit
     let preservation_ratio = unchanged_chunks as f64 / total_chunks as f64;
-    assert!(preservation_ratio > 0.8,
-           "Small edit should preserve most chunks, got {:.2}%", preservation_ratio * 100.0);
+    assert!(
+        preservation_ratio > 0.8,
+        "Small edit should preserve most chunks, got {:.2}%",
+        preservation_ratio * 100.0
+    );
 
-    println!("CDC preserved {:.1}% of chunks after small edit", preservation_ratio * 100.0);
+    println!(
+        "CDC preserved {:.1}% of chunks after small edit",
+        preservation_ratio * 100.0
+    );
 }
 
 #[test]
@@ -85,21 +94,25 @@ fn test_cdc_boundary_shift_resilience() {
     let shifted_chunks = engine.compute_cdc_boundaries(&shifted, &params).unwrap();
 
     // After re-synchronization, most content should produce same chunk hashes
-    let original_hashes: std::collections::HashSet<_> = original_chunks.iter()
-        .map(|c| c.content_hash)
-        .collect();
-    let shifted_hashes: std::collections::HashSet<_> = shifted_chunks.iter()
-        .map(|c| c.content_hash)
-        .collect();
+    let original_hashes: std::collections::HashSet<_> =
+        original_chunks.iter().map(|c| c.content_hash).collect();
+    let shifted_hashes: std::collections::HashSet<_> =
+        shifted_chunks.iter().map(|c| c.content_hash).collect();
 
     let common_hashes = original_hashes.intersection(&shifted_hashes).count();
     let resilience_ratio = common_hashes as f64 / original_hashes.len() as f64;
 
     // CDC should resynchronize and produce many common chunks
-    assert!(resilience_ratio > 0.6,
-           "CDC should resync after boundary shift, got {:.2}%", resilience_ratio * 100.0);
+    assert!(
+        resilience_ratio > 0.6,
+        "CDC should resync after boundary shift, got {:.2}%",
+        resilience_ratio * 100.0
+    );
 
-    println!("CDC resynchronized {:.1}% of chunks after boundary shift", resilience_ratio * 100.0);
+    println!(
+        "CDC resynchronized {:.1}% of chunks after boundary shift",
+        resilience_ratio * 100.0
+    );
 }
 
 #[test]
@@ -137,21 +150,25 @@ fn test_large_unchanged_ranges() {
     let modified_chunks = engine.compute_cdc_boundaries(&modified, &params).unwrap();
 
     // Count unchanged chunks by hash
-    let original_hashes: std::collections::HashSet<_> = original_chunks.iter()
-        .map(|c| c.content_hash)
-        .collect();
-    let modified_hashes: std::collections::HashSet<_> = modified_chunks.iter()
-        .map(|c| c.content_hash)
-        .collect();
+    let original_hashes: std::collections::HashSet<_> =
+        original_chunks.iter().map(|c| c.content_hash).collect();
+    let modified_hashes: std::collections::HashSet<_> =
+        modified_chunks.iter().map(|c| c.content_hash).collect();
 
     let unchanged_count = original_hashes.intersection(&modified_hashes).count();
     let preservation_ratio = unchanged_count as f64 / original_hashes.len() as f64;
 
     // Should preserve >90% of chunks with minimal changes
-    assert!(preservation_ratio > 0.90,
-           "Large unchanged ranges should be preserved, got {:.2}%", preservation_ratio * 100.0);
+    assert!(
+        preservation_ratio > 0.90,
+        "Large unchanged ranges should be preserved, got {:.2}%",
+        preservation_ratio * 100.0
+    );
 
-    println!("Preserved {:.1}% of chunks in large file with small changes", preservation_ratio * 100.0);
+    println!(
+        "Preserved {:.1}% of chunks in large file with small changes",
+        preservation_ratio * 100.0
+    );
 }
 
 #[test]
@@ -267,7 +284,9 @@ fn test_chunk_reuse_manager_cross_transfer() {
     };
 
     // Register chunks for first transfer
-    manager.register_transfer_chunk(transfer1_id, &shared_identity).unwrap();
+    manager
+        .register_transfer_chunk(transfer1_id, &shared_identity)
+        .unwrap();
 
     // Check if chunk can be reused for second transfer
     let reuse_criteria = ChunkReuseCriteria {
@@ -281,7 +300,9 @@ fn test_chunk_reuse_manager_cross_transfer() {
     assert_eq!(reusable[0].content_hash, shared_hash);
 
     // Register the reuse
-    manager.register_chunk_reuse(transfer2_id, &shared_identity, transfer1_id).unwrap();
+    manager
+        .register_chunk_reuse(transfer2_id, &shared_identity, transfer1_id)
+        .unwrap();
 
     // Verify reuse statistics
     let stats = manager.get_reuse_statistics(transfer2_id);
@@ -312,7 +333,9 @@ fn test_chunk_reuse_security_isolation() {
     };
 
     // Register chunk for secure transfer
-    manager.register_transfer_chunk(secure_transfer, &secure_identity).unwrap();
+    manager
+        .register_transfer_chunk(secure_transfer, &secure_identity)
+        .unwrap();
 
     // Public transfer should NOT be able to reuse secure chunks
     let reuse_criteria = ChunkReuseCriteria {
@@ -322,7 +345,11 @@ fn test_chunk_reuse_security_isolation() {
     };
 
     let reusable = manager.find_reusable_chunks(public_transfer, &[chunk_hash], &reuse_criteria);
-    assert_eq!(reusable.len(), 0, "Secure chunks should not be reusable by public transfers");
+    assert_eq!(
+        reusable.len(),
+        0,
+        "Secure chunks should not be reusable by public transfers"
+    );
 
     // Same capability scope should allow reuse
     let _another_secure = "another-secure-transfer";
@@ -338,7 +365,11 @@ fn test_chunk_reuse_security_isolation() {
     };
 
     let reusable = manager.find_reusable_chunks(secure_transfer, &[chunk_hash], &reuse_criteria);
-    assert_eq!(reusable.len(), 1, "Same capability scope should allow reuse");
+    assert_eq!(
+        reusable.len(),
+        1,
+        "Same capability scope should allow reuse"
+    );
 }
 
 #[test]
@@ -400,16 +431,24 @@ fn test_edge_cases_and_boundary_conditions() {
 
     // Data exactly at min chunk size
     let min_size_data = vec![b'A'; 64];
-    let min_chunks = engine.compute_cdc_boundaries(&min_size_data, &params).unwrap();
+    let min_chunks = engine
+        .compute_cdc_boundaries(&min_size_data, &params)
+        .unwrap();
     assert_eq!(min_chunks[0].size_bytes, 64);
 
     // Data that would exceed max chunk size
     let large_uniform_data = vec![b'B'; 1024]; // All same byte, unlikely to find boundaries
-    let large_chunks = engine.compute_cdc_boundaries(&large_uniform_data, &params).unwrap();
+    let large_chunks = engine
+        .compute_cdc_boundaries(&large_uniform_data, &params)
+        .unwrap();
 
     // Should respect max chunk size constraint
     for chunk in &large_chunks {
-        assert!(chunk.size_bytes <= 512, "Chunk size {} exceeds maximum", chunk.size_bytes);
+        assert!(
+            chunk.size_bytes <= 512,
+            "Chunk size {} exceeds maximum",
+            chunk.size_bytes
+        );
     }
 
     // Coverage verification
@@ -487,5 +526,8 @@ fn test_chunk_profile_integration() {
         }
     }
 
-    println!("Successfully tested integration with {} chunking profiles", profiles.len());
+    println!(
+        "Successfully tested integration with {} chunking profiles",
+        profiles.len()
+    );
 }

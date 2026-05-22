@@ -112,11 +112,15 @@ fn test_stream_out_of_order_reassembly() {
     let mut stream = AtpStream::new(StreamId::new(4), true, StreamPriority::Data, false);
 
     // Receive data out of order - second chunk first
-    let data2 = stream.receive_data(&cx, 5, Bytes::from("world"), false).unwrap();
+    let data2 = stream
+        .receive_data(&cx, 5, Bytes::from("world"), false)
+        .unwrap();
     assert_eq!(data2.len(), 0); // Buffered, not delivered yet
 
     // Now receive first chunk - should deliver both
-    let data1 = stream.receive_data(&cx, 0, Bytes::from("hello"), false).unwrap();
+    let data1 = stream
+        .receive_data(&cx, 0, Bytes::from("hello"), false)
+        .unwrap();
     assert_eq!(data1.len(), 2); // Both chunks delivered
     assert_eq!(data1[0], Bytes::from("hello"));
     assert_eq!(data1[1], Bytes::from("world"));

@@ -921,7 +921,7 @@ mod tests {
 
         // Send 1000 bytes
         tracker.on_packet_sent(1000);
-        
+
         // Only 200 bytes left
         assert!(tracker.can_send(200));
         assert!(!tracker.can_send(201));

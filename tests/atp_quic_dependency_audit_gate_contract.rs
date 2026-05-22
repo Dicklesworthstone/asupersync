@@ -52,14 +52,20 @@ fn atp_native_core_profiles_are_self_contained() {
     ];
 
     for (profile_name, feature_args) in profiles {
-        println!("Testing profile: {} with args: {}", profile_name, feature_args);
+        println!(
+            "Testing profile: {} with args: {}",
+            profile_name, feature_args
+        );
 
         // Check for forbidden QUIC dependencies using cargo tree
         let mut cmd = Command::new("rch");
         cmd.args(["exec", "--"]).arg("env");
 
         // Set unique target directory for each profile
-        let target_dir = format!("/tmp/rch_target_atp_audit_{}", profile_name.replace("-", "_"));
+        let target_dir = format!(
+            "/tmp/rch_target_atp_audit_{}",
+            profile_name.replace("-", "_")
+        );
         cmd.arg(format!("CARGO_TARGET_DIR={}", target_dir));
 
         cmd.args(["cargo", "tree", "-e", "normal", "-p", "asupersync"]);
@@ -68,7 +74,8 @@ fn atp_native_core_profiles_are_self_contained() {
             cmd.args(feature_args.split_whitespace());
         }
 
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .expect(&format!("Failed to run cargo tree for {}", profile_name));
 
         assert!(
@@ -82,9 +89,22 @@ fn atp_native_core_profiles_are_self_contained() {
 
         // Check for forbidden external QUIC stacks
         let forbidden_quic_crates = [
-            "quinn", "quinn-proto", "quinn-udp", "quiche", "s2n-quic", "s2n-quic-core",
-            "s2n-quic-transport", "h3-quinn", "h3-quiche", "msquic", "msquic-sys",
-            "cloudflare-quic", "neqo-transport", "neqo-http3", "lsquic", "lsquic-sys",
+            "quinn",
+            "quinn-proto",
+            "quinn-udp",
+            "quiche",
+            "s2n-quic",
+            "s2n-quic-core",
+            "s2n-quic-transport",
+            "h3-quinn",
+            "h3-quiche",
+            "msquic",
+            "msquic-sys",
+            "cloudflare-quic",
+            "neqo-transport",
+            "neqo-http3",
+            "lsquic",
+            "lsquic-sys",
         ];
 
         for crate_name in forbidden_quic_crates {
@@ -99,8 +119,16 @@ fn atp_native_core_profiles_are_self_contained() {
         // Check for forbidden Tokio dependencies (production profiles only)
         if profile_name.contains("production") {
             let forbidden_tokio_crates = [
-                "tokio ", "tokio-util ", "tokio-stream ", "tokio-tungstenite ",
-                "hyper ", "reqwest ", "axum ", "tower-http ", "async-std ", "smol ",
+                "tokio ",
+                "tokio-util ",
+                "tokio-stream ",
+                "tokio-tungstenite ",
+                "hyper ",
+                "reqwest ",
+                "axum ",
+                "tower-http ",
+                "async-std ",
+                "smol ",
             ];
 
             for crate_name in forbidden_tokio_crates {
@@ -119,8 +147,7 @@ fn atp_native_core_profiles_are_self_contained() {
 #[test]
 fn cargo_toml_documents_quic_native_policy() {
     // Verify that Cargo.toml contains the documented policy against external QUIC stacks
-    let cargo_toml = std::fs::read_to_string("Cargo.toml")
-        .expect("Failed to read Cargo.toml");
+    let cargo_toml = std::fs::read_to_string("Cargo.toml").expect("Failed to read Cargo.toml");
 
     assert!(
         cargo_toml.contains("QUIC/HTTP3 is intentionally native-only for ATP and the runtime core"),
@@ -138,13 +165,9 @@ fn audit_script_exists_and_is_executable() {
     use std::os::unix::fs::PermissionsExt;
 
     let script_path = "scripts/detect_forbidden_quic_deps.sh";
-    let metadata = std::fs::metadata(script_path)
-        .expect("ATP dependency audit script must exist");
+    let metadata = std::fs::metadata(script_path).expect("ATP dependency audit script must exist");
 
-    assert!(
-        metadata.is_file(),
-        "Audit script must be a regular file"
-    );
+    assert!(metadata.is_file(), "Audit script must be a regular file");
 
     // Check that the script is executable (has execute permission)
     let permissions = metadata.permissions();
@@ -162,8 +185,8 @@ fn audit_contract_exists() {
         .expect("ATP QUIC dependency audit gate contract must exist");
 
     // Parse as JSON to ensure it's valid
-    let contract: serde_json::Value = serde_json::from_str(&contract_content)
-        .expect("Contract must be valid JSON");
+    let contract: serde_json::Value =
+        serde_json::from_str(&contract_content).expect("Contract must be valid JSON");
 
     // Verify key contract fields
     assert_eq!(
@@ -195,25 +218,30 @@ mod integration {
         let manifest_content = std::fs::read_to_string("artifacts/proof_lane_manifest_v1.json")
             .expect("Proof lane manifest must exist");
 
-        let manifest: serde_json::Value = serde_json::from_str(&manifest_content)
-            .expect("Manifest must be valid JSON");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest_content).expect("Manifest must be valid JSON");
 
         // Check that the guarantee ID is in required_guarantee_ids
-        let required_ids = manifest["required_guarantee_ids"].as_array()
+        let required_ids = manifest["required_guarantee_ids"]
+            .as_array()
             .expect("required_guarantee_ids must be an array");
 
         assert!(
-            required_ids.iter().any(|id| id.as_str() == Some("atp-native-self-contained")),
+            required_ids
+                .iter()
+                .any(|id| id.as_str() == Some("atp-native-self-contained")),
             "Proof lane manifest must include atp-native-self-contained guarantee"
         );
 
         // Check that the lane exists
-        let lanes = manifest["lanes"].as_array()
+        let lanes = manifest["lanes"]
+            .as_array()
             .expect("lanes must be an array");
 
-        let audit_lane = lanes.iter().find(|lane| {
-            lane["lane_id"].as_str() == Some("atp-native-quic-dependency-audit")
-        }).expect("Audit lane must exist in manifest");
+        let audit_lane = lanes
+            .iter()
+            .find(|lane| lane["lane_id"].as_str() == Some("atp-native-quic-dependency-audit"))
+            .expect("Audit lane must exist in manifest");
 
         // Verify lane configuration
         assert_eq!(
@@ -221,21 +249,25 @@ mod integration {
             "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh"
         );
 
-        assert_eq!(
-            audit_lane["kind"].as_str().unwrap(),
-            "dependency_audit"
-        );
+        assert_eq!(audit_lane["kind"].as_str().unwrap(), "dependency_audit");
 
         // Check that the guarantee exists
-        let guarantees = manifest["guarantees"].as_array()
+        let guarantees = manifest["guarantees"]
+            .as_array()
             .expect("guarantees must be an array");
 
-        let audit_guarantee = guarantees.iter().find(|guarantee| {
-            guarantee["guarantee_id"].as_str() == Some("atp-native-self-contained")
-        }).expect("Audit guarantee must exist in manifest");
+        let audit_guarantee = guarantees
+            .iter()
+            .find(|guarantee| {
+                guarantee["guarantee_id"].as_str() == Some("atp-native-self-contained")
+            })
+            .expect("Audit guarantee must exist in manifest");
 
         assert!(
-            audit_guarantee["description"].as_str().unwrap().contains("no external QUIC stacks"),
+            audit_guarantee["description"]
+                .as_str()
+                .unwrap()
+                .contains("no external QUIC stacks"),
             "Guarantee description must mention QUIC stacks"
         );
     }

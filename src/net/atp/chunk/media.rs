@@ -477,7 +477,8 @@ impl MediaProfile {
             .map(|&idx| boundaries[idx].size_bytes)
             .sum();
 
-        let transfer_time_ms = (startup_bytes as f64 * 8.0) / (bandwidth_mbps.max(1) as f64 * 1000.0);
+        let transfer_time_ms =
+            (startup_bytes as f64 * 8.0) / (bandwidth_mbps.max(1) as f64 * 1000.0);
         let latency_overhead_ms = startup_chunks.len() as f64 * latency_ms as f64;
 
         let total_ms = transfer_time_ms + latency_overhead_ms;

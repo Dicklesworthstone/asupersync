@@ -162,9 +162,7 @@ impl ReassemblyBuffer {
     pub fn is_complete(&self) -> bool {
         self.received_final
             && self.segments.is_empty()
-            && self
-                .final_size
-                .is_some_and(|size| self.next_offset >= size)
+            && self.final_size.is_some_and(|size| self.next_offset >= size)
     }
 
     /// Get the current next expected offset

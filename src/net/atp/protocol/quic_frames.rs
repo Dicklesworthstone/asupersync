@@ -384,7 +384,11 @@ impl QuicFrame {
                 offset.encode_to_buf(buf)?;
                 match VarInt::new(data.len() as u64) {
                     Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
-                    _ => return Err(QuicFrameError::InvalidFormat("Invalid crypto data length".to_string())),
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid crypto data length".to_string(),
+                        ));
+                    }
                 }
                 buf.put_slice(data);
             }
@@ -409,7 +413,11 @@ impl QuicFrame {
 
                 match VarInt::new(frame_type) {
                     Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
-                    _ => return Err(QuicFrameError::InvalidFormat("Invalid frame type".to_string())),
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid frame type".to_string(),
+                        ));
+                    }
                 }
                 stream_id.encode_to_buf(buf)?;
 
@@ -420,7 +428,11 @@ impl QuicFrame {
                 if !data.is_empty() {
                     match VarInt::new(data.len() as u64) {
                         Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
-                        _ => return Err(QuicFrameError::InvalidFormat("Invalid data length".to_string())),
+                        _ => {
+                            return Err(QuicFrameError::InvalidFormat(
+                                "Invalid data length".to_string(),
+                            ));
+                        }
                     }
                 }
 
@@ -526,7 +538,11 @@ impl QuicFrame {
 
                 match VarInt::new(reason_phrase.len() as u64) {
                     Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
-                    _ => return Err(QuicFrameError::InvalidFormat("Invalid reason phrase length".to_string())),
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid reason phrase length".to_string(),
+                        ));
+                    }
                 }
                 buf.put_slice(reason_phrase);
             }
@@ -859,7 +875,11 @@ impl VarIntBufExt for VarInt {
         let mut temp = BytesMut::new();
         match self.encode(&mut temp) {
             Outcome::Ok(()) => {}
-            _ => return Err(QuicFrameError::InvalidFormat("VarInt encode failed".to_string())),
+            _ => {
+                return Err(QuicFrameError::InvalidFormat(
+                    "VarInt encode failed".to_string(),
+                ));
+            }
         }
         buf.put_slice(&temp);
         Ok(())

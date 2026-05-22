@@ -528,7 +528,7 @@ impl ArtifactProfile {
         if data.is_empty() {
             return false;
         }
-        
+
         // Simple heuristic: look for null-terminated strings
         let null_count = data.iter().filter(|&&b| b == 0).count();
         let null_ratio = null_count as f64 / data.len() as f64;

@@ -10,15 +10,15 @@
 //! correctness and robustness at the packet and frame level.
 
 pub mod conformance;
+pub mod e2e_endpoints;
 pub mod fuzz_harness;
 pub mod packet_lab;
-pub mod e2e_endpoints;
 
 // Re-export key types for easy access
-pub use conformance::{QuicConformanceContext, ConformanceResult};
-pub use fuzz_harness::{QuicFrameFuzzer, FuzzConfig, FuzzStats, FuzzResult};
-pub use packet_lab::{QuicPacketLab, NetworkScenario, ScheduledPacket, NetworkStats};
-pub use e2e_endpoints::{QuicE2EEndpoint, E2EConfig, run_e2e_test};
+pub use conformance::{ConformanceResult, QuicConformanceContext};
+pub use e2e_endpoints::{E2EConfig, QuicE2EEndpoint, run_e2e_test};
+pub use fuzz_harness::{FuzzConfig, FuzzResult, FuzzStats, QuicFrameFuzzer};
+pub use packet_lab::{NetworkScenario, NetworkStats, QuicPacketLab, ScheduledPacket};
 
 /// QUIC test suite runner
 pub struct QuicTestSuite {
@@ -99,8 +99,12 @@ impl QuicTestSuite {
             conformance::ConformanceResult::Pass,
         ];
 
-        println!("✓ Conformance tests completed: {}/{} passed",
-            self.conformance_results.iter().filter(|r| matches!(r, conformance::ConformanceResult::Pass)).count(),
+        println!(
+            "✓ Conformance tests completed: {}/{} passed",
+            self.conformance_results
+                .iter()
+                .filter(|r| matches!(r, conformance::ConformanceResult::Pass))
+                .count(),
             self.conformance_results.len()
         );
 
@@ -113,9 +117,9 @@ impl QuicTestSuite {
 
         // Run a limited set of fuzz cases for testing
         let test_cases = vec![
-            vec![0x00],                           // PADDING
-            vec![0x01],                           // PING
-            vec![0x02, 0x05, 0x00, 0x00, 0x05],  // ACK frame
+            vec![0x00],                         // PADDING
+            vec![0x01],                         // PING
+            vec![0x02, 0x05, 0x00, 0x00, 0x05], // ACK frame
         ];
 
         for test_case in test_cases {
@@ -123,9 +127,9 @@ impl QuicTestSuite {
         }
 
         self.fuzz_stats = fuzzer.stats;
-        println!("✓ Fuzz tests completed: {} runs, {} successful",
-            self.fuzz_stats.total_runs,
-            self.fuzz_stats.successful_parses
+        println!(
+            "✓ Fuzz tests completed: {} runs, {} successful",
+            self.fuzz_stats.total_runs, self.fuzz_stats.successful_parses
         );
 
         Ok(())
@@ -152,9 +156,9 @@ impl QuicTestSuite {
         }
 
         self.lab_stats = lab.get_stats();
-        println!("✓ Packet lab tests completed: {}/{} packets delivered",
-            self.lab_stats.packets_delivered,
-            self.lab_stats.packets_sent
+        println!(
+            "✓ Packet lab tests completed: {}/{} packets delivered",
+            self.lab_stats.packets_delivered, self.lab_stats.packets_sent
         );
 
         Ok(())
@@ -182,7 +186,8 @@ impl QuicTestSuite {
             },
         ];
 
-        println!("✓ E2E tests completed: {}/{} scenarios passed",
+        println!(
+            "✓ E2E tests completed: {}/{} scenarios passed",
             self.e2e_results.iter().filter(|r| r.success).count(),
             self.e2e_results.len()
         );
@@ -195,18 +200,26 @@ impl QuicTestSuite {
         println!("\n=== ATP Native QUIC Test Suite Report ===");
 
         println!("\nConformance Tests:");
-        let conformance_pass = self.conformance_results.iter()
+        let conformance_pass = self
+            .conformance_results
+            .iter()
             .filter(|r| matches!(r, conformance::ConformanceResult::Pass))
             .count();
-        println!("  Passed: {}/{}", conformance_pass, self.conformance_results.len());
+        println!(
+            "  Passed: {}/{}",
+            conformance_pass,
+            self.conformance_results.len()
+        );
 
         println!("\nFuzz Tests:");
         println!("  Total runs: {}", self.fuzz_stats.total_runs);
         println!("  Successful parses: {}", self.fuzz_stats.successful_parses);
         println!("  Parse errors: {}", self.fuzz_stats.parse_errors);
         if self.fuzz_stats.total_runs > 0 {
-            println!("  Success rate: {:.1}%",
-                (self.fuzz_stats.successful_parses as f64 / self.fuzz_stats.total_runs as f64) * 100.0
+            println!(
+                "  Success rate: {:.1}%",
+                (self.fuzz_stats.successful_parses as f64 / self.fuzz_stats.total_runs as f64)
+                    * 100.0
             );
         }
 
@@ -217,7 +230,8 @@ impl QuicTestSuite {
 
         println!("\nE2E Tests:");
         for result in &self.e2e_results {
-            println!("  {} - {} ({:.1} Mbps, {:.1}ms RTT, {:.1}% loss)",
+            println!(
+                "  {} - {} ({:.1} Mbps, {:.1}ms RTT, {:.1}% loss)",
                 result.scenario_name,
                 if result.success { "PASS" } else { "FAIL" },
                 result.throughput_mbps,
@@ -227,11 +241,18 @@ impl QuicTestSuite {
         }
 
         // Overall assessment
-        let overall_success = conformance_pass == self.conformance_results.len() &&
-            self.fuzz_stats.crashes == 0 &&
-            self.e2e_results.iter().all(|r| r.success);
+        let overall_success = conformance_pass == self.conformance_results.len()
+            && self.fuzz_stats.crashes == 0
+            && self.e2e_results.iter().all(|r| r.success);
 
-        println!("\nOverall Result: {}", if overall_success { "✓ PASS" } else { "✗ FAIL" });
+        println!(
+            "\nOverall Result: {}",
+            if overall_success {
+                "✓ PASS"
+            } else {
+                "✗ FAIL"
+            }
+        );
     }
 }
 

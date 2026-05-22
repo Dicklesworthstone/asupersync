@@ -15,15 +15,15 @@ use crate::atp::manifest::{ChunkBoundary, ChunkPlan};
 pub(crate) use crate::atp::manifest::{ChunkMetadata, SparseHoleMetadata};
 use profiles::ChunkingProfile as ChunkingProfileTrait;
 
-pub mod profiles;
 pub mod bulk_file;
 pub mod dedupe;
+pub mod profiles;
 // TODO: Fix syntax errors in these modules
-pub mod sync_tree;
+pub mod artifact;
 pub mod media;
 pub mod sparse_image;
-pub mod artifact;
 pub mod stream;
+pub mod sync_tree;
 
 /// Chunking profile identifier for deterministic chunk layout selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -81,7 +81,10 @@ impl ChunkingProfile {
 
     /// Compute chunk boundaries using this profile.
     #[must_use]
-    pub fn compute_boundaries(self, data: &[u8]) -> Result<Vec<ChunkBoundary>, ChunkingProfileError> {
+    pub fn compute_boundaries(
+        self,
+        data: &[u8],
+    ) -> Result<Vec<ChunkBoundary>, ChunkingProfileError> {
         use profiles::ChunkingProfile as ChunkingProfileTrait;
 
         match self {
@@ -103,7 +106,10 @@ impl ChunkingProfile {
     /// Check if profile supports incremental/streaming chunking.
     #[must_use]
     pub const fn supports_incremental_chunking(self) -> bool {
-        matches!(self, Self::SyncTree | Self::Media | Self::Artifact | Self::Stream)
+        matches!(
+            self,
+            Self::SyncTree | Self::Media | Self::Artifact | Self::Stream
+        )
     }
 
     /// Whether this profile supports streaming/progressive consumption.
@@ -152,7 +158,6 @@ impl std::str::FromStr for ChunkingProfile {
         }
     }
 }
-
 
 /// Errors in chunking operations.
 #[derive(Debug, Clone, PartialEq, Eq)]

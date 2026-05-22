@@ -5,12 +5,12 @@
 
 use asupersync::{
     cx::{Cx, Scope},
-    sync::{Barrier, BarrierWaitError, Mutex, Semaphore, AcquireError, LockError},
-    types::{Time, Duration},
+    sync::{AcquireError, Barrier, BarrierWaitError, LockError, Mutex, Semaphore},
+    types::{Duration, Time},
 };
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 /// Asupersync Sync Primitives Conformance Test Suite.
@@ -42,9 +42,9 @@ mod conformance_tests {
 
     #[derive(Debug, Clone, Copy)]
     enum RequirementLevel {
-        Must,    // Core contract - MUST pass
-        Should,  // Expected behavior - SHOULD pass
-        May,     // Optional behavior - MAY pass
+        Must,   // Core contract - MUST pass
+        Should, // Expected behavior - SHOULD pass
+        May,    // Optional behavior - MAY pass
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -127,7 +127,7 @@ mod conformance_tests {
         // This should return Cancelled, not block or panic
         let result = mutex.lock(&cancelled_cx).await;
         match result {
-            Err(LockError::Cancelled) => {}, // Expected
+            Err(LockError::Cancelled) => {} // Expected
             other => panic!("Expected Cancelled, got {:?}", other),
         }
 
@@ -157,11 +157,13 @@ mod conformance_tests {
         let _ = barrier.wait(&cx).await.unwrap();
 
         // Try to acquire with short timeout
-        let timeout_cx = test_cx_with_timeout(Duration::from_millis(50)).await.unwrap();
+        let timeout_cx = test_cx_with_timeout(Duration::from_millis(50))
+            .await
+            .unwrap();
         let result = mutex.lock(&timeout_cx).await;
 
         match result {
-            Err(LockError::TimedOut(_)) => {}, // Expected
+            Err(LockError::TimedOut(_)) => {} // Expected
             other => panic!("Expected TimedOut, got {:?}", other),
         }
     }
@@ -236,7 +238,7 @@ mod conformance_tests {
 
         let result = sem.acquire(&cancelled_cx, 1).await;
         match result {
-            Err(AcquireError::Cancelled) => {}, // Expected
+            Err(AcquireError::Cancelled) => {} // Expected
             other => panic!("Expected Cancelled, got {:?}", other),
         }
 
@@ -312,7 +314,7 @@ mod conformance_tests {
             // This will be cancelled
             let result = barrier_clone.wait(&cx).await;
             match result {
-                Err(BarrierWaitError::Cancelled) => {},
+                Err(BarrierWaitError::Cancelled) => {}
                 other => panic!("Expected Cancelled, got {:?}", other),
             }
         });
@@ -376,7 +378,10 @@ mod conformance_tests {
         let permit = sem.acquire(&cx, 1).await.unwrap();
 
         // Both should be held
-        assert_eq!(mutex.try_lock().unwrap_err(), asupersync::sync::TryLockError::Locked);
+        assert_eq!(
+            mutex.try_lock().unwrap_err(),
+            asupersync::sync::TryLockError::Locked
+        );
         assert!(sem.try_acquire(1).is_err());
 
         // Drop both (obligation release)
@@ -445,7 +450,8 @@ mod conformance_tests {
                 _ => {}
             }
 
-            println!("✓ {} ({}): {} [{:?}]",
+            println!(
+                "✓ {} ({}): {} [{:?}]",
                 case.id,
                 match case.requirement_level {
                     RequirementLevel::Must => "MUST",
@@ -460,7 +466,14 @@ mod conformance_tests {
         let score = (must_pass as f64 / must_total as f64) * 100.0;
         println!("\n=== CONFORMANCE SCORE ===");
         println!("MUST clauses: {}/{} ({:.1}%)", must_pass, must_total, score);
-        println!("Status: {}", if score >= 95.0 { "CONFORMANT" } else { "NON-CONFORMANT" });
+        println!(
+            "Status: {}",
+            if score >= 95.0 {
+                "CONFORMANT"
+            } else {
+                "NON-CONFORMANT"
+            }
+        );
 
         assert!(score >= 95.0, "Conformance score {} below threshold", score);
     }

@@ -175,7 +175,9 @@ impl StreamScheduler {
     }
 
     fn ready_count(&self, priority_index: usize) -> usize {
-        self.priority_queues.get(priority_index).unwrap() // ubs:ignore - index guaranteed bounded by 5
+        self.priority_queues
+            .get(priority_index)
+            .unwrap() // ubs:ignore - index guaranteed bounded by 5
             .iter()
             .filter(|stream_id| self.is_ready(**stream_id))
             .count()

@@ -389,7 +389,8 @@ impl DefendedFrameProcessor {
             Outcome::Ok(Some(version)) => version,
             _ => return None,
         };
-        if !ManifestVersion(version_varint.value() as u32).is_supported() { // ubs:ignore - ManifestVersion wraps u32, checked is_supported
+        if !ManifestVersion(version_varint.value() as u32).is_supported() {
+            // ubs:ignore - ManifestVersion wraps u32, checked is_supported
             return None;
         }
         offset += version_varint.encoded_len();
@@ -409,10 +410,8 @@ impl DefendedFrameProcessor {
         }
 
         // Validate declared size matches actual payload structure
-        let expected_payload_len = (offset as u64)
-            .checked_add(8)?
-            .checked_add(declared_size)?;
-            
+        let expected_payload_len = (offset as u64).checked_add(8)?.checked_add(declared_size)?;
+
         if payload.len() as u64 != expected_payload_len {
             return None;
         }

@@ -7,8 +7,8 @@
 //! - Proof bundle records prefix consumption and finalization semantics
 //! - Producer cancellation, receiver cancellation, and final manifest mismatch scenarios
 
+use asupersync::atp::object::{ContentId, ObjectId};
 use asupersync::atp::stream_object::*;
-use asupersync::atp::object::{ObjectId, ContentId};
 use std::time::{Duration, SystemTime};
 
 fn test_object_id() -> ObjectId {
@@ -72,9 +72,27 @@ fn test_early_consumer_safety_verified_only() {
     let mut manifest = StreamManifest::new(object_id.clone());
 
     // Add mixed verified and provisional epochs
-    let epoch1 = StreamEpoch::new(1, object_id.clone(), ByteRange::new(0, 1000), EpochState::Verified, vec![]);
-    let epoch2 = StreamEpoch::new(2, object_id.clone(), ByteRange::new(1000, 2000), EpochState::Provisional, vec![]);
-    let epoch3 = StreamEpoch::new(3, object_id.clone(), ByteRange::new(2000, 3000), EpochState::Verified, vec![]);
+    let epoch1 = StreamEpoch::new(
+        1,
+        object_id.clone(),
+        ByteRange::new(0, 1000),
+        EpochState::Verified,
+        vec![],
+    );
+    let epoch2 = StreamEpoch::new(
+        2,
+        object_id.clone(),
+        ByteRange::new(1000, 2000),
+        EpochState::Provisional,
+        vec![],
+    );
+    let epoch3 = StreamEpoch::new(
+        3,
+        object_id.clone(),
+        ByteRange::new(2000, 3000),
+        EpochState::Verified,
+        vec![],
+    );
 
     manifest.add_epoch(epoch1).unwrap();
     manifest.add_epoch(epoch2).unwrap();
@@ -104,8 +122,20 @@ fn test_early_consumer_safety_allow_provisional() {
     let mut manifest = StreamManifest::new(object_id.clone());
 
     // Add mixed epochs
-    let epoch1 = StreamEpoch::new(1, object_id.clone(), ByteRange::new(0, 1000), EpochState::Verified, vec![]);
-    let epoch2 = StreamEpoch::new(2, object_id.clone(), ByteRange::new(1000, 2000), EpochState::Provisional, vec![]);
+    let epoch1 = StreamEpoch::new(
+        1,
+        object_id.clone(),
+        ByteRange::new(0, 1000),
+        EpochState::Verified,
+        vec![],
+    );
+    let epoch2 = StreamEpoch::new(
+        2,
+        object_id.clone(),
+        ByteRange::new(1000, 2000),
+        EpochState::Provisional,
+        vec![],
+    );
 
     manifest.add_epoch(epoch1).unwrap();
     manifest.add_epoch(epoch2).unwrap();
@@ -216,8 +246,20 @@ fn test_producer_cancellation_scenario() {
     let mut manifest = StreamManifest::new(object_id.clone());
 
     // Producer starts stream normally
-    let epoch1 = StreamEpoch::new(1, object_id.clone(), ByteRange::new(0, 1000), EpochState::Verified, vec![]);
-    let epoch2 = StreamEpoch::new(2, object_id.clone(), ByteRange::new(1000, 2000), EpochState::Provisional, vec![]);
+    let epoch1 = StreamEpoch::new(
+        1,
+        object_id.clone(),
+        ByteRange::new(0, 1000),
+        EpochState::Verified,
+        vec![],
+    );
+    let epoch2 = StreamEpoch::new(
+        2,
+        object_id.clone(),
+        ByteRange::new(1000, 2000),
+        EpochState::Provisional,
+        vec![],
+    );
 
     manifest.add_epoch(epoch1).unwrap();
     manifest.add_epoch(epoch2).unwrap();
@@ -229,7 +271,9 @@ fn test_producer_cancellation_scenario() {
     assert_eq!(manifest.verified_epochs().len(), 1);
     assert_eq!(manifest.provisional_epochs().len(), 0);
 
-    let invalidated_epochs: Vec<_> = manifest.epochs.iter()
+    let invalidated_epochs: Vec<_> = manifest
+        .epochs
+        .iter()
         .filter(|e| e.state == EpochState::Invalidated)
         .collect();
     assert_eq!(invalidated_epochs.len(), 1);
@@ -303,8 +347,20 @@ fn test_final_manifest_mismatch_detection() {
     }
 
     // Make them final
-    let final_epoch1 = StreamEpoch::new(4, object_id.clone(), ByteRange::new(3000, 4000), EpochState::Final, vec![]);
-    let mut final_epoch2 = StreamEpoch::new(4, object_id.clone(), ByteRange::new(3000, 4000), EpochState::Final, vec![]);
+    let final_epoch1 = StreamEpoch::new(
+        4,
+        object_id.clone(),
+        ByteRange::new(3000, 4000),
+        EpochState::Final,
+        vec![],
+    );
+    let mut final_epoch2 = StreamEpoch::new(
+        4,
+        object_id.clone(),
+        ByteRange::new(3000, 4000),
+        EpochState::Final,
+        vec![],
+    );
 
     // Introduce difference in final epoch
     final_epoch2.producer_signature = Some(vec![0xFF; 32]); // Different signature
@@ -324,19 +380,43 @@ fn test_epoch_sequence_validation() {
     let mut manifest = StreamManifest::new(object_id.clone());
 
     // Add first epoch
-    let epoch1 = StreamEpoch::new(1, object_id.clone(), ByteRange::new(0, 1000), EpochState::Verified, vec![]);
+    let epoch1 = StreamEpoch::new(
+        1,
+        object_id.clone(),
+        ByteRange::new(0, 1000),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(epoch1).is_ok());
 
     // Try to add epoch with same sequence number
-    let epoch_dup = StreamEpoch::new(1, object_id.clone(), ByteRange::new(1000, 2000), EpochState::Verified, vec![]);
+    let epoch_dup = StreamEpoch::new(
+        1,
+        object_id.clone(),
+        ByteRange::new(1000, 2000),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(epoch_dup).is_err());
 
     // Try to add epoch with lower sequence number
-    let epoch_lower = StreamEpoch::new(0, object_id.clone(), ByteRange::new(1000, 2000), EpochState::Verified, vec![]);
+    let epoch_lower = StreamEpoch::new(
+        0,
+        object_id.clone(),
+        ByteRange::new(1000, 2000),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(epoch_lower).is_err());
 
     // Valid sequential epoch should work
-    let epoch2 = StreamEpoch::new(2, object_id.clone(), ByteRange::new(1000, 2000), EpochState::Verified, vec![]);
+    let epoch2 = StreamEpoch::new(
+        2,
+        object_id.clone(),
+        ByteRange::new(1000, 2000),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(epoch2).is_ok());
 }
 
@@ -346,23 +426,53 @@ fn test_byte_range_continuity_validation() {
     let mut manifest = StreamManifest::new(object_id.clone());
 
     // First epoch must start at 0
-    let invalid_first = StreamEpoch::new(1, object_id.clone(), ByteRange::new(100, 200), EpochState::Verified, vec![]);
+    let invalid_first = StreamEpoch::new(
+        1,
+        object_id.clone(),
+        ByteRange::new(100, 200),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(invalid_first).is_err());
 
     // Valid first epoch
-    let epoch1 = StreamEpoch::new(1, object_id.clone(), ByteRange::new(0, 1000), EpochState::Verified, vec![]);
+    let epoch1 = StreamEpoch::new(
+        1,
+        object_id.clone(),
+        ByteRange::new(0, 1000),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(epoch1).is_ok());
 
     // Gap in ranges should be rejected
-    let epoch_gap = StreamEpoch::new(2, object_id.clone(), ByteRange::new(1500, 2000), EpochState::Verified, vec![]);
+    let epoch_gap = StreamEpoch::new(
+        2,
+        object_id.clone(),
+        ByteRange::new(1500, 2000),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(epoch_gap).is_err());
 
     // Overlap should be rejected
-    let epoch_overlap = StreamEpoch::new(2, object_id.clone(), ByteRange::new(500, 1500), EpochState::Verified, vec![]);
+    let epoch_overlap = StreamEpoch::new(
+        2,
+        object_id.clone(),
+        ByteRange::new(500, 1500),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(epoch_overlap).is_err());
 
     // Valid continuous epoch
-    let epoch2 = StreamEpoch::new(2, object_id.clone(), ByteRange::new(1000, 2000), EpochState::Verified, vec![]);
+    let epoch2 = StreamEpoch::new(
+        2,
+        object_id.clone(),
+        ByteRange::new(1000, 2000),
+        EpochState::Verified,
+        vec![],
+    );
     assert!(manifest.add_epoch(epoch2).is_ok());
 }
 
@@ -372,7 +482,13 @@ fn test_epoch_state_transitions() {
     let mut manifest = StreamManifest::new(object_id.clone());
 
     // Add provisional epoch
-    let epoch = StreamEpoch::new(1, object_id.clone(), ByteRange::new(0, 1000), EpochState::Provisional, vec![]);
+    let epoch = StreamEpoch::new(
+        1,
+        object_id.clone(),
+        ByteRange::new(0, 1000),
+        EpochState::Provisional,
+        vec![],
+    );
     manifest.add_epoch(epoch).unwrap();
 
     assert_eq!(manifest.total_provisional_bytes, 1000);

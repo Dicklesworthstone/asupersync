@@ -279,7 +279,8 @@ impl Encoder<Frame> for AtpFrameCodec {
         Self::atp_to_frame_error(frame.header.payload_length.encode(dst))?;
 
         // Extension count
-        let ext_count_varint = Self::atp_to_frame_error(VarInt::new(frame.header.extensions.len() as u64))?;
+        let ext_count_varint =
+            Self::atp_to_frame_error(VarInt::new(frame.header.extensions.len() as u64))?;
         Self::atp_to_frame_error(ext_count_varint.encode(dst))?;
 
         // Extensions

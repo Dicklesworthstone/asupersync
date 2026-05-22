@@ -149,7 +149,11 @@ impl FrameHeader {
     ) -> Result<Self, FrameError> {
         let payload_varint = match VarInt::new(payload_length) {
             Outcome::Ok(varint) => varint,
-            _ => return Err(FrameError::InvalidFormat("Invalid payload length".to_string())),
+            _ => {
+                return Err(FrameError::InvalidFormat(
+                    "Invalid payload length".to_string(),
+                ));
+            }
         };
 
         Ok(FrameHeader {
