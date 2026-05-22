@@ -282,6 +282,37 @@ mod tests {
     }
 
     #[test]
+    fn test_limit_set_limit_after_write_shrinks_window_without_rewinding_inner() {
+        init_test("test_limit_set_limit_after_write_shrinks_window_without_rewinding_inner");
+        let mut data = [0u8; 6];
+        {
+            let buf: &mut [u8] = &mut data;
+            let mut limit = Limit::new(buf, 5);
+
+            limit.put_slice(&[1, 2]);
+            let remaining = limit.remaining_mut();
+            crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
+
+            limit.set_limit(1);
+            let remaining = limit.remaining_mut();
+            crate::assert_with_log!(remaining == 1, "remaining", 1, remaining);
+
+            limit.put_slice(&[3]);
+            let remaining = limit.remaining_mut();
+            crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+
+            let inner = limit.into_inner();
+            let len = inner.len();
+            crate::assert_with_log!(len == 3, "len", 3, len);
+        }
+
+        crate::assert_with_log!(data == [1, 2, 3, 0, 0, 0], "data", [1, 2, 3, 0, 0, 0], data);
+        crate::test_complete!(
+            "test_limit_set_limit_after_write_shrinks_window_without_rewinding_inner"
+        );
+    }
+
+    #[test]
     fn test_limit_into_inner() {
         init_test("test_limit_into_inner");
         let mut data = [0u8; 10];
