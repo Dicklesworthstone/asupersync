@@ -16,8 +16,9 @@ use asupersync::lab::oracle::evidence::{
 use asupersync::trace::{TraceBuffer, TraceEvent};
 use asupersync::types::Time;
 use atp::{
-    AtpCrashPoint, AtpForensics, AtpObligationTracker, FaultConfig, FaultInjector, FaultPoint,
-    FaultType, ObligationType,
+    AtpCrashPoint, AtpForensics, AtpObligationTracker, ChunkRangeInfo, FaultConfig, FaultInjector,
+    FaultPoint, FaultType, JournalOffsets, ObjectInfo, ObligationType, ReproducibleTestCase,
+    VerifierDecision,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -128,25 +129,84 @@ fn test_atp_forensics_basic() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let mut forensics = AtpForensics::new(temp_dir.path())?;
 
-    // Start capture
     forensics.start_capture("test_failure", "Test forensics capture", "test_operation");
-
-    // Record some test data
     forensics.record_manifest_root("test_manifest_root_123");
+    forensics.set_crash_point("post_fsync");
+    forensics.record_journal_offsets(JournalOffsets {
+        last_written: 128,
+        last_flushed: 128,
+        last_committed: 96,
+        recovery_checkpoint: 64,
+    })?;
+    forensics.record_chunk_range(ChunkRangeInfo {
+        start_offset: 64,
+        length: 64,
+        chunk_hash: "sha256:test-chunk".to_string(),
+        state: "verified".to_string(),
+        verified: true,
+    });
+    forensics.record_verifier_decision(VerifierDecision {
+        stage: "ChunkHash".to_string(),
+        target: "test-object:1".to_string(),
+        decision: "accepted".to_string(),
+        reason: Some("digest matched".to_string()),
+        timestamp: 7,
+    });
+    forensics.set_object_info(ObjectInfo {
+        object_id: "test-object".to_string(),
+        object_kind: "file".to_string(),
+        size: 128,
+        metadata: BTreeMap::from([("content_type".to_string(), serde_json::json!("test"))]),
+    });
+    forensics.set_test_case(ReproducibleTestCase {
+        test_function: "test_atp_forensics_basic".to_string(),
+        parameters: BTreeMap::from([
+            ("seed".to_string(), serde_json::json!(1234)),
+            ("crash_point".to_string(), serde_json::json!("post_fsync")),
+            ("diagnostic_noise".to_string(), serde_json::json!("drop-me")),
+        ]),
+        random_seed: 1234,
+        lab_config: None,
+        reproduction_steps: Vec::new(),
+    });
 
-    // Record test data would go here when forensics is implemented
-
-    // Finish capture
     let artifact_path = forensics.finish_capture()?;
     assert!(artifact_path.exists());
 
-    // Load and verify artifact (when implementation is complete)
-    // let loaded_artifact = AtpForensics::load_artifact(&artifact_path)?;
-    // assert_eq!(loaded_artifact.context.failure_type, "test_failure");
+    let loaded_artifact = AtpForensics::load_artifact(&artifact_path)?;
+    assert_eq!(loaded_artifact.context.failure_type, "test_failure");
+    assert_eq!(
+        loaded_artifact.manifest_root.as_deref(),
+        Some("test_manifest_root_123")
+    );
+    assert_eq!(
+        loaded_artifact.context.crash_point.as_deref(),
+        Some("post_fsync")
+    );
+    assert_eq!(loaded_artifact.chunk_ranges.len(), 1);
+    assert_eq!(loaded_artifact.verifier_decisions.len(), 1);
+    assert_eq!(loaded_artifact.journal_offsets.last_written, 128);
+    assert_eq!(loaded_artifact.journal_offsets.last_committed, 96);
+    assert_eq!(loaded_artifact.journal_offsets.recovery_checkpoint, 64);
 
-    println!("Artifact saved at: {}", artifact_path.display());
+    let replay_command = AtpForensics::generate_replay_command(&loaded_artifact);
+    assert!(replay_command.contains("test_atp_forensics_basic"));
+    assert!(replay_command.contains("--seed 1234"));
+    assert!(replay_command.contains(&loaded_artifact.artifact_id));
 
-    println!("ATP forensics basic test completed successfully");
+    let mut minimizer = AtpForensics::create_minimizer(&loaded_artifact);
+    let minimized = minimizer.minimize()?;
+    assert_eq!(minimized.random_seed, 1234);
+    assert!(minimized.parameters.contains_key("crash_point"));
+    assert!(!minimized.parameters.contains_key("diagnostic_noise"));
+    assert!(
+        minimized
+            .reproduction_steps
+            .iter()
+            .any(|step| step.contains("inject crash at post_fsync")),
+        "minimized reproduction did not preserve crash point: {:?}",
+        minimized.reproduction_steps
+    );
     Ok(())
 }
 
