@@ -777,6 +777,8 @@ pub struct SwarmWorkloadLease {
     pub owner: SwarmAdmissionOwner,
     /// Proof or validation lane associated with the lease.
     pub proof_lane: SwarmProofLaneKind,
+    /// Pressure priority associated with the admitted workload.
+    pub priority: RegionPriority,
     /// Region currently bound to this lease.
     pub region_id: RegionId,
     /// Current lifecycle state.
@@ -802,7 +804,7 @@ pub struct SwarmWorkloadLease {
 impl SwarmWorkloadLease {
     fn context_reason(&self, base: &str) -> String {
         format!(
-            "lease_id={} workload_id={} region_id={:?} owner_agent={} bead_id={} reservation_scope={} proof_lane={} state={} reserved_memory_bytes={} reserved_cpu_ns_per_sec={} reserved_io_ops_per_sec={} renewals={}: {base}",
+            "lease_id={} workload_id={} region_id={:?} owner_agent={} bead_id={} reservation_scope={} proof_lane={} priority={:?} state={} reserved_memory_bytes={} reserved_cpu_ns_per_sec={} reserved_io_ops_per_sec={} renewals={}: {base}",
             self.lease_id.as_u64(),
             self.workload_id.trim(),
             self.region_id,
@@ -810,6 +812,7 @@ impl SwarmWorkloadLease {
             optional_reason_field(self.owner.bead_id.as_deref()),
             optional_reason_field(self.owner.reservation_scope.as_deref()),
             self.proof_lane.as_str(),
+            self.priority,
             self.state.as_str(),
             optional_u64_reason_field(self.reserved_memory_bytes),
             optional_u64_reason_field(self.reserved_cpu_ns_per_sec),
@@ -828,12 +831,53 @@ pub struct SwarmWorkloadLeaseReceipt {
     pub workload_id: String,
     /// Region bound to the lease.
     pub region_id: RegionId,
+    /// Priority bound to the lease.
+    pub priority: RegionPriority,
     /// Lease state after the operation.
     pub state: SwarmWorkloadLeaseState,
     /// Lease expiry after the operation.
     pub expires_at: Instant,
     /// Terminal transition time, when the operation completed the lease.
     pub terminal_at: Option<Instant>,
+    /// Structured explanation for logs and replay receipts.
+    pub reason: String,
+}
+
+/// Deterministic live-lease scheduling row for swarm workload execution.
+#[derive(Debug, Clone)]
+pub struct SwarmWorkloadLeaseScheduleEntry {
+    /// Zero-based rank after deterministic scheduling order is applied.
+    pub scheduling_rank: u64,
+    /// Stable replay/audit pointer for this scheduled lease row.
+    pub replay_pointer: String,
+    /// Lease id represented by the row.
+    pub lease_id: SwarmWorkloadLeaseId,
+    /// Workload id represented by the row.
+    pub workload_id: String,
+    /// Owner metadata bound to the lease.
+    pub owner: SwarmAdmissionOwner,
+    /// Proof or validation lane associated with the lease.
+    pub proof_lane: SwarmProofLaneKind,
+    /// Pressure priority used by the scheduler.
+    pub priority: RegionPriority,
+    /// Region currently bound to this lease.
+    pub region_id: RegionId,
+    /// Live lifecycle state used by the scheduler.
+    pub state: SwarmWorkloadLeaseState,
+    /// Memory reservation carried by the lease.
+    pub reserved_memory_bytes: Option<u64>,
+    /// CPU reservation carried by the lease.
+    pub reserved_cpu_ns_per_sec: Option<u64>,
+    /// IO reservation carried by the lease.
+    pub reserved_io_ops_per_sec: Option<u64>,
+    /// Time at which the lease was granted.
+    pub issued_at: Instant,
+    /// Time at which the lease expires if not renewed or completed.
+    pub expires_at: Instant,
+    /// Most recent renewal timestamp, when any.
+    pub last_renewed_at: Option<Instant>,
+    /// Number of successful renewals.
+    pub renewal_count: u64,
     /// Structured explanation for logs and replay receipts.
     pub reason: String,
 }
@@ -1360,6 +1404,7 @@ impl SwarmPressureGovernor {
             workload_id: request.workload_id.trim().to_string(),
             owner: request.owner.clone(),
             proof_lane: request.proof_lane,
+            priority: request.priority,
             region_id,
             state: SwarmWorkloadLeaseState::Active,
             reserved_memory_bytes: request.requested_memory_bytes,
@@ -1513,6 +1558,24 @@ impl SwarmPressureGovernor {
     pub fn get_workload_lease(&self, lease_id: SwarmWorkloadLeaseId) -> Option<SwarmWorkloadLease> {
         let leases = self.workload_leases.lock().unwrap();
         leases.get(&lease_id).cloned()
+    }
+
+    /// Return a deterministic schedule snapshot of all currently live workload leases.
+    pub fn workload_lease_schedule(&self) -> Vec<SwarmWorkloadLeaseScheduleEntry> {
+        let now = Instant::now();
+        let mut leases = self.workload_leases.lock().unwrap();
+        let _ = self.expire_stale_workload_leases_locked(&mut leases, now);
+        let mut live_leases: Vec<_> = leases
+            .values()
+            .filter(|lease| lease.state.is_live())
+            .cloned()
+            .collect();
+        live_leases.sort_by_key(Self::workload_lease_schedule_key);
+        live_leases
+            .iter()
+            .enumerate()
+            .map(|(rank, lease)| Self::workload_lease_schedule_entry(lease, rank as u64))
+            .collect()
     }
 
     /// Record the latest pressure report from a peer runtime instance.
@@ -1855,10 +1918,87 @@ impl SwarmPressureGovernor {
             lease_id: lease.lease_id,
             workload_id: lease.workload_id.clone(),
             region_id: lease.region_id,
+            priority: lease.priority,
             state: lease.state,
             expires_at: lease.expires_at,
             terminal_at: lease.terminal_at,
             reason: lease.context_reason(reason.as_ref()),
+        }
+    }
+
+    fn workload_lease_schedule_key(
+        lease: &SwarmWorkloadLease,
+    ) -> (u8, Instant, u8, u8, Instant, u64) {
+        (
+            Self::priority_schedule_rank(lease.priority),
+            lease.expires_at,
+            Self::proof_lane_schedule_rank(lease.proof_lane),
+            Self::lease_state_schedule_rank(lease.state),
+            lease.issued_at,
+            lease.lease_id.as_u64(),
+        )
+    }
+
+    fn workload_lease_schedule_entry(
+        lease: &SwarmWorkloadLease,
+        scheduling_rank: u64,
+    ) -> SwarmWorkloadLeaseScheduleEntry {
+        let replay_pointer = format!(
+            "swarm-workload-lease://lease/{}/schedule/{scheduling_rank}",
+            lease.lease_id.as_u64()
+        );
+        SwarmWorkloadLeaseScheduleEntry {
+            scheduling_rank,
+            replay_pointer,
+            lease_id: lease.lease_id,
+            workload_id: lease.workload_id.clone(),
+            owner: lease.owner.clone(),
+            proof_lane: lease.proof_lane,
+            priority: lease.priority,
+            region_id: lease.region_id,
+            state: lease.state,
+            reserved_memory_bytes: lease.reserved_memory_bytes,
+            reserved_cpu_ns_per_sec: lease.reserved_cpu_ns_per_sec,
+            reserved_io_ops_per_sec: lease.reserved_io_ops_per_sec,
+            issued_at: lease.issued_at,
+            expires_at: lease.expires_at,
+            last_renewed_at: lease.last_renewed_at,
+            renewal_count: lease.renewal_count,
+            reason: lease.context_reason("live workload lease scheduled"),
+        }
+    }
+
+    const fn priority_schedule_rank(priority: RegionPriority) -> u8 {
+        match priority {
+            RegionPriority::Critical => 0,
+            RegionPriority::High => 1,
+            RegionPriority::Normal => 2,
+            RegionPriority::Low => 3,
+            RegionPriority::BestEffort => 4,
+        }
+    }
+
+    const fn proof_lane_schedule_rank(proof_lane: SwarmProofLaneKind) -> u8 {
+        match proof_lane {
+            SwarmProofLaneKind::ReleaseProof => 0,
+            SwarmProofLaneKind::CargoCheckAllTargets => 1,
+            SwarmProofLaneKind::ClippyAllTargets => 2,
+            SwarmProofLaneKind::CargoCheckLib => 3,
+            SwarmProofLaneKind::Test => 4,
+            SwarmProofLaneKind::Rustdoc => 5,
+            SwarmProofLaneKind::RustfmtCheck => 6,
+            SwarmProofLaneKind::Other => 7,
+            SwarmProofLaneKind::SourceOnly => 8,
+        }
+    }
+
+    const fn lease_state_schedule_rank(state: SwarmWorkloadLeaseState) -> u8 {
+        match state {
+            SwarmWorkloadLeaseState::Active => 0,
+            SwarmWorkloadLeaseState::Committed => 1,
+            SwarmWorkloadLeaseState::Released
+            | SwarmWorkloadLeaseState::Aborted
+            | SwarmWorkloadLeaseState::Expired => 2,
         }
     }
 
@@ -3367,6 +3507,158 @@ mod tests {
         assert_eq!(metrics.active_workload_lease_count, 0);
         assert_eq!(metrics.terminal_workload_lease_count, 1);
         assert_eq!(metrics.workload_leases_released, 1);
+    }
+
+    #[test]
+    fn test_workload_lease_schedule_orders_live_leases_deterministically_and_expires_stale() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let deadline_base = Instant::now() + Duration::from_secs(60);
+        let shared_high_deadline = deadline_base + Duration::from_secs(90);
+
+        let critical_request = SwarmWorkloadAdmissionRequest::new(
+            "critical-source",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_priority(RegionPriority::Critical)
+        .with_proof_lane(SwarmProofLaneKind::SourceOnly)
+        .with_deadline(deadline_base + Duration::from_secs(300));
+        let high_release_request = SwarmWorkloadAdmissionRequest::new(
+            "high-release",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_priority(RegionPriority::High)
+        .with_proof_lane(SwarmProofLaneKind::ReleaseProof)
+        .with_deadline(shared_high_deadline);
+        let high_source_request = SwarmWorkloadAdmissionRequest::new(
+            "high-source",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_priority(RegionPriority::High)
+        .with_proof_lane(SwarmProofLaneKind::SourceOnly)
+        .with_deadline(shared_high_deadline);
+        let normal_request = SwarmWorkloadAdmissionRequest::new(
+            "normal-check",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_priority(RegionPriority::Normal)
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib)
+        .with_deadline(deadline_base + Duration::from_secs(10));
+        let stale_request = SwarmWorkloadAdmissionRequest::new(
+            "stale-best-effort",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_priority(RegionPriority::BestEffort)
+        .with_proof_lane(SwarmProofLaneKind::Test)
+        .with_deadline(deadline_base + Duration::from_secs(5));
+
+        let critical_decision = governor
+            .check_workload_admission(&cx, &critical_request)
+            .expect("critical workload admission should classify");
+        let high_release_decision = governor
+            .check_workload_admission(&cx, &high_release_request)
+            .expect("release proof workload admission should classify");
+        let high_source_decision = governor
+            .check_workload_admission(&cx, &high_source_request)
+            .expect("source workload admission should classify");
+        let normal_decision = governor
+            .check_workload_admission(&cx, &normal_request)
+            .expect("normal workload admission should classify");
+        let stale_decision = governor
+            .check_workload_admission(&cx, &stale_request)
+            .expect("stale workload admission should classify");
+
+        let critical = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(57, 1),
+                &critical_request,
+                &critical_decision,
+            )
+            .expect("critical workload should acquire a lease");
+        let high_release = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(57, 2),
+                &high_release_request,
+                &high_release_decision,
+            )
+            .expect("high release workload should acquire a lease");
+        let high_source = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(57, 3),
+                &high_source_request,
+                &high_source_decision,
+            )
+            .expect("high source workload should acquire a lease");
+        let normal = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(57, 4),
+                &normal_request,
+                &normal_decision,
+            )
+            .expect("normal workload should acquire a lease");
+        let stale = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(57, 5),
+                &stale_request,
+                &stale_decision,
+            )
+            .expect("stale workload should initially acquire a lease");
+
+        governor
+            .commit_workload_lease(high_release.lease_id)
+            .expect("committed lease should remain scheduleable");
+        {
+            let mut leases = governor.workload_leases.lock().unwrap();
+            leases
+                .get_mut(&high_release.lease_id)
+                .expect("release lease should exist")
+                .expires_at = shared_high_deadline;
+            leases
+                .get_mut(&high_source.lease_id)
+                .expect("source lease should exist")
+                .expires_at = shared_high_deadline;
+            leases
+                .get_mut(&stale.lease_id)
+                .expect("stale lease should exist")
+                .expires_at = Instant::now() - Duration::from_secs(1);
+        }
+
+        let schedule = governor.workload_lease_schedule();
+        let ordered_ids: Vec<_> = schedule.iter().map(|entry| entry.lease_id).collect();
+        assert_eq!(
+            ordered_ids,
+            vec![
+                critical.lease_id,
+                high_release.lease_id,
+                high_source.lease_id,
+                normal.lease_id
+            ]
+        );
+        assert_eq!(schedule[0].scheduling_rank, 0);
+        assert_eq!(schedule[0].priority, RegionPriority::Critical);
+        assert_eq!(schedule[1].proof_lane, SwarmProofLaneKind::ReleaseProof);
+        assert_eq!(schedule[2].proof_lane, SwarmProofLaneKind::SourceOnly);
+        assert!(
+            schedule[1]
+                .replay_pointer
+                .starts_with("swarm-workload-lease://lease/")
+        );
+        assert!(schedule[1].reason.contains("live workload lease scheduled"));
+
+        let expired = governor
+            .get_workload_lease(stale.lease_id)
+            .expect("expired lease should remain available for audit");
+        assert_eq!(expired.state, SwarmWorkloadLeaseState::Expired);
+        let metrics = governor.metrics();
+        assert_eq!(metrics.workload_leases_expired, 1);
+        assert_eq!(metrics.active_workload_lease_count, 4);
+        assert_eq!(metrics.terminal_workload_lease_count, 1);
     }
 
     #[test]
