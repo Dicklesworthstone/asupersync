@@ -3,11 +3,12 @@
 //! Extends the existing replay infrastructure in `lab/replay.rs` with ATP-specific
 //! trace minimization and failure reproduction capabilities.
 
-use crate::lab::crashpack::evidence_ledger::AtpEvidenceLedger;
+use crate::lab::crashpack::evidence_ledger::{AtpEvidenceEntry, AtpEvidenceLedger};
 use crate::lab::crashpack::{
     ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, TransferOracleResult, TransferViolation,
     ViolationSeverity,
 };
+use crate::lab::oracle::evidence::EvidenceStrength;
 use crate::lab::oracle::{OracleEntryReport, OracleReport, OracleStats};
 use crate::trace::{TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
@@ -188,6 +189,10 @@ impl AtpReplayCoordinator {
                 )));
             }
         }
+
+        let oracle_results = parse_journal_oracle_results(&journal)?;
+        validate_manifest_violation_count(manifest_violations, &oracle_results)?;
+        validate_journal_matches_ledger(&ledger, &oracle_results)?;
 
         let violation_entries = ledger.violation_entries().len();
         if manifest_violations < violation_entries {
@@ -980,6 +985,15 @@ fn validate_journal_matches_manifest(
         .map_err(|err| {
             replay_validation_failed(format!("manifest violations field is invalid: {err}"))
         })?;
+    validate_manifest_violation_count(manifest_violations, oracle_results)?;
+
+    Ok(())
+}
+
+fn validate_manifest_violation_count(
+    manifest_violations: usize,
+    oracle_results: &[TransferOracleResult],
+) -> Result<(), ReplayError> {
     let journal_violations = oracle_results
         .iter()
         .map(|result| result.violations.len())
@@ -998,19 +1012,81 @@ fn validate_journal_matches_ledger(
     ledger: &AtpEvidenceLedger,
     oracle_results: &[TransferOracleResult],
 ) -> Result<(), ReplayError> {
+    let journal_by_oracle = oracle_results
+        .iter()
+        .map(|result| (result.oracle_name.as_str(), result))
+        .collect::<BTreeMap<_, _>>();
+    let ledger_oracles = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.oracle_name.as_str())
+        .collect::<BTreeSet<_>>();
+
     for entry in &ledger.entries {
-        if !oracle_results
-            .iter()
-            .any(|result| result.oracle_name == entry.oracle_name)
-        {
+        let result = journal_by_oracle
+            .get(entry.oracle_name.as_str())
+            .ok_or_else(|| {
+                replay_validation_failed(format!(
+                    "evidence ledger oracle {} is missing from journal",
+                    entry.oracle_name
+                ))
+            })?;
+        validate_ledger_entry_matches_journal(entry, result)?;
+    }
+
+    for result in oracle_results {
+        if !ledger_oracles.contains(result.oracle_name.as_str()) {
             return Err(replay_validation_failed(format!(
-                "evidence ledger oracle {} is missing from journal",
-                entry.oracle_name
+                "journal oracle {} is missing from evidence ledger",
+                result.oracle_name
             )));
         }
     }
 
     Ok(())
+}
+
+fn validate_ledger_entry_matches_journal(
+    entry: &AtpEvidenceEntry,
+    result: &TransferOracleResult,
+) -> Result<(), ReplayError> {
+    if entry.evidence.invariant != entry.oracle_name {
+        return Err(replay_validation_failed(format!(
+            "evidence ledger entry {} has mismatched invariant {}",
+            entry.oracle_name, entry.evidence.invariant
+        )));
+    }
+
+    if entry.evidence.passed != result.passed {
+        return Err(replay_validation_failed(format!(
+            "evidence ledger oracle {} passed status mismatch: ledger {}, journal {}",
+            entry.oracle_name, entry.evidence.passed, result.passed
+        )));
+    }
+
+    let ledger_reports_failure =
+        evidence_strength_reports_violation(&entry.evidence.bayes_factor.strength);
+    if result.passed && ledger_reports_failure {
+        return Err(replay_validation_failed(format!(
+            "evidence ledger oracle {} reports violation strength for passed journal oracle",
+            entry.oracle_name
+        )));
+    }
+    if !result.passed && !ledger_reports_failure {
+        return Err(replay_validation_failed(format!(
+            "evidence ledger oracle {} does not record the journal oracle failure",
+            entry.oracle_name
+        )));
+    }
+
+    Ok(())
+}
+
+fn evidence_strength_reports_violation(strength: &EvidenceStrength) -> bool {
+    matches!(
+        strength,
+        EvidenceStrength::Positive | EvidenceStrength::Strong | EvidenceStrength::VeryStrong
+    )
 }
 
 struct PendingJournalOracle {
