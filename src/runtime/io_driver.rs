@@ -2896,3 +2896,40 @@ mod tests {
         assert!(callback_executed.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
+
+#[cfg(test)]
+pub mod io_driver_conformance_tests;
+
+#[cfg(test)]
+mod io_driver_conformance_integration {
+    use super::io_driver_conformance_tests::*;
+
+    #[test]
+    fn run_io_driver_conformance_suite() {
+        let harness = IoDriverConformanceHarness::new();
+        let report = harness.run_all_tests();
+
+        // Generate detailed compliance report
+        let compliance_matrix = report.generate_compliance_matrix();
+        println!("\nIoDriver Event Loop Conformance Report:\n{}", compliance_matrix);
+
+        // Verify critical requirements pass
+        let must_failures: Vec<_> = report.results.iter()
+            .filter(|r| r.level == RequirementLevel::Must && !r.passed)
+            .collect();
+
+        if !must_failures.is_empty() {
+            panic!("Critical event loop conformance failures: {:#?}", must_failures);
+        }
+
+        let must_pass_rate = report.must_pass_rate();
+        let overall_pass_rate = report.pass_rate();
+
+        println!("MUST requirements pass rate: {:.1}%", must_pass_rate * 100.0);
+        println!("Overall pass rate: {:.1}%", overall_pass_rate * 100.0);
+
+        // Event loop conformance requires 100% MUST pass rate
+        assert!(must_pass_rate >= 1.0, "Event loop MUST requirements below 100%: {:.1}%", must_pass_rate * 100.0);
+        assert!(overall_pass_rate >= 0.85, "Overall pass rate below 85%: {:.1}%", overall_pass_rate * 100.0);
+    }
+}
