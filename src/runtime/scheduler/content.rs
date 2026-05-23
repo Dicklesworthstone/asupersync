@@ -218,7 +218,6 @@ impl ContentItem {
 struct ScheduledContent {
     item: ContentItem,
     generation: u64,
-    scheduled_at: Time,
 }
 
 impl PartialEq for ScheduledContent {
@@ -354,11 +353,7 @@ impl ContentScheduler {
         let generation = self.next_generation;
         self.next_generation += 1;
 
-        let scheduled_content = ScheduledContent {
-            item,
-            generation,
-            scheduled_at: self.current_pressure.measured_at,
-        };
+        let scheduled_content = ScheduledContent { item, generation };
 
         self.queue.push(scheduled_content);
         true
