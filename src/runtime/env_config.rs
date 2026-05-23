@@ -764,3 +764,9 @@ poll_budget = 64
         assert_eq!(config.poll_budget, 64);
     }
 }
+
+#[cfg(test)]
+mod metamorphic_tests {
+    #![allow(dead_code, unused_imports)]
+    include!("env_config_metamorphic_tests.rs");
+}
