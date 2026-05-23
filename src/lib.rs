@@ -281,6 +281,8 @@ pub mod grpc_protocol_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod http_grpc_protocol_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod io_bytes_time_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod lab_determinism_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod lab_trace_observability_security_metamorphic_tests;
