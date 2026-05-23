@@ -24,121 +24,207 @@
 //! 9. **Equivalence Transitivity**: If A ≡ B and B ≡ C, then A ≡ C
 
 use super::*;
-use crate::trace::event::{TraceEvent, TraceEventKind, TraceData};
+use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use crate::trace::independence::independent;
-use crate::types::{TaskId, RegionId, Time};
+use crate::types::{RegionId, TaskId, Time};
 
 /// Create diverse test traces for comprehensive metamorphic testing.
 fn create_test_traces() -> Vec<Vec<TraceEvent>> {
     vec![
         // Empty trace (monoid identity)
         vec![],
-
         // Single event
-        vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
+        vec![TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::Spawn,
+            TraceData::Task {
                 task: TaskId::new_for_test(1, 0),
                 region: RegionId::new_for_test(1, 0),
-            }),
-        ],
-
+            },
+        )],
         // Two independent events (should be in same layer)
         vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(2, 0),
-                region: RegionId::new_for_test(2, 0),
-            }),
+            TraceEvent::new(
+                1,
+                Time::ZERO,
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(2, 0),
+                    region: RegionId::new_for_test(2, 0),
+                },
+            ),
         ],
-
         // Two dependent events (spawn then complete same task)
         vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::Complete, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
+            TraceEvent::new(
+                1,
+                Time::ZERO,
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::Complete,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
         ],
-
         // Complex trace with multiple layers
         vec![
             // Layer 0: Two independent spawns
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(2, Time::from_nanos(50), TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(2, 0),
-                region: RegionId::new_for_test(2, 0),
-            }),
+            TraceEvent::new(
+                1,
+                Time::ZERO,
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(50),
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(2, 0),
+                    region: RegionId::new_for_test(2, 0),
+                },
+            ),
             // Layer 1: Dependent on first spawn
-            TraceEvent::new(3, Time::from_nanos(100), TraceEventKind::Complete, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(100),
+                TraceEventKind::Complete,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
             // Layer 1: Also dependent on second spawn (independent of first complete)
-            TraceEvent::new(4, Time::from_nanos(150), TraceEventKind::Complete, TraceData::Task {
-                task: TaskId::new_for_test(2, 0),
-                region: RegionId::new_for_test(2, 0),
-            }),
+            TraceEvent::new(
+                4,
+                Time::from_nanos(150),
+                TraceEventKind::Complete,
+                TraceData::Task {
+                    task: TaskId::new_for_test(2, 0),
+                    region: RegionId::new_for_test(2, 0),
+                },
+            ),
         ],
-
         // Events with different kinds but same task (dependent)
         vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::Poll, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(3, Time::from_nanos(200), TraceEventKind::Yield, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
+            TraceEvent::new(
+                1,
+                Time::ZERO,
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::Poll,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(200),
+                TraceEventKind::Yield,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
         ],
-
         // Region lifecycle events
         vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::RegionCreated, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(2, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(3, Time::from_nanos(200), TraceEventKind::Complete, TraceData::Task {
-                task: TaskId::new_for_test(2, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(4, Time::from_nanos(300), TraceEventKind::RegionCloseComplete, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
+            TraceEvent::new(
+                1,
+                Time::ZERO,
+                TraceEventKind::RegionCreated,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(2, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(200),
+                TraceEventKind::Complete,
+                TraceData::Task {
+                    task: TaskId::new_for_test(2, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                4,
+                Time::from_nanos(300),
+                TraceEventKind::RegionCloseComplete,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
         ],
-
         // Cancellation protocol events
         vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::CancelRequest, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(3, Time::from_nanos(200), TraceEventKind::CancelAck, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
+            TraceEvent::new(
+                1,
+                Time::ZERO,
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::CancelRequest,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(200),
+                TraceEventKind::CancelAck,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
         ],
     ]
 }
@@ -158,7 +244,8 @@ fn mr_layer_independence() {
                     assert!(
                         independent(&layer[i], &layer[j]),
                         "Events in same layer are not independent: {:?} and {:?}",
-                        layer[i].kind, layer[j].kind
+                        layer[i].kind,
+                        layer[j].kind
                     );
                 }
             }
@@ -186,7 +273,8 @@ fn mr_canonicalize_idempotence() {
         assert_eq!(
             canonical_once.depth(),
             canonical_twice.depth(),
-            "Double canonicalization changed depth for trace with {} events", trace.len()
+            "Double canonicalization changed depth for trace with {} events",
+            trace.len()
         );
 
         assert_eq!(
@@ -195,8 +283,15 @@ fn mr_canonicalize_idempotence() {
             "Double canonicalization changed layer count"
         );
 
-        for (layer1, layer2) in canonical_once.layers().iter().zip(canonical_twice.layers().iter()) {
-            assert_eq!(layer1, layer2, "Double canonicalization changed layer contents");
+        for (layer1, layer2) in canonical_once
+            .layers()
+            .iter()
+            .zip(canonical_twice.layers().iter())
+        {
+            assert_eq!(
+                layer1, layer2,
+                "Double canonicalization changed layer contents"
+            );
         }
     }
 }
@@ -236,7 +331,8 @@ fn mr_layer_ordering() {
                 assert!(
                     has_dependency || current_layer_idx == 0,
                     "Event {:?} in layer {} has no dependencies in previous layers",
-                    current_event.kind, current_layer_idx
+                    current_event.kind,
+                    current_layer_idx
                 );
             }
 
@@ -270,14 +366,15 @@ fn mr_fingerprint_consistency() {
             trace_fingerprint_direct,
             foata_fingerprint,
             "Fingerprint mismatch: direct computation ({}) vs canonical form ({}) for trace with {} events",
-            trace_fingerprint_direct, foata_fingerprint, trace.len()
+            trace_fingerprint_direct,
+            foata_fingerprint,
+            trace.len()
         );
 
         // Fingerprint should be consistent across multiple computations
         let foata_fingerprint2 = foata.fingerprint();
         assert_eq!(
-            foata_fingerprint,
-            foata_fingerprint2,
+            foata_fingerprint, foata_fingerprint2,
             "Fingerprint computation is not deterministic"
         );
     }
@@ -303,22 +400,29 @@ fn mr_event_preservation() {
             canonical_events.len(),
             trace.len(),
             "Canonical form has different event count: {} vs {}",
-            canonical_events.len(), trace.len()
+            canonical_events.len(),
+            trace.len()
         );
 
         // Every original event appears in canonical form
         for original_event in &trace {
             assert!(
-                canonical_events.iter().any(|&ce| events_semantically_equal(original_event, ce)),
-                "Original event {:?} not found in canonical form", original_event.kind
+                canonical_events
+                    .iter()
+                    .any(|&ce| events_semantically_equal(original_event, ce)),
+                "Original event {:?} not found in canonical form",
+                original_event.kind
             );
         }
 
         // Every canonical event appears in original trace
         for canonical_event in canonical_events {
             assert!(
-                trace.iter().any(|oe| events_semantically_equal(oe, canonical_event)),
-                "Canonical event {:?} not found in original trace", canonical_event.kind
+                trace
+                    .iter()
+                    .any(|oe| events_semantically_equal(oe, canonical_event)),
+                "Canonical event {:?} not found in original trace",
+                canonical_event.kind
             );
         }
     }
@@ -334,24 +438,44 @@ fn mr_trace_equivalence() {
         // Independent spawns in different orders
         (
             vec![
-                TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-                    task: TaskId::new_for_test(1, 0),
-                    region: RegionId::new_for_test(1, 0),
-                }),
-                TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::Spawn, TraceData::Task {
-                    task: TaskId::new_for_test(2, 0),
-                    region: RegionId::new_for_test(2, 0),
-                }),
+                TraceEvent::new(
+                    1,
+                    Time::ZERO,
+                    TraceEventKind::Spawn,
+                    TraceData::Task {
+                        task: TaskId::new_for_test(1, 0),
+                        region: RegionId::new_for_test(1, 0),
+                    },
+                ),
+                TraceEvent::new(
+                    2,
+                    Time::from_nanos(100),
+                    TraceEventKind::Spawn,
+                    TraceData::Task {
+                        task: TaskId::new_for_test(2, 0),
+                        region: RegionId::new_for_test(2, 0),
+                    },
+                ),
             ],
             vec![
-                TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::Spawn, TraceData::Task {
-                    task: TaskId::new_for_test(2, 0),
-                    region: RegionId::new_for_test(2, 0),
-                }),
-                TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-                    task: TaskId::new_for_test(1, 0),
-                    region: RegionId::new_for_test(1, 0),
-                }),
+                TraceEvent::new(
+                    2,
+                    Time::from_nanos(100),
+                    TraceEventKind::Spawn,
+                    TraceData::Task {
+                        task: TaskId::new_for_test(2, 0),
+                        region: RegionId::new_for_test(2, 0),
+                    },
+                ),
+                TraceEvent::new(
+                    1,
+                    Time::ZERO,
+                    TraceEventKind::Spawn,
+                    TraceData::Task {
+                        task: TaskId::new_for_test(1, 0),
+                        region: RegionId::new_for_test(1, 0),
+                    },
+                ),
             ],
         ),
     ];
@@ -375,8 +499,7 @@ fn mr_trace_equivalence() {
         );
 
         assert_eq!(
-            monoid1,
-            monoid2,
+            monoid1, monoid2,
             "Equivalent traces should have equal trace monoids"
         );
     }
@@ -395,16 +518,23 @@ fn mr_monoid_identity() {
 
         // Empty canonical form properties
         let empty_canonical = canonicalize(&empty_trace);
-        assert_eq!(empty_canonical.depth(), 0, "Empty trace should have depth 0");
-        assert_eq!(empty_canonical.layers().len(), 0, "Empty trace should have 0 layers");
+        assert_eq!(
+            empty_canonical.depth(),
+            0,
+            "Empty trace should have depth 0"
+        );
+        assert_eq!(
+            empty_canonical.layers().len(),
+            0,
+            "Empty trace should have 0 layers"
+        );
 
         // Identity behavior: concatenation with empty should preserve equivalence
         // Note: Actual concatenation would require implementing the monoid operation,
         // but we can test that empty trace has the right identity properties
 
         assert_eq!(
-            trace_monoid,
-            trace_monoid,
+            trace_monoid, trace_monoid,
             "Trace monoid should equal itself (reflexivity)"
         );
     }
@@ -416,7 +546,9 @@ fn mr_monoid_identity() {
 #[test]
 fn mr_event_order_preservation() {
     for trace in create_test_traces() {
-        if trace.len() < 2 { continue; }
+        if trace.len() < 2 {
+            continue;
+        }
 
         let foata = canonicalize(&trace);
 
@@ -432,7 +564,8 @@ fn mr_event_order_preservation() {
                     assert!(
                         pos_i < pos_j,
                         "Dependent events {:?} and {:?} have wrong order in canonical form",
-                        event_i.kind, event_j.kind
+                        event_i.kind,
+                        event_j.kind
                     );
                 }
             }
@@ -447,18 +580,33 @@ fn mr_event_order_preservation() {
 fn mr_equivalence_transitivity() {
     // Create three equivalent traces through different reorderings
     let trace_a = vec![
-        TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-            task: TaskId::new_for_test(1, 0),
-            region: RegionId::new_for_test(1, 0),
-        }),
-        TraceEvent::new(2, Time::from_nanos(50), TraceEventKind::Spawn, TraceData::Task {
-            task: TaskId::new_for_test(2, 0),
-            region: RegionId::new_for_test(2, 0),
-        }),
-        TraceEvent::new(3, Time::from_nanos(100), TraceEventKind::Spawn, TraceData::Task {
-            task: TaskId::new_for_test(3, 0),
-            region: RegionId::new_for_test(3, 0),
-        }),
+        TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::Spawn,
+            TraceData::Task {
+                task: TaskId::new_for_test(1, 0),
+                region: RegionId::new_for_test(1, 0),
+            },
+        ),
+        TraceEvent::new(
+            2,
+            Time::from_nanos(50),
+            TraceEventKind::Spawn,
+            TraceData::Task {
+                task: TaskId::new_for_test(2, 0),
+                region: RegionId::new_for_test(2, 0),
+            },
+        ),
+        TraceEvent::new(
+            3,
+            Time::from_nanos(100),
+            TraceEventKind::Spawn,
+            TraceData::Task {
+                task: TaskId::new_for_test(3, 0),
+                region: RegionId::new_for_test(3, 0),
+            },
+        ),
     ];
 
     // All these spawns are independent, so any ordering should be equivalent
@@ -472,7 +620,10 @@ fn mr_equivalence_transitivity() {
     // Transitivity: if A ≡ B and B ≡ C, then A ≡ C
     assert_eq!(monoid_a, monoid_b, "A and B should be equivalent");
     assert_eq!(monoid_b, monoid_c, "B and C should be equivalent");
-    assert_eq!(monoid_a, monoid_c, "A and C should be equivalent (transitivity)");
+    assert_eq!(
+        monoid_a, monoid_c,
+        "A and C should be equivalent (transitivity)"
+    );
 }
 
 /// Composite MR: Idempotence + Event Preservation + Layer Independence
@@ -491,7 +642,11 @@ fn mr_composite_idempotence_preservation_independence() {
             .flat_map(|layer| layer.iter().cloned())
             .collect();
         let double_canonical = canonicalize(&flattened);
-        assert_eq!(foata.layers(), double_canonical.layers(), "Idempotence failed");
+        assert_eq!(
+            foata.layers(),
+            double_canonical.layers(),
+            "Idempotence failed"
+        );
 
         // MR5: Event Preservation
         let canonical_events: Vec<&TraceEvent> = foata
@@ -530,7 +685,11 @@ fn events_semantically_equal(a: &TraceEvent, b: &TraceEvent) -> bool {
 }
 
 /// Find the positions of two events in the canonical form.
-fn find_event_positions(foata: &FoataTrace, event_a: &TraceEvent, event_b: &TraceEvent) -> (usize, usize) {
+fn find_event_positions(
+    foata: &FoataTrace,
+    event_a: &TraceEvent,
+    event_b: &TraceEvent,
+) -> (usize, usize) {
     let mut pos_a = None;
     let mut pos_b = None;
     let mut position = 0;
@@ -547,7 +706,10 @@ fn find_event_positions(foata: &FoataTrace, event_a: &TraceEvent, event_b: &Trac
         }
     }
 
-    (pos_a.expect("Event A not found"), pos_b.expect("Event B not found"))
+    (
+        pos_a.expect("Event A not found"),
+        pos_b.expect("Event B not found"),
+    )
 }
 
 #[cfg(test)]
@@ -560,24 +722,41 @@ mod validation_tests {
         // Test that layer independence MR would catch bugs where dependent events
         // are placed in the same layer
         let trace = vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::Complete, TraceData::Task {
-                task: TaskId::new_for_test(1, 0),
-                region: RegionId::new_for_test(1, 0),
-            }),
+            TraceEvent::new(
+                1,
+                Time::ZERO,
+                TraceEventKind::Spawn,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::Complete,
+                TraceData::Task {
+                    task: TaskId::new_for_test(1, 0),
+                    region: RegionId::new_for_test(1, 0),
+                },
+            ),
         ];
 
         let foata = canonicalize(&trace);
 
         // These events are dependent (same task), so should be in different layers
-        assert!(foata.depth() >= 2, "Dependent events should create multiple layers");
+        assert!(
+            foata.depth() >= 2,
+            "Dependent events should create multiple layers"
+        );
 
         // Test that event preservation would catch bugs where events are lost
         let canonical_event_count: usize = foata.layers().iter().map(|layer| layer.len()).sum();
-        assert_eq!(canonical_event_count, trace.len(), "Event preservation check");
+        assert_eq!(
+            canonical_event_count,
+            trace.len(),
+            "Event preservation check"
+        );
 
         // Test that fingerprint consistency would catch fingerprint computation bugs
         let fingerprint1 = trace_fingerprint(&trace);

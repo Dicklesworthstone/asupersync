@@ -22,67 +22,187 @@
 //! 8. **Level-Specific Event Filtering**: Each level filters appropriate event types
 
 use super::*;
-use crate::trace::event::{TraceEvent, TraceEventKind, TraceData};
-use crate::types::{TaskId, RegionId, Time};
+use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
+use crate::types::{RegionId, TaskId, Time};
 
 /// Create test trace events with different types for comprehensive testing.
 fn create_test_traces() -> Vec<Vec<TraceEvent>> {
     vec![
         // Empty trace (edge case)
         vec![],
-
         // Single skeleton event
-        vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::None),
-        ],
-
+        vec![TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::Spawn,
+            TraceData::None,
+        )],
         // Single noise event
-        vec![
-            TraceEvent::new(1, Time::ZERO, TraceEventKind::UserTrace, TraceData::None),
-        ],
-
+        vec![TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::UserTrace,
+            TraceData::None,
+        )],
         // Mixed skeleton and noise events
         vec![
             TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::None),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::UserTrace, TraceData::None),
-            TraceEvent::new(3, Time::from_nanos(200), TraceEventKind::Wake, TraceData::None),
-            TraceEvent::new(4, Time::from_nanos(300), TraceEventKind::Complete, TraceData::None),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::UserTrace,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(200),
+                TraceEventKind::Wake,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                4,
+                Time::from_nanos(300),
+                TraceEventKind::Complete,
+                TraceData::None,
+            ),
         ],
-
         // Complex trace with all event types
         vec![
             TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::None),
-            TraceEvent::new(2, Time::from_nanos(50), TraceEventKind::RegionCreated, TraceData::None),
-            TraceEvent::new(3, Time::from_nanos(100), TraceEventKind::UserTrace, TraceData::None),
-            TraceEvent::new(4, Time::from_nanos(150), TraceEventKind::Wake, TraceData::None),
-            TraceEvent::new(5, Time::from_nanos(200), TraceEventKind::ObligationReserve, TraceData::None),
-            TraceEvent::new(6, Time::from_nanos(250), TraceEventKind::TimerScheduled, TraceData::None),
-            TraceEvent::new(7, Time::from_nanos(300), TraceEventKind::CancelRequest, TraceData::None),
-            TraceEvent::new(8, Time::from_nanos(350), TraceEventKind::TimerFired, TraceData::None),
-            TraceEvent::new(9, Time::from_nanos(400), TraceEventKind::CancelAck, TraceData::None),
-            TraceEvent::new(10, Time::from_nanos(450), TraceEventKind::ObligationCommit, TraceData::None),
-            TraceEvent::new(11, Time::from_nanos(500), TraceEventKind::RegionCloseComplete, TraceData::None),
-            TraceEvent::new(12, Time::from_nanos(550), TraceEventKind::Complete, TraceData::None),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(50),
+                TraceEventKind::RegionCreated,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(100),
+                TraceEventKind::UserTrace,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                4,
+                Time::from_nanos(150),
+                TraceEventKind::Wake,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                5,
+                Time::from_nanos(200),
+                TraceEventKind::ObligationReserve,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                6,
+                Time::from_nanos(250),
+                TraceEventKind::TimerScheduled,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                7,
+                Time::from_nanos(300),
+                TraceEventKind::CancelRequest,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                8,
+                Time::from_nanos(350),
+                TraceEventKind::TimerFired,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                9,
+                Time::from_nanos(400),
+                TraceEventKind::CancelAck,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                10,
+                Time::from_nanos(450),
+                TraceEventKind::ObligationCommit,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                11,
+                Time::from_nanos(500),
+                TraceEventKind::RegionCloseComplete,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                12,
+                Time::from_nanos(550),
+                TraceEventKind::Complete,
+                TraceData::None,
+            ),
         ],
-
         // All noise events
         vec![
             TraceEvent::new(1, Time::ZERO, TraceEventKind::UserTrace, TraceData::None),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::Wake, TraceData::None),
-            TraceEvent::new(3, Time::from_nanos(200), TraceEventKind::TimerScheduled, TraceData::None),
-            TraceEvent::new(4, Time::from_nanos(300), TraceEventKind::TimerFired, TraceData::None),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::Wake,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(200),
+                TraceEventKind::TimerScheduled,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                4,
+                Time::from_nanos(300),
+                TraceEventKind::TimerFired,
+                TraceData::None,
+            ),
         ],
-
         // All skeleton events
         vec![
             TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::None),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::RegionCreated, TraceData::None),
-            TraceEvent::new(3, Time::from_nanos(200), TraceEventKind::ObligationReserve, TraceData::None),
-            TraceEvent::new(4, Time::from_nanos(300), TraceEventKind::CancelRequest, TraceData::None),
-            TraceEvent::new(5, Time::from_nanos(400), TraceEventKind::CancelAck, TraceData::None),
-            TraceEvent::new(6, Time::from_nanos(500), TraceEventKind::ObligationCommit, TraceData::None),
-            TraceEvent::new(7, Time::from_nanos(600), TraceEventKind::RegionCloseComplete, TraceData::None),
-            TraceEvent::new(8, Time::from_nanos(700), TraceEventKind::Complete, TraceData::None),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::RegionCreated,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(200),
+                TraceEventKind::ObligationReserve,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                4,
+                Time::from_nanos(300),
+                TraceEventKind::CancelRequest,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                5,
+                Time::from_nanos(400),
+                TraceEventKind::CancelAck,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                6,
+                Time::from_nanos(500),
+                TraceEventKind::ObligationCommit,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                7,
+                Time::from_nanos(600),
+                TraceEventKind::RegionCloseComplete,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                8,
+                Time::from_nanos(700),
+                TraceEventKind::Complete,
+                TraceData::None,
+            ),
         ],
     ]
 }
@@ -101,13 +221,15 @@ fn mr_compression_level_monotonicity() {
         assert!(
             skeleton.events.len() <= structural.events.len(),
             "Skeleton compression ({} events) should have ≤ events than Structural ({} events)",
-            skeleton.events.len(), structural.events.len()
+            skeleton.events.len(),
+            structural.events.len()
         );
 
         assert!(
             structural.events.len() <= lossless.events.len(),
             "Structural compression ({} events) should have ≤ events than Lossless ({} events)",
-            structural.events.len(), lossless.events.len()
+            structural.events.len(),
+            lossless.events.len()
         );
 
         // Subset relationship: every skeleton event should be in structural
@@ -143,19 +265,21 @@ fn mr_compression_idempotence() {
             assert_eq!(
                 compressed_once.events.len(),
                 compressed_twice.events.len(),
-                "Double compression changed event count for level {:?}", level
+                "Double compression changed event count for level {:?}",
+                level
             );
 
             assert_eq!(
-                compressed_once.events,
-                compressed_twice.events,
-                "Double compression changed events for level {:?}", level
+                compressed_once.events, compressed_twice.events,
+                "Double compression changed events for level {:?}",
+                level
             );
 
             assert_eq!(
                 compressed_once.certificate.event_hash(),
                 compressed_twice.certificate.event_hash(),
-                "Double compression changed certificate for level {:?}", level
+                "Double compression changed certificate for level {:?}",
+                level
             );
         }
     }
@@ -173,14 +297,16 @@ fn mr_certificate_consistency() {
             assert!(
                 validate_compressed(&compressed),
                 "Certificate validation failed for level {:?} with {} events",
-                level, trace.len()
+                level,
+                trace.len()
             );
 
             // Certificate should match event count
             assert_eq!(
                 compressed.certificate.event_count(),
                 compressed.events.len(),
-                "Certificate event count mismatch for level {:?}", level
+                "Certificate event count mismatch for level {:?}",
+                level
             );
         }
     }
@@ -192,26 +318,36 @@ fn mr_certificate_consistency() {
 #[test]
 fn mr_event_order_preservation() {
     for trace in create_test_traces() {
-        if trace.len() < 2 { continue; } // Skip traces too short for ordering tests
+        if trace.len() < 2 {
+            continue;
+        } // Skip traces too short for ordering tests
 
         for level in [Level::Lossless, Level::Structural, Level::Skeleton] {
             let compressed = compress(&trace, level);
 
             // Check that retained events maintain relative order
             for i in 1..compressed.events.len() {
-                let prev_event = &compressed.events[i-1];
+                let prev_event = &compressed.events[i - 1];
                 let curr_event = &compressed.events[i];
 
                 assert!(
                     prev_event.sequence < curr_event.sequence,
                     "Event ordering violated: event {} (seq {}) appears before event {} (seq {}) for level {:?}",
-                    i-1, prev_event.sequence, i, curr_event.sequence, level
+                    i - 1,
+                    prev_event.sequence,
+                    i,
+                    curr_event.sequence,
+                    level
                 );
 
                 assert!(
                     prev_event.timestamp <= curr_event.timestamp,
                     "Timestamp ordering violated: event {} (time {:?}) appears before event {} (time {:?}) for level {:?}",
-                    i-1, prev_event.timestamp, i, curr_event.timestamp, level
+                    i - 1,
+                    prev_event.timestamp,
+                    i,
+                    curr_event.timestamp,
+                    level
                 );
             }
         }
@@ -238,7 +374,8 @@ fn mr_noise_event_elimination() {
         for event in &structural.events {
             assert!(
                 !noise_events.contains(&event.kind),
-                "Noise event {:?} found in structural compression", event.kind
+                "Noise event {:?} found in structural compression",
+                event.kind
             );
         }
 
@@ -246,22 +383,25 @@ fn mr_noise_event_elimination() {
         for event in &skeleton.events {
             assert!(
                 !noise_events.contains(&event.kind),
-                "Noise event {:?} found in skeleton compression", event.kind
+                "Noise event {:?} found in skeleton compression",
+                event.kind
             );
         }
 
         // Lossless should retain noise events (if any in input)
         let lossless = compress(&trace, Level::Lossless);
-        let original_noise_count = trace.iter()
+        let original_noise_count = trace
+            .iter()
             .filter(|e| noise_events.contains(&e.kind))
             .count();
-        let lossless_noise_count = lossless.events.iter()
+        let lossless_noise_count = lossless
+            .events
+            .iter()
             .filter(|e| noise_events.contains(&e.kind))
             .count();
 
         assert_eq!(
-            original_noise_count,
-            lossless_noise_count,
+            original_noise_count, lossless_noise_count,
             "Lossless compression changed noise event count"
         );
     }
@@ -288,7 +428,8 @@ fn mr_single_event_preservation() {
         let skeleton_compressed = compress(&trace, Level::Skeleton);
 
         // Count skeleton events in original trace
-        let original_skeleton_count = trace.iter()
+        let original_skeleton_count = trace
+            .iter()
             .filter(|e| skeleton_events.contains(&e.kind))
             .count();
 
@@ -296,7 +437,8 @@ fn mr_single_event_preservation() {
         for event in &skeleton_compressed.events {
             assert!(
                 skeleton_events.contains(&event.kind),
-                "Non-skeleton event {:?} found in skeleton compression", event.kind
+                "Non-skeleton event {:?} found in skeleton compression",
+                event.kind
             );
         }
 
@@ -305,7 +447,8 @@ fn mr_single_event_preservation() {
             original_skeleton_count,
             skeleton_compressed.events.len(),
             "Skeleton compression changed skeleton event count from {} to {}",
-            original_skeleton_count, skeleton_compressed.events.len()
+            original_skeleton_count,
+            skeleton_compressed.events.len()
         );
     }
 }
@@ -323,14 +466,19 @@ fn mr_event_count_consistency() {
                 compressed.events.len() + compressed.events_removed(),
                 compressed.original_count,
                 "Event count consistency violated for level {:?}: {} + {} != {}",
-                level, compressed.events.len(), compressed.events_removed(), compressed.original_count
+                level,
+                compressed.events.len(),
+                compressed.events_removed(),
+                compressed.original_count
             );
 
             assert_eq!(
                 compressed.original_count,
                 trace.len(),
                 "Original count mismatch for level {:?}: {} != {}",
-                level, compressed.original_count, trace.len()
+                level,
+                compressed.original_count,
+                trace.len()
             );
 
             // Compression ratio should be consistent
@@ -343,7 +491,9 @@ fn mr_event_count_consistency() {
             assert!(
                 (compressed.ratio() - expected_ratio).abs() < f64::EPSILON,
                 "Compression ratio inconsistent for level {:?}: {} != {}",
-                level, compressed.ratio(), expected_ratio
+                level,
+                compressed.ratio(),
+                expected_ratio
             );
         }
     }
@@ -367,9 +517,7 @@ fn mr_level_specific_event_filtering() {
         );
 
         // If trace contains noise events, structural should remove them
-        let noise_count = trace.iter()
-            .filter(|e| is_noise_event(e))
-            .count();
+        let noise_count = trace.iter().filter(|e| is_noise_event(e)).count();
 
         if noise_count > 0 {
             assert!(
@@ -379,9 +527,7 @@ fn mr_level_specific_event_filtering() {
         }
 
         // If trace contains non-skeleton events, skeleton should remove them
-        let non_skeleton_count = trace.iter()
-            .filter(|e| !is_skeleton_event(e))
-            .count();
+        let non_skeleton_count = trace.iter().filter(|e| !is_skeleton_event(e)).count();
 
         if non_skeleton_count > 0 {
             assert!(
@@ -413,8 +559,11 @@ fn mr_composite_monotonicity_idempotence_certificate() {
             (Level::Skeleton, &skeleton),
         ] {
             let double_compressed = compress(&compressed.events, level);
-            assert_eq!(compressed.events, double_compressed.events,
-                "Idempotence failed for level {:?}", level);
+            assert_eq!(
+                compressed.events, double_compressed.events,
+                "Idempotence failed for level {:?}",
+                level
+            );
         }
 
         // MR3: Certificate consistency for all levels
@@ -449,14 +598,29 @@ mod validation_tests {
 
         let trace = vec![
             TraceEvent::new(1, Time::ZERO, TraceEventKind::Spawn, TraceData::None),
-            TraceEvent::new(2, Time::from_nanos(100), TraceEventKind::UserTrace, TraceData::None),
-            TraceEvent::new(3, Time::from_nanos(200), TraceEventKind::Complete, TraceData::None),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(100),
+                TraceEventKind::UserTrace,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(200),
+                TraceEventKind::Complete,
+                TraceData::None,
+            ),
         ];
 
         // Test certificate consistency catches certificate corruption
         let mut compressed = compress(&trace, Level::Structural);
         let mut bad_cert = compressed.certificate.clone();
-        bad_cert.record_event(&TraceEvent::new(999, Time::ZERO, TraceEventKind::Wake, TraceData::None));
+        bad_cert.record_event(&TraceEvent::new(
+            999,
+            Time::ZERO,
+            TraceEventKind::Wake,
+            TraceData::None,
+        ));
         compressed.certificate = bad_cert;
 
         assert!(
