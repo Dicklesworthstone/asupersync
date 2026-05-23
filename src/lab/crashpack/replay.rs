@@ -84,9 +84,14 @@ impl AtpReplayCoordinator {
         // Main replay command
         cmd.push_str("\n# Replay execution\n");
         cmd.push_str(&format!(
-            "atp replay {} --trace-file {} --validate-oracles",
+            "atp replay --trace-file {} --manifest {} --journal-digest {} --evidence-ledger {} --pathlog {} --quiclog {} --repairlog {} --validate-oracles",
             output_dir.join("transfer.atp-trace").display(),
-            output_dir.join("manifest").display()
+            output_dir.join("manifest").display(),
+            output_dir.join("journal.digest").display(),
+            output_dir.join("evidence-ledger.json").display(),
+            output_dir.join("pathlog").display(),
+            output_dir.join("quiclog").display(),
+            output_dir.join("repairlog").display()
         ));
 
         // Add minimization if configured

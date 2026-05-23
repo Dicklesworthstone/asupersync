@@ -291,6 +291,16 @@ fn test_atp_replay_command_sanitizes_seed_and_oracle_env_names() {
 
     assert!(command.contains("export ATP_SEED_LAB_SEED_V1=42"));
     assert!(command.contains("export ATP_ORACLE_PROOF_BUNDLE_VALIDITY=enabled"));
+    assert!(command.contains(
+        "atp replay --trace-file artifacts/transfer.atp-trace --manifest artifacts/manifest"
+    ));
+    assert!(command.contains("--journal-digest artifacts/journal.digest"));
+    assert!(command.contains("--evidence-ledger artifacts/evidence-ledger.json"));
+    assert!(command.contains("--pathlog artifacts/pathlog"));
+    assert!(command.contains("--quiclog artifacts/quiclog"));
+    assert!(command.contains("--repairlog artifacts/repairlog"));
+    assert!(command.contains("--validate-oracles"));
+    assert!(!command.contains("--trace-file artifacts/manifest"));
 }
 
 #[test]
@@ -416,7 +426,15 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
 
     let replay_command = std::fs::read_to_string(temp_dir.path().join("replay_command.sh"))?;
     assert!(replay_command.contains("export ATP_SEED_LAB_SEED=42"));
-    assert!(replay_command.contains("atp replay transfer.atp-trace"));
+    assert!(
+        replay_command.contains("atp replay --trace-file transfer.atp-trace --manifest manifest")
+    );
+    assert!(replay_command.contains("--journal-digest journal.digest"));
+    assert!(replay_command.contains("--evidence-ledger evidence-ledger.json"));
+    assert!(replay_command.contains("--pathlog pathlog"));
+    assert!(replay_command.contains("--quiclog quiclog"));
+    assert!(replay_command.contains("--repairlog repairlog"));
+    assert!(replay_command.contains("--validate-oracles"));
     assert!(replay_command.contains("--oracle manifest_integrity"));
 
     let pathlog = std::fs::read_to_string(temp_dir.path().join("pathlog"))?;
