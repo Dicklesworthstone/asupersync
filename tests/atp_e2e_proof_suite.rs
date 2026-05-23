@@ -15,9 +15,10 @@ use asupersync::lab::oracle::evidence::{
 use asupersync::trace::{TraceBuffer, TraceEvent};
 use asupersync::types::Time;
 use atp::{
-    AtpCrashPoint, AtpE2EContext, AtpForensics, AtpObligationTracker, FaultConfig, FaultInjector,
-    FaultPoint, FaultType, ObligationType,
+    AtpCrashPoint, AtpForensics, AtpObligationTracker, FaultConfig, FaultInjector, FaultPoint,
+    FaultType, ObligationType,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -313,6 +314,7 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
         "transfer.atp-trace",
         "manifest",
         "journal",
+        "journal.digest",
         "pathlog",
         "quiclog",
         "repairlog",
@@ -324,9 +326,15 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
         );
     }
 
+    let journal = std::fs::read_to_string(temp_dir.path().join("journal"))?;
+    let expected_journal_digest =
+        format!("sha256:{}", hex::encode(Sha256::digest(journal.as_bytes())));
+
     let manifest = std::fs::read_to_string(temp_dir.path().join("manifest"))?;
     assert!(manifest.contains("schema_version: 1"));
     assert!(manifest.contains("violations: 1"));
+    assert!(manifest.contains(&format!("journal_digest: {expected_journal_digest}")));
+    assert!(manifest.contains("journal_digest_artifact: journal.digest"));
     assert!(manifest.contains("metadata.transfer_id: tx-emit"));
     assert!(manifest.contains("seeds:"));
     assert!(manifest.contains("lab-seed: 42"));
@@ -337,7 +345,10 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
         "artifact paths should be de-duplicated"
     );
 
-    let journal = std::fs::read_to_string(temp_dir.path().join("journal"))?;
+    let journal_digest = std::fs::read_to_string(temp_dir.path().join("journal.digest"))?;
+    assert!(journal_digest.contains(&format!("digest: {expected_journal_digest}")));
+    assert!(journal_digest.contains(&format!("bytes: {}", journal.len())));
+
     assert!(journal.contains("oracle: manifest_integrity"));
     assert!(journal.contains("type: manifest_integrity"));
     assert!(journal.contains("severity: High"));

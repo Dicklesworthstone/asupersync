@@ -42,6 +42,7 @@ pub use replay::{
 use crate::lab::oracle::OracleStats;
 use crate::trace::{TraceBuffer, TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
@@ -383,15 +384,22 @@ impl AtpCrashpack {
         let trace_data = serde_json::to_string_pretty(&self.trace_events)?;
         std::fs::write(&trace_path, trace_data)?;
 
-        // Emit manifest
-        let manifest_path = output_dir.join("manifest");
-        let manifest_data = self.generate_manifest()?;
-        std::fs::write(&manifest_path, manifest_data)?;
-
         // Emit journal digest
-        let journal_path = output_dir.join("journal");
         let journal_data = self.generate_journal_digest()?;
-        std::fs::write(&journal_path, journal_data)?;
+        let journal_digest = journal_digest_ref(&journal_data);
+        let journal_path = output_dir.join("journal");
+        std::fs::write(&journal_path, &journal_data)?;
+
+        let journal_digest_path = output_dir.join("journal.digest");
+        std::fs::write(
+            &journal_digest_path,
+            format!("digest: {journal_digest}\nbytes: {}\n", journal_data.len()),
+        )?;
+
+        // Emit manifest after the journal so it can point at the exact digest.
+        let manifest_path = output_dir.join("manifest");
+        let manifest_data = self.generate_manifest(&journal_digest)?;
+        std::fs::write(&manifest_path, manifest_data)?;
 
         // Emit pathlog, quiclog, repairlog
         self.emit_specialized_logs(output_dir)?;
@@ -404,9 +412,9 @@ impl AtpCrashpack {
         Ok(())
     }
 
-    fn generate_manifest(&self) -> Result<String, CrashpackError> {
+    fn generate_manifest(&self, journal_digest: &str) -> Result<String, CrashpackError> {
         let mut manifest = format!(
-            "# ATP Crashpack Manifest\nschema_version: {}\nviolations: {}\n",
+            "# ATP Crashpack Manifest\nschema_version: {}\nviolations: {}\njournal_digest: {journal_digest}\njournal_digest_artifact: journal.digest\n",
             self.schema_version,
             self.oracle_results
                 .iter()
@@ -569,6 +577,11 @@ fn seed_env_suffix(name: &str) -> String {
     } else {
         suffix.to_string()
     }
+}
+
+fn journal_digest_ref(journal_data: &str) -> String {
+    let digest = Sha256::digest(journal_data.as_bytes());
+    format!("sha256:{}", hex::encode(digest))
 }
 
 /// Errors during crashpack operations.
