@@ -1164,6 +1164,12 @@ pub struct SwarmAdmissionDecisionReceipt {
     pub cleanup_debt_pressure_scaled: i64,
     /// Memory budget pressure ratio scaled by 10_000.
     pub memory_budget_pressure_scaled: i64,
+    /// Live peer pressure reports considered by this decision.
+    pub peer_pressure_report_count: u64,
+    /// Maximum peer-reported pressure ratio scaled by 10_000.
+    pub peer_pressure_max_pressure_scaled: i64,
+    /// Maximum peer-reported degradation level represented as its stable enum rank.
+    pub peer_pressure_max_degradation_level: u8,
     /// Live workload feedback reports considered by this decision.
     pub workload_feedback_report_count: u64,
     /// Maximum workload feedback pressure ratio scaled by 10_000.
@@ -1400,6 +1406,7 @@ impl SwarmPressureGovernor {
                 DegradationLevel::None,
                 &pressure_snapshot,
                 &reason,
+                SwarmPeerPressureSummary::EMPTY,
                 workload_pressure,
                 workload_request,
             );
@@ -1455,6 +1462,7 @@ impl SwarmPressureGovernor {
                 degradation_level,
                 &pressure_snapshot,
                 &reason,
+                peer_pressure,
                 workload_pressure,
                 workload_request,
             );
@@ -1484,6 +1492,7 @@ impl SwarmPressureGovernor {
                 degradation_level,
                 &pressure_snapshot,
                 &reason,
+                peer_pressure,
                 workload_pressure,
                 workload_request,
             );
@@ -1544,6 +1553,7 @@ impl SwarmPressureGovernor {
             degradation_level,
             &pressure_snapshot,
             &reason,
+            peer_pressure,
             workload_pressure,
             workload_request,
         );
@@ -2895,6 +2905,7 @@ impl SwarmPressureGovernor {
         degradation_level: DegradationLevel,
         pressure_snapshot: &PressureSnapshot,
         reason: &str,
+        peer_pressure: SwarmPeerPressureSummary,
         workload_pressure: SwarmWorkloadPressureSummary,
         workload_request: Option<&SwarmWorkloadAdmissionRequest>,
     ) -> SwarmAdmissionDecisionReceipt {
@@ -2962,6 +2973,11 @@ impl SwarmPressureGovernor {
             memory_budget_pressure_scaled: scale_pressure_for_metrics(
                 pressure_snapshot.memory_budget_pressure,
             ),
+            peer_pressure_report_count: peer_pressure.live_report_count,
+            peer_pressure_max_pressure_scaled: scale_pressure_for_metrics(
+                peer_pressure.max_overall_pressure,
+            ),
+            peer_pressure_max_degradation_level: peer_pressure.max_degradation_level as u8,
             workload_feedback_report_count: workload_pressure.live_report_count,
             workload_feedback_max_pressure_scaled: scale_pressure_for_metrics(
                 workload_pressure.max_overall_pressure,
@@ -3141,12 +3157,14 @@ impl SwarmPressureGovernor {
             .pressure()
             .composite_degradation_level();
         let pressure_snapshot = self.get_default_pressure_snapshot();
+        let peer_pressure = self.peer_pressure_summary(decision_start);
         let reason = request.context_reason(&reason);
         let decision_receipt = self.build_admission_decision_receipt(
             AdmissionDecision::Reject,
             degradation_level,
             &pressure_snapshot,
             &reason,
+            peer_pressure,
             SwarmWorkloadPressureSummary::EMPTY,
             Some(request),
         );
@@ -5481,6 +5499,18 @@ mod tests {
         ));
         assert!(decision.envelope.is_some());
         assert!(decision.reason.contains("live peer pressure reports"));
+        assert_eq!(decision.decision_receipt.peer_pressure_report_count, 1);
+        assert!(
+            (decision.decision_receipt.peer_pressure_max_pressure_scaled - 8500).abs() <= 1,
+            "receipt peer pressure should round near 8500, got {}",
+            decision.decision_receipt.peer_pressure_max_pressure_scaled
+        );
+        assert_eq!(
+            decision
+                .decision_receipt
+                .peer_pressure_max_degradation_level,
+            DegradationLevel::Moderate as u8
+        );
 
         let metrics = governor.metrics();
         assert_eq!(metrics.live_peer_pressure_reports, 1);
