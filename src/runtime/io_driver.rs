@@ -306,19 +306,18 @@ impl IoDriver {
         self.stats.events_received += n as u64;
 
         self.waker_buf.clear();
-        let mut seen_tokens = smallvec::SmallVec::<[Token; 64]>::new();
+        let mut seen_tokens = std::collections::HashSet::<Token>::new();
 
         // Dispatch wakers for ready events
         for event in &self.events {
             let interest = self.interests.get(&event.token).copied();
             on_event(event, interest);
-            if seen_tokens.contains(&event.token) {
+            if !seen_tokens.insert(event.token) {
                 continue;
             }
             let slab_key = SlabToken::from_usize(event.token.0);
             if let Some(waker) = self.wakers.get(slab_key) {
                 self.waker_buf.push(waker.clone());
-                seen_tokens.push(event.token);
                 self.stats.wakers_dispatched += 1;
             } else {
                 self.stats.unknown_tokens += 1;
