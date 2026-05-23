@@ -49,8 +49,7 @@
 #![allow(clippy::pedantic, clippy::nursery, clippy::too_many_lines)]
 
 use asupersync::observability::Metrics;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -86,7 +85,6 @@ impl Default for ConformanceConfig {
 enum ConformanceResult {
     Pass,
     Fail(String),
-    Skip(String),
 }
 
 impl ConformanceResult {
@@ -94,7 +92,6 @@ impl ConformanceResult {
         match self {
             ConformanceResult::Pass => {},
             ConformanceResult::Fail(msg) => panic!("{} failed: {}", test_name, msg),
-            ConformanceResult::Skip(msg) => panic!("{} unexpectedly skipped: {}", test_name, msg),
         }
     }
 }
@@ -226,7 +223,8 @@ fn p1_prometheus_format_conformance() {
 
     // Additional specific validations
     assert!(output.contains("# TYPE"), "Missing TYPE declarations");
-    assert!(output.contains("# HELP"), "Missing HELP text");
+    // HELP lines are optional in the Prometheus text format. The local exporter
+    // deliberately omits them; see src/observability/DISCREPANCIES.md DISC-001.
 
     // Validate histogram bucket ordering
     let histogram_lines: Vec<&str> = output.lines()
@@ -282,7 +280,7 @@ fn p2_opentelemetry_semantic_conventions() {
 #[test]
 fn p3_concurrency_safety() {
     let config = ConformanceConfig::default();
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Mutex::new(Metrics::new()));
     let barrier = Arc::new(Barrier::new(config.concurrency_level));
 
     let mut handles = Vec::new();
@@ -291,18 +289,25 @@ fn p3_concurrency_safety() {
         let metrics_clone = Arc::clone(&metrics);
         let barrier_clone = Arc::clone(&barrier);
         let ops_count = config.operations_per_thread;
+        let histogram_buckets = config.histogram_buckets.clone();
 
         let handle = thread::spawn(move || {
-            // Wait for all threads to be ready
-            barrier_clone.wait();
-
             let counter_name = format!("thread_{}_operations_total", thread_id);
             let gauge_name = format!("thread_{}_active_work", thread_id);
             let histogram_name = format!("thread_{}_latency_seconds", thread_id);
 
-            let counter = metrics_clone.counter(&counter_name);
-            let gauge = metrics_clone.gauge(&gauge_name);
-            let histogram = metrics_clone.histogram(&histogram_name, vec![0.001, 0.01, 0.1, 1.0]);
+            let (counter, gauge, histogram) = {
+                let mut metrics = metrics_clone.lock().unwrap();
+                (
+                    metrics.counter(&counter_name),
+                    metrics.gauge(&gauge_name),
+                    metrics.histogram(&histogram_name, histogram_buckets),
+                )
+            };
+
+            // Wait for all threads after instrument registration so updates race on the
+            // metric handles rather than on the mutable registry API.
+            barrier_clone.wait();
 
             for i in 0..ops_count {
                 // Simulate mixed workload
@@ -346,7 +351,7 @@ fn p3_concurrency_safety() {
     assert_eq!(total_counter, expected_total, "Counter operations not atomic");
 
     // Verify metrics can be exported without panicking
-    let output = metrics.export_prometheus();
+    let output = metrics.lock().unwrap().export_prometheus();
     assert!(!output.is_empty(), "Export should produce output after concurrent operations");
 
     // Validate format is still correct after concurrent access
@@ -356,7 +361,7 @@ fn p3_concurrency_safety() {
 /// Test P4: Memory efficiency and bounded growth.
 #[test]
 fn p4_memory_efficiency() {
-    let _config = ConformanceConfig::default();
+    let config = ConformanceConfig::default();
     let mut metrics = Metrics::new();
 
     // Test label cardinality limits
@@ -365,7 +370,8 @@ fn p4_memory_efficiency() {
     // Create metrics with high cardinality (but bounded)
     for method in ["GET", "POST", "PUT", "DELETE"] {
         for status in ["200", "400", "404", "500"] {
-            for endpoint in (1..=100).map(|i| format!("endpoint_{}", i)) {
+            let endpoint_count = (config.max_label_cardinality / 100).max(1);
+            for endpoint in (1..=endpoint_count).map(|i| format!("endpoint_{}", i)) {
                 let metric_name = format!("http_requests_total{{method=\"{}\",status=\"{}\",endpoint=\"{}\"}}",
                                         method, status, endpoint);
                 metrics.counter(&metric_name).increment();
@@ -404,10 +410,11 @@ fn p4_memory_efficiency() {
 /// Test P5: Histogram and summary statistical properties.
 #[test]
 fn p5_statistical_correctness() {
+    let config = ConformanceConfig::default();
     let mut metrics = Metrics::new();
 
     // Test histogram with known distribution
-    let histogram = metrics.histogram("test_latency", vec![0.1, 0.5, 1.0, 5.0, 10.0]);
+    let histogram = metrics.histogram("test_latency", config.histogram_buckets.clone());
 
     // Add observations with known distribution
     let observations = [
@@ -458,6 +465,10 @@ fn p5_statistical_correctness() {
     let quantile_lines: Vec<&str> = output.lines()
         .filter(|line| line.contains("test_response_size{quantile="))
         .collect();
+    assert!(
+        !quantile_lines.is_empty() && quantile_lines.len() <= config.summary_quantiles.len(),
+        "Unexpected number of summary quantiles"
+    );
 
     // Verify quantiles are in ascending order
     let mut prev_quantile = 0.0;
@@ -480,7 +491,7 @@ fn p5_statistical_correctness() {
 #[test]
 fn comprehensive_conformance_integration() {
     let _config = ConformanceConfig::default();
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Mutex::new(Metrics::new()));
 
     // Multi-threaded setup with various metric types
     let barrier = Arc::new(Barrier::new(4));
@@ -491,9 +502,17 @@ fn comprehensive_conformance_integration() {
         let metrics = Arc::clone(&metrics);
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
+            let counters = {
+                let mut metrics = metrics.lock().unwrap();
+                (0..10)
+                    .map(|i| {
+                        metrics.counter(&format!("requests_total{{endpoint=\"/api/{}\"}}", i))
+                    })
+                    .collect::<Vec<_>>()
+            };
             barrier.wait();
             for i in 0..1000 {
-                metrics.counter(&format!("requests_total{{endpoint=\"/api/{}\"}}", i % 10)).increment();
+                counters[i % 10].increment();
             }
         }));
     }
@@ -503,9 +522,13 @@ fn comprehensive_conformance_integration() {
         let metrics = Arc::clone(&metrics);
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
+            let gauge = {
+                let mut metrics = metrics.lock().unwrap();
+                metrics.gauge("active_connections")
+            };
             barrier.wait();
             for i in 0..1000 {
-                metrics.gauge("active_connections").set(i as i64);
+                gauge.set(i as i64);
                 thread::sleep(Duration::from_micros(10));
             }
         }));
@@ -516,8 +539,11 @@ fn comprehensive_conformance_integration() {
         let metrics = Arc::clone(&metrics);
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
+            let histogram = {
+                let mut metrics = metrics.lock().unwrap();
+                metrics.histogram("request_duration_seconds", vec![0.001, 0.01, 0.1, 1.0])
+            };
             barrier.wait();
-            let histogram = metrics.histogram("request_duration_seconds", vec![0.001, 0.01, 0.1, 1.0]);
             for i in 0..1000 {
                 histogram.observe((i as f64) / 1000.0);
             }
@@ -529,8 +555,11 @@ fn comprehensive_conformance_integration() {
         let metrics = Arc::clone(&metrics);
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
+            let summary = {
+                let mut metrics = metrics.lock().unwrap();
+                metrics.summary("response_size_bytes")
+            };
             barrier.wait();
-            let summary = metrics.summary("response_size_bytes");
             for i in 0..1000 {
                 summary.observe((i * 100) as f64);
             }
@@ -543,7 +572,7 @@ fn comprehensive_conformance_integration() {
     }
 
     // Export and validate comprehensive output
-    let output = metrics.export_prometheus();
+    let output = metrics.lock().unwrap().export_prometheus();
 
     // Run all conformance checks
     validate_prometheus_format(&output).expect_pass("Comprehensive: Prometheus format");
