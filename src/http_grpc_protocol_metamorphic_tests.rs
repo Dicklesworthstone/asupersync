@@ -997,7 +997,7 @@ mod tests {
             // Add entries until table starts evicting
             for i in 0..entry_count {
                 let name = format!("header-{}", i);
-                let value = format!("value-{}-{'x'.repeat(20)}", i); // Large values to force eviction
+                let value = format!("value-{i}-{}", "x".repeat(20)); // Large values to force eviction
 
                 let initial_size = table.dynamic_table.len();
                 table.add_entry(name.clone(), value.clone());
@@ -1173,7 +1173,7 @@ mod tests {
             let mut total_updates_received = 0u64;
 
             for operation in operations {
-                match operation.as_str() {
+                match operation {
                     "send_data" => {
                         if let Some(&stream_id) = stream_ids.first() {
                             let data_length = 100u32; // Fixed size for simplicity

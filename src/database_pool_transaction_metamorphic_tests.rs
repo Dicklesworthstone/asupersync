@@ -141,7 +141,7 @@ mod tests {
 
         pub fn parse_and_serialize(&self) -> String {
             // Mock implementation: parse SQL and serialize back
-            let parsed = self.normalize_sql(&self.sql);
+            let parsed = Self::normalize_sql(&self.sql);
             parsed
                 .replace(" WHERE ", " WHERE ")
                 .replace(" AND ", " AND ")
@@ -440,8 +440,9 @@ mod tests {
             prop_assert_eq!(transcript1.iterations, transcript2.iterations);
 
             // Server responses should be deterministic given client messages
-            prop_assert!(transcript1.server_first_message.contains(&format!("i={}", iterations)));
-            prop_assert!(transcript2.server_first_message.contains(&format!("i={}", iterations)));
+            let iteration_marker = format!("i={iterations}");
+            prop_assert!(transcript1.server_first_message.contains(&iteration_marker));
+            prop_assert!(transcript2.server_first_message.contains(&iteration_marker));
         }
     }
 
@@ -578,7 +579,8 @@ mod tests {
 
             // Correctness: bound query should contain parameter values
             prop_assert!(bound1.contains(&int_param.to_string()));
-            prop_assert!(bound1.contains(&format!("'{}'", text_param)));
+            let text_literal = format!("'{text_param}'");
+            prop_assert!(bound1.contains(&text_literal));
         }
     }
 
