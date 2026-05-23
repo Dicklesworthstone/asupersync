@@ -279,4 +279,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "compression_metamorphic_tests.rs"]
 mod compression_metamorphic_tests;

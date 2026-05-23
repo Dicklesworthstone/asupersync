@@ -1526,7 +1526,11 @@ mod tests {
         }
 
         fn canonical_seqs(events: &[TraceEvent]) -> Vec<u64> {
-            canonicalize(events).flatten().iter().map(|e| e.seq).collect()
+            canonicalize(events)
+                .flatten()
+                .iter()
+                .map(|e| e.seq)
+                .collect()
         }
 
         #[test]
@@ -1582,7 +1586,11 @@ mod tests {
             for n in [2u32, 3, 5, 8, 13] {
                 let base = independent_set(n);
                 let baseline = canonicalize(&base);
-                assert_eq!(baseline.depth(), 1, "independent events must collapse to one layer");
+                assert_eq!(
+                    baseline.depth(),
+                    1,
+                    "independent events must collapse to one layer"
+                );
                 let baseline_fp = baseline.fingerprint();
 
                 for seed in 0..16u64 {
@@ -1689,7 +1697,10 @@ mod tests {
             for trace in [independent_set(6), dependent_chain(8)] {
                 let m = TraceMonoid::from_events(&trace);
                 assert!(m.equivalent(&m), "equivalence must be reflexive");
-                assert!(m.equivalent_exact(&m), "exact equivalence must be reflexive");
+                assert!(
+                    m.equivalent_exact(&m),
+                    "exact equivalence must be reflexive"
+                );
                 let again = TraceMonoid::from_events(&trace);
                 assert_eq!(m, again, "PartialEq must be reflexive");
                 assert_eq!(m.class_fingerprint(), canonicalize(&trace).fingerprint());
@@ -1724,4 +1735,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "canonicalize_metamorphic_tests.rs"]
 mod canonicalize_metamorphic_tests;

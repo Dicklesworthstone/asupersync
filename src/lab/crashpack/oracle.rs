@@ -8,9 +8,11 @@
 //! - Path outcome consistency oracle
 //! - Proof bundle validity oracle
 
-use crate::lab::oracle::evidence::{EvidenceStrength, EvidenceEntry, BayesFactor, LogLikelihoodContributions, EvidenceLine};
-use crate::lab::oracle::OracleStats;
 use crate::lab::crashpack::evidence_ledger::AtpEvidenceLedger;
+use crate::lab::oracle::OracleStats;
+use crate::lab::oracle::evidence::{
+    BayesFactor, EvidenceEntry, EvidenceLine, EvidenceStrength, LogLikelihoodContributions,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -50,7 +52,10 @@ impl AtpTransferOracle {
         // Manifest integrity check
         if self.enabled_checks.manifest_integrity {
             let evidence = self.check_manifest_integrity(state);
-            let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
+            let oracle_passed = matches!(
+                evidence.bayes_factor.strength,
+                EvidenceStrength::Against | EvidenceStrength::Negligible
+            );
 
             evidence_ledger.record_oracle_result("manifest_integrity", evidence, None);
             stats.events_recorded += 1;
@@ -64,7 +69,10 @@ impl AtpTransferOracle {
         // Journal consistency check
         if self.enabled_checks.journal_consistency {
             let evidence = self.check_journal_consistency(state);
-            let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
+            let oracle_passed = matches!(
+                evidence.bayes_factor.strength,
+                EvidenceStrength::Against | EvidenceStrength::Negligible
+            );
 
             evidence_ledger.record_oracle_result("journal_consistency", evidence, None);
             stats.events_recorded += 1;
@@ -78,7 +86,10 @@ impl AtpTransferOracle {
         // Quiescence check
         if self.enabled_checks.quiescence {
             let evidence = self.check_quiescence(state);
-            let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
+            let oracle_passed = matches!(
+                evidence.bayes_factor.strength,
+                EvidenceStrength::Against | EvidenceStrength::Negligible
+            );
 
             evidence_ledger.record_oracle_result("quiescence", evidence, None);
             stats.events_recorded += 1;
@@ -92,7 +103,10 @@ impl AtpTransferOracle {
         // Obligation leak check
         if self.enabled_checks.obligation_leak {
             let evidence = self.check_obligation_leak(state);
-            let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
+            let oracle_passed = matches!(
+                evidence.bayes_factor.strength,
+                EvidenceStrength::Against | EvidenceStrength::Negligible
+            );
 
             evidence_ledger.record_oracle_result("obligation_leak", evidence, None);
             stats.events_recorded += 1;
@@ -106,7 +120,10 @@ impl AtpTransferOracle {
         // Path consistency check
         if self.enabled_checks.path_consistency {
             let evidence = self.check_path_consistency(state);
-            let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
+            let oracle_passed = matches!(
+                evidence.bayes_factor.strength,
+                EvidenceStrength::Against | EvidenceStrength::Negligible
+            );
 
             evidence_ledger.record_oracle_result("path_consistency", evidence, None);
             stats.events_recorded += 1;
@@ -120,7 +137,10 @@ impl AtpTransferOracle {
         // Proof bundle validity check
         if self.enabled_checks.proof_bundle_validity {
             let evidence = self.check_proof_bundle_validity(state);
-            let oracle_passed = matches!(evidence.bayes_factor.strength, EvidenceStrength::Against | EvidenceStrength::Negligible);
+            let oracle_passed = matches!(
+                evidence.bayes_factor.strength,
+                EvidenceStrength::Against | EvidenceStrength::Negligible
+            );
 
             evidence_ledger.record_oracle_result("proof_bundle_validity", evidence, None);
             stats.events_recorded += 1;
@@ -150,20 +170,20 @@ impl AtpTransferOracle {
                 bayes_factor: BayesFactor {
                     log10_bf: -2.0, // Strong evidence against violation
                     hypothesis: "manifest corruption".to_string(),
-                    strength: EvidenceStrength::Strong,
+                    strength: EvidenceStrength::from_log10_bf(-2.0),
                 },
                 log_likelihoods: LogLikelihoodContributions {
                     structural: -1.0,
                     detection: -1.0,
                     total: -2.0,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(hash_match | manifest_correct) / P(hash_match | manifest_corrupted)".to_string(),
-                        substitution: "0.999 / 0.001 = 999".to_string(),
-                        intuition: "Very strong evidence that manifest is correct".to_string(),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation:
+                        "P(hash_match | manifest_correct) / P(hash_match | manifest_corrupted)"
+                            .to_string(),
+                    substitution: "0.999 / 0.001 = 999".to_string(),
+                    intuition: "Very strong evidence that manifest is correct".to_string(),
+                }],
             }
         } else {
             // Evidence for violation (manifest is corrupted)
@@ -202,20 +222,19 @@ impl AtpTransferOracle {
                 bayes_factor: BayesFactor {
                     log10_bf: -1.5,
                     hypothesis: "journal inconsistency".to_string(),
-                    strength: EvidenceStrength::Strong,
+                    strength: EvidenceStrength::from_log10_bf(-1.5),
                 },
                 log_likelihoods: LogLikelihoodContributions {
                     structural: -0.7,
                     detection: -0.8,
                     total: -1.5,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(no_gaps | journal_consistent) / P(no_gaps | journal_inconsistent)".to_string(),
-                        substitution: "0.95 / 0.05 = 19".to_string(),
-                        intuition: "Strong evidence that journal is consistent".to_string(),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(no_gaps | journal_consistent) / P(no_gaps | journal_inconsistent)"
+                        .to_string(),
+                    substitution: "0.95 / 0.05 = 19".to_string(),
+                    intuition: "Strong evidence that journal is consistent".to_string(),
+                }],
             }
         } else {
             let log_bf = (state.journal_gaps as f64).log10() + 1.0;
@@ -232,13 +251,15 @@ impl AtpTransferOracle {
                     detection: log_bf / 2.0,
                     total: log_bf,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(gaps | journal_consistent) / P(gaps | journal_inconsistent)".to_string(),
-                        substitution: format!("0.01 / 0.9 = {:.3}", 10.0_f64.powf(log_bf)),
-                        intuition: format!("Evidence of journal inconsistency: {} gaps detected", state.journal_gaps),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(gaps | journal_consistent) / P(gaps | journal_inconsistent)"
+                        .to_string(),
+                    substitution: format!("0.01 / 0.9 = {:.3}", 10.0_f64.powf(log_bf)),
+                    intuition: format!(
+                        "Evidence of journal inconsistency: {} gaps detected",
+                        state.journal_gaps
+                    ),
+                }],
             }
         }
     }
@@ -253,20 +274,19 @@ impl AtpTransferOracle {
                 bayes_factor: BayesFactor {
                     log10_bf: -1.0,
                     hypothesis: "non-quiescence".to_string(),
-                    strength: EvidenceStrength::Positive,
+                    strength: EvidenceStrength::from_log10_bf(-1.0),
                 },
                 log_likelihoods: LogLikelihoodContributions {
                     structural: -0.5,
                     detection: -0.5,
                     total: -1.0,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(no_pending | quiescent) / P(no_pending | not_quiescent)".to_string(),
-                        substitution: "0.9 / 0.1 = 9".to_string(),
-                        intuition: "Positive evidence of quiescence".to_string(),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(no_pending | quiescent) / P(no_pending | not_quiescent)"
+                        .to_string(),
+                    substitution: "0.9 / 0.1 = 9".to_string(),
+                    intuition: "Positive evidence of quiescence".to_string(),
+                }],
             }
         } else {
             let log_bf = (state.pending_operations as f64 / 10.0).log10() + 0.5;
@@ -283,13 +303,14 @@ impl AtpTransferOracle {
                     detection: log_bf / 2.0,
                     total: log_bf,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(pending | quiescent) / P(pending | not_quiescent)".to_string(),
-                        substitution: format!("0.05 / 0.8 = {:.3}", 10.0_f64.powf(log_bf)),
-                        intuition: format!("Evidence against quiescence: {} operations pending", state.pending_operations),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(pending | quiescent) / P(pending | not_quiescent)".to_string(),
+                    substitution: format!("0.05 / 0.8 = {:.3}", 10.0_f64.powf(log_bf)),
+                    intuition: format!(
+                        "Evidence against quiescence: {} operations pending",
+                        state.pending_operations
+                    ),
+                }],
             }
         }
     }
@@ -304,20 +325,19 @@ impl AtpTransferOracle {
                 bayes_factor: BayesFactor {
                     log10_bf: -1.5,
                     hypothesis: "obligation leak".to_string(),
-                    strength: EvidenceStrength::Strong,
+                    strength: EvidenceStrength::from_log10_bf(-1.5),
                 },
                 log_likelihoods: LogLikelihoodContributions {
                     structural: -0.7,
                     detection: -0.8,
                     total: -1.5,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(no_leaks | correct_cleanup) / P(no_leaks | obligation_leak)".to_string(),
-                        substitution: "0.95 / 0.05 = 19".to_string(),
-                        intuition: "Strong evidence of correct obligation cleanup".to_string(),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(no_leaks | correct_cleanup) / P(no_leaks | obligation_leak)"
+                        .to_string(),
+                    substitution: "0.95 / 0.05 = 19".to_string(),
+                    intuition: "Strong evidence of correct obligation cleanup".to_string(),
+                }],
             }
         } else {
             let log_bf = (state.leaked_obligations as f64).log10() + 1.5;
@@ -334,13 +354,14 @@ impl AtpTransferOracle {
                     detection: log_bf / 2.0,
                     total: log_bf,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(leaks | correct_cleanup) / P(leaks | obligation_leak)".to_string(),
-                        substitution: format!("0.01 / 0.95 = {:.3}", 10.0_f64.powf(log_bf)),
-                        intuition: format!("Strong evidence of obligation leak: {} leaked", state.leaked_obligations),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(leaks | correct_cleanup) / P(leaks | obligation_leak)".to_string(),
+                    substitution: format!("0.01 / 0.95 = {:.3}", 10.0_f64.powf(log_bf)),
+                    intuition: format!(
+                        "Strong evidence of obligation leak: {} leaked",
+                        state.leaked_obligations
+                    ),
+                }],
             }
         }
     }
@@ -353,20 +374,19 @@ impl AtpTransferOracle {
                 bayes_factor: BayesFactor {
                     log10_bf: -1.0,
                     hypothesis: "path inconsistency".to_string(),
-                    strength: EvidenceStrength::Positive,
+                    strength: EvidenceStrength::from_log10_bf(-1.0),
                 },
                 log_likelihoods: LogLikelihoodContributions {
                     structural: -0.5,
                     detection: -0.5,
                     total: -1.0,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(consistent | correct_paths) / P(consistent | inconsistent_paths)".to_string(),
-                        substitution: "0.9 / 0.1 = 9".to_string(),
-                        intuition: "Positive evidence of path consistency".to_string(),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(consistent | correct_paths) / P(consistent | inconsistent_paths)"
+                        .to_string(),
+                    substitution: "0.9 / 0.1 = 9".to_string(),
+                    intuition: "Positive evidence of path consistency".to_string(),
+                }],
             }
         } else {
             EvidenceEntry {
@@ -382,13 +402,13 @@ impl AtpTransferOracle {
                     detection: 1.0,
                     total: 2.0,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(inconsistent | correct_paths) / P(inconsistent | inconsistent_paths)".to_string(),
-                        substitution: "0.05 / 0.8 = 100".to_string(),
-                        intuition: "Strong evidence of path inconsistency".to_string(),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation:
+                        "P(inconsistent | correct_paths) / P(inconsistent | inconsistent_paths)"
+                            .to_string(),
+                    substitution: "0.05 / 0.8 = 100".to_string(),
+                    intuition: "Strong evidence of path inconsistency".to_string(),
+                }],
             }
         }
     }
@@ -401,20 +421,19 @@ impl AtpTransferOracle {
                 bayes_factor: BayesFactor {
                     log10_bf: -1.2,
                     hypothesis: "invalid proof bundle".to_string(),
-                    strength: EvidenceStrength::Strong,
+                    strength: EvidenceStrength::from_log10_bf(-1.2),
                 },
                 log_likelihoods: LogLikelihoodContributions {
                     structural: -0.6,
                     detection: -0.6,
                     total: -1.2,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(valid_bundle | correct_proof) / P(valid_bundle | invalid_proof)".to_string(),
-                        substitution: "0.92 / 0.08 = 11.5".to_string(),
-                        intuition: "Strong evidence of valid proof bundle".to_string(),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(valid_bundle | correct_proof) / P(valid_bundle | invalid_proof)"
+                        .to_string(),
+                    substitution: "0.92 / 0.08 = 11.5".to_string(),
+                    intuition: "Strong evidence of valid proof bundle".to_string(),
+                }],
             }
         } else {
             EvidenceEntry {
@@ -430,13 +449,13 @@ impl AtpTransferOracle {
                     detection: 0.9,
                     total: 1.8,
                 },
-                evidence_lines: vec![
-                    EvidenceLine {
-                        equation: "P(invalid_bundle | correct_proof) / P(invalid_bundle | invalid_proof)".to_string(),
-                        substitution: "0.02 / 0.9 = 63".to_string(),
-                        intuition: "Strong evidence of invalid proof bundle".to_string(),
-                    },
-                ],
+                evidence_lines: vec![EvidenceLine {
+                    equation:
+                        "P(invalid_bundle | correct_proof) / P(invalid_bundle | invalid_proof)"
+                            .to_string(),
+                    substitution: "0.02 / 0.9 = 63".to_string(),
+                    intuition: "Strong evidence of invalid proof bundle".to_string(),
+                }],
             }
         }
     }
@@ -558,6 +577,78 @@ impl AtpOracleResult {
 
     /// Check if there are any high-confidence violations.
     pub fn has_strong_violations(&self) -> bool {
-        self.evidence_ledger.evidence_summary().has_strong_violations()
+        self.evidence_ledger
+            .evidence_summary()
+            .has_strong_violations()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lab::oracle::evidence::EvidenceStrength;
+
+    #[test]
+    fn clean_transfer_passes_all_enabled_oracles() {
+        let result = AtpTransferOracle::new("clean_transfer").validate(&AtpTransferState::clean());
+        let summary = result.evidence_ledger.evidence_summary();
+
+        assert!(
+            result.passed,
+            "clean transfer should not be classified as a violation"
+        );
+        assert_eq!(result.stats.events_recorded, 6);
+        assert_eq!(result.stats.entities_tracked, 0);
+        assert_eq!(summary.total, 6);
+        assert_eq!(summary.against, 6);
+        assert_eq!(summary.violation_count(), 0);
+        assert!(!result.has_strong_violations());
+    }
+
+    #[test]
+    fn clean_basic_oracle_records_only_basic_checks_as_passing() {
+        let result = AtpTransferOracle::basic().validate(&AtpTransferState::clean());
+        let summary = result.evidence_ledger.evidence_summary();
+
+        assert!(result.passed);
+        assert_eq!(result.stats.events_recorded, 3);
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.against, 3);
+        assert_eq!(summary.violation_count(), 0);
+    }
+
+    #[test]
+    fn corrupted_transfer_fails_with_violation_strength() {
+        let mut state = AtpTransferState::clean();
+        state.manifest_hash = "tampered".to_string();
+        state.journal_gaps = 2;
+        state.leaked_obligations = 1;
+        state.proof_bundle_valid = false;
+
+        let result = AtpTransferOracle::new("corrupted_transfer").validate(&state);
+        let summary = result.evidence_ledger.evidence_summary();
+
+        assert!(!result.passed);
+        assert_eq!(result.stats.events_recorded, 6);
+        assert_eq!(result.stats.entities_tracked, 4);
+        assert_eq!(summary.against, 2);
+        assert_eq!(summary.violation_count(), 4);
+        assert!(result.has_strong_violations());
+    }
+
+    #[test]
+    fn negative_log_bayes_factor_maps_to_against_violation() {
+        for entry in &AtpTransferOracle::new("polarity")
+            .validate(&AtpTransferState::clean())
+            .evidence_ledger
+            .entries
+        {
+            assert_eq!(
+                entry.evidence.bayes_factor.strength,
+                EvidenceStrength::Against,
+                "{} should provide evidence against violation",
+                entry.oracle_name
+            );
+        }
     }
 }
