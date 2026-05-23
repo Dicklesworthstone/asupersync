@@ -82,6 +82,48 @@ fn pressure_scenario(seed: u64) -> SwarmPressureScenario {
     }
 }
 
+fn agent_scale_pressure_scenario(seed: u64, agent_count: usize) -> SwarmPressureScenario {
+    let proof_tasks = agent_count / 2;
+    let cleanup_requests = (agent_count / 25).max(1);
+    SwarmPressureScenario {
+        scenario_id: format!("asw-pressure-{agent_count}-agent-workload"),
+        seed,
+        worker_count: agent_count.clamp(4, 64),
+        interactive_tasks: agent_count,
+        proof_tasks,
+        cleanup_requests,
+        rch_workers_initial: (agent_count / 8).clamp(2, 24),
+        disk_pressure_transitions: vec![
+            SwarmDiskPressureTransition {
+                at_step: 0,
+                level: SwarmDiskPressureLevel::Green,
+            },
+            SwarmDiskPressureTransition {
+                at_step: 1,
+                level: SwarmDiskPressureLevel::Red,
+            },
+            SwarmDiskPressureTransition {
+                at_step: 32,
+                level: SwarmDiskPressureLevel::Green,
+            },
+        ],
+        rch_worker_events: vec![
+            SwarmRchWorkerEvent {
+                at_step: 4,
+                kind: SwarmRchWorkerEventKind::Loss,
+                worker_delta: (agent_count / 8).clamp(2, 24),
+            },
+            SwarmRchWorkerEvent {
+                at_step: 40,
+                kind: SwarmRchWorkerEventKind::Recovery,
+                worker_delta: (agent_count / 10).max(2),
+            },
+        ],
+        interactive_latency_bound_steps: 4,
+        max_steps: 50_000,
+    }
+}
+
 #[test]
 fn swarm_replay_summary_is_byte_stable_for_same_seed() {
     let scenario = cancellation_scenario(0x5A5A_2026);
@@ -198,6 +240,86 @@ fn swarm_pressure_simulator_models_64_workers_red_disk_and_rch_recovery() {
         first_json, second_json,
         "pressure summary JSON must be byte stable"
     );
+}
+
+#[test]
+fn swarm_pressure_simulator_bounds_10_50_200_agent_workloads() {
+    for (seed, agent_count) in [
+        (0xA5A5_0010, 10usize),
+        (0xA5A5_0050, 50usize),
+        (0xA5A5_0200, 200usize),
+    ] {
+        let scenario = agent_scale_pressure_scenario(seed, agent_count);
+        let first = run_swarm_pressure_scenario(&scenario).expect("first agent-scale run");
+        let second = run_swarm_pressure_scenario(&scenario).expect("second agent-scale run");
+
+        assert_eq!(
+            first, second,
+            "{agent_count}-agent scenario must replay identically"
+        );
+        assert_eq!(first.schema_version, SWARM_PRESSURE_SCHEMA_VERSION);
+        assert_eq!(first.interactive_tasks, agent_count);
+        assert!(
+            first.quiescent,
+            "{agent_count}-agent pressure run must drain to quiescence"
+        );
+        assert_eq!(
+            first.task_leaks, 0,
+            "{agent_count}-agent pressure run must not leak tasks"
+        );
+        assert_eq!(first.non_terminal_task_count, 0);
+        assert_eq!(first.terminal_task_count, first.scheduled_task_count);
+        assert!(
+            first.max_interactive_admission_latency_steps <= first.interactive_latency_bound_steps,
+            "{agent_count}-agent interactive admission must remain bounded"
+        );
+        assert_eq!(
+            first.cleanup_authorization_required_count, scenario.cleanup_requests,
+            "{agent_count}-agent cleanup work must stay an explicit handoff"
+        );
+        assert_eq!(
+            first.auto_delete_command_count, 0,
+            "{agent_count}-agent simulator must never emit auto-delete commands"
+        );
+        assert!(
+            first.proof_throttled_count > 0,
+            "{agent_count}-agent proof lane must throttle under unsafe disk/rch pressure"
+        );
+        assert!(
+            first
+                .event_log
+                .iter()
+                .filter(|event| event.kind == SwarmPressureEventKind::CleanupRequested)
+                .all(|event| !event.cleanup_authorized && event.auto_delete_command_count == 0),
+            "{agent_count}-agent cleanup events must remain report-only"
+        );
+        assert!(
+            first.event_log.iter().any(|event| {
+                event.kind == SwarmPressureEventKind::ProofThrottled
+                    && (event.disk_pressure == SwarmDiskPressureLevel::Red
+                        || event.rch_workers_available == 0)
+            }),
+            "{agent_count}-agent proof throttling must cite unsafe disk/rch pressure"
+        );
+        let max_queue_depth = first
+            .event_log
+            .iter()
+            .map(|event| event.queue_depth)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_queue_depth < agent_count,
+            "{agent_count}-agent modeled queue depth must stay within submitted work"
+        );
+
+        let first_json = serde_json::to_vec(&first).expect("serialize first agent-scale summary");
+        let second_json =
+            serde_json::to_vec(&second).expect("serialize second agent-scale summary");
+        assert_eq!(
+            first_json, second_json,
+            "{agent_count}-agent JSON summary must be byte stable"
+        );
+    }
 }
 
 #[test]
