@@ -251,6 +251,8 @@ pub mod http_grpc_protocol_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod lab_trace_observability_security_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod messaging_scheduler_deep_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod net_http_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod obligation_combinator_metamorphic_tests;
