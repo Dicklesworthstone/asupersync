@@ -207,24 +207,7 @@ impl AtpReplayCoordinator {
         }
 
         let replay_command = read_replay_artifact(&output_dir.join("replay_command.sh"))?;
-        for token in [
-            "asupersync atp replay",
-            "--trace-file",
-            "transfer.atp-trace",
-            "--manifest",
-            "manifest",
-            "--journal-digest",
-            "journal.digest",
-            "--evidence-ledger",
-            "evidence-ledger.json",
-            "--validate-oracles",
-        ] {
-            if !replay_command.contains(token) {
-                return Err(replay_validation_failed(format!(
-                    "replay command is missing required token {token}"
-                )));
-            }
-        }
+        validate_replay_command(output_dir, &replay_command)?;
 
         Ok(AtpReplayArtifactReport {
             trace_events: trace_events.len(),
@@ -787,6 +770,16 @@ const REQUIRED_LEDGER_ARTIFACT_PATHS: &[&str] = &[
     "replay_command.sh",
 ];
 
+const REQUIRED_REPLAY_COMMAND_ARTIFACT_FLAGS: &[(&str, &str)] = &[
+    ("--trace-file", "transfer.atp-trace"),
+    ("--manifest", "manifest"),
+    ("--journal-digest", "journal.digest"),
+    ("--evidence-ledger", "evidence-ledger.json"),
+    ("--pathlog", "pathlog"),
+    ("--quiclog", "quiclog"),
+    ("--repairlog", "repairlog"),
+];
+
 fn read_replay_artifact(path: &Path) -> Result<String, ReplayError> {
     std::fs::read_to_string(path).map_err(|err| {
         replay_validation_failed(format!(
@@ -839,6 +832,142 @@ fn validate_manifest_reference(
     }
 
     Ok(())
+}
+
+fn validate_replay_command(output_dir: &Path, replay_command: &str) -> Result<(), ReplayError> {
+    let tokens = replay_invocation_tokens(replay_command)?;
+    for (flag, artifact) in REQUIRED_REPLAY_COMMAND_ARTIFACT_FLAGS {
+        let actual = replay_command_flag_value(&tokens, flag)?;
+        if !replay_command_arg_matches_artifact(&actual, output_dir, artifact) {
+            return Err(replay_validation_failed(format!(
+                "replay command flag {flag} mismatch: recorded {actual}, expected {artifact}"
+            )));
+        }
+    }
+
+    if !tokens.iter().any(|token| token == "--validate-oracles") {
+        return Err(replay_validation_failed(
+            "replay command is missing --validate-oracles",
+        ));
+    }
+
+    Ok(())
+}
+
+fn replay_invocation_tokens(replay_command: &str) -> Result<Vec<String>, ReplayError> {
+    for line in replay_command.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("export ") {
+            continue;
+        }
+
+        let tokens = shell_tokens(line)?;
+        if let Some(start) = tokens.windows(3).position(|window| {
+            window[0] == "asupersync" && window[1] == "atp" && window[2] == "replay"
+        }) {
+            return Ok(tokens[start..].to_vec());
+        }
+    }
+
+    Err(replay_validation_failed(
+        "replay command is missing asupersync atp replay invocation",
+    ))
+}
+
+fn replay_command_flag_value(tokens: &[String], flag: &str) -> Result<String, ReplayError> {
+    let mut value = None;
+    let mut count = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        if token != flag {
+            continue;
+        }
+        count += 1;
+        let Some(next) = tokens.get(index + 1) else {
+            return Err(replay_validation_failed(format!(
+                "replay command flag {flag} is missing a value"
+            )));
+        };
+        if next.starts_with("--") {
+            return Err(replay_validation_failed(format!(
+                "replay command flag {flag} is missing a value"
+            )));
+        }
+        value = Some(next.clone());
+    }
+
+    match (count, value) {
+        (0, _) => Err(replay_validation_failed(format!(
+            "replay command is missing {flag}"
+        ))),
+        (1, Some(value)) => Ok(value),
+        _ => Err(replay_validation_failed(format!(
+            "replay command has duplicate {flag} flags"
+        ))),
+    }
+}
+
+fn replay_command_arg_matches_artifact(actual: &str, output_dir: &Path, artifact: &str) -> bool {
+    actual == artifact || actual == output_dir.join(artifact).display().to_string()
+}
+
+fn shell_tokens(line: &str) -> Result<Vec<String>, ReplayError> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut token_started = false;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    for ch in line.chars() {
+        if in_single_quote {
+            if ch == '\'' {
+                in_single_quote = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if in_double_quote {
+            if ch == '"' {
+                in_double_quote = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                token_started = true;
+                in_single_quote = true;
+            }
+            '"' => {
+                token_started = true;
+                in_double_quote = true;
+            }
+            ch if ch.is_ascii_whitespace() => {
+                if token_started {
+                    tokens.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            _ => {
+                token_started = true;
+                current.push(ch);
+            }
+        }
+    }
+
+    if in_single_quote || in_double_quote {
+        return Err(replay_validation_failed(
+            "replay command contains unterminated shell quote",
+        ));
+    }
+    if token_started {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
 }
 
 fn replay_validation_failed(message: impl Into<String>) -> ReplayError {

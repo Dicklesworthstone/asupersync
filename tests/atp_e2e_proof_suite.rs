@@ -635,6 +635,31 @@ fn test_atp_replay_artifacts_reject_ledger_entry_detached_from_trace_artifact()
 }
 
 #[test]
+fn test_atp_replay_artifacts_reject_replay_command_detached_from_log_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let crashpack = CrashpackBuilder::new().build().expect("crashpack builds");
+
+    crashpack.emit_atp_trace(temp_dir.path())?;
+
+    let replay_command_path = temp_dir.path().join("replay_command.sh");
+    let replay_command = std::fs::read_to_string(&replay_command_path)?;
+    std::fs::write(
+        &replay_command_path,
+        replay_command.replace("--pathlog pathlog", "--pathlog stale-pathlog"),
+    )?;
+
+    let err = AtpReplayCoordinator::validate_replay_artifacts(temp_dir.path())
+        .expect_err("replay command must keep pathlog bound to emitted artifact");
+    assert!(
+        err.to_string().contains("flag --pathlog mismatch"),
+        "unexpected replay artifact validation error: {err}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_atp_crashpack_quotes_oracle_replay_args() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let crashpack = CrashpackBuilder::new()
