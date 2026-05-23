@@ -363,6 +363,16 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
         metrics.live_workload_feedback_reports,
         workload_count as u64
     );
+    let live_audit = governor.workload_lease_audit_snapshot();
+    assert_eq!(live_audit.live_lease_count, workload_count as u64);
+    assert_eq!(live_audit.terminal_lease_count, 0);
+    assert_eq!(live_audit.live_unregistered_region_count, 0);
+    assert_eq!(live_audit.live_expired_count, 0);
+    assert!(
+        !live_audit.leak_detected,
+        "deterministic live workload fixture should be leak-free: {}",
+        live_audit.reason
+    );
 
     let fingerprint = schedule
         .iter()
@@ -400,6 +410,15 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
     assert_eq!(metrics.active_workload_lease_count, 0);
     assert_eq!(metrics.terminal_workload_lease_count, workload_count as u64);
     assert_eq!(metrics.live_workload_feedback_reports, 0);
+    let terminal_audit = governor.workload_lease_audit_snapshot();
+    assert_eq!(terminal_audit.live_lease_count, 0);
+    assert_eq!(terminal_audit.terminal_lease_count, workload_count as u64);
+    assert_eq!(terminal_audit.terminal_missing_terminal_at_count, 0);
+    assert!(
+        !terminal_audit.leak_detected,
+        "deterministic terminal workload fixture should be leak-free: {}",
+        terminal_audit.reason
+    );
     assert_eq!(lab.run_until_quiescent(), 0);
 
     fingerprint

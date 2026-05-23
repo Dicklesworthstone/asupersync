@@ -969,6 +969,39 @@ pub struct SwarmWorkloadLeaseScheduleEntry {
     pub reason: String,
 }
 
+/// Read-only audit snapshot for linear workload-lease invariants.
+#[derive(Debug, Clone)]
+pub struct SwarmWorkloadLeaseAuditSnapshot {
+    /// Total live leases in `Active` or `Committed` state.
+    pub live_lease_count: u64,
+    /// Live leases still awaiting explicit commit.
+    pub active_lease_count: u64,
+    /// Live leases committed to caller-owned regions.
+    pub committed_lease_count: u64,
+    /// Total terminal leases retained for audit.
+    pub terminal_lease_count: u64,
+    /// Terminal leases released normally or by region close.
+    pub released_lease_count: u64,
+    /// Terminal leases aborted after cancellation or failed startup.
+    pub aborted_lease_count: u64,
+    /// Terminal leases expired by deadline.
+    pub expired_lease_count: u64,
+    /// Live leases whose bound region no longer has a registered envelope.
+    pub live_unregistered_region_count: u64,
+    /// Live leases whose expiry has already passed and need expiry processing.
+    pub live_expired_count: u64,
+    /// Terminal leases missing a terminal timestamp.
+    pub terminal_missing_terminal_at_count: u64,
+    /// Extra live leases sharing a workload id with another live lease.
+    pub duplicate_live_workload_id_count: u64,
+    /// Extra live leases sharing a reservation scope with another live lease.
+    pub duplicate_live_reservation_scope_count: u64,
+    /// True when any linear-obligation invariant violation is present.
+    pub leak_detected: bool,
+    /// Structured audit reason for logs and proof artifacts.
+    pub reason: String,
+}
+
 /// Typed workload context bound to an admission decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwarmAdmissionWorkloadReceipt {
@@ -1748,6 +1781,96 @@ impl SwarmPressureGovernor {
                 )
             })
             .collect()
+    }
+
+    /// Return a read-only audit snapshot for workload lease linearity.
+    ///
+    /// This deliberately does not mutate stale leases. Callers can use
+    /// `expire_stale_workload_leases` or region-close release paths after
+    /// observing the snapshot.
+    pub fn workload_lease_audit_snapshot(&self) -> SwarmWorkloadLeaseAuditSnapshot {
+        let now = Instant::now();
+        let mut active_lease_count = 0u64;
+        let mut committed_lease_count = 0u64;
+        let mut released_lease_count = 0u64;
+        let mut aborted_lease_count = 0u64;
+        let mut expired_lease_count = 0u64;
+        let mut live_unregistered_region_count = 0u64;
+        let mut live_expired_count = 0u64;
+        let mut terminal_missing_terminal_at_count = 0u64;
+        let mut live_workload_ids: HashMap<String, u64> = HashMap::new();
+        let mut live_reservation_scopes: HashMap<String, u64> = HashMap::new();
+
+        {
+            let active_regions = self.active_regions.lock().unwrap();
+            let leases = self.workload_leases.lock().unwrap();
+            for lease in leases.values() {
+                match lease.state {
+                    SwarmWorkloadLeaseState::Active => active_lease_count += 1,
+                    SwarmWorkloadLeaseState::Committed => committed_lease_count += 1,
+                    SwarmWorkloadLeaseState::Released => released_lease_count += 1,
+                    SwarmWorkloadLeaseState::Aborted => aborted_lease_count += 1,
+                    SwarmWorkloadLeaseState::Expired => expired_lease_count += 1,
+                }
+
+                if lease.state.is_live() {
+                    if !active_regions.contains_key(&lease.region_id) {
+                        live_unregistered_region_count += 1;
+                    }
+                    if lease.expires_at <= now {
+                        live_expired_count += 1;
+                    }
+                    *live_workload_ids
+                        .entry(lease.workload_id.trim().to_string())
+                        .or_insert(0) += 1;
+                    if let Some(scope) = lease
+                        .owner
+                        .reservation_scope
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|scope| !scope.is_empty())
+                    {
+                        *live_reservation_scopes
+                            .entry(scope.to_string())
+                            .or_insert(0) += 1;
+                    }
+                } else if lease.terminal_at.is_none() {
+                    terminal_missing_terminal_at_count += 1;
+                }
+            }
+        }
+
+        let duplicate_live_workload_id_count =
+            duplicate_count_from_group_counts(live_workload_ids.values());
+        let duplicate_live_reservation_scope_count =
+            duplicate_count_from_group_counts(live_reservation_scopes.values());
+        let live_lease_count = active_lease_count + committed_lease_count;
+        let terminal_lease_count = released_lease_count + aborted_lease_count + expired_lease_count;
+        let leak_detected = live_unregistered_region_count > 0
+            || live_expired_count > 0
+            || terminal_missing_terminal_at_count > 0
+            || duplicate_live_workload_id_count > 0
+            || duplicate_live_reservation_scope_count > 0;
+        let reason = format!(
+            "workload_lease_audit live_lease_count={live_lease_count} active_lease_count={active_lease_count} committed_lease_count={committed_lease_count} terminal_lease_count={terminal_lease_count} released_lease_count={released_lease_count} aborted_lease_count={aborted_lease_count} expired_lease_count={expired_lease_count} live_unregistered_region_count={live_unregistered_region_count} live_expired_count={live_expired_count} terminal_missing_terminal_at_count={terminal_missing_terminal_at_count} duplicate_live_workload_id_count={duplicate_live_workload_id_count} duplicate_live_reservation_scope_count={duplicate_live_reservation_scope_count} leak_detected={leak_detected}"
+        );
+
+        SwarmWorkloadLeaseAuditSnapshot {
+            live_lease_count,
+            active_lease_count,
+            committed_lease_count,
+            terminal_lease_count,
+            released_lease_count,
+            aborted_lease_count,
+            expired_lease_count,
+            live_unregistered_region_count,
+            live_expired_count,
+            terminal_missing_terminal_at_count,
+            duplicate_live_workload_id_count,
+            duplicate_live_reservation_scope_count,
+            leak_detected,
+            reason,
+        }
     }
 
     /// Record the latest pressure report from a peer runtime instance.
@@ -2940,6 +3063,13 @@ fn duration_as_u64_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
 }
 
+fn duplicate_count_from_group_counts<'a>(counts: impl Iterator<Item = &'a u64>) -> u64 {
+    counts
+        .filter(|count| **count > 1)
+        .map(|count| count.saturating_sub(1))
+        .sum()
+}
+
 fn optional_reason_field(value: Option<&str>) -> &str {
     value
         .map(str::trim)
@@ -4082,6 +4212,106 @@ mod tests {
             receipts[0]
                 .reason
                 .contains("workload lease released by region close")
+        );
+    }
+
+    #[test]
+    fn test_workload_lease_audit_snapshot_reports_linear_obligation_invariants() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let region_id = RegionId::new_for_test(54, 3);
+        let duplicate_region_id = RegionId::new_for_test(54, 4);
+        let request = SwarmWorkloadAdmissionRequest::new(
+            "lease-audit",
+            SwarmAdmissionOwner::new("DustyGorge")
+                .with_reservation_scope("src/observability/swarm_pressure_governor.rs"),
+        );
+        let decision = governor
+            .check_workload_admission(&cx, &request)
+            .expect("workload admission should classify");
+        let envelope = decision
+            .envelope
+            .clone()
+            .expect("admitted workload should include an envelope");
+        let lease = governor
+            .acquire_workload_lease(region_id, &request, &decision)
+            .expect("admitted workload should acquire");
+
+        let unbound_audit = governor.workload_lease_audit_snapshot();
+        assert_eq!(unbound_audit.live_lease_count, 1);
+        assert_eq!(unbound_audit.active_lease_count, 1);
+        assert_eq!(unbound_audit.live_unregistered_region_count, 1);
+        assert!(unbound_audit.leak_detected, "{}", unbound_audit.reason);
+        assert!(
+            unbound_audit
+                .reason
+                .contains("live_unregistered_region_count=1")
+        );
+
+        governor.register_region_envelope(region_id, envelope.clone());
+        let bound_audit = governor.workload_lease_audit_snapshot();
+        assert_eq!(bound_audit.live_unregistered_region_count, 0);
+        assert!(!bound_audit.leak_detected, "{}", bound_audit.reason);
+
+        governor
+            .commit_workload_lease(lease.lease_id)
+            .expect("bound lease should commit");
+        governor.register_region_envelope(duplicate_region_id, envelope);
+        let duplicate_id = SwarmWorkloadLeaseId::new_for_test(99_001);
+        {
+            let mut leases = governor.workload_leases.lock().unwrap();
+            let mut duplicate = leases
+                .get(&lease.lease_id)
+                .expect("original lease should exist")
+                .clone();
+            duplicate.lease_id = duplicate_id;
+            duplicate.region_id = duplicate_region_id;
+            duplicate.state = SwarmWorkloadLeaseState::Active;
+            duplicate.terminal_at = None;
+            leases.insert(duplicate_id, duplicate);
+        }
+
+        let duplicate_audit = governor.workload_lease_audit_snapshot();
+        assert_eq!(duplicate_audit.live_lease_count, 2);
+        assert_eq!(duplicate_audit.duplicate_live_workload_id_count, 1);
+        assert_eq!(duplicate_audit.duplicate_live_reservation_scope_count, 1);
+        assert!(duplicate_audit.leak_detected, "{}", duplicate_audit.reason);
+
+        {
+            let mut leases = governor.workload_leases.lock().unwrap();
+            let duplicate = leases
+                .get_mut(&duplicate_id)
+                .expect("duplicate lease should exist");
+            duplicate.state = SwarmWorkloadLeaseState::Aborted;
+            duplicate.terminal_at = Some(Instant::now());
+        }
+        governor
+            .release_workload_lease(lease.lease_id)
+            .expect("original lease should release");
+        let terminal_audit = governor.workload_lease_audit_snapshot();
+        assert_eq!(terminal_audit.live_lease_count, 0);
+        assert_eq!(terminal_audit.terminal_lease_count, 2);
+        assert!(!terminal_audit.leak_detected, "{}", terminal_audit.reason);
+
+        {
+            let mut leases = governor.workload_leases.lock().unwrap();
+            leases
+                .get_mut(&lease.lease_id)
+                .expect("released lease should exist")
+                .terminal_at = None;
+        }
+        let missing_terminal_audit = governor.workload_lease_audit_snapshot();
+        assert_eq!(missing_terminal_audit.terminal_missing_terminal_at_count, 1);
+        assert!(
+            missing_terminal_audit.leak_detected,
+            "{}",
+            missing_terminal_audit.reason
         );
     }
 
