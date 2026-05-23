@@ -35,13 +35,12 @@
 //! - MUST: Connection lifecycle follows proper state machine
 //! - SHOULD: Pool sizing adapts to workload patterns
 
-#[allow(dead_code)]
-
+#![allow(dead_code)]
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 #[cfg(test)]
@@ -125,8 +124,8 @@ pub struct MockPgProtocol {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransactionStatus {
-    Idle,           // 'I'
-    InTransaction,  // 'T'
+    Idle,                // 'I'
+    InTransaction,       // 'T'
     InFailedTransaction, // 'E'
 }
 
@@ -181,7 +180,11 @@ impl MockPgProtocol {
         }
     }
 
-    pub fn process_startup_message(&mut self, username: &str, database: &str) -> Result<Vec<PgMessage>, String> {
+    pub fn process_startup_message(
+        &mut self,
+        username: &str,
+        database: &str,
+    ) -> Result<Vec<PgMessage>, String> {
         if username.is_empty() || database.is_empty() {
             return Err("Username and database required".to_string());
         }
@@ -197,7 +200,11 @@ impl MockPgProtocol {
         }])
     }
 
-    pub fn process_scram_initial_response(&mut self, username: &str, client_nonce: &str) -> Result<Vec<PgMessage>, String> {
+    pub fn process_scram_initial_response(
+        &mut self,
+        username: &str,
+        client_nonce: &str,
+    ) -> Result<Vec<PgMessage>, String> {
         if client_nonce.len() < 16 {
             return Err("Client nonce too short".to_string());
         }
@@ -228,8 +235,13 @@ impl MockPgProtocol {
         }])
     }
 
-    pub fn process_scram_final_message(&mut self, client_final_message: &str) -> Result<Vec<PgMessage>, String> {
-        let _scram_state = self.scram_state.as_mut()
+    pub fn process_scram_final_message(
+        &mut self,
+        client_final_message: &str,
+    ) -> Result<Vec<PgMessage>, String> {
+        let _scram_state = self
+            .scram_state
+            .as_mut()
             .ok_or("SCRAM state not initialized")?;
 
         // Validate client-final-message format
@@ -258,7 +270,7 @@ impl MockPgProtocol {
             },
             PgMessage {
                 msg_type: PgMessageType::BackendKeyData,
-                payload: vec![0, 0, 0, 123, 0, 0, 0, 456], // process_id=123, secret_key=456
+                payload: vec![0, 0, 0, 123, 0, 0, 1, 200], // process_id=123, secret_key=456
             },
             PgMessage {
                 msg_type: PgMessageType::ReadyForQuery,
@@ -267,7 +279,12 @@ impl MockPgProtocol {
         ])
     }
 
-    pub fn process_parse_message(&mut self, statement_name: &str, query: &str, param_types: &[u32]) -> Result<Vec<PgMessage>, String> {
+    pub fn process_parse_message(
+        &mut self,
+        statement_name: &str,
+        query: &str,
+        param_types: &[u32],
+    ) -> Result<Vec<PgMessage>, String> {
         let prepared = PreparedStatement {
             name: statement_name.to_string(),
             query: query.to_string(),
@@ -275,7 +292,8 @@ impl MockPgProtocol {
             result_columns: self.infer_result_columns(query),
         };
 
-        self.prepared_statements.insert(statement_name.to_string(), prepared);
+        self.prepared_statements
+            .insert(statement_name.to_string(), prepared);
 
         Ok(vec![PgMessage {
             msg_type: PgMessageType::Parse,
@@ -283,8 +301,14 @@ impl MockPgProtocol {
         }])
     }
 
-    pub fn process_bind_message(&self, statement_name: &str, parameters: &[Vec<u8>]) -> Result<Vec<PgMessage>, String> {
-        let statement = self.prepared_statements.get(statement_name)
+    pub fn process_bind_message(
+        &self,
+        statement_name: &str,
+        parameters: &[Vec<u8>],
+    ) -> Result<Vec<PgMessage>, String> {
+        let statement = self
+            .prepared_statements
+            .get(statement_name)
             .ok_or("Prepared statement not found")?;
 
         if parameters.len() != statement.parameter_types.len() {
@@ -367,10 +391,10 @@ impl MockPgProtocol {
 
     fn validate_parameter_type(&self, expected_oid: u32, param_bytes: &[u8]) -> bool {
         match expected_oid {
-            23 => param_bytes.len() == 4, // INT4
-            25 => true, // TEXT - any length
+            23 => param_bytes.len() == 4,   // INT4
+            25 => true,                     // TEXT - any length
             1700 => param_bytes.len() >= 4, // NUMERIC
-            _ => true, // Accept any unknown type for testing
+            _ => true,                      // Accept any unknown type for testing
         }
     }
 
@@ -526,7 +550,13 @@ impl MockSqlParser {
 
     pub fn regenerate(&self, statement: &SqlStatement) -> String {
         match statement {
-            SqlStatement::Select { columns, from, where_clause, order_by, limit } => {
+            SqlStatement::Select {
+                columns,
+                from,
+                where_clause,
+                order_by,
+                limit,
+            } => {
                 let mut sql = format!("SELECT {} FROM {}", columns.join(", "), from);
 
                 if let Some(where_clause) = where_clause {
@@ -543,17 +573,38 @@ impl MockSqlParser {
 
                 sql
             }
-            SqlStatement::Insert { table, columns, values } => {
+            SqlStatement::Insert {
+                table,
+                columns,
+                values,
+            } => {
                 let columns_str = columns.join(", ");
-                let values_str = values.iter()
-                    .map(|row| format!("({})", row.iter().map(|v| self.value_to_string(v)).collect::<Vec<_>>().join(", ")))
+                let values_str = values
+                    .iter()
+                    .map(|row| {
+                        format!(
+                            "({})",
+                            row.iter()
+                                .map(|v| self.value_to_string(v))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
 
-                format!("INSERT INTO {} ({}) VALUES {}", table, columns_str, values_str)
+                format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    table, columns_str, values_str
+                )
             }
-            SqlStatement::Update { table, assignments, where_clause } => {
-                let assignments_str = assignments.iter()
+            SqlStatement::Update {
+                table,
+                assignments,
+                where_clause,
+            } => {
+                let assignments_str = assignments
+                    .iter()
                     .map(|(col, val)| format!("{} = {}", col, self.value_to_string(val)))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -566,7 +617,10 @@ impl MockSqlParser {
 
                 sql
             }
-            SqlStatement::Delete { table, where_clause } => {
+            SqlStatement::Delete {
+                table,
+                where_clause,
+            } => {
                 let mut sql = format!("DELETE FROM {}", table);
 
                 if let Some(where_clause) = where_clause {
@@ -576,7 +630,8 @@ impl MockSqlParser {
                 sql
             }
             SqlStatement::CreateTable { name, columns } => {
-                let columns_str = columns.iter()
+                let columns_str = columns
+                    .iter()
                     .map(|col| {
                         let mut def = format!("{} {}", col.name, col.data_type);
                         if !col.nullable {
@@ -605,7 +660,10 @@ impl MockSqlParser {
         // Simplified SELECT parser for testing
         let parts: Vec<&str> = sql.split_whitespace().collect();
 
-        if parts.len() < 4 || parts[0].to_lowercase() != "select" || parts[2].to_lowercase() != "from" {
+        if parts.len() < 4
+            || parts[0].to_lowercase() != "select"
+            || parts[2].to_lowercase() != "from"
+        {
             return Err("Invalid SELECT syntax".to_string());
         }
 
@@ -647,9 +705,16 @@ impl MockSqlParser {
         // Extract table name (simplified)
         let table = "test_table".to_string();
         let columns = vec!["col1".to_string(), "col2".to_string()];
-        let values = vec![vec![SqlValue::Integer(1), SqlValue::Text("test".to_string())]];
+        let values = vec![vec![
+            SqlValue::Integer(1),
+            SqlValue::Text("test".to_string()),
+        ]];
 
-        Ok(SqlStatement::Insert { table, columns, values })
+        Ok(SqlStatement::Insert {
+            table,
+            columns,
+            values,
+        })
     }
 
     fn parse_update(&self, _sql: &str) -> Result<SqlStatement, String> {
@@ -786,7 +851,10 @@ impl ConnectionManager<MockConnection> for MockConnectionManager {
 }
 
 impl<T: Clone> MockConnectionPool<T> {
-    pub fn new(max_size: usize, _manager: Arc<dyn ConnectionManager<T, Error = String> + Send + Sync>) -> Self {
+    pub fn new(
+        max_size: usize,
+        _manager: Arc<dyn ConnectionManager<T, Error = String> + Send + Sync>,
+    ) -> Self {
         Self {
             connections: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             active_count: Arc::new(AtomicUsize::new(0)),
@@ -799,7 +867,10 @@ impl<T: Clone> MockConnectionPool<T> {
         }
     }
 
-    pub fn get_connection(&self, manager: &dyn ConnectionManager<T, Error = String>) -> Result<PooledConnection<T>, String> {
+    pub fn get_connection(
+        &self,
+        manager: &dyn ConnectionManager<T, Error = String>,
+    ) -> Result<PooledConnection<T>, String> {
         // Try to get an existing connection
         let mut connections = self.connections.lock();
 
@@ -860,7 +931,10 @@ impl<T: Clone> MockConnectionPool<T> {
         }
     }
 
-    pub fn health_check(&self, manager: &dyn ConnectionManager<T, Error = String>) -> Result<HealthCheckResult, String> {
+    pub fn health_check(
+        &self,
+        manager: &dyn ConnectionManager<T, Error = String>,
+    ) -> Result<HealthCheckResult, String> {
         let mut last_check = self.last_health_check.lock();
         let now = SystemTime::now();
 
@@ -994,7 +1068,11 @@ impl TransactionIsolationTester {
         self.next_transaction_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn execute_operation(&self, tx_id: TransactionId, operation: &TransactionOperation) -> Result<Option<i32>, String> {
+    pub fn execute_operation(
+        &self,
+        tx_id: TransactionId,
+        operation: &TransactionOperation,
+    ) -> Result<Option<i32>, String> {
         match operation.operation_type {
             OperationType::Read => self.read_value(tx_id, &operation.key),
             OperationType::Write => {
@@ -1153,7 +1231,7 @@ impl TransactionIsolationTester {
 
         match self.isolation_level {
             IsolationLevel::ReadUncommitted => Ok(result.is_ok()), // Should allow dirty read
-            _ => Ok(result.is_err()), // Should prevent dirty read
+            _ => Ok(result.is_err()),                              // Should prevent dirty read
         }
     }
 
@@ -1205,7 +1283,7 @@ impl TransactionIsolationTester {
         // Simplified phantom read test
         match self.isolation_level {
             IsolationLevel::Serializable => Ok(false), // No phantom reads
-            _ => Ok(true), // Phantom reads possible
+            _ => Ok(true),                             // Phantom reads possible
         }
     }
 }
@@ -1251,7 +1329,6 @@ const DATABASE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::PostgresProtocol,
         description: "COPY protocol handles binary data correctly",
     },
-
     // Transaction Isolation
     ConformanceCase {
         id: "DB-TXN-001",
@@ -1274,7 +1351,6 @@ const DATABASE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::TransactionIsolation,
         description: "Repeatable read guarantees at appropriate isolation levels",
     },
-
     // SQL Parser Round-Trip
     ConformanceCase {
         id: "DB-SQL-001",
@@ -1297,7 +1373,6 @@ const DATABASE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::MysqlParser,
         description: "Prepared statement parameters preserve types",
     },
-
     // Connection Pool Invariants
     ConformanceCase {
         id: "DB-POOL-001",
@@ -1346,7 +1421,8 @@ fn test_postgres_scram_authentication() -> TestResult {
     }
 
     let startup_messages = startup_result.unwrap();
-    if startup_messages.len() != 1 || startup_messages[0].msg_type != PgMessageType::Authentication {
+    if startup_messages.len() != 1 || startup_messages[0].msg_type != PgMessageType::Authentication
+    {
         return TestResult::Fail {
             reason: "Expected authentication challenge".to_string(),
         };
@@ -1443,7 +1519,7 @@ fn test_postgres_extended_query_protocol() -> TestResult {
     // Test Bind message
     let parameters = vec![
         vec![0, 0, 0, 42], // INT4: 42
-        vec![1],            // BOOL: true
+        vec![1],           // BOOL: true
     ];
 
     let bind_result = protocol.process_bind_message("stmt1", &parameters);
@@ -1489,12 +1565,16 @@ fn test_sql_parser_round_trip() -> TestResult {
     for sql in &test_sqls {
         match parser.round_trip(sql) {
             Ok(true) => continue,
-            Ok(false) => return TestResult::Fail {
-                reason: format!("Round-trip failed for SQL: {}", sql),
-            },
-            Err(e) => return TestResult::Fail {
-                reason: format!("Parser error for SQL '{}': {}", sql, e),
-            },
+            Ok(false) => {
+                return TestResult::Fail {
+                    reason: format!("Round-trip failed for SQL: {}", sql),
+                };
+            }
+            Err(e) => {
+                return TestResult::Fail {
+                    reason: format!("Parser error for SQL '{}': {}", sql, e),
+                };
+            }
         }
     }
 
@@ -1519,9 +1599,11 @@ fn test_connection_pool_invariants() -> TestResult {
     for i in 0..3 {
         match pool.get_connection(manager.as_ref()) {
             Ok(conn) => connections.push(conn),
-            Err(e) => return TestResult::Fail {
-                reason: format!("Failed to get connection {}: {}", i + 1, e),
-            },
+            Err(e) => {
+                return TestResult::Fail {
+                    reason: format!("Failed to get connection {}: {}", i + 1, e),
+                };
+            }
         }
     }
 
@@ -1787,13 +1869,21 @@ fn test_database_integration_scenario() {
     let isolation_tester = TransactionIsolationTester::new(IsolationLevel::ReadCommitted);
 
     // Phase 1: Authentication
-    let auth_messages = pg_protocol.process_startup_message("testuser", "testdb").unwrap();
+    let auth_messages = pg_protocol
+        .process_startup_message("testuser", "testdb")
+        .unwrap();
     assert_eq!(auth_messages.len(), 1);
 
-    let scram_messages = pg_protocol.process_scram_initial_response("testuser", "client_nonce_12345678").unwrap();
+    let scram_messages = pg_protocol
+        .process_scram_initial_response("testuser", "client_nonce_12345678")
+        .unwrap();
     assert_eq!(scram_messages.len(), 1);
 
-    let final_messages = pg_protocol.process_scram_final_message("c=biws,r=client_nonce_12345678server_random_suffix,p=test_proof").unwrap();
+    let final_messages = pg_protocol
+        .process_scram_final_message(
+            "c=biws,r=client_nonce_12345678server_random_suffix,p=test_proof",
+        )
+        .unwrap();
     assert!(final_messages.len() >= 4);
 
     // Phase 2: Connection pooling
@@ -1811,10 +1901,7 @@ fn test_database_integration_scenario() {
     );
     assert!(parse_result.is_ok());
 
-    let bind_params = vec![
-        b"active".to_vec(),
-        b"2023-01-01 00:00:00".to_vec(),
-    ];
+    let bind_params = vec![b"active".to_vec(), b"2023-01-01 00:00:00".to_vec()];
     let bind_result = pg_protocol.process_bind_message("user_query", &bind_params);
     assert!(bind_result.is_ok());
 
@@ -1850,10 +1937,16 @@ fn test_database_integration_scenario() {
 
     // Phase 6: Protocol transaction state tracking
     assert!(pg_protocol.begin_transaction().is_ok());
-    assert_eq!(pg_protocol.get_transaction_status(), TransactionStatus::InTransaction);
+    assert_eq!(
+        pg_protocol.get_transaction_status(),
+        TransactionStatus::InTransaction
+    );
 
     assert!(pg_protocol.commit_transaction().is_ok());
-    assert_eq!(pg_protocol.get_transaction_status(), TransactionStatus::Idle);
+    assert_eq!(
+        pg_protocol.get_transaction_status(),
+        TransactionStatus::Idle
+    );
 
     // Phase 7: Pool cleanup and health check
     drop(conn1);
@@ -1882,13 +1975,31 @@ fn run_database_conformance_suite() {
 
     // Individual test cases
     let test_functions: Vec<(&ConformanceCase, fn() -> TestResult)> = vec![
-        (&DATABASE_CONFORMANCE_CASES[0], test_postgres_scram_authentication),
-        (&DATABASE_CONFORMANCE_CASES[1], test_postgres_binary_protocol),
-        (&DATABASE_CONFORMANCE_CASES[2], test_postgres_extended_query_protocol),
-        (&DATABASE_CONFORMANCE_CASES[4], test_transaction_isolation_semantics),
+        (
+            &DATABASE_CONFORMANCE_CASES[0],
+            test_postgres_scram_authentication,
+        ),
+        (
+            &DATABASE_CONFORMANCE_CASES[1],
+            test_postgres_binary_protocol,
+        ),
+        (
+            &DATABASE_CONFORMANCE_CASES[2],
+            test_postgres_extended_query_protocol,
+        ),
+        (
+            &DATABASE_CONFORMANCE_CASES[4],
+            test_transaction_isolation_semantics,
+        ),
         (&DATABASE_CONFORMANCE_CASES[7], test_sql_parser_round_trip),
-        (&DATABASE_CONFORMANCE_CASES[9], test_connection_pool_invariants),
-        (&DATABASE_CONFORMANCE_CASES[10], test_connection_pool_health_checks),
+        (
+            &DATABASE_CONFORMANCE_CASES[9],
+            test_connection_pool_invariants,
+        ),
+        (
+            &DATABASE_CONFORMANCE_CASES[10],
+            test_connection_pool_health_checks,
+        ),
         (&DATABASE_CONFORMANCE_CASES[3], test_postgres_copy_protocol),
     ];
 
@@ -1941,7 +2052,7 @@ fn run_database_conformance_suite() {
         match case.level {
             RequirementLevel::Must => entry.0 += 1,
             RequirementLevel::Should => entry.1 += 1,
-            RequirementLevel::May => {},
+            RequirementLevel::May => {}
         }
         entry.2 += 1; // tested
     }
@@ -1956,8 +2067,10 @@ fn run_database_conformance_suite() {
         } else {
             100.0
         };
-        println!("| {} | {} | {} | {} | {} | {:.1}% |",
-            section, entry.0, entry.1, entry.2, entry.3, score);
+        println!(
+            "| {} | {} | {} | {} | {} | {:.1}% |",
+            section, entry.0, entry.1, entry.2, entry.3, score
+        );
     }
 
     // Fail the test if any conformance tests failed

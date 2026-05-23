@@ -33,7 +33,7 @@
 //! - MUST: Message boundaries maintained under permutation
 //! - SHOULD: Codec performance scales with message size
 
-#[allow(dead_code)]
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
