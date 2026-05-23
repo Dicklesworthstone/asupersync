@@ -184,7 +184,7 @@ impl Capability {
             actions,
             temporal,
             constraints,
-            signature: Vec::new(), // To be filled by grant signing
+            signature: Vec::new(),        // To be filled by grant signing
             issued_at: SystemTime::now(), // ubs:ignore - non-crypto timestamp
         }
     }

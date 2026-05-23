@@ -67,12 +67,13 @@ fn sanitize_cancel_message(input: &str) -> String {
             c => c,
         };
         let mapped_len = mapped.len_utf8();
-        if byte_count + mapped_len > MAX_SANITIZED_CANCEL_MESSAGE_LEN {
+        // Use saturating arithmetic to prevent overflow
+        if byte_count.saturating_add(mapped_len) > MAX_SANITIZED_CANCEL_MESSAGE_LEN {
             truncated = true;
             break;
         }
         out.push(mapped);
-        byte_count += mapped_len;
+        byte_count = byte_count.saturating_add(mapped_len);
     }
     if truncated {
         out.push('…');

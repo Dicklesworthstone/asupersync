@@ -362,10 +362,8 @@ impl RepairReceiver {
         match repair_group.auth_domain.auth_algorithm {
             AuthenticationAlgorithm::HmacSha256 => {
                 let expected_tag = self.compute_hmac_sha256_tag(symbol, repair_group, session)?;
-                let tags_match: bool = subtle::ConstantTimeEq::ct_eq(
-                    &auth_tag[..],
-                    &expected_tag[..]
-                ).into();
+                let tags_match: bool =
+                    subtle::ConstantTimeEq::ct_eq(&auth_tag[..], &expected_tag[..]).into();
                 if !tags_match {
                     return Err(RepairReceiveError::AuthenticationFailed(
                         "HMAC-SHA256 verification failed".to_string(),

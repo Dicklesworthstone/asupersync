@@ -297,7 +297,8 @@ impl ChunkBitmap {
 
             if byte_index < self.bitmap_data.len() {
                 let mask = 1u8 << bit_index;
-                if (self.bitmap_data[byte_index] & mask) == 0 { // ubs:ignore
+                if (self.bitmap_data[byte_index] & mask) == 0 {
+                    // ubs:ignore
                     self.bitmap_data[byte_index] |= mask; // ubs:ignore
                     self.received_count += 1;
                 }
@@ -841,10 +842,8 @@ impl AtpProofBundle {
         let canonical_hash = self.compute_canonical_bundle_hash();
 
         // Verify the bundle hash matches what was signed
-        let hashes_match: bool = subtle::ConstantTimeEq::ct_eq(
-            &signatures.bundle_hash[..], 
-            &canonical_hash[..]
-        ).into();
+        let hashes_match: bool =
+            subtle::ConstantTimeEq::ct_eq(&signatures.bundle_hash[..], &canonical_hash[..]).into();
         if !hashes_match {
             return Ok(false); // Bundle tampered with after signing
         }
@@ -922,13 +921,15 @@ impl AtpProofBundle {
         // Ensure signer is a valid participant
         let is_source: bool = subtle::ConstantTimeEq::ct_eq(
             signer_id.as_bytes(),
-            self.peer_identity.source_peer_id.as_bytes()
-        ).into();
+            self.peer_identity.source_peer_id.as_bytes(),
+        )
+        .into();
         let is_dest: bool = subtle::ConstantTimeEq::ct_eq(
             signer_id.as_bytes(),
-            self.peer_identity.destination_peer_id.as_bytes()
-        ).into();
-        
+            self.peer_identity.destination_peer_id.as_bytes(),
+        )
+        .into();
+
         if !is_source && !is_dest {
             return Err("Signer is not a participant in this transfer".into());
         }

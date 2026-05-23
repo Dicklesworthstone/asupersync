@@ -157,7 +157,12 @@ impl Histogram {
         loop {
             let current_f64 = f64::from_bits(current);
             let new_f64 = current_f64 + value;
-            let new_bits = new_f64.to_bits();
+            // Check for non-finite results to prevent NaN/infinity propagation
+            let new_bits = if new_f64.is_finite() {
+                new_f64.to_bits()
+            } else {
+                current // Keep current value if addition would produce non-finite result
+            };
             match self.sum.compare_exchange_weak(
                 current,
                 new_bits,
@@ -243,7 +248,13 @@ impl Histogram {
         let target_rank = if p == 0.0 {
             1
         } else {
-            ((total as f64) * p).ceil() as u64
+            let rank_f64 = (total as f64) * p;
+            // Safely handle potential overflow in f64->u64 conversion
+            if rank_f64.is_finite() && rank_f64 <= (u64::MAX as f64) {
+                rank_f64.ceil() as u64
+            } else {
+                total // Fallback to total count if calculation overflows
+            }
         };
         let mut cumulative = 0_u64;
 
@@ -296,7 +307,12 @@ impl Summary {
         loop {
             let current_f64 = f64::from_bits(current);
             let new_f64 = current_f64 + value;
-            let new_bits = new_f64.to_bits();
+            // Check for non-finite results to prevent NaN/infinity propagation
+            let new_bits = if new_f64.is_finite() {
+                new_f64.to_bits()
+            } else {
+                current // Keep current value if addition would produce non-finite result
+            };
             match self.sum.compare_exchange_weak(
                 current,
                 new_bits,
@@ -341,7 +357,13 @@ impl Summary {
 
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let last_index = values.len() - 1;
-        let rank = ((last_index as f64) * q).round() as usize;
+        let rank_f64 = (last_index as f64) * q;
+        // Safely handle potential overflow in f64->usize conversion
+        let rank = if rank_f64.is_finite() && rank_f64 <= (usize::MAX as f64) {
+            rank_f64.round() as usize
+        } else {
+            last_index // Fallback to last index if calculation overflows
+        };
         values.get(rank).copied()
     }
 }

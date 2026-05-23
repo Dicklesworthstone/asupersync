@@ -136,6 +136,15 @@ pub enum WriterState {
     Error,
 }
 
+impl WriterState {
+    fn rejects_more_writes(self) -> bool {
+        matches!(
+            self,
+            Self::Finalizing | Self::Completed | Self::Cancelled | Self::Error
+        )
+    }
+}
+
 /// Progress information for ATP writers.
 #[derive(Debug, Clone)]
 pub struct WriterProgress {
@@ -309,7 +318,7 @@ impl AtpWriter {
     pub async fn write_all(&mut self, cx: &Cx, data: &[u8]) -> AtpOutcome<usize> {
         cx.trace(&format!("atp_writer_write {} bytes", data.len()));
 
-        if self.state == WriterState::Cancelled || self.state == WriterState::Error {
+        if self.state.rejects_more_writes() {
             return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
         }
 
@@ -324,7 +333,12 @@ impl AtpWriter {
         }
 
         // Check for backpressure
-        if self.buffer.len() + data.len() > self.config.backpressure_threshold as usize {
+        let pending_len = match checked_pending_buffer_len(self.buffer.len(), data.len()) {
+            Ok(len) => len,
+            Err(e) => return Outcome::Err(e),
+        };
+
+        if pending_len > self.backpressure_threshold_len() {
             self.state = WriterState::Backpressure;
             match self.flush_buffer(cx).await {
                 Outcome::Ok(()) => {}
@@ -469,6 +483,10 @@ impl AtpWriter {
     pub async fn cancel(&mut self, cx: &Cx) -> AtpOutcome<ResumeToken> {
         cx.trace("atp_writer_cancel");
 
+        if self.state == WriterState::Completed || self.state == WriterState::Error {
+            return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
+        }
+
         if self.transfer_id.is_none() {
             match self.initialize_transfer(cx).await {
                 Outcome::Ok(()) => {}
@@ -575,6 +593,10 @@ impl AtpWriter {
             Ok(chunk_len) => chunk_len,
             Err(_) => MAX_FILE_STREAM_CHUNK_LEN,
         }
+    }
+
+    fn backpressure_threshold_len(&self) -> usize {
+        usize::try_from(self.config.backpressure_threshold).unwrap_or(usize::MAX)
     }
 
     fn progress_chunks_completed(&self) -> u64 {
@@ -800,6 +822,12 @@ fn div_ceil_u64(numerator: u64, denominator: u64) -> u64 {
     quotient + u64::from(numerator % denominator != 0)
 }
 
+fn checked_pending_buffer_len(buffered_len: usize, incoming_len: usize) -> Result<usize, AtpError> {
+    buffered_len
+        .checked_add(incoming_len)
+        .ok_or(AtpError::Protocol(ProtocolError::FrameTooLarge))
+}
+
 /// ATP sink for streaming data with backpressure.
 pub struct AtpSink {
     writer: AtpWriter,
@@ -901,6 +929,16 @@ mod tests {
     }
 
     #[test]
+    fn pending_buffer_length_overflow_fails_closed() {
+        let result = checked_pending_buffer_len(usize::MAX, 1);
+
+        assert!(matches!(
+            result,
+            Err(AtpError::Protocol(ProtocolError::FrameTooLarge))
+        ));
+    }
+
+    #[test]
     fn test_resumed_write_overflow_fails_closed_before_mutating_proof_state() {
         futures_lite::future::block_on(async {
             let cx = Cx::for_testing();
@@ -962,6 +1000,54 @@ mod tests {
             proof.transfer_id,
             TransferId::derive([0; 32], remote_peer, [0; 32], [0; 32])
         );
+    }
+
+    #[test]
+    fn completed_writer_rejects_late_writes_without_state_mutation() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let object_id = ObjectId::content(ContentId::new([1; 32]));
+            let mut writer = AtpWriter::new(object_id, [2; 32], WriterConfig::default());
+
+            let proof = writer.write_buffer(&cx, b"final payload").await.unwrap();
+            let completed_bytes = writer.bytes_written;
+            let completed_chunks = writer.verified_chunks.len();
+
+            let late_write = writer.write_all(&cx, b"late bytes").await;
+
+            assert!(matches!(
+                late_write,
+                Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+            ));
+            assert_eq!(writer.state(), WriterState::Completed);
+            assert_eq!(writer.bytes_written, completed_bytes);
+            assert_eq!(writer.verified_chunks.len(), completed_chunks);
+            assert_eq!(writer.buffer, Vec::<u8>::new());
+            assert_eq!(proof.total_bytes, completed_bytes);
+        });
+    }
+
+    #[test]
+    fn completed_writer_rejects_cancellation_resume_token() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let object_id = ObjectId::content(ContentId::new([1; 32]));
+            let mut writer = AtpWriter::new(object_id, [2; 32], WriterConfig::default());
+
+            let proof = writer
+                .write_buffer(&cx, b"cannot resume this")
+                .await
+                .unwrap();
+            let cancellation = writer.cancel(&cx).await;
+
+            assert!(matches!(
+                cancellation,
+                Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+            ));
+            assert_eq!(writer.state(), WriterState::Completed);
+            assert_eq!(writer.bytes_written, proof.total_bytes);
+            assert!(writer.resume_token.is_none());
+        });
     }
 
     #[test]
