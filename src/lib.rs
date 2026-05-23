@@ -273,6 +273,8 @@ pub mod error_message_golden_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod fs_config_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod fs_protocol_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod golden_artifacts_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod grpc_protocol_conformance_tests;
@@ -328,6 +330,8 @@ pub mod test_utils;
 pub mod timer_wheel_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod trace_causality_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod web_protocol_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod web_tls_codec_raptorq_metamorphic_tests;
 
