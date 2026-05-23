@@ -341,6 +341,226 @@ impl SwarmPeerPressureSummary {
     }
 }
 
+/// Proof or validation lane associated with an admitted swarm workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwarmProofLaneKind {
+    /// Source-only work that does not claim validation proof.
+    SourceOnly,
+    /// Focused library check lane.
+    CargoCheckLib,
+    /// All-target compiler check lane.
+    CargoCheckAllTargets,
+    /// Clippy all-target lint lane.
+    ClippyAllTargets,
+    /// Rustfmt formatting lane.
+    RustfmtCheck,
+    /// Rustdoc generation/check lane.
+    Rustdoc,
+    /// Focused test lane.
+    Test,
+    /// Release proof bundle or release-gate lane.
+    ReleaseProof,
+    /// Project-specific lane not covered by the built-in classes.
+    Other,
+}
+
+impl SwarmProofLaneKind {
+    /// Stable snake-case label for logs, receipts, and decision reasons.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceOnly => "source_only",
+            Self::CargoCheckLib => "cargo_check_lib",
+            Self::CargoCheckAllTargets => "cargo_check_all_targets",
+            Self::ClippyAllTargets => "clippy_all_targets",
+            Self::RustfmtCheck => "rustfmt_check",
+            Self::Rustdoc => "rustdoc",
+            Self::Test => "test",
+            Self::ReleaseProof => "release_proof",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Owner metadata attached to a swarm workload admission request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmAdmissionOwner {
+    /// Agent or runtime component requesting admission.
+    pub agent_name: String,
+    /// Optional bead id that motivated the workload.
+    pub bead_id: Option<String>,
+    /// Optional reservation or file-frontier label.
+    pub reservation_scope: Option<String>,
+}
+
+impl SwarmAdmissionOwner {
+    /// Build owner metadata from the requesting agent/component name.
+    #[must_use]
+    pub fn new(agent_name: impl Into<String>) -> Self {
+        Self {
+            agent_name: agent_name.into(),
+            bead_id: None,
+            reservation_scope: None,
+        }
+    }
+
+    /// Attach the motivating bead id.
+    #[must_use]
+    pub fn with_bead_id(mut self, bead_id: impl Into<String>) -> Self {
+        self.bead_id = Some(bead_id.into());
+        self
+    }
+
+    /// Attach a reservation or file-frontier label.
+    #[must_use]
+    pub fn with_reservation_scope(mut self, reservation_scope: impl Into<String>) -> Self {
+        self.reservation_scope = Some(reservation_scope.into());
+        self
+    }
+
+    fn validate(&self) -> Option<String> {
+        if self.agent_name.trim().is_empty() {
+            return Some("owner agent_name must be non-empty".to_string());
+        }
+        if self
+            .bead_id
+            .as_deref()
+            .is_some_and(|bead_id| bead_id.trim().is_empty())
+        {
+            return Some("owner bead_id must be non-empty when present".to_string());
+        }
+        if self
+            .reservation_scope
+            .as_deref()
+            .is_some_and(|scope| scope.trim().is_empty())
+        {
+            return Some("owner reservation_scope must be non-empty when present".to_string());
+        }
+        None
+    }
+}
+
+/// Structured admission request for agent-swarm work.
+#[derive(Debug, Clone)]
+pub struct SwarmWorkloadAdmissionRequest {
+    /// Stable workload id used in logs and replay receipts.
+    pub workload_id: String,
+    /// Owner metadata for accountability and bead/file-reservation linking.
+    pub owner: SwarmAdmissionOwner,
+    /// Priority used by pressure and shedding decisions.
+    pub priority: RegionPriority,
+    /// Requested memory charged against the returned resource envelope.
+    pub requested_memory_bytes: Option<u64>,
+    /// Requested CPU nanoseconds per second charged against the envelope.
+    pub requested_cpu_ns_per_sec: Option<u64>,
+    /// Requested IO operations per second charged against the envelope.
+    pub requested_io_ops_per_sec: Option<u64>,
+    /// Proof or validation lane class for this workload.
+    pub proof_lane: SwarmProofLaneKind,
+    /// Optional absolute deadline for admission.
+    pub deadline: Option<Instant>,
+    /// Optional cancellation budget for cleanup/drain if the workload is refused or cancelled.
+    pub cancellation_budget: Option<Duration>,
+}
+
+impl SwarmWorkloadAdmissionRequest {
+    /// Build a normal-priority source-only admission request.
+    #[must_use]
+    pub fn new(workload_id: impl Into<String>, owner: SwarmAdmissionOwner) -> Self {
+        Self {
+            workload_id: workload_id.into(),
+            owner,
+            priority: RegionPriority::Normal,
+            requested_memory_bytes: None,
+            requested_cpu_ns_per_sec: None,
+            requested_io_ops_per_sec: None,
+            proof_lane: SwarmProofLaneKind::SourceOnly,
+            deadline: None,
+            cancellation_budget: None,
+        }
+    }
+
+    /// Set pressure priority.
+    #[must_use]
+    pub fn with_priority(mut self, priority: RegionPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Set declared resource reservations.
+    #[must_use]
+    pub fn with_declared_resources(
+        mut self,
+        memory_bytes: Option<u64>,
+        cpu_ns_per_sec: Option<u64>,
+        io_ops_per_sec: Option<u64>,
+    ) -> Self {
+        self.requested_memory_bytes = memory_bytes;
+        self.requested_cpu_ns_per_sec = cpu_ns_per_sec;
+        self.requested_io_ops_per_sec = io_ops_per_sec;
+        self
+    }
+
+    /// Set proof-lane class.
+    #[must_use]
+    pub fn with_proof_lane(mut self, proof_lane: SwarmProofLaneKind) -> Self {
+        self.proof_lane = proof_lane;
+        self
+    }
+
+    /// Set an absolute deadline.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Set cancellation/drain budget.
+    #[must_use]
+    pub fn with_cancellation_budget(mut self, cancellation_budget: Duration) -> Self {
+        self.cancellation_budget = Some(cancellation_budget);
+        self
+    }
+
+    fn validate(&self, now: Instant) -> Option<String> {
+        if self.workload_id.trim().is_empty() {
+            return Some("workload_id must be non-empty".to_string());
+        }
+        if let Some(reason) = self.owner.validate() {
+            return Some(reason);
+        }
+        if self.deadline.is_some_and(|deadline| deadline <= now) {
+            return Some("deadline has already expired".to_string());
+        }
+        if self
+            .cancellation_budget
+            .is_some_and(|budget| budget.is_zero())
+        {
+            return Some("cancellation_budget must be non-zero when present".to_string());
+        }
+        None
+    }
+
+    fn context_reason(&self, base: &str) -> String {
+        format!(
+            "workload_id={} owner_agent={} bead_id={} reservation_scope={} priority={:?} proof_lane={} requested_memory_bytes={} requested_cpu_ns_per_sec={} requested_io_ops_per_sec={} deadline_set={} cancellation_budget_ms={}: {base}",
+            self.workload_id.trim(),
+            self.owner.agent_name.trim(),
+            optional_reason_field(self.owner.bead_id.as_deref()),
+            optional_reason_field(self.owner.reservation_scope.as_deref()),
+            self.priority,
+            self.proof_lane.as_str(),
+            optional_u64_reason_field(self.requested_memory_bytes),
+            optional_u64_reason_field(self.requested_cpu_ns_per_sec),
+            optional_u64_reason_field(self.requested_io_ops_per_sec),
+            self.deadline.is_some(),
+            self.cancellation_budget
+                .map(duration_as_u64_ms)
+                .map_or_else(|| "unset".to_string(), |value| value.to_string())
+        )
+    }
+}
+
 /// Enhanced admission decision with resource envelope information.
 #[derive(Debug, Clone)]
 pub struct SwarmAdmissionDecision {
@@ -433,15 +653,56 @@ impl SwarmPressureGovernor {
         priority: RegionPriority,
         requested_memory: Option<u64>,
     ) -> Result<SwarmAdmissionDecision, SwarmPressureError> {
+        self.check_region_admission_with_declared_resources(
+            cx,
+            priority,
+            requested_memory,
+            None,
+            None,
+        )
+    }
+
+    /// Make a comprehensive admission decision for an agent-swarm workload.
+    pub fn check_workload_admission(
+        &self,
+        cx: &Cx,
+        request: &SwarmWorkloadAdmissionRequest,
+    ) -> Result<SwarmAdmissionDecision, SwarmPressureError> {
+        let decision_start = Instant::now();
+        if let Some(reason) = request.validate(decision_start) {
+            return Ok(self.rejected_workload_decision(decision_start, request, reason));
+        }
+
+        let mut decision = self.check_region_admission_with_declared_resources(
+            cx,
+            request.priority,
+            request.requested_memory_bytes,
+            request.requested_cpu_ns_per_sec,
+            request.requested_io_ops_per_sec,
+        )?;
+        decision.reason = request.context_reason(&decision.reason);
+        Ok(decision)
+    }
+
+    fn check_region_admission_with_declared_resources(
+        &self,
+        cx: &Cx,
+        priority: RegionPriority,
+        requested_memory: Option<u64>,
+        requested_cpu_ns_per_sec: Option<u64>,
+        requested_io_ops_per_sec: Option<u64>,
+    ) -> Result<SwarmAdmissionDecision, SwarmPressureError> {
         let decision_start = Instant::now();
         self.total_admission_checks.fetch_add(1, Ordering::Relaxed);
 
         if !self.config.enabled {
             // Swarm governance disabled, always admit while still preserving
-            // requested-memory accounting in the returned envelope.
+            // requested resource accounting in the returned envelope.
             let envelope = self.create_disabled_governance_envelope(
                 next_bootstrap_region_id(),
                 requested_memory,
+                requested_cpu_ns_per_sec,
+                requested_io_ops_per_sec,
             )?;
             self.regions_admitted.fetch_add(1, Ordering::Relaxed);
             return Ok(SwarmAdmissionDecision {
@@ -493,6 +754,23 @@ impl SwarmPressureGovernor {
                 ),
             });
         }
+        if let Some((resource, requested, limit)) =
+            self.first_envelope_budget_excess(requested_cpu_ns_per_sec, requested_io_ops_per_sec)
+        {
+            self.regions_rejected.fetch_add(1, Ordering::Relaxed);
+            self.envelope_budget_violations
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(SwarmAdmissionDecision {
+                decision: AdmissionDecision::Reject,
+                envelope: None,
+                pressure_snapshot,
+                degradation_level,
+                decision_latency_ns: self.record_decision_latency(decision_start),
+                reason: format!(
+                    "Requested {resource} {requested} exceeds region envelope budget {limit}"
+                ),
+            });
+        }
 
         // Apply swarm-specific logic
         let swarm_decision = self.evaluate_swarm_admission(
@@ -509,7 +787,12 @@ impl SwarmPressureGovernor {
             AdmissionDecision::Admit | AdmissionDecision::AdmitWithBackpressure
         ) {
             let region_id = next_bootstrap_region_id(); // Will be filled in by caller
-            Some(self.create_envelope_for_region(region_id, requested_memory)?)
+            Some(self.create_envelope_for_region(
+                region_id,
+                requested_memory,
+                requested_cpu_ns_per_sec,
+                requested_io_ops_per_sec,
+            )?)
         } else {
             None
         };
@@ -797,10 +1080,62 @@ impl SwarmPressureGovernor {
         }
     }
 
+    fn first_envelope_budget_excess(
+        &self,
+        requested_cpu_ns_per_sec: Option<u64>,
+        requested_io_ops_per_sec: Option<u64>,
+    ) -> Option<(&'static str, u64, u64)> {
+        if self.config.envelope_enforcement_enabled {
+            if let Some(requested_cpu) = requested_cpu_ns_per_sec
+                && requested_cpu > self.config.default_cpu_budget_ns_per_sec
+            {
+                return Some((
+                    "cpu",
+                    requested_cpu,
+                    self.config.default_cpu_budget_ns_per_sec,
+                ));
+            }
+            if let Some(requested_io) = requested_io_ops_per_sec
+                && requested_io > self.config.default_io_budget_ops_per_sec
+            {
+                return Some((
+                    "io",
+                    requested_io,
+                    self.config.default_io_budget_ops_per_sec,
+                ));
+            }
+        }
+        None
+    }
+
+    fn rejected_workload_decision(
+        &self,
+        decision_start: Instant,
+        request: &SwarmWorkloadAdmissionRequest,
+        reason: String,
+    ) -> SwarmAdmissionDecision {
+        self.total_admission_checks.fetch_add(1, Ordering::Relaxed);
+        self.regions_rejected.fetch_add(1, Ordering::Relaxed);
+        let degradation_level = self
+            .resource_monitor
+            .pressure()
+            .composite_degradation_level();
+        SwarmAdmissionDecision {
+            decision: AdmissionDecision::Reject,
+            envelope: None,
+            pressure_snapshot: self.get_default_pressure_snapshot(),
+            degradation_level,
+            decision_latency_ns: self.record_decision_latency(decision_start),
+            reason: request.context_reason(&reason),
+        }
+    }
+
     fn create_envelope_for_region(
         &self,
         region_id: RegionId,
         requested_memory: Option<u64>,
+        requested_cpu_ns_per_sec: Option<u64>,
+        requested_io_ops_per_sec: Option<u64>,
     ) -> Result<ResourceEnvelope, SwarmPressureError> {
         let memory_budget = if self.config.envelope_enforcement_enabled {
             self.config.default_memory_budget_bytes
@@ -817,6 +1152,12 @@ impl SwarmPressureGovernor {
         if let Some(requested_memory) = requested_memory {
             envelope.reserve_memory(requested_memory)?;
         }
+        if let Some(requested_cpu) = requested_cpu_ns_per_sec {
+            envelope.reserve_cpu(requested_cpu)?;
+        }
+        if let Some(requested_io) = requested_io_ops_per_sec {
+            envelope.reserve_io(requested_io)?;
+        }
         Ok(envelope)
     }
 
@@ -824,20 +1165,31 @@ impl SwarmPressureGovernor {
         &self,
         region_id: RegionId,
         requested_memory: Option<u64>,
+        requested_cpu_ns_per_sec: Option<u64>,
+        requested_io_ops_per_sec: Option<u64>,
     ) -> Result<ResourceEnvelope, SwarmPressureError> {
         let memory_budget = requested_memory
             .map_or(self.config.default_memory_budget_bytes, |requested| {
                 requested.max(self.config.default_memory_budget_bytes)
             });
+        let cpu_budget = requested_cpu_ns_per_sec
+            .map_or(self.config.default_cpu_budget_ns_per_sec, |requested| {
+                requested.max(self.config.default_cpu_budget_ns_per_sec)
+            });
+        let io_budget = requested_io_ops_per_sec
+            .map_or(self.config.default_io_budget_ops_per_sec, |requested| {
+                requested.max(self.config.default_io_budget_ops_per_sec)
+            });
 
-        let envelope = ResourceEnvelope::new(
-            region_id,
-            memory_budget,
-            self.config.default_cpu_budget_ns_per_sec,
-            self.config.default_io_budget_ops_per_sec,
-        );
+        let envelope = ResourceEnvelope::new(region_id, memory_budget, cpu_budget, io_budget);
         if let Some(requested_memory) = requested_memory {
             envelope.reserve_memory(requested_memory)?;
+        }
+        if let Some(requested_cpu) = requested_cpu_ns_per_sec {
+            envelope.reserve_cpu(requested_cpu)?;
+        }
+        if let Some(requested_io) = requested_io_ops_per_sec {
+            envelope.reserve_io(requested_io)?;
         }
         Ok(envelope)
     }
@@ -920,6 +1272,21 @@ fn scale_pressure_for_metrics(pressure: f64) -> i64 {
 
 fn duration_as_u64_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn duration_as_u64_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn optional_reason_field(value: Option<&str>) -> &str {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unset")
+}
+
+fn optional_u64_reason_field(value: Option<u64>) -> String {
+    value.map_or_else(|| "unset".to_string(), |value| value.to_string())
 }
 
 fn prune_stale_peer_pressure_reports_locked(
@@ -1317,6 +1684,191 @@ mod tests {
         let metrics = governor.metrics();
         assert_eq!(metrics.regions_rejected, 1);
         assert_eq!(metrics.envelope_budget_violations, 1);
+    }
+
+    #[test]
+    fn test_workload_admission_request_charges_declared_resources_and_owner_metadata() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let request = SwarmWorkloadAdmissionRequest::new(
+            "asw2-proof-lane",
+            SwarmAdmissionOwner::new("DustyGorge")
+                .with_bead_id("asupersync-oxqrae.2")
+                .with_reservation_scope("src/observability/swarm_pressure_governor.rs"),
+        )
+        .with_priority(RegionPriority::High)
+        .with_declared_resources(Some(4096), Some(25_000), Some(7))
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib)
+        .with_deadline(Instant::now() + Duration::from_secs(60))
+        .with_cancellation_budget(Duration::from_millis(250));
+
+        let decision = governor
+            .check_workload_admission(&cx, &request)
+            .expect("workload admission should produce a decision");
+
+        assert!(matches!(decision.decision, AdmissionDecision::Admit));
+        let envelope = decision
+            .envelope
+            .expect("admitted workload must receive a resource envelope");
+        assert_eq!(envelope.memory_used.load(Ordering::Relaxed), 4096);
+        assert_eq!(envelope.cpu_used_ns.load(Ordering::Relaxed), 25_000);
+        assert_eq!(envelope.io_ops_used.load(Ordering::Relaxed), 7);
+        for expected in [
+            "workload_id=asw2-proof-lane",
+            "owner_agent=DustyGorge",
+            "bead_id=asupersync-oxqrae.2",
+            "reservation_scope=src/observability/swarm_pressure_governor.rs",
+            "priority=High",
+            "proof_lane=cargo_check_lib",
+            "requested_memory_bytes=4096",
+            "requested_cpu_ns_per_sec=25000",
+            "requested_io_ops_per_sec=7",
+            "deadline_set=true",
+            "cancellation_budget_ms=250",
+            "Admission approved",
+        ] {
+            assert!(
+                decision.reason.contains(expected),
+                "decision reason missing {expected}: {}",
+                decision.reason
+            );
+        }
+    }
+
+    #[test]
+    fn test_workload_admission_rejects_declared_cpu_and_io_over_envelope_budget() {
+        let mut config = SwarmPressureGovernorConfig::default();
+        config.default_cpu_budget_ns_per_sec = 100;
+        config.default_io_budget_ops_per_sec = 10;
+
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let pressure_governor = PressureGovernor::new(
+            config.pressure_config.clone(),
+            std::sync::Arc::clone(&runtime),
+            Metrics::new(),
+        )
+        .expect("Failed to create pressure governor");
+        let governor =
+            SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let cpu_request = SwarmWorkloadAdmissionRequest::new(
+            "oversized-cpu",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_declared_resources(None, Some(101), Some(1))
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckAllTargets);
+        let cpu_decision = governor
+            .check_workload_admission(&cx, &cpu_request)
+            .expect("oversized cpu request should classify");
+        assert!(matches!(cpu_decision.decision, AdmissionDecision::Reject));
+        assert!(cpu_decision.envelope.is_none());
+        assert!(cpu_decision.reason.contains("Requested cpu 101 exceeds"));
+        assert!(cpu_decision.reason.contains("workload_id=oversized-cpu"));
+        assert!(
+            cpu_decision
+                .reason
+                .contains("proof_lane=cargo_check_all_targets")
+        );
+
+        let io_request = SwarmWorkloadAdmissionRequest::new(
+            "oversized-io",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_declared_resources(None, Some(10), Some(11))
+        .with_proof_lane(SwarmProofLaneKind::Test);
+        let io_decision = governor
+            .check_workload_admission(&cx, &io_request)
+            .expect("oversized io request should classify");
+        assert!(matches!(io_decision.decision, AdmissionDecision::Reject));
+        assert!(io_decision.envelope.is_none());
+        assert!(io_decision.reason.contains("Requested io 11 exceeds"));
+        assert!(io_decision.reason.contains("workload_id=oversized-io"));
+        assert!(io_decision.reason.contains("proof_lane=test"));
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.regions_rejected, 2);
+        assert_eq!(metrics.envelope_budget_violations, 2);
+    }
+
+    #[test]
+    fn test_workload_admission_rejects_invalid_owner_deadline_and_cancel_budget() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let missing_owner =
+            SwarmWorkloadAdmissionRequest::new("missing-owner", SwarmAdmissionOwner::new(" "));
+        let missing_owner_decision = governor
+            .check_workload_admission(&cx, &missing_owner)
+            .expect("missing owner should classify as a rejection");
+        assert!(matches!(
+            missing_owner_decision.decision,
+            AdmissionDecision::Reject
+        ));
+        assert!(missing_owner_decision.envelope.is_none());
+        assert!(
+            missing_owner_decision
+                .reason
+                .contains("owner agent_name must be non-empty")
+        );
+
+        let expired_deadline = SwarmWorkloadAdmissionRequest::new(
+            "expired-deadline",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_deadline(Instant::now() - Duration::from_secs(1));
+        let expired_deadline_decision = governor
+            .check_workload_admission(&cx, &expired_deadline)
+            .expect("expired deadline should classify as a rejection");
+        assert!(matches!(
+            expired_deadline_decision.decision,
+            AdmissionDecision::Reject
+        ));
+        assert!(
+            expired_deadline_decision
+                .reason
+                .contains("deadline has already expired")
+        );
+
+        let zero_cancel_budget = SwarmWorkloadAdmissionRequest::new(
+            "zero-cancel-budget",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_cancellation_budget(Duration::ZERO);
+        let zero_cancel_budget_decision = governor
+            .check_workload_admission(&cx, &zero_cancel_budget)
+            .expect("zero cancel budget should classify as a rejection");
+        assert!(matches!(
+            zero_cancel_budget_decision.decision,
+            AdmissionDecision::Reject
+        ));
+        assert!(
+            zero_cancel_budget_decision
+                .reason
+                .contains("cancellation_budget must be non-zero")
+        );
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.total_admission_checks, 3);
+        assert_eq!(metrics.regions_rejected, 3);
+        assert_eq!(metrics.regions_admitted, 0);
     }
 
     #[test]
