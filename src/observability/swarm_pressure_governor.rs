@@ -878,6 +878,20 @@ pub struct SwarmWorkloadLeaseScheduleEntry {
     pub last_renewed_at: Option<Instant>,
     /// Number of successful renewals.
     pub renewal_count: u64,
+    /// Whether live pressure feedback was attached to this schedule row.
+    pub pressure_feedback_present: bool,
+    /// Runtime queue pressure ratio scaled by 10_000.
+    pub queue_pressure_scaled: i64,
+    /// Disk or artifact-cache IO pressure ratio scaled by 10_000.
+    pub disk_io_pressure_scaled: i64,
+    /// RCH or remote-worker queue pressure ratio scaled by 10_000.
+    pub rch_queue_pressure_scaled: i64,
+    /// Validation-frontier blocker pressure ratio scaled by 10_000.
+    pub validation_frontier_pressure_scaled: i64,
+    /// Cancellation/drain tail-latency pressure ratio scaled by 10_000.
+    pub cancellation_tail_pressure_scaled: i64,
+    /// Maximum live workload pressure ratio scaled by 10_000.
+    pub max_pressure_scaled: i64,
     /// Structured explanation for logs and replay receipts.
     pub reason: String,
 }
@@ -1563,18 +1577,32 @@ impl SwarmPressureGovernor {
     /// Return a deterministic schedule snapshot of all currently live workload leases.
     pub fn workload_lease_schedule(&self) -> Vec<SwarmWorkloadLeaseScheduleEntry> {
         let now = Instant::now();
-        let mut leases = self.workload_leases.lock().unwrap();
-        let _ = self.expire_stale_workload_leases_locked(&mut leases, now);
-        let mut live_leases: Vec<_> = leases
-            .values()
-            .filter(|lease| lease.state.is_live())
-            .cloned()
-            .collect();
-        live_leases.sort_by_key(Self::workload_lease_schedule_key);
+        let mut live_leases: Vec<_> = {
+            let mut leases = self.workload_leases.lock().unwrap();
+            let _ = self.expire_stale_workload_leases_locked(&mut leases, now);
+            leases
+                .values()
+                .filter(|lease| lease.state.is_live())
+                .cloned()
+                .collect()
+        };
+        let feedback_by_workload = self.live_workload_feedback_by_id(now);
+        live_leases.sort_by_key(|lease| {
+            Self::workload_lease_schedule_key(
+                lease,
+                feedback_by_workload.get(lease.workload_id.as_str()),
+            )
+        });
         live_leases
             .iter()
             .enumerate()
-            .map(|(rank, lease)| Self::workload_lease_schedule_entry(lease, rank as u64))
+            .map(|(rank, lease)| {
+                Self::workload_lease_schedule_entry(
+                    lease,
+                    rank as u64,
+                    feedback_by_workload.get(lease.workload_id.as_str()),
+                )
+            })
             .collect()
     }
 
@@ -1928,9 +1956,11 @@ impl SwarmPressureGovernor {
 
     fn workload_lease_schedule_key(
         lease: &SwarmWorkloadLease,
-    ) -> (u8, Instant, u8, u8, Instant, u64) {
+        feedback: Option<&SwarmWorkloadPressureFeedback>,
+    ) -> (u8, i64, Instant, u8, u8, Instant, u64) {
         (
             Self::priority_schedule_rank(lease.priority),
+            Self::feedback_max_pressure_scaled(feedback),
             lease.expires_at,
             Self::proof_lane_schedule_rank(lease.proof_lane),
             Self::lease_state_schedule_rank(lease.state),
@@ -1942,11 +1972,20 @@ impl SwarmPressureGovernor {
     fn workload_lease_schedule_entry(
         lease: &SwarmWorkloadLease,
         scheduling_rank: u64,
+        feedback: Option<&SwarmWorkloadPressureFeedback>,
     ) -> SwarmWorkloadLeaseScheduleEntry {
         let replay_pointer = format!(
             "swarm-workload-lease://lease/{}/schedule/{scheduling_rank}",
             lease.lease_id.as_u64()
         );
+        let (
+            queue_pressure_scaled,
+            disk_io_pressure_scaled,
+            rch_queue_pressure_scaled,
+            validation_frontier_pressure_scaled,
+            cancellation_tail_pressure_scaled,
+            max_pressure_scaled,
+        ) = Self::schedule_pressure_fields(feedback);
         SwarmWorkloadLeaseScheduleEntry {
             scheduling_rank,
             replay_pointer,
@@ -1964,8 +2003,75 @@ impl SwarmPressureGovernor {
             expires_at: lease.expires_at,
             last_renewed_at: lease.last_renewed_at,
             renewal_count: lease.renewal_count,
-            reason: lease.context_reason("live workload lease scheduled"),
+            pressure_feedback_present: feedback.is_some(),
+            queue_pressure_scaled,
+            disk_io_pressure_scaled,
+            rch_queue_pressure_scaled,
+            validation_frontier_pressure_scaled,
+            cancellation_tail_pressure_scaled,
+            max_pressure_scaled,
+            reason: Self::workload_lease_schedule_reason(lease, feedback),
         }
+    }
+
+    fn live_workload_feedback_by_id(
+        &self,
+        now: Instant,
+    ) -> HashMap<String, SwarmWorkloadPressureFeedback> {
+        let mut reports = self.workload_pressure_feedback.lock().unwrap();
+        let _ = prune_stale_workload_pressure_feedback_locked(
+            &mut reports,
+            self.config.workload_feedback_max_age,
+            now,
+        );
+        reports
+            .iter()
+            .map(|(workload_id, feedback)| (workload_id.clone(), feedback.clone()))
+            .collect()
+    }
+
+    fn schedule_pressure_fields(
+        feedback: Option<&SwarmWorkloadPressureFeedback>,
+    ) -> (i64, i64, i64, i64, i64, i64) {
+        if let Some(feedback) = feedback {
+            (
+                scale_pressure_for_metrics(feedback.queue_pressure),
+                scale_pressure_for_metrics(feedback.disk_io_pressure),
+                scale_pressure_for_metrics(feedback.rch_queue_pressure),
+                scale_pressure_for_metrics(feedback.validation_frontier_pressure),
+                scale_pressure_for_metrics(feedback.cancellation_tail_pressure),
+                scale_pressure_for_metrics(feedback.max_pressure()),
+            )
+        } else {
+            (0, 0, 0, 0, 0, 0)
+        }
+    }
+
+    fn feedback_max_pressure_scaled(feedback: Option<&SwarmWorkloadPressureFeedback>) -> i64 {
+        feedback
+            .map(SwarmWorkloadPressureFeedback::max_pressure)
+            .map(scale_pressure_for_metrics)
+            .unwrap_or(0)
+    }
+
+    fn workload_lease_schedule_reason(
+        lease: &SwarmWorkloadLease,
+        feedback: Option<&SwarmWorkloadPressureFeedback>,
+    ) -> String {
+        let base = if let Some(feedback) = feedback {
+            format!(
+                "live workload lease scheduled with pressure feedback queue={} disk_io={} rch_queue={} validation_frontier={} cancellation_tail={} max={}",
+                scale_pressure_for_metrics(feedback.queue_pressure),
+                scale_pressure_for_metrics(feedback.disk_io_pressure),
+                scale_pressure_for_metrics(feedback.rch_queue_pressure),
+                scale_pressure_for_metrics(feedback.validation_frontier_pressure),
+                scale_pressure_for_metrics(feedback.cancellation_tail_pressure),
+                scale_pressure_for_metrics(feedback.max_pressure())
+            )
+        } else {
+            "live workload lease scheduled without pressure feedback".to_string()
+        };
+        lease.context_reason(&base)
     }
 
     const fn priority_schedule_rank(priority: RegionPriority) -> u8 {
@@ -3642,6 +3748,8 @@ mod tests {
         );
         assert_eq!(schedule[0].scheduling_rank, 0);
         assert_eq!(schedule[0].priority, RegionPriority::Critical);
+        assert!(!schedule[0].pressure_feedback_present);
+        assert_eq!(schedule[0].max_pressure_scaled, 0);
         assert_eq!(schedule[1].proof_lane, SwarmProofLaneKind::ReleaseProof);
         assert_eq!(schedule[2].proof_lane, SwarmProofLaneKind::SourceOnly);
         assert!(
@@ -3649,7 +3757,11 @@ mod tests {
                 .replay_pointer
                 .starts_with("swarm-workload-lease://lease/")
         );
-        assert!(schedule[1].reason.contains("live workload lease scheduled"));
+        assert!(
+            schedule[1]
+                .reason
+                .contains("live workload lease scheduled without pressure feedback")
+        );
 
         let expired = governor
             .get_workload_lease(stale.lease_id)
@@ -3659,6 +3771,92 @@ mod tests {
         assert_eq!(metrics.workload_leases_expired, 1);
         assert_eq!(metrics.active_workload_lease_count, 4);
         assert_eq!(metrics.terminal_workload_lease_count, 1);
+    }
+
+    #[test]
+    fn test_workload_lease_schedule_uses_live_pressure_feedback() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let shared_deadline = Instant::now() + Duration::from_secs(120);
+        let hot_owner = SwarmAdmissionOwner::new("DustyGorge")
+            .with_bead_id("asupersync-oxqrae.2")
+            .with_reservation_scope("asw-hot-rch-lane");
+        let cool_owner = SwarmAdmissionOwner::new("DustyGorge")
+            .with_bead_id("asupersync-oxqrae.2")
+            .with_reservation_scope("asw-cool-rch-lane");
+        let hot_request = SwarmWorkloadAdmissionRequest::new("hot-rch-lane", hot_owner)
+            .with_priority(RegionPriority::Normal)
+            .with_proof_lane(SwarmProofLaneKind::CargoCheckLib)
+            .with_deadline(shared_deadline);
+        let cool_request = SwarmWorkloadAdmissionRequest::new("cool-rch-lane", cool_owner)
+            .with_priority(RegionPriority::Normal)
+            .with_proof_lane(SwarmProofLaneKind::CargoCheckLib)
+            .with_deadline(shared_deadline);
+
+        let hot_decision = governor
+            .check_workload_admission(&cx, &hot_request)
+            .expect("hot workload admission should classify");
+        let cool_decision = governor
+            .check_workload_admission(&cx, &cool_request)
+            .expect("cool workload admission should classify");
+        let hot = governor
+            .acquire_workload_lease(RegionId::new_for_test(58, 1), &hot_request, &hot_decision)
+            .expect("hot workload should acquire first lease");
+        let cool = governor
+            .acquire_workload_lease(RegionId::new_for_test(58, 2), &cool_request, &cool_decision)
+            .expect("cool workload should acquire second lease");
+
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "hot-rch-lane",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::CargoCheckLib,
+                )
+                .with_pressures(0.20, 0.40, 0.95, 0.90, 0.30),
+            )
+            .expect("hot pressure feedback should be accepted");
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "cool-rch-lane",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::CargoCheckLib,
+                )
+                .with_pressures(0.05, 0.10, 0.20, 0.15, 0.05),
+            )
+            .expect("cool pressure feedback should be accepted");
+
+        let schedule = governor.workload_lease_schedule();
+        let ordered_ids: Vec<_> = schedule.iter().map(|entry| entry.lease_id).collect();
+        assert_eq!(
+            ordered_ids,
+            vec![cool.lease_id, hot.lease_id],
+            "lower-pressure workload should schedule before an otherwise identical hot lane"
+        );
+        assert_eq!(schedule[0].workload_id, "cool-rch-lane");
+        assert!(schedule[0].pressure_feedback_present);
+        assert_eq!(schedule[0].max_pressure_scaled, 2000);
+        assert_eq!(schedule[0].rch_queue_pressure_scaled, 2000);
+        assert_eq!(schedule[1].workload_id, "hot-rch-lane");
+        assert!(schedule[1].pressure_feedback_present);
+        assert_eq!(schedule[1].queue_pressure_scaled, 2000);
+        assert_eq!(schedule[1].disk_io_pressure_scaled, 4000);
+        assert_eq!(schedule[1].rch_queue_pressure_scaled, 9500);
+        assert_eq!(schedule[1].validation_frontier_pressure_scaled, 9000);
+        assert_eq!(schedule[1].cancellation_tail_pressure_scaled, 3000);
+        assert_eq!(schedule[1].max_pressure_scaled, 9500);
+        assert!(
+            schedule[1]
+                .reason
+                .contains("scheduled with pressure feedback")
+        );
     }
 
     #[test]
