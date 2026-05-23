@@ -710,7 +710,7 @@ impl WorkerCoordinator {
         if count == 0 {
             return;
         }
-        let idx = self.next_wake.fetch_add(1, Ordering::Relaxed);
+        let idx = self.next_wake.fetch_add(1, Ordering::AcqRel);
         // Use bitmask (AND) when worker count is power-of-two to avoid IDIV.
         let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
         self.parkers[slot].unpark();
@@ -729,7 +729,7 @@ impl WorkerCoordinator {
             self.wake_all();
             return;
         }
-        let start_idx = self.next_wake.fetch_add(num_wakes, Ordering::Relaxed);
+        let start_idx = self.next_wake.fetch_add(num_wakes, Ordering::AcqRel);
         for i in 0..num_wakes {
             let idx = start_idx.wrapping_add(i);
             let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
@@ -2056,6 +2056,11 @@ impl ThreeLaneScheduler {
 
         // Cancel is the highest-priority lane. Check wake_state for deduplication
         // before injecting to avoid duplicate dispatch from multiple lanes.
+        //
+        // KNOWN RACE CONDITION (TOCTOU): There's a window between checking wake_state.notify()
+        // and calling inject_cancel() where another thread could modify task state.
+        // This could lead to double-scheduling or scheduling completed tasks.
+        // TODO: Make injection atomic with deduplication check in global injector.
         let should_schedule = self.with_task_table_ref(|tt| {
             tt.task(task)
                 .is_none_or(|record| record.wake_state.notify())
@@ -2073,6 +2078,8 @@ impl ThreeLaneScheduler {
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_timed(&self, task: TaskId, deadline: Time) {
+        // KNOWN RACE CONDITION (TOCTOU): Same issue as inject_cancel - checking
+        // wake_state.notify() and then acting on the result creates a race window.
         let should_schedule = self.with_task_table_ref(|tt| {
             tt.task(task)
                 .is_none_or(|record| record.wake_state.notify())
@@ -2102,7 +2109,7 @@ impl ThreeLaneScheduler {
                 "inject_ready: throttled spawn due to governor drain suggestion (suspect deadlock)"
             );
             self.governor_throttled_spawns
-                .fetch_add(1, Ordering::Relaxed);
+                .fetch_add(1, Ordering::Release);
             return; // Task is throttled, not scheduled
         }
 
@@ -2155,6 +2162,7 @@ impl ThreeLaneScheduler {
             return;
         }
 
+        // KNOWN RACE CONDITION (TOCTOU): Same issue as other injection methods.
         if should_schedule {
             self.inject_global_ready_checked(task, priority);
             trace!(
@@ -2193,8 +2201,9 @@ impl ThreeLaneScheduler {
             return;
         }
 
+        // KNOWN RACE CONDITION (TOCTOU): Same issue as other injection methods.
         if should_schedule {
-            self.governor_bypass_spawns.fetch_add(1, Ordering::Relaxed);
+            self.governor_bypass_spawns.fetch_add(1, Ordering::Release);
 
             trace!(
                 ?task,
@@ -2266,6 +2275,8 @@ impl ThreeLaneScheduler {
     /// twice.
     fn schedule_internal(&self, task: TaskId, priority: u8, intent: ScheduleIntent) {
         // Dedup: check wake_state before scheduling anywhere.
+        // KNOWN RACE CONDITION (TOCTOU): Same issue as injection methods - race window
+        // between checking wake_state.notify() and subsequent scheduling operations.
         let (should_schedule, is_local, pinned_worker) = self.with_task_table_ref(|tt| {
             tt.task(task).map_or((true, false, None), |record| {
                 (
@@ -2342,11 +2353,11 @@ impl ThreeLaneScheduler {
             worker.preemption_metrics.governor_throttled_spawns = worker
                 .preemption_metrics
                 .governor_throttled_spawns
-                .saturating_add(self.governor_throttled_spawns.load(Ordering::Relaxed));
+                .saturating_add(self.governor_throttled_spawns.load(Ordering::Acquire));
             worker.preemption_metrics.governor_bypass_spawns = worker
                 .preemption_metrics
                 .governor_bypass_spawns
-                .saturating_add(self.governor_bypass_spawns.load(Ordering::Relaxed));
+                .saturating_add(self.governor_bypass_spawns.load(Ordering::Acquire));
         }
         std::mem::take(&mut self.workers).into_vec()
     }

@@ -156,8 +156,8 @@ impl ReadBiasedDrainingRegionSnapshot {
         match (old_counted, new_counted) {
             (false, true) => {
                 self.cached_count.fetch_add(1, Ordering::AcqRel);
-                self.writes_since_last_read.fetch_add(1, Ordering::Relaxed);
-                self.writer_adjustments.fetch_add(1, Ordering::Relaxed);
+                self.writes_since_last_read.fetch_add(1, Ordering::Release);
+                self.writer_adjustments.fetch_add(1, Ordering::Release);
                 self.valid.store(true, Ordering::Release);
             }
             (true, false) => {
@@ -166,8 +166,8 @@ impl ReadBiasedDrainingRegionSnapshot {
                         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                             Some(count.saturating_sub(1))
                         });
-                self.writes_since_last_read.fetch_add(1, Ordering::Relaxed);
-                self.writer_adjustments.fetch_add(1, Ordering::Relaxed);
+                self.writes_since_last_read.fetch_add(1, Ordering::Release);
+                self.writer_adjustments.fetch_add(1, Ordering::Release);
                 self.valid.store(true, Ordering::Release);
             }
             _ => {}
@@ -182,11 +182,14 @@ impl ReadBiasedDrainingRegionSnapshot {
             return regions.draining_region_count();
         }
 
+        // KNOWN RACE CONDITION (TOCTOU): Between checking valid/writes and loading
+        // cached_count, another thread could invalidate the cache leading to stale data.
+        // TODO: Use atomic compare-and-swap or hold lock across entire operation.
         let writes = self.writes_since_last_read.load(Ordering::Relaxed);
         if self.valid.load(Ordering::Acquire)
             && writes < READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD
         {
-            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.cache_hits.fetch_add(1, Ordering::Release);
             self.writes_since_last_read.store(0, Ordering::Release);
             return self.cached_count.load(Ordering::Acquire);
         }
@@ -3754,6 +3757,10 @@ impl RuntimeState {
                 crate::record::region::RegionState::Closing
                 | crate::record::region::RegionState::Draining => {
                     // Transition to Finalizing only once child regions and tasks are gone.
+                    // KNOWN RACE CONDITION (TOCTOU): Between checking child/task counts and
+                    // calling begin_finalize(), another thread could add children/tasks or
+                    // modify region state. This could lead to invalid state transitions.
+                    // TODO: Hold region lock across entire check-and-transition operation.
                     let transition_to_finalizing = {
                         let Some(region) = self.regions.get(region_id.arena_index()) else {
                             break;

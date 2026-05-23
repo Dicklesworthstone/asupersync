@@ -642,7 +642,7 @@ impl LyapunovGovernor {
         }
 
         let mut monotone = true;
-        let mut increase_count = 0;
+        let mut increase_count: usize = 0;
         let mut max_increase = 0.0_f64;
         let mut v_max = 0.0_f64;
 
