@@ -884,6 +884,8 @@ pub struct SwarmWorkloadLease {
     pub reserved_cpu_ns_per_sec: Option<u64>,
     /// IO budget reserved by the workload admission request.
     pub reserved_io_ops_per_sec: Option<u64>,
+    /// Cancellation/drain budget reserved by the workload admission request.
+    pub cancellation_budget: Option<Duration>,
     /// Time at which the lease was granted.
     pub issued_at: Instant,
     /// Time at which the lease expires if not renewed or completed.
@@ -899,7 +901,7 @@ pub struct SwarmWorkloadLease {
 impl SwarmWorkloadLease {
     fn context_reason(&self, base: &str) -> String {
         format!(
-            "lease_id={} workload_id={} region_id={:?} owner_agent={} bead_id={} reservation_scope={} proof_lane={} priority={:?} state={} reserved_memory_bytes={} reserved_cpu_ns_per_sec={} reserved_io_ops_per_sec={} renewals={}: {base}",
+            "lease_id={} workload_id={} region_id={:?} owner_agent={} bead_id={} reservation_scope={} proof_lane={} priority={:?} state={} reserved_memory_bytes={} reserved_cpu_ns_per_sec={} reserved_io_ops_per_sec={} cancellation_budget_ms={} renewals={}: {base}",
             self.lease_id.as_u64(),
             self.workload_id.trim(),
             self.region_id,
@@ -912,6 +914,7 @@ impl SwarmWorkloadLease {
             optional_u64_reason_field(self.reserved_memory_bytes),
             optional_u64_reason_field(self.reserved_cpu_ns_per_sec),
             optional_u64_reason_field(self.reserved_io_ops_per_sec),
+            optional_u64_reason_field(self.cancellation_budget.map(duration_as_u64_ms)),
             self.renewal_count
         )
     }
@@ -938,6 +941,8 @@ pub struct SwarmWorkloadLeaseReceipt {
     pub reserved_cpu_ns_per_sec: Option<u64>,
     /// IO reservation carried by the lease.
     pub reserved_io_ops_per_sec: Option<u64>,
+    /// Cancellation/drain budget carried by the lease.
+    pub cancellation_budget: Option<Duration>,
     /// Lease state after the operation.
     pub state: SwarmWorkloadLeaseState,
     /// Time at which the lease was granted.
@@ -985,6 +990,8 @@ pub struct SwarmWorkloadLeaseScheduleEntry {
     pub reserved_cpu_ns_per_sec: Option<u64>,
     /// IO reservation carried by the lease.
     pub reserved_io_ops_per_sec: Option<u64>,
+    /// Cancellation/drain budget carried by the lease, in milliseconds.
+    pub cancellation_budget_ms: Option<u64>,
     /// Time at which the lease was granted.
     pub issued_at: Instant,
     /// Time at which the lease expires if not renewed or completed.
@@ -1598,6 +1605,7 @@ impl SwarmPressureGovernor {
             reserved_memory_bytes: request.requested_memory_bytes,
             reserved_cpu_ns_per_sec: request.requested_cpu_ns_per_sec,
             reserved_io_ops_per_sec: request.requested_io_ops_per_sec,
+            cancellation_budget: request.cancellation_budget,
             issued_at: now,
             expires_at,
             last_renewed_at: None,
@@ -2287,6 +2295,7 @@ impl SwarmPressureGovernor {
             reserved_memory_bytes: lease.reserved_memory_bytes,
             reserved_cpu_ns_per_sec: lease.reserved_cpu_ns_per_sec,
             reserved_io_ops_per_sec: lease.reserved_io_ops_per_sec,
+            cancellation_budget: lease.cancellation_budget,
             state: lease.state,
             issued_at: lease.issued_at,
             expires_at: lease.expires_at,
@@ -2356,6 +2365,7 @@ impl SwarmPressureGovernor {
             reserved_memory_bytes: lease.reserved_memory_bytes,
             reserved_cpu_ns_per_sec: lease.reserved_cpu_ns_per_sec,
             reserved_io_ops_per_sec: lease.reserved_io_ops_per_sec,
+            cancellation_budget_ms: lease.cancellation_budget.map(duration_as_u64_ms),
             issued_at: lease.issued_at,
             expires_at: lease.expires_at,
             last_renewed_at: lease.last_renewed_at,
@@ -2492,8 +2502,10 @@ impl SwarmPressureGovernor {
         };
         let wait_age_ms = duration_as_u64_ms(now.saturating_duration_since(lease.issued_at));
         let time_to_expiry_ms = duration_as_u64_ms(lease.expires_at.saturating_duration_since(now));
+        let cancellation_budget_ms =
+            optional_u64_reason_field(lease.cancellation_budget.map(duration_as_u64_ms));
         base.push_str(&format!(
-            " wait_age_ms={wait_age_ms} time_to_expiry_ms={time_to_expiry_ms}"
+            " wait_age_ms={wait_age_ms} time_to_expiry_ms={time_to_expiry_ms} cancellation_budget_ms={cancellation_budget_ms}"
         ));
         let starvation_aging_discount = Self::starvation_aging_discount(lease, now, aging_step);
         if starvation_aging_discount > 0 {
@@ -3822,12 +3834,14 @@ mod tests {
                 .expect("Failed to create test runtime"),
         );
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cancellation_budget = Duration::from_millis(750);
         let request = SwarmWorkloadAdmissionRequest::new(
             "lease-lifecycle",
             SwarmAdmissionOwner::new("DustyGorge").with_bead_id("asupersync-oxqrae.2"),
         )
         .with_declared_resources(Some(1024), Some(50), Some(5))
-        .with_deadline(Instant::now() + Duration::from_secs(60));
+        .with_deadline(Instant::now() + Duration::from_secs(60))
+        .with_cancellation_budget(cancellation_budget);
         let decision = governor
             .check_workload_admission(&cx, &request)
             .expect("workload admission should classify");
@@ -3840,7 +3854,9 @@ mod tests {
         assert_eq!(acquired.state, SwarmWorkloadLeaseState::Active);
         assert_eq!(acquired.transition, SwarmWorkloadLeaseTransition::Acquired);
         assert_eq!(acquired.transition_reason, "workload lease acquired");
+        assert_eq!(acquired.cancellation_budget, Some(cancellation_budget));
         assert!(acquired.reason.contains("workload lease acquired"));
+        assert!(acquired.reason.contains("cancellation_budget_ms=750"));
 
         let committed = governor
             .commit_workload_lease(acquired.lease_id)
@@ -3851,6 +3867,8 @@ mod tests {
             SwarmWorkloadLeaseTransition::Committed
         );
         assert_eq!(committed.transition_reason, "workload lease committed");
+        assert_eq!(committed.cancellation_budget, Some(cancellation_budget));
+        assert!(committed.reason.contains("cancellation_budget_ms=750"));
         let old_expiry = committed.expires_at;
 
         let renewed = governor
@@ -3859,8 +3877,10 @@ mod tests {
         assert_eq!(renewed.state, SwarmWorkloadLeaseState::Committed);
         assert_eq!(renewed.transition, SwarmWorkloadLeaseTransition::Renewed);
         assert_eq!(renewed.transition_reason, "workload lease renewed");
+        assert_eq!(renewed.cancellation_budget, Some(cancellation_budget));
         assert!(renewed.expires_at > old_expiry);
         assert!(renewed.reason.contains("renewals=1"));
+        assert!(renewed.reason.contains("cancellation_budget_ms=750"));
 
         governor
             .record_workload_pressure_feedback(
@@ -3873,6 +3893,13 @@ mod tests {
             )
             .expect("live workload pressure feedback should record");
         assert_eq!(governor.metrics().live_workload_feedback_reports, 1);
+        let schedule = governor.workload_lease_schedule();
+        assert_eq!(schedule.len(), 1);
+        assert_eq!(schedule[0].cancellation_budget_ms, Some(750));
+        assert!(
+            schedule[0].reason.contains("cancellation_budget_ms=750"),
+            "schedule rows should expose the lease cancellation budget"
+        );
 
         let released = governor
             .release_workload_lease(acquired.lease_id)
@@ -3880,6 +3907,8 @@ mod tests {
         assert_eq!(released.state, SwarmWorkloadLeaseState::Released);
         assert_eq!(released.transition, SwarmWorkloadLeaseTransition::Released);
         assert_eq!(released.transition_reason, "workload lease released");
+        assert_eq!(released.cancellation_budget, Some(cancellation_budget));
+        assert!(released.reason.contains("cancellation_budget_ms=750"));
         assert!(released.terminal_at.is_some());
         assert_eq!(
             governor.metrics().live_workload_feedback_reports,

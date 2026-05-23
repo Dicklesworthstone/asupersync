@@ -355,6 +355,24 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
             entry.reason.contains("dominant_pressure_source="),
             "live workload lease should expose the dominant pressure source in its schedule reason"
         );
+        let workload_index = entry
+            .workload_id
+            .rsplit('-')
+            .next()
+            .expect("fixture workload id should end with an index")
+            .parse::<usize>()
+            .expect("fixture workload index should parse");
+        let expected_cancellation_budget_ms = 250 + (workload_index % 13) as u64 * 10;
+        assert_eq!(
+            entry.cancellation_budget_ms,
+            Some(expected_cancellation_budget_ms)
+        );
+        assert!(
+            entry.reason.contains(&format!(
+                "cancellation_budget_ms={expected_cancellation_budget_ms}"
+            )),
+            "live workload lease should expose the cancellation budget in its schedule reason"
+        );
         assert!(
             entry
                 .replay_pointer
@@ -390,13 +408,14 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
         .iter()
         .map(|entry| {
             format!(
-                "{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
                 entry.scheduling_rank,
                 entry.workload_id,
                 entry.proof_lane.as_str(),
                 entry.priority,
                 entry.effective_priority_rank,
                 entry.dominant_pressure_source.as_str(),
+                entry.cancellation_budget_ms.unwrap_or(0),
                 entry.queue_pressure_scaled,
                 entry.disk_io_pressure_scaled,
                 entry.rch_queue_pressure_scaled,
