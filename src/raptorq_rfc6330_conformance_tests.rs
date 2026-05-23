@@ -186,6 +186,43 @@ mod tests {
     }
 
     #[test]
+    fn production_decoder_recovers_with_mixed_systematic_and_repair_symbols() {
+        let k = 10;
+        let source = source_symbols(k, SYMBOL_SIZE);
+        let mut encoder =
+            SystematicEncoder::new(&source, SYMBOL_SIZE, SEED).expect("encoder should build");
+        let decoder = InactivationDecoder::new(k, SYMBOL_SIZE, SEED);
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(
+            encoder
+                .emit_systematic()
+                .iter()
+                .filter(|emitted| !matches!(emitted.esi, 1 | 6 | 8))
+                .map(|emitted| received_from_emitted(&decoder, emitted)),
+        );
+
+        let repairs = encoder.emit_repair(decoder.params().l);
+        assert!(
+            !repairs.is_empty(),
+            "repair emission must provide production repair rows"
+        );
+        received.extend(
+            repairs
+                .iter()
+                .map(|emitted| received_from_emitted(&decoder, emitted)),
+        );
+
+        let decoded = decoder
+            .decode(&received)
+            .expect("mixed production source+repair symbols must decode");
+        assert_eq!(
+            decoded.source, source,
+            "production repair symbols must recover withheld source symbols"
+        );
+    }
+
+    #[test]
     fn production_decoder_is_independent_of_received_symbol_order() {
         let k = 7;
         let source = source_symbols(k, SYMBOL_SIZE);
