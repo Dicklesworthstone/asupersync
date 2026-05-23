@@ -1023,10 +1023,10 @@ impl MinPlusCurve {
         }
 
         for idx in 1..samples.len() {
-            if samples[idx] < samples[idx - 1] {
+            if samples[idx] < samples[idx.saturating_sub(1)] {
                 return Err(CurveError::NonMonotone {
                     index: idx,
-                    prev: samples[idx - 1],
+                    prev: samples[idx.saturating_sub(1)],
                     next: samples[idx],
                 });
             }

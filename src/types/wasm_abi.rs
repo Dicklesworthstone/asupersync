@@ -1054,7 +1054,7 @@ impl WasmHandleTable {
             ownership: WasmHandleOwnership::WasmOwned,
             pinned: false,
         });
-        self.live_count += 1;
+        self.live_count = self.live_count.saturating_add(1);
 
         handle
     }
@@ -1304,14 +1304,20 @@ impl WasmHandleTable {
 
         for entry in self.slots.iter().flatten() {
             if entry.ownership != WasmHandleOwnership::Released {
-                *by_kind
-                    .entry(format!("{:?}", entry.handle.kind).to_lowercase())
-                    .or_insert(0usize) += 1;
-                *by_state
-                    .entry(format!("{:?}", entry.state).to_lowercase())
-                    .or_insert(0usize) += 1;
+                {
+                    let count = by_kind
+                        .entry(format!("{:?}", entry.handle.kind).to_lowercase())
+                        .or_insert(0usize);
+                    *count = count.saturating_add(1);
+                }
+                {
+                    let count = by_state
+                        .entry(format!("{:?}", entry.state).to_lowercase())
+                        .or_insert(0usize);
+                    *count = count.saturating_add(1);
+                }
                 if entry.pinned {
-                    pinned_count += 1;
+                    pinned_count = pinned_count.saturating_add(1);
                 }
             }
         }

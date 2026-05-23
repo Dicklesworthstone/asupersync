@@ -74,7 +74,7 @@ mod golden_tests {
     }
 
     fn hex_lower(bytes: &[u8]) -> String {
-        let mut s = String::with_capacity(bytes.len() * 2);
+        let mut s = String::with_capacity(bytes.len().saturating_mul(2));
         for b in bytes {
             write!(&mut s, "{b:02x}").expect("string formatting cannot fail");
         }
@@ -388,7 +388,7 @@ mod golden_tests {
         let encoder2 = SystematicEncoder::new(&source_data, symbol_size, seed)
             .expect("Second encoder construction must succeed");
 
-        for esi in (k as u32)..(k as u32 + 2) {
+        for esi in (k as u32)..(k as u32).saturating_add(2) {
             let repair1 = encoder.repair_symbol(esi);
             let repair2 = encoder2.repair_symbol(esi);
             assert_eq!(

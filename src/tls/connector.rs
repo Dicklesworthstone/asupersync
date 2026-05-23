@@ -582,8 +582,8 @@ impl TlsConnectorBuilder {
                                 #[cfg(feature = "tracing-integration")]
                                 match &load_result {
                                     Ok(counts) => {
-                                        loaded_total += counts.loaded;
-                                        rejected_total += counts.rejected_non_ca;
+                                        loaded_total = loaded_total.saturating_add(counts.loaded);
+                                        rejected_total = rejected_total.saturating_add(counts.rejected_non_ca);
                                     }
                                     Err(error) => {
                                         tracing::warn!(
@@ -660,7 +660,7 @@ impl TlsConnectorBuilder {
         let mut rejected = 0usize;
         for der in der_certs {
             if !is_ca_certificate(&der) {
-                rejected += 1;
+                rejected = rejected.saturating_add(1);
                 #[cfg(feature = "tracing-integration")]
                 tracing::warn!(
                     path = %path.display(),
@@ -670,7 +670,7 @@ impl TlsConnectorBuilder {
                 continue;
             }
             if self.root_certs.add(&Certificate::from_der(der)).is_ok() {
-                loaded += 1;
+                loaded = loaded.saturating_add(1);
             }
         }
         Ok(TlsCertificateLoadCounts {

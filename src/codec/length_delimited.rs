@@ -51,7 +51,7 @@ enum DecodeState {
 
 fn max_length_field_value(length_field_length: usize) -> io::Result<u64> {
     match length_field_length {
-        1..=7 => Ok((1u64 << (length_field_length * 8)) - 1),
+        1..=7 => Ok((1u64 << length_field_length.saturating_mul(8)).saturating_sub(1)),
         8 => Ok(u64::MAX),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -77,7 +77,7 @@ impl LengthDelimitedCodec {
             length_field_length: 4,
             length_adjustment: 0,
             num_skip: None,
-            max_frame_length: 8 * 1024 * 1024,
+            max_frame_length: 8_usize.saturating_mul(1024).saturating_mul(1024),
             big_endian: true,
         }
     }
@@ -184,7 +184,7 @@ impl LengthDelimitedCodec {
             }
         } else {
             for (shift, &b) in bytes.iter().enumerate() {
-                value |= u64::from(b) << (shift * 8);
+                value |= u64::from(b) << shift.saturating_mul(8);
             }
         }
 
@@ -1496,7 +1496,7 @@ mod tests {
                 length_field_length: 4,
                 length_adjustment: 0,
                 num_skip: 4,
-                max_frame_length: 8 * 1024 * 1024,
+                max_frame_length: 8_usize.saturating_mul(1024).saturating_mul(1024),
                 big_endian: true,
             }
         }
