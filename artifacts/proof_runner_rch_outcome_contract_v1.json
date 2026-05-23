@@ -13,6 +13,7 @@
     "command_scope",
     "remote_exit_status",
     "outcome_class",
+    "diagnostic_class",
     "decision",
     "first_blocker",
     "control_plane",
@@ -32,6 +33,15 @@
     "failed_local",
     "blocked_external",
     "wrapper_hang_after_remote_exit",
+    "rch-control-plane-inconsistent"
+  ],
+  "allowed_diagnostic_classes": [
+    "none",
+    "rustc_compile_error",
+    "rustfmt_diff",
+    "clippy_lint_wall",
+    "truncated_rustc_output",
+    "rch_admission_refusal",
     "rch-control-plane-inconsistent"
   ],
   "fixtures": [
@@ -63,6 +73,36 @@
     {
       "path": "tests/fixtures/proof_runner/rch_control_plane_inconsistent_enable_not_found.log",
       "expected_outcome_class": "rch-control-plane-inconsistent",
+      "expected_decision": "blocked-external"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/rustc_json_error.log",
+      "expected_outcome_class": "failed_local",
+      "expected_diagnostic_class": "rustc_compile_error",
+      "expected_decision": "failed-local"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/rustfmt_diff.log",
+      "expected_outcome_class": "failed_local",
+      "expected_diagnostic_class": "rustfmt_diff",
+      "expected_decision": "failed-local"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/clippy_lint.log",
+      "expected_outcome_class": "failed_local",
+      "expected_diagnostic_class": "clippy_lint_wall",
+      "expected_decision": "failed-local"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/truncated_rustc_output.log",
+      "expected_outcome_class": "blocked_external",
+      "expected_diagnostic_class": "truncated_rustc_output",
+      "expected_decision": "blocked-external"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/rch_remote_required_refusal.log",
+      "expected_outcome_class": "blocked_external",
+      "expected_diagnostic_class": "rch_admission_refusal",
       "expected_decision": "blocked-external"
     }
   ],

@@ -1,0 +1,8 @@
+error[E0599]: no method named `drain_to_quiescence` found for struct `RegionHeap` in the current scope
+   --> src/runtime/region_heap.rs:44:18
+    |
+44 |         heap.drain_to_quiescence();
+   |              ^^^^^^^^^^^^^^^^^^^ method not found in `RegionHeap`
+[output truncated after 8192 bytes]
+error: could not compile `asupersync` (lib test) due to 149 previous errors
+Remote command finished: exit=101

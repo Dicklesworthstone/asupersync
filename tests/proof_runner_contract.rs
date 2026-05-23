@@ -1914,6 +1914,11 @@ fn proof_runner_rch_outcome_contract_names_required_fixtures() {
         "tests/fixtures/proof_runner/wrapper_hang_after_remote_exit.log",
         "tests/fixtures/proof_runner/external_blocker.log",
         "tests/fixtures/proof_runner/rch_control_plane_inconsistent_enable_not_found.log",
+        "tests/fixtures/proof_runner/rustc_json_error.log",
+        "tests/fixtures/proof_runner/rustfmt_diff.log",
+        "tests/fixtures/proof_runner/clippy_lint.log",
+        "tests/fixtures/proof_runner/truncated_rustc_output.log",
+        "tests/fixtures/proof_runner/rch_remote_required_refusal.log",
     ] {
         assert!(
             fixture_names.contains(required),
@@ -1932,6 +1937,7 @@ fn proof_runner_rch_outcome_contract_names_required_fixtures() {
         "command_scope",
         "remote_exit_status",
         "outcome_class",
+        "diagnostic_class",
         "decision",
         "first_blocker",
         "control_plane",
@@ -2080,6 +2086,180 @@ fn proof_runner_classifies_local_cargo_error_blocker() {
     assert_eq!(
         frontier["affected_files"][0].as_str(),
         Some("tests/proof_runner_contract.rs")
+    );
+    assert_eq!(frontier["green_proof_claimed"].as_bool(), Some(false));
+}
+
+#[test]
+fn proof_runner_classifies_rustc_json_error_fixture() {
+    let command = "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_validation_frontier cargo test -p asupersync --test validation_frontier_ledger_contract --message-format=json";
+    let result = classify_fixture(
+        "rustc_json_error.log",
+        command,
+        &["tests/validation_frontier_ledger_contract.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+    let frontier = &result["validation_frontier_record"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("failed_local"));
+    assert_eq!(
+        outcome["diagnostic_class"].as_str(),
+        Some("rustc_compile_error")
+    );
+    assert_eq!(outcome["decision"].as_str(), Some("failed-local"));
+    assert_eq!(
+        outcome["first_blocker"]["file"].as_str(),
+        Some("tests/validation_frontier_ledger_contract.rs")
+    );
+    assert_eq!(outcome["first_blocker"]["line"].as_i64(), Some(18));
+    assert_eq!(outcome["first_blocker"]["code"].as_str(), Some("E0063"));
+    assert_eq!(
+        frontier["error_class"].as_str(),
+        Some("rustc_compile_error")
+    );
+    assert_eq!(
+        frontier["error_buckets"][0]["error_code"].as_str(),
+        Some("E0063")
+    );
+    assert_eq!(
+        frontier["affected_files"][0].as_str(),
+        Some("tests/validation_frontier_ledger_contract.rs")
+    );
+}
+
+#[test]
+fn proof_runner_classifies_rustfmt_diff_fixture() {
+    let command = "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_fmt cargo fmt --check";
+    let result = classify_fixture(
+        "rustfmt_diff.log",
+        command,
+        &["tests/validation_frontier_ledger_contract.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+    let frontier = &result["validation_frontier_record"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("failed_local"));
+    assert_eq!(outcome["diagnostic_class"].as_str(), Some("rustfmt_diff"));
+    assert_eq!(outcome["decision"].as_str(), Some("failed-local"));
+    assert_eq!(
+        outcome["first_blocker"]["file"].as_str(),
+        Some("tests/validation_frontier_ledger_contract.rs")
+    );
+    assert_eq!(outcome["first_blocker"]["line"].as_i64(), Some(18));
+    assert_eq!(frontier["error_class"].as_str(), Some("rustfmt_diff"));
+    assert_eq!(
+        frontier["first_failure"]["crate_or_surface"].as_str(),
+        Some("rustfmt")
+    );
+    assert_eq!(
+        frontier["first_failure"]["target"].as_str(),
+        Some("format-check")
+    );
+    assert_eq!(
+        frontier["error_buckets"][0]["error_code"].as_str(),
+        Some("rustfmt_diff")
+    );
+}
+
+#[test]
+fn proof_runner_classifies_clippy_lint_fixture() {
+    let command = "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_clippy cargo clippy -p asupersync --lib -- -D warnings";
+    let result = classify_fixture("clippy_lint.log", command, &["src/observability/otel.rs"]);
+    let outcome = &result["rch_outcome"];
+    let frontier = &result["validation_frontier_record"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("failed_local"));
+    assert_eq!(
+        outcome["diagnostic_class"].as_str(),
+        Some("clippy_lint_wall")
+    );
+    assert_eq!(outcome["decision"].as_str(), Some("failed-local"));
+    assert_eq!(
+        outcome["first_blocker"]["file"].as_str(),
+        Some("src/observability/otel.rs")
+    );
+    assert_eq!(outcome["first_blocker"]["line"].as_i64(), Some(114));
+    assert_eq!(frontier["error_class"].as_str(), Some("clippy_lint_wall"));
+    assert_eq!(
+        frontier["error_buckets"][0]["error_code"].as_str(),
+        Some("clippy::too_many_arguments")
+    );
+}
+
+#[test]
+fn proof_runner_classifies_truncated_rustc_output_fixture() {
+    let command = "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_lib cargo test -p asupersync --lib -- --nocapture";
+    let result = classify_fixture(
+        "truncated_rustc_output.log",
+        command,
+        &["tests/proof_runner_contract.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+    let frontier = &result["validation_frontier_record"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("blocked_external"));
+    assert_eq!(
+        outcome["diagnostic_class"].as_str(),
+        Some("truncated_rustc_output")
+    );
+    assert_eq!(outcome["decision"].as_str(), Some("blocked-external"));
+    assert_eq!(
+        outcome["first_blocker"]["file"].as_str(),
+        Some("src/runtime/region_heap.rs")
+    );
+    assert_eq!(outcome["first_blocker"]["line"].as_i64(), Some(44));
+    assert_eq!(
+        frontier["error_class"].as_str(),
+        Some("truncated_rustc_output")
+    );
+    assert_eq!(
+        frontier["first_blocker"]["file"].as_str(),
+        Some("src/runtime/region_heap.rs")
+    );
+    assert_eq!(
+        frontier["external_to_narrow_fuzz_target_work"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn proof_runner_classifies_remote_required_refusal_as_external_admission_blocker() {
+    let command = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_refusal cargo test -p asupersync --test proof_runner_contract -- --nocapture";
+    let result = classify_fixture(
+        "rch_remote_required_refusal.log",
+        command,
+        &["tests/proof_runner_contract.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+    let frontier = &result["validation_frontier_record"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("blocked_external"));
+    assert_eq!(
+        outcome["diagnostic_class"].as_str(),
+        Some("rch_admission_refusal")
+    );
+    assert_eq!(outcome["decision"].as_str(), Some("blocked-external"));
+    assert_eq!(outcome["first_blocker"]["file"].as_str(), Some("rch"));
+    assert_eq!(outcome["first_blocker"]["line"].as_i64(), Some(0));
+    assert_eq!(
+        frontier["error_class"].as_str(),
+        Some("rch_admission_refusal")
+    );
+    assert_eq!(
+        frontier["first_failure"]["crate_or_surface"].as_str(),
+        Some("rch")
+    );
+    assert_eq!(
+        frontier["first_failure"]["target"].as_str(),
+        Some("remote-admission")
+    );
+    assert_eq!(
+        frontier["rch_result"]["admission"].as_str(),
+        Some("local-fallback-refused")
+    );
+    assert_eq!(
+        frontier["rch_result"]["local_fallback_refused"].as_bool(),
+        Some(true)
     );
     assert_eq!(frontier["green_proof_claimed"].as_bool(), Some(false));
 }

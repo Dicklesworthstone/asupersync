@@ -70,6 +70,11 @@ CARGO_LOCATION_RE = re.compile(r"^\s*-->\s+([^:\s]+):(\d+):(\d+)")
 RUST_ERROR_RE = re.compile(
     r"^\s*error(?:\[(?P<code>[^\]]+)\])?:\s*(?P<message>.+)"
 )
+RUSTFMT_DIFF_RE = re.compile(r"^Diff in (?P<file>[^:\n]+):(?P<line>\d+):", re.MULTILINE)
+TRUNCATED_OUTPUT_RE = re.compile(r"truncated (?:after|output)|output truncated", re.IGNORECASE)
+CLIPPY_LINT_RE = re.compile(
+    r"(?:rust-clippy/[^\s#]+#|clippy::)(?P<lint>[A-Za-z0-9_-]+)"
+)
 WRAPPER_RETRIEVAL_HANG_HINTS = (
     "retrieval timed out",
     "retrieval stalled",
@@ -663,9 +668,89 @@ def remote_exit_status(log_text: str) -> Optional[int]:
     return int(matches[-1])
 
 
+def has_rch_remote_required_refusal(log_text: str) -> bool:
+    """Return true when RCH_REQUIRE_REMOTE refused local fallback before proof."""
+    lowered = log_text.lower()
+    return (
+        "remote required; refusing local fallback" in lowered
+        or "remote worker admission refused" in lowered
+        or (
+            "rch_require_remote=1" in lowered
+            and "local fallback refused" in lowered
+        )
+    )
+
+
 def has_rch_local_fallback(log_text: str) -> bool:
     """Return true when rch reports a local fallback instead of remote proof."""
     return bool(RCH_LOCAL_FALLBACK_RE.search(log_text))
+
+
+def empty_blocker(message: str = "", code: str = "") -> Dict[str, Any]:
+    """Return a neutral blocker shape for classifier fallbacks."""
+    return {
+        "file": "",
+        "line": 0,
+        "column": 0,
+        "message": message,
+        "code": code,
+        "raw": "",
+    }
+
+
+def has_blocker_location(blocker: Dict[str, Any]) -> bool:
+    """Return true when a blocker identifies a concrete file/surface."""
+    return bool(normalize_repo_path(str(blocker.get("file", ""))))
+
+
+def first_rustc_json_blocker(log_text: str) -> Dict[str, Any]:
+    """Extract the first rustc --message-format=json error diagnostic."""
+    for line in log_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("reason") != "compiler-message":
+            continue
+        message = payload.get("message") or {}
+        if message.get("level") != "error":
+            continue
+        spans = [span for span in message.get("spans") or [] if isinstance(span, dict)]
+        primary = next((span for span in spans if span.get("is_primary")), None)
+        if primary is None and spans:
+            primary = spans[0]
+        if primary is None:
+            continue
+        code = message.get("code") or {}
+        return {
+            "file": str(primary.get("file_name", "")),
+            "line": int(primary.get("line_start") or 0),
+            "column": int(primary.get("column_start") or 0),
+            "message": str(message.get("message", "")),
+            "code": str(code.get("code") or ""),
+            "raw": stripped,
+        }
+    return empty_blocker()
+
+
+def first_rustfmt_blocker(log_text: str) -> Dict[str, Any]:
+    """Extract the first rustfmt --check diff location."""
+    match = RUSTFMT_DIFF_RE.search(log_text)
+    if not match:
+        return empty_blocker()
+    file = normalize_repo_path(match.group("file"))
+    line = int(match.group("line"))
+    return {
+        "file": file,
+        "line": line,
+        "column": 0,
+        "message": f"rustfmt diff in {file}:{line}",
+        "code": "rustfmt_diff",
+        "raw": match.group(0).strip(),
+    }
 
 
 def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
@@ -690,14 +775,66 @@ def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
                 "raw": line.strip(),
             }
 
-    return {
-        "file": "",
-        "line": 0,
-        "column": 0,
-        "message": pending_message,
-        "code": pending_code,
-        "raw": "",
-    }
+    return empty_blocker(pending_message, pending_code)
+
+
+def first_output_blocker(log_text: str) -> Dict[str, Any]:
+    """Extract the first structured, formatter, or rustc text blocker."""
+    for candidate in (
+        first_rustc_json_blocker(log_text),
+        first_rustfmt_blocker(log_text),
+        first_cargo_blocker(log_text),
+    ):
+        if has_blocker_location(candidate):
+            return candidate
+    return first_cargo_blocker(log_text)
+
+
+def clippy_lint_code(log_text: str) -> str:
+    """Return a stable clippy lint code when rust-clippy names one."""
+    match = CLIPPY_LINT_RE.search(log_text)
+    if not match:
+        return ""
+    lint = match.group("lint").replace("-", "_")
+    return f"clippy::{lint}"
+
+
+def diagnostic_error_class(
+    command: str,
+    log_text: str,
+    blocker: Dict[str, Any],
+    outcome_class: str,
+) -> str:
+    """Classify the diagnostic surface separately from pass/fail ownership."""
+    scope = command_scope(command)
+    if outcome_class == "pass":
+        return "none"
+    if has_rch_remote_required_refusal(log_text) or blocker.get("file") == "rch-local-fallback":
+        return "rch_admission_refusal"
+    if blocker.get("file") == "rch-control-plane":
+        return RCH_CONTROL_PLANE_INCONSISTENT_CLASS
+    if first_rustfmt_blocker(log_text).get("file") or scope.get("program") == "rustfmt":
+        return "rustfmt_diff"
+    if TRUNCATED_OUTPUT_RE.search(log_text):
+        return "truncated_rustc_output"
+    if scope.get("cargo_subcommand") == "clippy" or clippy_lint_code(log_text):
+        return "clippy_lint_wall"
+    if has_blocker_location(blocker) or blocker.get("message"):
+        return "rustc_compile_error"
+    return outcome_class
+
+
+def diagnostic_target(scope: Dict[str, Any], diagnostic_class: str) -> Tuple[str, str]:
+    """Return crate_or_surface and target for the frontier first_failure row."""
+    if diagnostic_class == "rch_admission_refusal":
+        return "rch", "remote-admission"
+    if diagnostic_class == "rustfmt_diff":
+        return "rustfmt", "format-check"
+    surface = scope.get("package") or scope.get("program") or "cargo"
+    if scope.get("target"):
+        kind = scope.get("target_kind") or "target"
+        return surface, f'{kind} "{scope["target"]}"'
+    return surface, scope.get("cargo_subcommand") or scope.get("program") or ""
 
 
 def has_wrapper_retrieval_hang(log_text: str, remote_exit: Optional[int]) -> bool:
@@ -772,13 +909,25 @@ def classify_rch_outcome(
     """Convert an rch output transcript into a structured outcome row."""
     scope = command_scope(command)
     remote_exit = remote_exit_status(log_text)
-    blocker = first_cargo_blocker(log_text)
+    blocker = first_output_blocker(log_text)
     touched = {normalize_repo_path(path) for path in touched_files}
     blocker_file = normalize_repo_path(str(blocker["file"]))
     wrapper_hang = has_wrapper_retrieval_hang(log_text, remote_exit)
     control_plane = detect_rch_control_plane_inconsistency(log_text)
 
-    if has_rch_local_fallback(log_text):
+    if has_rch_remote_required_refusal(log_text):
+        outcome_class = "blocked_external"
+        decision = "blocked-external"
+        summary = "RCH_REQUIRE_REMOTE=1 remote worker admission refused; local fallback refused"
+        blocker = {
+            "file": "rch",
+            "line": 0,
+            "column": 0,
+            "message": summary,
+            "code": "rch_admission_refusal",
+            "raw": summary,
+        }
+    elif has_rch_local_fallback(log_text):
         outcome_class = "failed_local"
         decision = "failed-local"
         summary = "rch local fallback detected; refusing local cargo execution"
@@ -787,6 +936,7 @@ def classify_rch_outcome(
             "line": 0,
             "column": 0,
             "message": summary,
+            "code": "rch_admission_refusal",
             "raw": summary,
         }
     elif control_plane:
@@ -801,6 +951,7 @@ def classify_rch_outcome(
             "line": 0,
             "column": 0,
             "message": control_plane["action_error"],
+            "code": RCH_CONTROL_PLANE_INCONSISTENT_CLASS,
             "raw": control_plane["action_error"],
         }
     elif wrapper_hang:
@@ -820,12 +971,23 @@ def classify_rch_outcome(
         decision = "failed-local"
         summary = "remote proof command failed on the touched proof surface"
 
+    diagnostic_class = diagnostic_error_class(command, log_text, blocker, outcome_class)
+    if diagnostic_class == "rustfmt_diff":
+        summary = blocker.get("message") or summary
+    elif diagnostic_class in {
+        "clippy_lint_wall",
+        "rustc_compile_error",
+        "truncated_rustc_output",
+    } and blocker.get("message"):
+        summary = blocker["message"]
+
     outcome = {
         "schema_version": RCH_OUTCOME_SCHEMA_VERSION,
         "command": command,
         "command_scope": scope,
         "remote_exit_status": remote_exit,
         "outcome_class": outcome_class,
+        "diagnostic_class": diagnostic_class,
         "decision": decision,
         "first_blocker": blocker,
         "touched_files": touched_files,
@@ -1077,8 +1239,9 @@ def rch_result_from_outcome(outcome: Dict[str, Any]) -> Dict[str, Any]:
     outcome_class = str(outcome.get("outcome_class", ""))
     remote_exit = outcome.get("remote_exit_status")
     control_plane = outcome.get("control_plane") or {}
-    if outcome_class == "failed_local" and (
-        outcome.get("first_blocker", {}).get("file") == "rch-local-fallback"
+    if (
+        outcome.get("diagnostic_class") == "rch_admission_refusal"
+        or outcome.get("first_blocker", {}).get("file") in {"rch", "rch-local-fallback"}
     ):
         admission = "local-fallback-refused"
         local_fallback_refused = True
@@ -1239,6 +1402,7 @@ class ValidationFrontierRecord:
         supplemental: str = "",
         line: int = 0,
         target: str = "preflight",
+        crate_or_surface: str = "coordination",
         exit_status: Optional[int] = None,
         blocker_message: str = "",
         error_code: str = "",
@@ -1251,7 +1415,7 @@ class ValidationFrontierRecord:
             "blocked-external",
             error_class,
             {
-                "crate_or_surface": "coordination",
+                "crate_or_surface": crate_or_surface,
                 "target": target,
                 "file": normalized_file,
                 "line": line,
@@ -1299,6 +1463,7 @@ class ValidationFrontierRecord:
         summary: str,
         line: int = 0,
         target: str = "",
+        crate_or_surface: str = "cargo",
         exit_status: Optional[int] = None,
         blocker_message: str = "",
         error_code: str = "",
@@ -1311,7 +1476,7 @@ class ValidationFrontierRecord:
             "failed-local",
             error_class,
             {
-                "crate_or_surface": "cargo",
+                "crate_or_surface": crate_or_surface,
                 "target": target,
                 "file": normalized_file,
                 "line": line,
@@ -3046,28 +3211,37 @@ class ProofRunner:
         )
         blocker = outcome["first_blocker"]
         scope = outcome["command_scope"]
+        diagnostic_class = str(outcome.get("diagnostic_class") or outcome["outcome_class"])
+        crate_or_surface, target = diagnostic_target(scope, diagnostic_class)
+        error_code = str(blocker.get("code", ""))
+        if diagnostic_class == "clippy_lint_wall":
+            error_code = clippy_lint_code(log_text) or error_code
+        if not error_code:
+            error_code = diagnostic_class
 
         if outcome["decision"] == "pass":
             frontier = record.as_pass()
         elif outcome["decision"] == "blocked-external":
             frontier = record.as_blocked_external(
-                outcome["outcome_class"],
+                diagnostic_class,
                 blocker.get("file", "") or "rch-wrapper",
                 outcome["summary"],
                 line=int(blocker.get("line") or 0),
-                target=scope.get("target") or scope.get("cargo_subcommand") or "rch",
+                target=target or scope.get("target") or scope.get("cargo_subcommand") or "rch",
+                crate_or_surface=crate_or_surface,
                 blocker_message=blocker.get("message", ""),
-                error_code=blocker.get("code", ""),
+                error_code=error_code,
             )
         else:
             frontier = record.as_failed_local(
-                outcome["outcome_class"],
+                diagnostic_class,
                 blocker.get("file", ""),
                 outcome["summary"],
                 line=int(blocker.get("line") or 0),
-                target=scope.get("target") or scope.get("cargo_subcommand") or "",
+                target=target or scope.get("target") or scope.get("cargo_subcommand") or "",
+                crate_or_surface=crate_or_surface,
                 blocker_message=blocker.get("message", ""),
-                error_code=blocker.get("code", ""),
+                error_code=error_code,
             )
 
         return {
