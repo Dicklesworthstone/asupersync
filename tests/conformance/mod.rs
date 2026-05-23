@@ -14,9 +14,9 @@ pub mod tls_handshake;
 
 // Runtime+Scheduler Conformance Test Harnesses
 pub mod harness;
-pub mod remote_conformance;
 pub mod kernel_conformance;
 pub mod reactor_conformance;
+pub mod remote_conformance;
 pub mod scheduler_conformance;
 // pub mod codec_framing;
 // codec_framing.rs would collide with the codec_framing/ directory;
@@ -204,16 +204,13 @@ pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Runtime+Scheduler Conformance Test Harnesses
 pub use harness::{
-    ConformanceTestResult as RuntimeConformanceTestResult,
-    CoverageStats as RuntimeCoverageStats,
-    RequirementLevel as RuntimeRequirementLevel,
-    RuntimeConformanceHarness,
-    TestCategory as RuntimeTestCategory,
-    TestVerdict as RuntimeTestVerdict,
+    ConformanceTestResult as RuntimeConformanceTestResult, CoverageStats as RuntimeCoverageStats,
+    RequirementLevel as RuntimeRequirementLevel, RuntimeConformanceHarness,
+    TestCategory as RuntimeTestCategory, TestVerdict as RuntimeTestVerdict,
 };
-pub use remote_conformance::RemoteConformanceHarness;
 pub use kernel_conformance::KernelConformanceHarness;
 pub use reactor_conformance::ReactorConformanceHarness;
+pub use remote_conformance::RemoteConformanceHarness;
 pub use scheduler_conformance::SchedulerConformanceHarness;
 
 // Unified test categories for all conformance suites
@@ -1174,14 +1171,20 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             test_id: r.test_name.to_owned(),
             description: format!("Runtime+Scheduler: {}", r.test_name),
             category: match r.category {
-                harness::TestCategory::DistributedStructuredConcurrency => TestCategory::DistributedStructuredConcurrency,
-                harness::TestCategory::NamedComputationContract => TestCategory::NamedComputationContract,
+                harness::TestCategory::DistributedStructuredConcurrency => {
+                    TestCategory::DistributedStructuredConcurrency
+                }
+                harness::TestCategory::NamedComputationContract => {
+                    TestCategory::NamedComputationContract
+                }
                 harness::TestCategory::RemoteCapabilityModel => TestCategory::RemoteCapabilityModel,
                 harness::TestCategory::RemoteLeaseManagement => TestCategory::RemoteLeaseManagement,
                 harness::TestCategory::RemoteMessageProtocol => TestCategory::RemoteMessageProtocol,
                 harness::TestCategory::RemoteTaskLifecycle => TestCategory::RemoteTaskLifecycle,
                 harness::TestCategory::SnapshotContract => TestCategory::SnapshotContract,
-                harness::TestCategory::ControllerRegistration => TestCategory::ControllerRegistration,
+                harness::TestCategory::ControllerRegistration => {
+                    TestCategory::ControllerRegistration
+                }
                 harness::TestCategory::VersionCompatibility => TestCategory::VersionCompatibility,
                 harness::TestCategory::ObservabilityContract => TestCategory::ObservabilityContract,
                 harness::TestCategory::IoEventNotification => TestCategory::IoEventNotification,

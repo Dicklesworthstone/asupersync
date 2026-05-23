@@ -12,7 +12,9 @@
 //! - Three-lane scheduling (ready/cancel/finalize)
 //! - Panic isolation and task failure containment
 
-use super::harness::{ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict};
+use super::harness::{
+    ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict,
+};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -581,7 +583,11 @@ impl MockScheduler {
     }
 
     fn average_steal_success_rate(&self) -> f64 {
-        let rates: Vec<f64> = self.workers.iter().map(|w| w.steal_success_rate()).collect();
+        let rates: Vec<f64> = self
+            .workers
+            .iter()
+            .map(|w| w.steal_success_rate())
+            .collect();
         if rates.is_empty() {
             0.0
         } else {
@@ -674,20 +680,24 @@ impl SchedulerConformanceHarness {
 
     /// Test basic task execution.
     fn test_basic_task_execution(&mut self) -> ConformanceTestResult {
-        self.harness.run_test(
-            || {
-                let initial_executions = self.scheduler.total_executions();
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
-                self.scheduler.execute_round();
-                let final_executions = self.scheduler.total_executions();
+        self.harness
+            .run_test(
+                || {
+                    let initial_executions = self.scheduler.total_executions();
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                    self.scheduler.execute_round();
+                    let final_executions = self.scheduler.total_executions();
 
-                let executed = final_executions > initial_executions;
-                self.harness.verify(executed, "Tasks should execute when scheduled")
-            },
-            "basic_task_execution",
-            RequirementLevel::Must,
-            TestCategory::TaskExecution,
-        ).with_spec_section("task-execution")
+                    let executed = final_executions > initial_executions;
+                    self.harness
+                        .verify(executed, "Tasks should execute when scheduled")
+                },
+                "basic_task_execution",
+                RequirementLevel::Must,
+                TestCategory::TaskExecution,
+            )
+            .with_spec_section("task-execution")
     }
 
     /// Test cooperative scheduling behavior.
@@ -696,14 +706,18 @@ impl SchedulerConformanceHarness {
             || {
                 // Spawn multiple tasks
                 for _ in 0..10 {
-                    self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 }
 
                 self.scheduler.execute_round();
                 let executions = self.scheduler.total_executions();
 
                 let cooperative = executions > 0; // Some tasks should execute cooperatively
-                self.harness.verify(cooperative, "Scheduler should support cooperative execution")
+                self.harness.verify(
+                    cooperative,
+                    "Scheduler should support cooperative execution",
+                )
             },
             "cooperative_scheduling",
             RequirementLevel::Must,
@@ -716,12 +730,14 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 let initial_total = self.scheduler.total_worker_executions();
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 self.scheduler.execute_round();
                 let final_total = self.scheduler.total_worker_executions();
 
                 let tracked = final_total > initial_total;
-                self.harness.verify(tracked, "Task completion should be tracked")
+                self.harness
+                    .verify(tracked, "Task completion should be tracked")
             },
             "task_completion_tracking",
             RequirementLevel::Must,
@@ -734,13 +750,18 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Spawn tasks with different priorities
-                self.scheduler.spawn_task(TaskPriority::High, SchedulerLane::Ready);
-                self.scheduler.spawn_task(TaskPriority::Low, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::High, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Low, SchedulerLane::Ready);
 
                 self.scheduler.execute_round();
                 let executions = self.scheduler.total_executions();
 
-                self.harness.verify(executions > 0, "Scheduler should maintain execution ordering")
+                self.harness.verify(
+                    executions > 0,
+                    "Scheduler should maintain execution ordering",
+                )
             },
             "execution_ordering",
             RequirementLevel::Should,
@@ -754,7 +775,8 @@ impl SchedulerConformanceHarness {
             || {
                 // Create task imbalance
                 for _ in 0..20 {
-                    self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 }
 
                 // Execute several rounds to trigger stealing
@@ -763,7 +785,8 @@ impl SchedulerConformanceHarness {
                 }
 
                 let total_steals = self.scheduler.total_successful_steals();
-                self.harness.verify(total_steals >= 0, "Work stealing should be available")
+                self.harness
+                    .verify(total_steals >= 0, "Work stealing should be available")
             },
             "work_stealing_mechanism",
             RequirementLevel::Must,
@@ -777,7 +800,8 @@ impl SchedulerConformanceHarness {
             || {
                 // Work stealing should prefer stealing from the back of queues
                 // This is implemented in MockLocalQueue::steal()
-                self.harness.verify(true, "Work stealing should maintain cache locality")
+                self.harness
+                    .verify(true, "Work stealing should maintain cache locality")
             },
             "steal_from_back_locality",
             RequirementLevel::Should,
@@ -791,7 +815,8 @@ impl SchedulerConformanceHarness {
             || {
                 // Create significant task imbalance
                 for _ in 0..50 {
-                    self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 }
 
                 // Execute multiple rounds
@@ -800,7 +825,10 @@ impl SchedulerConformanceHarness {
                 }
 
                 let avg_success_rate = self.scheduler.average_steal_success_rate();
-                self.harness.verify(avg_success_rate >= 0.0, "Work stealing should be fair across workers")
+                self.harness.verify(
+                    avg_success_rate >= 0.0,
+                    "Work stealing should be fair across workers",
+                )
             },
             "steal_fairness",
             RequirementLevel::Should,
@@ -813,7 +841,10 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 let success_rate = self.scheduler.average_steal_success_rate();
-                self.harness.verify(success_rate >= 0.0 && success_rate <= 1.0, "Steal success rate should be tracked")
+                self.harness.verify(
+                    success_rate >= 0.0 && success_rate <= 1.0,
+                    "Steal success rate should be tracked",
+                )
             },
             "steal_success_rate",
             RequirementLevel::Should,
@@ -827,14 +858,16 @@ impl SchedulerConformanceHarness {
             || {
                 // Spawn tasks to trigger load balancing
                 for _ in 0..20 {
-                    self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 }
 
                 self.scheduler.execute_round();
                 let ready_tasks = self.scheduler.global_ready_len();
 
                 // Load balancing should distribute tasks
-                self.harness.verify(ready_tasks >= 0, "Load balancing should distribute tasks")
+                self.harness
+                    .verify(ready_tasks >= 0, "Load balancing should distribute tasks")
             },
             "load_balancing_algorithm",
             RequirementLevel::Must,
@@ -848,13 +881,17 @@ impl SchedulerConformanceHarness {
             || {
                 let worker_count = self.scheduler.worker_count();
                 for _ in 0..worker_count * 2 {
-                    self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 }
 
                 self.scheduler.execute_round();
                 let executions = self.scheduler.total_executions();
 
-                self.harness.verify(executions > 0, "Global tasks should be distributed to workers")
+                self.harness.verify(
+                    executions > 0,
+                    "Global tasks should be distributed to workers",
+                )
             },
             "global_task_distribution",
             RequirementLevel::Must,
@@ -868,7 +905,8 @@ impl SchedulerConformanceHarness {
             || {
                 // Execute round with no tasks (workers should handle idle state)
                 self.scheduler.execute_round();
-                self.harness.verify(true, "Workers should handle idle state gracefully")
+                self.harness
+                    .verify(true, "Workers should handle idle state gracefully")
             },
             "worker_idle_handling",
             RequirementLevel::Must,
@@ -881,7 +919,8 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Balancing should consider queue lengths
-                self.harness.verify(true, "Load balancing should consider queue lengths")
+                self.harness
+                    .verify(true, "Load balancing should consider queue lengths")
             },
             "queue_length_balancing",
             RequirementLevel::Should,
@@ -894,9 +933,12 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Spawn tasks with different priorities
-                self.scheduler.spawn_task(TaskPriority::Low, SchedulerLane::Ready);
-                self.scheduler.spawn_task(TaskPriority::High, SchedulerLane::Ready);
-                self.scheduler.spawn_task(TaskPriority::Critical, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Low, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::High, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Critical, SchedulerLane::Ready);
 
                 let initial_heap_size = self.scheduler.priority_heap_len();
                 self.scheduler.execute_round();
@@ -904,7 +946,8 @@ impl SchedulerConformanceHarness {
 
                 // High/Critical priority tasks go to heap
                 let priority_handled = initial_heap_size > 0 || final_heap_size >= 0;
-                self.harness.verify(priority_handled, "Priority ordering should be maintained")
+                self.harness
+                    .verify(priority_handled, "Priority ordering should be maintained")
             },
             "priority_ordering",
             RequirementLevel::Must,
@@ -917,10 +960,14 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // High priority tasks should preempt lower priority
-                self.scheduler.spawn_task(TaskPriority::Critical, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Critical, SchedulerLane::Ready);
                 self.scheduler.execute_round();
 
-                self.harness.verify(true, "High priority tasks should have preemption capability")
+                self.harness.verify(
+                    true,
+                    "High priority tasks should have preemption capability",
+                )
             },
             "high_priority_preemption",
             RequirementLevel::Should,
@@ -933,14 +980,18 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 let initial_heap_size = self.scheduler.priority_heap_len();
-                self.scheduler.spawn_task(TaskPriority::High, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::High, SchedulerLane::Ready);
                 let after_spawn = self.scheduler.priority_heap_len();
 
                 self.scheduler.execute_round();
                 let after_execution = self.scheduler.priority_heap_len();
 
                 let heap_operations_work = after_spawn > initial_heap_size;
-                self.harness.verify(heap_operations_work, "Priority heap operations should work correctly")
+                self.harness.verify(
+                    heap_operations_work,
+                    "Priority heap operations should work correctly",
+                )
             },
             "priority_heap_operations",
             RequirementLevel::Must,
@@ -953,7 +1004,8 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Deadline-driven scheduling support
-                self.harness.verify(true, "Scheduler should support deadline-driven execution")
+                self.harness
+                    .verify(true, "Scheduler should support deadline-driven execution")
             },
             "deadline_driven_scheduling",
             RequirementLevel::May,
@@ -966,14 +1018,16 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 let initial_cancel_len = self.scheduler.global_cancel_len();
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Cancel);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Cancel);
                 let after_spawn = self.scheduler.global_cancel_len();
 
                 self.scheduler.execute_round();
                 let after_execution = self.scheduler.global_cancel_len();
 
                 let cancel_processed = after_spawn > initial_cancel_len;
-                self.harness.verify(cancel_processed, "Cancellation lane should process tasks")
+                self.harness
+                    .verify(cancel_processed, "Cancellation lane should process tasks")
             },
             "cancellation_lane_processing",
             RequirementLevel::Must,
@@ -987,7 +1041,8 @@ impl SchedulerConformanceHarness {
             || {
                 // Spawn many cancel tasks to test streak limiting
                 for _ in 0..10 {
-                    self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Cancel);
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Cancel);
                 }
 
                 // Execute multiple rounds
@@ -995,7 +1050,10 @@ impl SchedulerConformanceHarness {
                     self.scheduler.execute_round();
                 }
 
-                self.harness.verify(true, "Cancel streak should be limited to prevent starvation")
+                self.harness.verify(
+                    true,
+                    "Cancel streak should be limited to prevent starvation",
+                )
             },
             "cancel_streak_limiting",
             RequirementLevel::Must,
@@ -1007,13 +1065,18 @@ impl SchedulerConformanceHarness {
     fn test_cancel_vs_ready_prioritization(&mut self) -> ConformanceTestResult {
         self.harness.run_test(
             || {
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Cancel);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Cancel);
 
                 self.scheduler.execute_round();
                 let executions = self.scheduler.total_executions();
 
-                self.harness.verify(executions > 0, "Cancel and ready tasks should be prioritized correctly")
+                self.harness.verify(
+                    executions > 0,
+                    "Cancel and ready tasks should be prioritized correctly",
+                )
             },
             "cancel_vs_ready_prioritization",
             RequirementLevel::Should,
@@ -1026,7 +1089,8 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Cancel tasks should be isolated from normal execution
-                self.harness.verify(true, "Cancel tasks should be properly isolated")
+                self.harness
+                    .verify(true, "Cancel tasks should be properly isolated")
             },
             "cancel_task_isolation",
             RequirementLevel::Should,
@@ -1039,16 +1103,22 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Test all three lanes
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Cancel);
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Finalize);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Cancel);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Finalize);
 
                 let ready_len = self.scheduler.global_ready_len();
                 let cancel_len = self.scheduler.global_cancel_len();
                 // Note: finalize_len would need to be exposed for full test
 
                 let three_lanes_work = ready_len >= 0 && cancel_len >= 0;
-                self.harness.verify(three_lanes_work, "Three-lane architecture should be functional")
+                self.harness.verify(
+                    three_lanes_work,
+                    "Three-lane architecture should be functional",
+                )
             },
             "three_lane_architecture",
             RequirementLevel::Must,
@@ -1061,7 +1131,10 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Lane selection should follow priority rules
-                self.harness.verify(true, "Lane selection algorithm should prioritize appropriately")
+                self.harness.verify(
+                    true,
+                    "Lane selection algorithm should prioritize appropriately",
+                )
             },
             "lane_selection_algorithm",
             RequirementLevel::Must,
@@ -1073,10 +1146,12 @@ impl SchedulerConformanceHarness {
     fn test_finalize_lane_processing(&mut self) -> ConformanceTestResult {
         self.harness.run_test(
             || {
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Finalize);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Finalize);
                 self.scheduler.execute_round();
 
-                self.harness.verify(true, "Finalize lane should process cleanup tasks")
+                self.harness
+                    .verify(true, "Finalize lane should process cleanup tasks")
             },
             "finalize_lane_processing",
             RequirementLevel::Must,
@@ -1089,7 +1164,8 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // All lanes should get fair execution opportunity
-                self.harness.verify(true, "Cross-lane execution should be fair")
+                self.harness
+                    .verify(true, "Cross-lane execution should be fair")
             },
             "cross_lane_fairness",
             RequirementLevel::Should,
@@ -1102,11 +1178,13 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 let initial_ready = self.scheduler.global_ready_len();
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 let after_injection = self.scheduler.global_ready_len();
 
                 let injected = after_injection > initial_ready;
-                self.harness.verify(injected, "Tasks should be injectable into global queues")
+                self.harness
+                    .verify(injected, "Tasks should be injectable into global queues")
             },
             "global_task_injection",
             RequirementLevel::Must,
@@ -1119,13 +1197,17 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 for _ in 0..self.scheduler.worker_count() {
-                    self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 }
 
                 self.scheduler.execute_round();
                 let executions = self.scheduler.total_executions();
 
-                self.harness.verify(executions > 0, "Injected tasks should be distributed to workers")
+                self.harness.verify(
+                    executions > 0,
+                    "Injected tasks should be distributed to workers",
+                )
             },
             "injection_distribution",
             RequirementLevel::Must,
@@ -1139,10 +1221,12 @@ impl SchedulerConformanceHarness {
             || {
                 // High injection rate should be handled gracefully
                 for _ in 0..1000 {
-                    self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                    self.scheduler
+                        .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 }
 
-                self.harness.verify(true, "High injection rates should be handled gracefully")
+                self.harness
+                    .verify(true, "High injection rates should be handled gracefully")
             },
             "injection_rate_limiting",
             RequirementLevel::Should,
@@ -1155,7 +1239,8 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Tasks should be visible across workers for stealing
-                self.harness.verify(true, "Tasks should be visible across workers")
+                self.harness
+                    .verify(true, "Tasks should be visible across workers")
             },
             "cross_worker_visibility",
             RequirementLevel::Must,
@@ -1168,14 +1253,18 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 let initial_heap_size = self.scheduler.priority_heap_len();
-                self.scheduler.spawn_task(TaskPriority::High, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::High, SchedulerLane::Ready);
                 let after_push = self.scheduler.priority_heap_len();
 
                 self.scheduler.execute_round();
                 let after_pop = self.scheduler.priority_heap_len();
 
                 let heap_ops_work = after_push > initial_heap_size;
-                self.harness.verify(heap_ops_work, "Intrusive heap operations should work correctly")
+                self.harness.verify(
+                    heap_ops_work,
+                    "Intrusive heap operations should work correctly",
+                )
             },
             "intrusive_heap_operations",
             RequirementLevel::Must,
@@ -1188,11 +1277,14 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Heap should maintain priority ordering
-                self.scheduler.spawn_task(TaskPriority::High, SchedulerLane::Ready);
-                self.scheduler.spawn_task(TaskPriority::Critical, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::High, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Critical, SchedulerLane::Ready);
 
                 self.scheduler.execute_round();
-                self.harness.verify(true, "Heap should maintain priority ordering")
+                self.harness
+                    .verify(true, "Heap should maintain priority ordering")
             },
             "heap_priority_ordering",
             RequirementLevel::Must,
@@ -1218,7 +1310,8 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 // Heap should support concurrent access
-                self.harness.verify(true, "Heap should support safe concurrent access")
+                self.harness
+                    .verify(true, "Heap should support safe concurrent access")
             },
             "heap_concurrent_access",
             RequirementLevel::Must,
@@ -1232,14 +1325,19 @@ impl SchedulerConformanceHarness {
             || {
                 let initial_panic_count = self.scheduler.total_panic_count();
                 self.scheduler.spawn_panic_task(); // Task that will panic
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready); // Normal task
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Ready); // Normal task
 
                 self.scheduler.execute_round();
                 let final_panic_count = self.scheduler.total_panic_count();
                 let total_executions = self.scheduler.total_executions();
 
-                let panic_isolated = final_panic_count >= initial_panic_count && total_executions > 0;
-                self.harness.verify(panic_isolated, "Panics should be isolated and not affect other tasks")
+                let panic_isolated =
+                    final_panic_count >= initial_panic_count && total_executions > 0;
+                self.harness.verify(
+                    panic_isolated,
+                    "Panics should be isolated and not affect other tasks",
+                )
             },
             "panic_isolation",
             RequirementLevel::Must,
@@ -1255,7 +1353,8 @@ impl SchedulerConformanceHarness {
                 self.scheduler.execute_round();
 
                 let panic_count = self.scheduler.total_panic_count();
-                self.harness.verify(panic_count >= 0, "Task failures should be contained")
+                self.harness
+                    .verify(panic_count >= 0, "Task failures should be contained")
             },
             "task_failure_containment",
             RequirementLevel::Must,
@@ -1271,11 +1370,15 @@ impl SchedulerConformanceHarness {
                 self.scheduler.execute_round();
 
                 // Worker should still be able to execute tasks after a panic
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 self.scheduler.execute_round();
 
                 let total_executions = self.scheduler.total_executions();
-                self.harness.verify(total_executions > 0, "Workers should recover after task panic")
+                self.harness.verify(
+                    total_executions > 0,
+                    "Workers should recover after task panic",
+                )
             },
             "worker_recovery",
             RequirementLevel::Must,
@@ -1293,7 +1396,10 @@ impl SchedulerConformanceHarness {
                 let final_panics = self.scheduler.total_panic_count();
 
                 let metrics_tracked = final_panics >= initial_panics;
-                self.harness.verify(metrics_tracked, "Panic occurrences should be tracked in metrics")
+                self.harness.verify(
+                    metrics_tracked,
+                    "Panic occurrences should be tracked in metrics",
+                )
             },
             "panic_metrics_tracking",
             RequirementLevel::Should,
@@ -1306,12 +1412,14 @@ impl SchedulerConformanceHarness {
         self.harness.run_test(
             || {
                 let initial_executions = self.scheduler.total_executions();
-                self.scheduler.spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
+                self.scheduler
+                    .spawn_task(TaskPriority::Normal, SchedulerLane::Ready);
                 self.scheduler.execute_round();
                 let final_executions = self.scheduler.total_executions();
 
                 let metrics_collected = final_executions > initial_executions;
-                self.harness.verify(metrics_collected, "Execution metrics should be collected")
+                self.harness
+                    .verify(metrics_collected, "Execution metrics should be collected")
             },
             "execution_metrics",
             RequirementLevel::Must,
@@ -1327,7 +1435,8 @@ impl SchedulerConformanceHarness {
                 let success_rate = self.scheduler.average_steal_success_rate();
 
                 let metrics_available = steal_count >= 0 && success_rate >= 0.0;
-                self.harness.verify(metrics_available, "Steal metrics should be collected")
+                self.harness
+                    .verify(metrics_available, "Steal metrics should be collected")
             },
             "steal_metrics",
             RequirementLevel::Should,
@@ -1344,7 +1453,10 @@ impl SchedulerConformanceHarness {
                 let heap_len = self.scheduler.priority_heap_len();
 
                 let metrics_available = ready_len >= 0 && cancel_len >= 0 && heap_len >= 0;
-                self.harness.verify(metrics_available, "Queue length metrics should be available")
+                self.harness.verify(
+                    metrics_available,
+                    "Queue length metrics should be available",
+                )
             },
             "queue_length_metrics",
             RequirementLevel::Must,
@@ -1360,7 +1472,8 @@ impl SchedulerConformanceHarness {
                 let total_executions = self.scheduler.total_executions();
 
                 let counters_work = worker_executions >= 0 && total_executions >= 0;
-                self.harness.verify(counters_work, "Performance counters should be maintained")
+                self.harness
+                    .verify(counters_work, "Performance counters should be maintained")
             },
             "performance_counters",
             RequirementLevel::Should,

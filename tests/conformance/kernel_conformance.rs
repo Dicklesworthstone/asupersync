@@ -10,10 +10,12 @@
 //! - Deterministic snapshot creation and serialization
 //! - Controller authority isolation and audit trails
 
-use super::harness::{ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict};
+use super::harness::{
+    ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict,
+};
 use crate::runtime::kernel::{
-    RuntimeKernelSnapshot, SnapshotId, SnapshotVersion,
-    SNAPSHOT_VERSION, CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION,
+    CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION, RuntimeKernelSnapshot, SNAPSHOT_VERSION, SnapshotId,
+    SnapshotVersion,
 };
 use crate::types::Time;
 use std::collections::BTreeMap;
@@ -41,11 +43,16 @@ impl MockController {
 
     fn observe_snapshot(&self, snapshot: &RuntimeKernelSnapshot) -> Result<(), String> {
         // Check version compatibility
-        let compatible = self.supported_versions.iter()
+        let compatible = self
+            .supported_versions
+            .iter()
             .any(|v| snapshot.version.is_compatible_with(v));
 
         if !compatible {
-            return Err(format!("Incompatible snapshot version: {}", snapshot.version));
+            return Err(format!(
+                "Incompatible snapshot version: {}",
+                snapshot.version
+            ));
         }
 
         self.snapshots_observed.lock().unwrap().push(snapshot.id);
@@ -81,11 +88,16 @@ impl MockControllerRegistry {
         let id = controller.id.clone();
 
         // Check if controller supports current snapshot version
-        let compatible = controller.supported_versions.iter()
+        let compatible = controller
+            .supported_versions
+            .iter()
             .any(|v| SNAPSHOT_VERSION.is_compatible_with(v));
 
         if !compatible {
-            return Err(format!("Controller {} incompatible with current version {}", id, SNAPSHOT_VERSION));
+            return Err(format!(
+                "Controller {} incompatible with current version {}",
+                id, SNAPSHOT_VERSION
+            ));
         }
 
         self.registration_log.push(format!("Registered {}", id));
@@ -94,7 +106,8 @@ impl MockControllerRegistry {
     }
 
     fn notify_all_controllers(&self, snapshot: &RuntimeKernelSnapshot) -> Vec<Result<(), String>> {
-        self.controllers.values()
+        self.controllers
+            .values()
             .map(|controller| controller.observe_snapshot(snapshot))
             .collect()
     }
@@ -137,7 +150,6 @@ impl TestSnapshotBuilder {
             // Obligation state
             outstanding_obligations: 7,
             obligation_leak_count: 0,
-
             // I/O state (would include actual I/O metrics in real implementation)
         }
     }
@@ -149,7 +161,8 @@ impl TestSnapshotBuilder {
 
         // Make values deterministic based on seed
         snapshot.ready_queue_len = (seed_data % 100) as usize;
-        snapshot.total_tasks = snapshot.ready_queue_len + snapshot.cancel_lane_len + snapshot.finalize_lane_len;
+        snapshot.total_tasks =
+            snapshot.ready_queue_len + snapshot.cancel_lane_len + snapshot.finalize_lane_len;
 
         snapshot
     }
@@ -216,21 +229,24 @@ impl KernelConformanceHarness {
 
     /// Test that snapshot creation is deterministic.
     fn test_snapshot_determinism(&mut self) -> ConformanceTestResult {
-        self.harness.run_test(
-            || {
-                let snapshot1 = self.snapshot_builder.build_deterministic_snapshot(12345);
-                let snapshot2 = self.snapshot_builder.build_deterministic_snapshot(12345);
+        self.harness
+            .run_test(
+                || {
+                    let snapshot1 = self.snapshot_builder.build_deterministic_snapshot(12345);
+                    let snapshot2 = self.snapshot_builder.build_deterministic_snapshot(12345);
 
-                let deterministic = snapshot1.ready_queue_len == snapshot2.ready_queue_len
-                    && snapshot1.timestamp == snapshot2.timestamp
-                    && snapshot1.version == snapshot2.version;
+                    let deterministic = snapshot1.ready_queue_len == snapshot2.ready_queue_len
+                        && snapshot1.timestamp == snapshot2.timestamp
+                        && snapshot1.version == snapshot2.version;
 
-                self.harness.verify(deterministic, "Snapshot creation should be deterministic")
-            },
-            "snapshot_determinism",
-            RequirementLevel::Must,
-            TestCategory::SnapshotContract,
-        ).with_spec_section("deterministic-snapshots")
+                    self.harness
+                        .verify(deterministic, "Snapshot creation should be deterministic")
+                },
+                "snapshot_determinism",
+                RequirementLevel::Must,
+                TestCategory::SnapshotContract,
+            )
+            .with_spec_section("deterministic-snapshots")
     }
 
     /// Test snapshot version field presence.
@@ -239,7 +255,8 @@ impl KernelConformanceHarness {
             || {
                 let snapshot = self.snapshot_builder.build_snapshot(Time::from_nanos(0));
                 let has_version = snapshot.version == SNAPSHOT_VERSION;
-                self.harness.verify(has_version, "Snapshot should contain version field")
+                self.harness
+                    .verify(has_version, "Snapshot should contain version field")
             },
             "snapshot_version_field",
             RequirementLevel::Must,
@@ -255,7 +272,8 @@ impl KernelConformanceHarness {
 
                 // Test that snapshot is serializable (in real implementation would use serde)
                 let serializable = true; // RuntimeKernelSnapshot derives Serialize
-                self.harness.verify(serializable, "Snapshot should be serializable")
+                self.harness
+                    .verify(serializable, "Snapshot should be serializable")
             },
             "snapshot_serialization",
             RequirementLevel::Must,
@@ -270,11 +288,13 @@ impl KernelConformanceHarness {
                 let snapshot = self.snapshot_builder.build_snapshot(Time::from_nanos(0));
 
                 // Verify required fields are present
-                let has_required_fields = snapshot.id.0 > 0
-                    && snapshot.ready_queue_len >= 0
-                    && snapshot.total_tasks >= 0;
+                let has_required_fields =
+                    snapshot.id.0 > 0 && snapshot.ready_queue_len >= 0 && snapshot.total_tasks >= 0;
 
-                self.harness.verify(has_required_fields, "Snapshot should contain minimal required fields")
+                self.harness.verify(
+                    has_required_fields,
+                    "Snapshot should contain minimal required fields",
+                )
             },
             "snapshot_minimal_fields",
             RequirementLevel::Must,
@@ -286,13 +306,13 @@ impl KernelConformanceHarness {
     fn test_controller_registration_contract(&mut self) -> ConformanceTestResult {
         self.harness.run_test(
             || {
-                let controller = MockController::new(
-                    "test_controller",
-                    vec![SNAPSHOT_VERSION],
-                );
+                let controller = MockController::new("test_controller", vec![SNAPSHOT_VERSION]);
 
                 let registration_result = self.controller_registry.register_controller(controller);
-                self.harness.verify(registration_result.is_ok(), "Compatible controller should register successfully")
+                self.harness.verify(
+                    registration_result.is_ok(),
+                    "Compatible controller should register successfully",
+                )
             },
             "controller_registration_contract",
             RequirementLevel::Must,
@@ -304,13 +324,16 @@ impl KernelConformanceHarness {
     fn test_version_compatibility_checking(&mut self) -> ConformanceTestResult {
         self.harness.run_test(
             || {
-                let compatible_controller = MockController::new(
-                    "compatible",
-                    vec![SNAPSHOT_VERSION],
-                );
+                let compatible_controller =
+                    MockController::new("compatible", vec![SNAPSHOT_VERSION]);
 
-                let result = self.controller_registry.register_controller(compatible_controller);
-                self.harness.verify(result.is_ok(), "Version compatibility should be checked during registration")
+                let result = self
+                    .controller_registry
+                    .register_controller(compatible_controller);
+                self.harness.verify(
+                    result.is_ok(),
+                    "Version compatibility should be checked during registration",
+                )
             },
             "version_compatibility_checking",
             RequirementLevel::Must,
@@ -322,14 +345,20 @@ impl KernelConformanceHarness {
     fn test_incompatible_controller_rejection(&mut self) -> ConformanceTestResult {
         self.harness.run_test(
             || {
-                let incompatible_version = SnapshotVersion { major: 999, minor: 0 };
-                let incompatible_controller = MockController::new(
-                    "incompatible",
-                    vec![incompatible_version],
-                );
+                let incompatible_version = SnapshotVersion {
+                    major: 999,
+                    minor: 0,
+                };
+                let incompatible_controller =
+                    MockController::new("incompatible", vec![incompatible_version]);
 
-                let result = self.controller_registry.register_controller(incompatible_controller);
-                self.harness.verify(result.is_err(), "Incompatible controllers should be rejected")
+                let result = self
+                    .controller_registry
+                    .register_controller(incompatible_controller);
+                self.harness.verify(
+                    result.is_err(),
+                    "Incompatible controllers should be rejected",
+                )
             },
             "incompatible_controller_rejection",
             RequirementLevel::Must,
@@ -342,11 +371,17 @@ impl KernelConformanceHarness {
         self.harness.run_test(
             || {
                 // Controllers with older minor versions should work in shadow mode
-                let older_version = SnapshotVersion { major: SNAPSHOT_VERSION.major, minor: 0 };
+                let older_version = SnapshotVersion {
+                    major: SNAPSHOT_VERSION.major,
+                    minor: 0,
+                };
                 let controller = MockController::new("shadow", vec![older_version]);
 
                 let registration_result = self.controller_registry.register_controller(controller);
-                self.harness.verify(registration_result.is_ok(), "Controllers should support shadow mode")
+                self.harness.verify(
+                    registration_result.is_ok(),
+                    "Controllers should support shadow mode",
+                )
             },
             "controller_shadow_mode",
             RequirementLevel::Should,
@@ -365,7 +400,10 @@ impl KernelConformanceHarness {
                 let compatible = v1_1.is_compatible_with(&v1_0); // 1.1 compatible with 1.0
                 let incompatible = !v1_0.is_compatible_with(&v2_0); // 1.0 not compatible with 2.0
 
-                self.harness.verify(compatible && incompatible, "Version comparison should work correctly")
+                self.harness.verify(
+                    compatible && incompatible,
+                    "Version comparison should work correctly",
+                )
             },
             "snapshot_version_comparison",
             RequirementLevel::Must,
@@ -381,7 +419,10 @@ impl KernelConformanceHarness {
                 let v2_0 = SnapshotVersion { major: 2, minor: 0 };
 
                 let not_compatible = !v1_0.is_compatible_with(&v2_0);
-                self.harness.verify(not_compatible, "Different major versions should be incompatible")
+                self.harness.verify(
+                    not_compatible,
+                    "Different major versions should be incompatible",
+                )
             },
             "major_version_compatibility",
             RequirementLevel::Must,
@@ -399,8 +440,10 @@ impl KernelConformanceHarness {
                 let backward_compatible = v1_2.is_compatible_with(&v1_0);
                 let not_forward_compatible = !v1_0.is_compatible_with(&v1_2);
 
-                self.harness.verify(backward_compatible && not_forward_compatible,
-                    "Minor versions should be backward compatible only")
+                self.harness.verify(
+                    backward_compatible && not_forward_compatible,
+                    "Minor versions should be backward compatible only",
+                )
             },
             "minor_version_backward_compatibility",
             RequirementLevel::Must,
@@ -413,7 +456,8 @@ impl KernelConformanceHarness {
         self.harness.run_test(
             || {
                 // Controllers should be able to upgrade gracefully
-                self.harness.verify(true, "Version upgrade paths should be supported")
+                self.harness
+                    .verify(true, "Version upgrade paths should be supported")
             },
             "version_upgrade_paths",
             RequirementLevel::Should,
@@ -427,14 +471,16 @@ impl KernelConformanceHarness {
             || {
                 let snapshot = self.snapshot_builder.build_snapshot(Time::from_nanos(0));
 
-                let has_scheduler_state =
-                    snapshot.ready_queue_len >= 0 &&
-                    snapshot.cancel_lane_len >= 0 &&
-                    snapshot.finalize_lane_len >= 0 &&
-                    snapshot.total_tasks >= 0 &&
-                    snapshot.active_regions >= 0;
+                let has_scheduler_state = snapshot.ready_queue_len >= 0
+                    && snapshot.cancel_lane_len >= 0
+                    && snapshot.finalize_lane_len >= 0
+                    && snapshot.total_tasks >= 0
+                    && snapshot.active_regions >= 0;
 
-                self.harness.verify(has_scheduler_state, "Snapshot should provide scheduler observability")
+                self.harness.verify(
+                    has_scheduler_state,
+                    "Snapshot should provide scheduler observability",
+                )
             },
             "required_scheduler_observability",
             RequirementLevel::Must,
@@ -448,10 +494,13 @@ impl KernelConformanceHarness {
             || {
                 let snapshot = self.snapshot_builder.build_snapshot(Time::from_nanos(0));
 
-                let has_obligation_state = snapshot.outstanding_obligations >= 0
-                    && snapshot.obligation_leak_count >= 0;
+                let has_obligation_state =
+                    snapshot.outstanding_obligations >= 0 && snapshot.obligation_leak_count >= 0;
 
-                self.harness.verify(has_obligation_state, "Snapshot should provide obligation observability")
+                self.harness.verify(
+                    has_obligation_state,
+                    "Snapshot should provide obligation observability",
+                )
             },
             "required_obligation_observability",
             RequirementLevel::Must,
@@ -467,7 +516,8 @@ impl KernelConformanceHarness {
                 let snapshot2 = self.snapshot_builder.build_snapshot(Time::from_nanos(2000));
 
                 let monotonic = snapshot2.timestamp > snapshot1.timestamp;
-                self.harness.verify(monotonic, "Snapshot timestamps should be monotonic")
+                self.harness
+                    .verify(monotonic, "Snapshot timestamps should be monotonic")
             },
             "snapshot_timestamp_monotonicity",
             RequirementLevel::Should,
@@ -483,7 +533,8 @@ impl KernelConformanceHarness {
                 let snapshot2 = self.snapshot_builder.build_snapshot(Time::from_nanos(1000));
 
                 let unique_ids = snapshot1.id != snapshot2.id;
-                self.harness.verify(unique_ids, "Snapshot IDs should be unique")
+                self.harness
+                    .verify(unique_ids, "Snapshot IDs should be unique")
             },
             "snapshot_id_uniqueness",
             RequirementLevel::Must,
@@ -496,7 +547,8 @@ impl KernelConformanceHarness {
         self.harness.run_test(
             || {
                 // Controllers should only receive snapshots, not direct runtime access
-                self.harness.verify(true, "Controllers should have isolated authority")
+                self.harness
+                    .verify(true, "Controllers should have isolated authority")
             },
             "controller_authority_isolation",
             RequirementLevel::Must,
@@ -514,7 +566,8 @@ impl KernelConformanceHarness {
                 let _ = controller.observe_snapshot(&snapshot);
                 let decisions = controller.decision_count();
 
-                self.harness.verify(decisions > 0, "Controller decisions should be auditable")
+                self.harness
+                    .verify(decisions > 0, "Controller decisions should be auditable")
             },
             "decision_audit_trail",
             RequirementLevel::Should,
@@ -529,7 +582,10 @@ impl KernelConformanceHarness {
                 let snapshot = self.snapshot_builder.build_snapshot(Time::from_nanos(1000));
 
                 let has_metadata = snapshot.id.0 > 0 && snapshot.timestamp.as_nanos() > 0;
-                self.harness.verify(has_metadata, "Snapshots should include metadata for tracking")
+                self.harness.verify(
+                    has_metadata,
+                    "Snapshots should include metadata for tracking",
+                )
             },
             "snapshot_metadata_tracking",
             RequirementLevel::Must,
@@ -542,7 +598,8 @@ impl KernelConformanceHarness {
         self.harness.run_test(
             || {
                 // Controllers can't access runtime internals beyond snapshots
-                self.harness.verify(true, "Controllers should have no ambient authority")
+                self.harness
+                    .verify(true, "Controllers should have no ambient authority")
             },
             "no_ambient_authority",
             RequirementLevel::Must,
@@ -555,7 +612,10 @@ impl KernelConformanceHarness {
         self.harness.run_test(
             || {
                 let schema_defined = !CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION.is_empty();
-                self.harness.verify(schema_defined, "Snapshot ledger schema version should be defined")
+                self.harness.verify(
+                    schema_defined,
+                    "Snapshot ledger schema version should be defined",
+                )
             },
             "snapshot_ledger_schema_version",
             RequirementLevel::Must,
@@ -568,7 +628,8 @@ impl KernelConformanceHarness {
         self.harness.run_test(
             || {
                 let version_valid = SNAPSHOT_VERSION.major > 0;
-                self.harness.verify(version_valid, "Schema version constants should be valid")
+                self.harness
+                    .verify(version_valid, "Schema version constants should be valid")
             },
             "schema_version_constants",
             RequirementLevel::Must,
@@ -581,7 +642,8 @@ impl KernelConformanceHarness {
         self.harness.run_test(
             || {
                 // New fields should be additive, requiring version bumps
-                self.harness.verify(true, "Snapshot fields should support evolution")
+                self.harness
+                    .verify(true, "Snapshot fields should support evolution")
             },
             "snapshot_field_evolution",
             RequirementLevel::Should,
@@ -652,6 +714,9 @@ mod tests {
     fn schema_version_constants() {
         assert!(SNAPSHOT_VERSION.major > 0);
         assert!(!CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION.is_empty());
-        assert_eq!(CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION, "controller-snapshot-ledger-v1");
+        assert_eq!(
+            CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION,
+            "controller-snapshot-ledger-v1"
+        );
     }
 }

@@ -11,7 +11,9 @@
 //! - Interest flag handling and modification semantics
 //! - Source lifetime management and cleanup contracts
 
-use super::harness::{ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict};
+use super::harness::{
+    ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -242,7 +244,11 @@ impl MockReactor {
         }
     }
 
-    fn poll(&self, events: &mut Vec<MockEvent>, timeout: Option<Duration>) -> Result<usize, String> {
+    fn poll(
+        &self,
+        events: &mut Vec<MockEvent>,
+        timeout: Option<Duration>,
+    ) -> Result<usize, String> {
         if self.is_polling.swap(true, Ordering::AcqRel) {
             return Err("Concurrent poll detected - only one poll allowed".into());
         }
@@ -408,21 +414,24 @@ impl ReactorConformanceHarness {
 
     /// Test source registration.
     fn test_register_source(&mut self) -> ConformanceTestResult {
-        self.harness.run_test(
-            || {
-                let fd = MockFd::new(42);
-                let token = MockToken::new(1);
-                let interest = MockInterest::READABLE;
+        self.harness
+            .run_test(
+                || {
+                    let fd = MockFd::new(42);
+                    let token = MockToken::new(1);
+                    let interest = MockInterest::READABLE;
 
-                let result = self.mock_reactor.register(fd, token, interest);
-                let registered = result.is_ok() && self.mock_reactor.is_registered(token);
+                    let result = self.mock_reactor.register(fd, token, interest);
+                    let registered = result.is_ok() && self.mock_reactor.is_registered(token);
 
-                self.harness.verify(registered, "Source registration should succeed")
-            },
-            "register_source",
-            RequirementLevel::Must,
-            TestCategory::RegistrationLifecycle,
-        ).with_spec_section("registration")
+                    self.harness
+                        .verify(registered, "Source registration should succeed")
+                },
+                "register_source",
+                RequirementLevel::Must,
+                TestCategory::RegistrationLifecycle,
+            )
+            .with_spec_section("registration")
     }
 
     /// Test interest modification.
@@ -437,7 +446,10 @@ impl ReactorConformanceHarness {
                 let _ = self.mock_reactor.register(fd, token, initial_interest);
                 let modify_result = self.mock_reactor.modify(token, new_interest);
 
-                self.harness.verify(modify_result.is_ok(), "Interest modification should succeed")
+                self.harness.verify(
+                    modify_result.is_ok(),
+                    "Interest modification should succeed",
+                )
             },
             "modify_interest",
             RequirementLevel::Must,
@@ -458,7 +470,8 @@ impl ReactorConformanceHarness {
                 let not_registered = !self.mock_reactor.is_registered(token);
 
                 let success = deregister_result.is_ok() && not_registered;
-                self.harness.verify(success, "Source deregistration should succeed and clean up")
+                self.harness
+                    .verify(success, "Source deregistration should succeed and clean up")
             },
             "deregister_source",
             RequirementLevel::Must,
@@ -478,7 +491,8 @@ impl ReactorConformanceHarness {
                 let second_result = self.mock_reactor.register(fd, token, interest);
 
                 let prevented = first_result.is_ok() && second_result.is_err();
-                self.harness.verify(prevented, "Duplicate registration should be prevented")
+                self.harness
+                    .verify(prevented, "Duplicate registration should be prevented")
             },
             "duplicate_registration_prevention",
             RequirementLevel::Must,
@@ -498,11 +512,10 @@ impl ReactorConformanceHarness {
                 let mut events = Vec::with_capacity(1);
                 let poll_result = self.mock_reactor.poll(&mut events, None);
 
-                let delivered = poll_result.is_ok() &&
-                    events.len() == 1 &&
-                    events[0].is_readable();
+                let delivered = poll_result.is_ok() && events.len() == 1 && events[0].is_readable();
 
-                self.harness.verify(delivered, "Readable events should be delivered")
+                self.harness
+                    .verify(delivered, "Readable events should be delivered")
             },
             "readable_event_delivery",
             RequirementLevel::Must,
@@ -522,11 +535,10 @@ impl ReactorConformanceHarness {
                 let mut events = Vec::with_capacity(1);
                 let poll_result = self.mock_reactor.poll(&mut events, None);
 
-                let delivered = poll_result.is_ok() &&
-                    events.len() == 1 &&
-                    events[0].is_writable();
+                let delivered = poll_result.is_ok() && events.len() == 1 && events[0].is_writable();
 
-                self.harness.verify(delivered, "Writable events should be delivered")
+                self.harness
+                    .verify(delivered, "Writable events should be delivered")
             },
             "writable_event_delivery",
             RequirementLevel::Must,
@@ -546,11 +558,10 @@ impl ReactorConformanceHarness {
                 let mut events = Vec::with_capacity(1);
                 let poll_result = self.mock_reactor.poll(&mut events, None);
 
-                let delivered = poll_result.is_ok() &&
-                    events.len() == 1 &&
-                    events[0].is_error();
+                let delivered = poll_result.is_ok() && events.len() == 1 && events[0].is_error();
 
-                self.harness.verify(delivered, "Error events should be delivered")
+                self.harness
+                    .verify(delivered, "Error events should be delivered")
             },
             "error_event_delivery",
             RequirementLevel::Must,
@@ -570,11 +581,10 @@ impl ReactorConformanceHarness {
                 let mut events = Vec::with_capacity(1);
                 let poll_result = self.mock_reactor.poll(&mut events, None);
 
-                let delivered = poll_result.is_ok() &&
-                    events.len() == 1 &&
-                    events[0].is_hup();
+                let delivered = poll_result.is_ok() && events.len() == 1 && events[0].is_hup();
 
-                self.harness.verify(delivered, "Hangup events should be delivered")
+                self.harness
+                    .verify(delivered, "Hangup events should be delivered")
             },
             "hangup_event_delivery",
             RequirementLevel::Must,
@@ -589,7 +599,8 @@ impl ReactorConformanceHarness {
                 let edge_interest = MockInterest::READABLE.combine(MockInterest::EDGE_TRIGGERED);
                 let supports_edge = edge_interest.is_edge_triggered();
 
-                self.harness.verify(supports_edge, "Edge-triggered mode should be supported")
+                self.harness
+                    .verify(supports_edge, "Edge-triggered mode should be supported")
             },
             "edge_triggered_events",
             RequirementLevel::Should,
@@ -604,7 +615,8 @@ impl ReactorConformanceHarness {
                 let oneshot_interest = MockInterest::READABLE.combine(MockInterest::ONESHOT);
                 let supports_oneshot = oneshot_interest.is_oneshot();
 
-                self.harness.verify(supports_oneshot, "Oneshot mode should be supported")
+                self.harness
+                    .verify(supports_oneshot, "Oneshot mode should be supported")
             },
             "oneshot_event_delivery",
             RequirementLevel::Should,
@@ -620,7 +632,8 @@ impl ReactorConformanceHarness {
                 let level_interest = MockInterest::READABLE;
                 let is_level = !level_interest.is_edge_triggered();
 
-                self.harness.verify(is_level, "Level-triggered should be the default")
+                self.harness
+                    .verify(is_level, "Level-triggered should be the default")
             },
             "level_triggered_fallback",
             RequirementLevel::Must,
@@ -636,7 +649,8 @@ impl ReactorConformanceHarness {
                 let combined = MockInterest::READABLE.combine(MockInterest::WRITABLE);
                 let has_both = combined.is_readable() && combined.is_writable();
 
-                self.harness.verify(has_both, "Interest flags should be combinable")
+                self.harness
+                    .verify(has_both, "Interest flags should be combinable")
             },
             "interest_modification_semantics",
             RequirementLevel::Must,
@@ -652,10 +666,15 @@ impl ReactorConformanceHarness {
                 let initial_count = self.mock_reactor.registration_count();
                 let fd = MockFd::new(42);
                 let token = MockToken::new(2);
-                let _ = self.mock_reactor.register(fd, token, MockInterest::READABLE);
+                let _ = self
+                    .mock_reactor
+                    .register(fd, token, MockInterest::READABLE);
                 let final_count = self.mock_reactor.registration_count();
 
-                self.harness.verify(final_count > initial_count, "Concurrent registration should be safe")
+                self.harness.verify(
+                    final_count > initial_count,
+                    "Concurrent registration should be safe",
+                )
             },
             "concurrent_registration",
             RequirementLevel::Must,
@@ -671,7 +690,8 @@ impl ReactorConformanceHarness {
                 let mut events = Vec::with_capacity(1);
                 let poll_result = self.mock_reactor.poll(&mut events, None);
 
-                self.harness.verify(poll_result.is_ok(), "Polling should enforce exclusion")
+                self.harness
+                    .verify(poll_result.is_ok(), "Polling should enforce exclusion")
             },
             "exclusive_polling",
             RequirementLevel::Must,
@@ -703,9 +723,14 @@ impl ReactorConformanceHarness {
                 // Registration should work while another thread is polling
                 let fd = MockFd::new(42);
                 let token = MockToken::new(3);
-                let register_result = self.mock_reactor.register(fd, token, MockInterest::READABLE);
+                let register_result = self
+                    .mock_reactor
+                    .register(fd, token, MockInterest::READABLE);
 
-                self.harness.verify(register_result.is_ok(), "Registration during polling should work")
+                self.harness.verify(
+                    register_result.is_ok(),
+                    "Registration during polling should work",
+                )
             },
             "registration_while_polling",
             RequirementLevel::Should,
@@ -720,7 +745,8 @@ impl ReactorConformanceHarness {
                 let platform = self.reactor_factory.platform();
                 let detected = !platform.is_empty() && platform != "unknown";
 
-                self.harness.verify(detected, "Platform should be correctly detected")
+                self.harness
+                    .verify(detected, "Platform should be correctly detected")
             },
             "platform_detection",
             RequirementLevel::Should,
@@ -733,7 +759,10 @@ impl ReactorConformanceHarness {
         self.harness.run_test(
             || {
                 let reactor_result = self.reactor_factory.create_reactor();
-                self.harness.verify(reactor_result.is_ok(), "Platform-specific reactor should be created")
+                self.harness.verify(
+                    reactor_result.is_ok(),
+                    "Platform-specific reactor should be created",
+                )
             },
             "platform_specific_reactor",
             RequirementLevel::Must,
@@ -750,7 +779,8 @@ impl ReactorConformanceHarness {
                 let writable = MockInterest::WRITABLE;
 
                 let portable = readable.is_readable() && writable.is_writable();
-                self.harness.verify(portable, "Interest flags should be portable")
+                self.harness
+                    .verify(portable, "Interest flags should be portable")
             },
             "portable_interest_flags",
             RequirementLevel::Must,
@@ -763,7 +793,8 @@ impl ReactorConformanceHarness {
         self.harness.run_test(
             || {
                 // Core behavior should be consistent across platforms
-                self.harness.verify(true, "Cross-platform behavior should be consistent")
+                self.harness
+                    .verify(true, "Cross-platform behavior should be consistent")
             },
             "cross_platform_behavior",
             RequirementLevel::Should,
@@ -779,7 +810,10 @@ impl ReactorConformanceHarness {
                 let timeout = Some(Duration::from_millis(1));
                 let poll_result = self.mock_reactor.poll(&mut events, timeout);
 
-                self.harness.verify(poll_result.is_ok(), "Poll timeout should be handled correctly")
+                self.harness.verify(
+                    poll_result.is_ok(),
+                    "Poll timeout should be handled correctly",
+                )
             },
             "poll_timeout_handling",
             RequirementLevel::Must,
@@ -794,14 +828,17 @@ impl ReactorConformanceHarness {
                 // Multiple events should be batched in a single poll
                 let token1 = MockToken::new(1);
                 let token2 = MockToken::new(2);
-                self.mock_reactor.add_pending_event(MockEvent::new(token1).with_readable());
-                self.mock_reactor.add_pending_event(MockEvent::new(token2).with_writable());
+                self.mock_reactor
+                    .add_pending_event(MockEvent::new(token1).with_readable());
+                self.mock_reactor
+                    .add_pending_event(MockEvent::new(token2).with_writable());
 
                 let mut events = Vec::with_capacity(10);
                 let poll_result = self.mock_reactor.poll(&mut events, None);
 
                 let batched = poll_result.is_ok() && events.len() == 2;
-                self.harness.verify(batched, "Multiple events should be batched")
+                self.harness
+                    .verify(batched, "Multiple events should be batched")
             },
             "poll_event_batching",
             RequirementLevel::Should,
@@ -819,7 +856,8 @@ impl ReactorConformanceHarness {
                 let new_poll_count = self.mock_reactor.poll_count();
 
                 let counted = poll_result.is_ok() && new_poll_count > poll_count;
-                self.harness.verify(counted, "Poll should return event count and track calls")
+                self.harness
+                    .verify(counted, "Poll should return event count and track calls")
             },
             "poll_return_value",
             RequirementLevel::Must,
@@ -832,10 +870,13 @@ impl ReactorConformanceHarness {
         self.harness.run_test(
             || {
                 let mut events = Vec::with_capacity(1);
-                let poll_result = self.mock_reactor.poll(&mut events, Some(Duration::from_millis(1)));
+                let poll_result = self
+                    .mock_reactor
+                    .poll(&mut events, Some(Duration::from_millis(1)));
 
                 let empty_ok = poll_result.is_ok() && events.is_empty();
-                self.harness.verify(empty_ok, "Empty poll should succeed with no events")
+                self.harness
+                    .verify(empty_ok, "Empty poll should succeed with no events")
             },
             "empty_poll_behavior",
             RequirementLevel::Must,
@@ -849,14 +890,17 @@ impl ReactorConformanceHarness {
             || {
                 let fd = MockFd::new(42);
                 let token = MockToken::new(1);
-                let _ = self.mock_reactor.register(fd, token, MockInterest::READABLE);
+                let _ = self
+                    .mock_reactor
+                    .register(fd, token, MockInterest::READABLE);
 
                 let initial_count = self.mock_reactor.registration_count();
                 let _ = self.mock_reactor.deregister(token);
                 let final_count = self.mock_reactor.registration_count();
 
                 let cleaned_up = final_count < initial_count;
-                self.harness.verify(cleaned_up, "Deregistration should clean up resources")
+                self.harness
+                    .verify(cleaned_up, "Deregistration should clean up resources")
             },
             "source_cleanup_on_deregister",
             RequirementLevel::Must,
@@ -869,7 +913,8 @@ impl ReactorConformanceHarness {
         self.harness.run_test(
             || {
                 // File descriptor close should trigger automatic cleanup
-                self.harness.verify(true, "Automatic cleanup should happen on fd close")
+                self.harness
+                    .verify(true, "Automatic cleanup should happen on fd close")
             },
             "automatic_cleanup_on_close",
             RequirementLevel::Should,
@@ -884,13 +929,19 @@ impl ReactorConformanceHarness {
                 let initial_count = self.mock_reactor.registration_count();
                 let fd = MockFd::new(42);
                 let token = MockToken::new(1);
-                let _ = self.mock_reactor.register(fd, token, MockInterest::READABLE);
+                let _ = self
+                    .mock_reactor
+                    .register(fd, token, MockInterest::READABLE);
                 let after_register = self.mock_reactor.registration_count();
                 let _ = self.mock_reactor.deregister(token);
                 let after_deregister = self.mock_reactor.registration_count();
 
-                let bookkeeping_ok = after_register > initial_count && after_deregister == initial_count;
-                self.harness.verify(bookkeeping_ok, "Registration bookkeeping should be accurate")
+                let bookkeeping_ok =
+                    after_register > initial_count && after_deregister == initial_count;
+                self.harness.verify(
+                    bookkeeping_ok,
+                    "Registration bookkeeping should be accurate",
+                )
             },
             "registration_bookkeeping",
             RequirementLevel::Must,
@@ -904,9 +955,14 @@ impl ReactorConformanceHarness {
             || {
                 let valid_fd = MockFd::new(42);
                 let token = MockToken::new(1);
-                let register_result = self.mock_reactor.register(valid_fd, token, MockInterest::READABLE);
+                let register_result =
+                    self.mock_reactor
+                        .register(valid_fd, token, MockInterest::READABLE);
 
-                self.harness.verify(register_result.is_ok(), "Valid file descriptors should be accepted")
+                self.harness.verify(
+                    register_result.is_ok(),
+                    "Valid file descriptors should be accepted",
+                )
             },
             "file_descriptor_validity",
             RequirementLevel::Must,
@@ -921,10 +977,15 @@ impl ReactorConformanceHarness {
                 // Invalid FDs should be handled gracefully
                 let invalid_fd = MockFd::new(-1);
                 let token = MockToken::new(1);
-                let register_result = self.mock_reactor.register(invalid_fd, token, MockInterest::READABLE);
+                let register_result =
+                    self.mock_reactor
+                        .register(invalid_fd, token, MockInterest::READABLE);
 
                 // In our mock, we accept any FD, but real implementation would validate
-                self.harness.verify(register_result.is_ok(), "Invalid FD handling should be graceful")
+                self.harness.verify(
+                    register_result.is_ok(),
+                    "Invalid FD handling should be graceful",
+                )
             },
             "invalid_file_descriptor_handling",
             RequirementLevel::Should,
@@ -937,7 +998,8 @@ impl ReactorConformanceHarness {
         self.harness.run_test(
             || {
                 // System should recover from registration errors
-                self.harness.verify(true, "Registration errors should be recoverable")
+                self.harness
+                    .verify(true, "Registration errors should be recoverable")
             },
             "registration_error_recovery",
             RequirementLevel::Should,
@@ -953,7 +1015,10 @@ impl ReactorConformanceHarness {
                 let poll_result = self.mock_reactor.poll(&mut events, None);
 
                 // Poll should handle error conditions gracefully
-                self.harness.verify(poll_result.is_ok(), "Poll error conditions should be handled")
+                self.harness.verify(
+                    poll_result.is_ok(),
+                    "Poll error conditions should be handled",
+                )
             },
             "poll_error_conditions",
             RequirementLevel::Should,
@@ -966,7 +1031,10 @@ impl ReactorConformanceHarness {
         self.harness.run_test(
             || {
                 let wake_result = self.mock_reactor.wake();
-                self.harness.verify(wake_result.is_ok(), "Wake errors should be handled gracefully")
+                self.harness.verify(
+                    wake_result.is_ok(),
+                    "Wake errors should be handled gracefully",
+                )
             },
             "wake_error_handling",
             RequirementLevel::Should,
@@ -1023,9 +1091,7 @@ mod tests {
     #[test]
     fn mock_event_creation() {
         let token = MockToken::new(1);
-        let event = MockEvent::new(token)
-            .with_readable()
-            .with_writable();
+        let event = MockEvent::new(token).with_readable().with_writable();
 
         assert_eq!(event.token(), token);
         assert!(event.is_readable());

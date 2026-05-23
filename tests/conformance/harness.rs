@@ -83,11 +83,7 @@ pub struct ConformanceTestResult {
 
 impl ConformanceTestResult {
     /// Creates a new passing test result.
-    pub fn pass(
-        test_name: &'static str,
-        level: RequirementLevel,
-        category: TestCategory,
-    ) -> Self {
+    pub fn pass(test_name: &'static str, level: RequirementLevel, category: TestCategory) -> Self {
         Self {
             test_name,
             requirement_level: level,
@@ -172,18 +168,42 @@ impl CoverageStats {
     /// Calculate coverage statistics from test results.
     pub fn from_results(results: &[ConformanceTestResult]) -> Self {
         let total_tests = results.len();
-        let passing = results.iter().filter(|r| matches!(r.verdict, TestVerdict::Pass)).count();
-        let failing = results.iter().filter(|r| matches!(r.verdict, TestVerdict::Fail(_))).count();
-        let expected_failures = results.iter().filter(|r| matches!(r.verdict, TestVerdict::XFail(_))).count();
-        let skipped = results.iter().filter(|r| matches!(r.verdict, TestVerdict::Skip(_))).count();
+        let passing = results
+            .iter()
+            .filter(|r| matches!(r.verdict, TestVerdict::Pass))
+            .count();
+        let failing = results
+            .iter()
+            .filter(|r| matches!(r.verdict, TestVerdict::Fail(_)))
+            .count();
+        let expected_failures = results
+            .iter()
+            .filter(|r| matches!(r.verdict, TestVerdict::XFail(_)))
+            .count();
+        let skipped = results
+            .iter()
+            .filter(|r| matches!(r.verdict, TestVerdict::Skip(_)))
+            .count();
 
         let (must_pass, must_total) = Self::count_by_level(results, RequirementLevel::Must);
         let (should_pass, should_total) = Self::count_by_level(results, RequirementLevel::Should);
         let (may_pass, may_total) = Self::count_by_level(results, RequirementLevel::May);
 
-        let must_score = if must_total > 0 { must_pass as f64 / must_total as f64 } else { 1.0 };
-        let should_score = if should_total > 0 { should_pass as f64 / should_total as f64 } else { 1.0 };
-        let may_score = if may_total > 0 { may_pass as f64 / may_total as f64 } else { 1.0 };
+        let must_score = if must_total > 0 {
+            must_pass as f64 / must_total as f64
+        } else {
+            1.0
+        };
+        let should_score = if should_total > 0 {
+            should_pass as f64 / should_total as f64
+        } else {
+            1.0
+        };
+        let may_score = if may_total > 0 {
+            may_pass as f64 / may_total as f64
+        } else {
+            1.0
+        };
 
         Self {
             total_tests,
@@ -197,8 +217,14 @@ impl CoverageStats {
         }
     }
 
-    fn count_by_level(results: &[ConformanceTestResult], level: RequirementLevel) -> (usize, usize) {
-        let level_results: Vec<_> = results.iter().filter(|r| r.requirement_level == level).collect();
+    fn count_by_level(
+        results: &[ConformanceTestResult],
+        level: RequirementLevel,
+    ) -> (usize, usize) {
+        let level_results: Vec<_> = results
+            .iter()
+            .filter(|r| r.requirement_level == level)
+            .collect();
         let passed = level_results.iter().filter(|r| r.is_successful()).count();
         (passed, level_results.len())
     }
@@ -232,12 +258,24 @@ impl CoverageStats {
             self.expected_failures,
             self.skipped,
             self.must_score * 100.0,
-            if self.must_score >= 0.95 { "✅" } else { "❌" },
+            if self.must_score >= 0.95 {
+                "✅"
+            } else {
+                "❌"
+            },
             self.should_score * 100.0,
-            if self.should_score >= 0.80 { "✅" } else { "❌" },
+            if self.should_score >= 0.80 {
+                "✅"
+            } else {
+                "❌"
+            },
             self.may_score * 100.0,
             if self.may_score >= 0.50 { "✅" } else { "❌" },
-            if self.is_conformant() { "✅ CONFORMANT" } else { "❌ NON-CONFORMANT" }
+            if self.is_conformant() {
+                "✅ CONFORMANT"
+            } else {
+                "❌ NON-CONFORMANT"
+            }
         )
     }
 }
@@ -291,7 +329,13 @@ impl RuntimeConformanceHarness {
     }
 
     /// Run a single conformance test with timing.
-    pub fn run_test<F>(&self, test_fn: F, name: &'static str, level: RequirementLevel, category: TestCategory) -> ConformanceTestResult
+    pub fn run_test<F>(
+        &self,
+        test_fn: F,
+        name: &'static str,
+        level: RequirementLevel,
+        category: TestCategory,
+    ) -> ConformanceTestResult
     where
         F: FnOnce() -> TestVerdict,
     {
@@ -332,9 +376,23 @@ mod tests {
     #[test]
     fn coverage_stats_calculation() {
         let results = vec![
-            ConformanceTestResult::pass("test1", RequirementLevel::Must, TestCategory::TaskExecution),
-            ConformanceTestResult::fail("test2", RequirementLevel::Must, TestCategory::TaskExecution, "failed"),
-            ConformanceTestResult::xfail("test3", RequirementLevel::Should, TestCategory::WorkStealing, "known issue"),
+            ConformanceTestResult::pass(
+                "test1",
+                RequirementLevel::Must,
+                TestCategory::TaskExecution,
+            ),
+            ConformanceTestResult::fail(
+                "test2",
+                RequirementLevel::Must,
+                TestCategory::TaskExecution,
+                "failed",
+            ),
+            ConformanceTestResult::xfail(
+                "test3",
+                RequirementLevel::Should,
+                TestCategory::WorkStealing,
+                "known issue",
+            ),
         ];
 
         let stats = CoverageStats::from_results(&results);
@@ -348,15 +406,32 @@ mod tests {
     #[test]
     fn conformance_thresholds() {
         let passing_results = vec![
-            ConformanceTestResult::pass("test1", RequirementLevel::Must, TestCategory::TaskExecution),
-            ConformanceTestResult::pass("test2", RequirementLevel::Must, TestCategory::TaskExecution),
+            ConformanceTestResult::pass(
+                "test1",
+                RequirementLevel::Must,
+                TestCategory::TaskExecution,
+            ),
+            ConformanceTestResult::pass(
+                "test2",
+                RequirementLevel::Must,
+                TestCategory::TaskExecution,
+            ),
         ];
         let passing_stats = CoverageStats::from_results(&passing_results);
         assert!(passing_stats.is_conformant());
 
         let failing_results = vec![
-            ConformanceTestResult::pass("test1", RequirementLevel::Must, TestCategory::TaskExecution),
-            ConformanceTestResult::fail("test2", RequirementLevel::Must, TestCategory::TaskExecution, "failed"),
+            ConformanceTestResult::pass(
+                "test1",
+                RequirementLevel::Must,
+                TestCategory::TaskExecution,
+            ),
+            ConformanceTestResult::fail(
+                "test2",
+                RequirementLevel::Must,
+                TestCategory::TaskExecution,
+                "failed",
+            ),
         ];
         let failing_stats = CoverageStats::from_results(&failing_results);
         assert!(!failing_stats.is_conformant()); // 50% MUST score < 95%

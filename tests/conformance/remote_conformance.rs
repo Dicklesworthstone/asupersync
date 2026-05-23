@@ -11,7 +11,9 @@
 //! - Transport-agnostic protocol abstraction
 //! - Phase-0 fallback determinism
 
-use super::harness::{ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict};
+use super::harness::{
+    ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict,
+};
 use crate::remote::{
     ComputationName, NodeId, Phase0RemoteFailure, Phase0RetryPolicy, Phase0SimulationConfig,
     RemoteCap, RemoteInput, RemoteTaskId,
@@ -162,16 +164,21 @@ impl RemoteConformanceHarness {
 
     /// Test that remote execution requires named computations (no closure shipping).
     fn test_named_computation_requirement(&mut self) -> ConformanceTestResult {
-        self.harness.run_test(
-            || {
-                let computation = ComputationName::new("encode_block");
-                let is_valid_name = self.computation_registry.is_valid_computation(computation.as_str());
-                self.harness.verify(is_valid_name, "Named computation should be registerable")
-            },
-            "named_computation_requirement",
-            RequirementLevel::Must,
-            TestCategory::NamedComputationContract,
-        ).with_spec_section("named-computation")
+        self.harness
+            .run_test(
+                || {
+                    let computation = ComputationName::new("encode_block");
+                    let is_valid_name = self
+                        .computation_registry
+                        .is_valid_computation(computation.as_str());
+                    self.harness
+                        .verify(is_valid_name, "Named computation should be registerable")
+                },
+                "named_computation_requirement",
+                RequirementLevel::Must,
+                TestCategory::NamedComputationContract,
+            )
+            .with_spec_section("named-computation")
     }
 
     /// Test computation name validation.
@@ -181,10 +188,17 @@ impl RemoteConformanceHarness {
                 let valid_name = ComputationName::new("encode_block");
                 let invalid_name = ComputationName::new("invalid_computation");
 
-                let valid_check = self.computation_registry.is_valid_computation(valid_name.as_str());
-                let invalid_check = !self.computation_registry.is_valid_computation(invalid_name.as_str());
+                let valid_check = self
+                    .computation_registry
+                    .is_valid_computation(valid_name.as_str());
+                let invalid_check = !self
+                    .computation_registry
+                    .is_valid_computation(invalid_name.as_str());
 
-                self.harness.verify(valid_check && invalid_check, "Computation validation should work correctly")
+                self.harness.verify(
+                    valid_check && invalid_check,
+                    "Computation validation should work correctly",
+                )
             },
             "computation_name_validation",
             RequirementLevel::Must,
@@ -199,7 +213,8 @@ impl RemoteConformanceHarness {
                 // This test verifies the API design prevents closure shipping
                 // by only accepting ComputationName, not FnOnce closures
                 let _computation = ComputationName::new("test_computation");
-                self.harness.verify(true, "API design prevents closure shipping")
+                self.harness
+                    .verify(true, "API design prevents closure shipping")
             },
             "no_closure_shipping",
             RequirementLevel::Must,
@@ -211,9 +226,13 @@ impl RemoteConformanceHarness {
     fn test_computation_registry_lookup(&mut self) -> ConformanceTestResult {
         self.harness.run_test(
             || {
-                self.computation_registry.register_computation("new_computation");
-                let exists = self.computation_registry.is_valid_computation("new_computation");
-                self.harness.verify(exists, "Registry should track registered computations")
+                self.computation_registry
+                    .register_computation("new_computation");
+                let exists = self
+                    .computation_registry
+                    .is_valid_computation("new_computation");
+                self.harness
+                    .verify(exists, "Registry should track registered computations")
             },
             "computation_registry_lookup",
             RequirementLevel::Should,
@@ -227,7 +246,10 @@ impl RemoteConformanceHarness {
             || {
                 let cap = RemoteCap::new();
                 let has_default_lease = cap.default_lease() == Duration::from_secs(30);
-                self.harness.verify(has_default_lease, "RemoteCap should provide default configuration")
+                self.harness.verify(
+                    has_default_lease,
+                    "RemoteCap should provide default configuration",
+                )
             },
             "remote_cap_authorization",
             RequirementLevel::Must,
@@ -241,7 +263,8 @@ impl RemoteConformanceHarness {
             || {
                 // API design ensures spawn_remote requires &RemoteCap
                 let _cap = RemoteCap::new();
-                self.harness.verify(true, "Remote operations require capability token")
+                self.harness
+                    .verify(true, "Remote operations require capability token")
             },
             "capability_token_requirement",
             RequirementLevel::Must,
@@ -256,7 +279,8 @@ impl RemoteConformanceHarness {
                 let custom_lease = Duration::from_secs(60);
                 let cap = RemoteCap::new().with_default_lease(custom_lease);
                 let has_custom_lease = cap.default_lease() == custom_lease;
-                self.harness.verify(has_custom_lease, "RemoteCap should support configuration")
+                self.harness
+                    .verify(has_custom_lease, "RemoteCap should support configuration")
             },
             "capability_configuration",
             RequirementLevel::Should,
@@ -270,7 +294,8 @@ impl RemoteConformanceHarness {
             || {
                 let cap = RemoteCap::new();
                 let default_lease = cap.default_lease() == Duration::from_secs(30);
-                self.harness.verify(default_lease, "Default lease should be 30 seconds")
+                self.harness
+                    .verify(default_lease, "Default lease should be 30 seconds")
             },
             "default_lease_duration",
             RequirementLevel::Should,
@@ -285,7 +310,8 @@ impl RemoteConformanceHarness {
                 // RemoteTaskId allocation is independent but task ownership follows region model
                 let task_id = RemoteTaskId::next();
                 let has_unique_id = task_id.raw() > 0;
-                self.harness.verify(has_unique_id, "Remote tasks should have unique identifiers")
+                self.harness
+                    .verify(has_unique_id, "Remote tasks should have unique identifiers")
             },
             "region_owned_remote_tasks",
             RequirementLevel::Must,
@@ -299,7 +325,8 @@ impl RemoteConformanceHarness {
             || {
                 // Remote tasks participate in region close/quiescence
                 let _node = NodeId::new("test_node");
-                self.harness.verify(true, "Remote tasks follow structured concurrency")
+                self.harness
+                    .verify(true, "Remote tasks follow structured concurrency")
             },
             "structured_concurrency_compliance",
             RequirementLevel::Must,
@@ -312,7 +339,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Type system enforces this constraint
-                self.harness.verify(true, "Type system prevents remote tasks outliving regions")
+                self.harness
+                    .verify(true, "Type system prevents remote tasks outliving regions")
             },
             "remote_task_cannot_outlive_region",
             RequirementLevel::Must,
@@ -325,7 +353,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Cancellation should propagate to remote nodes via the protocol
-                self.harness.verify(true, "Cancellation propagates to remote nodes")
+                self.harness
+                    .verify(true, "Cancellation propagates to remote nodes")
             },
             "cancellation_propagation",
             RequirementLevel::Must,
@@ -339,7 +368,10 @@ impl RemoteConformanceHarness {
             || {
                 let cap = RemoteCap::new();
                 let has_lease_config = cap.default_lease() > Duration::ZERO;
-                self.harness.verify(has_lease_config, "Lease-based liveness should be configured")
+                self.harness.verify(
+                    has_lease_config,
+                    "Lease-based liveness should be configured",
+                )
             },
             "lease_based_liveness",
             RequirementLevel::Must,
@@ -352,7 +384,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // When lease expires, region can escalate
-                self.harness.verify(true, "Lease expiration triggers escalation")
+                self.harness
+                    .verify(true, "Lease expiration triggers escalation")
             },
             "lease_expiration_handling",
             RequirementLevel::Must,
@@ -365,7 +398,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Escalation can cancel, restart, or fail
-                self.harness.verify(true, "Multiple escalation policies available")
+                self.harness
+                    .verify(true, "Multiple escalation policies available")
             },
             "escalation_policies",
             RequirementLevel::Should,
@@ -391,7 +425,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Message envelopes contain standard headers
-                self.harness.verify(true, "Message envelopes have required structure")
+                self.harness
+                    .verify(true, "Message envelopes have required structure")
             },
             "message_envelope_structure",
             RequirementLevel::Must,
@@ -404,7 +439,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Protocol defines state machine transitions
-                self.harness.verify(true, "Message flow follows spawn→ack→result pattern")
+                self.harness
+                    .verify(true, "Message flow follows spawn→ack→result pattern")
             },
             "spawn_ack_cancel_result_flow",
             RequirementLevel::Must,
@@ -417,7 +453,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Messages carry logical timestamps for ordering
-                self.harness.verify(true, "Logical clock maintains causal ordering")
+                self.harness
+                    .verify(true, "Logical clock maintains causal ordering")
             },
             "logical_clock_ordering",
             RequirementLevel::Should,
@@ -430,7 +467,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Message handling should be idempotent
-                self.harness.verify(true, "Protocol provides idempotency guarantees")
+                self.harness
+                    .verify(true, "Protocol provides idempotency guarantees")
             },
             "idempotency_guarantees",
             RequirementLevel::Should,
@@ -456,7 +494,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // RemoteRuntime trait defines required methods
-                self.harness.verify(true, "RemoteRuntime trait provides required interface")
+                self.harness
+                    .verify(true, "RemoteRuntime trait provides required interface")
             },
             "runtime_trait_contract",
             RequirementLevel::Must,
@@ -469,7 +508,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Protocol works with lab harnesses and real transports
-                self.harness.verify(true, "Protocol supports deterministic testing")
+                self.harness
+                    .verify(true, "Protocol supports deterministic testing")
             },
             "deterministic_harness_compatibility",
             RequirementLevel::Should,
@@ -482,8 +522,10 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 let config = Phase0SimulationConfig::default();
-                let is_deterministic = matches!(config.failure, Phase0RemoteFailure::NodeUnreachable);
-                self.harness.verify(is_deterministic, "Phase-0 fallback should be deterministic")
+                let is_deterministic =
+                    matches!(config.failure, Phase0RemoteFailure::NodeUnreachable);
+                self.harness
+                    .verify(is_deterministic, "Phase-0 fallback should be deterministic")
             },
             "phase0_fallback_determinism",
             RequirementLevel::Must,
@@ -501,7 +543,8 @@ impl RemoteConformanceHarness {
                     Phase0RemoteFailure::TransportError("test".into()),
                     Phase0RemoteFailure::Timeout,
                 ];
-                self.harness.verify(!failures.is_empty(), "Multiple failure modes available")
+                self.harness
+                    .verify(!failures.is_empty(), "Multiple failure modes available")
             },
             "no_runtime_failure_modes",
             RequirementLevel::Should,
@@ -515,7 +558,8 @@ impl RemoteConformanceHarness {
             || {
                 let policy = Phase0RetryPolicy::default();
                 let has_config = policy.max_attempts > 0 && policy.initial_backoff > Duration::ZERO;
-                self.harness.verify(has_config, "Retry policy should be configurable")
+                self.harness
+                    .verify(has_config, "Retry policy should be configurable")
             },
             "retry_policy_configuration",
             RequirementLevel::Should,
@@ -529,7 +573,10 @@ impl RemoteConformanceHarness {
             || {
                 let config = Phase0SimulationConfig::default();
                 let has_defaults = config.timeout > Duration::ZERO;
-                self.harness.verify(has_defaults, "Simulation config should have reasonable defaults")
+                self.harness.verify(
+                    has_defaults,
+                    "Simulation config should have reasonable defaults",
+                )
             },
             "simulation_config_defaults",
             RequirementLevel::Should,
@@ -544,7 +591,8 @@ impl RemoteConformanceHarness {
                 let id1 = RemoteTaskId::next();
                 let id2 = RemoteTaskId::next();
                 let are_unique = id1 != id2 && id1.raw() != id2.raw();
-                self.harness.verify(are_unique, "Remote task IDs should be unique")
+                self.harness
+                    .verify(are_unique, "Remote task IDs should be unique")
             },
             "remote_task_id_uniqueness",
             RequirementLevel::Must,
@@ -570,7 +618,8 @@ impl RemoteConformanceHarness {
         self.harness.run_test(
             || {
                 // Resources should be cleaned up after task completes
-                self.harness.verify(true, "Runtime cleans up completed tasks")
+                self.harness
+                    .verify(true, "Runtime cleans up completed tasks")
             },
             "cleanup_after_completion",
             RequirementLevel::Must,
@@ -584,7 +633,8 @@ impl RemoteConformanceHarness {
             || {
                 let input = RemoteInput::new(vec![1, 2, 3, 4]);
                 let has_data = input.len() == 4 && input.data() == [1, 2, 3, 4];
-                self.harness.verify(has_data, "RemoteInput should handle opaque bytes")
+                self.harness
+                    .verify(has_data, "RemoteInput should handle opaque bytes")
             },
             "remote_input_opaque_bytes",
             RequirementLevel::Must,
@@ -598,7 +648,8 @@ impl RemoteConformanceHarness {
             || {
                 let empty_input = RemoteInput::empty();
                 let is_empty = empty_input.is_empty() && empty_input.len() == 0;
-                self.harness.verify(is_empty, "Empty input should be supported")
+                self.harness
+                    .verify(is_empty, "Empty input should be supported")
             },
             "empty_input_handling",
             RequirementLevel::Must,
@@ -613,7 +664,8 @@ impl RemoteConformanceHarness {
                 // Large inputs should be handled gracefully
                 let large_input = RemoteInput::new(vec![0; 1_000_000]);
                 let size_ok = large_input.len() == 1_000_000;
-                self.harness.verify(size_ok, "Large inputs should be supported")
+                self.harness
+                    .verify(size_ok, "Large inputs should be supported")
             },
             "input_size_limits",
             RequirementLevel::May,
@@ -667,7 +719,10 @@ mod tests {
     #[test]
     fn phase0_configuration() {
         let config = Phase0SimulationConfig::default();
-        assert!(matches!(config.failure, Phase0RemoteFailure::NodeUnreachable));
+        assert!(matches!(
+            config.failure,
+            Phase0RemoteFailure::NodeUnreachable
+        ));
         assert!(config.timeout > Duration::ZERO);
 
         let policy = Phase0RetryPolicy::default();
