@@ -460,13 +460,14 @@ fn normalize_permille_generic<const N: usize>(scores: [u32; N], zero_total: [u16
     for (index, score) in scores.iter().copied().enumerate() {
         let scaled = score.saturating_mul(PERMILLE_SCALE);
         let base = scaled / total;
-        normalized[index] = u16::try_from(base).expect("permille base fits into u16");
+        // Cap to u16::MAX if base exceeds u16 range (pathological case)
+        normalized[index] = u16::try_from(base).unwrap_or(u16::MAX);
         assigned = assigned.saturating_add(base);
         remainders[index] = (index, scaled % total);
     }
 
     let mut remaining = usize::try_from(PERMILLE_SCALE.saturating_sub(assigned))
-        .expect("permille remainder fits into usize");
+        .unwrap_or(0); // fallback to 0 if conversion fails
     remainders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     for (index, remainder) in remainders {
         if remaining == 0 || remainder == 0 {
@@ -491,6 +492,8 @@ fn normalize_contributor_permille(scores: [u32; 3]) -> [u16; 3] {
 
 #[inline]
 fn posterior_from_permille(posterior_permille: [u16; state::COUNT]) -> Posterior {
+    // TODO: Handle Posterior::new failure gracefully instead of panicking
+    // Current assumption: normalized permille values should always be valid
     Posterior::new(
         posterior_permille
             .into_iter()
