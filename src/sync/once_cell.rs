@@ -2989,13 +2989,7 @@ mod tests {
         let immediate_visibility_rate =
             (successful_immediate_visibility as f64) / (test_iterations as f64);
 
-        println!(
-            "Set/Get ordering audit: {}/{} immediate visibility ({:.1}%), {} late visibility cases",
-            successful_immediate_visibility,
-            test_iterations,
-            immediate_visibility_rate * 100.0,
-            late_visibility_total
-        );
+        // Set/Get ordering audit completed
 
         // Verify ordering guarantees
         if immediate_visibility_rate < 0.95 {
@@ -3017,9 +3011,7 @@ mod tests {
             );
         }
 
-        println!(
-            "✅ SOUND: OnceCell set()/get() has correct Release/Acquire happens-before ordering"
-        );
+        // OnceCell set()/get() has correct Release/Acquire happens-before ordering
 
         crate::test_complete!("audit_set_get_happens_before_ordering");
     }
@@ -3203,14 +3195,7 @@ mod tests {
             }
         }
 
-        println!("✅ SOUND: OnceCell::wait() cancellation behavior verified:");
-        println!("  - Returns Err(Cancelled) immediately when context is cancelled ✓");
-        println!("  - Does not hang waiting for initialization ✓");
-        println!("  - Succeeds immediately for already-initialized cells ✓");
-        println!(
-            "  - Stress test: {}/{} cancelled contexts handled correctly ✓",
-            10, 10
-        );
+        // OnceCell::wait() cancellation behavior verified
 
         crate::test_complete!("audit_once_cell_wait_cancellation_behavior");
     }
