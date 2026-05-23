@@ -259,7 +259,14 @@ impl<S> RateLimit<S> {
     ) {
         let last_refill = state.last_refill.unwrap_or(now);
         let elapsed_nanos = now.as_nanos().saturating_sub(last_refill.as_nanos());
-        let period_nanos = period.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let period_nanos = {
+            let nanos = period.as_nanos();
+            if nanos <= u128::from(u64::MAX) {
+                nanos as u64
+            } else {
+                u64::MAX
+            }
+        };
 
         if period_nanos == 0 {
             // Zero period means "no throttling": always make at least one token
@@ -277,7 +284,7 @@ impl<S> RateLimit<S> {
                 let new_tokens = periods.saturating_mul(rate);
                 state.tokens = state.tokens.saturating_add(new_tokens).min(rate);
                 // Update last_refill to the last complete period boundary
-                let refill_time = last_refill.saturating_add_nanos(periods * period_nanos);
+                let refill_time = last_refill.saturating_add_nanos(periods.saturating_mul(period_nanos));
                 state.last_refill = Some(refill_time);
             }
         } else if state.last_refill.is_none() {
@@ -331,7 +338,14 @@ impl<S> RateLimit<S> {
             Self::refill_state_locked(&mut state, self.rate, self.period, now);
             if state.tokens == 0 {
                 let next_deadline = state.last_refill.map(|last_refill| {
-                    let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
+                    let period_nanos = {
+                        let nanos = self.period.as_nanos();
+                        if nanos <= u128::from(u64::MAX) {
+                            nanos as u64
+                        } else {
+                            u64::MAX
+                        }
+                    };
                     last_refill.saturating_add_nanos(period_nanos)
                 });
                 drop(state);
