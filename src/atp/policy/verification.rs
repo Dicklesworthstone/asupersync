@@ -4,6 +4,7 @@ use super::{Capability, CapabilityError, CapabilityResult};
 use crate::atp::identity::DurablePeerIdentity;
 use crate::security::keys::IdentityKeyStore;
 use crate::types::outcome::Outcome;
+use nkeys::KeyPair;
 use serde_json;
 
 /// Capability signer for creating signed capability grants.
@@ -141,7 +142,7 @@ impl CapabilityVerifier {
     /// Verify a capability signature.
     pub fn verify_capability(&self, capability: &Capability) -> CapabilityResult<bool> {
         // Get the issuer's identity
-        let _issuer_identity = match self.trusted_peers.get(&capability.issuer) {
+        let issuer_identity = match self.trusted_peers.get(&capability.issuer) {
             Some(identity) => identity,
             None => {
                 return Outcome::err(CapabilityError::InvalidCapability {
@@ -150,23 +151,32 @@ impl CapabilityVerifier {
             }
         };
 
+        if capability.signature.is_empty() {
+            return Outcome::ok(false);
+        }
+
         // Create the signing data
-        let _signing_data = match self.create_verification_data(capability) {
+        let signing_data = match self.create_verification_data(capability) {
             Outcome::Ok(data) => data,
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
-        // Create a temporary key store for verification
-        // Note: In a real implementation, you'd want to cache these or use a different approach
-        // For now, we'll assume verification succeeds if we have the identity
-        // TODO: Implement proper public key verification
+        let issuer_key = match KeyPair::from_public_key(issuer_identity.public_key()) {
+            Ok(key) => key,
+            Err(error) => {
+                return Outcome::err(CapabilityError::InvalidCapability {
+                    reason: format!("issuer public key invalid: {error}"),
+                });
+            }
+        };
 
-        // Verify the signature
-        // TODO: Implement proper signature verification when key store API is available
-        // For now, assume verification passes if we have the trusted identity
-        Outcome::ok(true)
+        Outcome::ok(
+            issuer_key
+                .verify(&signing_data, &capability.signature)
+                .is_ok(),
+        )
     }
 
     /// Verify and validate a capability comprehensively.
@@ -382,6 +392,70 @@ mod tests {
             .verify_capability(&capability)
             .expect("verify capability"); // ubs:ignore - test oracle
         assert!(valid);
+    }
+
+    #[test]
+    fn capability_verification_rejects_tampered_signed_field() {
+        let signer = create_test_signer();
+        let mut capability = create_test_capability(&signer);
+        signer
+            .sign_capability(&mut capability)
+            .expect("sign capability"); // ubs:ignore - test oracle
+
+        capability.grant_id.push_str("-tampered");
+
+        let mut verifier = CapabilityVerifier::new();
+        verifier.add_trusted_peer(signer.identity().clone());
+
+        let valid = verifier
+            .verify_capability(&capability)
+            .expect("verify tampered capability"); // ubs:ignore - test oracle
+        assert!(!valid);
+
+        let result = verifier
+            .validate_capability(&capability)
+            .expect("validate tampered capability"); // ubs:ignore - test oracle
+        assert!(!result.valid);
+        assert!(result.issues.contains(&ValidationIssue::InvalidSignature));
+    }
+
+    #[test]
+    fn capability_verification_rejects_tampered_signature() {
+        let signer = create_test_signer();
+        let mut capability = create_test_capability(&signer);
+        signer
+            .sign_capability(&mut capability)
+            .expect("sign capability"); // ubs:ignore - test oracle
+
+        capability.signature[0] ^= 0x01;
+
+        let mut verifier = CapabilityVerifier::new();
+        verifier.add_trusted_peer(signer.identity().clone());
+
+        let valid = verifier
+            .verify_capability(&capability)
+            .expect("verify tampered signature"); // ubs:ignore - test oracle
+        assert!(!valid);
+    }
+
+    #[test]
+    fn capability_validation_rejects_missing_signature() {
+        let signer = create_test_signer();
+        let capability = create_test_capability(&signer);
+
+        let mut verifier = CapabilityVerifier::new();
+        verifier.add_trusted_peer(signer.identity().clone());
+
+        let valid = verifier
+            .verify_capability(&capability)
+            .expect("verify unsigned capability"); // ubs:ignore - test oracle
+        assert!(!valid);
+
+        let result = verifier
+            .validate_capability(&capability)
+            .expect("validate unsigned capability"); // ubs:ignore - test oracle
+        assert!(!result.valid);
+        assert!(result.issues.contains(&ValidationIssue::InvalidSignature));
     }
 
     #[test]
