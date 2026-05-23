@@ -5,6 +5,10 @@
 //! plaintext, records path proof telemetry, and models UDP-first with
 //! TCP/TLS port 443 fallback for hostile networks.
 
+use crate::atp::path::{
+    PathBudget, PathCandidate, PathCandidateId, PathFailureKind, PathKind, PathOutcome,
+    PathSecurity, PathSuccessKind, PathTraceId,
+};
 use crate::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -45,6 +49,15 @@ impl RelayTransport {
         match self {
             Self::Udp => None,
             Self::TcpTls443 => Some("udp_unavailable_tcp_tls_443"),
+        }
+    }
+
+    /// Shared path graph kind represented by this relay transport.
+    #[must_use]
+    pub const fn path_kind(self) -> PathKind {
+        match self {
+            Self::Udp => PathKind::AtpRelayUdp,
+            Self::TcpTls443 => PathKind::AtpRelayTcpTls443,
         }
     }
 }
@@ -502,6 +515,33 @@ impl RelayPathCandidate {
     pub fn relay_id(&self) -> &str {
         &self.relay_id
     }
+
+    /// Shared path graph kind represented by the primary relay transport.
+    #[must_use]
+    pub const fn path_kind(&self) -> PathKind {
+        self.primary_transport.path_kind()
+    }
+
+    /// Shared path graph kind represented by the fallback relay transport.
+    #[must_use]
+    pub fn fallback_path_kind(&self) -> Option<PathKind> {
+        self.fallback_transport.map(RelayTransport::path_kind)
+    }
+
+    /// Convert this relay reservation into the shared ATP path graph model.
+    ///
+    /// The caller supplies the path-candidate id and trace id because those are
+    /// race-local identities. The relay reservation id remains in the relay
+    /// proof artifact, while the path graph receives the transport kind,
+    /// security defaults, and deterministic attempt budget it needs for racing
+    /// and loser-drain diagnostics.
+    #[must_use]
+    pub fn to_path_candidate(&self, id: PathCandidateId, trace_id: PathTraceId) -> PathCandidate {
+        let kind = self.path_kind();
+        PathCandidate::new(id, kind, trace_id)
+            .with_budget(PathBudget::default())
+            .with_security(PathSecurity::for_kind(kind))
+    }
 }
 
 /// Packet emitted from a relay queue.
@@ -659,6 +699,27 @@ pub struct RelayProofArtifact {
     pub replay_pointer: u64,
     /// Relay preserved end-to-end proof tags without minting verified chunks.
     pub e2e_proof_preserved: bool,
+}
+
+impl RelayProofArtifact {
+    /// Convert relay proof telemetry into a shared path-race success outcome.
+    ///
+    /// The relay still does not verify object plaintext or mint verified
+    /// chunks. The byte counters copied into the path outcome are opaque relay
+    /// bytes used for diagnostics and replay correlation.
+    #[must_use]
+    pub const fn to_path_success_outcome(
+        &self,
+        completed_at_micros: u64,
+        observed_rtt_micros: Option<u64>,
+    ) -> PathOutcome {
+        PathOutcome::success(
+            PathSuccessKind::RelaySelected,
+            completed_at_micros,
+            observed_rtt_micros,
+        )
+        .with_bytes(self.opaque_bytes_forwarded, self.opaque_bytes_forwarded)
+    }
 }
 
 /// Restart snapshot for self-hosted relay recovery.
@@ -1469,6 +1530,31 @@ pub enum RelayError {
     InvalidLossSummary,
 }
 
+impl RelayError {
+    /// Map relay-specific failures into the shared path graph failure taxonomy.
+    #[must_use]
+    pub const fn path_failure_kind(self) -> PathFailureKind {
+        match self {
+            Self::InvalidAuthorization | Self::UnauthorizedPeer => PathFailureKind::AuthFailure,
+            Self::TransportUnavailable
+            | Self::UnknownReservation
+            | Self::ExpiredReservation
+            | Self::ReservationCancelled => PathFailureKind::RelayUnavailable,
+            Self::QuotaExceeded | Self::PacketTooLarge | Self::InvalidQuota => {
+                PathFailureKind::PolicyDenied
+            }
+            Self::ZeroReservationId
+            | Self::EmptyRelayId
+            | Self::EmptyPathId
+            | Self::EmptyPacket
+            | Self::InvalidProofTag
+            | Self::LoopbackReservation
+            | Self::DuplicateReservation
+            | Self::InvalidLossSummary => PathFailureKind::ProtocolError,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1552,6 +1638,82 @@ mod tests {
         assert_eq!(
             candidate.primary_transport().fallback_reason(),
             Some("udp_unavailable_tcp_tls_443")
+        );
+    }
+
+    #[test]
+    fn relay_candidate_converts_to_path_graph_candidate() {
+        let config = RelayServiceConfig::default().with_udp_enabled(false);
+        let mut service = RelayService::new(config);
+        let relay_candidate = service
+            .reserve(
+                10,
+                reservation_id(33),
+                "path-relay-33",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        assert_eq!(relay_candidate.path_kind(), PathKind::AtpRelayTcpTls443);
+        assert_eq!(relay_candidate.fallback_path_kind(), None);
+
+        let path_candidate =
+            relay_candidate.to_path_candidate(PathCandidateId::new(333), PathTraceId::new(333_000));
+        assert_eq!(path_candidate.id, PathCandidateId::new(333));
+        assert_eq!(path_candidate.kind, PathKind::AtpRelayTcpTls443);
+        assert_eq!(path_candidate.trace_id, PathTraceId::new(333_000));
+        assert!(path_candidate.security.authenticated_peer);
+        assert!(path_candidate.security.end_to_end_encrypted);
+        assert!(!path_candidate.security.exposes_local_ip_to_peer);
+        assert!(path_candidate.security.relay_metadata_visible);
+    }
+
+    #[test]
+    fn relay_proof_and_errors_convert_to_path_graph_outcomes() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(34),
+                "path-relay-34",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                20,
+                reservation_id(34),
+                peer(1),
+                packet(RelayTransport::Udp, b"ciphertext", 1),
+            )
+            .expect("forward");
+
+        let proof = service
+            .proof_artifact(reservation_id(34))
+            .expect("proof artifact");
+        let outcome = proof.to_path_success_outcome(30, Some(10));
+        assert!(outcome.is_success());
+        assert_eq!(outcome.observed_rtt_micros, Some(10));
+        assert_eq!(outcome.bytes_sent, proof.opaque_bytes_forwarded);
+        assert_eq!(outcome.bytes_received, proof.opaque_bytes_forwarded);
+
+        assert_eq!(
+            RelayError::InvalidAuthorization.path_failure_kind(),
+            PathFailureKind::AuthFailure
+        );
+        assert_eq!(
+            RelayError::TransportUnavailable.path_failure_kind(),
+            PathFailureKind::RelayUnavailable
+        );
+        assert_eq!(
+            RelayError::PacketTooLarge.path_failure_kind(),
+            PathFailureKind::PolicyDenied
+        );
+        assert_eq!(
+            RelayError::InvalidProofTag.path_failure_kind(),
+            PathFailureKind::ProtocolError
         );
     }
 

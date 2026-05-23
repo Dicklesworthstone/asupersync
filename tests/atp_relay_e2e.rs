@@ -4,6 +4,10 @@
 //! than mocks. They are intentionally deterministic so `scripts/run_atp_relay_e2e.sh`
 //! can capture stable stage logs, proof metadata, and failure points.
 
+use asupersync::atp::path::{
+    PathAttemptState, PathCandidate, PathCandidateId, PathFailureKind, PathKind, PathOutcome,
+    PathOutcomeResult, PathRace, PathSelectionReason, PathSuccessKind, PathTraceId,
+};
 use asupersync::net::atp::relay::{
     OpaqueRelayPacket, ProofTag, RelayError, RelayEventKind, RelayQuota, RelayReservationGrant,
     RelayReservationId, RelayService, RelayServiceConfig, RelayTransport,
@@ -139,6 +143,96 @@ fn relay_only_locked_down_tcp_tls_fallback_produces_complete_proof_logs() {
             && event.fallback_reason == Some("udp_unavailable_tcp_tls_443")
             && event.replay_pointer > 0
     }));
+}
+
+#[test]
+fn relay_candidate_feeds_path_race_and_preserves_proof_evidence() {
+    let test = "relay_candidate_feeds_path_race_and_preserves_proof_evidence";
+    let config = RelayServiceConfig::new("relay-path-race-e2e", 4)
+        .expect("config")
+        .with_udp_enabled(false)
+        .with_log_peer_ids(true);
+    let mut service = RelayService::new(config);
+
+    log_stage(
+        test,
+        "reserve",
+        "tcp_tls_443 relay candidate is converted into shared path graph",
+    );
+    let relay_candidate = service
+        .reserve(
+            100,
+            reservation_id(400),
+            "relay-path-graph",
+            grant(10_000, RelayQuota::default()),
+            &|grant: &RelayReservationGrant| grant.signature().bytes() == [0xa7, 0x50, 0xf5],
+        )
+        .expect("reserve relay candidate");
+    assert_eq!(relay_candidate.path_kind(), PathKind::AtpRelayTcpTls443);
+    let relay_path =
+        relay_candidate.to_path_candidate(PathCandidateId::new(40), PathTraceId::new(40_000));
+    assert_eq!(relay_path.kind, PathKind::AtpRelayTcpTls443);
+    assert!(relay_path.security.relay_metadata_visible);
+    assert!(!relay_path.security.exposes_local_ip_to_peer);
+
+    log_stage(
+        test,
+        "path-race",
+        "direct path fails and relay path wins with structured loser state",
+    );
+    let direct_id = PathCandidateId::new(10);
+    let relay_id = relay_path.id;
+    let mut race = PathRace::new();
+    race.add_candidate(PathCandidate::new(
+        direct_id,
+        PathKind::NatPunchedUdp,
+        PathTraceId::new(10_000),
+    ))
+    .expect("direct candidate");
+    race.add_candidate(relay_path).expect("relay candidate");
+    race.start_all().expect("start path race");
+    race.record_outcome(
+        direct_id,
+        PathOutcome::failure(PathFailureKind::UdpBlocked, 150),
+    )
+    .expect("record direct failure");
+
+    let forwarded = service
+        .forward(
+            160,
+            reservation_id(400),
+            peer(1),
+            packet(RelayTransport::TcpTls443, b"encrypted-path-race-frame", 1),
+        )
+        .expect("relay forward");
+    assert_eq!(forwarded.to_peer_id(), peer(2));
+    let proof = service
+        .proof_artifact(reservation_id(400))
+        .expect("relay proof");
+    let relay_outcome = proof.to_path_success_outcome(175, Some(25));
+    race.record_outcome(relay_id, relay_outcome)
+        .expect("record relay win");
+
+    let snapshot = race.diagnostic_snapshot();
+    assert_eq!(race.winner(), Some(relay_id));
+    assert_eq!(snapshot.reason, PathSelectionReason::RelayFallbackValidated);
+    assert_eq!(snapshot.selected_kind, Some(PathKind::AtpRelayTcpTls443));
+    assert_eq!(snapshot.relay_count, 1);
+    assert_eq!(snapshot.failure_count, 1);
+    assert_eq!(snapshot.success_count, 1);
+    assert!(matches!(
+        race.candidate(relay_id).expect("relay state").state,
+        PathAttemptState::Succeeded(outcome)
+            if outcome.result == PathOutcomeResult::Success(PathSuccessKind::RelaySelected)
+                && outcome.bytes_sent == proof.opaque_bytes_forwarded
+                && outcome.bytes_received == proof.opaque_bytes_forwarded
+    ));
+    assert_eq!(
+        RelayError::InvalidAuthorization.path_failure_kind(),
+        PathFailureKind::AuthFailure
+    );
+    assert_eq!(proof.fallback_reason, Some("udp_unavailable_tcp_tls_443"));
+    assert!(proof.e2e_proof_preserved);
 }
 
 #[test]
