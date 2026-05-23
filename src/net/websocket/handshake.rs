@@ -87,8 +87,8 @@ fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError
     let crlf_pos = data
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4);
-    let lf_pos = data.windows(2).position(|w| w == b"\n\n").map(|p| p + 2);
+        .map(|p| p.saturating_add(4));
+    let lf_pos = data.windows(2).position(|w| w == b"\n\n").map(|p| p.saturating_add(2));
 
     let split_at = match (crlf_pos, lf_pos) {
         (Some(c), Some(l)) => Some(std::cmp::min(c, l)),
@@ -199,7 +199,7 @@ impl WsUrl {
                 },
                 |bracket_end| {
                     let host = &host_port[1..bracket_end];
-                    let suffix = &host_port[bracket_end + 1..];
+                    let suffix = &host_port[bracket_end.saturating_add(1)..];
                     let port = if suffix.is_empty() {
                         default_port
                     } else if let Some(port_str) = suffix.strip_prefix(':') {
@@ -220,7 +220,7 @@ impl WsUrl {
         } else if let Some(colon_idx) = host_port.rfind(':') {
             // host:port
             let host = &host_port[..colon_idx];
-            let port = host_port[colon_idx + 1..]
+            let port = host_port[colon_idx.saturating_add(1)..]
                 .parse()
                 .map_err(|_| HandshakeError::InvalidUrl("invalid port".into()))?;
             (host.to_string(), port)
