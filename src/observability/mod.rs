@@ -242,8 +242,8 @@ pub use structured_cancellation_analyzer::{
     StructuredCancellationAnalyzer, StructuredCancellationConfig,
 };
 pub use swarm_pressure_governor::{
-    ResourceEnvelope, SwarmAdmissionDecision, SwarmPressureError, SwarmPressureGovernor,
-    SwarmPressureGovernorConfig, SwarmPressureMetrics,
+    ResourceEnvelope, SwarmAdmissionDecision, SwarmAdmissionWorkloadReceipt, SwarmPressureError,
+    SwarmPressureGovernor, SwarmPressureGovernorConfig, SwarmPressureMetrics,
 };
 pub use task_inspector::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire,

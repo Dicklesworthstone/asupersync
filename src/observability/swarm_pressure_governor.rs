@@ -838,6 +838,46 @@ pub struct SwarmWorkloadLeaseReceipt {
     pub reason: String,
 }
 
+/// Typed workload context bound to an admission decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmAdmissionWorkloadReceipt {
+    /// Workload id used when the admission decision was computed.
+    pub workload_id: String,
+    /// Owner metadata used when the admission decision was computed.
+    pub owner: SwarmAdmissionOwner,
+    /// Proof or validation lane used when the admission decision was computed.
+    pub proof_lane: SwarmProofLaneKind,
+    /// Requested memory bytes charged to the admission decision.
+    pub requested_memory_bytes: Option<u64>,
+    /// Requested CPU nanoseconds per second charged to the admission decision.
+    pub requested_cpu_ns_per_sec: Option<u64>,
+    /// Requested IO operations per second charged to the admission decision.
+    pub requested_io_ops_per_sec: Option<u64>,
+    /// Deadline used for the admission decision.
+    pub deadline: Option<Instant>,
+    /// Cancellation budget used for the admission decision.
+    pub cancellation_budget: Option<Duration>,
+}
+
+impl SwarmAdmissionWorkloadReceipt {
+    fn from_request(request: &SwarmWorkloadAdmissionRequest) -> Self {
+        Self {
+            workload_id: request.workload_id.trim().to_string(),
+            owner: normalized_owner_metadata(&request.owner),
+            proof_lane: request.proof_lane,
+            requested_memory_bytes: request.requested_memory_bytes,
+            requested_cpu_ns_per_sec: request.requested_cpu_ns_per_sec,
+            requested_io_ops_per_sec: request.requested_io_ops_per_sec,
+            deadline: request.deadline,
+            cancellation_budget: request.cancellation_budget,
+        }
+    }
+
+    fn matches_request(&self, request: &SwarmWorkloadAdmissionRequest) -> bool {
+        self == &Self::from_request(request)
+    }
+}
+
 /// Enhanced admission decision with resource envelope information.
 #[derive(Debug, Clone)]
 pub struct SwarmAdmissionDecision {
@@ -853,6 +893,8 @@ pub struct SwarmAdmissionDecision {
     pub decision_latency_ns: u64,
     /// Reason for the decision.
     pub reason: String,
+    /// Workload request context bound to this decision, when it came from workload admission.
+    pub workload_receipt: Option<SwarmAdmissionWorkloadReceipt>,
 }
 
 /// Swarm-aware pressure governor with resource envelope management.
@@ -994,6 +1036,7 @@ impl SwarmPressureGovernor {
             workload_pressure,
         )?;
         decision.reason = request.context_reason(&decision.reason);
+        decision.workload_receipt = Some(SwarmAdmissionWorkloadReceipt::from_request(request));
         Ok(decision)
     }
 
@@ -1044,6 +1087,7 @@ impl SwarmPressureGovernor {
                 degradation_level: DegradationLevel::None,
                 decision_latency_ns: self.record_decision_latency(decision_start),
                 reason: "Swarm governance disabled".to_string(),
+                workload_receipt: None,
             });
         }
 
@@ -1084,6 +1128,7 @@ impl SwarmPressureGovernor {
                     "Requested memory {requested_memory} exceeds region envelope budget {}",
                     self.config.default_memory_budget_bytes
                 ),
+                workload_receipt: None,
             });
         }
         if let Some((resource, requested, limit)) =
@@ -1101,6 +1146,7 @@ impl SwarmPressureGovernor {
                 reason: format!(
                     "Requested {resource} {requested} exceeds region envelope budget {limit}"
                 ),
+                workload_receipt: None,
             });
         }
 
@@ -1150,6 +1196,7 @@ impl SwarmPressureGovernor {
             degradation_level,
             decision_latency_ns: self.record_decision_latency(decision_start),
             reason: swarm_decision.reason,
+            workload_receipt: None,
         })
     }
 
@@ -1201,6 +1248,9 @@ impl SwarmPressureGovernor {
             return Err(workload_lease_error(
                 "admitted workload decision must include a resource envelope",
             ));
+        }
+        if let Some(reason) = Self::workload_admission_receipt_mismatch_reason(decision, request) {
+            return Err(workload_lease_error(reason));
         }
 
         let expires_at = self.workload_lease_expiry(now, request.deadline)?;
@@ -1613,6 +1663,38 @@ impl SwarmPressureGovernor {
         None
     }
 
+    fn workload_admission_receipt_mismatch_reason(
+        decision: &SwarmAdmissionDecision,
+        request: &SwarmWorkloadAdmissionRequest,
+    ) -> Option<String> {
+        let receipt = match &decision.workload_receipt {
+            Some(receipt) => receipt,
+            None => {
+                return Some(
+                    "admitted workload decision must include a workload admission receipt"
+                        .to_string(),
+                );
+            }
+        };
+
+        if receipt.matches_request(request) {
+            return None;
+        }
+
+        Some(format!(
+            "admission workload receipt does not match request: \
+             decision_workload_id={} request_workload_id={} \
+             decision_owner_agent={} request_owner_agent={} \
+             decision_proof_lane={} request_proof_lane={}",
+            receipt.workload_id,
+            request.workload_id.trim(),
+            receipt.owner.agent_name,
+            request.owner.agent_name.trim(),
+            receipt.proof_lane.as_str(),
+            request.proof_lane.as_str()
+        ))
+    }
+
     fn expire_stale_workload_leases_locked(
         &self,
         leases: &mut HashMap<SwarmWorkloadLeaseId, SwarmWorkloadLease>,
@@ -1935,6 +2017,7 @@ impl SwarmPressureGovernor {
             degradation_level,
             decision_latency_ns: self.record_decision_latency(decision_start),
             reason: request.context_reason(&reason),
+            workload_receipt: Some(SwarmAdmissionWorkloadReceipt::from_request(request)),
         }
     }
 
@@ -2125,6 +2208,21 @@ fn optional_reason_field(value: Option<&str>) -> &str {
 
 fn optional_u64_reason_field(value: Option<u64>) -> String {
     value.map_or_else(|| "unset".to_string(), |value| value.to_string())
+}
+
+fn normalized_owner_metadata(owner: &SwarmAdmissionOwner) -> SwarmAdmissionOwner {
+    SwarmAdmissionOwner {
+        agent_name: owner.agent_name.trim().to_string(),
+        bead_id: normalized_optional_string(owner.bead_id.as_deref()),
+        reservation_scope: normalized_optional_string(owner.reservation_scope.as_deref()),
+    }
+}
+
+fn normalized_optional_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn prune_stale_peer_pressure_reports_locked(
@@ -2779,6 +2877,80 @@ mod tests {
         assert_eq!(metrics.workload_leases_released, 1);
         assert_eq!(metrics.active_workload_lease_count, 0);
         assert_eq!(metrics.terminal_workload_lease_count, 1);
+    }
+
+    #[test]
+    fn test_workload_admission_receipt_binds_lease_to_exact_request() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let request = SwarmWorkloadAdmissionRequest::new(
+            " receipt-owner-a ",
+            SwarmAdmissionOwner::new(" DustyGorge ")
+                .with_bead_id(" asupersync-oxqrae.2 ")
+                .with_reservation_scope(" src/observability/swarm_pressure_governor.rs "),
+        )
+        .with_declared_resources(Some(1024), Some(50), Some(5))
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib)
+        .with_deadline(deadline)
+        .with_cancellation_budget(Duration::from_secs(5));
+
+        let decision = governor
+            .check_workload_admission(&cx, &request)
+            .expect("workload admission should classify");
+        let receipt = decision
+            .workload_receipt
+            .as_ref()
+            .expect("workload admission should bind a typed workload receipt");
+        assert_eq!(receipt.workload_id, "receipt-owner-a");
+        assert_eq!(receipt.owner.agent_name, "DustyGorge");
+        assert_eq!(
+            receipt.owner.bead_id.as_deref(),
+            Some("asupersync-oxqrae.2")
+        );
+        assert_eq!(
+            receipt.owner.reservation_scope.as_deref(),
+            Some("src/observability/swarm_pressure_governor.rs")
+        );
+        assert!(receipt.matches_request(&request));
+
+        let mismatched_request = SwarmWorkloadAdmissionRequest::new(
+            "receipt-owner-b",
+            SwarmAdmissionOwner::new("DustyGorge")
+                .with_bead_id("asupersync-oxqrae.2")
+                .with_reservation_scope("src/observability/swarm_pressure_governor.rs"),
+        )
+        .with_declared_resources(Some(1024), Some(50), Some(5))
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib)
+        .with_deadline(deadline)
+        .with_cancellation_budget(Duration::from_secs(5));
+        let mismatch = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(50, 2),
+                &mismatched_request,
+                &decision,
+            )
+            .expect_err("lease acquisition must reject a mismatched admission receipt");
+        assert!(matches!(
+            mismatch,
+            SwarmPressureError::WorkloadLease { ref reason }
+                if reason.contains("admission workload receipt does not match request")
+                    && reason.contains("decision_workload_id=receipt-owner-a")
+                    && reason.contains("request_workload_id=receipt-owner-b")
+        ));
+        assert_eq!(governor.metrics().workload_leases_acquired, 0);
+
+        let acquired = governor
+            .acquire_workload_lease(RegionId::new_for_test(50, 1), &request, &decision)
+            .expect("matching workload receipt should acquire");
+        assert_eq!(acquired.workload_id, "receipt-owner-a");
+        assert_eq!(governor.metrics().workload_leases_acquired, 1);
     }
 
     #[test]
