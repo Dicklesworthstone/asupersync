@@ -340,66 +340,76 @@ impl QuicUdpEndpoint {
         packets: &[OutgoingPacket],
     ) -> Result<BatchResult, QuicUdpEndpointError> {
         let batch_start = Instant::now();
-        let effective_packets = std::cmp::min(packets.len(), self.config.max_batch_size);
-        let mut datagrams: SmallVec<[UdpOutboundDatagram<'_>; 32]> =
-            SmallVec::with_capacity(effective_packets);
+        let mut total_packets = 0;
+        let mut total_bytes = 0;
+        let mut batch_error = None;
 
-        for packet in packets.iter().take(effective_packets) {
-            if cx.checkpoint().is_err() {
-                return Err(QuicUdpEndpointError::Cancelled);
-            }
+        for chunk in packets.chunks(self.config.max_batch_size) {
+            let mut datagrams: SmallVec<[UdpOutboundDatagram<'_>; 32]> =
+                SmallVec::with_capacity(chunk.len());
 
-            if packet.data.len() > self.config.max_packet_size {
-                return Err(QuicUdpEndpointError::PacketTooLarge {
-                    size: packet.data.len(),
-                    limit: self.config.max_packet_size,
+            for packet in chunk {
+                if cx.checkpoint().is_err() {
+                    return Err(QuicUdpEndpointError::Cancelled);
+                }
+
+                if packet.data.len() > self.config.max_packet_size {
+                    return Err(QuicUdpEndpointError::PacketTooLarge {
+                        size: packet.data.len(),
+                        limit: self.config.max_packet_size,
+                    });
+                }
+
+                datagrams.push(UdpOutboundDatagram {
+                    dst_addr: packet.dst_addr,
+                    payload: &packet.data,
                 });
             }
 
-            datagrams.push(UdpOutboundDatagram {
-                dst_addr: packet.dst_addr,
-                payload: &packet.data,
-            });
-        }
+            let report = match self.socket.send_batch_to(&datagrams).await {
+                Ok(report) => report,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    return Err(QuicUdpEndpointError::Cancelled);
+                }
+                Err(e) => {
+                    self.metrics
+                        .send_errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Err(e.into());
+                }
+            };
 
-        let report = match self.socket.send_batch_to(&datagrams).await {
-            Ok(report) => report,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                return Err(QuicUdpEndpointError::Cancelled);
-            }
-            Err(e) => {
+            total_packets += report.packets_processed;
+            total_bytes += report.bytes_processed;
+            self.metrics.packets_sent.fetch_add(
+                report.packets_processed as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.metrics.bytes_sent.fetch_add(
+                report.bytes_processed as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
+            if let Some(error) = report.error {
                 self.metrics
                     .send_errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Err(e.into());
+                batch_error = Some(error);
+                break;
             }
-        };
-
-        if report.error.is_some() {
-            self.metrics
-                .send_errors
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        self.metrics.packets_sent.fetch_add(
-            report.packets_processed as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.metrics.bytes_sent.fetch_add(
-            report.bytes_processed as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
 
         let batch_duration = batch_start.elapsed();
         cx.trace(&format!(
             "endpoint: {}: sent {} packets ({} bytes) in {:?}",
-            self.endpoint_id, report.packets_processed, report.bytes_processed, batch_duration
+            self.endpoint_id, total_packets, total_bytes, batch_duration
         ));
 
         Ok(BatchResult {
-            packets_processed: report.packets_processed,
-            bytes_processed: report.bytes_processed,
+            packets_processed: total_packets,
+            bytes_processed: total_bytes,
             duration: batch_duration,
-            error: report.error,
+            error: batch_error,
         })
     }
 
@@ -544,6 +554,73 @@ mod tests {
                     .bytes_received
                     .load(std::sync::atomic::Ordering::Relaxed),
                 10
+            );
+        });
+    }
+
+    #[test]
+    fn test_send_batch_processes_all_packets_across_configured_chunks() {
+        run_test_with_cx(|cx| async move {
+            let sender_config = QuicUdpEndpointConfig {
+                max_batch_size: 2,
+                ..QuicUdpEndpointConfig::default()
+            };
+            let receiver_config = QuicUdpEndpointConfig {
+                max_batch_size: 8,
+                ..QuicUdpEndpointConfig::default()
+            };
+
+            let mut sender =
+                QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), sender_config)
+                    .await
+                    .expect("bind sender");
+            let mut receiver =
+                QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), receiver_config)
+                    .await
+                    .expect("bind receiver");
+
+            let receiver_addr = receiver.local_addr();
+            let expected_payloads = (0..5)
+                .map(|index| format!("packet-{index}").into_bytes())
+                .collect::<Vec<_>>();
+            let packets = expected_payloads
+                .iter()
+                .map(|payload| OutgoingPacket {
+                    dst_addr: receiver_addr,
+                    data: payload.clone(),
+                    send_time: None,
+                })
+                .collect::<Vec<_>>();
+            let expected_bytes = expected_payloads.iter().map(Vec::len).sum::<usize>();
+
+            let send_result = sender
+                .send_batch(&cx, &packets)
+                .await
+                .expect("send chunked packet batch");
+            assert_eq!(send_result.packets_processed, packets.len());
+            assert_eq!(send_result.bytes_processed, expected_bytes);
+            assert!(send_result.error.is_none());
+
+            let received = receiver
+                .receive_batch(&cx, packets.len())
+                .await
+                .expect("receive full packet batch");
+            let mut received_payloads = received
+                .into_iter()
+                .map(|packet| packet.data)
+                .collect::<Vec<_>>();
+            received_payloads.sort();
+
+            let mut expected_sorted = expected_payloads;
+            expected_sorted.sort();
+            assert_eq!(received_payloads, expected_sorted);
+
+            assert_eq!(
+                sender
+                    .metrics()
+                    .packets_sent
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                5
             );
         });
     }
