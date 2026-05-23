@@ -11,7 +11,8 @@ use crate::atp::path::{
 };
 use crate::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::io;
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 
 /// TCP/TLS fallback port used by locked-down egress networks.
 pub const TCP_TLS_443_PORT: u16 = 443;
@@ -606,6 +607,69 @@ impl RelayTcpTlsStreamWrite {
     }
 }
 
+/// Errors from the concrete relay socket I/O boundary.
+///
+/// Relay protocol failures stay in [`RelayError`]. This type adds the OS-facing
+/// cases a nonblocking UDP loop must handle without weakening the deterministic
+/// relay model or consuming queued packets before a socket write has completed.
+#[derive(Debug, thiserror::Error)]
+pub enum RelaySocketIoError {
+    /// The socket was not ready for this nonblocking read or write attempt.
+    #[error("relay socket would block")]
+    WouldBlock,
+    /// Caller scratch space cannot distinguish a valid maximum-size relay frame
+    /// from a truncated oversized UDP datagram.
+    #[error("relay UDP receive buffer too small: capacity {capacity}, required {required}")]
+    DatagramBufferTooSmall {
+        /// Caller-provided receive buffer length.
+        capacity: usize,
+        /// Minimum receive buffer length for this relay socket loop.
+        required: usize,
+    },
+    /// UDP datagram filled the whole scratch buffer, so `std::net::UdpSocket`
+    /// cannot prove whether bytes were truncated by the OS.
+    #[error("relay UDP datagram may be truncated: received {received}, capacity {capacity}")]
+    TruncatedDatagram {
+        /// Bytes copied into the scratch buffer.
+        received: usize,
+        /// Caller-provided receive buffer length.
+        capacity: usize,
+    },
+    /// UDP writes are datagram-oriented; a short successful write is treated as
+    /// an I/O boundary failure instead of committing the relay queue entry.
+    #[error("relay UDP socket short write: sent {sent} of {expected} bytes")]
+    ShortUdpWrite {
+        /// Bytes reported by `send_to`.
+        sent: usize,
+        /// Encoded datagram bytes expected.
+        expected: usize,
+    },
+    /// Relay-level validation or state transition failed.
+    #[error(transparent)]
+    Relay {
+        /// Relay error propagated from deterministic relay state.
+        #[from]
+        source: RelayError,
+    },
+    /// Operating-system socket I/O failed.
+    #[error("relay socket I/O failed")]
+    Io {
+        /// Source socket error.
+        #[source]
+        source: io::Error,
+    },
+}
+
+impl From<io::Error> for RelaySocketIoError {
+    fn from(source: io::Error) -> Self {
+        if source.kind() == io::ErrorKind::WouldBlock {
+            Self::WouldBlock
+        } else {
+            Self::Io { source }
+        }
+    }
+}
+
 /// Deterministic socket-facing relay loop state.
 ///
 /// This is the boundary a real UDP socket loop or TCP/TLS accept/read/write loop
@@ -653,6 +717,22 @@ impl RelaySocketLoop {
     #[must_use]
     pub fn tcp_tls_stream_buffer_count(&self) -> usize {
         self.tcp_tls_streams.len()
+    }
+
+    /// Minimum scratch-buffer capacity for [`Self::recv_udp_socket_once`].
+    ///
+    /// The extra byte is intentional. `std::net::UdpSocket::recv_from` does not
+    /// expose a portable truncation flag, so the relay requires a scratch buffer
+    /// one byte larger than the largest valid relay UDP frame. A read that fills
+    /// that buffer is then known to be oversized or truncated and is rejected
+    /// before any relay state is mutated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidQuota`] or [`RelayError::PacketTooLarge`]
+    /// when the configured payload bound cannot produce a safe capacity.
+    pub fn udp_socket_recv_buffer_capacity(&self) -> Result<usize, RelayError> {
+        udp_socket_recv_buffer_capacity_for(self.max_payload_bytes)
     }
 
     /// Admit a UDP socket endpoint for an authenticated peer.
@@ -744,6 +824,50 @@ impl RelaySocketLoop {
         )
     }
 
+    /// Read and forward at most one datagram from a concrete UDP socket.
+    ///
+    /// This helper is intentionally one-shot: production loops should call it
+    /// after readiness notification or on a nonblocking socket and preserve the
+    /// returned `Ok(None)` as "no datagram was available." Endpoint admission is
+    /// still checked before frame decode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelaySocketIoError::DatagramBufferTooSmall`] when `scratch`
+    /// cannot safely detect truncation, [`RelaySocketIoError::TruncatedDatagram`]
+    /// for oversized UDP input, OS socket errors, or relay validation errors.
+    pub fn recv_udp_socket_once(
+        &self,
+        service: &mut RelayService,
+        now_micros: u64,
+        socket: &UdpSocket,
+        scratch: &mut [u8],
+    ) -> Result<Option<ForwardedPacket>, RelaySocketIoError> {
+        let required = self.udp_socket_recv_buffer_capacity()?;
+        if scratch.len() < required {
+            return Err(RelaySocketIoError::DatagramBufferTooSmall {
+                capacity: scratch.len(),
+                required,
+            });
+        }
+
+        let (received, src_addr) = match socket.recv_from(scratch) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if received == scratch.len() {
+            return Err(RelaySocketIoError::TruncatedDatagram {
+                received,
+                capacity: scratch.len(),
+            });
+        }
+
+        self.ingest_udp_datagram(service, now_micros, src_addr, &scratch[..received])
+            .map(Some)
+            .map_err(Into::into)
+    }
+
     /// Ingest bytes read from an admitted TCP/TLS 443 stream.
     ///
     /// Unknown streams are rejected before buffering. Admitted streams fail
@@ -791,6 +915,48 @@ impl RelaySocketLoop {
     ) -> Result<Option<RelayUdpDatagram>, RelayError> {
         let dst_addr = self.endpoints.first_udp_endpoint_for_peer(peer_id)?;
         service.dequeue_udp_datagram_for_peer(peer_id, dst_addr, self.max_payload_bytes)
+    }
+
+    /// Write at most one queued UDP relay datagram to a concrete socket.
+    ///
+    /// The queued relay packet is only committed after `send_to` reports that
+    /// the complete encoded datagram was accepted by the OS. A nonblocking
+    /// `WouldBlock` or I/O error leaves the queue front intact for a later
+    /// retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the peer has no admitted
+    /// UDP endpoint, [`RelaySocketIoError::WouldBlock`] when a nonblocking socket
+    /// cannot accept a write, [`RelaySocketIoError::ShortUdpWrite`] for an
+    /// unexpected short datagram write, or relay encoding/state errors.
+    pub fn send_udp_socket_once(
+        &mut self,
+        service: &mut RelayService,
+        socket: &UdpSocket,
+        peer_id: PeerId,
+    ) -> Result<Option<usize>, RelaySocketIoError> {
+        let dst_addr = self.endpoints.first_udp_endpoint_for_peer(peer_id)?;
+        let Some(datagram) =
+            service.peek_udp_datagram_for_peer(peer_id, dst_addr, self.max_payload_bytes)?
+        else {
+            return Ok(None);
+        };
+
+        let expected = datagram.payload().len();
+        let sent = match socket.send_to(datagram.payload(), datagram.dst_addr()) {
+            Ok(sent) => sent,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(RelaySocketIoError::WouldBlock);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if sent != expected {
+            return Err(RelaySocketIoError::ShortUdpWrite { sent, expected });
+        }
+
+        service.commit_udp_datagram_for_peer(peer_id, datagram.reservation_id())?;
+        Ok(Some(sent))
     }
 
     /// Drain one queued TCP/TLS relay record to the peer's admitted stream.
@@ -2342,26 +2508,79 @@ impl RelayService {
         dst_addr: SocketAddr,
         max_payload_bytes: usize,
     ) -> Result<Option<RelayUdpDatagram>, RelayError> {
-        let Some((forwarded, transfer_nonce, encoded)) =
+        let Some(datagram) =
+            self.peek_udp_datagram_for_peer(peer_id, dst_addr, max_payload_bytes)?
+        else {
+            return Ok(None);
+        };
+        self.commit_udp_datagram_for_peer(peer_id, datagram.reservation_id())?;
+        Ok(Some(datagram))
+    }
+
+    /// Encode the next UDP packet queued for `peer_id` without consuming it.
+    ///
+    /// This is the first phase of UDP socket egress. It lets a concrete socket
+    /// loop attempt `send_to` and only call [`Self::commit_udp_datagram_for_peer`]
+    /// after the OS accepts the whole datagram.
+    ///
+    /// # Errors
+    ///
+    /// Returns relay frame encoding errors or [`RelayError::UnknownReservation`]
+    /// if the queued packet references state that no longer exists.
+    pub fn peek_udp_datagram_for_peer(
+        &self,
+        peer_id: PeerId,
+        dst_addr: SocketAddr,
+        max_payload_bytes: usize,
+    ) -> Result<Option<RelayUdpDatagram>, RelayError> {
+        let Some((forwarded, _transfer_nonce, encoded)) =
             self.encode_front_for_peer_transport(peer_id, RelayTransport::Udp, max_payload_bytes)?
         else {
             return Ok(None);
         };
-        let popped = self
-            .dequeue_for_peer(peer_id)
-            .ok_or(RelayError::UnknownReservation)?;
-        debug_assert_eq!(popped.reservation_id, forwarded.reservation_id);
-        debug_assert_eq!(popped.packet.transport(), RelayTransport::Udp);
-        let popped_transfer_nonce = self.transfer_nonce_for(&popped)?;
-        debug_assert_eq!(transfer_nonce, popped_transfer_nonce);
 
         Ok(Some(RelayUdpDatagram {
             dst_addr,
             to_peer_id: peer_id,
-            reservation_id: popped.reservation_id,
+            reservation_id: forwarded.reservation_id,
             payload: encoded,
-            opaque_bytes: popped.packet.opaque_len() as u64,
+            opaque_bytes: forwarded.packet.opaque_len() as u64,
         }))
+    }
+
+    /// Commit the UDP datagram previously returned by [`Self::peek_udp_datagram_for_peer`].
+    ///
+    /// The queue front must still be the same reservation and transport. This
+    /// prevents an OS write loop from accidentally consuming a newer or
+    /// different packet if relay state was advanced between peek and commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownReservation`] when the peer queue is empty
+    /// or the queue front no longer matches `reservation_id`, and
+    /// [`RelayError::InvalidRelayWireFrame`] if the queue front is not a UDP
+    /// relay packet.
+    pub fn commit_udp_datagram_for_peer(
+        &mut self,
+        peer_id: PeerId,
+        reservation_id: RelayReservationId,
+    ) -> Result<(), RelayError> {
+        let Some(forwarded) = self.queues.get(&peer_id).and_then(VecDeque::front) else {
+            return Err(RelayError::UnknownReservation);
+        };
+        if forwarded.reservation_id != reservation_id {
+            return Err(RelayError::UnknownReservation);
+        }
+        if forwarded.packet.transport() != RelayTransport::Udp {
+            return Err(RelayError::InvalidRelayWireFrame);
+        }
+
+        let popped = self
+            .dequeue_for_peer(peer_id)
+            .ok_or(RelayError::UnknownReservation)?;
+        debug_assert_eq!(popped.reservation_id, reservation_id);
+        debug_assert_eq!(popped.packet.transport(), RelayTransport::Udp);
+        Ok(())
     }
 
     /// Encode the next TCP/TLS 443 packet queued for `peer_id` as one stream record.
@@ -3109,6 +3328,17 @@ fn validate_relay_socket_endpoint(endpoint: SocketAddr) -> Result<(), RelayError
         IpAddr::V6(addr) if addr.is_unspecified() => Err(RelayError::InvalidRelayEndpoint),
         _ => Ok(()),
     }
+}
+
+fn udp_socket_recv_buffer_capacity_for(max_payload_bytes: usize) -> Result<usize, RelayError> {
+    if max_payload_bytes == 0 {
+        return Err(RelayError::InvalidQuota);
+    }
+
+    RELAY_WIRE_HEADER_LEN
+        .checked_add(max_payload_bytes)
+        .and_then(|capacity| capacity.checked_add(1))
+        .ok_or(RelayError::PacketTooLarge)
 }
 
 fn read_array<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], RelayError> {
@@ -3962,6 +4192,79 @@ mod tests {
                     RelayQuota::default().max_packet_bytes
                 )
                 .expect("empty udp queue")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn udp_socket_egress_peek_does_not_consume_before_commit() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(41),
+                "path-relay-41",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        let frame = RelayWireFrame::new(
+            reservation_id(41),
+            transfer_nonce(9),
+            peer(1),
+            packet_sent_at(RelayTransport::Udp, b"udp-peek-ciphertext", 1, 90),
+        );
+        let encoded = frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode udp datagram");
+        service
+            .forward_udp_datagram(
+                125,
+                peer(1),
+                &encoded,
+                RelayQuota::default().max_packet_bytes,
+            )
+            .expect("udp datagram forwards");
+
+        let dst_addr = SocketAddr::from(([127, 0, 0, 1], 45_001));
+        let first = service
+            .peek_udp_datagram_for_peer(peer(2), dst_addr, RelayQuota::default().max_packet_bytes)
+            .expect("peek queued udp")
+            .expect("queued udp packet");
+        let second = service
+            .peek_udp_datagram_for_peer(peer(2), dst_addr, RelayQuota::default().max_packet_bytes)
+            .expect("peek queued udp again")
+            .expect("queue remains intact after peek");
+        assert_eq!(first, second);
+        assert_eq!(
+            service
+                .commit_udp_datagram_for_peer(peer(2), reservation_id(999))
+                .expect_err("wrong reservation does not consume queue"),
+            RelayError::UnknownReservation
+        );
+        assert!(
+            service
+                .peek_udp_datagram_for_peer(
+                    peer(2),
+                    dst_addr,
+                    RelayQuota::default().max_packet_bytes
+                )
+                .expect("peek after failed commit")
+                .is_some()
+        );
+
+        service
+            .commit_udp_datagram_for_peer(peer(2), reservation_id(41))
+            .expect("commit sent datagram");
+        assert!(
+            service
+                .peek_udp_datagram_for_peer(
+                    peer(2),
+                    dst_addr,
+                    RelayQuota::default().max_packet_bytes
+                )
+                .expect("empty queue after commit")
                 .is_none()
         );
     }

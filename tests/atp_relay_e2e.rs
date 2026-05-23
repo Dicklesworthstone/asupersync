@@ -11,11 +11,12 @@ use asupersync::atp::path::{
 use asupersync::net::atp::relay::{
     OpaqueRelayPacket, ProofTag, RelayEndpointDirectory, RelayEndpointDirectoryQuota, RelayError,
     RelayEventKind, RelayQuota, RelayReservationGrant, RelayReservationId, RelayService,
-    RelayServiceConfig, RelaySocketLoop, RelayTcpTlsStreamBuffer, RelayTcpTlsStreamId,
-    RelayTransport, RelayWireFrame,
+    RelayServiceConfig, RelaySocketIoError, RelaySocketLoop, RelayTcpTlsStreamBuffer,
+    RelayTcpTlsStreamId, RelayTransport, RelayWireFrame,
 };
 use asupersync::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
+use std::time::Duration;
 
 fn log_stage(test: &str, stage: &str, detail: impl AsRef<str>) {
     println!(
@@ -1193,6 +1194,185 @@ fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
             && event.quota_decision == "endpoint_peer_mismatch_rejected"
             && event.transport == Some(RelayTransport::TcpTls443)
     }));
+}
+
+#[test]
+fn relay_socket_loop_round_trips_real_udp_socket_with_detailed_logs() {
+    let test = "relay_socket_loop_round_trips_real_udp_socket_with_detailed_logs";
+    let mut service = RelayService::new(
+        RelayServiceConfig::new("relay-real-udp-socket-e2e", 4)
+            .expect("config")
+            .with_log_peer_ids(true),
+    );
+    log_stage(
+        test,
+        "reserve",
+        "accept a relay reservation before admitting concrete loopback UDP sockets",
+    );
+    service
+        .reserve(
+            600,
+            reservation_id(704),
+            "real-udp-socket-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve real udp socket relay");
+
+    let relay_socket =
+        UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind relay socket");
+    let source_socket =
+        UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind source socket");
+    let destination_socket =
+        UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind destination socket");
+    relay_socket
+        .set_nonblocking(true)
+        .expect("relay socket nonblocking");
+    destination_socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("destination read timeout");
+
+    let source_addr = source_socket.local_addr().expect("source addr");
+    let relay_addr = relay_socket.local_addr().expect("relay addr");
+    let destination_addr = destination_socket.local_addr().expect("destination addr");
+    let mut socket_loop = RelaySocketLoop::new(
+        RelayEndpointDirectoryQuota {
+            max_udp_endpoints: 2,
+            max_tcp_tls_streams: 1,
+        },
+        RelayQuota::default().max_packet_bytes,
+        1024,
+    )
+    .expect("socket loop");
+    socket_loop
+        .admit_udp_endpoint(peer(1), source_addr)
+        .expect("admit source udp");
+    socket_loop
+        .admit_udp_endpoint(peer(2), destination_addr)
+        .expect("admit destination udp");
+    let recv_capacity = socket_loop
+        .udp_socket_recv_buffer_capacity()
+        .expect("udp recv capacity");
+
+    log_stage(
+        test,
+        "empty-nonblocking-read",
+        "nonblocking relay UDP sockets report no datagram without mutating relay state",
+    );
+    let mut scratch = vec![0; recv_capacity];
+    assert_eq!(
+        socket_loop
+            .recv_udp_socket_once(&mut service, 601, &relay_socket, &mut scratch)
+            .expect("empty nonblocking relay socket read"),
+        None
+    );
+    assert_eq!(
+        service
+            .proof_artifact(reservation_id(704))
+            .expect("proof after empty read")
+            .packets_forwarded,
+        0
+    );
+
+    log_stage(
+        test,
+        "buffer-capacity",
+        "socket read helper rejects scratch buffers that cannot prove truncation safety",
+    );
+    let mut undersized_scratch = vec![0; recv_capacity - 1];
+    let err = socket_loop
+        .recv_udp_socket_once(&mut service, 602, &relay_socket, &mut undersized_scratch)
+        .expect_err("undersized scratch is rejected before socket read");
+    match err {
+        RelaySocketIoError::DatagramBufferTooSmall { capacity, required } => {
+            assert_eq!(capacity, recv_capacity - 1);
+            assert_eq!(required, recv_capacity);
+        }
+        other => panic!("unexpected socket I/O error: {other:?}"),
+    }
+
+    let udp_frame = RelayWireFrame::new(
+        reservation_id(704),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(RelayTransport::Udp, b"real-udp-socket-ciphertext", 1, 610),
+    );
+    let udp_datagram = udp_frame
+        .encode(RelayQuota::default().max_packet_bytes)
+        .expect("encode udp datagram");
+    source_socket
+        .send_to(&udp_datagram, relay_addr)
+        .expect("source sends to relay socket");
+
+    log_stage(
+        test,
+        "socket-ingress",
+        "real UDP socket bytes are admitted by source address before relay decode",
+    );
+    let forwarded = socket_loop
+        .recv_udp_socket_once(&mut service, 620, &relay_socket, &mut scratch)
+        .expect("read relay UDP datagram")
+        .expect("forwarded packet");
+    assert_eq!(forwarded.from_peer_id(), peer(1));
+    assert_eq!(forwarded.to_peer_id(), peer(2));
+    assert_eq!(
+        forwarded.packet().opaque_bytes(),
+        b"real-udp-socket-ciphertext"
+    );
+    assert_eq!(
+        service
+            .proof_artifact(reservation_id(704))
+            .expect("proof after real udp ingress")
+            .packets_forwarded,
+        1
+    );
+
+    log_stage(
+        test,
+        "empty-egress",
+        "socket write helper distinguishes empty queues from successful sends",
+    );
+    assert_eq!(
+        socket_loop
+            .send_udp_socket_once(&mut service, &relay_socket, peer(1))
+            .expect("no queued source write"),
+        None
+    );
+
+    log_stage(
+        test,
+        "socket-egress",
+        "queued relay datagram is committed only after the OS accepts the UDP send",
+    );
+    let bytes_sent = socket_loop
+        .send_udp_socket_once(&mut service, &relay_socket, peer(2))
+        .expect("relay socket write")
+        .expect("queued destination datagram");
+    assert!(bytes_sent > 0);
+
+    let mut received = vec![0; recv_capacity];
+    let (received_len, from_addr) = destination_socket
+        .recv_from(&mut received)
+        .expect("destination receives relay datagram");
+    assert_eq!(from_addr, relay_addr);
+    let decoded = RelayWireFrame::decode(
+        &received[..received_len],
+        RelayQuota::default().max_packet_bytes,
+    )
+    .expect("decode destination relay datagram");
+    assert_eq!(decoded.reservation_id(), reservation_id(704));
+    assert_eq!(decoded.from_peer_id(), peer(1));
+    assert_eq!(decoded.packet().transport(), RelayTransport::Udp);
+    assert_eq!(
+        decoded.packet().opaque_bytes(),
+        b"real-udp-socket-ciphertext"
+    );
+    assert!(
+        socket_loop
+            .drain_udp_datagram_for_peer(&mut service, peer(2))
+            .expect("queue drained after successful socket send")
+            .is_none()
+    );
 }
 
 #[test]
