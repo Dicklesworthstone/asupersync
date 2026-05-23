@@ -450,7 +450,15 @@ fn parse_urlencoded(
 
     for (key, values) in multi_values {
         if values.len() == 1 {
-            single_values.insert(key, values.into_iter().next().unwrap());
+            // Safe: length check ensures exactly one element exists
+            if let Some(value) = values.into_iter().next() {
+                single_values.insert(key, value);
+            } else {
+                // Should never happen given length check, but handle gracefully
+                return Err(ExtractionError::bad_request(format!(
+                    "internal error: expected value for {field_kind} `{key}`"
+                )));
+            }
         } else {
             return Err(ExtractionError::bad_request(format!(
                 "duplicate {field_kind} `{key}` (use multi-value extractor for forms)"
