@@ -310,6 +310,8 @@ pub struct SwarmPressureGovernorConfig {
     pub max_live_workload_leases_per_proof_lane: usize,
     /// Maximum live workload leases allowed per owner agent; zero means unlimited.
     pub max_live_workload_leases_per_owner: usize,
+    /// Maximum live workload leases allowed per bead id; zero means unlimited.
+    pub max_live_workload_leases_per_bead: usize,
     /// Wait time per priority-rank aging step for live workload leases.
     pub workload_lease_starvation_aging_step: Duration,
 }
@@ -334,6 +336,7 @@ impl Default for SwarmPressureGovernorConfig {
                 DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD,
             max_live_workload_leases_per_proof_lane: 0,
             max_live_workload_leases_per_owner: 0,
+            max_live_workload_leases_per_bead: 0,
             workload_lease_starvation_aging_step: DEFAULT_WORKLOAD_LEASE_STARVATION_AGING_STEP,
         }
     }
@@ -1658,6 +1661,13 @@ impl SwarmPressureGovernor {
                 self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
                 return Err(workload_lease_error(reason));
             }
+            if let Some(reason) = self.workload_lease_bead_capacity_reason(&leases, request) {
+                self.workload_lease_conflicts
+                    .fetch_add(1, Ordering::Relaxed);
+                drop(leases);
+                self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+                return Err(workload_lease_error(reason));
+            }
 
             leases.insert(lease_id, lease);
             expired_receipts
@@ -2268,6 +2278,33 @@ impl SwarmPressureGovernor {
         Some(format!(
             "owner_agent {owner_agent} already has {live_owner_count} live workload leases; \
              max_live_workload_leases_per_owner={limit}"
+        ))
+    }
+
+    fn workload_lease_bead_capacity_reason(
+        &self,
+        leases: &HashMap<SwarmWorkloadLeaseId, SwarmWorkloadLease>,
+        request: &SwarmWorkloadAdmissionRequest,
+    ) -> Option<String> {
+        let limit = self.config.max_live_workload_leases_per_bead;
+        if limit == 0 {
+            return None;
+        }
+
+        let bead_id = normalized_optional_string(request.owner.bead_id.as_deref())?;
+        let live_bead_count = leases
+            .values()
+            .filter(|lease| {
+                lease.state.is_live() && lease.owner.bead_id.as_deref() == Some(bead_id.as_str())
+            })
+            .count();
+        if live_bead_count < limit {
+            return None;
+        }
+
+        Some(format!(
+            "bead_id {bead_id} already has {live_bead_count} live workload leases; \
+             max_live_workload_leases_per_bead={limit}"
         ))
     }
 
@@ -4589,6 +4626,95 @@ mod tests {
             )
             .expect("released owner capacity should allow the next lease");
         assert_eq!(second.workload_id, "owner-cap-b");
+    }
+
+    #[test]
+    fn test_workload_lease_bead_capacity_rejects_over_cap_and_releases() {
+        let mut config = SwarmPressureGovernorConfig::default();
+        config.max_live_workload_leases_per_bead = 1;
+        let governor = create_test_swarm_governor_with_config(config);
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let first_request = SwarmWorkloadAdmissionRequest::new(
+            "bead-cap-a",
+            SwarmAdmissionOwner::new("DustyGorge")
+                .with_bead_id(" asupersync-oxqrae.2 ")
+                .with_reservation_scope("bead/a"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib);
+        let second_request = SwarmWorkloadAdmissionRequest::new(
+            "bead-cap-b",
+            SwarmAdmissionOwner::new("TanAspen")
+                .with_bead_id("asupersync-oxqrae.2")
+                .with_reservation_scope("bead/b"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::RustfmtCheck);
+        let other_bead_request = SwarmWorkloadAdmissionRequest::new(
+            "bead-cap-other",
+            SwarmAdmissionOwner::new("TanAspen")
+                .with_bead_id("asupersync-oxqrae.3")
+                .with_reservation_scope("bead/other"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::RustfmtCheck);
+
+        let first_decision = governor
+            .check_workload_admission(&cx, &first_request)
+            .expect("first bead workload admission should classify");
+        let second_decision = governor
+            .check_workload_admission(&cx, &second_request)
+            .expect("second bead workload admission should classify");
+        let other_bead_decision = governor
+            .check_workload_admission(&cx, &other_bead_request)
+            .expect("different bead workload admission should classify");
+
+        let first = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(61, 1),
+                &first_request,
+                &first_decision,
+            )
+            .expect("first workload for capped bead should acquire");
+        let conflict = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(61, 2),
+                &second_request,
+                &second_decision,
+            )
+            .expect_err("same bead should reject over the live lease cap");
+        assert!(matches!(
+            conflict,
+            SwarmPressureError::WorkloadLease { ref reason }
+                if reason.contains("bead_id asupersync-oxqrae.2 already has 1 live workload leases")
+                    && reason.contains("max_live_workload_leases_per_bead=1")
+        ));
+
+        let other_bead = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(61, 3),
+                &other_bead_request,
+                &other_bead_decision,
+            )
+            .expect("different bead should not consume asupersync-oxqrae.2 capacity");
+        assert_eq!(other_bead.workload_id, "bead-cap-other");
+        assert_eq!(governor.metrics().workload_lease_conflicts, 1);
+
+        governor
+            .release_workload_lease(first.lease_id)
+            .expect("releasing first bead lease should free bead capacity");
+        let second = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(61, 4),
+                &second_request,
+                &second_decision,
+            )
+            .expect("released bead capacity should allow the next lease");
+        assert_eq!(second.workload_id, "bead-cap-b");
     }
 
     #[test]
