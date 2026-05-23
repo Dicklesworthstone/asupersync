@@ -75,6 +75,13 @@ pub enum SwarmPressureError {
         reason: String,
     },
 
+    /// Workload lease lifecycle operation failed.
+    #[error("workload lease error: {reason}")]
+    WorkloadLease {
+        /// Human-readable lease failure reason.
+        reason: String,
+    },
+
     /// Underlying pressure governor error.
     #[error("pressure governor error: {0}")]
     PressureGovernor(#[from] Error),
@@ -289,6 +296,10 @@ pub struct SwarmPressureGovernorConfig {
     pub peer_pressure_max_age: Duration,
     /// Peer pressure ratio that triggers swarm-wide backpressure rules.
     pub peer_pressure_backpressure_threshold: f64,
+    /// Default lease time-to-live for workload admission leases.
+    pub default_workload_lease_ttl: Duration,
+    /// Maximum lease time-to-live that a workload may hold after any renewal.
+    pub max_workload_lease_ttl: Duration,
 }
 
 impl Default for SwarmPressureGovernorConfig {
@@ -304,6 +315,8 @@ impl Default for SwarmPressureGovernorConfig {
             swarm_coordination_timeout: Duration::from_millis(50),
             peer_pressure_max_age: Duration::from_secs(5),
             peer_pressure_backpressure_threshold: DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD,
+            default_workload_lease_ttl: Duration::from_secs(30 * 60),
+            max_workload_lease_ttl: Duration::from_secs(2 * 60 * 60),
         }
     }
 }
@@ -561,6 +574,137 @@ impl SwarmWorkloadAdmissionRequest {
     }
 }
 
+/// Stable identifier for a swarm workload lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SwarmWorkloadLeaseId(u64);
+
+impl SwarmWorkloadLeaseId {
+    /// Build a lease id for deterministic tests and replay fixtures.
+    #[must_use]
+    pub const fn new_for_test(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Return the raw numeric lease id.
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// Lifecycle state for a linear swarm workload lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwarmWorkloadLeaseState {
+    /// Lease was granted but not yet committed to a caller-owned region.
+    Active,
+    /// Lease was committed to a caller-owned region and remains renewable.
+    Committed,
+    /// Lease was explicitly released after normal completion or region close.
+    Released,
+    /// Lease was aborted because admission or execution was cancelled.
+    Aborted,
+    /// Lease reached its deadline before explicit release.
+    Expired,
+}
+
+impl SwarmWorkloadLeaseState {
+    /// Stable snake-case label for receipts and decision reasons.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Committed => "committed",
+            Self::Released => "released",
+            Self::Aborted => "aborted",
+            Self::Expired => "expired",
+        }
+    }
+
+    /// Returns true when the lease can still be renewed or completed.
+    #[must_use]
+    pub const fn is_live(self) -> bool {
+        matches!(self, Self::Active | Self::Committed)
+    }
+
+    /// Returns true once the lease no longer represents a live obligation.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        !self.is_live()
+    }
+}
+
+/// Linear workload lease bound to an admitted region envelope.
+#[derive(Debug, Clone)]
+pub struct SwarmWorkloadLease {
+    /// Unique lease id assigned by the governor.
+    pub lease_id: SwarmWorkloadLeaseId,
+    /// Workload id from the admission request.
+    pub workload_id: String,
+    /// Owner metadata carried from admission.
+    pub owner: SwarmAdmissionOwner,
+    /// Proof or validation lane associated with the lease.
+    pub proof_lane: SwarmProofLaneKind,
+    /// Region currently bound to this lease.
+    pub region_id: RegionId,
+    /// Current lifecycle state.
+    pub state: SwarmWorkloadLeaseState,
+    /// Memory reserved by the workload admission request.
+    pub reserved_memory_bytes: Option<u64>,
+    /// CPU budget reserved by the workload admission request.
+    pub reserved_cpu_ns_per_sec: Option<u64>,
+    /// IO budget reserved by the workload admission request.
+    pub reserved_io_ops_per_sec: Option<u64>,
+    /// Time at which the lease was granted.
+    pub issued_at: Instant,
+    /// Time at which the lease expires if not renewed or completed.
+    pub expires_at: Instant,
+    /// Most recent successful renewal time.
+    pub last_renewed_at: Option<Instant>,
+    /// Terminal transition time for released, aborted, or expired leases.
+    pub terminal_at: Option<Instant>,
+    /// Number of successful renewals.
+    pub renewal_count: u64,
+}
+
+impl SwarmWorkloadLease {
+    fn context_reason(&self, base: &str) -> String {
+        format!(
+            "lease_id={} workload_id={} region_id={:?} owner_agent={} bead_id={} reservation_scope={} proof_lane={} state={} reserved_memory_bytes={} reserved_cpu_ns_per_sec={} reserved_io_ops_per_sec={} renewals={}: {base}",
+            self.lease_id.as_u64(),
+            self.workload_id.trim(),
+            self.region_id,
+            self.owner.agent_name.trim(),
+            optional_reason_field(self.owner.bead_id.as_deref()),
+            optional_reason_field(self.owner.reservation_scope.as_deref()),
+            self.proof_lane.as_str(),
+            self.state.as_str(),
+            optional_u64_reason_field(self.reserved_memory_bytes),
+            optional_u64_reason_field(self.reserved_cpu_ns_per_sec),
+            optional_u64_reason_field(self.reserved_io_ops_per_sec),
+            self.renewal_count
+        )
+    }
+}
+
+/// Receipt returned by workload lease lifecycle operations.
+#[derive(Debug, Clone)]
+pub struct SwarmWorkloadLeaseReceipt {
+    /// Lease id affected by the operation.
+    pub lease_id: SwarmWorkloadLeaseId,
+    /// Workload id affected by the operation.
+    pub workload_id: String,
+    /// Region bound to the lease.
+    pub region_id: RegionId,
+    /// Lease state after the operation.
+    pub state: SwarmWorkloadLeaseState,
+    /// Lease expiry after the operation.
+    pub expires_at: Instant,
+    /// Terminal transition time, when the operation completed the lease.
+    pub terminal_at: Option<Instant>,
+    /// Structured explanation for logs and replay receipts.
+    pub reason: String,
+}
+
 /// Enhanced admission decision with resource envelope information.
 #[derive(Debug, Clone)]
 pub struct SwarmAdmissionDecision {
@@ -590,9 +734,18 @@ pub struct SwarmPressureGovernor {
     regions_rejected: AtomicU64,
     envelope_budget_violations: AtomicU64,
     max_decision_latency_ns: AtomicU64,
+    workload_leases_acquired: AtomicU64,
+    workload_leases_committed: AtomicU64,
+    workload_leases_renewed: AtomicU64,
+    workload_leases_released: AtomicU64,
+    workload_leases_aborted: AtomicU64,
+    workload_leases_expired: AtomicU64,
+    workload_lease_conflicts: AtomicU64,
+    next_workload_lease_id: AtomicU64,
 
-    // Resource envelope tracking
+    // Resource envelope and workload lease tracking.
     active_regions: std::sync::Mutex<HashMap<RegionId, ResourceEnvelope>>,
+    workload_leases: std::sync::Mutex<HashMap<SwarmWorkloadLeaseId, SwarmWorkloadLease>>,
     peer_pressure_reports: std::sync::Mutex<HashMap<String, SwarmPeerPressureReport>>,
 }
 
@@ -612,7 +765,16 @@ impl SwarmPressureGovernor {
             regions_rejected: AtomicU64::new(0),
             envelope_budget_violations: AtomicU64::new(0),
             max_decision_latency_ns: AtomicU64::new(0),
+            workload_leases_acquired: AtomicU64::new(0),
+            workload_leases_committed: AtomicU64::new(0),
+            workload_leases_renewed: AtomicU64::new(0),
+            workload_leases_released: AtomicU64::new(0),
+            workload_leases_aborted: AtomicU64::new(0),
+            workload_leases_expired: AtomicU64::new(0),
+            workload_lease_conflicts: AtomicU64::new(0),
+            next_workload_lease_id: AtomicU64::new(1),
             active_regions: std::sync::Mutex::new(HashMap::new()),
+            workload_leases: std::sync::Mutex::new(HashMap::new()),
             peer_pressure_reports: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -635,7 +797,16 @@ impl SwarmPressureGovernor {
             regions_rejected: AtomicU64::new(0),
             envelope_budget_violations: AtomicU64::new(0),
             max_decision_latency_ns: AtomicU64::new(0),
+            workload_leases_acquired: AtomicU64::new(0),
+            workload_leases_committed: AtomicU64::new(0),
+            workload_leases_renewed: AtomicU64::new(0),
+            workload_leases_released: AtomicU64::new(0),
+            workload_leases_aborted: AtomicU64::new(0),
+            workload_leases_expired: AtomicU64::new(0),
+            workload_lease_conflicts: AtomicU64::new(0),
+            next_workload_lease_id: AtomicU64::new(1),
             active_regions: std::sync::Mutex::new(HashMap::new()),
+            workload_leases: std::sync::Mutex::new(HashMap::new()),
             peer_pressure_reports: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -829,14 +1000,211 @@ impl SwarmPressureGovernor {
 
     /// Remove a region's resource envelope when the region closes.
     pub fn unregister_region_envelope(&self, region_id: RegionId) -> Option<ResourceEnvelope> {
-        let mut envelopes = self.active_regions.lock().unwrap();
-        envelopes.remove(&region_id)
+        let removed = {
+            let mut envelopes = self.active_regions.lock().unwrap();
+            envelopes.remove(&region_id)
+        };
+        if removed.is_some() {
+            let _ = self.release_region_workload_leases(region_id);
+        }
+        removed
     }
 
     /// Get resource envelope for a region.
     pub fn get_region_envelope(&self, region_id: RegionId) -> Option<ResourceEnvelope> {
         let envelopes = self.active_regions.lock().unwrap();
         envelopes.get(&region_id).cloned()
+    }
+
+    /// Acquire a linear workload lease for an admitted workload decision.
+    pub fn acquire_workload_lease(
+        &self,
+        region_id: RegionId,
+        request: &SwarmWorkloadAdmissionRequest,
+        decision: &SwarmAdmissionDecision,
+    ) -> Result<SwarmWorkloadLeaseReceipt, SwarmPressureError> {
+        let now = Instant::now();
+        if let Some(reason) = request.validate(now) {
+            return Err(workload_lease_error(reason));
+        }
+        if !matches!(
+            decision.decision,
+            AdmissionDecision::Admit | AdmissionDecision::AdmitWithBackpressure
+        ) {
+            return Err(workload_lease_error(
+                "cannot acquire a lease for a rejected workload",
+            ));
+        }
+        if decision.envelope.is_none() {
+            return Err(workload_lease_error(
+                "admitted workload decision must include a resource envelope",
+            ));
+        }
+
+        let expires_at = self.workload_lease_expiry(now, request.deadline)?;
+        let lease_id =
+            SwarmWorkloadLeaseId(self.next_workload_lease_id.fetch_add(1, Ordering::Relaxed));
+        let lease = SwarmWorkloadLease {
+            lease_id,
+            workload_id: request.workload_id.trim().to_string(),
+            owner: request.owner.clone(),
+            proof_lane: request.proof_lane,
+            region_id,
+            state: SwarmWorkloadLeaseState::Active,
+            reserved_memory_bytes: request.requested_memory_bytes,
+            reserved_cpu_ns_per_sec: request.requested_cpu_ns_per_sec,
+            reserved_io_ops_per_sec: request.requested_io_ops_per_sec,
+            issued_at: now,
+            expires_at,
+            last_renewed_at: None,
+            terminal_at: None,
+            renewal_count: 0,
+        };
+
+        let mut leases = self.workload_leases.lock().unwrap();
+        self.expire_stale_workload_leases_locked(&mut leases, now);
+        if leases
+            .values()
+            .any(|existing| existing.state.is_live() && existing.workload_id == lease.workload_id)
+        {
+            self.workload_lease_conflicts
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(workload_lease_error(format!(
+                "workload {} already has a live lease",
+                lease.workload_id
+            )));
+        }
+
+        leases.insert(lease_id, lease.clone());
+        self.workload_leases_acquired
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(Self::lease_receipt(&lease, "workload lease acquired"))
+    }
+
+    /// Commit a live workload lease to its caller-owned region.
+    pub fn commit_workload_lease(
+        &self,
+        lease_id: SwarmWorkloadLeaseId,
+    ) -> Result<SwarmWorkloadLeaseReceipt, SwarmPressureError> {
+        let now = Instant::now();
+        let mut leases = self.workload_leases.lock().unwrap();
+        self.expire_stale_workload_leases_locked(&mut leases, now);
+        let lease = leases
+            .get_mut(&lease_id)
+            .ok_or_else(|| workload_lease_error("unknown workload lease"))?;
+        if lease.state.is_terminal() {
+            return Err(workload_lease_error(format!(
+                "cannot commit terminal lease in state {}",
+                lease.state.as_str()
+            )));
+        }
+        if lease.state == SwarmWorkloadLeaseState::Active {
+            lease.state = SwarmWorkloadLeaseState::Committed;
+            self.workload_leases_committed
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Self::lease_receipt(lease, "workload lease committed"))
+    }
+
+    /// Renew a live workload lease by extending from the later of now or its current expiry.
+    pub fn renew_workload_lease(
+        &self,
+        lease_id: SwarmWorkloadLeaseId,
+        extension: Duration,
+    ) -> Result<SwarmWorkloadLeaseReceipt, SwarmPressureError> {
+        if extension.is_zero() {
+            return Err(workload_lease_error(
+                "lease renewal extension must be non-zero",
+            ));
+        }
+
+        let now = Instant::now();
+        let max_expires_at = self.max_workload_lease_expiry(now)?;
+        let mut leases = self.workload_leases.lock().unwrap();
+        self.expire_stale_workload_leases_locked(&mut leases, now);
+        let lease = leases
+            .get_mut(&lease_id)
+            .ok_or_else(|| workload_lease_error("unknown workload lease"))?;
+        if lease.state.is_terminal() {
+            return Err(workload_lease_error(format!(
+                "cannot renew terminal lease in state {}",
+                lease.state.as_str()
+            )));
+        }
+
+        let renewal_base = lease.expires_at.max(now);
+        let requested_expires_at = renewal_base
+            .checked_add(extension)
+            .ok_or_else(|| workload_lease_error("lease renewal deadline overflow"))?;
+        lease.expires_at = requested_expires_at.min(max_expires_at);
+        lease.last_renewed_at = Some(now);
+        lease.renewal_count = lease.renewal_count.saturating_add(1);
+        self.workload_leases_renewed.fetch_add(1, Ordering::Relaxed);
+        Ok(Self::lease_receipt(lease, "workload lease renewed"))
+    }
+
+    /// Release a live workload lease after successful completion.
+    pub fn release_workload_lease(
+        &self,
+        lease_id: SwarmWorkloadLeaseId,
+    ) -> Result<SwarmWorkloadLeaseReceipt, SwarmPressureError> {
+        self.complete_workload_lease(
+            lease_id,
+            SwarmWorkloadLeaseState::Released,
+            "workload lease released",
+        )
+    }
+
+    /// Abort a live workload lease after cancellation or failed startup.
+    pub fn abort_workload_lease(
+        &self,
+        lease_id: SwarmWorkloadLeaseId,
+        reason: impl AsRef<str>,
+    ) -> Result<SwarmWorkloadLeaseReceipt, SwarmPressureError> {
+        let reason = reason.as_ref().trim();
+        let reason = if reason.is_empty() {
+            "workload lease aborted"
+        } else {
+            reason
+        };
+        self.complete_workload_lease(lease_id, SwarmWorkloadLeaseState::Aborted, reason)
+    }
+
+    /// Expire all live workload leases whose deadlines have passed.
+    pub fn expire_stale_workload_leases(&self) -> Vec<SwarmWorkloadLeaseReceipt> {
+        let now = Instant::now();
+        let mut leases = self.workload_leases.lock().unwrap();
+        self.expire_stale_workload_leases_locked(&mut leases, now)
+    }
+
+    /// Release all live workload leases bound to a closing region.
+    pub fn release_region_workload_leases(
+        &self,
+        region_id: RegionId,
+    ) -> Vec<SwarmWorkloadLeaseReceipt> {
+        let now = Instant::now();
+        let mut receipts = Vec::new();
+        let mut leases = self.workload_leases.lock().unwrap();
+        let _ = self.expire_stale_workload_leases_locked(&mut leases, now);
+        for lease in leases.values_mut() {
+            if lease.region_id == region_id && lease.state.is_live() {
+                lease.state = SwarmWorkloadLeaseState::Released;
+                lease.terminal_at = Some(now);
+                self.workload_leases_released
+                    .fetch_add(1, Ordering::Relaxed);
+                receipts.push(Self::lease_receipt(
+                    lease,
+                    "workload lease released by region close",
+                ));
+            }
+        }
+        receipts
+    }
+
+    /// Get a workload lease by id.
+    pub fn get_workload_lease(&self, lease_id: SwarmWorkloadLeaseId) -> Option<SwarmWorkloadLease> {
+        let leases = self.workload_leases.lock().unwrap();
+        leases.get(&lease_id).cloned()
     }
 
     /// Record the latest pressure report from a peer runtime instance.
@@ -892,22 +1260,40 @@ impl SwarmPressureGovernor {
 
     /// Returns current swarm governance metrics.
     pub fn metrics(&self) -> SwarmPressureMetrics {
-        let envelopes = self.active_regions.lock().unwrap();
-        let max_memory_utilization_scaled = envelopes
-            .values()
-            .map(|envelope| scale_pressure_for_metrics(envelope.memory_utilization()))
-            .max()
-            .unwrap_or(0);
-        let max_cpu_utilization_scaled = envelopes
-            .values()
-            .map(|envelope| scale_pressure_for_metrics(envelope.cpu_utilization()))
-            .max()
-            .unwrap_or(0);
-        let max_io_utilization_scaled = envelopes
-            .values()
-            .map(|envelope| scale_pressure_for_metrics(envelope.io_utilization()))
-            .max()
-            .unwrap_or(0);
+        let (
+            active_region_count,
+            max_memory_utilization_scaled,
+            max_cpu_utilization_scaled,
+            max_io_utilization_scaled,
+        ) = {
+            let envelopes = self.active_regions.lock().unwrap();
+            (
+                envelopes.len() as u64,
+                envelopes
+                    .values()
+                    .map(|envelope| scale_pressure_for_metrics(envelope.memory_utilization()))
+                    .max()
+                    .unwrap_or(0),
+                envelopes
+                    .values()
+                    .map(|envelope| scale_pressure_for_metrics(envelope.cpu_utilization()))
+                    .max()
+                    .unwrap_or(0),
+                envelopes
+                    .values()
+                    .map(|envelope| scale_pressure_for_metrics(envelope.io_utilization()))
+                    .max()
+                    .unwrap_or(0),
+            )
+        };
+        let (active_workload_lease_count, terminal_workload_lease_count) = {
+            let leases = self.workload_leases.lock().unwrap();
+            let active = leases
+                .values()
+                .filter(|lease| lease.state.is_live())
+                .count() as u64;
+            (active, leases.len() as u64 - active)
+        };
         let peer_pressure = self.peer_pressure_summary(Instant::now());
         SwarmPressureMetrics {
             total_admission_checks: self.total_admission_checks.load(Ordering::Relaxed),
@@ -915,10 +1301,19 @@ impl SwarmPressureGovernor {
             regions_rejected: self.regions_rejected.load(Ordering::Relaxed),
             envelope_budget_violations: self.envelope_budget_violations.load(Ordering::Relaxed),
             max_decision_latency_ns: self.max_decision_latency_ns.load(Ordering::Relaxed),
-            active_region_count: envelopes.len() as u64,
+            active_region_count,
             max_memory_utilization_scaled,
             max_cpu_utilization_scaled,
             max_io_utilization_scaled,
+            workload_leases_acquired: self.workload_leases_acquired.load(Ordering::Relaxed),
+            workload_leases_committed: self.workload_leases_committed.load(Ordering::Relaxed),
+            workload_leases_renewed: self.workload_leases_renewed.load(Ordering::Relaxed),
+            workload_leases_released: self.workload_leases_released.load(Ordering::Relaxed),
+            workload_leases_aborted: self.workload_leases_aborted.load(Ordering::Relaxed),
+            workload_leases_expired: self.workload_leases_expired.load(Ordering::Relaxed),
+            workload_lease_conflicts: self.workload_lease_conflicts.load(Ordering::Relaxed),
+            active_workload_lease_count,
+            terminal_workload_lease_count,
             live_peer_pressure_reports: peer_pressure.live_report_count,
             max_peer_pressure_scaled: scale_pressure_for_metrics(
                 peer_pressure.max_overall_pressure,
@@ -928,6 +1323,112 @@ impl SwarmPressureGovernor {
     }
 
     // Private helper methods
+
+    fn complete_workload_lease(
+        &self,
+        lease_id: SwarmWorkloadLeaseId,
+        terminal_state: SwarmWorkloadLeaseState,
+        reason: impl AsRef<str>,
+    ) -> Result<SwarmWorkloadLeaseReceipt, SwarmPressureError> {
+        debug_assert!(terminal_state.is_terminal());
+        let now = Instant::now();
+        let mut leases = self.workload_leases.lock().unwrap();
+        self.expire_stale_workload_leases_locked(&mut leases, now);
+        let lease = leases
+            .get_mut(&lease_id)
+            .ok_or_else(|| workload_lease_error("unknown workload lease"))?;
+        if lease.state.is_terminal() {
+            return Err(workload_lease_error(format!(
+                "cannot complete terminal lease in state {}",
+                lease.state.as_str()
+            )));
+        }
+
+        lease.state = terminal_state;
+        lease.terminal_at = Some(now);
+        match terminal_state {
+            SwarmWorkloadLeaseState::Released => {
+                self.workload_leases_released
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            SwarmWorkloadLeaseState::Aborted => {
+                self.workload_leases_aborted.fetch_add(1, Ordering::Relaxed);
+            }
+            SwarmWorkloadLeaseState::Expired => {
+                self.workload_leases_expired.fetch_add(1, Ordering::Relaxed);
+            }
+            SwarmWorkloadLeaseState::Active | SwarmWorkloadLeaseState::Committed => {}
+        }
+        Ok(Self::lease_receipt(lease, reason.as_ref()))
+    }
+
+    fn expire_stale_workload_leases_locked(
+        &self,
+        leases: &mut HashMap<SwarmWorkloadLeaseId, SwarmWorkloadLease>,
+        now: Instant,
+    ) -> Vec<SwarmWorkloadLeaseReceipt> {
+        let mut receipts = Vec::new();
+        for lease in leases.values_mut() {
+            if lease.state.is_live() && lease.expires_at <= now {
+                lease.state = SwarmWorkloadLeaseState::Expired;
+                lease.terminal_at = Some(now);
+                self.workload_leases_expired.fetch_add(1, Ordering::Relaxed);
+                receipts.push(Self::lease_receipt(lease, "workload lease expired"));
+            }
+        }
+        receipts
+    }
+
+    fn workload_lease_expiry(
+        &self,
+        now: Instant,
+        requested_deadline: Option<Instant>,
+    ) -> Result<Instant, SwarmPressureError> {
+        let max_expires_at = self.max_workload_lease_expiry(now)?;
+        if let Some(deadline) = requested_deadline {
+            if deadline <= now {
+                return Err(workload_lease_error("lease deadline has already expired"));
+            }
+            return Ok(deadline.min(max_expires_at));
+        }
+
+        let default_ttl = self
+            .config
+            .default_workload_lease_ttl
+            .min(self.config.max_workload_lease_ttl);
+        if default_ttl.is_zero() {
+            return Err(workload_lease_error(
+                "default_workload_lease_ttl must be non-zero without an explicit deadline",
+            ));
+        }
+        now.checked_add(default_ttl)
+            .ok_or_else(|| workload_lease_error("lease default deadline overflow"))
+    }
+
+    fn max_workload_lease_expiry(&self, now: Instant) -> Result<Instant, SwarmPressureError> {
+        if self.config.max_workload_lease_ttl.is_zero() {
+            return Err(workload_lease_error(
+                "max_workload_lease_ttl must be non-zero",
+            ));
+        }
+        now.checked_add(self.config.max_workload_lease_ttl)
+            .ok_or_else(|| workload_lease_error("lease max deadline overflow"))
+    }
+
+    fn lease_receipt(
+        lease: &SwarmWorkloadLease,
+        reason: impl AsRef<str>,
+    ) -> SwarmWorkloadLeaseReceipt {
+        SwarmWorkloadLeaseReceipt {
+            lease_id: lease.lease_id,
+            workload_id: lease.workload_id.clone(),
+            region_id: lease.region_id,
+            state: lease.state,
+            expires_at: lease.expires_at,
+            terminal_at: lease.terminal_at,
+            reason: lease.context_reason(reason.as_ref()),
+        }
+    }
 
     fn evaluate_swarm_admission(
         &self,
@@ -1251,6 +1752,24 @@ pub struct SwarmPressureMetrics {
     pub max_cpu_utilization_scaled: i64,
     /// Maximum active IO-envelope utilization scaled by 10_000.
     pub max_io_utilization_scaled: i64,
+    /// Total workload leases acquired.
+    pub workload_leases_acquired: u64,
+    /// Total workload leases committed to a caller-owned region.
+    pub workload_leases_committed: u64,
+    /// Total successful workload lease renewals.
+    pub workload_leases_renewed: u64,
+    /// Total workload leases released normally.
+    pub workload_leases_released: u64,
+    /// Total workload leases aborted after cancellation or startup failure.
+    pub workload_leases_aborted: u64,
+    /// Total workload leases expired by deadline.
+    pub workload_leases_expired: u64,
+    /// Total workload lease conflict rejections.
+    pub workload_lease_conflicts: u64,
+    /// Number of live workload leases.
+    pub active_workload_lease_count: u64,
+    /// Number of terminal workload leases retained for audit.
+    pub terminal_workload_lease_count: u64,
     /// Number of live peer pressure reports considered by admission.
     pub live_peer_pressure_reports: u64,
     /// Maximum live peer pressure ratio scaled by 10_000.
@@ -1267,6 +1786,12 @@ fn scale_pressure_for_metrics(pressure: f64) -> i64 {
         i64::MAX
     } else {
         (pressure * PRESSURE_SCALE) as i64
+    }
+}
+
+fn workload_lease_error(reason: impl Into<String>) -> SwarmPressureError {
+    SwarmPressureError::WorkloadLease {
+        reason: reason.into(),
     }
 }
 
@@ -1869,6 +2394,188 @@ mod tests {
         assert_eq!(metrics.total_admission_checks, 3);
         assert_eq!(metrics.regions_rejected, 3);
         assert_eq!(metrics.regions_admitted, 0);
+    }
+
+    #[test]
+    fn test_workload_lease_commit_renew_release_lifecycle() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let request = SwarmWorkloadAdmissionRequest::new(
+            "lease-lifecycle",
+            SwarmAdmissionOwner::new("DustyGorge").with_bead_id("asupersync-oxqrae.2"),
+        )
+        .with_declared_resources(Some(1024), Some(50), Some(5))
+        .with_deadline(Instant::now() + Duration::from_secs(60));
+        let decision = governor
+            .check_workload_admission(&cx, &request)
+            .expect("workload admission should classify");
+        let region_id = RegionId::new_for_test(50, 1);
+
+        let acquired = governor
+            .acquire_workload_lease(region_id, &request, &decision)
+            .expect("admitted workload should acquire a lease");
+        assert_eq!(acquired.lease_id.as_u64(), 1);
+        assert_eq!(acquired.state, SwarmWorkloadLeaseState::Active);
+        assert!(acquired.reason.contains("workload lease acquired"));
+
+        let committed = governor
+            .commit_workload_lease(acquired.lease_id)
+            .expect("live lease should commit");
+        assert_eq!(committed.state, SwarmWorkloadLeaseState::Committed);
+        let old_expiry = committed.expires_at;
+
+        let renewed = governor
+            .renew_workload_lease(acquired.lease_id, Duration::from_secs(30))
+            .expect("committed lease should renew");
+        assert_eq!(renewed.state, SwarmWorkloadLeaseState::Committed);
+        assert!(renewed.expires_at > old_expiry);
+        assert!(renewed.reason.contains("renewals=1"));
+
+        let released = governor
+            .release_workload_lease(acquired.lease_id)
+            .expect("renewed lease should release");
+        assert_eq!(released.state, SwarmWorkloadLeaseState::Released);
+        assert!(released.terminal_at.is_some());
+        assert!(
+            governor
+                .renew_workload_lease(acquired.lease_id, Duration::from_secs(1))
+                .is_err(),
+            "terminal leases must not renew"
+        );
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.workload_leases_acquired, 1);
+        assert_eq!(metrics.workload_leases_committed, 1);
+        assert_eq!(metrics.workload_leases_renewed, 1);
+        assert_eq!(metrics.workload_leases_released, 1);
+        assert_eq!(metrics.active_workload_lease_count, 0);
+        assert_eq!(metrics.terminal_workload_lease_count, 1);
+    }
+
+    #[test]
+    fn test_workload_lease_conflicts_abort_and_expiry_are_terminal() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let request = SwarmWorkloadAdmissionRequest::new(
+            "lease-conflict",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        );
+        let decision = governor
+            .check_workload_admission(&cx, &request)
+            .expect("workload admission should classify");
+
+        let first = governor
+            .acquire_workload_lease(RegionId::new_for_test(51, 1), &request, &decision)
+            .expect("first workload lease should acquire");
+        assert!(
+            governor
+                .acquire_workload_lease(RegionId::new_for_test(52, 1), &request, &decision)
+                .is_err(),
+            "same workload id must not hold two live leases"
+        );
+
+        let aborted = governor
+            .abort_workload_lease(first.lease_id, "cancelled before proof lane started")
+            .expect("live lease should abort");
+        assert_eq!(aborted.state, SwarmWorkloadLeaseState::Aborted);
+        assert!(
+            aborted
+                .reason
+                .contains("cancelled before proof lane started")
+        );
+
+        let second_request = SwarmWorkloadAdmissionRequest::new(
+            "lease-expiry",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        );
+        let second_decision = governor
+            .check_workload_admission(&cx, &second_request)
+            .expect("second workload admission should classify");
+        let expiring = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(53, 1),
+                &second_request,
+                &second_decision,
+            )
+            .expect("second workload lease should acquire");
+        {
+            let mut leases = governor.workload_leases.lock().unwrap();
+            leases
+                .get_mut(&expiring.lease_id)
+                .expect("lease should exist for forced expiry")
+                .expires_at = Instant::now() - Duration::from_secs(1);
+        }
+
+        let expired = governor.expire_stale_workload_leases();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].lease_id, expiring.lease_id);
+        assert_eq!(expired[0].state, SwarmWorkloadLeaseState::Expired);
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.workload_lease_conflicts, 1);
+        assert_eq!(metrics.workload_leases_aborted, 1);
+        assert_eq!(metrics.workload_leases_expired, 1);
+        assert_eq!(metrics.active_workload_lease_count, 0);
+        assert_eq!(metrics.terminal_workload_lease_count, 2);
+    }
+
+    #[test]
+    fn test_unregister_region_envelope_releases_bound_workload_lease() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let request = SwarmWorkloadAdmissionRequest::new(
+            "region-close-release",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        );
+        let decision = governor
+            .check_workload_admission(&cx, &request)
+            .expect("workload admission should classify");
+        let region_id = RegionId::new_for_test(54, 1);
+        governor.register_region_envelope(
+            region_id,
+            decision
+                .envelope
+                .clone()
+                .expect("admitted workload should include an envelope"),
+        );
+        let lease = governor
+            .acquire_workload_lease(region_id, &request, &decision)
+            .expect("admitted workload should acquire a lease");
+        governor
+            .commit_workload_lease(lease.lease_id)
+            .expect("lease should commit before region close");
+
+        let removed = governor.unregister_region_envelope(region_id);
+        assert!(removed.is_some());
+        let stored = governor
+            .get_workload_lease(lease.lease_id)
+            .expect("released lease should remain available for audit");
+        assert_eq!(stored.state, SwarmWorkloadLeaseState::Released);
+        assert!(stored.terminal_at.is_some());
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.active_region_count, 0);
+        assert_eq!(metrics.active_workload_lease_count, 0);
+        assert_eq!(metrics.terminal_workload_lease_count, 1);
+        assert_eq!(metrics.workload_leases_released, 1);
     }
 
     #[test]
