@@ -472,9 +472,9 @@ fn percent_decode(input: &str) -> String {
                 i += 1;
             }
             b'%' => {
-                if i + 2 < input.len() {
-                    let hi = hex_val(input[i + 1]);
-                    let lo = hex_val(input[i + 2]);
+                if i.saturating_add(2) < input.len() {
+                    let hi = hex_val(input[i.saturating_add(1)]);
+                    let lo = hex_val(input[i.saturating_add(2)]);
                     if let (Some(h), Some(l)) = (hi, lo) {
                         output.push(h << 4 | l);
                         i += 3;
@@ -498,9 +498,9 @@ fn percent_decode(input: &str) -> String {
 
 fn hex_val(b: u8) -> Option<u8> {
     match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
+        b'0'..=b'9' => Some(b.saturating_sub(b'0')),
+        b'a'..=b'f' => Some((b.saturating_sub(b'a')).saturating_add(10)),
+        b'A'..=b'F' => Some((b.saturating_sub(b'A')).saturating_add(10)),
         _ => None,
     }
 }
@@ -1704,7 +1704,10 @@ mod tests {
         let req = Request::new("GET", "/items").with_query("value=17&value=18");
         let err = Query::<u32>::from_request_parts(&req).unwrap_err();
         assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
-        assert_eq!(err.message, "duplicate query parameter `value` (use multi-value extractor for forms)");
+        assert_eq!(
+            err.message,
+            "duplicate query parameter `value` (use multi-value extractor for forms)"
+        );
     }
 
     #[test]

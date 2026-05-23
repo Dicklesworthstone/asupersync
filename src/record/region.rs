@@ -726,7 +726,7 @@ impl RegionRecord {
             }
         }
 
-        inner.pending_obligations += 1;
+        inner.pending_obligations = inner.pending_obligations.saturating_add(1);
         drop(inner);
         Ok(())
     }
