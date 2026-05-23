@@ -568,7 +568,8 @@ impl MockCliProcessor {
 
     fn hash_output(&self, content: &str) -> String {
         // Simple hash for determinism testing (in real implementation, use proper hash function)
-        format!("{:x}", content.len() * 31 + content.chars().map(|c| c as u32).sum::<u32>())
+        let char_sum = content.chars().map(|c| c as u32).sum::<u32>() as usize;
+        format!("{:x}", content.len() * 31 + char_sum)
     }
 
     /// Test CLI command reproducibility
@@ -608,7 +609,7 @@ impl MockCliProcessor {
         Ok(())
     }
 
-    fn simulate_command_execution(&self, command: &str, args: &[String]) -> (String, String, i32) {
+    fn simulate_command_execution(&self, command: &str, _args: &[String]) -> (String, String, i32) {
         match command {
             "doctor" => {
                 let stdout = "System diagnostics: All checks passed\n".to_string();
@@ -753,7 +754,7 @@ impl MockAuditProcessor {
         self.record_audit_event(&root_context.context_id, AuditEventType::ContextCreated, HashMap::new());
 
         // Test context derivation (child contexts inherit ambient properties)
-        let mut derived_contexts = Vec::new();
+        let mut derived_contexts: Vec<AuditContext> = Vec::new();
         let mut current_depth = 0;
 
         for i in 0..3 {
