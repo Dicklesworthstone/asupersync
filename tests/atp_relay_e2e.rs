@@ -9,9 +9,9 @@ use asupersync::atp::path::{
     PathOutcomeResult, PathRace, PathSelectionReason, PathSuccessKind, PathTraceId,
 };
 use asupersync::net::atp::relay::{
-    OpaqueRelayPacket, ProofTag, RelayError, RelayEventKind, RelayQuota, RelayReservationGrant,
-    RelayReservationId, RelayService, RelayServiceConfig, RelayTcpTlsStreamBuffer, RelayTransport,
-    RelayWireFrame,
+    OpaqueRelayPacket, ProofTag, RelayEndpointDirectory, RelayError, RelayEventKind, RelayQuota,
+    RelayReservationGrant, RelayReservationId, RelayService, RelayServiceConfig,
+    RelayTcpTlsStreamBuffer, RelayTcpTlsStreamId, RelayTransport, RelayWireFrame,
 };
 use asupersync::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 use std::net::SocketAddr;
@@ -713,6 +713,234 @@ fn relay_socket_adapters_bridge_udp_datagrams_and_tcp_records() {
         Some("udp_unavailable_tcp_tls_443")
     );
     assert!(tcp_proof.e2e_proof_preserved);
+}
+
+#[test]
+fn relay_endpoint_directory_admits_socket_sources_before_forwarding() {
+    let test = "relay_endpoint_directory_admits_socket_sources_before_forwarding";
+    let mut service = RelayService::new(
+        RelayServiceConfig::new("relay-endpoint-directory-e2e", 4)
+            .expect("config")
+            .with_log_peer_ids(true),
+    );
+    service
+        .reserve(
+            400,
+            reservation_id(702),
+            "endpoint-directory-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve endpoint directory relay");
+    let mut directory = RelayEndpointDirectory::default();
+    let source_udp = SocketAddr::from(([203, 0, 113, 21], 47_021));
+    let wrong_udp = SocketAddr::from(([203, 0, 113, 22], 47_022));
+    let source_stream = RelayTcpTlsStreamId::new(702).expect("source stream id");
+    let wrong_stream = RelayTcpTlsStreamId::new(703).expect("wrong stream id");
+
+    log_stage(
+        test,
+        "admit",
+        "bind UDP endpoints and TCP/TLS stream ids to authenticated peer ids",
+    );
+    directory
+        .bind_udp_endpoint(peer(1), source_udp)
+        .expect("bind source udp endpoint");
+    directory
+        .bind_udp_endpoint(peer(3), wrong_udp)
+        .expect("bind wrong udp endpoint");
+    directory
+        .bind_tcp_tls_stream(peer(1), source_stream)
+        .expect("bind source tcp stream");
+    directory
+        .bind_tcp_tls_stream(peer(3), wrong_stream)
+        .expect("bind wrong tcp stream");
+    assert_eq!(directory.udp_endpoint_count(), 2);
+    assert_eq!(directory.tcp_tls_stream_count(), 2);
+    assert_eq!(
+        directory
+            .first_udp_endpoint_for_peer(peer(1))
+            .expect("first source udp endpoint"),
+        source_udp
+    );
+
+    let udp_frame = RelayWireFrame::new(
+        reservation_id(702),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(RelayTransport::Udp, b"endpoint-udp-ciphertext", 1, 425),
+    );
+    let udp_datagram = udp_frame
+        .encode(RelayQuota::default().max_packet_bytes)
+        .expect("encode udp datagram");
+    log_stage(
+        test,
+        "udp-unknown",
+        "unadmitted UDP addresses fail before frame metadata can affect relay state",
+    );
+    assert_eq!(
+        service
+            .forward_udp_datagram_from_endpoint(
+                430,
+                &directory,
+                SocketAddr::from(([203, 0, 113, 99], 47_099)),
+                &udp_datagram,
+                RelayQuota::default().max_packet_bytes,
+            )
+            .expect_err("unknown udp endpoint"),
+        RelayError::UnknownRelayEndpoint
+    );
+    assert_eq!(
+        service
+            .proof_artifact(reservation_id(702))
+            .expect("proof after unknown udp")
+            .packets_forwarded,
+        0
+    );
+
+    log_stage(
+        test,
+        "udp-mismatch",
+        "admitted endpoint peer must match decoded frame source peer",
+    );
+    assert_eq!(
+        service
+            .forward_udp_datagram_from_endpoint(
+                431,
+                &directory,
+                wrong_udp,
+                &udp_datagram,
+                RelayQuota::default().max_packet_bytes,
+            )
+            .expect_err("mismatched udp endpoint"),
+        RelayError::UnauthorizedPeer
+    );
+    assert!(service.events().iter().any(|event| {
+        event.kind == RelayEventKind::AuthorizationRejected
+            && event.transport == Some(RelayTransport::Udp)
+            && event.quota_decision == "endpoint_peer_mismatch_rejected"
+    }));
+
+    log_stage(
+        test,
+        "udp-forward",
+        "admitted UDP endpoint forwards through normal proof and queue path",
+    );
+    let udp_forwarded = service
+        .forward_udp_datagram_from_endpoint(
+            432,
+            &directory,
+            source_udp,
+            &udp_datagram,
+            RelayQuota::default().max_packet_bytes,
+        )
+        .expect("forward admitted udp endpoint");
+    assert_eq!(udp_forwarded.to_peer_id(), peer(2));
+
+    let tcp_frame = RelayWireFrame::new(
+        reservation_id(702),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(
+            RelayTransport::TcpTls443,
+            b"endpoint-tcp-ciphertext",
+            2,
+            440,
+        ),
+    );
+    let tcp_record = tcp_frame
+        .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+        .expect("encode tcp record");
+    log_stage(
+        test,
+        "tcp-unknown",
+        "unadmitted TCP/TLS stream ids fail before bytes enter the stream decoder",
+    );
+    let mut unknown_stream =
+        RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
+            .expect("unknown stream buffer");
+    assert_eq!(
+        service
+            .forward_tcp_tls_stream_bytes_from_endpoint(
+                450,
+                &directory,
+                RelayTcpTlsStreamId::new(704).expect("unknown stream id"),
+                &mut unknown_stream,
+                &tcp_record,
+            )
+            .expect_err("unknown tcp stream"),
+        RelayError::UnknownRelayEndpoint
+    );
+    assert_eq!(unknown_stream.pending_len(), 0);
+
+    log_stage(
+        test,
+        "tcp-mismatch",
+        "admitted TCP/TLS stream peer must match decoded frame source peer",
+    );
+    let mut wrong_stream_buffer =
+        RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
+            .expect("wrong stream buffer");
+    assert_eq!(
+        service
+            .forward_tcp_tls_stream_bytes_from_endpoint(
+                451,
+                &directory,
+                wrong_stream,
+                &mut wrong_stream_buffer,
+                &tcp_record,
+            )
+            .expect_err("mismatched tcp stream"),
+        RelayError::UnauthorizedPeer
+    );
+    assert!(service.events().iter().any(|event| {
+        event.kind == RelayEventKind::AuthorizationRejected
+            && event.transport == Some(RelayTransport::TcpTls443)
+            && event.quota_decision == "endpoint_peer_mismatch_rejected"
+    }));
+
+    log_stage(
+        test,
+        "tcp-forward",
+        "admitted TCP/TLS stream forwards through normal proof and queue path",
+    );
+    let mut source_stream_buffer =
+        RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
+            .expect("source stream buffer");
+    let tcp_forwarded = service
+        .forward_tcp_tls_stream_bytes_from_endpoint(
+            452,
+            &directory,
+            source_stream,
+            &mut source_stream_buffer,
+            &tcp_record,
+        )
+        .expect("forward admitted tcp stream");
+    assert_eq!(tcp_forwarded.len(), 1);
+    assert_eq!(tcp_forwarded[0].to_peer_id(), peer(2));
+
+    let proof = service
+        .proof_artifact(reservation_id(702))
+        .expect("endpoint proof");
+    assert_eq!(proof.packets_forwarded, 2);
+    assert_eq!(
+        proof.opaque_bytes_forwarded,
+        u64::try_from(b"endpoint-udp-ciphertext".len() + b"endpoint-tcp-ciphertext".len())
+            .expect("ciphertext lengths fit")
+    );
+    assert!(proof.e2e_proof_preserved);
+    assert_eq!(
+        service
+            .dequeue_for_peer(peer(2))
+            .expect("first queued packet"),
+        udp_forwarded
+    );
+    assert_eq!(
+        service
+            .dequeue_for_peer(peer(2))
+            .expect("second queued packet"),
+        tcp_forwarded[0]
+    );
 }
 
 #[test]

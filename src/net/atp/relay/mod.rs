@@ -11,7 +11,7 @@ use crate::atp::path::{
 };
 use crate::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 /// TCP/TLS fallback port used by locked-down egress networks.
 pub const TCP_TLS_443_PORT: u16 = 443;
@@ -258,6 +258,222 @@ pub struct RelayTcpTlsStreamBuffer {
     buffered: Vec<u8>,
     max_payload_bytes: usize,
     max_buffered_bytes: usize,
+}
+
+/// Stable identifier for one accepted TCP/TLS 443 relay stream.
+///
+/// The relay socket loop should allocate this only after TLS/session admission
+/// has authenticated the peer attached to the stream. The stream id is local to
+/// the relay process and is intentionally separate from ATP transfer ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RelayTcpTlsStreamId(u128);
+
+impl RelayTcpTlsStreamId {
+    /// Construct a non-zero TCP/TLS relay stream id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::ZeroTcpTlsStreamId`] when `raw` is zero.
+    pub const fn new(raw: u128) -> Result<Self, RelayError> {
+        if raw == 0 {
+            return Err(RelayError::ZeroTcpTlsStreamId);
+        }
+        Ok(Self(raw))
+    }
+
+    /// Return the raw relay-local stream id.
+    #[must_use]
+    pub const fn get(self) -> u128 {
+        self.0
+    }
+}
+
+/// Bounds for the relay endpoint admission directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayEndpointDirectoryQuota {
+    /// Maximum UDP socket endpoints retained at once.
+    pub max_udp_endpoints: usize,
+    /// Maximum TCP/TLS stream bindings retained at once.
+    pub max_tcp_tls_streams: usize,
+}
+
+impl RelayEndpointDirectoryQuota {
+    /// Validate endpoint directory bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidQuota`] when either bound is zero.
+    pub const fn validate(self) -> Result<Self, RelayError> {
+        if self.max_udp_endpoints == 0 || self.max_tcp_tls_streams == 0 {
+            return Err(RelayError::InvalidQuota);
+        }
+        Ok(self)
+    }
+}
+
+impl Default for RelayEndpointDirectoryQuota {
+    fn default() -> Self {
+        Self {
+            max_udp_endpoints: 16_384,
+            max_tcp_tls_streams: 16_384,
+        }
+    }
+}
+
+/// Socket-facing endpoint admission directory for the relay.
+///
+/// Relay frames contain a self-declared peer id, but socket ingress must not
+/// trust that field. This directory is the boundary between path/rendezvous/TLS
+/// admission and relay forwarding: a socket address or TCP/TLS stream id maps to
+/// the authenticated peer id, and service helpers compare that admitted peer
+/// against decoded frame metadata before any quota, usage, proof, or queue state
+/// can change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayEndpointDirectory {
+    udp_endpoints: BTreeMap<SocketAddr, PeerId>,
+    tcp_tls_streams: BTreeMap<RelayTcpTlsStreamId, PeerId>,
+    quota: RelayEndpointDirectoryQuota,
+}
+
+impl RelayEndpointDirectory {
+    /// Construct an empty endpoint directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidQuota`] when any quota bound is zero.
+    pub fn new(quota: RelayEndpointDirectoryQuota) -> Result<Self, RelayError> {
+        Ok(Self {
+            udp_endpoints: BTreeMap::new(),
+            tcp_tls_streams: BTreeMap::new(),
+            quota: quota.validate()?,
+        })
+    }
+
+    /// Number of admitted UDP endpoints.
+    #[must_use]
+    pub fn udp_endpoint_count(&self) -> usize {
+        self.udp_endpoints.len()
+    }
+
+    /// Number of admitted TCP/TLS streams.
+    #[must_use]
+    pub fn tcp_tls_stream_count(&self) -> usize {
+        self.tcp_tls_streams.len()
+    }
+
+    /// Bind a UDP socket endpoint to an authenticated peer id.
+    ///
+    /// The operation is idempotent for the same endpoint/peer pair and fails
+    /// closed if a different peer is already bound to the endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidRelayEndpoint`] for wildcard/port-zero
+    /// addresses, [`RelayError::DuplicateRelayEndpoint`] for conflicting
+    /// bindings, and [`RelayError::QuotaExceeded`] when the directory is full.
+    pub fn bind_udp_endpoint(
+        &mut self,
+        peer_id: PeerId,
+        endpoint: SocketAddr,
+    ) -> Result<(), RelayError> {
+        validate_relay_socket_endpoint(endpoint)?;
+        if let Some(bound_peer) = self.udp_endpoints.get(&endpoint) {
+            if *bound_peer == peer_id {
+                return Ok(());
+            }
+            return Err(RelayError::DuplicateRelayEndpoint);
+        }
+        if self.udp_endpoints.len() >= self.quota.max_udp_endpoints {
+            return Err(RelayError::QuotaExceeded);
+        }
+        self.udp_endpoints.insert(endpoint, peer_id);
+        Ok(())
+    }
+
+    /// Resolve the authenticated peer id for a UDP socket endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the endpoint has not
+    /// passed admission.
+    pub fn peer_for_udp_endpoint(&self, endpoint: SocketAddr) -> Result<PeerId, RelayError> {
+        self.udp_endpoints
+            .get(&endpoint)
+            .copied()
+            .ok_or(RelayError::UnknownRelayEndpoint)
+    }
+
+    /// Return the first deterministic UDP endpoint admitted for `peer_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the peer has no UDP
+    /// endpoint in the directory.
+    pub fn first_udp_endpoint_for_peer(&self, peer_id: PeerId) -> Result<SocketAddr, RelayError> {
+        self.udp_endpoints
+            .iter()
+            .find_map(|(endpoint, bound_peer)| (*bound_peer == peer_id).then_some(*endpoint))
+            .ok_or(RelayError::UnknownRelayEndpoint)
+    }
+
+    /// Remove a UDP endpoint binding, returning the peer that was bound.
+    pub fn unbind_udp_endpoint(&mut self, endpoint: SocketAddr) -> Option<PeerId> {
+        self.udp_endpoints.remove(&endpoint)
+    }
+
+    /// Bind a TCP/TLS stream id to an authenticated peer id.
+    ///
+    /// The operation is idempotent for the same stream/peer pair and fails
+    /// closed if a different peer is already bound to the stream id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::DuplicateRelayEndpoint`] for conflicting bindings
+    /// and [`RelayError::QuotaExceeded`] when the directory is full.
+    pub fn bind_tcp_tls_stream(
+        &mut self,
+        peer_id: PeerId,
+        stream_id: RelayTcpTlsStreamId,
+    ) -> Result<(), RelayError> {
+        if let Some(bound_peer) = self.tcp_tls_streams.get(&stream_id) {
+            if *bound_peer == peer_id {
+                return Ok(());
+            }
+            return Err(RelayError::DuplicateRelayEndpoint);
+        }
+        if self.tcp_tls_streams.len() >= self.quota.max_tcp_tls_streams {
+            return Err(RelayError::QuotaExceeded);
+        }
+        self.tcp_tls_streams.insert(stream_id, peer_id);
+        Ok(())
+    }
+
+    /// Resolve the authenticated peer id for a TCP/TLS stream id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the stream has not
+    /// passed admission.
+    pub fn peer_for_tcp_tls_stream(
+        &self,
+        stream_id: RelayTcpTlsStreamId,
+    ) -> Result<PeerId, RelayError> {
+        self.tcp_tls_streams
+            .get(&stream_id)
+            .copied()
+            .ok_or(RelayError::UnknownRelayEndpoint)
+    }
+
+    /// Remove a TCP/TLS stream binding, returning the peer that was bound.
+    pub fn unbind_tcp_tls_stream(&mut self, stream_id: RelayTcpTlsStreamId) -> Option<PeerId> {
+        self.tcp_tls_streams.remove(&stream_id)
+    }
+}
+
+impl Default for RelayEndpointDirectory {
+    fn default() -> Self {
+        Self::new(RelayEndpointDirectoryQuota::default()).expect("default relay endpoint quota")
+    }
 }
 
 impl RelayTcpTlsStreamBuffer {
@@ -1674,6 +1890,29 @@ impl RelayService {
         self.forward_wire_frame_from_peer(now_micros, from_peer_id, frame)
     }
 
+    /// Resolve UDP endpoint admission, then decode and forward one datagram.
+    ///
+    /// Socket loops should prefer this helper when the only trusted identity
+    /// attached to the read is the source [`SocketAddr`]. Unknown endpoints are
+    /// rejected before frame decoding so unadmitted addresses cannot exercise
+    /// reservation, quota, or proof state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] for unadmitted addresses and
+    /// otherwise propagates [`Self::forward_udp_datagram`] errors.
+    pub fn forward_udp_datagram_from_endpoint(
+        &mut self,
+        now_micros: u64,
+        endpoints: &RelayEndpointDirectory,
+        src_addr: SocketAddr,
+        datagram: &[u8],
+        max_payload_bytes: usize,
+    ) -> Result<ForwardedPacket, RelayError> {
+        let from_peer_id = endpoints.peer_for_udp_endpoint(src_addr)?;
+        self.forward_udp_datagram(now_micros, from_peer_id, datagram, max_payload_bytes)
+    }
+
     /// Append TCP/TLS stream bytes, decode complete relay records, and forward
     /// them in stream order.
     ///
@@ -1722,6 +1961,27 @@ impl RelayService {
         }
 
         Ok(forwarded)
+    }
+
+    /// Resolve TCP/TLS stream admission, then forward stream bytes in order.
+    ///
+    /// Unknown stream ids are rejected before decoding so unadmitted sockets
+    /// cannot probe reservation ids, transfer nonces, quotas, or lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] for unadmitted streams and
+    /// otherwise propagates [`Self::forward_tcp_tls_stream_bytes`] errors.
+    pub fn forward_tcp_tls_stream_bytes_from_endpoint(
+        &mut self,
+        now_micros: u64,
+        endpoints: &RelayEndpointDirectory,
+        stream_id: RelayTcpTlsStreamId,
+        stream: &mut RelayTcpTlsStreamBuffer,
+        bytes: &[u8],
+    ) -> Result<Vec<ForwardedPacket>, RelayError> {
+        let from_peer_id = endpoints.peer_for_tcp_tls_stream(stream_id)?;
+        self.forward_tcp_tls_stream_bytes(now_micros, from_peer_id, stream, bytes)
     }
 
     /// Encode the next UDP packet queued for `peer_id` as a socket datagram.
@@ -2391,9 +2651,21 @@ pub enum RelayError {
     /// Reservation id was zero.
     #[error("relay reservation id is zero")]
     ZeroReservationId,
+    /// TCP/TLS relay stream id was zero.
+    #[error("relay tcp/tls stream id is zero")]
+    ZeroTcpTlsStreamId,
     /// Relay id was empty.
     #[error("relay id is empty")]
     EmptyRelayId,
+    /// Relay endpoint address or stream binding was invalid.
+    #[error("invalid relay endpoint")]
+    InvalidRelayEndpoint,
+    /// Relay endpoint is already bound to a different peer.
+    #[error("duplicate relay endpoint")]
+    DuplicateRelayEndpoint,
+    /// Relay endpoint has not been admitted.
+    #[error("unknown relay endpoint")]
+    UnknownRelayEndpoint,
     /// Path id was empty.
     #[error("relay path id is empty")]
     EmptyPathId,
@@ -2458,16 +2730,21 @@ impl RelayError {
     #[must_use]
     pub const fn path_failure_kind(self) -> PathFailureKind {
         match self {
-            Self::InvalidAuthorization | Self::UnauthorizedPeer => PathFailureKind::AuthFailure,
+            Self::InvalidAuthorization | Self::UnauthorizedPeer | Self::UnknownRelayEndpoint => {
+                PathFailureKind::AuthFailure
+            }
             Self::TransportUnavailable
             | Self::UnknownReservation
             | Self::ExpiredReservation
             | Self::ReservationCancelled => PathFailureKind::RelayUnavailable,
-            Self::QuotaExceeded | Self::PacketTooLarge | Self::InvalidQuota => {
-                PathFailureKind::PolicyDenied
-            }
+            Self::QuotaExceeded
+            | Self::PacketTooLarge
+            | Self::InvalidQuota
+            | Self::DuplicateRelayEndpoint => PathFailureKind::PolicyDenied,
             Self::ZeroReservationId
+            | Self::ZeroTcpTlsStreamId
             | Self::EmptyRelayId
+            | Self::InvalidRelayEndpoint
             | Self::EmptyPathId
             | Self::EmptyPacket
             | Self::InvalidProofTag
@@ -2479,6 +2756,17 @@ impl RelayError {
             | Self::UnsupportedRelayWireVersion
             | Self::UnsupportedRelayWireFrameKind => PathFailureKind::ProtocolError,
         }
+    }
+}
+
+fn validate_relay_socket_endpoint(endpoint: SocketAddr) -> Result<(), RelayError> {
+    if endpoint.port() == 0 {
+        return Err(RelayError::InvalidRelayEndpoint);
+    }
+    match endpoint.ip() {
+        IpAddr::V4(addr) if addr.is_unspecified() => Err(RelayError::InvalidRelayEndpoint),
+        IpAddr::V6(addr) if addr.is_unspecified() => Err(RelayError::InvalidRelayEndpoint),
+        _ => Ok(()),
     }
 }
 
@@ -2560,6 +2848,121 @@ mod tests {
             sent_at_micros,
         )
         .expect("packet")
+    }
+
+    #[test]
+    fn endpoint_directory_binds_socket_endpoints_to_authenticated_peers() {
+        let mut directory = RelayEndpointDirectory::new(RelayEndpointDirectoryQuota {
+            max_udp_endpoints: 2,
+            max_tcp_tls_streams: 2,
+        })
+        .expect("directory");
+        let udp_endpoint = SocketAddr::from(([192, 0, 2, 10], 40_000));
+        let second_udp_endpoint = SocketAddr::from(([192, 0, 2, 11], 40_001));
+        let stream_id = RelayTcpTlsStreamId::new(700).expect("stream id");
+        let second_stream_id = RelayTcpTlsStreamId::new(701).expect("second stream id");
+
+        assert_eq!(
+            RelayTcpTlsStreamId::new(0).expect_err("zero stream id"),
+            RelayError::ZeroTcpTlsStreamId
+        );
+        assert_eq!(
+            directory
+                .bind_udp_endpoint(peer(1), SocketAddr::from(([0, 0, 0, 0], 40_000)))
+                .expect_err("wildcard endpoint"),
+            RelayError::InvalidRelayEndpoint
+        );
+        assert_eq!(
+            directory
+                .bind_udp_endpoint(peer(1), SocketAddr::from(([192, 0, 2, 12], 0)))
+                .expect_err("port-zero endpoint"),
+            RelayError::InvalidRelayEndpoint
+        );
+
+        directory
+            .bind_udp_endpoint(peer(1), udp_endpoint)
+            .expect("bind udp");
+        directory
+            .bind_udp_endpoint(peer(1), udp_endpoint)
+            .expect("idempotent udp bind");
+        assert_eq!(
+            directory
+                .bind_udp_endpoint(peer(2), udp_endpoint)
+                .expect_err("conflicting udp bind"),
+            RelayError::DuplicateRelayEndpoint
+        );
+        assert_eq!(
+            directory
+                .peer_for_udp_endpoint(udp_endpoint)
+                .expect("udp peer"),
+            peer(1)
+        );
+        assert_eq!(
+            directory
+                .first_udp_endpoint_for_peer(peer(1))
+                .expect("udp endpoint for peer"),
+            udp_endpoint
+        );
+        assert_eq!(
+            directory
+                .peer_for_udp_endpoint(SocketAddr::from(([192, 0, 2, 99], 40_099)))
+                .expect_err("unknown udp endpoint"),
+            RelayError::UnknownRelayEndpoint
+        );
+        directory
+            .bind_udp_endpoint(peer(2), second_udp_endpoint)
+            .expect("second udp endpoint");
+        assert_eq!(
+            directory
+                .bind_udp_endpoint(peer(3), SocketAddr::from(([192, 0, 2, 13], 40_002)))
+                .expect_err("udp endpoint quota"),
+            RelayError::QuotaExceeded
+        );
+        assert_eq!(directory.unbind_udp_endpoint(udp_endpoint), Some(peer(1)));
+        assert_eq!(
+            directory
+                .peer_for_udp_endpoint(udp_endpoint)
+                .expect_err("unbound udp endpoint"),
+            RelayError::UnknownRelayEndpoint
+        );
+
+        directory
+            .bind_tcp_tls_stream(peer(1), stream_id)
+            .expect("bind tcp stream");
+        directory
+            .bind_tcp_tls_stream(peer(1), stream_id)
+            .expect("idempotent tcp bind");
+        assert_eq!(
+            directory
+                .bind_tcp_tls_stream(peer(2), stream_id)
+                .expect_err("conflicting tcp bind"),
+            RelayError::DuplicateRelayEndpoint
+        );
+        assert_eq!(
+            directory
+                .peer_for_tcp_tls_stream(stream_id)
+                .expect("tcp stream peer"),
+            peer(1)
+        );
+        directory
+            .bind_tcp_tls_stream(peer(2), second_stream_id)
+            .expect("second tcp stream");
+        assert_eq!(
+            directory
+                .bind_tcp_tls_stream(
+                    peer(3),
+                    RelayTcpTlsStreamId::new(702).expect("third stream id"),
+                )
+                .expect_err("tcp stream quota"),
+            RelayError::QuotaExceeded
+        );
+        assert_eq!(directory.unbind_tcp_tls_stream(stream_id), Some(peer(1)));
+        assert_eq!(
+            directory
+                .peer_for_tcp_tls_stream(stream_id)
+                .expect_err("unbound tcp stream"),
+            RelayError::UnknownRelayEndpoint
+        );
     }
 
     #[test]
@@ -3196,6 +3599,155 @@ mod tests {
                 .expect("empty udp queue")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn endpoint_admission_helpers_reject_unknown_or_mismatched_socket_sources() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(42),
+                "path-relay-42",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        let mut directory = RelayEndpointDirectory::default();
+        let source_udp = SocketAddr::from(([203, 0, 113, 10], 47_000));
+        let wrong_udp = SocketAddr::from(([203, 0, 113, 11], 47_001));
+        let source_stream = RelayTcpTlsStreamId::new(42).expect("source stream");
+        let wrong_stream = RelayTcpTlsStreamId::new(43).expect("wrong stream");
+        directory
+            .bind_udp_endpoint(peer(1), source_udp)
+            .expect("bind source udp");
+        directory
+            .bind_udp_endpoint(peer(3), wrong_udp)
+            .expect("bind wrong udp");
+        directory
+            .bind_tcp_tls_stream(peer(1), source_stream)
+            .expect("bind source stream");
+        directory
+            .bind_tcp_tls_stream(peer(3), wrong_stream)
+            .expect("bind wrong stream");
+
+        let udp_frame = RelayWireFrame::new(
+            reservation_id(42),
+            transfer_nonce(9),
+            peer(1),
+            packet_sent_at(RelayTransport::Udp, b"udp-endpoint-ciphertext", 1, 90),
+        );
+        let udp_datagram = udp_frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode udp datagram");
+        assert_eq!(
+            service
+                .forward_udp_datagram_from_endpoint(
+                    100,
+                    &directory,
+                    SocketAddr::from(([203, 0, 113, 99], 47_099)),
+                    &udp_datagram,
+                    RelayQuota::default().max_packet_bytes,
+                )
+                .expect_err("unknown udp endpoint"),
+            RelayError::UnknownRelayEndpoint
+        );
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(42))
+                .expect("proof after unknown udp endpoint")
+                .packets_forwarded,
+            0
+        );
+        assert_eq!(
+            service
+                .forward_udp_datagram_from_endpoint(
+                    101,
+                    &directory,
+                    wrong_udp,
+                    &udp_datagram,
+                    RelayQuota::default().max_packet_bytes,
+                )
+                .expect_err("mismatched udp endpoint"),
+            RelayError::UnauthorizedPeer
+        );
+        let udp_forwarded = service
+            .forward_udp_datagram_from_endpoint(
+                102,
+                &directory,
+                source_udp,
+                &udp_datagram,
+                RelayQuota::default().max_packet_bytes,
+            )
+            .expect("forward admitted udp endpoint");
+        assert_eq!(udp_forwarded.to_peer_id(), peer(2));
+
+        let tcp_frame = RelayWireFrame::new(
+            reservation_id(42),
+            transfer_nonce(9),
+            peer(1),
+            packet_sent_at(
+                RelayTransport::TcpTls443,
+                b"tcp-endpoint-ciphertext",
+                2,
+                110,
+            ),
+        );
+        let tcp_record = tcp_frame
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect("encode tcp record");
+        let mut unknown_stream_buffer =
+            RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
+                .expect("unknown stream buffer");
+        assert_eq!(
+            service
+                .forward_tcp_tls_stream_bytes_from_endpoint(
+                    120,
+                    &directory,
+                    RelayTcpTlsStreamId::new(44).expect("unknown stream"),
+                    &mut unknown_stream_buffer,
+                    &tcp_record,
+                )
+                .expect_err("unknown tcp stream"),
+            RelayError::UnknownRelayEndpoint
+        );
+        assert_eq!(unknown_stream_buffer.pending_len(), 0);
+
+        let mut wrong_stream_buffer =
+            RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
+                .expect("wrong stream buffer");
+        assert_eq!(
+            service
+                .forward_tcp_tls_stream_bytes_from_endpoint(
+                    121,
+                    &directory,
+                    wrong_stream,
+                    &mut wrong_stream_buffer,
+                    &tcp_record,
+                )
+                .expect_err("mismatched tcp stream"),
+            RelayError::UnauthorizedPeer
+        );
+        assert!(service.events().iter().any(|event| {
+            event.kind == RelayEventKind::AuthorizationRejected
+                && event.quota_decision == "endpoint_peer_mismatch_rejected"
+                && event.transport == Some(RelayTransport::TcpTls443)
+        }));
+
+        let mut source_stream_buffer =
+            RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
+                .expect("source stream buffer");
+        let tcp_forwarded = service
+            .forward_tcp_tls_stream_bytes_from_endpoint(
+                122,
+                &directory,
+                source_stream,
+                &mut source_stream_buffer,
+                &tcp_record,
+            )
+            .expect("forward admitted tcp stream");
+        assert_eq!(tcp_forwarded.len(), 1);
+        assert_eq!(tcp_forwarded[0].to_peer_id(), peer(2));
     }
 
     #[test]
