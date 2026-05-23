@@ -125,6 +125,20 @@ impl ActorStateCell {
         self.state.store(Self::encode(state), Ordering::Release);
     }
 
+    /// Atomically compare and swap state from `current` to `new`.
+    /// Returns true if the swap succeeded, false otherwise.
+    #[inline]
+    fn compare_and_swap(&self, current: ActorState, new: ActorState) -> bool {
+        self.state
+            .compare_exchange_weak(
+                Self::encode(current),
+                Self::encode(new),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
     #[inline]
     const fn encode(state: ActorState) -> u8 {
         match state {
@@ -808,9 +822,8 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // Only transition to Running if stop() wasn't called before the actor started.
     // stop() sets Stopping before scheduling; we must honour that signal so the
     // poll_fn guard in the message loop can detect the pre-stop and break.
-    if cell.state.load() != ActorState::Stopping {
-        cell.state.store(ActorState::Running);
-    }
+    // Use compare_and_swap to avoid TOCTOU race between load() and store().
+    cell.state.compare_and_swap(ActorState::Created, ActorState::Running);
 
     // Phase 1: Initialization
     // We always run on_start, even if cancelled or pre-stopped, because
