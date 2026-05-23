@@ -13457,3 +13457,6 @@ mod tests {
         crate::test_complete!("read_biased_region_snapshot_enabled_by_default");
     }
 }
+
+#[cfg(test)]
+mod state_metamorphic;
