@@ -27,6 +27,7 @@
   "required_guarantee_ids": [
     "default-production-tokio-free",
     "metrics-production-tokio-free",
+    "atp-native-self-contained",
     "fuzz-tokio-quarantine",
     "workspace-tokio-audit",
     "feature-gated-native-surfaces",
@@ -37,6 +38,7 @@
     "rustfmt-frontier",
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
+    "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
   "lanes": [
@@ -247,6 +249,22 @@
       ]
     },
     {
+      "lane_id": "dirty-tree-ownership-receipt-contract",
+      "kind": "artifact_contract",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dirty_tree_ownership_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test dirty_tree_ownership_receipt_contract -- --nocapture",
+      "guarantee_ids": [
+        "shared-main-commit-guard"
+      ],
+      "feature_flags": [],
+      "expected_signal": "dirty_tree_ownership_receipt_contract tests pass",
+      "source_paths": [
+        "scripts/dirty_tree_ownership_receipt.py",
+        "tests/dirty_tree_ownership_receipt_contract.rs",
+        "docs/proof_runner_usage.md"
+      ]
+    },
+    {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
       "package": "asupersync",
@@ -262,6 +280,23 @@
         "Cargo.toml",
         "AGENTS.md",
         "README.md"
+      ]
+    },
+    {
+      "lane_id": "atp-native-quic-dependency-audit",
+      "kind": "dependency_audit",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
+      "guarantee_ids": [
+        "atp-native-self-contained"
+      ],
+      "feature_flags": [],
+      "expected_signal": "exit code 0 with 'ATP Dependency Audit PASSED' message",
+      "source_paths": [
+        "Cargo.toml",
+        "scripts/detect_forbidden_quic_deps.sh",
+        "artifacts/atp_quic_dependency_audit_gate_contract_v1.json",
+        "artifacts/atp_native_quic_endpoint_contract_v1.json"
       ]
     }
   ],
@@ -288,6 +323,12 @@
       "guarantee_id": "workspace-tokio-audit",
       "lane_ids": [
         "workspace-normal-tokio-audit"
+      ]
+    },
+    {
+      "guarantee_id": "atp-native-self-contained",
+      "lane_ids": [
+        "atp-native-quic-dependency-audit"
       ]
     },
     {
@@ -336,6 +377,12 @@
       "guarantee_id": "formal-lean-core-invariants",
       "lane_ids": [
         "formal-lean-build"
+      ]
+    },
+    {
+      "guarantee_id": "shared-main-commit-guard",
+      "lane_ids": [
+        "dirty-tree-ownership-receipt-contract"
       ]
     },
     {

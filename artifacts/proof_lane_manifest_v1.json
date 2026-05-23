@@ -31,6 +31,7 @@
     "rustfmt-frontier",
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
+    "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
   "lanes": [
@@ -322,6 +323,30 @@
       "escalation_notes": "Keep this command direct; do not shell-wrap through bash or cd."
     },
     {
+      "lane_id": "dirty-tree-ownership-receipt-contract",
+      "kind": "artifact_contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dirty_tree_ownership_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test dirty_tree_ownership_receipt_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "shared-main-commit-guard"
+      ],
+      "covers": "Dirty-tree ownership receipt and declared-path commit preflight protect shared-main commits from mixed ownership and shared-index races.",
+      "explicit_not_covered": "Does not execute commits in the project checkout, prove unrelated proof lanes, or override Agent Mail reservation policy.",
+      "expected_signal": "dirty_tree_ownership_receipt_contract tests pass",
+      "source_paths": [
+        "scripts/dirty_tree_ownership_receipt.py",
+        "tests/dirty_tree_ownership_receipt_contract.rs",
+        "docs/proof_runner_usage.md"
+      ],
+      "common_unrelated_blockers": [
+        "git executable unavailable on worker",
+        "offline reservation artifact shape drift",
+        "dirty-tree golden fixture drift"
+      ],
+      "escalation_notes": "Use this lane for ASW-7 guard changes; if it fails, do not commit from a shared dirty checkout until the first failing scenario is understood."
+    },
+    {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
@@ -462,6 +487,13 @@
       "description": "Lean core-invariant proof build has a canonical direct rch command.",
       "lane_ids": [
         "formal-lean-build"
+      ]
+    },
+    {
+      "guarantee_id": "shared-main-commit-guard",
+      "description": "Shared-main dirty-tree ownership guard and declared-path commit preflight have a canonical no-mock contract lane.",
+      "lane_ids": [
+        "dirty-tree-ownership-receipt-contract"
       ]
     },
     {

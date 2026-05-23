@@ -167,6 +167,17 @@ emergency recovery from a relocated archive. The guard treats active
 peer-reserved, unreserved, unknown, or tracker staged paths outside the
 declared set as commit-race blockers and exits before Git creates a commit.
 
+Required shared-main sequence:
+
+1. Reserve the exact files you intend to edit.
+2. Run the focused proof lane for those files with `rch exec -- ...` and an
+   isolated `CARGO_TARGET_DIR`.
+3. Run this declared-path preflight with every path that should enter the
+   commit.
+4. Commit only those paths with `git commit --only -- <declared paths>`.
+5. Push `main`, then sync `master` with `git push origin main:master`.
+6. Close or update the bead, release reservations, and send Agent Mail closeout.
+
 Normal code commit:
 
 ```bash
@@ -232,6 +243,15 @@ commit. Use `declared_commit.dirty_peer_paths_outside_scope`,
 `declared_commit.unsafe_declared_paths` to route the race through Agent Mail or
 rerun with a narrower declared path set.
 
+Recovery after an accidental mixed commit is coordination-first and
+non-destructive. Do not rewrite history, reset the checkout, clean files, or
+unstage peer paths by guesswork. Send Agent Mail with the commit hash, the
+unexpected paths, the preflight output if available, and the path-limited
+follow-up plan. Then land a normal forward commit that restores ownership
+clarity: either move the accidental peer changes into the peer's next commit
+with their explicit agreement, or add a narrow corrective commit that re-aligns
+the intended path ownership without discarding anyone's work.
+
 Agent Mail closeout template:
 
 ```text
@@ -263,6 +283,7 @@ The proof runner reads from `artifacts/proof_lane_manifest_v1.json`. Common lane
 | `lib-tests` | Unit tests | Library code changes |
 | `default-production-tokio-tree` | Dependency audit | Cargo.toml changes |
 | `rustdoc-api` | Documentation | Public API changes |
+| `dirty-tree-ownership-receipt-contract` | Shared-main commit guard | ASW-7 guard or docs changes |
 
 ## Integration with Beads Workflow
 

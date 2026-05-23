@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -81,6 +81,166 @@ fn unique_temp_dir(test_name: &str) -> PathBuf {
         "asupersync-dirty-tree-{test_name}-{}-{nanos}",
         std::process::id()
     ))
+}
+
+fn assert_success(output: &Output, context: &str) {
+    assert!(
+        output.status.success(),
+        "{context} failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn run_git(repo_path: &Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .unwrap_or_else(|err| panic!("run git {args:?}: {err}"))
+}
+
+fn git_success(repo_path: &Path, args: &[&str]) {
+    let output = run_git(repo_path, args);
+    assert_success(&output, &format!("git {args:?}"));
+}
+
+fn git_stdout(repo_path: &Path, args: &[&str]) -> String {
+    let output = run_git(repo_path, args);
+    assert_success(&output, &format!("git {args:?}"));
+    String::from_utf8(output.stdout).expect("git stdout must be UTF-8")
+}
+
+fn git_commit(repo_path: &Path, message: &str, args: &[&str]) {
+    let mut command = Command::new("git");
+    let output = command
+        .arg("-c")
+        .arg("user.name=Asupersync Test")
+        .arg("-c")
+        .arg("user.email=asupersync-test@example.invalid")
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .expect("run git commit");
+    assert_success(&output, "git commit");
+}
+
+fn write_repo_file(repo_path: &Path, relative_path: &str, contents: &str) {
+    let path = repo_path.join(relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create parent directory");
+    }
+    fs::write(path, contents).expect("write repo file");
+}
+
+fn write_reservation_artifact(
+    artifact_dir: &Path,
+    id: u64,
+    agent: &str,
+    path_pattern: &str,
+    expires_ts: &str,
+) {
+    fs::create_dir_all(artifact_dir).expect("create reservation artifact dir");
+    fs::write(
+        artifact_dir.join(format!("reservation-{id}.json")),
+        format!(
+            r#"{{
+  "id": {id},
+  "project": "/tmp/asupersync-dirty-tree-test",
+  "agent": "{agent}",
+  "path_pattern": "{path_pattern}",
+  "exclusive": true,
+  "reason": "no-mock-shared-main-test",
+  "created_ts": "2026-05-08T05:00:00Z",
+  "expires_ts": "{expires_ts}"
+}}"#
+        ),
+    )
+    .expect("write reservation artifact");
+}
+
+fn init_temp_git_repo(test_name: &str) -> PathBuf {
+    let repo_path = unique_temp_dir(test_name);
+    assert!(
+        repo_path.starts_with(std::env::temp_dir()),
+        "no-mock guard tests must stay under the system temp dir"
+    );
+    assert!(
+        !repo_path.starts_with(repo_root()),
+        "no-mock guard tests must not create repos inside the project checkout"
+    );
+
+    fs::create_dir_all(&repo_path).expect("create temp repo");
+    git_success(&repo_path, &["init", "-b", "main"]);
+    write_repo_file(
+        &repo_path,
+        "src/self.rs",
+        "pub fn self_value() -> u8 { 1 }\n",
+    );
+    write_repo_file(
+        &repo_path,
+        "src/peer.rs",
+        "pub fn peer_value() -> u8 { 1 }\n",
+    );
+    write_repo_file(&repo_path, "docs/operator.md", "initial operator notes\n");
+    git_success(
+        &repo_path,
+        &[
+            "add",
+            "--",
+            "src/self.rs",
+            "src/peer.rs",
+            "docs/operator.md",
+        ],
+    );
+    git_commit(&repo_path, "initial", &[]);
+    repo_path
+}
+
+fn run_live_declared_preflight(
+    repo_path: &Path,
+    artifact_dir: &Path,
+    commit_paths: &[&str],
+) -> Output {
+    let mut command = Command::new("python3");
+    command
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--repo-path")
+        .arg(repo_path)
+        .arg("--agent")
+        .arg("TopazGoose")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--timeout")
+        .arg("5")
+        .arg("--reservation-artifact-dir")
+        .arg(artifact_dir)
+        .arg("--declared-commit-preflight")
+        .arg("--output")
+        .arg("json");
+    for path in commit_paths {
+        command.arg("--commit-path").arg(path);
+    }
+    command
+        .current_dir(repo_root())
+        .output()
+        .expect("run live declared preflight")
+}
+
+fn json_string_array<'a>(value: &'a Value, key: &str) -> Vec<&'a str> {
+    value[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+        })
+        .collect()
 }
 
 fn assert_receipt_output_matches_golden(fixture: &str, expected_fixture: &str) {
@@ -556,6 +716,226 @@ fn declared_commit_preflight_treats_expired_offline_reservation_as_unreserved_bl
             .unwrap_or("")
             .is_empty(),
         "expired reservation id must not be cited as active ownership"
+    );
+}
+
+#[test]
+fn no_mock_shared_index_preflight_refuses_peer_staged_race_without_mutating_index() {
+    let repo_path = init_temp_git_repo("peer-staged-race");
+    let artifact_dir = unique_temp_dir("peer-staged-race-reservations");
+    write_reservation_artifact(
+        &artifact_dir,
+        9101,
+        "TopazGoose",
+        "src/self.rs",
+        "2026-05-08T06:08:00Z",
+    );
+    write_reservation_artifact(
+        &artifact_dir,
+        9102,
+        "MaroonBear",
+        "src/peer.rs",
+        "2026-05-08T06:08:00Z",
+    );
+
+    write_repo_file(
+        &repo_path,
+        "src/self.rs",
+        "pub fn self_value() -> u8 { 2 }\n",
+    );
+    write_repo_file(
+        &repo_path,
+        "src/peer.rs",
+        "pub fn peer_value() -> u8 { 2 }\n",
+    );
+    git_success(&repo_path, &["add", "--", "src/self.rs", "src/peer.rs"]);
+
+    let before_status = git_stdout(&repo_path, &["status", "--porcelain=v1"]);
+    assert!(before_status.contains("M  src/self.rs"));
+    assert!(before_status.contains("M  src/peer.rs"));
+
+    let output = run_live_declared_preflight(&repo_path, &artifact_dir, &["src/self.rs"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "live shared-index peer race should fail closed"
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(receipt["subsystems"]["git"].as_str(), Some("ok"));
+    assert_eq!(
+        receipt["subsystems"]["agent_mail"].as_str(),
+        Some("offline-reservation-artifacts-ok")
+    );
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("refuse-staged-paths-outside-declared-scope")
+    );
+    assert_eq!(
+        json_string_array(preflight, "currently_staged_paths"),
+        vec!["src/peer.rs", "src/self.rs"]
+    );
+    assert_eq!(
+        preflight["commit_race_blockers"][0]["path"].as_str(),
+        Some("src/peer.rs")
+    );
+    assert_eq!(
+        preflight["commit_race_blockers"][0]["scope"].as_str(),
+        Some("peer-reserved")
+    );
+    assert_eq!(
+        preflight["commit_race_blockers"][0]["reservation_holder"].as_str(),
+        Some("MaroonBear")
+    );
+
+    let after_status = git_stdout(&repo_path, &["status", "--porcelain=v1"]);
+    assert_eq!(
+        after_status, before_status,
+        "preflight must not mutate staged self or peer paths"
+    );
+}
+
+#[test]
+fn no_mock_declared_only_commit_preserves_unstaged_peer_work() {
+    let repo_path = init_temp_git_repo("declared-only-preserves-peer-work");
+    let artifact_dir = unique_temp_dir("declared-only-preserves-peer-work-reservations");
+    write_reservation_artifact(
+        &artifact_dir,
+        9111,
+        "TopazGoose",
+        "src/self.rs",
+        "2026-05-08T06:08:00Z",
+    );
+    write_reservation_artifact(
+        &artifact_dir,
+        9112,
+        "MaroonBear",
+        "src/peer.rs",
+        "2026-05-08T06:08:00Z",
+    );
+
+    write_repo_file(
+        &repo_path,
+        "src/self.rs",
+        "pub fn self_value() -> u8 { 3 }\n",
+    );
+    write_repo_file(
+        &repo_path,
+        "src/peer.rs",
+        "pub fn peer_value() -> u8 { 3 }\n",
+    );
+    git_success(&repo_path, &["add", "--", "src/self.rs"]);
+
+    let output = run_live_declared_preflight(&repo_path, &artifact_dir, &["src/self.rs"]);
+    assert_success(&output, "live declared-only preflight");
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("ready-path-limited-commit")
+    );
+    assert_eq!(
+        preflight["path_limited_commit_command"].as_str(),
+        Some("git commit --only -- src/self.rs")
+    );
+    assert_eq!(
+        json_string_array(preflight, "dirty_peer_paths_outside_scope"),
+        vec!["src/peer.rs"]
+    );
+    assert_eq!(
+        json_string_array(preflight, "dirty_unstaged_paths_outside_scope"),
+        vec!["src/peer.rs"]
+    );
+
+    git_commit(
+        &repo_path,
+        "commit self slice only",
+        &["--only", "--", "src/self.rs"],
+    );
+    let committed_paths = git_stdout(
+        &repo_path,
+        &["show", "--name-only", "--pretty=format:", "HEAD"],
+    );
+    assert!(committed_paths.contains("src/self.rs"));
+    assert!(
+        !committed_paths.contains("src/peer.rs"),
+        "path-limited commit must exclude peer work"
+    );
+
+    let status = git_stdout(&repo_path, &["status", "--porcelain=v1"]);
+    assert!(
+        status.contains(" M src/peer.rs"),
+        "unstaged peer work should remain after declared-only commit: {status:?}"
+    );
+    assert!(
+        !status.contains("src/self.rs"),
+        "declared self path should be clean after commit: {status:?}"
+    );
+}
+
+#[test]
+fn no_mock_path_limited_commit_preserves_other_staged_work_when_guard_allows() {
+    let repo_path = init_temp_git_repo("path-limited-preserves-other-staged-work");
+    let artifact_dir = unique_temp_dir("path-limited-preserves-other-staged-work-reservations");
+    write_reservation_artifact(
+        &artifact_dir,
+        9121,
+        "TopazGoose",
+        "src/self.rs",
+        "2026-05-08T06:08:00Z",
+    );
+    write_reservation_artifact(
+        &artifact_dir,
+        9122,
+        "TopazGoose",
+        "docs/operator.md",
+        "2026-05-08T06:08:00Z",
+    );
+
+    write_repo_file(
+        &repo_path,
+        "src/self.rs",
+        "pub fn self_value() -> u8 { 4 }\n",
+    );
+    write_repo_file(&repo_path, "docs/operator.md", "follow-up operator notes\n");
+    git_success(
+        &repo_path,
+        &["add", "--", "src/self.rs", "docs/operator.md"],
+    );
+
+    let output = run_live_declared_preflight(&repo_path, &artifact_dir, &["src/self.rs"]);
+    assert_success(&output, "live path-limited preflight");
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("ready-path-limited-commit")
+    );
+    assert_eq!(
+        preflight["own_reserved_staged_paths_outside_scope"][0]["path"].as_str(),
+        Some("docs/operator.md")
+    );
+    assert_eq!(
+        preflight["path_limited_commit_command"].as_str(),
+        Some("git commit --only -- src/self.rs")
+    );
+
+    git_commit(
+        &repo_path,
+        "commit one reserved path only",
+        &["--only", "--", "src/self.rs"],
+    );
+    let status = git_stdout(&repo_path, &["status", "--porcelain=v1"]);
+    assert!(
+        status.contains("M  docs/operator.md"),
+        "other staged work should remain staged after git commit --only: {status:?}"
+    );
+    assert!(
+        !status.contains("src/self.rs"),
+        "declared path should be clean after path-limited commit: {status:?}"
     );
 }
 

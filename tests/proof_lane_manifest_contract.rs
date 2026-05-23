@@ -274,6 +274,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "clippy-all-targets",
         "rustdoc-api",
         "formal-lean-build",
+        "dirty-tree-ownership-receipt-contract",
         "proof-lane-manifest-contract",
     ] {
         assert!(lane_ids.contains(required), "missing lane {required}");
