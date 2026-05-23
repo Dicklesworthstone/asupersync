@@ -396,6 +396,10 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn reader_arrived_before_writer(reader_id: u64, writer_id: u64) -> bool {
+        // AUDIT: Potential fairness issue on wraparound. This logic assumes
+        // IDs are close in value, but after billions of operations, wraparound
+        // could cause incorrect ordering when mixing very old and very new IDs.
+        // Risk is low due to the huge ID space (2^64).
         reader_id.wrapping_sub(writer_id).cast_signed() < 0
     }
 
@@ -824,11 +828,6 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
-        if !this.counted {
-            state.writer_waiters += 1;
-            this.counted = true;
-        }
-
         if let Some(waiter_id) = this.waiter_id {
             if state.writer_queue.update_waker(waiter_id, context.waker()) {
                 drop(state);
@@ -864,10 +863,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             }
 
             state.writer_active = true;
-            if this.counted {
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                this.counted = false;
-            }
+            // Only count as waiting writer if we actually queue
             drop(state);
 
             // Record lock acquisition for ordering tracking
@@ -879,6 +875,11 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
         }
 
+        // Only increment writer_waiters when we must actually queue
+        if !this.counted {
+            state.writer_waiters += 1;
+            this.counted = true;
+        }
         let id = state.next_waiter_id;
         state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
         let waiter_id = state
@@ -1346,11 +1347,6 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
-        if !this.counted {
-            state.writer_waiters += 1;
-            this.counted = true;
-        }
-
         if let Some(waiter_id) = this.waiter_id {
             if state.writer_queue.update_waker(waiter_id, context.waker()) {
                 drop(state);
@@ -1388,10 +1384,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             }
 
             state.writer_active = true;
-            if this.counted {
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                this.counted = false;
-            }
+            // Only count as waiting writer if we actually queue
             drop(state);
 
             // Record lock acquisition for ordering tracking
@@ -1403,6 +1396,12 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                 lock: Arc::clone(&this.lock),
             }));
+        }
+
+        // Only increment writer_waiters when we must actually queue
+        if !this.counted {
+            state.writer_waiters += 1;
+            this.counted = true;
         }
 
         let id = state.next_waiter_id;
