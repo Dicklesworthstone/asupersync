@@ -1225,16 +1225,13 @@ impl SwarmPressureGovernor {
 
         let mut leases = self.workload_leases.lock().unwrap();
         self.expire_stale_workload_leases_locked(&mut leases, now);
-        if leases
+        if let Some(reason) = leases
             .values()
-            .any(|existing| existing.state.is_live() && existing.workload_id == lease.workload_id)
+            .find_map(|existing| Self::workload_lease_conflict_reason(existing, request))
         {
             self.workload_lease_conflicts
                 .fetch_add(1, Ordering::Relaxed);
-            return Err(workload_lease_error(format!(
-                "workload {} already has a live lease",
-                lease.workload_id
-            )));
+            return Err(workload_lease_error(reason));
         }
 
         leases.insert(lease_id, lease.clone());
@@ -1572,6 +1569,48 @@ impl SwarmPressureGovernor {
             SwarmWorkloadLeaseState::Active | SwarmWorkloadLeaseState::Committed => {}
         }
         Ok(Self::lease_receipt(lease, reason.as_ref()))
+    }
+
+    fn workload_lease_conflict_reason(
+        existing: &SwarmWorkloadLease,
+        request: &SwarmWorkloadAdmissionRequest,
+    ) -> Option<String> {
+        if !existing.state.is_live() {
+            return None;
+        }
+
+        let requested_workload_id = request.workload_id.trim();
+        if existing.workload_id == requested_workload_id {
+            return Some(format!(
+                "workload {requested_workload_id} already has a live lease"
+            ));
+        }
+
+        let existing_scope = existing
+            .owner
+            .reservation_scope
+            .as_deref()
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty());
+        let requested_scope = request
+            .owner
+            .reservation_scope
+            .as_deref()
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty());
+        if let (Some(existing_scope), Some(requested_scope)) = (existing_scope, requested_scope)
+            && existing_scope == requested_scope
+        {
+            return Some(format!(
+                "reservation_scope {requested_scope} already has a live workload lease \
+                 for workload {} live proof_lane={} requested proof_lane={}",
+                existing.workload_id,
+                existing.proof_lane.as_str(),
+                request.proof_lane.as_str()
+            ));
+        }
+
+        None
     }
 
     fn expire_stale_workload_leases_locked(
@@ -2813,6 +2852,72 @@ mod tests {
         assert_eq!(metrics.workload_leases_expired, 1);
         assert_eq!(metrics.active_workload_lease_count, 0);
         assert_eq!(metrics.terminal_workload_lease_count, 2);
+    }
+
+    #[test]
+    fn test_workload_lease_conflicts_on_live_reservation_scope() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let reservation_scope = "src/observability/swarm_pressure_governor.rs";
+        let first_request = SwarmWorkloadAdmissionRequest::new(
+            "scope-owner-a",
+            SwarmAdmissionOwner::new("DustyGorge")
+                .with_reservation_scope(format!(" {reservation_scope} ")),
+        )
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib);
+        let first_decision = governor
+            .check_workload_admission(&cx, &first_request)
+            .expect("first workload admission should classify");
+        let first = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(55, 1),
+                &first_request,
+                &first_decision,
+            )
+            .expect("first scoped workload lease should acquire");
+
+        let second_request = SwarmWorkloadAdmissionRequest::new(
+            "scope-owner-b",
+            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope(reservation_scope),
+        )
+        .with_proof_lane(SwarmProofLaneKind::ClippyAllTargets);
+        let second_decision = governor
+            .check_workload_admission(&cx, &second_request)
+            .expect("second workload admission should classify before lease conflict check");
+
+        let conflict = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(56, 1),
+                &second_request,
+                &second_decision,
+            )
+            .expect_err("live reservation scope must reject a second workload lease");
+        assert!(matches!(
+            conflict,
+            SwarmPressureError::WorkloadLease { ref reason }
+                if reason.contains("reservation_scope src/observability/swarm_pressure_governor.rs")
+                    && reason.contains("live proof_lane=cargo_check_lib")
+                    && reason.contains("requested proof_lane=clippy_all_targets")
+        ));
+        assert_eq!(governor.metrics().workload_lease_conflicts, 1);
+
+        governor
+            .abort_workload_lease(first.lease_id, "scope owner cancelled")
+            .expect("terminal first lease should release reservation-scope conflict");
+        let second = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(56, 1),
+                &second_request,
+                &second_decision,
+            )
+            .expect("terminal prior lease must not block the same reservation scope forever");
+        assert_eq!(second.workload_id, "scope-owner-b");
     }
 
     #[test]
