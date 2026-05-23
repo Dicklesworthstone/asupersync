@@ -90,27 +90,33 @@ fn test_quic_frame_roundtrip_conformance() -> Result<(), Box<dyn std::error::Err
         ("HANDSHAKE_DONE", create_handshake_done_frame()),
     ];
 
+    let expected_frame_count = frame_tests.len();
     let mut passed = 0;
-    let mut failed = 0;
+    let mut failures = Vec::new();
 
     for (frame_name, frame_data) in frame_tests {
         match test_frame_roundtrip(frame_name, &frame_data) {
-            Ok(_) => {
-                passed += 1;
-                println!("✓ {} frame roundtrip test passed", frame_name);
-            }
+            Ok(_) => passed += 1,
             Err(e) => {
-                failed += 1;
-                println!("✗ {} frame roundtrip test failed: {}", frame_name, e);
+                failures.push(format!("{frame_name}: {e}"));
             }
         }
     }
 
-    if failed == 0 {
+    if failures.is_empty() {
         ctx.set_result(ConformanceResult::Pass);
-        println!("All {} frame roundtrip tests passed", passed);
+        assert!(ctx.is_passing(), "frame roundtrip context should pass");
+        assert_eq!(
+            passed, expected_frame_count,
+            "all frame roundtrip cases must be exercised"
+        );
     } else {
-        ctx.set_result(ConformanceResult::Fail(format!("{} tests failed", failed)));
+        ctx.set_result(ConformanceResult::Fail(format!(
+            "{} tests failed: {}",
+            failures.len(),
+            failures.join("; ")
+        )));
+        return Err(format!("{:?}", ctx.actual).into());
     }
 
     Ok(())
@@ -128,9 +134,7 @@ fn test_unsupported_standard_frame_types_fail_closed() -> Result<(), Box<dyn std
     for (name, wire) in unsupported {
         let mut decode_buf = std::io::Cursor::new(wire.as_ref());
         match QuicFrame::decode(&mut decode_buf) {
-            Err(QuicFrameError::UnknownFrameType(_)) => {
-                println!("✓ {} frame fails closed as unsupported", name);
-            }
+            Err(QuicFrameError::UnknownFrameType(_)) => {}
             Ok(Some(frame)) => {
                 return Err(format!("{name} decoded unexpectedly as {frame:?}").into());
             }
@@ -165,19 +169,16 @@ fn test_packet_number_space_conformance() -> Result<(), Box<dyn std::error::Erro
 
     for (packet_number, expected_length) in pn_tests {
         match test_packet_number_encoding(packet_number, expected_length) {
-            Ok(_) => println!(
-                "✓ Packet number {} encoded in {} bytes",
-                packet_number, expected_length
-            ),
+            Ok(_) => {}
             Err(e) => {
                 ctx.set_result(ConformanceResult::Fail(e.to_string()));
-                return Ok(());
+                return Err(e);
             }
         }
     }
 
     ctx.set_result(ConformanceResult::Pass);
-    println!("Packet number space conformance tests passed");
+    assert!(ctx.is_passing(), "packet-number context should pass");
     Ok(())
 }
 
@@ -195,11 +196,11 @@ fn test_transport_parameters_conformance() -> Result<(), Box<dyn std::error::Err
     match test_transport_params_roundtrip(&params) {
         Ok(_) => {
             ctx.set_result(ConformanceResult::Pass);
-            println!("✓ Transport parameters conformance test passed");
+            assert!(ctx.is_passing(), "transport-parameter context should pass");
         }
         Err(e) => {
             ctx.set_result(ConformanceResult::Fail(e.to_string()));
-            println!("✗ Transport parameters conformance test failed: {}", e);
+            return Err(e);
         }
     }
 
@@ -218,11 +219,11 @@ fn test_version_negotiation_conformance() -> Result<(), Box<dyn std::error::Erro
     match test_version_negotiation(supported_versions, unsupported_version) {
         Ok(_) => {
             ctx.set_result(ConformanceResult::Pass);
-            println!("✓ Version negotiation conformance test passed");
+            assert!(ctx.is_passing(), "version-negotiation context should pass");
         }
         Err(e) => {
             ctx.set_result(ConformanceResult::Fail(e.to_string()));
-            println!("✗ Version negotiation conformance test failed: {}", e);
+            return Err(e);
         }
     }
 
@@ -248,16 +249,19 @@ fn test_ack_ranges_conformance() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, (acked_packets, expected_ranges)) in test_cases.iter().enumerate() {
         match test_ack_range_encoding(acked_packets.clone(), expected_ranges.clone()) {
-            Ok(_) => println!("✓ ACK range test case {} passed", i + 1),
+            Ok(_) => {}
             Err(e) => {
-                ctx.set_result(ConformanceResult::Fail(e.to_string()));
-                return Ok(());
+                ctx.set_result(ConformanceResult::Fail(format!(
+                    "ACK range test case {} failed: {e}",
+                    i + 1
+                )));
+                return Err(format!("{:?}", ctx.actual).into());
             }
         }
     }
 
     ctx.set_result(ConformanceResult::Pass);
-    println!("ACK ranges conformance tests passed");
+    assert!(ctx.is_passing(), "ACK range context should pass");
     Ok(())
 }
 
@@ -279,19 +283,16 @@ fn test_flow_control_conformance() -> Result<(), Box<dyn std::error::Error>> {
 
     for (limit, data_size, should_allow) in flow_control_tests {
         match test_flow_control_boundary(limit, data_size, should_allow) {
-            Ok(_) => println!(
-                "✓ Flow control test (limit:{}, size:{}) passed",
-                limit, data_size
-            ),
+            Ok(_) => {}
             Err(e) => {
                 ctx.set_result(ConformanceResult::Fail(e.to_string()));
-                return Ok(());
+                return Err(e);
             }
         }
     }
 
     ctx.set_result(ConformanceResult::Pass);
-    println!("Flow control conformance tests passed");
+    assert!(ctx.is_passing(), "flow-control context should pass");
     Ok(())
 }
 
@@ -310,16 +311,18 @@ fn test_close_drain_conformance() -> Result<(), Box<dyn std::error::Error>> {
 
     for (test_name, error_code, reason) in close_tests {
         match test_connection_close(error_code, reason) {
-            Ok(_) => println!("✓ Connection close test '{}' passed", test_name),
+            Ok(_) => {}
             Err(e) => {
-                ctx.set_result(ConformanceResult::Fail(e.to_string()));
-                return Ok(());
+                ctx.set_result(ConformanceResult::Fail(format!(
+                    "connection close test '{test_name}' failed: {e}"
+                )));
+                return Err(format!("{:?}", ctx.actual).into());
             }
         }
     }
 
     ctx.set_result(ConformanceResult::Pass);
-    println!("Close/drain conformance tests passed");
+    assert!(ctx.is_passing(), "close/drain context should pass");
     Ok(())
 }
 
@@ -492,12 +495,6 @@ fn test_frame_roundtrip(
         return Err(format!("{frame_name} encoded to empty bytes").into());
     }
 
-    println!(
-        "Testing {} frame roundtrip with {} bytes",
-        frame_name,
-        encoded.len()
-    );
-
     let mut decode_buf = std::io::Cursor::new(encoded.as_ref());
     let decoded = QuicFrame::decode(&mut decode_buf)?
         .ok_or_else(|| format!("{frame_name} did not decode a complete frame"))?;
@@ -527,11 +524,6 @@ fn test_packet_number_encoding(
     packet_number: u64,
     expected_length: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
-        "Encoding packet number {} expecting {} bytes",
-        packet_number, expected_length
-    );
-
     let minimal_length = packet_number_encoded_len(packet_number)?;
     if minimal_length != expected_length {
         return Err(format!(
