@@ -318,19 +318,19 @@ impl MockChaosGenerator {
 
             let event = match hash_value % 5 {
                 0 => ChaosEvent::NetworkDelay {
-                    duration_ms: (hash_value % 1000) + 10
+                    duration_ms: (hash_value % 1000) + 10,
                 },
                 1 => ChaosEvent::ProcessCrash {
-                    process_id: hash_value % 10
+                    process_id: hash_value % 10,
                 },
                 2 => ChaosEvent::MemoryPressure {
-                    pressure_level: ((hash_value % 100) as u8).min(100)
+                    pressure_level: ((hash_value % 100) as u8).min(100),
                 },
                 3 => ChaosEvent::DiskFailure {
-                    disk_id: hash_value % 5
+                    disk_id: hash_value % 5,
                 },
                 _ => ChaosEvent::PacketLoss {
-                    loss_rate: ((hash_value % 100) as f64) / 100.0
+                    loss_rate: ((hash_value % 100) as f64) / 100.0,
                 },
             };
 
@@ -388,8 +388,10 @@ impl MockReplayVerifier {
     }
 
     pub fn replay_correctness_holds(&self) -> bool {
-        matches!(self.verification_result,
-            VerificationResult::Identical | VerificationResult::EquivalentOrdering)
+        matches!(
+            self.verification_result,
+            VerificationResult::Identical | VerificationResult::EquivalentOrdering
+        )
     }
 }
 
@@ -438,9 +440,9 @@ impl MockScenarioRunner {
     }
 
     pub fn execution_determinism_holds(&self, other: &Self) -> bool {
-        self.deterministic_seed == other.deterministic_seed &&
-        self.execution_steps == other.execution_steps &&
-        self.execution_results == other.execution_results
+        self.deterministic_seed == other.deterministic_seed
+            && self.execution_steps == other.execution_steps
+            && self.execution_results == other.execution_results
     }
 }
 
@@ -461,7 +463,10 @@ impl MockLabSnapshot {
         Self::create(snapshot.state_data.clone(), snapshot.metadata.clone())
     }
 
-    fn calculate_integrity_hash(state_data: &[(String, Vec<u8>)], metadata: &SnapshotMetadata) -> u64 {
+    fn calculate_integrity_hash(
+        state_data: &[(String, Vec<u8>)],
+        metadata: &SnapshotMetadata,
+    ) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -479,9 +484,9 @@ impl MockLabSnapshot {
     }
 
     pub fn roundtrip_preserves_state(&self, restored: &Self) -> bool {
-        self.state_data == restored.state_data &&
-        self.metadata == restored.metadata &&
-        self.integrity_hash == restored.integrity_hash
+        self.state_data == restored.state_data
+            && self.metadata == restored.metadata
+            && self.integrity_hash == restored.integrity_hash
     }
 }
 
@@ -504,9 +509,8 @@ impl MockCausalityDag {
 
     pub fn compute_topological_order(&mut self) -> bool {
         // Simple topological sort using Kahn's algorithm
-        let mut in_degree: std::collections::HashMap<u64, usize> = self.events.iter()
-            .map(|e| (e.event_id, 0))
-            .collect();
+        let mut in_degree: std::collections::HashMap<u64, usize> =
+            self.events.iter().map(|e| (e.event_id, 0)).collect();
 
         // Calculate in-degrees
         for &(_, successor) in &self.dependencies {
@@ -514,10 +518,13 @@ impl MockCausalityDag {
         }
 
         // Find nodes with no incoming edges
-        let mut queue: Vec<u64> = in_degree.iter()
-            .filter_map(|(&event_id, &degree)| {
-                if degree == 0 { Some(event_id) } else { None }
-            })
+        let mut queue: Vec<u64> = in_degree
+            .iter()
+            .filter_map(
+                |(&event_id, &degree)| {
+                    if degree == 0 { Some(event_id) } else { None }
+                },
+            )
             .collect();
 
         self.topological_order.clear();
@@ -576,7 +583,10 @@ impl MockDpor {
             std::collections::HashMap::new();
 
         for (i, path) in self.execution_paths.iter().enumerate() {
-            state_groups.entry(path.final_state.clone()).or_insert_with(Vec::new).push(i);
+            state_groups
+                .entry(path.final_state.clone())
+                .or_insert_with(Vec::new)
+                .push(i);
         }
 
         // Create equivalence classes
@@ -586,7 +596,8 @@ impl MockDpor {
         self.reduced_paths.clear();
         for class in &self.equivalence_classes {
             if let Some(&first_idx) = class.first() {
-                self.reduced_paths.push(self.execution_paths[first_idx].clone());
+                self.reduced_paths
+                    .push(self.execution_paths[first_idx].clone());
             }
         }
     }
@@ -594,7 +605,8 @@ impl MockDpor {
     pub fn dpor_equivalence_preserved(&self) -> bool {
         // Check that each equivalence class has same final state
         for class in &self.equivalence_classes {
-            let mut final_states: std::collections::HashSet<&String> = std::collections::HashSet::new();
+            let mut final_states: std::collections::HashSet<&String> =
+                std::collections::HashSet::new();
 
             for &path_idx in class {
                 if let Some(path) = self.execution_paths.get(path_idx) {
@@ -636,7 +648,11 @@ impl MockTraceIntegrity {
     }
 
     pub fn generate_integrity_proof(&mut self, segment_id: u64) -> bool {
-        if let Some(segment) = self.trace_segments.iter().find(|s| s.segment_id == segment_id) {
+        if let Some(segment) = self
+            .trace_segments
+            .iter()
+            .find(|s| s.segment_id == segment_id)
+        {
             // Generate merkle proof for segment
             let merkle_root = segment.segment_hash;
             let proof_chain = vec![merkle_root, self.cumulative_hash];
@@ -704,7 +720,9 @@ impl MockOtelSpanTree {
         self.exported_spans.clear();
 
         // Export root span
-        let root_duration = self.root_span.end_time
+        let root_duration = self
+            .root_span
+            .end_time
             .map(|end| end.saturating_sub(self.root_span.start_time))
             .unwrap_or(0);
 
@@ -732,7 +750,9 @@ impl MockOtelSpanTree {
     pub fn span_tree_preserved(&self) -> bool {
         // Check that parent-child relationships are preserved in export
         for relationship in &self.span_relationships {
-            let child_exported = self.exported_spans.iter()
+            let child_exported = self
+                .exported_spans
+                .iter()
                 .find(|s| s.span_id == relationship.child_id);
 
             if let Some(exported_child) = child_exported {
@@ -766,14 +786,21 @@ impl MockSpectralHealth {
         self.smoothed_series.clear();
 
         for i in 0..self.time_series.len() {
-            let start = if i >= window_size / 2 { i - window_size / 2 } else { 0 };
+            let start = if i >= window_size / 2 {
+                i - window_size / 2
+            } else {
+                0
+            };
             let end = (i + window_size / 2 + 1).min(self.time_series.len());
 
             let sum: f64 = self.time_series[start..end].iter().map(|dp| dp.value).sum();
             let count = (end - start) as f64;
             let smoothed_value = sum / count;
 
-            let confidence_sum: f64 = self.time_series[start..end].iter().map(|dp| dp.confidence).sum();
+            let confidence_sum: f64 = self.time_series[start..end]
+                .iter()
+                .map(|dp| dp.confidence)
+                .sum();
             let smoothed_confidence = confidence_sum / count;
 
             self.smoothed_series.push(HealthDataPoint {
@@ -792,11 +819,17 @@ impl MockSpectralHealth {
             return;
         }
 
-        let first_half_avg = self.smoothed_series[..self.smoothed_series.len()/2]
-            .iter().map(|dp| dp.value).sum::<f64>() / (self.smoothed_series.len()/2) as f64;
+        let first_half_avg = self.smoothed_series[..self.smoothed_series.len() / 2]
+            .iter()
+            .map(|dp| dp.value)
+            .sum::<f64>()
+            / (self.smoothed_series.len() / 2) as f64;
 
-        let second_half_avg = self.smoothed_series[self.smoothed_series.len()/2..]
-            .iter().map(|dp| dp.value).sum::<f64>() / (self.smoothed_series.len() - self.smoothed_series.len()/2) as f64;
+        let second_half_avg = self.smoothed_series[self.smoothed_series.len() / 2..]
+            .iter()
+            .map(|dp| dp.value)
+            .sum::<f64>()
+            / (self.smoothed_series.len() - self.smoothed_series.len() / 2) as f64;
 
         let threshold = 0.05; // 5% threshold for trend detection
 
@@ -812,9 +845,9 @@ impl MockSpectralHealth {
     pub fn smoothing_preserves_trends(&self, original_trend: TrendDirection) -> bool {
         // Smoothing should preserve major trends
         match (original_trend, &self.trend_direction) {
-            (TrendDirection::Improving, TrendDirection::Improving) |
-            (TrendDirection::Degrading, TrendDirection::Degrading) |
-            (TrendDirection::Stable, TrendDirection::Stable) => true,
+            (TrendDirection::Improving, TrendDirection::Improving)
+            | (TrendDirection::Degrading, TrendDirection::Degrading)
+            | (TrendDirection::Stable, TrendDirection::Stable) => true,
             // Allow some tolerance for unknown trends
             (TrendDirection::Unknown, _) | (_, TrendDirection::Unknown) => true,
             // Smoothing might stabilize small variations
@@ -907,7 +940,9 @@ impl MockAuthenticatedEncryption {
         }
 
         // Simple XOR encryption (for testing purposes)
-        self.ciphertext = self.plaintext.iter()
+        self.ciphertext = self
+            .plaintext
+            .iter()
             .zip(self.key.iter().cycle())
             .map(|(p, k)| p ^ k)
             .collect();
@@ -929,7 +964,9 @@ impl MockAuthenticatedEncryption {
         }
 
         // Decrypt (reverse XOR)
-        let decrypted: Vec<u8> = self.ciphertext.iter()
+        let decrypted: Vec<u8> = self
+            .ciphertext
+            .iter()
             .zip(self.key.iter().cycle())
             .map(|(c, k)| c ^ k)
             .collect();
@@ -1019,10 +1056,10 @@ impl MockSecurityTag {
 
     pub fn tag_verification_consistency(&self, other: &Self) -> bool {
         // Same data and key should produce same verification result
-        self.data == other.data &&
-        self.tag == other.tag &&
-        self.algorithm == other.algorithm &&
-        self.verification_result == other.verification_result
+        self.data == other.data
+            && self.tag == other.tag
+            && self.algorithm == other.algorithm
+            && self.verification_result == other.verification_result
     }
 }
 
@@ -1588,14 +1625,12 @@ mod tests {
         assert!(gen1.determinism_holds(&gen2));
 
         // Test replay verifier
-        let events = vec![
-            TraceEvent {
-                event_id: 1,
-                timestamp: 1000,
-                event_type: EventType::TaskStart { task_id: 1 },
-                causality_vector: vec![1, 0],
-            }
-        ];
+        let events = vec![TraceEvent {
+            event_id: 1,
+            timestamp: 1000,
+            event_type: EventType::TaskStart { task_id: 1 },
+            causality_vector: vec![1, 0],
+        }];
         let mut verifier = MockReplayVerifier::new(events.clone());
         let result = verifier.replay(events);
         assert_eq!(result, VerificationResult::Identical);

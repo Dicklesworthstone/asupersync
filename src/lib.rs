@@ -239,27 +239,27 @@ pub mod signal;
 
 // ── Test-only modules ───────────────────────────────────────────────────
 #[cfg(any(test, feature = "test-internals"))]
+pub mod cancel_cx_runtime_channel_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod database_grpc_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod distributed_service_messaging_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod lab_trace_observability_security_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod net_http_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod obligation_combinator_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod plan_trace_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod sync_scheduler_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod test_logging;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_ndjson;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_utils;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod plan_trace_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod obligation_combinator_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod cancel_cx_runtime_channel_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod net_http_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod database_grpc_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod sync_scheduler_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod distributed_service_messaging_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod lab_trace_observability_security_metamorphic_tests;
 
 // Re-exports for convenient access to core types
 pub use config::{
