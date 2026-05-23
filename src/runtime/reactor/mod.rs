@@ -1059,7 +1059,7 @@ mod tests {
     #[test]
     fn reactor_trait_bounds_epoll() {
         init_test("reactor_trait_bounds_epoll");
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         assert_reactor_trait_bounds::<super::EpollReactor>();
         crate::test_complete!("reactor_trait_bounds_epoll");
     }
@@ -1078,7 +1078,7 @@ mod tests {
         crate::test_complete!("reactor_trait_bounds_browser");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn reactor_trait_bounds_io_uring() {
         init_test("reactor_trait_bounds_io_uring");
@@ -1164,7 +1164,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn cross_reactor_compliance_epoll() {
         init_test("cross_reactor_compliance_epoll");
@@ -1210,7 +1210,7 @@ mod tests {
         crate::test_complete!("cross_reactor_compliance_browser");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn cross_reactor_compliance_io_uring() {
         init_test("cross_reactor_compliance_io_uring");

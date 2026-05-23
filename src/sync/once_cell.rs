@@ -3375,9 +3375,13 @@ mod tests {
     /// Different functions producing equivalent values should yield equivalent cells.
     /// MR: OnceCell.init(f) ≡ OnceCell.init(g) when f() = g()
     proptest! {
+        #[allow(clippy::clone_on_copy, clippy::let_and_return)]
         #[test]
         fn mr_initialization_function_independence(value in any::<u32>()) {
-            // Create equivalent functions that produce the same value
+            // Create equivalent functions that produce the same value.
+            // The redundant-looking forms are intentional: the MR is that
+            // syntactically distinct closures with the same value behavior
+            // yield equivalent cells.
             let func1 = || value;
             let func2 = || { let v = value; v };
             let func3 = || value.clone();
@@ -3441,24 +3445,37 @@ mod tests {
                     "Clone must preserve exact value when initialized");
             }
 
-            // Test that both behave identically to further operations
+            // Test that both behave identically to further operations.
+            // `OnceCell::clone` produces an independent cell (deep value
+            // clone, see the `Clone` impl above), so for the uninitialized
+            // case both `get_or_init_blocking` calls run their closure.
+            // Both closures therefore produce the SAME probe value, so the
+            // equality assertion below holds in both the already-initialized
+            // and uninitialized branches, and `wrapping_add` keeps the
+            // arithmetic safe across the full `i32` range proptest samples.
+            let probe_value = value.wrapping_add(100);
             let probe_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
             let probe1 = Arc::clone(&probe_counter);
             let original_probe = original.get_or_init_blocking(|| {
                 probe1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                value + 100
+                probe_value
             });
 
             let probe2 = Arc::clone(&probe_counter);
             let cloned_probe = cloned.get_or_init_blocking(|| {
                 probe2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                value + 200
+                probe_value
             });
 
             prop_assert_eq!(*original_probe, *cloned_probe,
                 "Clone and original should respond identically to get_or_init");
 
+            // Initialized cases (set / blocking init / async init) leave both
+            // cells already initialized, so neither closure runs (count 0).
+            // The uninitialized case starts both cells empty and independent,
+            // so both closures run (count 2). A regression where `clone`
+            // started sharing inner state would surface here as count == 1.
             let expected_probe_count = if init_method == 3 { 2 } else { 0 };
             prop_assert_eq!(probe_counter.load(std::sync::atomic::Ordering::SeqCst),
                 expected_probe_count,
