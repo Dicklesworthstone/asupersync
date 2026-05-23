@@ -978,8 +978,11 @@ fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
     .expect("socket loop");
     let source_udp = SocketAddr::from(([203, 0, 113, 31], 47_031));
     let destination_udp = SocketAddr::from(([203, 0, 113, 32], 47_032));
+    let migrated_destination_udp = SocketAddr::from(([203, 0, 113, 33], 47_033));
     let source_stream = RelayTcpTlsStreamId::new(731).expect("source stream");
     let destination_stream = RelayTcpTlsStreamId::new(732).expect("destination stream");
+    let migrated_destination_stream =
+        RelayTcpTlsStreamId::new(734).expect("migrated destination stream");
     let unknown_stream = RelayTcpTlsStreamId::new(733).expect("unknown stream");
 
     log_stage(
@@ -994,11 +997,17 @@ fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
         .admit_udp_endpoint(peer(2), destination_udp)
         .expect("admit destination udp");
     socket_loop
+        .admit_udp_endpoint(peer(2), migrated_destination_udp)
+        .expect("admit migrated destination udp");
+    socket_loop
         .admit_tcp_tls_stream(peer(1), source_stream)
         .expect("admit source tcp");
     socket_loop
         .admit_tcp_tls_stream(peer(2), destination_stream)
         .expect("admit destination tcp");
+    socket_loop
+        .admit_tcp_tls_stream(peer(2), migrated_destination_stream)
+        .expect("admit migrated destination tcp");
 
     log_stage(
         test,
@@ -1022,7 +1031,7 @@ fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
             .expect_err("unknown tcp stream is rejected before buffering"),
         RelayError::UnknownRelayEndpoint
     );
-    assert_eq!(socket_loop.tcp_tls_stream_buffer_count(), 2);
+    assert_eq!(socket_loop.tcp_tls_stream_buffer_count(), 3);
     assert_eq!(
         service
             .proof_artifact(reservation_id(703))
@@ -1066,7 +1075,7 @@ fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
         .drain_udp_datagram_for_peer(&mut service, peer(2))
         .expect("drain udp")
         .expect("udp write");
-    assert_eq!(udp_write.dst_addr(), destination_udp);
+    assert_eq!(udp_write.dst_addr(), migrated_destination_udp);
     let decoded_udp =
         RelayWireFrame::decode(udp_write.payload(), RelayQuota::default().max_packet_bytes)
             .expect("decode udp write");
@@ -1122,7 +1131,7 @@ fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
         .drain_tcp_tls_record_for_peer(&mut service, peer(2))
         .expect("drain tcp")
         .expect("tcp write");
-    assert_eq!(tcp_write.stream_id(), destination_stream);
+    assert_eq!(tcp_write.stream_id(), migrated_destination_stream);
     assert_eq!(
         tcp_write.opaque_bytes(),
         u64::try_from(b"loop-e2e-tcp-ciphertext".len()).expect("ciphertext len fits")

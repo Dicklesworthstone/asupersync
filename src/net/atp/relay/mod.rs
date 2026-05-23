@@ -328,11 +328,18 @@ impl Default for RelayEndpointDirectoryQuota {
 /// the authenticated peer id, and service helpers compare that admitted peer
 /// against decoded frame metadata before any quota, usage, proof, or queue state
 /// can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelayEndpointBinding {
+    peer_id: PeerId,
+    generation: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayEndpointDirectory {
-    udp_endpoints: BTreeMap<SocketAddr, PeerId>,
-    tcp_tls_streams: BTreeMap<RelayTcpTlsStreamId, PeerId>,
+    udp_endpoints: BTreeMap<SocketAddr, RelayEndpointBinding>,
+    tcp_tls_streams: BTreeMap<RelayTcpTlsStreamId, RelayEndpointBinding>,
     quota: RelayEndpointDirectoryQuota,
+    next_admission_generation: u64,
 }
 
 impl RelayEndpointDirectory {
@@ -346,6 +353,7 @@ impl RelayEndpointDirectory {
             udp_endpoints: BTreeMap::new(),
             tcp_tls_streams: BTreeMap::new(),
             quota: quota.validate()?,
+            next_admission_generation: 0,
         })
     }
 
@@ -377,16 +385,26 @@ impl RelayEndpointDirectory {
         endpoint: SocketAddr,
     ) -> Result<(), RelayError> {
         validate_relay_socket_endpoint(endpoint)?;
-        if let Some(bound_peer) = self.udp_endpoints.get(&endpoint) {
-            if *bound_peer == peer_id {
-                return Ok(());
+        if let Some(binding) = self.udp_endpoints.get(&endpoint) {
+            if binding.peer_id != peer_id {
+                return Err(RelayError::DuplicateRelayEndpoint);
             }
-            return Err(RelayError::DuplicateRelayEndpoint);
+        }
+        if self.udp_endpoints.contains_key(&endpoint) {
+            let generation = self.next_endpoint_admission_generation();
+            if let Some(binding) = self.udp_endpoints.get_mut(&endpoint) {
+                binding.generation = generation;
+            }
+            return Ok(());
         }
         if self.udp_endpoints.len() >= self.quota.max_udp_endpoints {
             return Err(RelayError::QuotaExceeded);
         }
-        self.udp_endpoints.insert(endpoint, peer_id);
+        let binding = RelayEndpointBinding {
+            peer_id,
+            generation: self.next_endpoint_admission_generation(),
+        };
+        self.udp_endpoints.insert(endpoint, binding);
         Ok(())
     }
 
@@ -399,11 +417,16 @@ impl RelayEndpointDirectory {
     pub fn peer_for_udp_endpoint(&self, endpoint: SocketAddr) -> Result<PeerId, RelayError> {
         self.udp_endpoints
             .get(&endpoint)
-            .copied()
+            .map(|binding| binding.peer_id)
             .ok_or(RelayError::UnknownRelayEndpoint)
     }
 
-    /// Return the first deterministic UDP endpoint admitted for `peer_id`.
+    /// Return the preferred UDP endpoint admitted for `peer_id`.
+    ///
+    /// Peers can legitimately rebind when NAT mappings change. The relay
+    /// therefore prefers the most recently admitted endpoint for a peer instead
+    /// of the lexicographically first address, while keeping deterministic
+    /// ordering for replay if admission generations ever tie.
     ///
     /// # Errors
     ///
@@ -412,13 +435,19 @@ impl RelayEndpointDirectory {
     pub fn first_udp_endpoint_for_peer(&self, peer_id: PeerId) -> Result<SocketAddr, RelayError> {
         self.udp_endpoints
             .iter()
-            .find_map(|(endpoint, bound_peer)| (*bound_peer == peer_id).then_some(*endpoint))
+            .filter_map(|(endpoint, binding)| {
+                (binding.peer_id == peer_id).then_some((binding.generation, *endpoint))
+            })
+            .max_by_key(|(generation, endpoint)| (*generation, *endpoint))
+            .map(|(_, endpoint)| endpoint)
             .ok_or(RelayError::UnknownRelayEndpoint)
     }
 
     /// Remove a UDP endpoint binding, returning the peer that was bound.
     pub fn unbind_udp_endpoint(&mut self, endpoint: SocketAddr) -> Option<PeerId> {
-        self.udp_endpoints.remove(&endpoint)
+        self.udp_endpoints
+            .remove(&endpoint)
+            .map(|binding| binding.peer_id)
     }
 
     /// Bind a TCP/TLS stream id to an authenticated peer id.
@@ -435,16 +464,26 @@ impl RelayEndpointDirectory {
         peer_id: PeerId,
         stream_id: RelayTcpTlsStreamId,
     ) -> Result<(), RelayError> {
-        if let Some(bound_peer) = self.tcp_tls_streams.get(&stream_id) {
-            if *bound_peer == peer_id {
-                return Ok(());
+        if let Some(binding) = self.tcp_tls_streams.get(&stream_id) {
+            if binding.peer_id != peer_id {
+                return Err(RelayError::DuplicateRelayEndpoint);
             }
-            return Err(RelayError::DuplicateRelayEndpoint);
+        }
+        if self.tcp_tls_streams.contains_key(&stream_id) {
+            let generation = self.next_endpoint_admission_generation();
+            if let Some(binding) = self.tcp_tls_streams.get_mut(&stream_id) {
+                binding.generation = generation;
+            }
+            return Ok(());
         }
         if self.tcp_tls_streams.len() >= self.quota.max_tcp_tls_streams {
             return Err(RelayError::QuotaExceeded);
         }
-        self.tcp_tls_streams.insert(stream_id, peer_id);
+        let binding = RelayEndpointBinding {
+            peer_id,
+            generation: self.next_endpoint_admission_generation(),
+        };
+        self.tcp_tls_streams.insert(stream_id, binding);
         Ok(())
     }
 
@@ -460,16 +499,22 @@ impl RelayEndpointDirectory {
     ) -> Result<PeerId, RelayError> {
         self.tcp_tls_streams
             .get(&stream_id)
-            .copied()
+            .map(|binding| binding.peer_id)
             .ok_or(RelayError::UnknownRelayEndpoint)
     }
 
     /// Remove a TCP/TLS stream binding, returning the peer that was bound.
     pub fn unbind_tcp_tls_stream(&mut self, stream_id: RelayTcpTlsStreamId) -> Option<PeerId> {
-        self.tcp_tls_streams.remove(&stream_id)
+        self.tcp_tls_streams
+            .remove(&stream_id)
+            .map(|binding| binding.peer_id)
     }
 
-    /// Return the first deterministic TCP/TLS stream admitted for `peer_id`.
+    /// Return the preferred TCP/TLS stream admitted for `peer_id`.
+    ///
+    /// A reconnecting peer may have an older still-admitted stream and a newer
+    /// stream during handoff. Egress uses the most recently admitted stream so a
+    /// successful reconnect can take over without draining to a stale writer.
     ///
     /// # Errors
     ///
@@ -481,8 +526,17 @@ impl RelayEndpointDirectory {
     ) -> Result<RelayTcpTlsStreamId, RelayError> {
         self.tcp_tls_streams
             .iter()
-            .find_map(|(stream_id, bound_peer)| (*bound_peer == peer_id).then_some(*stream_id))
+            .filter_map(|(stream_id, binding)| {
+                (binding.peer_id == peer_id).then_some((binding.generation, *stream_id))
+            })
+            .max_by_key(|(generation, stream_id)| (*generation, *stream_id))
+            .map(|(_, stream_id)| stream_id)
             .ok_or(RelayError::UnknownRelayEndpoint)
+    }
+
+    fn next_endpoint_admission_generation(&mut self) -> u64 {
+        self.next_admission_generation = self.next_admission_generation.saturating_add(1);
+        self.next_admission_generation
     }
 }
 
@@ -492,6 +546,7 @@ impl Default for RelayEndpointDirectory {
             udp_endpoints: BTreeMap::new(),
             tcp_tls_streams: BTreeMap::new(),
             quota: RelayEndpointDirectoryQuota::default(),
+            next_admission_generation: 0,
         }
     }
 }
@@ -3189,15 +3244,21 @@ mod tests {
                 .expect("udp endpoint for peer"),
             udp_endpoint
         );
+        directory
+            .bind_udp_endpoint(peer(1), second_udp_endpoint)
+            .expect("migrated udp endpoint");
+        assert_eq!(
+            directory
+                .first_udp_endpoint_for_peer(peer(1))
+                .expect("fresh udp endpoint for peer"),
+            second_udp_endpoint
+        );
         assert_eq!(
             directory
                 .peer_for_udp_endpoint(SocketAddr::from(([192, 0, 2, 99], 40_099)))
                 .expect_err("unknown udp endpoint"),
             RelayError::UnknownRelayEndpoint
         );
-        directory
-            .bind_udp_endpoint(peer(2), second_udp_endpoint)
-            .expect("second udp endpoint");
         assert_eq!(
             directory
                 .bind_udp_endpoint(peer(3), SocketAddr::from(([192, 0, 2, 13], 40_002)))
@@ -3205,6 +3266,12 @@ mod tests {
             RelayError::QuotaExceeded
         );
         assert_eq!(directory.unbind_udp_endpoint(udp_endpoint), Some(peer(1)));
+        assert_eq!(
+            directory
+                .first_udp_endpoint_for_peer(peer(1))
+                .expect("fresh udp endpoint survives stale unbind"),
+            second_udp_endpoint
+        );
         assert_eq!(
             directory
                 .peer_for_udp_endpoint(udp_endpoint)
@@ -3231,8 +3298,14 @@ mod tests {
             peer(1)
         );
         directory
-            .bind_tcp_tls_stream(peer(2), second_stream_id)
-            .expect("second tcp stream");
+            .bind_tcp_tls_stream(peer(1), second_stream_id)
+            .expect("reconnected tcp stream");
+        assert_eq!(
+            directory
+                .first_tcp_tls_stream_for_peer(peer(1))
+                .expect("fresh tcp stream for peer"),
+            second_stream_id
+        );
         assert_eq!(
             directory
                 .bind_tcp_tls_stream(
@@ -3243,6 +3316,12 @@ mod tests {
             RelayError::QuotaExceeded
         );
         assert_eq!(directory.unbind_tcp_tls_stream(stream_id), Some(peer(1)));
+        assert_eq!(
+            directory
+                .first_tcp_tls_stream_for_peer(peer(1))
+                .expect("fresh tcp stream survives stale unbind"),
+            second_stream_id
+        );
         assert_eq!(
             directory
                 .peer_for_tcp_tls_stream(stream_id)
