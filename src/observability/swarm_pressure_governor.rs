@@ -1431,21 +1431,28 @@ impl SwarmPressureGovernor {
             renewal_count: 0,
         };
 
-        let mut leases = self.workload_leases.lock().unwrap();
-        self.expire_stale_workload_leases_locked(&mut leases, now);
-        if let Some(reason) = leases
-            .values()
-            .find_map(|existing| Self::workload_lease_conflict_reason(existing, request))
-        {
-            self.workload_lease_conflicts
-                .fetch_add(1, Ordering::Relaxed);
-            return Err(workload_lease_error(reason));
-        }
+        let receipt = Self::lease_receipt(&lease, "workload lease acquired");
+        let expired_receipts = {
+            let mut leases = self.workload_leases.lock().unwrap();
+            let expired_receipts = self.expire_stale_workload_leases_locked(&mut leases, now);
+            if let Some(reason) = leases
+                .values()
+                .find_map(|existing| Self::workload_lease_conflict_reason(existing, request))
+            {
+                self.workload_lease_conflicts
+                    .fetch_add(1, Ordering::Relaxed);
+                drop(leases);
+                self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+                return Err(workload_lease_error(reason));
+            }
 
-        leases.insert(lease_id, lease.clone());
+            leases.insert(lease_id, lease);
+            expired_receipts
+        };
+        self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
         self.workload_leases_acquired
             .fetch_add(1, Ordering::Relaxed);
-        Ok(Self::lease_receipt(&lease, "workload lease acquired"))
+        Ok(receipt)
     }
 
     /// Commit a live workload lease to its caller-owned region.
@@ -1454,23 +1461,28 @@ impl SwarmPressureGovernor {
         lease_id: SwarmWorkloadLeaseId,
     ) -> Result<SwarmWorkloadLeaseReceipt, SwarmPressureError> {
         let now = Instant::now();
-        let mut leases = self.workload_leases.lock().unwrap();
-        self.expire_stale_workload_leases_locked(&mut leases, now);
-        let lease = leases
-            .get_mut(&lease_id)
-            .ok_or_else(|| workload_lease_error("unknown workload lease"))?;
-        if lease.state.is_terminal() {
-            return Err(workload_lease_error(format!(
-                "cannot commit terminal lease in state {}",
-                lease.state.as_str()
-            )));
-        }
-        if lease.state == SwarmWorkloadLeaseState::Active {
-            lease.state = SwarmWorkloadLeaseState::Committed;
-            self.workload_leases_committed
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(Self::lease_receipt(lease, "workload lease committed"))
+        let (result, expired_receipts) = {
+            let mut leases = self.workload_leases.lock().unwrap();
+            let expired_receipts = self.expire_stale_workload_leases_locked(&mut leases, now);
+            let result = match leases.get_mut(&lease_id) {
+                Some(lease) if lease.state.is_terminal() => Err(workload_lease_error(format!(
+                    "cannot commit terminal lease in state {}",
+                    lease.state.as_str()
+                ))),
+                Some(lease) => {
+                    if lease.state == SwarmWorkloadLeaseState::Active {
+                        lease.state = SwarmWorkloadLeaseState::Committed;
+                        self.workload_leases_committed
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(Self::lease_receipt(lease, "workload lease committed"))
+                }
+                None => Err(workload_lease_error("unknown workload lease")),
+            };
+            (result, expired_receipts)
+        };
+        self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+        result
     }
 
     /// Renew a live workload lease by extending from the later of now or its current expiry.
@@ -1487,27 +1499,33 @@ impl SwarmPressureGovernor {
 
         let now = Instant::now();
         let max_expires_at = self.max_workload_lease_expiry(now)?;
-        let mut leases = self.workload_leases.lock().unwrap();
-        self.expire_stale_workload_leases_locked(&mut leases, now);
-        let lease = leases
-            .get_mut(&lease_id)
-            .ok_or_else(|| workload_lease_error("unknown workload lease"))?;
-        if lease.state.is_terminal() {
-            return Err(workload_lease_error(format!(
-                "cannot renew terminal lease in state {}",
-                lease.state.as_str()
-            )));
-        }
-
-        let renewal_base = lease.expires_at.max(now);
-        let requested_expires_at = renewal_base
-            .checked_add(extension)
-            .ok_or_else(|| workload_lease_error("lease renewal deadline overflow"))?;
-        lease.expires_at = requested_expires_at.min(max_expires_at);
-        lease.last_renewed_at = Some(now);
-        lease.renewal_count = lease.renewal_count.saturating_add(1);
-        self.workload_leases_renewed.fetch_add(1, Ordering::Relaxed);
-        Ok(Self::lease_receipt(lease, "workload lease renewed"))
+        let (result, expired_receipts) = {
+            let mut leases = self.workload_leases.lock().unwrap();
+            let expired_receipts = self.expire_stale_workload_leases_locked(&mut leases, now);
+            let result = match leases.get_mut(&lease_id) {
+                Some(lease) if lease.state.is_terminal() => Err(workload_lease_error(format!(
+                    "cannot renew terminal lease in state {}",
+                    lease.state.as_str()
+                ))),
+                Some(lease) => {
+                    let renewal_base = lease.expires_at.max(now);
+                    match renewal_base.checked_add(extension) {
+                        Some(requested_expires_at) => {
+                            lease.expires_at = requested_expires_at.min(max_expires_at);
+                            lease.last_renewed_at = Some(now);
+                            lease.renewal_count = lease.renewal_count.saturating_add(1);
+                            self.workload_leases_renewed.fetch_add(1, Ordering::Relaxed);
+                            Ok(Self::lease_receipt(lease, "workload lease renewed"))
+                        }
+                        None => Err(workload_lease_error("lease renewal deadline overflow")),
+                    }
+                }
+                None => Err(workload_lease_error("unknown workload lease")),
+            };
+            (result, expired_receipts)
+        };
+        self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+        result
     }
 
     /// Release a live workload lease after successful completion.
@@ -1540,8 +1558,12 @@ impl SwarmPressureGovernor {
     /// Expire all live workload leases whose deadlines have passed.
     pub fn expire_stale_workload_leases(&self) -> Vec<SwarmWorkloadLeaseReceipt> {
         let now = Instant::now();
-        let mut leases = self.workload_leases.lock().unwrap();
-        self.expire_stale_workload_leases_locked(&mut leases, now)
+        let receipts = {
+            let mut leases = self.workload_leases.lock().unwrap();
+            self.expire_stale_workload_leases_locked(&mut leases, now)
+        };
+        self.clear_workload_pressure_feedback_for_receipts(&receipts);
+        receipts
     }
 
     /// Release all live workload leases bound to a closing region.
@@ -1550,21 +1572,26 @@ impl SwarmPressureGovernor {
         region_id: RegionId,
     ) -> Vec<SwarmWorkloadLeaseReceipt> {
         let now = Instant::now();
-        let mut receipts = Vec::new();
-        let mut leases = self.workload_leases.lock().unwrap();
-        let _ = self.expire_stale_workload_leases_locked(&mut leases, now);
-        for lease in leases.values_mut() {
-            if lease.region_id == region_id && lease.state.is_live() {
-                lease.state = SwarmWorkloadLeaseState::Released;
-                lease.terminal_at = Some(now);
-                self.workload_leases_released
-                    .fetch_add(1, Ordering::Relaxed);
-                receipts.push(Self::lease_receipt(
-                    lease,
-                    "workload lease released by region close",
-                ));
+        let (receipts, expired_receipts) = {
+            let mut receipts = Vec::new();
+            let mut leases = self.workload_leases.lock().unwrap();
+            let expired_receipts = self.expire_stale_workload_leases_locked(&mut leases, now);
+            for lease in leases.values_mut() {
+                if lease.region_id == region_id && lease.state.is_live() {
+                    lease.state = SwarmWorkloadLeaseState::Released;
+                    lease.terminal_at = Some(now);
+                    self.workload_leases_released
+                        .fetch_add(1, Ordering::Relaxed);
+                    receipts.push(Self::lease_receipt(
+                        lease,
+                        "workload lease released by region close",
+                    ));
+                }
             }
-        }
+            (receipts, expired_receipts)
+        };
+        self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+        self.clear_workload_pressure_feedback_for_receipts(&receipts);
         receipts
     }
 
@@ -1577,15 +1604,17 @@ impl SwarmPressureGovernor {
     /// Return a deterministic schedule snapshot of all currently live workload leases.
     pub fn workload_lease_schedule(&self) -> Vec<SwarmWorkloadLeaseScheduleEntry> {
         let now = Instant::now();
-        let mut live_leases: Vec<_> = {
+        let (mut live_leases, expired_receipts): (Vec<_>, Vec<_>) = {
             let mut leases = self.workload_leases.lock().unwrap();
-            let _ = self.expire_stale_workload_leases_locked(&mut leases, now);
-            leases
+            let expired_receipts = self.expire_stale_workload_leases_locked(&mut leases, now);
+            let live_leases = leases
                 .values()
                 .filter(|lease| lease.state.is_live())
                 .cloned()
-                .collect()
+                .collect();
+            (live_leases, expired_receipts)
         };
+        self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
         let feedback_by_workload = self.live_workload_feedback_by_id(now);
         live_leases.sort_by_key(|lease| {
             Self::workload_lease_schedule_key(
@@ -1781,34 +1810,43 @@ impl SwarmPressureGovernor {
     ) -> Result<SwarmWorkloadLeaseReceipt, SwarmPressureError> {
         debug_assert!(terminal_state.is_terminal());
         let now = Instant::now();
-        let mut leases = self.workload_leases.lock().unwrap();
-        self.expire_stale_workload_leases_locked(&mut leases, now);
-        let lease = leases
-            .get_mut(&lease_id)
-            .ok_or_else(|| workload_lease_error("unknown workload lease"))?;
-        if lease.state.is_terminal() {
-            return Err(workload_lease_error(format!(
-                "cannot complete terminal lease in state {}",
-                lease.state.as_str()
-            )));
+        let (result, workload_id, expired_receipts) = {
+            let mut leases = self.workload_leases.lock().unwrap();
+            let expired_receipts = self.expire_stale_workload_leases_locked(&mut leases, now);
+            let mut completed_workload_id = None;
+            let result = match leases.get_mut(&lease_id) {
+                Some(lease) if lease.state.is_terminal() => Err(workload_lease_error(format!(
+                    "cannot complete terminal lease in state {}",
+                    lease.state.as_str()
+                ))),
+                Some(lease) => {
+                    lease.state = terminal_state;
+                    lease.terminal_at = Some(now);
+                    match terminal_state {
+                        SwarmWorkloadLeaseState::Released => {
+                            self.workload_leases_released
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        SwarmWorkloadLeaseState::Aborted => {
+                            self.workload_leases_aborted.fetch_add(1, Ordering::Relaxed);
+                        }
+                        SwarmWorkloadLeaseState::Expired => {
+                            self.workload_leases_expired.fetch_add(1, Ordering::Relaxed);
+                        }
+                        SwarmWorkloadLeaseState::Active | SwarmWorkloadLeaseState::Committed => {}
+                    }
+                    completed_workload_id = Some(lease.workload_id.clone());
+                    Ok(Self::lease_receipt(lease, reason.as_ref()))
+                }
+                None => Err(workload_lease_error("unknown workload lease")),
+            };
+            (result, completed_workload_id, expired_receipts)
+        };
+        self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+        if let Some(workload_id) = workload_id {
+            self.clear_workload_pressure_feedback_for_workload(&workload_id);
         }
-
-        lease.state = terminal_state;
-        lease.terminal_at = Some(now);
-        match terminal_state {
-            SwarmWorkloadLeaseState::Released => {
-                self.workload_leases_released
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            SwarmWorkloadLeaseState::Aborted => {
-                self.workload_leases_aborted.fetch_add(1, Ordering::Relaxed);
-            }
-            SwarmWorkloadLeaseState::Expired => {
-                self.workload_leases_expired.fetch_add(1, Ordering::Relaxed);
-            }
-            SwarmWorkloadLeaseState::Active | SwarmWorkloadLeaseState::Committed => {}
-        }
-        Ok(Self::lease_receipt(lease, reason.as_ref()))
+        result
     }
 
     fn workload_lease_conflict_reason(
@@ -2028,6 +2066,32 @@ impl SwarmPressureGovernor {
             .iter()
             .map(|(workload_id, feedback)| (workload_id.clone(), feedback.clone()))
             .collect()
+    }
+
+    fn clear_workload_pressure_feedback_for_receipts(
+        &self,
+        receipts: &[SwarmWorkloadLeaseReceipt],
+    ) {
+        if receipts.is_empty() {
+            return;
+        }
+
+        let mut reports = self.workload_pressure_feedback.lock().unwrap();
+        for receipt in receipts {
+            if receipt.state.is_terminal() {
+                reports.remove(receipt.workload_id.trim());
+            }
+        }
+    }
+
+    fn clear_workload_pressure_feedback_for_workload(&self, workload_id: &str) {
+        let workload_id = workload_id.trim();
+        if workload_id.is_empty() {
+            return;
+        }
+
+        let mut reports = self.workload_pressure_feedback.lock().unwrap();
+        reports.remove(workload_id);
     }
 
     fn schedule_pressure_fields(
@@ -3299,11 +3363,34 @@ mod tests {
         assert!(renewed.expires_at > old_expiry);
         assert!(renewed.reason.contains("renewals=1"));
 
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "lease-lifecycle",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::SourceOnly,
+                )
+                .with_pressures(0.10, 0.20, 0.30, 0.40, 0.50),
+            )
+            .expect("live workload pressure feedback should record");
+        assert_eq!(governor.metrics().live_workload_feedback_reports, 1);
+
         let released = governor
             .release_workload_lease(acquired.lease_id)
             .expect("renewed lease should release");
         assert_eq!(released.state, SwarmWorkloadLeaseState::Released);
         assert!(released.terminal_at.is_some());
+        assert_eq!(
+            governor.metrics().live_workload_feedback_reports,
+            0,
+            "terminal release should clear matching workload pressure feedback"
+        );
+        assert!(
+            governor
+                .clear_workload_pressure_feedback("lease-lifecycle")
+                .is_none(),
+            "release should remove the feedback row rather than leaving it for TTL pruning"
+        );
         assert!(
             governor
                 .renew_workload_lease(acquired.lease_id, Duration::from_secs(1))
@@ -3456,6 +3543,16 @@ mod tests {
                 .is_err(),
             "same workload id must not hold two live leases"
         );
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "lease-conflict",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::SourceOnly,
+                )
+                .with_pressures(0.25, 0.0, 0.0, 0.0, 0.0),
+            )
+            .expect("abort feedback should record before terminal transition");
 
         let aborted = governor
             .abort_workload_lease(first.lease_id, "cancelled before proof lane started")
@@ -3465,6 +3562,11 @@ mod tests {
             aborted
                 .reason
                 .contains("cancelled before proof lane started")
+        );
+        assert_eq!(
+            governor.metrics().live_workload_feedback_reports,
+            0,
+            "terminal abort should clear matching workload pressure feedback"
         );
 
         let second_request = SwarmWorkloadAdmissionRequest::new(
@@ -3481,6 +3583,16 @@ mod tests {
                 &second_decision,
             )
             .expect("second workload lease should acquire");
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "lease-expiry",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::SourceOnly,
+                )
+                .with_pressures(0.0, 0.0, 0.90, 0.0, 0.0),
+            )
+            .expect("expiry feedback should record before terminal transition");
         {
             let mut leases = governor.workload_leases.lock().unwrap();
             leases
@@ -3493,6 +3605,11 @@ mod tests {
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].lease_id, expiring.lease_id);
         assert_eq!(expired[0].state, SwarmWorkloadLeaseState::Expired);
+        assert_eq!(
+            governor.metrics().live_workload_feedback_reports,
+            0,
+            "terminal expiry should clear matching workload pressure feedback"
+        );
 
         let metrics = governor.metrics();
         assert_eq!(metrics.workload_lease_conflicts, 1);
@@ -3599,6 +3716,16 @@ mod tests {
         governor
             .commit_workload_lease(lease.lease_id)
             .expect("lease should commit before region close");
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "region-close-release",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::SourceOnly,
+                )
+                .with_pressures(0.0, 0.70, 0.0, 0.0, 0.0),
+            )
+            .expect("region-close feedback should record before terminal transition");
 
         let removed = governor.unregister_region_envelope(region_id);
         assert!(removed.is_some());
@@ -3613,6 +3740,10 @@ mod tests {
         assert_eq!(metrics.active_workload_lease_count, 0);
         assert_eq!(metrics.terminal_workload_lease_count, 1);
         assert_eq!(metrics.workload_leases_released, 1);
+        assert_eq!(
+            metrics.live_workload_feedback_reports, 0,
+            "region close release should clear matching workload pressure feedback"
+        );
     }
 
     #[test]
