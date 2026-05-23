@@ -381,7 +381,7 @@ fn exact_search_with_ledger(
     }
 
     let pred_masks = build_pred_masks(poset);
-    let full_mask = (1u64 << n) - 1;
+    let full_mask = (1u64 << n).saturating_sub(1);
 
     let start = ExactState {
         mask: 0,
@@ -407,7 +407,7 @@ fn exact_search_with_ledger(
         if steps >= step_budget {
             return None;
         }
-        steps += 1;
+        steps = steps.saturating_add(1);
 
         let state = ExactState {
             mask: entry.mask,
@@ -475,7 +475,7 @@ fn exact_search_with_ledger(
                     mask: new_state.mask,
                     last_owner: new_state.last_owner,
                 });
-                successors += 1;
+                successors = successors.saturating_add(1);
             }
         }
 
@@ -510,7 +510,7 @@ fn greedy_with_ledger(
     let mut steps = 0;
 
     while !available.is_empty() && steps < step_budget {
-        steps += 1;
+        steps = steps.saturating_add(1);
 
         available.sort_by(|&a, &b| {
             let owner_a = poset.owner(a);
@@ -539,7 +539,7 @@ fn greedy_with_ledger(
         };
 
         ledger.push(DecisionEntry::GreedyChoice {
-            step: steps - 1,
+            step: steps.saturating_sub(1),
             chosen,
             chosen_owner,
             owner_match,
@@ -552,7 +552,7 @@ fn greedy_with_ledger(
 
         if let Some(prev) = current_owner {
             if prev != chosen_owner {
-                switch_count += 1;
+                switch_count = switch_count.saturating_add(1);
             }
         }
         current_owner = Some(chosen_owner);
@@ -625,7 +625,7 @@ fn beam_search_with_ledger(
             }
 
             for &chosen in &available {
-                steps += 1;
+                steps = steps.saturating_add(1);
                 if steps >= step_budget {
                     break;
                 }
@@ -810,7 +810,7 @@ fn exact_search(poset: &TracePoset, step_budget: usize) -> Option<GeodesicResult
     }
 
     let pred_masks = build_pred_masks(poset);
-    let full_mask = (1u64 << n) - 1;
+    let full_mask = (1u64 << n).saturating_sub(1);
 
     let start = ExactState {
         mask: 0,
@@ -834,7 +834,7 @@ fn exact_search(poset: &TracePoset, step_budget: usize) -> Option<GeodesicResult
         if steps >= step_budget {
             return None;
         }
-        steps += 1;
+        steps = steps.saturating_add(1);
 
         let state = ExactState {
             mask: entry.mask,
@@ -972,7 +972,7 @@ fn greedy(poset: &TracePoset, step_budget: usize) -> GeodesicResult {
     let mut steps = 0;
 
     while !available.is_empty() && steps < step_budget {
-        steps += 1;
+        steps = steps.saturating_add(1);
 
         // Sort available by our preference order
         available.sort_by(|&a, &b| {
@@ -1118,7 +1118,7 @@ fn beam_search(poset: &TracePoset, beam_width: usize, step_budget: usize) -> Geo
 
             // Generate successors for each available event
             for &chosen in &available {
-                steps += 1;
+                steps = steps.saturating_add(1);
                 if steps >= step_budget {
                     break;
                 }

@@ -499,7 +499,7 @@ impl ContractChecker {
 
                     snap.state = new_state;
                     snap.resolved_at = Some(time);
-                    snap.transition_count += 1;
+                    snap.transition_count = snap.transition_count.saturating_add(1);
 
                     // Extract values before releasing the mutable borrow.
                     let transition_count = snap.transition_count;

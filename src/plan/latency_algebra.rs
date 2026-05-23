@@ -173,11 +173,11 @@ impl PiecewiseLinearCurve {
                 return None;
             }
             if i > 0 {
-                if segments[i].start <= segments[i - 1].start {
+                if segments[i].start <= segments[i.saturating_sub(1)].start {
                     return None;
                 }
                 // Continuity check: end of previous segment == burst of next.
-                let prev = &segments[i - 1];
+                let prev = &segments[i.saturating_sub(1)];
                 let expected = prev
                     .rate
                     .mul_add(segments[i].start - prev.start, prev.burst);
@@ -235,7 +235,7 @@ impl PiecewiseLinearCurve {
         debug_assert!(step_size > 0.0 && period > 0.0 && num_steps > 0);
         // Approximate staircase with piecewise-linear segments.
         // Each step is a steep ramp over a tiny epsilon, then flat.
-        let mut segments = Vec::with_capacity(num_steps * 2);
+        let mut segments = Vec::with_capacity(num_steps.saturating_mul(2));
         let epsilon = (period * 1e-6).max(f64::MIN_POSITIVE);
         let steep_rate = step_size / epsilon;
 
@@ -282,7 +282,7 @@ impl PiecewiseLinearCurve {
                 if i == 0 {
                     return 0.0;
                 }
-                i - 1
+                i.saturating_sub(1)
             }
         };
 
@@ -441,8 +441,8 @@ fn build_curve_from_points(points: &[(f64, f64)]) -> PiecewiseLinearCurve {
 
     for i in 0..points.len() {
         let (t, v) = points[i];
-        let rate = if i + 1 < points.len() {
-            let (t_next, v_next) = points[i + 1];
+        let rate = if i.saturating_add(1) < points.len() {
+            let (t_next, v_next) = points[i.saturating_add(1)];
             let dt = t_next - t;
             if dt > 1e-12 {
                 ((v_next - v) / dt).max(0.0)

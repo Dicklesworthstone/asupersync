@@ -654,7 +654,7 @@ impl LyapunovGovernor {
             let delta = curr - prev;
             if delta > f64::EPSILON {
                 monotone = false;
-                increase_count += 1;
+                increase_count = increase_count.saturating_add(1);
                 max_increase = max_increase.max(delta);
             }
         }
@@ -1826,7 +1826,7 @@ mod tests {
         let mut drain_steps = 0_u64;
         while !runtime.is_quiescent() && drain_steps < max_drain_steps {
             runtime.step_for_test();
-            drain_steps += 1;
+            drain_steps = drain_steps.saturating_add(1);
             governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
         }
 
@@ -2116,7 +2116,7 @@ mod tests {
         let mut drain_steps = 0_u64;
         while !runtime.is_quiescent() && drain_steps < 10_000 {
             runtime.step_for_test();
-            drain_steps += 1;
+            drain_steps = drain_steps.saturating_add(1);
             governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
         }
 

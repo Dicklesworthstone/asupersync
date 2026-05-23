@@ -943,26 +943,26 @@ impl GlobalProtocol {
             Interaction::Comm {
                 monotonicity, then, ..
             } => {
-                stats.comm_count += 1;
+                stats.comm_count = stats.comm_count.saturating_add(1);
                 match monotonicity {
-                    Some(Monotonicity::Monotone) => stats.monotone_comm_count += 1,
-                    Some(Monotonicity::NonMonotone) => stats.non_monotone_comm_count += 1,
+                    Some(Monotonicity::Monotone) => stats.monotone_comm_count = stats.monotone_comm_count.saturating_add(1),
+                    Some(Monotonicity::NonMonotone) => stats.non_monotone_comm_count = stats.non_monotone_comm_count.saturating_add(1),
                     None => {}
                 }
-                Self::count_interaction(then, depth + 1, stats);
+                Self::count_interaction(then, depth.saturating_add(1), stats);
             }
             Interaction::Choice {
                 then_branch,
                 else_branch,
                 ..
             } => {
-                stats.choice_count += 1;
-                Self::count_interaction(then_branch, depth + 1, stats);
-                Self::count_interaction(else_branch, depth + 1, stats);
+                stats.choice_count = stats.choice_count.saturating_add(1);
+                Self::count_interaction(then_branch, depth.saturating_add(1), stats);
+                Self::count_interaction(else_branch, depth.saturating_add(1), stats);
             }
             Interaction::Loop { body, .. } => {
-                stats.loop_count += 1;
-                Self::count_interaction(body, depth + 1, stats);
+                stats.loop_count = stats.loop_count.saturating_add(1);
+                Self::count_interaction(body, depth.saturating_add(1), stats);
             }
             Interaction::Continue { .. } | Interaction::End => {}
             Interaction::Compensate {
