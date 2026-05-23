@@ -22,12 +22,15 @@
   "chosen_next_lane": {
     "candidate_id": "stale-rch-target-large",
     "category": "request-cleanup-authorization",
+    "files_to_reserve": [],
     "lane": "disk-pressure-cleanup-authorization",
     "paths": [
       "/tmp/rch_target_maroontrout_semaphore_fuzz"
     ],
     "reason": "critical disk pressure leaves no safe work candidate; ask for explicit cleanup authorization",
-    "title": "stale artifact candidate"
+    "safety_reason": "cleanup is report-only and requires explicit user authorization",
+    "title": "stale artifact candidate",
+    "validation_class": "human-authorization"
   },
   "cleanup_candidates": [
     {
