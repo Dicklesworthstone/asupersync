@@ -12,6 +12,7 @@
     "rustfmt-check",
     "rustdoc-api",
     "formal-lean-build",
-    "proof-lane-manifest-contract"
+    "proof-lane-manifest-contract",
+    "atp-native-quic-dependency-audit"
   ]
 }

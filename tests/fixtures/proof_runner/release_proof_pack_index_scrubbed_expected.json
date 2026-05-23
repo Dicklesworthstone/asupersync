@@ -18,7 +18,7 @@
       "summary": {
         "claim_count": 8,
         "green_claim_count": 3,
-        "lane_count": 13,
+        "lane_count": 14,
         "red_claim_count": 0,
         "stale_blocker_count": 0,
         "unclassified_rch_outcome_count": 0,
@@ -37,7 +37,7 @@
   "rch_log_rows": [],
   "proof_commands": [
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
       "expected_signal": "cargo check exits 0 or records the first unrelated all-target blocker",
       "guarantee_ids": [
         "all-target-compile-frontier"
@@ -45,7 +45,15 @@
       "lane_id": "all-targets-check"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
+      "expected_signal": "exit code 0 with 'ATP Dependency Audit PASSED' message",
+      "guarantee_ids": [
+        "atp-native-self-contained"
+      ],
+      "lane_id": "atp-native-quic-dependency-audit"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
       "expected_signal": "clippy exits 0 or records the first lint frontier blocker",
       "guarantee_ids": [
         "clippy-frontier"
@@ -53,7 +61,7 @@
       "lane_id": "clippy-all-targets"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
       "expected_signal": "warning: nothing to print.",
       "guarantee_ids": [
         "default-production-tokio-free"
@@ -61,7 +69,7 @@
       "lane_id": "default-production-tokio-tree"
     },
     {
-      "command": "rch exec -- lake --dir formal/lean build",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build",
       "expected_signal": "Build completed successfully",
       "guarantee_ids": [
         "formal-lean-core-invariants"
@@ -69,7 +77,7 @@
       "lane_id": "formal-lean-build"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
       "expected_signal": "cargo check exits 0 or records the first fuzz target compile blocker",
       "guarantee_ids": [
         "fuzz-manifest-smoke"
@@ -77,7 +85,7 @@
       "lane_id": "fuzz-manifest-smoke"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
       "expected_signal": "dependency path containing opentelemetry-proto, tonic or tonic-prost, and tokio",
       "guarantee_ids": [
         "fuzz-tokio-quarantine"
@@ -85,7 +93,7 @@
       "lane_id": "fuzz-tokio-quarantine-tree"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
       "expected_signal": "lib tests pass or the first failing compile/test frontier is recorded",
       "guarantee_ids": [
         "lib-test-frontier"
@@ -93,7 +101,7 @@
       "lane_id": "lib-tests"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
       "expected_signal": "warning: nothing to print.",
       "guarantee_ids": [
         "metrics-production-tokio-free"
@@ -101,7 +109,7 @@
       "lane_id": "metrics-production-tokio-tree"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
       "expected_signal": "cargo check exits 0 or records the first unrelated compile frontier blocker",
       "guarantee_ids": [
         "feature-gated-native-surfaces"
@@ -109,7 +117,7 @@
       "lane_id": "native-feature-smoke"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "expected_signal": "proof_lane_manifest_contract tests pass",
       "guarantee_ids": [
         "proof-lane-manifest-verifier"
@@ -117,7 +125,7 @@
       "lane_id": "proof-lane-manifest-contract"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
       "expected_signal": "cargo doc exits 0 or records the first rustdoc warning/error",
       "guarantee_ids": [
         "rustdoc-api-frontier"
@@ -125,7 +133,7 @@
       "lane_id": "rustdoc-api"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
       "expected_signal": "rustfmt exits 0 or prints exact formatting diffs",
       "guarantee_ids": [
         "rustfmt-frontier"
@@ -133,7 +141,7 @@
       "lane_id": "rustfmt-check"
     },
     {
-      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
       "expected_signal": "tokio paths are limited to documented workspace carve-outs",
       "guarantee_ids": [
         "workspace-tokio-audit"
@@ -200,7 +208,7 @@
     "proof_console": {
       "claim_count": 8,
       "green_claim_count": 3,
-      "lane_count": 13,
+      "lane_count": 14,
       "red_claim_count": 0,
       "stale_blocker_count": 0,
       "unclassified_rch_outcome_count": 0,
@@ -225,8 +233,8 @@
   },
   "summary": {
     "missing_source_artifact_count": 0,
-    "proof_command_count": 13,
-    "proof_lane_count": 13,
+    "proof_command_count": 14,
+    "proof_lane_count": 14,
     "rch_log_count": 0,
     "rch_outcome_count": 0,
     "rch_outcome_provenance_failure_count": 0,

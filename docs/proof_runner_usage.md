@@ -65,13 +65,44 @@ The proof runner returns structured JSON with:
 {
   "preflight_passed": true,
   "lane_id": "rustfmt-check", 
-  "command_would_run": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo fmt --check",
+  "command_would_run": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo fmt --check",
   "validation_frontier_record": {
-    "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo fmt --check",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo fmt --check",
+    "proof_lane_id": "rustfmt-check",
+    "commit": "abc1234def56",
     "timestamp": "2026-05-07T19:30:00Z",
     "touched_files": ["src/runtime/state.rs"],
+    "dirty_tree_summary": {
+      "tracked_modified": ["src/runtime/state.rs"],
+      "deleted": [],
+      "untracked": [],
+      "staged": [],
+      "overlaps_touched_files": true,
+      "touched_dirty_files": ["src/runtime/state.rs"]
+    },
+    "rch_result": {
+      "admission": "not-applicable",
+      "worker": null,
+      "local_fallback_refused": false
+    },
+    "exit_status": 0,
     "decision": "pass",
-    "supplemental_proof_command": "rch exec -- rustfmt --edition 2024 --check src/runtime/state.rs"
+    "error_class": "none",
+    "first_blocker": null,
+    "first_failure": {
+      "crate_or_surface": "",
+      "target": "",
+      "file": "",
+      "line": 0
+    },
+    "error_buckets": [],
+    "affected_files": [],
+    "likely_owner": "local_change",
+    "likely_bead": null,
+    "external_to_narrow_fuzz_target_work": false,
+    "green_proof_claimed": true,
+    "supplemental_proof_command": "rch exec -- rustfmt --edition 2024 --check src/runtime/state.rs",
+    "summary": "preflight checks passed"
   },
   "recommendation": "proceed"
 }
@@ -84,6 +115,12 @@ The proof runner emits records compatible with the validation frontier ledger sc
 - **`pass`**: Safe to run the intended broad proof
 - **`blocked-external`**: Blocked by unrelated changes, use supplemental proof
 - **`failed-local`**: Your changes have issues, fix them first
+
+Each record carries the proof lane id, target commit, dirty-tree summary, RCH
+admission receipt, process exit status, first blocker, grouped error buckets,
+affected files, and `green_proof_claimed`. Closeout text may only claim a green
+proof when `green_proof_claimed=true` and the cited lane's own verdict supports
+the claim.
 
 ## Available Proof Lanes
 

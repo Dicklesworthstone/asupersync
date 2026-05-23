@@ -1539,6 +1539,7 @@ can_proceed, record = runner.analyze_preflight(
 print(json.dumps({
     "can_proceed": can_proceed,
     "decision": record["decision"],
+    "dirty_tree_summary": record["dirty_tree_summary"],
     "summary": record["summary"],
     "uncommitted": runner.git.get_uncommitted_files(),
     "staged": runner.git.get_staged_files(),
@@ -1564,6 +1565,14 @@ print(json.dumps({
         parsed["staged"][0].as_str(),
         Some("tests/proof_runner_contract.rs")
     );
+    assert_eq!(
+        parsed["dirty_tree_summary"]["overlaps_touched_files"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        parsed["dirty_tree_summary"]["touched_dirty_files"][0].as_str(),
+        Some("scripts/proof_runner.py")
+    );
 }
 
 #[test]
@@ -1583,6 +1592,11 @@ fn proof_runner_emits_validation_frontier_compatible_records() {
     // Verify required fields from the schema exist
     assert!(record["command"].is_string(), "record must have command");
     assert!(
+        record["proof_lane_id"].is_string(),
+        "record must have proof_lane_id"
+    );
+    assert!(record["commit"].is_string(), "record must have commit");
+    assert!(
         record["timestamp"].is_string(),
         "record must have timestamp"
     );
@@ -1590,10 +1604,26 @@ fn proof_runner_emits_validation_frontier_compatible_records() {
         record["touched_files"].is_array(),
         "record must have touched_files array"
     );
+    assert!(
+        record["dirty_tree_summary"].is_object(),
+        "record must have dirty_tree_summary object"
+    );
+    assert!(
+        record["rch_result"].is_object(),
+        "record must have rch_result object"
+    );
+    assert!(
+        record["exit_status"].is_number(),
+        "record must have exit_status"
+    );
     assert!(record["decision"].is_string(), "record must have decision");
     assert!(
         record["error_class"].is_string(),
         "record must have error_class"
+    );
+    assert!(
+        record["first_blocker"].is_object() || record["first_blocker"].is_null(),
+        "record must have nullable first_blocker"
     );
 
     let first_failure = &record["first_failure"];
@@ -1603,8 +1633,24 @@ fn proof_runner_emits_validation_frontier_compatible_records() {
     assert!(first_failure["line"].is_number());
 
     assert!(
+        record["error_buckets"].is_array(),
+        "record must have error_buckets"
+    );
+    assert!(
+        record["affected_files"].is_array(),
+        "record must have affected_files"
+    );
+    assert!(
         record["likely_owner"].is_string(),
         "record must have likely_owner"
+    );
+    assert!(
+        record["external_to_narrow_fuzz_target_work"].is_boolean(),
+        "record must have external_to_narrow_fuzz_target_work"
+    );
+    assert!(
+        record["green_proof_claimed"].is_boolean(),
+        "record must have green_proof_claimed"
     );
     assert!(record["supplemental_proof_command"].is_string());
     assert!(record["summary"].is_string(), "record must have summary");
@@ -1946,6 +1992,16 @@ fn proof_runner_classifies_rch_pass_log_with_command_scope() {
         result["validation_frontier_record"]["decision"].as_str(),
         Some("pass")
     );
+    let frontier = &result["validation_frontier_record"];
+    assert_eq!(frontier["proof_lane_id"].as_str(), Some("lib-tests"));
+    assert_eq!(
+        frontier["rch_result"]["admission"].as_str(),
+        Some("remote-executed")
+    );
+    assert_eq!(frontier["exit_status"].as_i64(), Some(0));
+    assert!(frontier["first_blocker"].is_null());
+    assert_eq!(frontier["error_class"].as_str(), Some("none"));
+    assert_eq!(frontier["green_proof_claimed"].as_bool(), Some(true));
 }
 
 #[test]
@@ -2007,6 +2063,25 @@ fn proof_runner_classifies_local_cargo_error_blocker() {
         result["validation_frontier_record"]["decision"].as_str(),
         Some("failed-local")
     );
+    let frontier = &result["validation_frontier_record"];
+    assert_eq!(frontier["exit_status"].as_i64(), Some(101));
+    assert_eq!(
+        frontier["rch_result"]["admission"].as_str(),
+        Some("remote-executed")
+    );
+    assert_eq!(
+        frontier["first_blocker"]["file"].as_str(),
+        Some("tests/proof_runner_contract.rs")
+    );
+    assert_eq!(
+        frontier["error_buckets"][0]["error_code"].as_str(),
+        Some("E0425")
+    );
+    assert_eq!(
+        frontier["affected_files"][0].as_str(),
+        Some("tests/proof_runner_contract.rs")
+    );
+    assert_eq!(frontier["green_proof_claimed"].as_bool(), Some(false));
 }
 
 #[test]
@@ -2060,6 +2135,16 @@ fn proof_runner_classifies_full_local_fallback_marker_set_as_failed_local() {
             Some("rch-local-fallback"),
             "marker should surface local fallback blocker: {marker}"
         );
+        assert_eq!(
+            result["validation_frontier_record"]["rch_result"]["admission"].as_str(),
+            Some("local-fallback-refused"),
+            "marker should preserve local fallback admission: {marker}"
+        );
+        assert_eq!(
+            result["validation_frontier_record"]["rch_result"]["local_fallback_refused"].as_bool(),
+            Some(true),
+            "marker should refuse local fallback: {marker}"
+        );
     }
 }
 
@@ -2112,6 +2197,22 @@ fn proof_runner_extracts_external_blocker_file_and_line() {
         result["validation_frontier_record"]["first_failure"]["line"].as_i64(),
         Some(15747)
     );
+    assert_eq!(
+        result["validation_frontier_record"]["first_blocker"]["file"].as_str(),
+        Some("src/runtime/scheduler/three_lane.rs")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["error_buckets"][0]["error_code"].as_str(),
+        Some("E0609")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["affected_files"][0].as_str(),
+        Some("src/runtime/scheduler/three_lane.rs")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["external_to_narrow_fuzz_target_work"].as_bool(),
+        Some(true)
+    );
 }
 
 #[test]
@@ -2162,6 +2263,14 @@ fn proof_runner_classifies_rch_control_plane_inconsistency() {
         result["validation_frontier_record"]["first_failure"]["file"].as_str(),
         Some("rch-control-plane")
     );
+    assert_eq!(
+        result["validation_frontier_record"]["rch_result"]["admission"].as_str(),
+        Some("remote-refused")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["first_blocker"]["file"].as_str(),
+        Some("rch-control-plane")
+    );
 }
 
 #[test]
@@ -2200,6 +2309,7 @@ fn proof_runner_record_schema_matches_validation_frontier_contract() {
                 assert!(
                     record[parts[0]][parts[1]].is_string()
                         || record[parts[0]][parts[1]].is_number()
+                        || record[parts[0]][parts[1]].is_boolean()
                         || record[parts[0]][parts[1]].is_null(),
                     "record should have nested field {field}"
                 );
@@ -2207,7 +2317,12 @@ fn proof_runner_record_schema_matches_validation_frontier_contract() {
         } else {
             // Top-level field
             assert!(
-                record[field].is_string() || record[field].is_array() || record[field].is_null(),
+                record[field].is_string()
+                    || record[field].is_array()
+                    || record[field].is_object()
+                    || record[field].is_boolean()
+                    || record[field].is_number()
+                    || record[field].is_null(),
                 "record should have field {field}"
             );
         }
@@ -2362,7 +2477,7 @@ fn proof_console_report_maps_explicit_rch_outcome_to_lane_status() {
     let outcome = write_reservation_snapshot(
         r#"{
           "rch_outcome": {
-            "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
+            "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
             "outcome_class": "pass",
             "decision": "pass",
             "remote_exit_status": 0,
@@ -2545,8 +2660,8 @@ fn proof_runner_emits_deterministic_release_proof_pack() {
         commands.iter().any(|row| row["command"]
             .as_str()
             .expect("proof command")
-            .starts_with("rch exec -- ")),
-        "proof pack must carry rch-routed commands"
+            .starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- ")),
+        "proof pack must carry remote-required rch-routed commands"
     );
 }
 

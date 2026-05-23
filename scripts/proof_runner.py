@@ -67,7 +67,9 @@ RCH_LOCAL_FALLBACK_RE = re.compile(
     re.IGNORECASE,
 )
 CARGO_LOCATION_RE = re.compile(r"^\s*-->\s+([^:\s]+):(\d+):(\d+)")
-RUST_ERROR_RE = re.compile(r"^\s*error(?:\[[^\]]+\])?:\s*(.+)")
+RUST_ERROR_RE = re.compile(
+    r"^\s*error(?:\[(?P<code>[^\]]+)\])?:\s*(?P<message>.+)"
+)
 WRAPPER_RETRIEVAL_HANG_HINTS = (
     "retrieval timed out",
     "retrieval stalled",
@@ -669,10 +671,12 @@ def has_rch_local_fallback(log_text: str) -> bool:
 def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
     """Extract the first cargo/rustc file:line blocker from captured output."""
     pending_message = ""
+    pending_code = ""
     for line in log_text.splitlines():
         error_match = RUST_ERROR_RE.match(line)
         if error_match:
-            pending_message = error_match.group(1).strip()
+            pending_message = error_match.group("message").strip()
+            pending_code = error_match.group("code") or ""
             continue
 
         location_match = CARGO_LOCATION_RE.match(line)
@@ -682,6 +686,7 @@ def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
                 "line": int(location_match.group(2)),
                 "column": int(location_match.group(3)),
                 "message": pending_message,
+                "code": pending_code,
                 "raw": line.strip(),
             }
 
@@ -690,6 +695,7 @@ def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
         "line": 0,
         "column": 0,
         "message": pending_message,
+        "code": pending_code,
         "raw": "",
     }
 
@@ -814,7 +820,7 @@ def classify_rch_outcome(
         decision = "failed-local"
         summary = "remote proof command failed on the touched proof surface"
 
-    return {
+    outcome = {
         "schema_version": RCH_OUTCOME_SCHEMA_VERSION,
         "command": command,
         "command_scope": scope,
@@ -826,6 +832,8 @@ def classify_rch_outcome(
         "control_plane": control_plane or default_rch_control_plane(),
         "summary": summary,
     }
+    outcome["rch_result"] = rch_result_from_outcome(outcome)
+    return outcome
 
 
 def operator_action_recipes() -> List[Dict[str, Any]]:
@@ -1018,13 +1026,159 @@ class ProofLaneManifest:
         return [lane["lane_id"] for lane in self.data["lanes"]]
 
 
+def infer_proof_lane_id(command: str, fallback: str = "manual") -> str:
+    """Best-effort stable lane id for saved transcripts outside manifest preflight."""
+    scope = command_scope(command)
+    program = scope.get("program", "")
+    subcommand = scope.get("cargo_subcommand", "")
+    if program == "rustfmt" or "cargo fmt" in command:
+        return "rustfmt-check"
+    if program == "cargo":
+        if subcommand == "clippy":
+            return "clippy-all-targets"
+        if subcommand == "test":
+            if scope.get("target"):
+                return "lib-tests"
+            return "lib-tests"
+        if subcommand == "check":
+            if "--all-targets" in command:
+                return "all-targets-check"
+            return "production-lib-check"
+        if subcommand == "doc":
+            return "rustdoc-api"
+        if subcommand == "tree" and "-i tokio" in command:
+            return "default-production-tokio-tree"
+    return fallback
+
+
+def default_dirty_tree_summary() -> Dict[str, Any]:
+    """Neutral dirty-tree receipt for fixture-only records."""
+    return {
+        "tracked_modified": [],
+        "deleted": [],
+        "untracked": [],
+        "staged": [],
+        "overlaps_touched_files": False,
+        "touched_dirty_files": [],
+    }
+
+
+def default_rch_result() -> Dict[str, Any]:
+    """Neutral RCH receipt for non-rch preflight records."""
+    return {
+        "admission": "not-applicable",
+        "worker": None,
+        "local_fallback_refused": False,
+    }
+
+
+def rch_result_from_outcome(outcome: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize RCH admission state from a classified transcript."""
+    outcome_class = str(outcome.get("outcome_class", ""))
+    remote_exit = outcome.get("remote_exit_status")
+    control_plane = outcome.get("control_plane") or {}
+    if outcome_class == "failed_local" and (
+        outcome.get("first_blocker", {}).get("file") == "rch-local-fallback"
+    ):
+        admission = "local-fallback-refused"
+        local_fallback_refused = True
+    elif outcome_class == RCH_CONTROL_PLANE_INCONSISTENT_CLASS:
+        admission = "remote-refused"
+        local_fallback_refused = False
+    elif remote_exit is not None:
+        admission = "remote-executed"
+        local_fallback_refused = False
+    else:
+        admission = "not-applicable"
+        local_fallback_refused = False
+
+    worker = str(control_plane.get("worker") or "")
+    return {
+        "admission": admission,
+        "worker": worker or None,
+        "local_fallback_refused": local_fallback_refused,
+    }
+
+
+def exit_status_from_decision(decision: str, remote_exit_status: Optional[int]) -> int:
+    """Use the remote exit when known; otherwise provide deterministic status."""
+    if remote_exit_status is not None:
+        return int(remote_exit_status)
+    return 0 if decision == "pass" else 1
+
+
+def blocker_object(file: str, line: int, error_class: str, summary: str) -> Dict[str, Any]:
+    """Normalize a first-blocker object for validation frontier records."""
+    return {
+        "file": normalize_repo_path(file),
+        "line": int(line or 0),
+        "error_class": error_class,
+        "summary": summary,
+    }
+
+
+def affected_files_from_blocker(file: str) -> List[str]:
+    """Return source paths implicated by a blocker, excluding coordination sentinels."""
+    normalized = normalize_repo_path(file)
+    if not normalized:
+        return []
+    if normalized.startswith(("rch-", "build-slot:")):
+        return []
+    return [normalized]
+
+
+def error_buckets_from_blocker(
+    error_class: str,
+    file: str,
+    line: int,
+    summary: str,
+    owner: str,
+    likely_bead: Optional[str],
+    touched_files: List[str],
+    error_code: str = "",
+) -> List[Dict[str, Any]]:
+    """Build the stable one-bucket summary used by ASW-1 ledger records."""
+    normalized = normalize_repo_path(file)
+    if not normalized:
+        return []
+    touched = {normalize_repo_path(path) for path in touched_files}
+    module = normalized.removesuffix(".rs").replace("/", "::")
+    return [
+        {
+            "file": normalized,
+            "module": module,
+            "error_code": error_code or error_class,
+            "count": 1,
+            "first_line": int(line or 0),
+            "summary": summary,
+            "likely_owner": owner,
+            "likely_bead": likely_bead,
+            "owned_slice_overlap": normalized in touched,
+        }
+    ]
+
+
 class ValidationFrontierRecord:
     """Builder for validation frontier ledger records."""
 
-    def __init__(self, command: str, touched_files: List[str]):
+    def __init__(
+        self,
+        command: str,
+        touched_files: List[str],
+        proof_lane_id: str = "manual",
+        commit: str = "unknown",
+        dirty_tree_summary: Optional[Dict[str, Any]] = None,
+        rch_result: Optional[Dict[str, Any]] = None,
+        exit_status: Optional[int] = None,
+    ):
         self.command = command
+        self.proof_lane_id = proof_lane_id
+        self.commit = commit
         self.timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-        self.touched_files = touched_files
+        self.touched_files = [normalize_repo_path(path) for path in touched_files]
+        self.dirty_tree_summary = dirty_tree_summary or default_dirty_tree_summary()
+        self.rch_result = rch_result or default_rch_result()
+        self.exit_status = exit_status
         self.decision = "pass"
         self.error_class = ""
         self.first_failure = {
@@ -1038,6 +1192,44 @@ class ValidationFrontierRecord:
         self.supplemental_proof_command = ""
         self.summary = ""
 
+    def _base(
+        self,
+        decision: str,
+        error_class: str,
+        first_failure: Dict[str, Any],
+        first_blocker: Optional[Dict[str, Any]],
+        likely_owner: str,
+        supplemental: str,
+        summary: str,
+        error_buckets: Optional[List[Dict[str, Any]]] = None,
+        affected_files: Optional[List[str]] = None,
+        exit_status: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Render the shared ASW-1 validation frontier record shape."""
+        status = self.exit_status if self.exit_status is not None else exit_status
+        return {
+            "command": self.command,
+            "proof_lane_id": self.proof_lane_id,
+            "commit": self.commit,
+            "timestamp": self.timestamp,
+            "touched_files": self.touched_files,
+            "dirty_tree_summary": self.dirty_tree_summary,
+            "rch_result": self.rch_result,
+            "exit_status": exit_status_from_decision(decision, status),
+            "decision": decision,
+            "error_class": error_class,
+            "first_blocker": first_blocker,
+            "first_failure": first_failure,
+            "error_buckets": error_buckets or [],
+            "affected_files": affected_files or [],
+            "likely_owner": likely_owner,
+            "likely_bead": self.likely_bead,
+            "external_to_narrow_fuzz_target_work": decision == "blocked-external",
+            "green_proof_claimed": decision == "pass",
+            "supplemental_proof_command": supplemental,
+            "summary": summary,
+        }
+
     def as_blocked_external(
         self,
         error_class: str,
@@ -1045,46 +1237,60 @@ class ValidationFrontierRecord:
         summary: str,
         owner: str = "shared-main external blocker",
         supplemental: str = "",
-        line: int = 0
+        line: int = 0,
+        target: str = "preflight",
+        exit_status: Optional[int] = None,
+        blocker_message: str = "",
+        error_code: str = "",
     ) -> Dict[str, Any]:
         """Mark as externally blocked."""
-        return {
-            "command": self.command,
-            "timestamp": self.timestamp,
-            "touched_files": self.touched_files,
-            "decision": "blocked-external",
-            "error_class": error_class,
-            "first_failure": {
+        normalized_file = normalize_repo_path(file)
+        blocker_summary = blocker_message or summary
+        first_blocker = blocker_object(normalized_file, line, error_class, blocker_summary)
+        return self._base(
+            "blocked-external",
+            error_class,
+            {
                 "crate_or_surface": "coordination",
-                "target": "preflight",
-                "file": file,
-                "line": line
+                "target": target,
+                "file": normalized_file,
+                "line": line,
             },
-            "likely_owner": owner,
-            "likely_bead": self.likely_bead,
-            "supplemental_proof_command": supplemental,
-            "summary": summary
-        }
+            first_blocker,
+            owner,
+            supplemental,
+            summary,
+            error_buckets_from_blocker(
+                error_class,
+                normalized_file,
+                line,
+                blocker_summary,
+                owner,
+                self.likely_bead,
+                self.touched_files,
+                error_code=error_code,
+            ),
+            affected_files_from_blocker(normalized_file),
+            exit_status=exit_status,
+        )
 
     def as_pass(self, supplemental: str = "") -> Dict[str, Any]:
         """Mark as passed."""
-        return {
-            "command": self.command,
-            "timestamp": self.timestamp,
-            "touched_files": self.touched_files,
-            "decision": "pass",
-            "error_class": "",
-            "first_failure": {
+        return self._base(
+            "pass",
+            "none",
+            {
                 "crate_or_surface": "",
                 "target": "",
                 "file": "",
-                "line": 0
+                "line": 0,
             },
-            "likely_owner": "local_change",
-            "likely_bead": self.likely_bead,
-            "supplemental_proof_command": supplemental,
-            "summary": "preflight checks passed"
-        }
+            None,
+            "local_change",
+            supplemental,
+            "preflight checks passed",
+            exit_status=0,
+        )
 
     def as_failed_local(
         self,
@@ -1093,25 +1299,40 @@ class ValidationFrontierRecord:
         summary: str,
         line: int = 0,
         target: str = "",
+        exit_status: Optional[int] = None,
+        blocker_message: str = "",
+        error_code: str = "",
     ) -> Dict[str, Any]:
         """Mark as a local proof failure."""
-        return {
-            "command": self.command,
-            "timestamp": self.timestamp,
-            "touched_files": self.touched_files,
-            "decision": "failed-local",
-            "error_class": error_class,
-            "first_failure": {
+        normalized_file = normalize_repo_path(file)
+        blocker_summary = blocker_message or summary
+        first_blocker = blocker_object(normalized_file, line, error_class, blocker_summary)
+        return self._base(
+            "failed-local",
+            error_class,
+            {
                 "crate_or_surface": "cargo",
                 "target": target,
-                "file": file,
+                "file": normalized_file,
                 "line": line,
             },
-            "likely_owner": "local_change",
-            "likely_bead": self.likely_bead,
-            "supplemental_proof_command": "",
-            "summary": summary,
-        }
+            first_blocker,
+            "local_change",
+            "",
+            summary,
+            error_buckets_from_blocker(
+                error_class,
+                normalized_file,
+                line,
+                blocker_summary,
+                "local_change",
+                self.likely_bead,
+                self.touched_files,
+                error_code=error_code,
+            ),
+            affected_files_from_blocker(normalized_file),
+            exit_status=exit_status,
+        )
 
 
 class GitStatus:
@@ -1173,6 +1394,56 @@ class GitStatus:
             if len(line) >= 3 and line[0] != ' ' and line[0] != '?':
                 staged.extend(self._status_paths(line))
         return staged
+
+    def head_commit(self) -> str:
+        """Return the current commit for validation frontier receipts."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            return "unknown"
+        return result.stdout.strip() or "unknown"
+
+    def dirty_tree_summary(self, touched_files: List[str]) -> Dict[str, Any]:
+        """Summarize dirty shared-main state without mutating the index."""
+        tracked_modified = []
+        deleted = []
+        untracked = []
+        staged = []
+
+        for line in self._get_status():
+            if len(line) < 3:
+                continue
+            status = line[:2]
+            paths = self._status_paths(line)
+            if not paths:
+                continue
+            if status == "??":
+                untracked.extend(paths)
+                continue
+            if "D" in status:
+                deleted.extend(paths)
+            if status[0] != " " and status[0] != "?":
+                staged.extend(paths)
+            if status.strip("D "):
+                tracked_modified.extend(paths)
+
+        touched = {normalize_repo_path(path) for path in touched_files}
+        all_dirty = set(tracked_modified) | set(deleted) | set(untracked) | set(staged)
+        touched_dirty = sorted(path for path in all_dirty if path in touched)
+        return {
+            "tracked_modified": sorted(set(tracked_modified)),
+            "deleted": sorted(set(deleted)),
+            "untracked": sorted(set(untracked)),
+            "staged": sorted(set(staged)),
+            "overlaps_touched_files": bool(touched_dirty),
+            "touched_dirty_files": touched_dirty,
+        }
 
 
 class AgentMailChecker:
@@ -1625,6 +1896,26 @@ class ProofRunner:
         self.disk_preflight_snapshot = disk_preflight_snapshot
         self.disk_min_free_bytes = max(int(disk_min_free_bytes), 0)
         self.disk_dev_shm_min_free_bytes = max(int(disk_dev_shm_min_free_bytes), 0)
+
+    def _frontier_record(
+        self,
+        command: str,
+        touched_files: List[str],
+        proof_lane_id: str,
+        rch_result: Optional[Dict[str, Any]] = None,
+        exit_status: Optional[int] = None,
+    ) -> ValidationFrontierRecord:
+        """Build a frontier record with live shared-main context attached."""
+        normalized_touched = [normalize_repo_path(path) for path in touched_files]
+        return ValidationFrontierRecord(
+            command,
+            normalized_touched,
+            proof_lane_id=proof_lane_id,
+            commit=self.git.head_commit(),
+            dirty_tree_summary=self.git.dirty_tree_summary(normalized_touched),
+            rch_result=rch_result,
+            exit_status=exit_status,
+        )
 
     def _repo_json(self, relative_path: str) -> Dict[str, Any]:
         with (self.repo_root / relative_path).open(encoding="utf-8") as handle:
@@ -2390,6 +2681,11 @@ class ProofRunner:
             classified["validation_frontier_record"] = ValidationFrontierRecord(
                 command,
                 touched_files,
+                proof_lane_id=infer_proof_lane_id(command, "rch-smoke"),
+                commit=self.git.head_commit(),
+                dirty_tree_summary=self.git.dirty_tree_summary(touched_files),
+                rch_result=rch_result_from_outcome(outcome),
+                exit_status=0,
             ).as_pass()
         outcome_path = outcome_dir / "smoke_000.json"
         outcome_path.write_bytes(canonical_json_bytes(classified))
@@ -2473,7 +2769,12 @@ class ProofRunner:
         """
         lane = self.manifest.get_lane(lane_id)
         if not lane:
-            record = ValidationFrontierRecord(f"proof-runner --lane={lane_id}", touched_files)
+            record = self._frontier_record(
+                f"proof-runner --lane={lane_id}",
+                touched_files,
+                lane_id,
+                exit_status=1,
+            )
             return False, record.as_blocked_external(
                 "unknown_proof_lane",
                 "artifacts/proof_lane_manifest_v1.json",
@@ -2482,7 +2783,7 @@ class ProofRunner:
             )
 
         command = lane["command"]
-        record = ValidationFrontierRecord(command, touched_files)
+        record = self._frontier_record(command, touched_files, lane_id)
 
         has_slot_conflicts, slot_conflicts = self.build_slots.check_build_slot(lane, execute)
         if has_slot_conflicts and slot_conflicts:
@@ -2736,7 +3037,13 @@ class ProofRunner:
         outcome["source_log_path"] = str(source_log)
         outcome["source_log_sha256"] = file_hash(source_log)
         outcome["source_log_bytes"] = source_log.stat().st_size
-        record = ValidationFrontierRecord(command, touched_files)
+        record = self._frontier_record(
+            command,
+            touched_files,
+            infer_proof_lane_id(command, "rch-classified"),
+            rch_result=rch_result_from_outcome(outcome),
+            exit_status=outcome.get("remote_exit_status"),
+        )
         blocker = outcome["first_blocker"]
         scope = outcome["command_scope"]
 
@@ -2748,6 +3055,9 @@ class ProofRunner:
                 blocker.get("file", "") or "rch-wrapper",
                 outcome["summary"],
                 line=int(blocker.get("line") or 0),
+                target=scope.get("target") or scope.get("cargo_subcommand") or "rch",
+                blocker_message=blocker.get("message", ""),
+                error_code=blocker.get("code", ""),
             )
         else:
             frontier = record.as_failed_local(
@@ -2756,6 +3066,8 @@ class ProofRunner:
                 outcome["summary"],
                 line=int(blocker.get("line") or 0),
                 target=scope.get("target") or scope.get("cargo_subcommand") or "",
+                blocker_message=blocker.get("message", ""),
+                error_code=blocker.get("code", ""),
             )
 
         return {
