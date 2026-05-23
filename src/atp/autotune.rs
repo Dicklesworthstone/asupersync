@@ -231,6 +231,170 @@ impl AtpAutotuneTelemetryReport {
     }
 }
 
+/// Runtime pressure observations for one ATP transfer decision window.
+///
+/// Transfer code can fill this snapshot from path, disk, CPU, repair, and relay
+/// counters without depending directly on the policy implementation. The
+/// snapshot then exports stable metric names through
+/// [`AtpAutotuneTelemetryReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpTransferPressureSnapshot {
+    /// Stable trace id linking every sample to path/proof logs.
+    pub trace_id: String,
+    /// Stable transfer or workload id.
+    pub transfer_id: String,
+    /// Samples represented by this snapshot.
+    pub sample_count: u32,
+    /// Smoothed round-trip time in microseconds.
+    pub rtt_micros: Option<u64>,
+    /// Observed loss rate in packets per thousand.
+    pub loss_permille: Option<u16>,
+    /// Probe timeout in microseconds.
+    pub pto_micros: Option<u64>,
+    /// Congestion window in bytes.
+    pub congestion_window_bytes: Option<u64>,
+    /// Bytes currently in flight.
+    pub in_flight_bytes: Option<u64>,
+    /// Bytes queued in the send buffer.
+    pub send_buffer_queued_bytes: Option<u64>,
+    /// Bytes queued in the receive buffer.
+    pub receive_buffer_queued_bytes: Option<u64>,
+    /// Disk read lag in microseconds.
+    pub disk_read_lag_micros: Option<u64>,
+    /// Disk write lag in microseconds.
+    pub disk_write_lag_micros: Option<u64>,
+    /// Pending encoder work in symbols.
+    pub encode_backlog_symbols: Option<u32>,
+    /// Pending decoder work in symbols.
+    pub decode_backlog_symbols: Option<u32>,
+    /// Repair symbols sent during this window.
+    pub repair_symbols_sent: Option<u32>,
+    /// Repair symbols that helped decoding during this window.
+    pub useful_repair_symbols: Option<u32>,
+    /// Relay path cost observed during this window.
+    pub relay_cost_micros: Option<u64>,
+    /// Payload bytes forwarded through the relay during this window.
+    pub relay_bytes: Option<u64>,
+    /// Number of path migration events in the current decision window.
+    pub migration_events: Option<u32>,
+}
+
+impl AtpTransferPressureSnapshot {
+    /// Create an empty pressure snapshot for one transfer.
+    #[must_use]
+    pub fn new(trace_id: impl Into<String>, transfer_id: impl Into<String>) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+            transfer_id: transfer_id.into(),
+            sample_count: 0,
+            rtt_micros: None,
+            loss_permille: None,
+            pto_micros: None,
+            congestion_window_bytes: None,
+            in_flight_bytes: None,
+            send_buffer_queued_bytes: None,
+            receive_buffer_queued_bytes: None,
+            disk_read_lag_micros: None,
+            disk_write_lag_micros: None,
+            encode_backlog_symbols: None,
+            decode_backlog_symbols: None,
+            repair_symbols_sent: None,
+            useful_repair_symbols: None,
+            relay_cost_micros: None,
+            relay_bytes: None,
+            migration_events: None,
+        }
+    }
+
+    /// Set the represented sample count.
+    #[must_use]
+    pub const fn with_sample_count(mut self, sample_count: u32) -> Self {
+        self.sample_count = sample_count;
+        self
+    }
+
+    /// Derived repair ROI in useful repair symbols per thousand sent symbols.
+    #[must_use]
+    pub fn repair_roi_permille(&self) -> Option<u16> {
+        let sent = self.repair_symbols_sent?;
+        if sent == 0 {
+            return None;
+        }
+        let useful = u64::from(self.useful_repair_symbols.unwrap_or(0));
+        let roi = useful.saturating_mul(1_000) / u64::from(sent);
+        Some(roi.min(u64::from(u16::MAX)) as u16)
+    }
+
+    /// Derived relay cost in microseconds per MiB.
+    #[must_use]
+    pub fn relay_cost_micros_per_mib(&self) -> Option<u64> {
+        let bytes = self.relay_bytes?;
+        if bytes == 0 {
+            return None;
+        }
+        let cost = self.relay_cost_micros?;
+        Some(cost.saturating_mul(1_048_576) / bytes)
+    }
+
+    /// Export this snapshot as stable metric samples.
+    #[must_use]
+    pub fn to_report(&self) -> AtpAutotuneTelemetryReport {
+        let mut report =
+            AtpAutotuneTelemetryReport::new(self.trace_id.clone(), self.transfer_id.clone())
+                .with_sample_count(self.sample_count);
+
+        if let Some(value) = self.rtt_micros {
+            report = report.with_sample(AtpAutotuneMetric::RttMicros, value);
+        }
+        if let Some(value) = self.loss_permille {
+            report = report.with_sample(AtpAutotuneMetric::LossPermille, u64::from(value));
+        }
+        if let Some(value) = self.pto_micros {
+            report = report.with_sample(AtpAutotuneMetric::PtoMicros, value);
+        }
+        if let Some(value) = self.congestion_window_bytes {
+            report = report.with_sample(AtpAutotuneMetric::CongestionWindowBytes, value);
+        }
+        if let Some(value) = self.in_flight_bytes {
+            report = report.with_sample(AtpAutotuneMetric::InFlightBytes, value);
+        }
+        if let Some(value) = self.send_buffer_queued_bytes {
+            report = report.with_sample(AtpAutotuneMetric::SendBufferQueuedBytes, value);
+        }
+        if let Some(value) = self.receive_buffer_queued_bytes {
+            report = report.with_sample(AtpAutotuneMetric::ReceiveBufferQueuedBytes, value);
+        }
+        if let Some(value) = self.disk_read_lag_micros {
+            report = report.with_sample(AtpAutotuneMetric::DiskReadLagMicros, value);
+        }
+        if let Some(value) = self.disk_write_lag_micros {
+            report = report.with_sample(AtpAutotuneMetric::DiskWriteLagMicros, value);
+        }
+        if let Some(value) = self.encode_backlog_symbols {
+            report = report.with_sample(AtpAutotuneMetric::EncodeBacklogSymbols, u64::from(value));
+        }
+        if let Some(value) = self.decode_backlog_symbols {
+            report = report.with_sample(AtpAutotuneMetric::DecodeBacklogSymbols, u64::from(value));
+        }
+        if let Some(value) = self.repair_roi_permille() {
+            report = report.with_sample(AtpAutotuneMetric::RepairRoiPermille, u64::from(value));
+        }
+        if let Some(value) = self.relay_cost_micros_per_mib() {
+            report = report.with_sample(AtpAutotuneMetric::RelayCostMicrosPerMiB, value);
+        }
+        if let Some(value) = self.migration_events {
+            report = report.with_sample(AtpAutotuneMetric::MigrationEvents, u64::from(value));
+        }
+
+        report
+    }
+
+    /// Aggregate this snapshot into one autotune decision window.
+    pub fn into_telemetry(self) -> Result<AtpAutotuneTelemetry, AtpAutotuneTelemetryError> {
+        self.to_report().into_telemetry()
+    }
+}
+
 /// Error returned while aggregating ATP autotune metric samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtpAutotuneTelemetryError {
@@ -1326,6 +1490,86 @@ mod tests {
         assert_eq!(roundtrip.sample_count, 2);
         assert_eq!(roundtrip.rtt_micros, Some(25_000));
         assert_eq!(roundtrip.loss_permille, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_pressure_snapshot_exports_runtime_metrics_and_derived_costs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut snapshot =
+            AtpTransferPressureSnapshot::new("trace-transfer", "transfer-42").with_sample_count(12);
+        snapshot.rtt_micros = Some(44_000);
+        snapshot.loss_permille = Some(9);
+        snapshot.pto_micros = Some(120_000);
+        snapshot.congestion_window_bytes = Some(96 * 1_048_576);
+        snapshot.in_flight_bytes = Some(32 * 1_048_576);
+        snapshot.send_buffer_queued_bytes = Some(512 * 1_024);
+        snapshot.receive_buffer_queued_bytes = Some(256 * 1_024);
+        snapshot.disk_read_lag_micros = Some(8_000);
+        snapshot.disk_write_lag_micros = Some(9_000);
+        snapshot.encode_backlog_symbols = Some(64);
+        snapshot.decode_backlog_symbols = Some(32);
+        snapshot.repair_symbols_sent = Some(400);
+        snapshot.useful_repair_symbols = Some(250);
+        snapshot.relay_cost_micros = Some(300_000);
+        snapshot.relay_bytes = Some(2 * 1_048_576);
+        snapshot.migration_events = Some(1);
+
+        assert_eq!(snapshot.repair_roi_permille(), Some(625));
+        assert_eq!(snapshot.relay_cost_micros_per_mib(), Some(150_000));
+
+        let report = snapshot.to_report();
+        assert_eq!(report.trace_id, "trace-transfer");
+        assert_eq!(report.workload_id, "transfer-42");
+        assert_eq!(report.sample_count, 12);
+        assert_eq!(report.samples.len(), ATP_AUTOTUNE_METRIC_NAMES.len());
+        assert_eq!(
+            report.samples[11],
+            AtpAutotuneMetricSample::new(AtpAutotuneMetric::RepairRoiPermille, 625)
+        );
+        assert_eq!(
+            report.samples[12],
+            AtpAutotuneMetricSample::new(AtpAutotuneMetric::RelayCostMicrosPerMiB, 150_000)
+        );
+
+        let telemetry = report.into_telemetry()?;
+        assert_eq!(telemetry.trace_id, "trace-transfer");
+        assert_eq!(telemetry.workload_id, "transfer-42");
+        assert_eq!(telemetry.sample_count, 12);
+        assert_eq!(telemetry.loss_permille, Some(9));
+        assert_eq!(telemetry.repair_roi_permille, Some(625));
+        assert_eq!(telemetry.relay_cost_micros_per_mib, Some(150_000));
+        assert_eq!(telemetry.migration_events, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_pressure_snapshot_omits_denominator_based_metrics_when_empty()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut snapshot = AtpTransferPressureSnapshot::new("trace-empty", "transfer-empty");
+        snapshot.repair_symbols_sent = Some(0);
+        snapshot.useful_repair_symbols = Some(10);
+        snapshot.relay_cost_micros = Some(1_000);
+        snapshot.relay_bytes = Some(0);
+        snapshot.migration_events = Some(2);
+
+        assert_eq!(snapshot.repair_roi_permille(), None);
+        assert_eq!(snapshot.relay_cost_micros_per_mib(), None);
+
+        let report = snapshot.to_report();
+        assert_eq!(
+            report.samples,
+            vec![AtpAutotuneMetricSample::new(
+                AtpAutotuneMetric::MigrationEvents,
+                2,
+            )]
+        );
+
+        let telemetry = report.into_telemetry()?;
+        assert_eq!(telemetry.sample_count, 1);
+        assert_eq!(telemetry.repair_roi_permille, None);
+        assert_eq!(telemetry.relay_cost_micros_per_mib, None);
+        assert_eq!(telemetry.migration_events, Some(2));
         Ok(())
     }
 

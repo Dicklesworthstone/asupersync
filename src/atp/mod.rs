@@ -39,6 +39,7 @@ pub use autotune::{
     AtpAutotuneKnobDirection, AtpAutotuneLimits, AtpAutotuneMetric, AtpAutotuneMetricSample,
     AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryError,
     AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
+    AtpTransferPressureSnapshot,
 };
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};
