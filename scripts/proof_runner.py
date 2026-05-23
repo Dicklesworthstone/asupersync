@@ -25,6 +25,10 @@ SAFE_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ALLOWED_REMOTE_PROGRAMS = {"cargo", "lake", "rustfmt"}
 REMOTE_REQUIRED_VALUES = {"1", "true", "yes", "on"}
 SHELL_CONTROL_TOKENS = (";", "&", "|", "<", ">", "`", "$(")
+FORBIDDEN_VALIDATION_COMMAND_POLICY = (
+    "validation commands must not contain shell control or irreversible "
+    "git/filesystem operations"
+)
 RCH_OUTCOME_SCHEMA_VERSION = "proof-runner-rch-outcome-v1"
 PROOF_CONSOLE_REPORT_SCHEMA_VERSION = "proof-console-report-v1"
 RELEASE_PROOF_PACK_SCHEMA_VERSION = "release-proof-pack-v1"
@@ -360,6 +364,78 @@ def command_routes_cargo_through_rch(command: str) -> bool:
     )
 
 
+def _effective_program_tokens(argv: List[str]) -> List[str]:
+    """Return command tokens after leading env assignments."""
+    index = _first_non_assignment(argv)
+    if index < len(argv) and argv[index] == "env":
+        index = _first_non_assignment(argv, index + 1)
+    return argv[index:]
+
+
+def _rch_remote_program_tokens(argv: List[str]) -> List[str]:
+    """Return rch remote command tokens, or an empty list for non-rch commands."""
+    tokens = _effective_program_tokens(argv)
+    for index in range(len(tokens) - 2):
+        if tokens[index:index + 3] == ["rch", "exec", "--"]:
+            return _effective_program_tokens(tokens[index + 3:])
+    return []
+
+
+def _git_branch_creates_non_main_ref(tokens: List[str]) -> bool:
+    if len(tokens) < 3 or tokens[:2] != ["git", "branch"]:
+        return False
+    for token in tokens[2:]:
+        if token.startswith("-"):
+            continue
+        return token != "main"
+    return False
+
+
+def forbidden_validation_command_reasons(command: str) -> List[str]:
+    """Return reasons a fallback validation command must not be recommended."""
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError as error:
+        return [f"invalid-command-syntax: {error}"]
+
+    reasons = []
+    if any(any(marker in token for marker in SHELL_CONTROL_TOKENS) for token in argv):
+        reasons.append("shell-control-metacharacters")
+
+    candidates = [_effective_program_tokens(argv)]
+    remote_tokens = _rch_remote_program_tokens(argv)
+    if remote_tokens:
+        candidates.append(remote_tokens)
+
+    for tokens in candidates:
+        if not tokens:
+            continue
+        program = tokens[0]
+        if program == "rm":
+            reasons.append("forbidden-file-deletion")
+        elif tokens[:3] == ["git", "reset", "--hard"]:
+            reasons.append("forbidden-git-reset-hard")
+        elif len(tokens) >= 3 and tokens[:2] == ["git", "clean"] and any(
+            flag in {"-fd", "-df", "-ffd", "-fdf"} or (
+                flag.startswith("-") and "f" in flag and "d" in flag
+            )
+            for flag in tokens[2:]
+        ):
+            reasons.append("forbidden-git-clean")
+        elif tokens[:3] == ["git", "worktree", "add"]:
+            reasons.append("forbidden-git-worktree-add")
+        elif tokens[:3] == ["git", "checkout", "-b"]:
+            reasons.append("forbidden-git-checkout-branch")
+        elif tokens[:3] == ["git", "switch", "-c"]:
+            reasons.append("forbidden-git-switch-branch")
+        elif _git_branch_creates_non_main_ref(tokens):
+            reasons.append("forbidden-git-branch-non-main")
+        elif len(tokens) >= 2 and tokens[:2] == ["git", "push"]:
+            reasons.append("forbidden-git-push")
+
+    return sorted(set(reasons))
+
+
 def fallback_disk_safety(bead: Dict[str, Any]) -> str:
     explicit = str(bead.get("disk_safety", "")).strip().lower()
     if explicit in {"disk-safe", "cargo-heavy", "neutral"}:
@@ -415,10 +491,20 @@ def rank_fallback_beads_for_disk(
         disk_safety = fallback_disk_safety(bead)
         warning = FALLBACK_CARGO_HEAVY_WARNING if disk_low and disk_safety == "cargo-heavy" else ""
         touched_files = fallback_touched_files(bead)
+        unsafe_validation_reasons = []
+        for command in fallback_validation_commands(bead):
+            reasons = forbidden_validation_command_reasons(command)
+            if not command_routes_cargo_through_rch(command):
+                reasons.append("cargo-validation-not-remote-rch-routed")
+            if reasons:
+                unsafe_validation_reasons.append(
+                    {
+                        "command": command,
+                        "reasons": sorted(set(reasons)),
+                    }
+                )
         unsafe_validation_commands = [
-            command
-            for command in fallback_validation_commands(bead)
-            if not command_routes_cargo_through_rch(command)
+            row["command"] for row in unsafe_validation_reasons
         ]
         reservation_overlaps = []
         if reservation_checker and touched_files:
@@ -446,9 +532,11 @@ def rank_fallback_beads_for_disk(
             "reservation_hard_blocked": bool(hard_overlaps),
             "unsafe_validation_blocked": bool(unsafe_validation_commands),
             "unsafe_validation_commands": unsafe_validation_commands,
+            "unsafe_validation_reasons": unsafe_validation_reasons,
             "validation_command_policy": (
                 "cargo validation must route through "
-                "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo"
+                "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo; "
+                f"{FORBIDDEN_VALIDATION_COMMAND_POLICY}"
             ),
             "reservation_warning": (
                 f"peer-active reservation overlaps {peer_overlaps[0]['path']} held by {peer_overlaps[0]['holder']}"

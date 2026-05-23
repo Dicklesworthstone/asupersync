@@ -1257,6 +1257,8 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
          "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"},
         {"id": "shell-control-rch-cargo", "title": "rch cargo validation with shell control", "priority": 1,
          "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract; touch /tmp/asupersync-proof-runner-pwn"},
+        {"id": "forbidden-delete", "title": "destructive validation command", "priority": 1,
+         "validation_command": "rm -rf /tmp/asupersync-proof-runner-pwn"},
         {"id": "rch-cargo", "title": "rch cargo validation", "priority": 1,
          "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"}
     ]}));
@@ -1283,12 +1285,13 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
             "bare-cargo",
             "bare-rch-cargo",
             "missing-remote-required",
-            "shell-control-rch-cargo"
+            "shell-control-rch-cargo",
+            "forbidden-delete"
         ]
     );
     assert_eq!(
         result["summary"]["unsafe_validation_block_count"].as_i64(),
-        Some(4)
+        Some(5)
     );
 
     let safe = &result["ranked_fallback_beads"][0];
@@ -1307,7 +1310,7 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
     assert_eq!(
         blocked["validation_command_policy"].as_str(),
         Some(
-            "cargo validation must route through RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo"
+            "cargo validation must route through RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo; validation commands must not contain shell control or irreversible git/filesystem operations"
         )
     );
 
@@ -1340,6 +1343,27 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
         Some(
             "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract; touch /tmp/asupersync-proof-runner-pwn"
         )
+    );
+    assert!(
+        blocked["unsafe_validation_reasons"][0]["reasons"]
+            .as_array()
+            .expect("shell-control reasons array")
+            .contains(&Value::String("shell-control-metacharacters".to_string()))
+    );
+
+    let blocked = &result["ranked_fallback_beads"][5];
+    assert_eq!(blocked["id"].as_str(), Some("forbidden-delete"));
+    assert_eq!(blocked["eligible"].as_bool(), Some(false));
+    assert_eq!(blocked["unsafe_validation_blocked"].as_bool(), Some(true));
+    assert_eq!(
+        blocked["unsafe_validation_commands"][0].as_str(),
+        Some("rm -rf /tmp/asupersync-proof-runner-pwn")
+    );
+    assert!(
+        blocked["unsafe_validation_reasons"][0]["reasons"]
+            .as_array()
+            .expect("destructive reasons array")
+            .contains(&Value::String("forbidden-file-deletion".to_string()))
     );
 
     let plan = proof_runner_json(&[
