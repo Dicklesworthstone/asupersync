@@ -247,6 +247,8 @@ pub mod channel_ordering_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod combinator_family_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod distributed_primitives_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod bytes_io_time_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cx_obligation_trace_metamorphic_tests;
@@ -298,6 +300,8 @@ pub mod raptorq_rfc6330_conformance_tests;
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod scheduler_priority_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod service_layer_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod supervision_genserver_actor_io_fs_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
