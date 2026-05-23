@@ -306,6 +306,8 @@ pub struct SwarmPressureGovernorConfig {
     pub workload_feedback_max_age: Duration,
     /// Workload pressure ratio that triggers admission backpressure rules.
     pub workload_feedback_backpressure_threshold: f64,
+    /// Maximum live workload leases allowed per proof lane; zero means unlimited.
+    pub max_live_workload_leases_per_proof_lane: usize,
     /// Wait time per priority-rank aging step for live workload leases.
     pub workload_lease_starvation_aging_step: Duration,
 }
@@ -328,6 +330,7 @@ impl Default for SwarmPressureGovernorConfig {
             workload_feedback_max_age: Duration::from_secs(5),
             workload_feedback_backpressure_threshold:
                 DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD,
+            max_live_workload_leases_per_proof_lane: 0,
             workload_lease_starvation_aging_step: DEFAULT_WORKLOAD_LEASE_STARVATION_AGING_STEP,
         }
     }
@@ -1631,6 +1634,13 @@ impl SwarmPressureGovernor {
                 self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
                 return Err(workload_lease_error(reason));
             }
+            if let Some(reason) = self.workload_lease_proof_lane_capacity_reason(&leases, request) {
+                self.workload_lease_conflicts
+                    .fetch_add(1, Ordering::Relaxed);
+                drop(leases);
+                self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+                return Err(workload_lease_error(reason));
+            }
 
             leases.insert(lease_id, lease);
             expired_receipts
@@ -2187,6 +2197,31 @@ impl SwarmPressureGovernor {
         }
 
         None
+    }
+
+    fn workload_lease_proof_lane_capacity_reason(
+        &self,
+        leases: &HashMap<SwarmWorkloadLeaseId, SwarmWorkloadLease>,
+        request: &SwarmWorkloadAdmissionRequest,
+    ) -> Option<String> {
+        let limit = self.config.max_live_workload_leases_per_proof_lane;
+        if limit == 0 {
+            return None;
+        }
+
+        let live_lane_count = leases
+            .values()
+            .filter(|lease| lease.state.is_live() && lease.proof_lane == request.proof_lane)
+            .count();
+        if live_lane_count < limit {
+            return None;
+        }
+
+        Some(format!(
+            "proof_lane {} already has {live_lane_count} live workload leases; \
+             max_live_workload_leases_per_proof_lane={limit}",
+            request.proof_lane.as_str()
+        ))
     }
 
     fn workload_admission_receipt_mismatch_reason(
@@ -3229,6 +3264,12 @@ mod tests {
     use crate::types::Budget;
 
     fn create_test_swarm_governor() -> SwarmPressureGovernor {
+        create_test_swarm_governor_with_config(SwarmPressureGovernorConfig::default())
+    }
+
+    fn create_test_swarm_governor_with_config(
+        config: SwarmPressureGovernorConfig,
+    ) -> SwarmPressureGovernor {
         let runtime = std::sync::Arc::new(
             RuntimeBuilder::new()
                 .worker_threads(1)
@@ -3236,7 +3277,6 @@ mod tests {
                 .expect("Failed to create test runtime"),
         );
 
-        let config = SwarmPressureGovernorConfig::default();
         let resource_monitor = runtime.resource_monitor();
         let pressure_governor = PressureGovernor::new(
             config.pressure_config.clone(),
@@ -4264,6 +4304,89 @@ mod tests {
             )
             .expect("terminal prior lease must not block the same reservation scope forever");
         assert_eq!(second.workload_id, "scope-owner-b");
+    }
+
+    #[test]
+    fn test_workload_lease_proof_lane_capacity_rejects_over_cap_and_releases() {
+        let mut config = SwarmPressureGovernorConfig::default();
+        config.max_live_workload_leases_per_proof_lane = 1;
+        let governor = create_test_swarm_governor_with_config(config);
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let first_request = SwarmWorkloadAdmissionRequest::new(
+            "proof-lane-a",
+            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope("proof/a"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib);
+        let second_request = SwarmWorkloadAdmissionRequest::new(
+            "proof-lane-b",
+            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope("proof/b"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib);
+        let source_request = SwarmWorkloadAdmissionRequest::new(
+            "proof-lane-source",
+            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope("proof/source"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::SourceOnly);
+
+        let first_decision = governor
+            .check_workload_admission(&cx, &first_request)
+            .expect("first proof-lane workload admission should classify");
+        let second_decision = governor
+            .check_workload_admission(&cx, &second_request)
+            .expect("second proof-lane workload admission should classify");
+        let source_decision = governor
+            .check_workload_admission(&cx, &source_request)
+            .expect("different proof-lane workload admission should classify");
+
+        let first = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(56, 10),
+                &first_request,
+                &first_decision,
+            )
+            .expect("first workload in capped proof lane should acquire");
+        let conflict = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(56, 11),
+                &second_request,
+                &second_decision,
+            )
+            .expect_err("same proof lane should reject over the live lease cap");
+        assert!(matches!(
+            conflict,
+            SwarmPressureError::WorkloadLease { ref reason }
+                if reason.contains("proof_lane cargo_check_lib already has 1 live workload leases")
+                    && reason.contains("max_live_workload_leases_per_proof_lane=1")
+        ));
+
+        let source = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(56, 12),
+                &source_request,
+                &source_decision,
+            )
+            .expect("different proof lane should not consume cargo_check_lib capacity");
+        assert_eq!(source.workload_id, "proof-lane-source");
+        assert_eq!(governor.metrics().workload_lease_conflicts, 1);
+
+        governor
+            .release_workload_lease(first.lease_id)
+            .expect("releasing first lease should free proof-lane capacity");
+        let second = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(56, 13),
+                &second_request,
+                &second_decision,
+            )
+            .expect("released proof-lane capacity should allow the next lease");
+        assert_eq!(second.workload_id, "proof-lane-b");
     }
 
     #[test]
