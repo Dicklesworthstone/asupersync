@@ -11,6 +11,7 @@ use crate::atp::path::{
 };
 use crate::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::net::SocketAddr;
 
 /// TCP/TLS fallback port used by locked-down egress networks.
 pub const TCP_TLS_443_PORT: u16 = 443;
@@ -1027,6 +1028,103 @@ impl ForwardedPacket {
     }
 }
 
+/// Encoded UDP datagram ready for a relay socket send.
+///
+/// This is the socket-facing representation of a queued relay packet. It carries
+/// the canonical [`RelayWireFrame`] bytes and destination endpoint selected by
+/// the caller's peer directory. The payload is still opaque ATP ciphertext plus
+/// relay routing/proof metadata; the relay does not inspect object plaintext.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayUdpDatagram {
+    dst_addr: SocketAddr,
+    to_peer_id: PeerId,
+    reservation_id: RelayReservationId,
+    payload: Vec<u8>,
+    opaque_bytes: u64,
+}
+
+impl RelayUdpDatagram {
+    /// Destination socket address for this datagram.
+    #[must_use]
+    pub const fn dst_addr(&self) -> SocketAddr {
+        self.dst_addr
+    }
+
+    /// Peer id whose endpoint should receive this datagram.
+    #[must_use]
+    pub const fn to_peer_id(&self) -> PeerId {
+        self.to_peer_id
+    }
+
+    /// Reservation id represented by the encoded frame.
+    #[must_use]
+    pub const fn reservation_id(&self) -> RelayReservationId {
+        self.reservation_id
+    }
+
+    /// Canonical relay frame bytes to send over UDP.
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Consume this value and return the datagram payload bytes.
+    #[must_use]
+    pub fn into_payload(self) -> Vec<u8> {
+        self.payload
+    }
+
+    /// Number of opaque ATP ciphertext bytes represented by this datagram.
+    #[must_use]
+    pub const fn opaque_bytes(&self) -> u64 {
+        self.opaque_bytes
+    }
+}
+
+/// Encoded TCP/TLS 443 stream record ready for a relay socket write.
+///
+/// Unlike UDP, TCP/TLS fallback is a byte stream, so the canonical
+/// [`RelayWireFrame`] is wrapped in the length-prefixed stream record format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayTcpTlsRecord {
+    to_peer_id: PeerId,
+    reservation_id: RelayReservationId,
+    bytes: Vec<u8>,
+    opaque_bytes: u64,
+}
+
+impl RelayTcpTlsRecord {
+    /// Peer id whose TCP/TLS stream should receive this record.
+    #[must_use]
+    pub const fn to_peer_id(&self) -> PeerId {
+        self.to_peer_id
+    }
+
+    /// Reservation id represented by the encoded record.
+    #[must_use]
+    pub const fn reservation_id(&self) -> RelayReservationId {
+        self.reservation_id
+    }
+
+    /// Length-prefixed TCP/TLS relay record bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Consume this value and return the stream record bytes.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    /// Number of opaque ATP ciphertext bytes represented by this record.
+    #[must_use]
+    pub const fn opaque_bytes(&self) -> u64 {
+        self.opaque_bytes
+    }
+}
+
 /// Packet loss summary for a reservation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayLossSummary {
@@ -1520,6 +1618,29 @@ impl RelayService {
         )
     }
 
+    /// Decode and forward one UDP relay datagram.
+    ///
+    /// Real UDP socket loops can feed received datagram bytes into this method
+    /// after endpoint admission has mapped the sender address to the peer id
+    /// carried in the frame. TCP/TLS frames wrapped into UDP datagrams fail
+    /// closed before quota, usage, or queue state is mutated.
+    ///
+    /// # Errors
+    ///
+    /// Returns relay frame validation or forwarding validation errors.
+    pub fn forward_udp_datagram(
+        &mut self,
+        now_micros: u64,
+        datagram: &[u8],
+        max_payload_bytes: usize,
+    ) -> Result<ForwardedPacket, RelayError> {
+        let frame = RelayWireFrame::decode(datagram, max_payload_bytes)?;
+        if frame.packet.transport() != RelayTransport::Udp {
+            return Err(RelayError::InvalidRelayWireFrame);
+        }
+        self.forward_wire_frame(now_micros, frame)
+    }
+
     /// Append TCP/TLS stream bytes, decode complete relay records, and forward
     /// them in stream order.
     ///
@@ -1560,6 +1681,84 @@ impl RelayService {
         }
 
         Ok(forwarded)
+    }
+
+    /// Encode the next UDP packet queued for `peer_id` as a socket datagram.
+    ///
+    /// The method only consumes the queue front when that packet is actually a
+    /// UDP relay packet and encoding succeeds. If a TCP/TLS packet is at the
+    /// front of the peer queue, `Ok(None)` is returned and the queue is left
+    /// intact so the TCP/TLS writer can preserve per-peer delivery order.
+    ///
+    /// # Errors
+    ///
+    /// Returns relay frame encoding errors or [`RelayError::UnknownReservation`]
+    /// if the queued packet references state that no longer exists.
+    pub fn dequeue_udp_datagram_for_peer(
+        &mut self,
+        peer_id: PeerId,
+        dst_addr: SocketAddr,
+        max_payload_bytes: usize,
+    ) -> Result<Option<RelayUdpDatagram>, RelayError> {
+        let Some((forwarded, transfer_nonce, encoded)) =
+            self.encode_front_for_peer_transport(peer_id, RelayTransport::Udp, max_payload_bytes)?
+        else {
+            return Ok(None);
+        };
+        let popped = self
+            .dequeue_for_peer(peer_id)
+            .ok_or(RelayError::UnknownReservation)?;
+        debug_assert_eq!(popped.reservation_id, forwarded.reservation_id);
+        debug_assert_eq!(popped.packet.transport(), RelayTransport::Udp);
+        let popped_transfer_nonce = self.transfer_nonce_for(&popped)?;
+        debug_assert_eq!(transfer_nonce, popped_transfer_nonce);
+
+        Ok(Some(RelayUdpDatagram {
+            dst_addr,
+            to_peer_id: peer_id,
+            reservation_id: popped.reservation_id,
+            payload: encoded,
+            opaque_bytes: popped.packet.opaque_len() as u64,
+        }))
+    }
+
+    /// Encode the next TCP/TLS 443 packet queued for `peer_id` as one stream record.
+    ///
+    /// The method mirrors [`Self::dequeue_udp_datagram_for_peer`]: it only
+    /// consumes the queue front when the packet belongs on the TCP/TLS fallback
+    /// stream and record encoding has already succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns relay frame encoding errors or [`RelayError::UnknownReservation`]
+    /// if the queued packet references state that no longer exists.
+    pub fn dequeue_tcp_tls_record_for_peer(
+        &mut self,
+        peer_id: PeerId,
+        max_payload_bytes: usize,
+    ) -> Result<Option<RelayTcpTlsRecord>, RelayError> {
+        let Some((forwarded, transfer_nonce, encoded)) = self.encode_front_for_peer_transport(
+            peer_id,
+            RelayTransport::TcpTls443,
+            max_payload_bytes,
+        )?
+        else {
+            return Ok(None);
+        };
+        let popped = self
+            .dequeue_for_peer(peer_id)
+            .ok_or(RelayError::UnknownReservation)?;
+        debug_assert_eq!(popped.reservation_id, forwarded.reservation_id);
+        debug_assert_eq!(popped.packet.transport(), RelayTransport::TcpTls443);
+        let popped_transfer_nonce = self.transfer_nonce_for(&popped)?;
+        debug_assert_eq!(transfer_nonce, popped_transfer_nonce);
+
+        Ok(Some(RelayTcpTlsRecord {
+            to_peer_id: peer_id,
+            reservation_id: popped.reservation_id,
+            bytes: encoded,
+            opaque_bytes: popped.packet.opaque_len() as u64,
+        }))
     }
 
     /// Dequeue the next forwarded packet for a peer.
@@ -1837,6 +2036,41 @@ impl RelayService {
             replay_pointer: self.replay_pointer,
             e2e_proof_preserved: true,
         })
+    }
+
+    fn encode_front_for_peer_transport(
+        &self,
+        peer_id: PeerId,
+        transport: RelayTransport,
+        max_payload_bytes: usize,
+    ) -> Result<Option<(ForwardedPacket, TransferNonce, Vec<u8>)>, RelayError> {
+        let Some(forwarded) = self.queues.get(&peer_id).and_then(VecDeque::front) else {
+            return Ok(None);
+        };
+        if forwarded.packet.transport() != transport {
+            return Ok(None);
+        }
+
+        let transfer_nonce = self.transfer_nonce_for(forwarded)?;
+        let frame = RelayWireFrame::new(
+            forwarded.reservation_id,
+            transfer_nonce,
+            forwarded.from_peer_id,
+            forwarded.packet.clone(),
+        );
+        let encoded = match transport {
+            RelayTransport::Udp => frame.encode(max_payload_bytes)?,
+            RelayTransport::TcpTls443 => frame.encode_tcp_tls_record(max_payload_bytes)?,
+        };
+
+        Ok(Some((forwarded.clone(), transfer_nonce, encoded)))
+    }
+
+    fn transfer_nonce_for(&self, forwarded: &ForwardedPacket) -> Result<TransferNonce, RelayError> {
+        self.reservations
+            .get(&forwarded.reservation_id)
+            .map(|state| state.grant.transfer_nonce)
+            .ok_or(RelayError::UnknownReservation)
     }
 
     fn active_reservation_count(&self, now_micros: u64) -> usize {
@@ -2807,6 +3041,160 @@ mod tests {
             stream.pending_len(),
             udp_record.len(),
             "malformed bytes are retained for caller diagnostics before close"
+        );
+    }
+
+    #[test]
+    fn udp_socket_ingress_and_egress_round_trip_without_plaintext_authority() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(40),
+                "path-relay-40",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        let frame = RelayWireFrame::new(
+            reservation_id(40),
+            transfer_nonce(9),
+            peer(1),
+            packet_sent_at(RelayTransport::Udp, b"udp-socket-ciphertext", 1, 90),
+        );
+        let encoded = frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode udp datagram");
+        let forwarded = service
+            .forward_udp_datagram(125, &encoded, RelayQuota::default().max_packet_bytes)
+            .expect("udp datagram forwards");
+        assert_eq!(forwarded.to_peer_id(), peer(2));
+        assert_eq!(forwarded.packet().opaque_bytes(), b"udp-socket-ciphertext");
+
+        let dst_addr = SocketAddr::from(([127, 0, 0, 1], 45_000));
+        let datagram = service
+            .dequeue_udp_datagram_for_peer(
+                peer(2),
+                dst_addr,
+                RelayQuota::default().max_packet_bytes,
+            )
+            .expect("encode outbound udp datagram")
+            .expect("queued udp packet");
+        assert_eq!(datagram.dst_addr(), dst_addr);
+        assert_eq!(datagram.to_peer_id(), peer(2));
+        assert_eq!(datagram.reservation_id(), reservation_id(40));
+        assert_eq!(
+            datagram.opaque_bytes(),
+            u64::try_from(b"udp-socket-ciphertext".len()).expect("ciphertext len fits in u64")
+        );
+
+        let decoded =
+            RelayWireFrame::decode(datagram.payload(), RelayQuota::default().max_packet_bytes)
+                .expect("decode outbound datagram frame");
+        assert_eq!(decoded.reservation_id(), reservation_id(40));
+        assert_eq!(decoded.transfer_nonce(), transfer_nonce(9));
+        assert_eq!(decoded.from_peer_id(), peer(1));
+        assert_eq!(decoded.packet().transport(), RelayTransport::Udp);
+        assert_eq!(decoded.packet().opaque_bytes(), b"udp-socket-ciphertext");
+        assert!(
+            service
+                .dequeue_udp_datagram_for_peer(
+                    peer(2),
+                    dst_addr,
+                    RelayQuota::default().max_packet_bytes
+                )
+                .expect("empty udp queue")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn socket_adapters_fail_closed_and_preserve_transport_order() {
+        let config = RelayServiceConfig::default().with_udp_enabled(false);
+        let mut service = RelayService::new(config);
+        service
+            .reserve(
+                10,
+                reservation_id(41),
+                "path-relay-41",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        let tcp_frame = RelayWireFrame::new(
+            reservation_id(41),
+            transfer_nonce(9),
+            peer(1),
+            packet_sent_at(RelayTransport::TcpTls443, b"tcp-stream-ciphertext", 1, 90),
+        );
+        let canonical_tcp_frame = tcp_frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode canonical tcp frame");
+        assert_eq!(
+            service
+                .forward_udp_datagram(
+                    100,
+                    &canonical_tcp_frame,
+                    RelayQuota::default().max_packet_bytes
+                )
+                .expect_err("tcp frame must not enter udp datagram ingress"),
+            RelayError::InvalidRelayWireFrame
+        );
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(41))
+                .expect("proof after rejected udp ingress")
+                .packets_forwarded,
+            0
+        );
+
+        let tcp_record = tcp_frame
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect("encode tcp record");
+        let mut stream =
+            RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
+                .expect("stream buffer");
+        let forwarded = service
+            .forward_tcp_tls_stream_bytes(125, &mut stream, &tcp_record)
+            .expect("tcp stream forwards");
+        assert_eq!(forwarded.len(), 1);
+
+        let dst_addr = SocketAddr::from(([127, 0, 0, 1], 45_001));
+        assert!(
+            service
+                .dequeue_udp_datagram_for_peer(
+                    peer(2),
+                    dst_addr,
+                    RelayQuota::default().max_packet_bytes
+                )
+                .expect("udp egress sees tcp front and preserves it")
+                .is_none()
+        );
+        let record = service
+            .dequeue_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+            .expect("encode outbound tcp record")
+            .expect("queued tcp packet");
+        assert_eq!(record.to_peer_id(), peer(2));
+        assert_eq!(record.reservation_id(), reservation_id(41));
+        assert_eq!(
+            record.opaque_bytes(),
+            u64::try_from(b"tcp-stream-ciphertext".len()).expect("ciphertext len fits in u64")
+        );
+        let decoded = RelayWireFrame::decode_complete_tcp_tls_record(
+            record.bytes(),
+            RelayQuota::default().max_packet_bytes,
+        )
+        .expect("decode outbound tcp record");
+        assert_eq!(decoded.from_peer_id(), peer(1));
+        assert_eq!(decoded.packet().transport(), RelayTransport::TcpTls443);
+        assert_eq!(decoded.packet().opaque_bytes(), b"tcp-stream-ciphertext");
+        assert!(
+            service
+                .dequeue_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+                .expect("empty tcp queue")
+                .is_none()
         );
     }
 

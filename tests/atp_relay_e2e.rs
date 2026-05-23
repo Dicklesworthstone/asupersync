@@ -14,6 +14,7 @@ use asupersync::net::atp::relay::{
     RelayWireFrame,
 };
 use asupersync::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
+use std::net::SocketAddr;
 
 fn log_stage(test: &str, stage: &str, detail: impl AsRef<str>) {
     println!(
@@ -501,6 +502,160 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
             && event.fallback_reason == Some("udp_unavailable_tcp_tls_443")
             && event.quota_decision == "packet_accepted"
     }));
+}
+
+#[test]
+fn relay_socket_adapters_bridge_udp_datagrams_and_tcp_records() {
+    let test = "relay_socket_adapters_bridge_udp_datagrams_and_tcp_records";
+    let mut udp_service = RelayService::new(
+        RelayServiceConfig::new("relay-socket-udp", 4)
+            .expect("udp config")
+            .with_log_peer_ids(true),
+    );
+
+    log_stage(
+        test,
+        "udp-ingress",
+        "socket datagram bytes enter the canonical relay forwarding path",
+    );
+    udp_service
+        .reserve(
+            100,
+            reservation_id(700),
+            "socket-udp-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve udp socket relay");
+    let udp_frame = RelayWireFrame::new(
+        reservation_id(700),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(RelayTransport::Udp, b"socket-udp-ciphertext", 1, 175),
+    );
+    let udp_datagram_bytes = udp_frame
+        .encode(RelayQuota::default().max_packet_bytes)
+        .expect("encode inbound udp datagram");
+    let udp_forwarded = udp_service
+        .forward_udp_datagram(
+            200,
+            &udp_datagram_bytes,
+            RelayQuota::default().max_packet_bytes,
+        )
+        .expect("forward inbound udp datagram");
+    assert_eq!(udp_forwarded.to_peer_id(), peer(2));
+
+    log_stage(
+        test,
+        "udp-egress",
+        "queued relay packet encodes as a UDP datagram for the peer directory endpoint",
+    );
+    let dst_addr = SocketAddr::from(([127, 0, 0, 1], 47_000));
+    let udp_egress = udp_service
+        .dequeue_udp_datagram_for_peer(peer(2), dst_addr, RelayQuota::default().max_packet_bytes)
+        .expect("encode outbound udp datagram")
+        .expect("queued udp egress packet");
+    assert_eq!(udp_egress.dst_addr(), dst_addr);
+    assert_eq!(udp_egress.to_peer_id(), peer(2));
+    assert_eq!(
+        udp_egress.opaque_bytes(),
+        u64::try_from(b"socket-udp-ciphertext".len()).expect("ciphertext len fits in u64")
+    );
+    let decoded_udp =
+        RelayWireFrame::decode(udp_egress.payload(), RelayQuota::default().max_packet_bytes)
+            .expect("decode outbound udp datagram");
+    assert_eq!(decoded_udp.from_peer_id(), peer(1));
+    assert_eq!(decoded_udp.packet().transport(), RelayTransport::Udp);
+    assert_eq!(
+        decoded_udp.packet().opaque_bytes(),
+        b"socket-udp-ciphertext"
+    );
+    assert!(
+        udp_service
+            .events()
+            .iter()
+            .any(|event| event.kind == RelayEventKind::PacketForwarded
+                && event.transport == Some(RelayTransport::Udp)
+                && event.quota_decision == "packet_accepted")
+    );
+
+    log_stage(
+        test,
+        "tcp-egress",
+        "tcp/tls stream bytes retain ordering until the tcp writer drains the record",
+    );
+    let mut tcp_service = RelayService::new(
+        RelayServiceConfig::new("relay-socket-tcp", 4)
+            .expect("tcp config")
+            .with_udp_enabled(false)
+            .with_log_peer_ids(true),
+    );
+    tcp_service
+        .reserve(
+            300,
+            reservation_id(701),
+            "socket-tcp-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve tcp socket relay");
+    let tcp_frame = RelayWireFrame::new(
+        reservation_id(701),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(RelayTransport::TcpTls443, b"socket-tcp-ciphertext", 2, 310),
+    );
+    let tcp_record_bytes = tcp_frame
+        .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+        .expect("encode inbound tcp record");
+    let mut stream = RelayTcpTlsStreamBuffer::new(
+        RelayQuota::default().max_packet_bytes,
+        tcp_record_bytes.len(),
+    )
+    .expect("tcp stream buffer");
+    let tcp_forwarded = tcp_service
+        .forward_tcp_tls_stream_bytes(350, &mut stream, &tcp_record_bytes)
+        .expect("forward inbound tcp record");
+    assert_eq!(tcp_forwarded.len(), 1);
+    assert!(
+        tcp_service
+            .dequeue_udp_datagram_for_peer(
+                peer(2),
+                dst_addr,
+                RelayQuota::default().max_packet_bytes
+            )
+            .expect("udp egress must preserve tcp queue front")
+            .is_none(),
+        "wrong writer must not consume tcp/tls queued packets"
+    );
+    let tcp_record = tcp_service
+        .dequeue_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+        .expect("encode outbound tcp record")
+        .expect("queued tcp egress packet");
+    assert_eq!(tcp_record.to_peer_id(), peer(2));
+    assert_eq!(
+        tcp_record.opaque_bytes(),
+        u64::try_from(b"socket-tcp-ciphertext".len()).expect("ciphertext len fits in u64")
+    );
+    let decoded_tcp = RelayWireFrame::decode_complete_tcp_tls_record(
+        tcp_record.bytes(),
+        RelayQuota::default().max_packet_bytes,
+    )
+    .expect("decode outbound tcp record");
+    assert_eq!(decoded_tcp.from_peer_id(), peer(1));
+    assert_eq!(decoded_tcp.packet().transport(), RelayTransport::TcpTls443);
+    assert_eq!(
+        decoded_tcp.packet().opaque_bytes(),
+        b"socket-tcp-ciphertext"
+    );
+    let tcp_proof = tcp_service
+        .proof_artifact(reservation_id(701))
+        .expect("tcp proof");
+    assert_eq!(
+        tcp_proof.fallback_reason,
+        Some("udp_unavailable_tcp_tls_443")
+    );
+    assert!(tcp_proof.e2e_proof_preserved);
 }
 
 #[test]
