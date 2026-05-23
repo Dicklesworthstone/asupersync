@@ -4,8 +4,11 @@
 //! trace minimization and failure reproduction capabilities.
 
 use crate::lab::crashpack::evidence_ledger::AtpEvidenceLedger;
-use crate::lab::crashpack::{ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, TransferViolation};
-use crate::lab::oracle::{OracleEntryReport, OracleReport};
+use crate::lab::crashpack::{
+    ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, TransferOracleResult, TransferViolation,
+    ViolationSeverity,
+};
+use crate::lab::oracle::{OracleEntryReport, OracleReport, OracleStats};
 use crate::trace::{TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -122,13 +125,7 @@ impl AtpReplayCoordinator {
             }
         }
 
-        let trace_path = output_dir.join("transfer.atp-trace");
-        let trace_json = read_replay_artifact(&trace_path)?;
-        let trace_events = serde_json::from_str::<Vec<TraceEvent>>(&trace_json).map_err(|err| {
-            replay_validation_failed(format!(
-                "transfer.atp-trace is not a TraceEvent list: {err}"
-            ))
-        })?;
+        let trace_events = read_trace_events(output_dir)?;
 
         let journal_path = output_dir.join("journal");
         let journal = read_replay_artifact(&journal_path)?;
@@ -174,11 +171,7 @@ impl AtpReplayCoordinator {
                 replay_validation_failed(format!("manifest violations field is invalid: {err}"))
             })?;
 
-        let ledger_path = output_dir.join("evidence-ledger.json");
-        let ledger_json = read_replay_artifact(&ledger_path)?;
-        let ledger = AtpEvidenceLedger::import_json(&ledger_json).map_err(|err| {
-            replay_validation_failed(format!("evidence-ledger.json is invalid: {err}"))
-        })?;
+        let ledger = read_evidence_ledger(output_dir)?;
         if ledger.schema_version != ATP_CRASHPACK_SCHEMA_VERSION {
             return Err(replay_validation_failed(format!(
                 "unsupported evidence ledger schema version {}",
@@ -236,6 +229,42 @@ impl AtpReplayCoordinator {
             journal_digest: computed_journal_digest,
             replay_ready: true,
         })
+    }
+
+    /// Rebuild an ATP crashpack from emitted replay artifacts and replay it.
+    pub fn replay_from_artifacts(output_dir: &Path) -> Result<AtpReplayResult, ReplayError> {
+        Self::replay_from_artifacts_with_config(output_dir, TraceMinimizerConfig::default())
+    }
+
+    /// Rebuild an ATP crashpack from emitted replay artifacts with a minimizer override.
+    pub fn replay_from_artifacts_with_config(
+        output_dir: &Path,
+        minimizer_config: TraceMinimizerConfig,
+    ) -> Result<AtpReplayResult, ReplayError> {
+        Self::validate_replay_artifacts(output_dir)?;
+        let trace_events = read_trace_events(output_dir)?;
+        let ledger = read_evidence_ledger(output_dir)?;
+        let journal = read_replay_artifact(&output_dir.join("journal"))?;
+        let oracle_results = parse_journal_oracle_results(&journal)?;
+        validate_journal_matches_manifest(output_dir, &oracle_results)?;
+        validate_journal_matches_ledger(&ledger, &oracle_results)?;
+
+        let crashpack = AtpCrashpack {
+            schema_version: ledger.schema_version,
+            oracle_results,
+            trace_events,
+            seeds: ledger.seeds,
+            artifact_paths: ledger
+                .artifact_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            metadata: ledger.metadata,
+        };
+
+        Self::new(crashpack)
+            .with_minimizer_config(minimizer_config)
+            .replay()
     }
 
     fn count_original_violations(&self) -> usize {
@@ -762,6 +791,23 @@ fn read_replay_artifact(path: &Path) -> Result<String, ReplayError> {
     })
 }
 
+fn read_trace_events(output_dir: &Path) -> Result<Vec<TraceEvent>, ReplayError> {
+    let trace_path = output_dir.join("transfer.atp-trace");
+    let trace_json = read_replay_artifact(&trace_path)?;
+    serde_json::from_str::<Vec<TraceEvent>>(&trace_json).map_err(|err| {
+        replay_validation_failed(format!(
+            "transfer.atp-trace is not a TraceEvent list: {err}"
+        ))
+    })
+}
+
+fn read_evidence_ledger(output_dir: &Path) -> Result<AtpEvidenceLedger, ReplayError> {
+    let ledger_path = output_dir.join("evidence-ledger.json");
+    let ledger_json = read_replay_artifact(&ledger_path)?;
+    AtpEvidenceLedger::import_json(&ledger_json)
+        .map_err(|err| replay_validation_failed(format!("evidence-ledger.json is invalid: {err}")))
+}
+
 fn journal_digest_ref(journal_data: &str) -> String {
     let digest = Sha256::digest(journal_data.as_bytes());
     format!("sha256:{}", hex::encode(digest))
@@ -792,6 +838,309 @@ fn validate_manifest_reference(
 
 fn replay_validation_failed(message: impl Into<String>) -> ReplayError {
     ReplayError::ReplayValidationFailed(message.into())
+}
+
+fn parse_journal_oracle_results(journal: &str) -> Result<Vec<TransferOracleResult>, ReplayError> {
+    let mut results = Vec::new();
+    let mut pending_oracle: Option<PendingJournalOracle> = None;
+
+    for (line_index, raw_line) in journal.lines().enumerate() {
+        let line_number = line_index + 1;
+        let indent = raw_line
+            .chars()
+            .take_while(|ch| ch.is_ascii_whitespace())
+            .count();
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(name) = line.strip_prefix("oracle:") {
+            if let Some(oracle) = pending_oracle.take() {
+                results.push(oracle.into_result()?);
+            }
+
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(replay_validation_failed(format!(
+                    "journal has empty oracle name at line {line_number}"
+                )));
+            }
+            pending_oracle = Some(PendingJournalOracle::new(name));
+            continue;
+        }
+
+        let oracle = pending_oracle.as_mut().ok_or_else(|| {
+            replay_validation_failed(format!(
+                "journal field appeared before oracle header at line {line_number}"
+            ))
+        })?;
+
+        if indent >= 8 {
+            let (key, value) = line.split_once(':').ok_or_else(|| {
+                replay_validation_failed(format!(
+                    "journal evidence field is invalid at line {line_number}: {line}"
+                ))
+            })?;
+            let violation = oracle.current_violation_mut(line_number)?;
+            violation
+                .evidence
+                .insert(key.trim().to_string(), value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("events_recorded:") {
+            oracle.events_recorded = Some(parse_usize_journal_field(
+                "events_recorded",
+                value,
+                line_number,
+            )?);
+        } else if let Some(value) = line.strip_prefix("entities_tracked:") {
+            oracle.entities_tracked = Some(parse_usize_journal_field(
+                "entities_tracked",
+                value,
+                line_number,
+            )?);
+        } else if let Some(value) = line.strip_prefix("passed:") {
+            oracle.passed = Some(parse_bool_journal_field("passed", value, line_number)?);
+        } else if line == "violations:" || line == "evidence:" {
+            continue;
+        } else if let Some(value) = line.strip_prefix("- type:") {
+            oracle.finish_violation()?;
+            oracle.current_violation = Some(PendingJournalViolation::new(value.trim()));
+        } else if let Some(value) = line.strip_prefix("severity:") {
+            let violation = oracle.current_violation_mut(line_number)?;
+            violation.severity = Some(parse_violation_severity(value.trim(), line_number)?);
+        } else if let Some(value) = line.strip_prefix("description:") {
+            let violation = oracle.current_violation_mut(line_number)?;
+            violation.description = Some(value.trim().to_string());
+        } else if let Some((key, value)) = line.split_once(':') {
+            let violation = oracle.current_violation_mut(line_number)?;
+            violation
+                .evidence
+                .insert(key.trim().to_string(), value.trim().to_string());
+        } else {
+            return Err(replay_validation_failed(format!(
+                "unsupported journal line {line_number}: {line}"
+            )));
+        }
+    }
+
+    if let Some(oracle) = pending_oracle.take() {
+        results.push(oracle.into_result()?);
+    }
+
+    Ok(results)
+}
+
+fn parse_usize_journal_field(
+    field: &str,
+    value: &str,
+    line_number: usize,
+) -> Result<usize, ReplayError> {
+    value.trim().parse::<usize>().map_err(|err| {
+        replay_validation_failed(format!(
+            "journal {field} field is invalid at line {line_number}: {err}"
+        ))
+    })
+}
+
+fn parse_bool_journal_field(
+    field: &str,
+    value: &str,
+    line_number: usize,
+) -> Result<bool, ReplayError> {
+    value.trim().parse::<bool>().map_err(|err| {
+        replay_validation_failed(format!(
+            "journal {field} field is invalid at line {line_number}: {err}"
+        ))
+    })
+}
+
+fn parse_violation_severity(
+    value: &str,
+    line_number: usize,
+) -> Result<ViolationSeverity, ReplayError> {
+    match value {
+        "Low" => Ok(ViolationSeverity::Low),
+        "Medium" => Ok(ViolationSeverity::Medium),
+        "High" => Ok(ViolationSeverity::High),
+        "Critical" => Ok(ViolationSeverity::Critical),
+        _ => Err(replay_validation_failed(format!(
+            "journal severity field is invalid at line {line_number}: {value}"
+        ))),
+    }
+}
+
+fn validate_journal_matches_manifest(
+    output_dir: &Path,
+    oracle_results: &[TransferOracleResult],
+) -> Result<(), ReplayError> {
+    let manifest = read_replay_artifact(&output_dir.join("manifest"))?;
+    let manifest_violations = keyed_value(&manifest, "violations")
+        .ok_or_else(|| replay_validation_failed("manifest is missing violations field"))?
+        .parse::<usize>()
+        .map_err(|err| {
+            replay_validation_failed(format!("manifest violations field is invalid: {err}"))
+        })?;
+    let journal_violations = oracle_results
+        .iter()
+        .map(|result| result.violations.len())
+        .sum::<usize>();
+
+    if journal_violations != manifest_violations {
+        return Err(replay_validation_failed(format!(
+            "journal violation count mismatch: journal {journal_violations}, manifest {manifest_violations}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_journal_matches_ledger(
+    ledger: &AtpEvidenceLedger,
+    oracle_results: &[TransferOracleResult],
+) -> Result<(), ReplayError> {
+    for entry in &ledger.entries {
+        if !oracle_results
+            .iter()
+            .any(|result| result.oracle_name == entry.oracle_name)
+        {
+            return Err(replay_validation_failed(format!(
+                "evidence ledger oracle {} is missing from journal",
+                entry.oracle_name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+struct PendingJournalOracle {
+    oracle_name: String,
+    entities_tracked: Option<usize>,
+    events_recorded: Option<usize>,
+    passed: Option<bool>,
+    violations: Vec<TransferViolation>,
+    current_violation: Option<PendingJournalViolation>,
+}
+
+impl PendingJournalOracle {
+    fn new(name: &str) -> Self {
+        Self {
+            oracle_name: name.to_string(),
+            entities_tracked: None,
+            events_recorded: None,
+            passed: None,
+            violations: Vec::new(),
+            current_violation: None,
+        }
+    }
+
+    fn current_violation_mut(
+        &mut self,
+        line_number: usize,
+    ) -> Result<&mut PendingJournalViolation, ReplayError> {
+        self.current_violation.as_mut().ok_or_else(|| {
+            replay_validation_failed(format!(
+                "journal violation field appeared before violation type at line {line_number}"
+            ))
+        })
+    }
+
+    fn finish_violation(&mut self) -> Result<(), ReplayError> {
+        if let Some(violation) = self.current_violation.take() {
+            self.violations.push(violation.into_violation()?);
+        }
+        Ok(())
+    }
+
+    fn into_result(mut self) -> Result<TransferOracleResult, ReplayError> {
+        self.finish_violation()?;
+        let passed = self.passed.ok_or_else(|| {
+            replay_validation_failed(format!(
+                "journal oracle {} is missing passed field",
+                self.oracle_name
+            ))
+        })?;
+        let entities_tracked = self.entities_tracked.ok_or_else(|| {
+            replay_validation_failed(format!(
+                "journal oracle {} is missing entities_tracked field",
+                self.oracle_name
+            ))
+        })?;
+        let events_recorded = self.events_recorded.ok_or_else(|| {
+            replay_validation_failed(format!(
+                "journal oracle {} is missing events_recorded field",
+                self.oracle_name
+            ))
+        })?;
+
+        if passed && !self.violations.is_empty() {
+            return Err(replay_validation_failed(format!(
+                "journal oracle {} is marked passed but contains violations",
+                self.oracle_name
+            )));
+        }
+        if !passed && self.violations.is_empty() {
+            return Err(replay_validation_failed(format!(
+                "journal oracle {} is marked failed but contains no violations",
+                self.oracle_name
+            )));
+        }
+
+        Ok(TransferOracleResult {
+            oracle_name: self.oracle_name,
+            violations: self.violations,
+            stats: OracleStats {
+                entities_tracked,
+                events_recorded,
+            },
+            passed,
+        })
+    }
+}
+
+struct PendingJournalViolation {
+    violation_type: String,
+    severity: Option<ViolationSeverity>,
+    description: Option<String>,
+    evidence: BTreeMap<String, String>,
+}
+
+impl PendingJournalViolation {
+    fn new(violation_type: &str) -> Self {
+        Self {
+            violation_type: violation_type.to_string(),
+            severity: None,
+            description: None,
+            evidence: BTreeMap::new(),
+        }
+    }
+
+    fn into_violation(self) -> Result<TransferViolation, ReplayError> {
+        if self.violation_type.is_empty() {
+            return Err(replay_validation_failed(
+                "journal violation is missing violation type",
+            ));
+        }
+        let severity = self.severity.ok_or_else(|| {
+            replay_validation_failed(format!(
+                "journal violation {} is missing severity",
+                self.violation_type
+            ))
+        })?;
+        let description = self.description.ok_or_else(|| {
+            replay_validation_failed(format!(
+                "journal violation {} is missing description",
+                self.violation_type
+            ))
+        })?;
+
+        Ok(TransferViolation {
+            violation_type: self.violation_type,
+            description,
+            severity,
+            evidence: self.evidence,
+        })
+    }
 }
 
 fn shell_path_arg(path: &Path) -> String {

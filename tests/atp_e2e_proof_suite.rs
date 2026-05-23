@@ -455,6 +455,95 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn test_atp_replay_from_emitted_artifacts_reproduces_journal_violations() {
+    let temp_dir = TempDir::new().expect("tempdir is available");
+    let mut trace = TraceBuffer::new(8);
+    trace.push(TraceEvent::user_trace(
+        1,
+        Time::from_nanos(1),
+        "setup event",
+    ));
+    trace.push(TraceEvent::user_trace(
+        2,
+        Time::from_nanos(2),
+        "ATP violation: manifest integrity failure",
+    ));
+    trace.push(TraceEvent::user_trace(
+        3,
+        Time::from_nanos(3),
+        "ATP violation: journal consistency failure",
+    ));
+    trace.push(TraceEvent::user_trace(
+        4,
+        Time::from_nanos(4),
+        "diagnostic noise after transfer",
+    ));
+
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(TransferOracleResult {
+            oracle_name: "transfer_integrity".to_string(),
+            violations: vec![
+                transfer_violation(
+                    "manifest_integrity",
+                    "manifest integrity failed",
+                    ViolationSeverity::High,
+                ),
+                transfer_violation(
+                    "journal_consistency",
+                    "journal consistency failed",
+                    ViolationSeverity::Medium,
+                ),
+            ],
+            stats: OracleStats {
+                entities_tracked: 2,
+                events_recorded: 4,
+            },
+            passed: false,
+        })
+        .with_trace(trace)
+        .with_seed("lab-seed", 99)
+        .with_metadata("transfer_id", "tx-replay-from-artifacts")
+        .build()
+        .expect("crashpack builds");
+
+    crashpack
+        .emit_atp_trace(temp_dir.path())
+        .expect("crashpack emits replay artifacts");
+
+    let result = AtpReplayCoordinator::replay_from_artifacts_with_config(
+        temp_dir.path(),
+        TraceMinimizerConfig {
+            enabled: true,
+            reduction_target: 0.8,
+            max_attempts: 16,
+            preserve_oracle_events: true,
+            preserve_timing: false,
+        },
+    )
+    .expect("emitted artifacts replay");
+
+    assert_eq!(result.original_violations, 2);
+    assert!(result.replay_successful);
+    assert_eq!(result.minimized_trace_length, 2);
+    assert_eq!(result.oracle_results.len(), 1);
+
+    let replay_report = &result.oracle_results[0];
+    assert_eq!(replay_report.total, 1);
+    assert_eq!(replay_report.passed, 0);
+    assert_eq!(replay_report.failed, 1);
+    let replay_entry = replay_report
+        .entry("transfer_integrity")
+        .expect("replay report preserves journal oracle");
+    assert!(!replay_entry.passed);
+    let violation_summary = replay_entry
+        .violation
+        .as_deref()
+        .expect("journal violations should be reported");
+    assert!(violation_summary.contains("manifest_integrity"));
+    assert!(violation_summary.contains("journal_consistency"));
+}
+
+#[test]
 fn test_atp_replay_artifacts_require_trace_witnesses() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let crashpack = CrashpackBuilder::new()
@@ -589,16 +678,28 @@ fn ledger_evidence(invariant: &str, passed: bool, log10_bf: f64) -> EvidenceEntr
 fn violation_result(oracle_name: &str) -> TransferOracleResult {
     TransferOracleResult {
         oracle_name: oracle_name.to_string(),
-        violations: vec![TransferViolation {
-            violation_type: oracle_name.to_string(),
-            description: format!("{oracle_name} failed"),
-            severity: ViolationSeverity::High,
-            evidence: BTreeMap::from([("source".to_string(), "test".to_string())]),
-        }],
+        violations: vec![transfer_violation(
+            oracle_name,
+            &format!("{oracle_name} failed"),
+            ViolationSeverity::High,
+        )],
         stats: OracleStats {
             entities_tracked: 1,
             events_recorded: 1,
         },
         passed: false,
+    }
+}
+
+fn transfer_violation(
+    violation_type: &str,
+    description: &str,
+    severity: ViolationSeverity,
+) -> TransferViolation {
+    TransferViolation {
+        violation_type: violation_type.to_string(),
+        description: description.to_string(),
+        severity,
+        evidence: BTreeMap::from([("source".to_string(), "test".to_string())]),
     }
 }
