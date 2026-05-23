@@ -1860,8 +1860,8 @@ mod tests {
         let mut lock = RwLock::new(42_u32);
 
         // get_mut provides direct access when we have &mut
-        *lock.get_mut() = 100;
-        let value = *lock.get_mut();
+        *lock.get_mut().expect("rwlock should not be poisoned") = 100;
+        let value = *lock.get_mut().expect("rwlock should not be poisoned");
         crate::assert_with_log!(value == 100, "get_mut works", 100u32, value);
         crate::test_complete!("test_rwlock_get_mut");
     }
@@ -1871,7 +1871,7 @@ mod tests {
         init_test("test_rwlock_into_inner");
         let lock = RwLock::new(42_u32);
 
-        let value = lock.into_inner();
+        let value = lock.into_inner().expect("rwlock should not be poisoned");
         crate::assert_with_log!(value == 42, "into_inner works", 42u32, value);
         crate::test_complete!("test_rwlock_into_inner");
     }

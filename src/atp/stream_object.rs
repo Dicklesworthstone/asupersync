@@ -557,6 +557,34 @@ impl PrefixConsumer {
         })
     }
 
+    /// Refresh the manifest and produce a proof/log exposure record.
+    pub fn refresh_manifest_with_exposure_record(
+        &mut self,
+        manifest: StreamManifest,
+        invalidation_reason: Option<String>,
+        replay_pointer: Option<String>,
+    ) -> AtpOutcome<(PrefixRefresh, PrefixExposureRecord)> {
+        match self.refresh_manifest(manifest) {
+            Outcome::Ok(refresh) => {
+                let mut exposure = self.exposure_record(replay_pointer);
+
+                if let Some(invalidated_range) = refresh.invalidated_consumed_range {
+                    exposure.prefix_range = Some(invalidated_range);
+                    exposure.verified_state = PrefixVerifiedState::Invalidated;
+                    exposure.exposure_decision = PrefixExposureDecision::Withhold;
+                    exposure.invalidation_reason = Some(invalidation_reason.unwrap_or_else(|| {
+                        "manifest refresh invalidated a previously consumed prefix".to_string()
+                    }));
+                }
+
+                Outcome::ok((refresh, exposure))
+            }
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
     /// Check if data is available for consumption at the current offset.
     #[must_use]
     pub fn data_available(&self) -> bool {
@@ -582,6 +610,36 @@ impl PrefixConsumer {
             .min(self.available_prefix_end());
     }
 
+    /// Build the proof/log record for the current prefix exposure decision.
+    #[must_use]
+    pub fn exposure_record(&self, replay_pointer: Option<String>) -> PrefixExposureRecord {
+        let prefix_range = self.next_safe_range();
+        let verified_prefix_end = self.manifest.verified_prefix_end();
+        let (verified_state, exposure_decision) = match prefix_range {
+            Some(range) if range.end <= verified_prefix_end => (
+                PrefixVerifiedState::Verified,
+                PrefixExposureDecision::Expose,
+            ),
+            Some(_) => (
+                PrefixVerifiedState::Provisional,
+                PrefixExposureDecision::Expose,
+            ),
+            None => (
+                PrefixVerifiedState::NoConsumablePrefix,
+                PrefixExposureDecision::Withhold,
+            ),
+        };
+
+        PrefixExposureRecord::new(
+            self.manifest.object_id.clone(),
+            prefix_range,
+            verified_state,
+            exposure_decision,
+            self.safety_policy,
+            replay_pointer,
+        )
+    }
+
     /// Get consumption progress as a percentage.
     #[must_use]
     pub fn consumption_progress(&self) -> f64 {
@@ -604,6 +662,84 @@ pub enum ConsumptionPolicy {
     AllowProvisional,
 }
 
+impl ConsumptionPolicy {
+    /// Stable policy identifier for proof and log artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::VerifiedOnly => "verified_only",
+            Self::AllowProvisional => "allow_provisional",
+        }
+    }
+}
+
+/// Verification state recorded for a prefix exposure decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixVerifiedState {
+    /// No prefix is currently safe to expose.
+    NoConsumablePrefix,
+    /// The exposed prefix contains only verified epochs.
+    Verified,
+    /// The exposed prefix includes provisional epochs under explicit policy.
+    Provisional,
+    /// Previously exposed bytes were invalidated by a later manifest.
+    Invalidated,
+}
+
+/// Consumer exposure decision for a stream prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixExposureDecision {
+    /// The prefix may be exposed to the consumer.
+    Expose,
+    /// The prefix must be withheld from the consumer.
+    Withhold,
+}
+
+/// Proof/log record for a prefix exposure decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixExposureRecord {
+    /// Stream object identifier.
+    pub object_id: ObjectId,
+    /// Prefix range considered by the decision.
+    pub prefix_range: Option<ByteRange>,
+    /// Verification state for the considered prefix.
+    pub verified_state: PrefixVerifiedState,
+    /// Consumer-facing exposure decision.
+    pub exposure_decision: PrefixExposureDecision,
+    /// Reason a previously exposed prefix was invalidated, if any.
+    pub invalidation_reason: Option<String>,
+    /// Deterministic replay pointer for reproducing the decision.
+    pub replay_pointer: Option<String>,
+    /// Consumption policy used for the decision.
+    pub consumption_policy: String,
+    /// Time the record was produced.
+    pub recorded_at: SystemTime,
+}
+
+impl PrefixExposureRecord {
+    /// Create a new prefix exposure record.
+    #[must_use]
+    pub fn new(
+        object_id: ObjectId,
+        prefix_range: Option<ByteRange>,
+        verified_state: PrefixVerifiedState,
+        exposure_decision: PrefixExposureDecision,
+        consumption_policy: ConsumptionPolicy,
+        replay_pointer: Option<String>,
+    ) -> Self {
+        Self {
+            object_id,
+            prefix_range,
+            verified_state,
+            exposure_decision,
+            invalidation_reason: None,
+            replay_pointer,
+            consumption_policy: consumption_policy.as_str().to_string(),
+            recorded_at: SystemTime::now(),
+        }
+    }
+}
+
 /// Proof bundle record for stream consumption.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamProofRecord {
@@ -617,6 +753,8 @@ pub struct StreamProofRecord {
     pub consumption_policy: String,
     /// Whether the stream was fully consumed.
     pub fully_consumed: bool,
+    /// Prefix exposure records that justify early consumer visibility.
+    pub prefix_exposures: Vec<PrefixExposureRecord>,
     /// Verification timestamp.
     pub verified_at: SystemTime,
     /// Consumer signature (if available).
@@ -637,14 +775,17 @@ impl StreamProofRecord {
             object_id,
             consumed_epochs,
             final_offset,
-            consumption_policy: match consumption_policy {
-                ConsumptionPolicy::VerifiedOnly => "verified_only".to_string(),
-                ConsumptionPolicy::AllowProvisional => "allow_provisional".to_string(),
-            },
+            consumption_policy: consumption_policy.as_str().to_string(),
             fully_consumed,
+            prefix_exposures: Vec::new(),
             verified_at: SystemTime::now(),
             consumer_signature: None,
         }
+    }
+
+    /// Attach a prefix exposure record to this proof record.
+    pub fn record_prefix_exposure(&mut self, exposure: PrefixExposureRecord) {
+        self.prefix_exposures.push(exposure);
     }
 
     /// Sign this proof record.
@@ -839,6 +980,83 @@ mod tests {
     }
 
     #[test]
+    fn prefix_exposure_record_includes_verified_prefix_proof_fields() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Provisional,
+                vec![],
+            ))
+            .unwrap();
+
+        let consumer = PrefixConsumer::new(manifest, ConsumptionPolicy::VerifiedOnly);
+        let record = consumer.exposure_record(Some("replay:prefix-verified".to_string()));
+
+        assert_eq!(record.object_id, object_id);
+        assert_eq!(record.prefix_range, Some(ByteRange::new(0, 100)));
+        assert_eq!(record.verified_state, PrefixVerifiedState::Verified);
+        assert_eq!(record.exposure_decision, PrefixExposureDecision::Expose);
+        assert_eq!(record.invalidation_reason, None);
+        assert_eq!(
+            record.replay_pointer.as_deref(),
+            Some("replay:prefix-verified")
+        );
+        assert_eq!(record.consumption_policy, "verified_only");
+    }
+
+    #[test]
+    fn prefix_exposure_record_marks_provisional_policy_caveat() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Provisional,
+                vec![],
+            ))
+            .unwrap();
+
+        let consumer = PrefixConsumer::new(manifest, ConsumptionPolicy::AllowProvisional);
+        let record = consumer.exposure_record(Some("replay:prefix-provisional".to_string()));
+
+        assert_eq!(record.object_id, object_id);
+        assert_eq!(record.prefix_range, Some(ByteRange::new(0, 200)));
+        assert_eq!(record.verified_state, PrefixVerifiedState::Provisional);
+        assert_eq!(record.exposure_decision, PrefixExposureDecision::Expose);
+        assert_eq!(record.consumption_policy, "allow_provisional");
+        assert_eq!(
+            record.replay_pointer.as_deref(),
+            Some("replay:prefix-provisional")
+        );
+    }
+
+    #[test]
     fn verified_only_prefix_stops_before_provisional_gap() {
         let object_id = test_object_id();
         let mut manifest = StreamManifest::new(object_id.clone());
@@ -981,6 +1199,61 @@ mod tests {
         );
         assert_eq!(refresh.consumption_offset, 100);
         assert_eq!(consumer.next_safe_range(), None);
+    }
+
+    #[test]
+    fn refresh_with_exposure_record_logs_invalidation_reason_and_replay() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Provisional,
+                vec![],
+            ))
+            .unwrap();
+
+        let mut consumer =
+            PrefixConsumer::new(manifest.clone(), ConsumptionPolicy::AllowProvisional);
+        consumer.advance_consumption(200);
+
+        manifest.invalidate_epoch(2).unwrap();
+        let (refresh, record) = consumer
+            .refresh_manifest_with_exposure_record(
+                manifest,
+                Some("epoch 2 manifest hash mismatch".to_string()),
+                Some("replay:prefix-invalidated".to_string()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            refresh.invalidated_consumed_range,
+            Some(ByteRange::new(100, 200))
+        );
+        assert_eq!(record.object_id, object_id);
+        assert_eq!(record.prefix_range, Some(ByteRange::new(100, 200)));
+        assert_eq!(record.verified_state, PrefixVerifiedState::Invalidated);
+        assert_eq!(record.exposure_decision, PrefixExposureDecision::Withhold);
+        assert_eq!(
+            record.invalidation_reason.as_deref(),
+            Some("epoch 2 manifest hash mismatch")
+        );
+        assert_eq!(
+            record.replay_pointer.as_deref(),
+            Some("replay:prefix-invalidated")
+        );
     }
 
     #[test]
@@ -1128,11 +1401,44 @@ mod tests {
         assert_eq!(proof.final_offset, 3072);
         assert_eq!(proof.consumption_policy, "verified_only");
         assert!(proof.fully_consumed);
+        assert!(proof.prefix_exposures.is_empty());
         assert!(proof.consumer_signature.is_none());
 
         // Test signing
         proof.sign(vec![0xFF; 64]);
         assert!(proof.consumer_signature.is_some());
+    }
+
+    #[test]
+    fn stream_proof_record_collects_prefix_exposure_records() {
+        let object_id = test_object_id();
+        let exposure = PrefixExposureRecord::new(
+            object_id.clone(),
+            Some(ByteRange::new(0, 1024)),
+            PrefixVerifiedState::Verified,
+            PrefixExposureDecision::Expose,
+            ConsumptionPolicy::VerifiedOnly,
+            Some("replay:proof-exposure".to_string()),
+        );
+        let mut proof = StreamProofRecord::new(
+            object_id,
+            vec![1],
+            1024,
+            ConsumptionPolicy::VerifiedOnly,
+            false,
+        );
+
+        proof.record_prefix_exposure(exposure);
+
+        assert_eq!(proof.prefix_exposures.len(), 1);
+        assert_eq!(
+            proof.prefix_exposures[0].replay_pointer.as_deref(),
+            Some("replay:proof-exposure")
+        );
+        assert_eq!(
+            proof.prefix_exposures[0].prefix_range,
+            Some(ByteRange::new(0, 1024))
+        );
     }
 
     #[test]

@@ -654,7 +654,7 @@ impl TimerWheel {
             return;
         }
 
-        for (_idx, level) in self.levels.iter_mut().enumerate() {
+        for (idx, level) in self.levels.iter_mut().enumerate() {
             if delta < level.range_ns() {
                 let tick = entry.deadline.as_nanos() / level.resolution_ns;
 

@@ -1417,9 +1417,9 @@ mod tests {
         let mut mutex = Mutex::new(42);
 
         // get_mut provides direct access when we have &mut
-        *mutex.get_mut() = 100;
+        *mutex.get_mut().expect("mutex should not be poisoned") = 100;
 
-        let value = *mutex.get_mut();
+        let value = *mutex.get_mut().expect("mutex should not be poisoned");
         crate::assert_with_log!(value == 100, "get_mut works", 100, value);
         crate::test_complete!("test_mutex_get_mut");
     }
@@ -1429,7 +1429,7 @@ mod tests {
         init_test("test_mutex_into_inner");
         let mutex = Mutex::new(42);
 
-        let value = mutex.into_inner();
+        let value = mutex.into_inner().expect("mutex should not be poisoned");
         crate::assert_with_log!(value == 42, "into_inner works", 42, value);
         crate::test_complete!("test_mutex_into_inner");
     }
