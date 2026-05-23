@@ -947,6 +947,10 @@ pub struct SwarmWorkloadLeaseScheduleEntry {
     pub last_renewed_at: Option<Instant>,
     /// Number of successful renewals.
     pub renewal_count: u64,
+    /// Milliseconds elapsed since the lease was granted.
+    pub wait_age_ms: u64,
+    /// Milliseconds remaining until this live lease expires.
+    pub time_to_expiry_ms: u64,
     /// Whether live pressure feedback was attached to this schedule row.
     pub pressure_feedback_present: bool,
     /// Runtime queue pressure ratio scaled by 10_000.
@@ -2159,6 +2163,8 @@ impl SwarmPressureGovernor {
             cancellation_tail_pressure_scaled,
             max_pressure_scaled,
         ) = Self::schedule_pressure_fields(feedback);
+        let wait_age_ms = duration_as_u64_ms(now.saturating_duration_since(lease.issued_at));
+        let time_to_expiry_ms = duration_as_u64_ms(lease.expires_at.saturating_duration_since(now));
         SwarmWorkloadLeaseScheduleEntry {
             scheduling_rank,
             replay_pointer,
@@ -2178,6 +2184,8 @@ impl SwarmPressureGovernor {
             expires_at: lease.expires_at,
             last_renewed_at: lease.last_renewed_at,
             renewal_count: lease.renewal_count,
+            wait_age_ms,
+            time_to_expiry_ms,
             pressure_feedback_present: feedback.is_some(),
             queue_pressure_scaled,
             disk_io_pressure_scaled,
@@ -2304,13 +2312,17 @@ impl SwarmPressureGovernor {
         } else {
             "live workload lease scheduled without pressure feedback".to_string()
         };
+        let wait_age_ms = duration_as_u64_ms(now.saturating_duration_since(lease.issued_at));
+        let time_to_expiry_ms = duration_as_u64_ms(lease.expires_at.saturating_duration_since(now));
+        base.push_str(&format!(
+            " wait_age_ms={wait_age_ms} time_to_expiry_ms={time_to_expiry_ms}"
+        ));
         let starvation_aging_discount = Self::starvation_aging_discount(lease, now, aging_step);
         if starvation_aging_discount > 0 {
             let effective_priority_rank =
                 Self::effective_priority_schedule_rank(lease, now, aging_step);
-            let wait_age_ms = now.saturating_duration_since(lease.issued_at).as_millis();
             base.push_str(&format!(
-                " starvation_aging_discount={starvation_aging_discount} effective_priority_rank={effective_priority_rank} wait_age_ms={wait_age_ms}"
+                " starvation_aging_discount={starvation_aging_discount} effective_priority_rank={effective_priority_rank}"
             ));
         }
         lease.context_reason(&base)
@@ -4208,6 +4220,10 @@ mod tests {
         assert_eq!(schedule[0].priority, RegionPriority::Critical);
         assert!(!schedule[0].pressure_feedback_present);
         assert_eq!(schedule[0].max_pressure_scaled, 0);
+        assert!(
+            schedule[0].time_to_expiry_ms > 0,
+            "live schedule rows should expose structured time-to-expiry"
+        );
         assert_eq!(schedule[1].proof_lane, SwarmProofLaneKind::ReleaseProof);
         assert_eq!(schedule[2].proof_lane, SwarmProofLaneKind::SourceOnly);
         assert!(
@@ -4220,6 +4236,7 @@ mod tests {
                 .reason
                 .contains("live workload lease scheduled without pressure feedback")
         );
+        assert!(schedule[1].reason.contains("time_to_expiry_ms="));
 
         let expired = governor
             .get_workload_lease(stale.lease_id)
@@ -4339,6 +4356,16 @@ mod tests {
         assert_eq!(schedule[1].workload_id, "aged-low");
         assert_eq!(schedule[1].effective_priority_rank, 1);
         assert_eq!(schedule[1].starvation_aging_discount, 2);
+        assert!(
+            schedule[1].wait_age_ms >= 20_000,
+            "aged low-priority lease should expose structured wait age"
+        );
+        assert!(
+            schedule[1].time_to_expiry_ms > 0,
+            "aged low-priority lease should expose structured time-to-expiry"
+        );
+        assert!(schedule[1].reason.contains("wait_age_ms="));
+        assert!(schedule[1].reason.contains("time_to_expiry_ms="));
         assert!(
             schedule[1].reason.contains("starvation_aging_discount=2"),
             "{}",

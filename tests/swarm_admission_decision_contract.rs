@@ -348,6 +348,10 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
                 .replay_pointer
                 .starts_with("swarm-workload-lease://lease/")
         );
+        assert!(
+            entry.time_to_expiry_ms > 0,
+            "live workload lease should expose a structured time-to-expiry field"
+        );
         assert!(entry.reason.contains("workload_id=asw-lab-"));
     }
 
