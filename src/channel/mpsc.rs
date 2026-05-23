@@ -249,6 +249,31 @@ impl<T> ChannelInner<T> {
     fn record_cancellation(&mut self) {
         self.cancellation_count = self.cancellation_count.saturating_add(1);
     }
+
+    /// Efficiently removes the first occurrence of `token` from the waiter queue.
+    ///
+    /// This is an optimization over the pattern:
+    /// ```ignore
+    /// if let Some(pos) = waiter_queue.iter().position(|&t| t == token) {
+    ///     waiter_queue.remove(pos);
+    /// }
+    /// ```
+    ///
+    /// The above pattern is O(n) + O(n) = O(2n) due to separate find and remove operations.
+    /// This method finds and removes in a single O(n) pass, removing only the first occurrence.
+    #[inline]
+    fn remove_waiter_token(&mut self, token: crate::runtime::reactor::token::SlabToken) -> bool {
+        let mut found = false;
+        self.waiter_queue.retain(|&t| {
+            if !found && t == token {
+                found = true;
+                false // Remove this element
+            } else {
+                true // Keep this element
+            }
+        });
+        found
+    }
 }
 
 impl<T> ChannelShared<T> {
@@ -589,9 +614,7 @@ impl<T> Reserve<'_, T> {
                 } else if inner.send_wakers.remove(token).is_some() {
                     // We are in the slab. We haven't been granted a reservation.
                     // Remove from FIFO queue as well.
-                    if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == token) {
-                        inner.waiter_queue.remove(pos);
-                    }
+                    inner.remove_waiter_token(token);
                     // CASCADE: A receiver may have freed capacity and woken us,
                     // but we never polled. Pass the baton to the next waiter.
                     if inner.has_capacity(self.sender.shared.capacity) {
@@ -650,8 +673,8 @@ impl<'a, T> Future for Reserve<'a, T> {
                 // Remove from FIFO queue (should be at front)
                 if inner.waiter_queue.front().copied() == Some(token) {
                     inner.waiter_queue.pop_front();
-                } else if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == token) {
-                    inner.waiter_queue.remove(pos);
+                } else {
+                    inner.remove_waiter_token(token);
                 }
 
                 // Remove from slab
@@ -2526,9 +2549,7 @@ mod tests {
                 .remove(waiter_token_a)
                 .expect("A queued in slab");
             // Remove from FIFO queue
-            if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == waiter_token_a) {
-                inner.waiter_queue.remove(pos);
-            }
+            inner.remove_waiter_token(waiter_token_a);
             inner.queue.clear();
         }
 
