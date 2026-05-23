@@ -331,8 +331,13 @@ impl RelayWireFrame {
     ///
     /// # Errors
     ///
-    /// Propagates [`Self::encode`] validation errors.
+    /// Returns [`RelayError::InvalidRelayWireFrame`] when the frame carries a
+    /// non-TCP/TLS relay transport, and otherwise propagates [`Self::encode`]
+    /// validation errors.
     pub fn encode_tcp_tls_record(&self, max_payload_bytes: usize) -> Result<Vec<u8>, RelayError> {
+        if self.packet.transport() != RelayTransport::TcpTls443 {
+            return Err(RelayError::InvalidRelayWireFrame);
+        }
         let encoded_frame = self.encode(max_payload_bytes)?;
         let frame_len =
             u32::try_from(encoded_frame.len()).map_err(|_| RelayError::PacketTooLarge)?;
@@ -457,11 +462,16 @@ impl RelayWireFrame {
             });
         }
 
+        let frame = Self::decode(
+            &bytes[RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN..record_len],
+            max_payload_bytes,
+        )?;
+        if frame.packet.transport() != RelayTransport::TcpTls443 {
+            return Err(RelayError::InvalidRelayWireFrame);
+        }
+
         Ok(RelayWireRecordDecode::Complete {
-            frame: Self::decode(
-                &bytes[RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN..record_len],
-                max_payload_bytes,
-            )?,
+            frame,
             consumed: record_len,
         })
     }
@@ -2429,6 +2439,32 @@ mod tests {
         let second_record = second
             .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
             .expect("encode second record");
+        let udp_frame = RelayWireFrame::new(
+            reservation_id(38),
+            transfer_nonce(9),
+            peer(1),
+            packet(RelayTransport::Udp, b"udp-on-tcp-record", 3),
+        );
+
+        assert_eq!(
+            udp_frame
+                .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+                .expect_err("tcp record encoder rejects udp frame transport"),
+            RelayError::InvalidRelayWireFrame
+        );
+        let udp_encoded = udp_frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode raw udp relay frame");
+        let udp_len = u32::try_from(udp_encoded.len()).expect("udp frame len fits in u32");
+        let mut udp_inside_tcp_record =
+            Vec::with_capacity(RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN + udp_encoded.len());
+        udp_inside_tcp_record.extend_from_slice(&udp_len.to_be_bytes());
+        udp_inside_tcp_record.extend_from_slice(&udp_encoded);
+        assert_eq!(
+            RelayWireFrame::decode_tcp_tls_record(&udp_inside_tcp_record, 1024)
+                .expect_err("tcp record decoder rejects udp frame transport"),
+            RelayError::InvalidRelayWireFrame
+        );
 
         assert_eq!(
             RelayWireFrame::decode_tcp_tls_record(&first_record[..2], 1024)

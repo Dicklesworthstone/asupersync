@@ -339,6 +339,24 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
     let udp_encoded = udp_frame
         .encode(RelayQuota::default().max_packet_bytes)
         .expect("encode udp wire frame");
+    assert_eq!(
+        udp_frame
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect_err("tcp stream record must not carry udp transport"),
+        RelayError::InvalidRelayWireFrame
+    );
+    let udp_record_len = u32::try_from(udp_encoded.len()).expect("udp frame len fits in u32");
+    let mut udp_inside_tcp_record = Vec::with_capacity(4 + udp_encoded.len());
+    udp_inside_tcp_record.extend_from_slice(&udp_record_len.to_be_bytes());
+    udp_inside_tcp_record.extend_from_slice(&udp_encoded);
+    assert_eq!(
+        RelayWireFrame::decode_tcp_tls_record(
+            &udp_inside_tcp_record,
+            RelayQuota::default().max_packet_bytes,
+        )
+        .expect_err("tcp stream decoder must reject udp transport"),
+        RelayError::InvalidRelayWireFrame
+    );
     let udp_decoded = RelayWireFrame::decode(&udp_encoded, RelayQuota::default().max_packet_bytes)
         .expect("decode udp wire frame");
     let udp_forwarded = udp_decoded
