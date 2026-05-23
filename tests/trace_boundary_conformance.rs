@@ -180,7 +180,10 @@ fn boundary_of_boundary_is_zero_on_random_complexes() {
         "random corpus produced too few complexes with squares ({complexes_with_squares}); \
          the chain-complex test would be near-vacuous"
     );
-    assert!(total_squares >= 100, "too few total squares: {total_squares}");
+    assert!(
+        total_squares >= 100,
+        "too few total squares: {total_squares}"
+    );
 }
 
 #[test]
@@ -209,10 +212,7 @@ fn boundary_of_boundary_is_zero_on_grid_lattices() {
         );
 
         let product = matmul_gf2(&cx.boundary_1(), &cx.boundary_2());
-        assert!(
-            is_zero_matrix(&product),
-            "∂₁∘∂₂ != 0 on {m}x{m} lattice"
-        );
+        assert!(is_zero_matrix(&product), "∂₁∘∂₂ != 0 on {m}x{m} lattice");
     }
 }
 
@@ -521,7 +521,10 @@ fn from_edges_is_invariant_under_input_permutation() {
             }
             let permuted = SquareComplex::from_edges(n, shuffled);
 
-            assert_eq!(baseline.edges, permuted.edges, "edges differ under permutation");
+            assert_eq!(
+                baseline.edges, permuted.edges,
+                "edges differ under permutation"
+            );
             assert_eq!(
                 baseline.squares, permuted.squares,
                 "squares differ under permutation (n={n}, seed={seed})"
@@ -549,8 +552,14 @@ fn from_edges_is_idempotent_under_duplicate_edges() {
             noisy.push((n + 5, 0)); // out of range
             let cleaned = SquareComplex::from_edges(n, noisy);
 
-            assert_eq!(baseline.edges, cleaned.edges, "edges differ after dedup/clean");
-            assert_eq!(baseline.squares, cleaned.squares, "squares differ after dedup");
+            assert_eq!(
+                baseline.edges, cleaned.edges,
+                "edges differ after dedup/clean"
+            );
+            assert_eq!(
+                baseline.squares, cleaned.squares,
+                "squares differ after dedup"
+            );
         }
     }
 }
@@ -621,7 +630,11 @@ fn filled_square_kills_its_h1_cycle() {
     let cx = SquareComplex::from_edges(5, vec![(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)]);
     assert_eq!(cx.squares.len(), 1, "expected exactly one filling square");
     let pairs = cx.h1_persistence_pairs();
-    assert_eq!(pairs.pairs.len(), 1, "filled square should yield one H1 death");
+    assert_eq!(
+        pairs.pairs.len(),
+        1,
+        "filled square should yield one H1 death"
+    );
     assert!(
         pairs.unpaired.is_empty(),
         "the square should kill the only H1 class"

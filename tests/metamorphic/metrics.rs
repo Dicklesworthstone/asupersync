@@ -25,8 +25,8 @@
 
 use proptest::prelude::*;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::sync::atomic::{AtomicU64, AtomicI64, Ordering};
 use std::time::Duration;
 
 use asupersync::cx::{Cx, Scope};
@@ -95,15 +95,15 @@ impl Arbitrary for MetricsTestConfig {
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         (
-            any::<u64>(),                                           // seed
-            prop::collection::vec(1u64..1000, 1..20),             // counter_operations
-            prop::collection::vec(-1000i64..1000, 1..20),         // gauge_operations
-            prop::collection::vec(0.0f64..1000.0, 1..50),         // histogram_observations
-            prop::collection::vec(1.0f64..100.0, 3..10),          // histogram_buckets
-            1u8..8,                                                // worker_count
-            any::<bool>(),                                         // use_labels
-            prop::collection::vec("[a-z]{1,5}", 1..5),            // label_values
-            any::<bool>(),                                         // inject_cancellation
+            any::<u64>(),                                 // seed
+            prop::collection::vec(1u64..1000, 1..20),     // counter_operations
+            prop::collection::vec(-1000i64..1000, 1..20), // gauge_operations
+            prop::collection::vec(0.0f64..1000.0, 1..50), // histogram_observations
+            prop::collection::vec(1.0f64..100.0, 3..10),  // histogram_buckets
+            1u8..8,                                       // worker_count
+            any::<bool>(),                                // use_labels
+            prop::collection::vec("[a-z]{1,5}", 1..5),    // label_values
+            any::<bool>(),                                // inject_cancellation
         )
             .prop_map(
                 |(
@@ -123,7 +123,8 @@ impl Arbitrary for MetricsTestConfig {
                     }
 
                     // Sort and deduplicate histogram buckets
-                    histogram_buckets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    histogram_buckets
+                        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     histogram_buckets.dedup_by(|a, b| (a - b).abs() < f64::EPSILON);
                     if histogram_buckets.is_empty() {
                         histogram_buckets = vec![1.0, 10.0, 100.0];
@@ -196,7 +197,7 @@ impl MetricsTracker {
 /// at all observation points.
 #[test]
 fn mr1_counter_monotonicity() {
-    proptest!(|(config: MetricsTestConfig)| {
+    proptest!(|(config in any::<MetricsTestConfig>())| {
         let mut runtime = test_lab_runtime_with_seed(config.seed);
         let result = runtime.block_on(|cx| async {
             cx.region(|region| async {
@@ -258,7 +259,7 @@ fn mr1_counter_monotonicity() {
 /// Test: add(x) followed by add(y) equals add(y) followed by add(x).
 #[test]
 fn mr2_gauge_bidirectionality() {
-    proptest!(|(config: MetricsTestConfig)| {
+    proptest!(|(config in any::<MetricsTestConfig>())| {
         let mut runtime = test_lab_runtime_with_seed(config.seed);
         let result = runtime.block_on(|cx| async {
             cx.region(|region| async {
@@ -334,7 +335,7 @@ fn mr2_gauge_bidirectionality() {
 /// Test: sum(observations) = histogram.sum(), count(observations) = histogram.count()
 #[test]
 fn mr3_histogram_sample_preservation() {
-    proptest!(|(config: MetricsTestConfig)| {
+    proptest!(|(config in any::<MetricsTestConfig>())| {
         let mut runtime = test_lab_runtime_with_seed(config.seed);
         let result = runtime.block_on(|cx| async {
             cx.region(|region| async {
@@ -418,7 +419,7 @@ fn mr3_histogram_sample_preservation() {
 /// Test: sum(metric{label=*}) = total metric value across all label values.
 #[test]
 fn mr4_label_aggregation_invariants() {
-    proptest!(|(config: MetricsTestConfig)| {
+    proptest!(|(config in any::<MetricsTestConfig>())| {
         let mut runtime = test_lab_runtime_with_seed(config.seed);
         let result = runtime.block_on(|cx| async {
             cx.region(|region| async {
@@ -492,7 +493,7 @@ fn mr4_label_aggregation_invariants() {
 /// Test: At any point in time, metrics snapshot shows consistent state across all metric types.
 #[test]
 fn mr5_concurrent_snapshot_consistency() {
-    proptest!(|(config: MetricsTestConfig)| {
+    proptest!(|(config in any::<MetricsTestConfig>())| {
         let mut runtime = test_lab_runtime_with_seed(config.seed);
         let result = runtime.block_on(|cx| async {
             cx.region(|region| async {
@@ -657,7 +658,7 @@ fn mr5_concurrent_snapshot_consistency() {
 /// Test: Execute mixed operations and verify all MRs hold together.
 #[test]
 fn composite_all_metrics_invariants() {
-    proptest!(|(config: MetricsTestConfig)| {
+    proptest!(|(config in any::<MetricsTestConfig>())| {
         let mut runtime = test_lab_runtime_with_seed(config.seed);
         let result = runtime.block_on(|cx| async {
             cx.region(|region| async {
@@ -767,7 +768,7 @@ fn composite_all_metrics_invariants() {
 /// Property-based test that verifies metrics behavior under cancellation scenarios.
 #[test]
 fn property_metrics_cancellation_safety() {
-    proptest!(|(config: MetricsTestConfig)| {
+    proptest!(|(config in any::<MetricsTestConfig>())| {
         let mut runtime = test_lab_runtime_with_seed(config.seed);
         let result = runtime.block_on(|cx| async {
             if !config.inject_cancellation {

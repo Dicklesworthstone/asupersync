@@ -483,8 +483,8 @@ fn mr_trace_equivalence() {
     for (trace1, trace2) in equivalent_pairs {
         let foata1 = canonicalize(&trace1);
         let foata2 = canonicalize(&trace2);
-        let monoid1 = TraceMonoid::new(&trace1);
-        let monoid2 = TraceMonoid::new(&trace2);
+        let monoid1 = TraceMonoid::from_events(&trace1);
+        let monoid2 = TraceMonoid::from_events(&trace2);
 
         assert_eq!(
             foata1.fingerprint(),
@@ -511,10 +511,10 @@ fn mr_trace_equivalence() {
 #[test]
 fn mr_monoid_identity() {
     let empty_trace = vec![];
-    let empty_monoid = TraceMonoid::new(&empty_trace);
+    let empty_monoid = TraceMonoid::from_events(&empty_trace);
 
     for trace in create_test_traces() {
-        let trace_monoid = TraceMonoid::new(&trace);
+        let trace_monoid = TraceMonoid::from_events(&trace);
 
         // Empty canonical form properties
         let empty_canonical = canonicalize(&empty_trace);
@@ -613,9 +613,9 @@ fn mr_equivalence_transitivity() {
     let trace_b = vec![trace_a[1].clone(), trace_a[0].clone(), trace_a[2].clone()];
     let trace_c = vec![trace_a[2].clone(), trace_a[1].clone(), trace_a[0].clone()];
 
-    let monoid_a = TraceMonoid::new(&trace_a);
-    let monoid_b = TraceMonoid::new(&trace_b);
-    let monoid_c = TraceMonoid::new(&trace_c);
+    let monoid_a = TraceMonoid::from_events(&trace_a);
+    let monoid_b = TraceMonoid::from_events(&trace_b);
+    let monoid_c = TraceMonoid::from_events(&trace_c);
 
     // Transitivity: if A ≡ B and B ≡ C, then A ≡ C
     assert_eq!(monoid_a, monoid_b, "A and B should be equivalent");

@@ -23,7 +23,7 @@
 
 use super::*;
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
-use crate::types::{RegionId, TaskId, Time};
+use crate::types::Time;
 
 /// Create test trace events with different types for comprehensive testing.
 fn create_test_traces() -> Vec<Vec<TraceEvent>> {
@@ -303,7 +303,7 @@ fn mr_certificate_consistency() {
 
             // Certificate should match event count
             assert_eq!(
-                compressed.certificate.event_count(),
+                compressed.certificate.event_count() as usize,
                 compressed.events.len(),
                 "Certificate event count mismatch for level {:?}",
                 level
@@ -331,22 +331,22 @@ fn mr_event_order_preservation() {
                 let curr_event = &compressed.events[i];
 
                 assert!(
-                    prev_event.sequence < curr_event.sequence,
+                    prev_event.seq < curr_event.seq,
                     "Event ordering violated: event {} (seq {}) appears before event {} (seq {}) for level {:?}",
                     i - 1,
-                    prev_event.sequence,
+                    prev_event.seq,
                     i,
-                    curr_event.sequence,
+                    curr_event.seq,
                     level
                 );
 
                 assert!(
-                    prev_event.timestamp <= curr_event.timestamp,
+                    prev_event.time <= curr_event.time,
                     "Timestamp ordering violated: event {} (time {:?}) appears before event {} (time {:?}) for level {:?}",
                     i - 1,
-                    prev_event.timestamp,
+                    prev_event.time,
                     i,
-                    curr_event.timestamp,
+                    curr_event.time,
                     level
                 );
             }

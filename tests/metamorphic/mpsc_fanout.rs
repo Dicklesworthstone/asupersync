@@ -24,8 +24,8 @@ use asupersync::util::ArenaIndex;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -86,59 +86,63 @@ impl Arbitrary for MpscFanoutConfig {
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         (
-            any::<u64>(),                                    // seed
-            1usize..=32,                                     // capacity
-            2u8..=8,                                         // sender_count
-            prop::collection::vec(                           // sender_values
+            any::<u64>(), // seed
+            1usize..=32,  // capacity
+            2u8..=8,      // sender_count
+            prop::collection::vec(
+                // sender_values
                 prop::collection::vec(0i64..1000, 1..10),
-                1..8
+                1..8,
             ),
-            any::<bool>(),                                   // test_early_drops
-            prop::collection::vec(0u8..8, 0..4),           // early_drop_senders
-            any::<bool>(),                                   // inject_cancellation
-            1u64..=100,                                      // cancel_delay_ms
-            any::<bool>(),                                   // use_reserve_pattern
-            any::<bool>(),                                   // test_fairness
-            prop::option::of(1u32..=100),                   // sender_rate_limit
+            any::<bool>(),                       // test_early_drops
+            prop::collection::vec(0u8..8, 0..4), // early_drop_senders
+            any::<bool>(),                       // inject_cancellation
+            1u64..=100,                          // cancel_delay_ms
+            any::<bool>(),                       // use_reserve_pattern
+            any::<bool>(),                       // test_fairness
+            prop::option::of(1u32..=100),        // sender_rate_limit
         )
-        .prop_map(|(
-            seed,
-            capacity,
-            sender_count,
-            mut sender_values,
-            test_early_drops,
-            early_drop_senders,
-            inject_cancellation,
-            cancel_delay_ms,
-            use_reserve_pattern,
-            test_fairness,
-            sender_rate_limit,
-        )| {
-            // Ensure we have enough sender values for all senders
-            sender_values.resize(sender_count as usize, Vec::new());
-            for values in &mut sender_values {
-                if values.is_empty() {
-                    values.push(1); // Ensure each sender has at least one value
-                }
-            }
+            .prop_map(
+                |(
+                    seed,
+                    capacity,
+                    sender_count,
+                    mut sender_values,
+                    test_early_drops,
+                    early_drop_senders,
+                    inject_cancellation,
+                    cancel_delay_ms,
+                    use_reserve_pattern,
+                    test_fairness,
+                    sender_rate_limit,
+                )| {
+                    // Ensure we have enough sender values for all senders
+                    sender_values.resize(sender_count as usize, Vec::new());
+                    for values in &mut sender_values {
+                        if values.is_empty() {
+                            values.push(1); // Ensure each sender has at least one value
+                        }
+                    }
 
-            MpscFanoutConfig {
-                seed,
-                capacity,
-                sender_count: sender_count.max(2), // Ensure at least 2 senders for fan-out
-                sender_values,
-                test_early_drops,
-                early_drop_senders: early_drop_senders.into_iter()
-                    .filter(|&idx| idx < sender_count)
-                    .collect(),
-                inject_cancellation,
-                cancel_delay_ms,
-                use_reserve_pattern,
-                test_fairness,
-                sender_rate_limit,
-            }
-        })
-        .boxed()
+                    MpscFanoutConfig {
+                        seed,
+                        capacity,
+                        sender_count: sender_count.max(2), // Ensure at least 2 senders for fan-out
+                        sender_values,
+                        test_early_drops,
+                        early_drop_senders: early_drop_senders
+                            .into_iter()
+                            .filter(|&idx| idx < sender_count)
+                            .collect(),
+                        inject_cancellation,
+                        cancel_delay_ms,
+                        use_reserve_pattern,
+                        test_fairness,
+                        sender_rate_limit,
+                    }
+                },
+            )
+            .boxed()
     }
 }
 
@@ -176,7 +180,8 @@ impl MpscFanoutHarness {
             cx.region(|region| async {
                 let scope = Scope::new(region, "mpsc_fanout_test");
                 test_fn(&scope.cx())
-            }).await
+            })
+            .await
         })
     }
 
@@ -200,7 +205,7 @@ impl MpscFanoutHarness {
 /// Test: All senders successfully deliver their messages to the receiver.
 #[test]
 fn mr1_multi_sender_delivery() {
-    proptest!(|(config: MpscFanoutConfig)| {
+    proptest!(|(config in any::<MpscFanoutConfig>())| {
         let mut harness = MpscFanoutHarness::new(config.seed);
         let result = harness.execute(|cx| Box::pin(async {
             let (tx, mut rx) = mpsc::channel(config.capacity);
@@ -281,7 +286,7 @@ fn mr1_multi_sender_delivery() {
 /// Test: Messages from each individual sender arrive in the same order they were sent.
 #[test]
 fn mr2_per_sender_ordering() {
-    proptest!(|(config: MpscFanoutConfig)| {
+    proptest!(|(config in any::<MpscFanoutConfig>())| {
         let mut harness = MpscFanoutHarness::new(config.seed);
         let result = harness.execute(|cx| Box::pin(async {
             let (tx, mut rx) = mpsc::channel(config.capacity);
@@ -375,7 +380,7 @@ fn mr2_per_sender_ordering() {
 /// Test: No single sender monopolizes the channel when multiple senders are active.
 #[test]
 fn mr3_fair_interleaving() {
-    proptest!(|(config: MpscFanoutConfig)| {
+    proptest!(|(config in any::<MpscFanoutConfig>())| {
         if !config.test_fairness || config.sender_count < 2 {
             return Ok(());
         }
@@ -478,7 +483,7 @@ fn mr3_fair_interleaving() {
 /// Test: Total messages received equals total messages sent across all senders.
 #[test]
 fn mr4_count_preservation() {
-    proptest!(|(config: MpscFanoutConfig)| {
+    proptest!(|(config in any::<MpscFanoutConfig>())| {
         let mut harness = MpscFanoutHarness::new(config.seed);
         let result = harness.execute(|cx| Box::pin(async {
             let (tx, mut rx) = mpsc::channel(config.capacity);
@@ -563,7 +568,7 @@ fn mr4_count_preservation() {
 /// Test: Receiver gets Disconnected error after all senders are dropped.
 #[test]
 fn mr5_last_sender_disconnect() {
-    proptest!(|(config: MpscFanoutConfig)| {
+    proptest!(|(config in any::<MpscFanoutConfig>())| {
         let mut harness = MpscFanoutHarness::new(config.seed);
         let result = harness.execute(|cx| Box::pin(async {
             let (tx, mut rx) = mpsc::channel(config.capacity);
@@ -670,7 +675,7 @@ fn mr5_last_sender_disconnect() {
 /// Test: Execute complex fan-out scenario and verify all MRs hold together.
 #[test]
 fn composite_all_fanout_invariants() {
-    proptest!(|(config: MpscFanoutConfig)| {
+    proptest!(|(config in any::<MpscFanoutConfig>())| {
         let mut harness = MpscFanoutHarness::new(config.seed);
         let result = harness.execute(|cx| Box::pin(async {
             let (tx, mut rx) = mpsc::channel(config.capacity);

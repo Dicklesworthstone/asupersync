@@ -265,7 +265,7 @@ fn mr_channel_state_consistency() {
 /// The type of proof generated should depend only on the terminating operation,
 /// not on the history of operations or the specific values sent.
 fn mr_proof_type_preservation() {
-    proptest!(|(values: Vec<i32>)| {
+    proptest!(|(values in prop::collection::vec(any::<i32>(), 0..=20))| {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
@@ -323,8 +323,8 @@ fn mr_proof_type_preservation() {
 /// should be the same regardless of operation order.
 fn mr_operation_commutativity() {
     proptest!(|(
-        ops_a: Vec<(u8, i32)>, // Operations on channel A
-        ops_b: Vec<(u8, i32)>  // Operations on channel B
+        ops_a in prop::collection::vec((any::<u8>(), any::<i32>()), 0..=20), // Operations on channel A
+        ops_b in prop::collection::vec((any::<u8>(), any::<i32>()), 0..=20)  // Operations on channel B
     )| {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
@@ -396,7 +396,7 @@ fn mr_operation_commutativity() {
 /// If the underlying channel operation would fail, the tracked version
 /// should fail with the same error type.
 fn mr_error_propagation_preservation() {
-    proptest!(|(values: Vec<i32>)| {
+    proptest!(|(values in prop::collection::vec(any::<i32>(), 0..=20))| {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
@@ -443,7 +443,7 @@ fn mr_error_propagation_preservation() {
 /// Once a permit is consumed (send or abort), it cannot be used again.
 /// This tests the move semantics and obligation tracking.
 fn mr_permit_lifecycle_invariant() {
-    proptest!(|(values: Vec<i32>)| {
+    proptest!(|(values in prop::collection::vec(any::<i32>(), 0..=20))| {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
@@ -524,7 +524,7 @@ fn mr_channel_capacity_consistency() {
 ///
 /// Proofs should be unique and cannot be duplicated or forged.
 fn mr_proof_uniqueness() {
-    proptest!(|(values: Vec<i32>)| {
+    proptest!(|(values in prop::collection::vec(any::<i32>(), 0..=20))| {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
@@ -559,7 +559,7 @@ fn mr_proof_uniqueness() {
 /// Invalid protocol usage should be impossible to express.
 /// This is primarily a compile-time property but we test runtime behavior.
 fn mr_session_type_safety() {
-    proptest!(|(value: i32)| {
+    proptest!(|(value in any::<i32>())| {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {

@@ -253,7 +253,10 @@ fn popcount_under_xor_is_hamming_bounded() {
             let pa = a.count_ones();
             let pb = b.count_ones();
             let pc = a.xor(&b).count_ones();
-            assert!(pc <= pa + pb, "upper Hamming bound (len={len}, seed={seed})");
+            assert!(
+                pc <= pa + pb,
+                "upper Hamming bound (len={len}, seed={seed})"
+            );
             assert!(
                 pc >= pa.abs_diff(pb),
                 "lower Hamming bound (len={len}, seed={seed})"
@@ -349,7 +352,11 @@ fn singleton_has_exactly_one_bit() {
         }
         for bit in [0, len / 2, len - 1] {
             let v = BitVec::singleton(len, bit);
-            assert_eq!(v.count_ones(), 1, "singleton popcount (len={len}, bit={bit})");
+            assert_eq!(
+                v.count_ones(),
+                1,
+                "singleton popcount (len={len}, bit={bit})"
+            );
             assert!(v.get(bit));
             assert_eq!(v.pivot(), Some(bit));
             assert_eq!(v.highest_bit(), Some(bit));
@@ -740,7 +747,15 @@ fn persistence_pair_count_equals_rank() {
 fn persistence_pairs_never_panic_on_extreme_shapes() {
     // Stress the rows/cols dimension split that previously caused an
     // out-of-bounds index on non-square matrices.
-    let shapes = [(1, 64), (64, 1), (3, 200), (200, 3), (65, 65), (0, 4), (4, 0)];
+    let shapes = [
+        (1, 64),
+        (64, 1),
+        (3, 200),
+        (200, 3),
+        (65, 65),
+        (0, 4),
+        (4, 0),
+    ];
     for &(rows, cols) in &shapes {
         for seed in 0..6u64 {
             let mut rng = Rng::new(seed ^ 0xBAD0 ^ (rows as u64) << 16 ^ (cols as u64));
@@ -764,14 +779,20 @@ fn persistence_pairs_never_panic_on_extreme_shapes() {
 fn from_columns_round_trips_with_accessors() {
     for &(rows, cols, density) in MATRIX_CASES {
         let mut rng = Rng::new(0xC0FFEE ^ (rows as u64) << 16 ^ (cols as u64));
-        let original: Vec<BitVec> = (0..cols).map(|_| gen_bitvec(&mut rng, rows, density)).collect();
+        let original: Vec<BitVec> = (0..cols)
+            .map(|_| gen_bitvec(&mut rng, rows, density))
+            .collect();
         let m = BoundaryMatrix::from_columns(rows, original.clone());
         assert_eq!(m.rows(), rows);
         assert_eq!(m.cols(), cols);
         for j in 0..cols {
             assert_eq!(m.column(j), &original[j], "column {j} round-trip");
             for i in 0..rows {
-                assert_eq!(m.get(i, j), original[j].get(i), "entry ({i},{j}) round-trip");
+                assert_eq!(
+                    m.get(i, j),
+                    original[j].get(i),
+                    "entry ({i},{j}) round-trip"
+                );
             }
         }
     }

@@ -389,12 +389,10 @@ fn event_is_self_dependent_under_seq_bump_iff_footprint_has_a_write() {
 
         let indep = independent(e, e2);
         assert_eq!(
-            indep,
-            !has_write,
+            indep, !has_write,
             "self-vs-bumped independence mismatch for {:?}: footprint={:?}, \
              has_write={has_write}, independent={indep}",
-            e.kind,
-            footprint
+            e.kind, footprint
         );
     }
 }
@@ -512,7 +510,10 @@ fn shared_writable_resource_forces_dependence() {
             .any(|a| a.resource == Resource::Task(tid(1)) && a.mode == AccessMode::Write)
     };
     assert!(has_task_write(&lifecycle) && has_task_write(&kill));
-    assert!(!independent(&lifecycle, &kill), "shared Task write ⇒ dependent");
+    assert!(
+        !independent(&lifecycle, &kill),
+        "shared Task write ⇒ dependent"
+    );
 }
 
 // ---------------------------------------------------------------------------

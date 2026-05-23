@@ -43,7 +43,11 @@ fn ring_holds_exactly_the_last_min_n_cap_events_in_order() {
             );
             assert_eq!(buf.len(), expected_len, "len wrong (cap={cap}, pushed={n})");
             assert_eq!(buf.is_empty(), n == 0);
-            assert_eq!(buf.is_full(), n >= cap, "is_full wrong (cap={cap}, pushed={n})");
+            assert_eq!(
+                buf.is_full(),
+                n >= cap,
+                "is_full wrong (cap={cap}, pushed={n})"
+            );
         }
     }
 }
@@ -111,7 +115,11 @@ fn capacity_is_clamped_to_at_least_one() {
     assert_eq!(buf.capacity(), 1);
     buf.push(ev(1));
     buf.push(ev(2));
-    assert_eq!(buf.len(), 1, "capacity-1 buffer keeps only the newest event");
+    assert_eq!(
+        buf.len(),
+        1,
+        "capacity-1 buffer keeps only the newest event"
+    );
     assert_eq!(buf.last().map(|e| e.seq), Some(2));
 }
 
@@ -131,7 +139,10 @@ fn handle_snapshot_matches_the_sliding_window_and_counts_evictions() {
 
             let expected_len = n.min(cap);
             let expected: Vec<u64> = ((n - expected_len)..n).map(|x| x as u64).collect();
-            assert_eq!(snap, expected, "handle window wrong (cap={cap}, pushed={n})");
+            assert_eq!(
+                snap, expected,
+                "handle window wrong (cap={cap}, pushed={n})"
+            );
             assert_eq!(handle.len(), expected_len);
             assert_eq!(handle.is_empty(), n == 0);
 

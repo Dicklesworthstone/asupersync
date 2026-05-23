@@ -468,7 +468,10 @@ fn scale_event_time(event: &TraceEvent, scale_factor: u64) -> TraceEvent {
     // Also scale embedded timestamps in event data if present
     match &mut new_event.data {
         crate::trace::event::TraceData::Timer { deadline, .. } => {
-            *deadline = Time::from_nanos(deadline.as_nanos().saturating_mul(scale_factor));
+            if let Some(deadline_time) = deadline {
+                *deadline_time =
+                    Time::from_nanos(deadline_time.as_nanos().saturating_mul(scale_factor));
+            }
         }
         _ => {} // No embedded time to scale
     }

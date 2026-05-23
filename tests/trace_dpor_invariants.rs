@@ -85,7 +85,10 @@ fn every_race_runs_forward_with_in_range_indices() {
         let analysis = detect_races(&trace);
         for race in &analysis.races {
             assert!(race.earlier < race.later, "race not forward: {race:?}");
-            assert!(race.later < trace.len(), "race index out of range: {race:?}");
+            assert!(
+                race.later < trace.len(),
+                "race index out of range: {race:?}"
+            );
         }
         // Backtrack points correspond one-to-one with races.
         assert_eq!(
@@ -252,16 +255,25 @@ fn sleep_set_membership_is_monotone_and_insertion_idempotent() {
         TraceEvent::complete(2, z, tid(1), rid(1)),
     ];
     let bp = BacktrackPoint {
-        race: Race { earlier: 0, later: 1 },
+        race: Race {
+            earlier: 0,
+            later: 1,
+        },
         divergence_index: 0,
     };
 
     let mut sleep = SleepSet::new();
     assert!(sleep.is_empty());
-    assert!(!sleep.contains(&bp, &events), "fresh sleep set contains nothing");
+    assert!(
+        !sleep.contains(&bp, &events),
+        "fresh sleep set contains nothing"
+    );
 
     sleep.insert(&bp, &events);
-    assert!(sleep.contains(&bp, &events), "inserted point must be present");
+    assert!(
+        sleep.contains(&bp, &events),
+        "inserted point must be present"
+    );
     assert_eq!(sleep.len(), 1);
 
     // Idempotent: re-inserting the same point does not grow the set, and

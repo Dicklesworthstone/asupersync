@@ -11,11 +11,11 @@
 //! linear resource usage, and type safety. These tests verify the runtime
 //! behavior respects those compile-time guarantees.
 
-use asupersync::session::{
-    channel, Dual, End, Endpoint, Recv, Send, SessionError, Choose, Offer, Offered, Branch,
-};
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::session::{
+    Branch, Choose, Dual, End, Endpoint, Offer, Offered, Recv, Send, SessionError, channel,
+};
 use asupersync::types::Budget;
 use proptest::prelude::*;
 use std::sync::Arc;
@@ -42,7 +42,8 @@ impl Arbitrary for ProtocolOp {
             Just(ProtocolOp::ChooseLeft),
             Just(ProtocolOp::ChooseRight),
             Just(ProtocolOp::Close),
-        ].boxed()
+        ]
+        .boxed()
     }
 }
 
@@ -56,7 +57,7 @@ impl Arbitrary for ProtocolOp {
 /// preserving both value and type. The session type system enforces type
 /// matching at compile time; this verifies runtime correctness.
 fn mr_send_recv_type_preservation() {
-    proptest!(|(values: Vec<u32>)| {
+    proptest!(|(values in prop::collection::vec(any::<u32>(), 0..=20))| {
         let config = LabConfig::default();
         let mut runtime = LabRuntime::new(config);
         let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -118,7 +119,7 @@ fn mr_send_recv_type_preservation() {
 /// type doesn't match the expected type, `SessionError::TypeMismatch` must be
 /// returned to maintain type safety.
 fn mr_type_mismatch_error() {
-    proptest!(|(wrong_values: Vec<String>)| {
+    proptest!(|(wrong_values in prop::collection::vec(".*", 0..=10))| {
         let config = LabConfig::default();
         let mut runtime = LabRuntime::new(config);
         let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -248,7 +249,7 @@ fn mr_protocol_completion_releases_handle() {
 /// When operations are cancelled, the session should rollback to a consistent state.
 /// No partial protocol steps should be visible to peers.
 fn mr_cancel_rollback_consistency() {
-    proptest!(|(values: Vec<u32>)| {
+    proptest!(|(values in prop::collection::vec(any::<u32>(), 0..=10))| {
         for value in values.into_iter().take(5) {
             let config = LabConfig::default();
             let mut runtime = LabRuntime::new(config);
@@ -300,7 +301,7 @@ fn mr_cancel_rollback_consistency() {
 /// Complex protocols with bidirectional communication should maintain FIFO ordering
 /// for messages in each direction, even under concurrent operation.
 fn mr_full_duplex_ordering_preservation() {
-    proptest!(|(sequences: Vec<(u32, u32)>)| {
+    proptest!(|(sequences in prop::collection::vec((any::<u32>(), any::<u32>()), 0..=10))| {
         let config = LabConfig::default();
         let mut runtime = LabRuntime::new(config);
         let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -455,7 +456,7 @@ fn mr_linear_capability_no_duplication() {
 /// Choice protocols with multiple branches should execute deterministically
 /// when using the same seed, regardless of which branch is chosen.
 fn mr_choice_protocol_determinism() {
-    proptest!(|(choice_left: bool)| {
+    proptest!(|(choice_left in any::<bool>())| {
         fn run_choice_protocol(seed: u64, choose_left: bool) -> u32 {
             let config = LabConfig::new(seed);
             let mut runtime = LabRuntime::new(config);

@@ -68,7 +68,7 @@ fn generate_operations(sequences: Vec<u64>) -> Vec<ChannelOperation> {
 /// - Incorrect waiter reordering after cancellation
 /// - Lost wakeups when cancelled permits are cleaned up
 fn mr_mpsc_order_preservation_under_cancellation() {
-    proptest!(|(sequences: Vec<u64>)| {
+    proptest!(|(sequences in prop::collection::vec(any::<u64>(), 0..=20))| {
         let sequences: Vec<u64> = sequences.into_iter().take(15).collect(); // Limit for performance
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 

@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn mr1_insert_assigns_unique_task_id() {
-        proptest!(|(config: TaskTableTestConfig)| {
+        proptest!(|(config in any::<TaskTableTestConfig>())| {
             let mut harness = TaskTableTestHarness::new(config.seed);
 
             let result = harness.execute(|shards| {
@@ -213,7 +213,7 @@ mod tests {
     /// Catches: Lookup bugs, storage corruption, indexing errors
     #[test]
     fn mr2_lookup_returns_exactly_inserted_task() {
-        proptest!(|(config: TaskTableTestConfig)| {
+        proptest!(|(config in any::<TaskTableTestConfig>())| {
             let mut harness = TaskTableTestHarness::new(config.seed);
 
             harness.execute(|shards| {
@@ -255,7 +255,7 @@ mod tests {
     /// Catches: Incomplete removal, memory leaks, slot accounting errors
     #[test]
     fn mr3_evict_removes_task_and_frees_slot() {
-        proptest!(|(config: TaskTableTestConfig)| {
+        proptest!(|(config in any::<TaskTableTestConfig>())| {
             let mut harness = TaskTableTestHarness::new(config.seed);
 
             harness.execute(|shards| {
@@ -313,7 +313,7 @@ mod tests {
     /// Catches: Generation counter bugs, stale ID access, arena corruption
     #[test]
     fn mr4_generation_token_prevents_stale_access() {
-        proptest!(|(config: TaskTableTestConfig)| {
+        proptest!(|(config in any::<TaskTableTestConfig>())| {
             let mut harness = TaskTableTestHarness::new(config.seed);
 
             harness.execute(|shards| {

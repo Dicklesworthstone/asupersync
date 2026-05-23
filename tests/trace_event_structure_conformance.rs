@@ -366,7 +366,10 @@ fn owner_key_for_event_classifies_each_data_variant() {
             detail: "d".to_string(),
         },
     );
-    assert_eq!(OwnerKey::for_event(&chaos_with_task), OwnerKey::Task(tid(1)));
+    assert_eq!(
+        OwnerKey::for_event(&chaos_with_task),
+        OwnerKey::Task(tid(1))
+    );
     // Events without a stable owner id → Kind fallback.
     assert_eq!(
         OwnerKey::for_event(&TraceEvent::user_trace(6, t, "x")),
@@ -432,7 +435,10 @@ fn event_structure_causality_matches_trace_poset_edges() {
             for &(from, to) in es.causality() {
                 let (i, j) = (from.index(), to.index());
                 assert!(i < j, "causality edge {i}->{j} not forward");
-                assert!(poset.has_edge(i, j), "causality edge {i}->{j} absent from poset");
+                assert!(
+                    poset.has_edge(i, j),
+                    "causality edge {i}->{j} absent from poset"
+                );
             }
             // Every poset edge appears exactly once in the causality list.
             let mut poset_edge_count = 0usize;
@@ -476,7 +482,10 @@ fn to_hda_produces_one_zero_cell_per_event() {
 
             assert_eq!(hda.cells.len(), len, "HDA cell count != event count");
             for (idx, cell) in hda.cells.iter().enumerate() {
-                assert_eq!(cell.dimension, 0, "single-trace HDA cell must be 0-dimensional");
+                assert_eq!(
+                    cell.dimension, 0,
+                    "single-trace HDA cell must be 0-dimensional"
+                );
                 assert_eq!(cell.events.len(), 1, "0-cell should span exactly one event");
                 assert_eq!(cell.events[0].index(), idx, "0-cell event index mismatch");
             }

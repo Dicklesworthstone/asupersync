@@ -26,7 +26,9 @@ use std::io::Cursor;
 
 use asupersync::trace::TraceBuffer;
 use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
-use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture, format_trace, trace_to_string};
+use asupersync::trace::format::{
+    GoldenTraceConfig, GoldenTraceFixture, format_trace, trace_to_string,
+};
 use asupersync::types::{RegionId, TaskId, Time};
 
 // ---------------------------------------------------------------------------
@@ -147,7 +149,10 @@ fn a_divergent_event_stream_fails_verification() {
     );
     let report = baseline.delta_report(&drifted);
     assert!(!report.is_clean(), "delta report must record the drift");
-    assert!(!report.deltas.is_empty(), "drift must surface at least one delta");
+    assert!(
+        !report.deltas.is_empty(),
+        "drift must surface at least one delta"
+    );
 }
 
 #[test]
@@ -171,11 +176,8 @@ fn oracle_violations_are_sorted_and_deduplicated() {
     );
 
     // Same set, different input order ⇒ equal fixtures.
-    let other_order = GoldenTraceFixture::from_events(
-        cfg(),
-        &trace_a(),
-        vec!["mango", "zebra", "alpha"],
-    );
+    let other_order =
+        GoldenTraceFixture::from_events(cfg(), &trace_a(), vec!["mango", "zebra", "alpha"]);
     assert_eq!(
         messy, other_order,
         "violation discovery order must not affect the fixture"
@@ -209,7 +211,10 @@ fn trace_to_string_is_deterministic() {
     let s1 = trace_to_string(&buf);
     let s2 = trace_to_string(&buf);
     assert_eq!(s1, s2, "trace_to_string must be deterministic");
-    assert!(!s1.is_empty(), "a non-empty trace should render non-empty text");
+    assert!(
+        !s1.is_empty(),
+        "a non-empty trace should render non-empty text"
+    );
 }
 
 #[test]
@@ -247,9 +252,16 @@ fn user_trace_events_round_trip_through_the_buffer() {
         TraceData::Message("hello".to_string()),
     );
     let buf = buffer_from(&[ev]);
-    let fixture = GoldenTraceFixture::from_events(cfg(), &[
-        TraceEvent::new(42, Time::ZERO, TraceEventKind::UserTrace, TraceData::Message("hello".to_string())),
-    ], no_violations());
+    let fixture = GoldenTraceFixture::from_events(
+        cfg(),
+        &[TraceEvent::new(
+            42,
+            Time::ZERO,
+            TraceEventKind::UserTrace,
+            TraceData::Message("hello".to_string()),
+        )],
+        no_violations(),
+    );
     assert_eq!(fixture.event_count, 1);
     assert!(!trace_to_string(&buf).is_empty());
 }

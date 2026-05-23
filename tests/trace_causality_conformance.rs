@@ -234,7 +234,10 @@ fn unannotated_events_are_skipped_entirely() {
         TraceEvent::complete(2, Time::ZERO, task(1), region()),
         TraceEvent::schedule(3, Time::ZERO, task(1), region()),
     ];
-    assert!(ok(&trace), "unannotated events must never produce violations");
+    assert!(
+        ok(&trace),
+        "unannotated events must never produce violations"
+    );
 }
 
 #[test]

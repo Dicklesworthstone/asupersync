@@ -85,7 +85,10 @@ fn assert_report_well_formed(report: &MinimizationReport, original_len: usize) {
         report.minimized_count <= report.original_count,
         "minimized set larger than original"
     );
-    assert!(report.replay_attempts >= 1, "must replay at least the full set");
+    assert!(
+        report.replay_attempts >= 1,
+        "must replay at least the full set"
+    );
 
     // Indices are in range and strictly ascending.
     let mut prev: Option<usize> = None;
@@ -295,13 +298,18 @@ fn minimize_with_logical_clock_is_deterministic() {
             1 => Box::new(conjunction_oracle(vec![adv(4), adv(13)])),
             _ => Box::new(cardinality_oracle(6)),
         };
-        let a = TraceMinimizer::minimize_with_clock(&scenario, &oracle, &LogicalMinimizerClock::new());
-        let b = TraceMinimizer::minimize_with_clock(&scenario, &oracle, &LogicalMinimizerClock::new());
+        let a =
+            TraceMinimizer::minimize_with_clock(&scenario, &oracle, &LogicalMinimizerClock::new());
+        let b =
+            TraceMinimizer::minimize_with_clock(&scenario, &oracle, &LogicalMinimizerClock::new());
         assert_eq!(a.minimized_indices, b.minimized_indices, "indices differ");
         assert_eq!(a.replay_attempts, b.replay_attempts, "replay tally differs");
         assert_eq!(a.is_minimal, b.is_minimal, "is_minimal differs");
         assert_eq!(a.minimized_count, b.minimized_count);
-        assert_eq!(a.wall_time_ms, b.wall_time_ms, "logical-clock time not stable");
+        assert_eq!(
+            a.wall_time_ms, b.wall_time_ms,
+            "logical-clock time not stable"
+        );
         assert_eq!(a.steps.len(), b.steps.len(), "step count differs");
     }
 }
