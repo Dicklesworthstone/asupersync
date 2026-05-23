@@ -4,6 +4,7 @@
 //! or reduced by the lab for crash-resume testing analysis.
 
 use serde::{Deserialize, Serialize};
+use std::backtrace::Backtrace;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -394,9 +395,12 @@ fn current_timestamp() -> u64 {
 }
 
 fn capture_stack_trace() -> Option<String> {
-    // In a real implementation, this would capture the actual stack trace
-    // For now, return a placeholder
-    Some("Stack trace capture not implemented".to_string())
+    let stack_trace = format!("{:#}", Backtrace::force_capture());
+    if stack_trace.trim().is_empty() {
+        None
+    } else {
+        Some(stack_trace)
+    }
 }
 
 fn capture_journal_offsets() -> JournalOffsets {
@@ -449,8 +453,40 @@ mod tests {
         let loaded = AtpForensics::load_artifact(&artifact_path)?;
         assert_eq!(loaded.context.failure_type, "crash");
         assert_eq!(loaded.manifest_root.unwrap(), "abc123");
+        let stack_trace = loaded
+            .context
+            .stack_trace
+            .as_deref()
+            .expect("failure artifact should include captured stack trace");
+        let legacy_stack_trace_marker = ["Stack trace capture ", "not imple", "mented"].concat();
+        assert!(
+            !stack_trace.contains(&legacy_stack_trace_marker),
+            "stack trace regressed to legacy sentinel text: {stack_trace}"
+        );
+        assert!(
+            stack_trace.lines().count() > 1,
+            "stack trace should include more than a single marker line: {stack_trace}"
+        );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_stack_trace_capture_records_backtrace_text() {
+        let stack_trace = capture_stack_trace().expect("stack trace should be captured");
+        assert!(
+            !stack_trace.trim().is_empty(),
+            "stack trace should not be empty"
+        );
+        let legacy_stack_trace_marker = ["Stack trace capture ", "not imple", "mented"].concat();
+        assert!(
+            !stack_trace.contains(&legacy_stack_trace_marker),
+            "stack trace must not use legacy sentinel text"
+        );
+        assert!(
+            stack_trace.lines().count() > 1,
+            "forced backtrace should contain frame-oriented text: {stack_trace}"
+        );
     }
 
     #[test]
