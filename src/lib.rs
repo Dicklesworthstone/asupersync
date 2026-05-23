@@ -275,7 +275,11 @@ pub mod fs_config_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod golden_artifacts_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod grpc_protocol_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod http_grpc_protocol_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod lab_determinism_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod lab_trace_observability_security_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
@@ -322,6 +326,8 @@ pub mod test_ndjson;
 pub mod test_utils;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod timer_wheel_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod trace_causality_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod web_tls_codec_raptorq_metamorphic_tests;
 

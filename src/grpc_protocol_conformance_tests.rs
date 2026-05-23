@@ -819,7 +819,7 @@ fn test_grpc_message_framing_identity() -> TestResult {
 
 /// Test compression flag preservation.
 fn test_compression_flag_preservation() -> TestResult {
-    let codec = MockGrpcCodec::with_compression();
+    let codec = MockGrpcCodec::new().with_compression();
 
     let uncompressed = MockGrpcMessage::new(b"uncompressed".to_vec());
     let compressed = MockGrpcMessage::compressed(b"compressed".to_vec());
@@ -1163,7 +1163,7 @@ proptest! {
         data in prop::collection::vec(any::<u8>(), 0..1000),
         compressed in any::<bool>(),
     ) {
-        let codec = MockGrpcCodec::with_compression();
+        let codec = MockGrpcCodec::new().with_compression();
         let message = if compressed {
             MockGrpcMessage::compressed(data.clone())
         } else {
@@ -1187,7 +1187,7 @@ proptest! {
 fn test_grpc_integration_scenario() {
     // Scenario: Complete gRPC call with message framing, status handling, and metadata
 
-    let codec = MockGrpcCodec::with_compression();
+    let codec = MockGrpcCodec::new().with_compression();
     let generator = MessagePermutationGenerator::new(98765);
 
     // Phase 1: Create request with metadata
