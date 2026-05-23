@@ -878,6 +878,53 @@ impl SwarmAdmissionWorkloadReceipt {
     }
 }
 
+/// Structured audit receipt for an admission decision.
+#[derive(Debug, Clone)]
+pub struct SwarmAdmissionDecisionReceipt {
+    /// Monotonic decision id assigned by this governor instance.
+    pub decision_id: u64,
+    /// Stable replay/audit pointer for logs and proof artifacts.
+    pub replay_pointer: String,
+    /// Admission outcome.
+    pub decision: AdmissionDecision,
+    /// System degradation level used by the decision.
+    pub degradation_level: DegradationLevel,
+    /// Final human-readable decision reason.
+    pub reason: String,
+    /// Workload id, when the decision came from workload admission.
+    pub workload_id: Option<String>,
+    /// Owner agent, when the decision came from workload admission.
+    pub owner_agent: Option<String>,
+    /// Bead id, when supplied by workload owner metadata.
+    pub bead_id: Option<String>,
+    /// Reservation/file-frontier scope, when supplied by workload owner metadata.
+    pub reservation_scope: Option<String>,
+    /// Proof lane, when the decision came from workload admission.
+    pub proof_lane: Option<SwarmProofLaneKind>,
+    /// Requested memory bytes charged to the decision.
+    pub requested_memory_bytes: Option<u64>,
+    /// Requested CPU nanoseconds per second charged to the decision.
+    pub requested_cpu_ns_per_sec: Option<u64>,
+    /// Requested IO operations per second charged to the decision.
+    pub requested_io_ops_per_sec: Option<u64>,
+    /// Whether the request included an admission deadline.
+    pub deadline_set: bool,
+    /// Cancellation budget in milliseconds, when supplied.
+    pub cancellation_budget_ms: Option<u64>,
+    /// Overall pressure ratio scaled by 10_000 for deterministic structured logs.
+    pub overall_pressure_scaled: i64,
+    /// Runnable queue pressure ratio scaled by 10_000.
+    pub runnable_queue_pressure_scaled: i64,
+    /// Blocking pool pressure ratio scaled by 10_000.
+    pub blocking_pool_pressure_scaled: i64,
+    /// Channel backlog pressure ratio scaled by 10_000.
+    pub channel_backlog_pressure_scaled: i64,
+    /// Cleanup debt pressure ratio scaled by 10_000.
+    pub cleanup_debt_pressure_scaled: i64,
+    /// Memory budget pressure ratio scaled by 10_000.
+    pub memory_budget_pressure_scaled: i64,
+}
+
 /// Enhanced admission decision with resource envelope information.
 #[derive(Debug, Clone)]
 pub struct SwarmAdmissionDecision {
@@ -893,6 +940,8 @@ pub struct SwarmAdmissionDecision {
     pub decision_latency_ns: u64,
     /// Reason for the decision.
     pub reason: String,
+    /// Structured audit receipt for logs and replayable proof artifacts.
+    pub decision_receipt: SwarmAdmissionDecisionReceipt,
     /// Workload request context bound to this decision, when it came from workload admission.
     pub workload_receipt: Option<SwarmAdmissionWorkloadReceipt>,
 }
@@ -917,6 +966,7 @@ pub struct SwarmPressureGovernor {
     workload_leases_expired: AtomicU64,
     workload_lease_conflicts: AtomicU64,
     workload_feedback_reports_recorded: AtomicU64,
+    next_admission_decision_id: AtomicU64,
     next_workload_lease_id: AtomicU64,
 
     // Resource envelope and workload lease tracking.
@@ -950,6 +1000,7 @@ impl SwarmPressureGovernor {
             workload_leases_expired: AtomicU64::new(0),
             workload_lease_conflicts: AtomicU64::new(0),
             workload_feedback_reports_recorded: AtomicU64::new(0),
+            next_admission_decision_id: AtomicU64::new(1),
             next_workload_lease_id: AtomicU64::new(1),
             active_regions: std::sync::Mutex::new(HashMap::new()),
             workload_leases: std::sync::Mutex::new(HashMap::new()),
@@ -984,6 +1035,7 @@ impl SwarmPressureGovernor {
             workload_leases_expired: AtomicU64::new(0),
             workload_lease_conflicts: AtomicU64::new(0),
             workload_feedback_reports_recorded: AtomicU64::new(0),
+            next_admission_decision_id: AtomicU64::new(1),
             next_workload_lease_id: AtomicU64::new(1),
             active_regions: std::sync::Mutex::new(HashMap::new()),
             workload_leases: std::sync::Mutex::new(HashMap::new()),
@@ -1011,6 +1063,7 @@ impl SwarmPressureGovernor {
             requested_memory,
             None,
             None,
+            None,
         )
     }
 
@@ -1027,17 +1080,15 @@ impl SwarmPressureGovernor {
 
         let workload_pressure =
             self.workload_pressure_summary(decision_start, Some(request.workload_id.trim()));
-        let mut decision = self.check_region_admission_with_feedback(
+        self.check_region_admission_with_feedback(
             cx,
             request.priority,
             request.requested_memory_bytes,
             request.requested_cpu_ns_per_sec,
             request.requested_io_ops_per_sec,
             workload_pressure,
-        )?;
-        decision.reason = request.context_reason(&decision.reason);
-        decision.workload_receipt = Some(SwarmAdmissionWorkloadReceipt::from_request(request));
-        Ok(decision)
+            Some(request),
+        )
     }
 
     fn check_region_admission_with_declared_resources(
@@ -1047,6 +1098,7 @@ impl SwarmPressureGovernor {
         requested_memory: Option<u64>,
         requested_cpu_ns_per_sec: Option<u64>,
         requested_io_ops_per_sec: Option<u64>,
+        workload_request: Option<&SwarmWorkloadAdmissionRequest>,
     ) -> Result<SwarmAdmissionDecision, SwarmPressureError> {
         self.check_region_admission_with_feedback(
             cx,
@@ -1055,6 +1107,7 @@ impl SwarmPressureGovernor {
             requested_cpu_ns_per_sec,
             requested_io_ops_per_sec,
             SwarmWorkloadPressureSummary::EMPTY,
+            workload_request,
         )
     }
 
@@ -1066,6 +1119,7 @@ impl SwarmPressureGovernor {
         requested_cpu_ns_per_sec: Option<u64>,
         requested_io_ops_per_sec: Option<u64>,
         workload_pressure: SwarmWorkloadPressureSummary,
+        workload_request: Option<&SwarmWorkloadAdmissionRequest>,
     ) -> Result<SwarmAdmissionDecision, SwarmPressureError> {
         let decision_start = Instant::now();
         self.total_admission_checks.fetch_add(1, Ordering::Relaxed);
@@ -1079,15 +1133,28 @@ impl SwarmPressureGovernor {
                 requested_cpu_ns_per_sec,
                 requested_io_ops_per_sec,
             )?;
+            let pressure_snapshot = self.get_default_pressure_snapshot();
+            let reason = Self::contextual_admission_reason(
+                workload_request,
+                "Swarm governance disabled".to_string(),
+            );
+            let decision_receipt = self.build_admission_decision_receipt(
+                AdmissionDecision::Admit,
+                DegradationLevel::None,
+                &pressure_snapshot,
+                &reason,
+                workload_request,
+            );
             self.regions_admitted.fetch_add(1, Ordering::Relaxed);
             return Ok(SwarmAdmissionDecision {
                 decision: AdmissionDecision::Admit,
                 envelope: Some(envelope),
-                pressure_snapshot: self.get_default_pressure_snapshot(),
+                pressure_snapshot,
                 degradation_level: DegradationLevel::None,
                 decision_latency_ns: self.record_decision_latency(decision_start),
-                reason: "Swarm governance disabled".to_string(),
-                workload_receipt: None,
+                reason,
+                decision_receipt,
+                workload_receipt: workload_request.map(SwarmAdmissionWorkloadReceipt::from_request),
             });
         }
 
@@ -1118,17 +1185,29 @@ impl SwarmPressureGovernor {
             self.regions_rejected.fetch_add(1, Ordering::Relaxed);
             self.envelope_budget_violations
                 .fetch_add(1, Ordering::Relaxed);
+            let reason = Self::contextual_admission_reason(
+                workload_request,
+                format!(
+                    "Requested memory {requested_memory} exceeds region envelope budget {}",
+                    self.config.default_memory_budget_bytes
+                ),
+            );
+            let decision_receipt = self.build_admission_decision_receipt(
+                AdmissionDecision::Reject,
+                degradation_level,
+                &pressure_snapshot,
+                &reason,
+                workload_request,
+            );
             return Ok(SwarmAdmissionDecision {
                 decision: AdmissionDecision::Reject,
                 envelope: None,
                 pressure_snapshot,
                 degradation_level,
                 decision_latency_ns: self.record_decision_latency(decision_start),
-                reason: format!(
-                    "Requested memory {requested_memory} exceeds region envelope budget {}",
-                    self.config.default_memory_budget_bytes
-                ),
-                workload_receipt: None,
+                reason,
+                decision_receipt,
+                workload_receipt: workload_request.map(SwarmAdmissionWorkloadReceipt::from_request),
             });
         }
         if let Some((resource, requested, limit)) =
@@ -1137,16 +1216,26 @@ impl SwarmPressureGovernor {
             self.regions_rejected.fetch_add(1, Ordering::Relaxed);
             self.envelope_budget_violations
                 .fetch_add(1, Ordering::Relaxed);
+            let reason = Self::contextual_admission_reason(
+                workload_request,
+                format!("Requested {resource} {requested} exceeds region envelope budget {limit}"),
+            );
+            let decision_receipt = self.build_admission_decision_receipt(
+                AdmissionDecision::Reject,
+                degradation_level,
+                &pressure_snapshot,
+                &reason,
+                workload_request,
+            );
             return Ok(SwarmAdmissionDecision {
                 decision: AdmissionDecision::Reject,
                 envelope: None,
                 pressure_snapshot,
                 degradation_level,
                 decision_latency_ns: self.record_decision_latency(decision_start),
-                reason: format!(
-                    "Requested {resource} {requested} exceeds region envelope budget {limit}"
-                ),
-                workload_receipt: None,
+                reason,
+                decision_receipt,
+                workload_receipt: workload_request.map(SwarmAdmissionWorkloadReceipt::from_request),
             });
         }
 
@@ -1189,14 +1278,24 @@ impl SwarmPressureGovernor {
             }
         }
 
+        let reason = Self::contextual_admission_reason(workload_request, swarm_decision.reason);
+        let decision_receipt = self.build_admission_decision_receipt(
+            swarm_decision.decision,
+            degradation_level,
+            &pressure_snapshot,
+            &reason,
+            workload_request,
+        );
+
         Ok(SwarmAdmissionDecision {
             decision: swarm_decision.decision,
             envelope,
             pressure_snapshot,
             degradation_level,
             decision_latency_ns: self.record_decision_latency(decision_start),
-            reason: swarm_decision.reason,
-            workload_receipt: None,
+            reason,
+            decision_receipt,
+            workload_receipt: workload_request.map(SwarmAdmissionWorkloadReceipt::from_request),
         })
     }
 
@@ -1881,6 +1980,92 @@ impl SwarmPressureGovernor {
         latency_ns
     }
 
+    fn contextual_admission_reason(
+        workload_request: Option<&SwarmWorkloadAdmissionRequest>,
+        reason: String,
+    ) -> String {
+        if let Some(request) = workload_request {
+            request.context_reason(&reason)
+        } else {
+            reason
+        }
+    }
+
+    fn build_admission_decision_receipt(
+        &self,
+        decision: AdmissionDecision,
+        degradation_level: DegradationLevel,
+        pressure_snapshot: &PressureSnapshot,
+        reason: &str,
+        workload_request: Option<&SwarmWorkloadAdmissionRequest>,
+    ) -> SwarmAdmissionDecisionReceipt {
+        let decision_id = self
+            .next_admission_decision_id
+            .fetch_add(1, Ordering::Relaxed);
+        let (
+            workload_id,
+            owner_agent,
+            bead_id,
+            reservation_scope,
+            proof_lane,
+            requested_memory_bytes,
+            requested_cpu_ns_per_sec,
+            requested_io_ops_per_sec,
+            deadline_set,
+            cancellation_budget_ms,
+        ) = if let Some(request) = workload_request {
+            let owner = normalized_owner_metadata(&request.owner);
+            (
+                normalized_optional_string(Some(request.workload_id.as_str())),
+                normalized_optional_string(Some(owner.agent_name.as_str())),
+                owner.bead_id,
+                owner.reservation_scope,
+                Some(request.proof_lane),
+                request.requested_memory_bytes,
+                request.requested_cpu_ns_per_sec,
+                request.requested_io_ops_per_sec,
+                request.deadline.is_some(),
+                request.cancellation_budget.map(duration_as_u64_ms),
+            )
+        } else {
+            (None, None, None, None, None, None, None, None, false, None)
+        };
+
+        SwarmAdmissionDecisionReceipt {
+            decision_id,
+            replay_pointer: format!("swarm-admission://decision/{decision_id}"),
+            decision,
+            degradation_level,
+            reason: reason.to_string(),
+            workload_id,
+            owner_agent,
+            bead_id,
+            reservation_scope,
+            proof_lane,
+            requested_memory_bytes,
+            requested_cpu_ns_per_sec,
+            requested_io_ops_per_sec,
+            deadline_set,
+            cancellation_budget_ms,
+            overall_pressure_scaled: scale_pressure_for_metrics(pressure_snapshot.overall_pressure),
+            runnable_queue_pressure_scaled: scale_pressure_for_metrics(
+                pressure_snapshot.runnable_queue_pressure,
+            ),
+            blocking_pool_pressure_scaled: scale_pressure_for_metrics(
+                pressure_snapshot.blocking_pool_pressure,
+            ),
+            channel_backlog_pressure_scaled: scale_pressure_for_metrics(
+                pressure_snapshot.channel_backlog_pressure,
+            ),
+            cleanup_debt_pressure_scaled: scale_pressure_for_metrics(
+                pressure_snapshot.cleanup_debt_pressure,
+            ),
+            memory_budget_pressure_scaled: scale_pressure_for_metrics(
+                pressure_snapshot.memory_budget_pressure,
+            ),
+        }
+    }
+
     fn peer_pressure_summary(&self, now: Instant) -> SwarmPeerPressureSummary {
         let reports = self.peer_pressure_reports.lock().unwrap();
         let mut summary = SwarmPeerPressureSummary::EMPTY;
@@ -2010,13 +2195,23 @@ impl SwarmPressureGovernor {
             .resource_monitor
             .pressure()
             .composite_degradation_level();
+        let pressure_snapshot = self.get_default_pressure_snapshot();
+        let reason = request.context_reason(&reason);
+        let decision_receipt = self.build_admission_decision_receipt(
+            AdmissionDecision::Reject,
+            degradation_level,
+            &pressure_snapshot,
+            &reason,
+            Some(request),
+        );
         SwarmAdmissionDecision {
             decision: AdmissionDecision::Reject,
             envelope: None,
-            pressure_snapshot: self.get_default_pressure_snapshot(),
+            pressure_snapshot,
             degradation_level,
             decision_latency_ns: self.record_decision_latency(decision_start),
-            reason: request.context_reason(&reason),
+            reason,
+            decision_receipt,
             workload_receipt: Some(SwarmAdmissionWorkloadReceipt::from_request(request)),
         }
     }
@@ -2919,6 +3114,41 @@ mod tests {
             Some("src/observability/swarm_pressure_governor.rs")
         );
         assert!(receipt.matches_request(&request));
+        assert_eq!(decision.decision_receipt.decision, AdmissionDecision::Admit);
+        assert!(decision.decision_receipt.decision_id > 0);
+        assert!(
+            decision
+                .decision_receipt
+                .replay_pointer
+                .starts_with("swarm-admission://decision/")
+        );
+        assert_eq!(decision.decision_receipt.reason, decision.reason);
+        assert_eq!(
+            decision.decision_receipt.workload_id.as_deref(),
+            Some("receipt-owner-a")
+        );
+        assert_eq!(
+            decision.decision_receipt.owner_agent.as_deref(),
+            Some("DustyGorge")
+        );
+        assert_eq!(
+            decision.decision_receipt.bead_id.as_deref(),
+            Some("asupersync-oxqrae.2")
+        );
+        assert_eq!(
+            decision.decision_receipt.reservation_scope.as_deref(),
+            Some("src/observability/swarm_pressure_governor.rs")
+        );
+        assert_eq!(
+            decision.decision_receipt.proof_lane,
+            Some(SwarmProofLaneKind::CargoCheckLib)
+        );
+        assert_eq!(decision.decision_receipt.requested_memory_bytes, Some(1024));
+        assert_eq!(decision.decision_receipt.requested_cpu_ns_per_sec, Some(50));
+        assert_eq!(decision.decision_receipt.requested_io_ops_per_sec, Some(5));
+        assert!(decision.decision_receipt.deadline_set);
+        assert_eq!(decision.decision_receipt.cancellation_budget_ms, Some(5000));
+        assert_eq!(decision.decision_receipt.overall_pressure_scaled, 0);
 
         let mismatched_request = SwarmWorkloadAdmissionRequest::new(
             "receipt-owner-b",
