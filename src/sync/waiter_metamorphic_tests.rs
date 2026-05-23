@@ -3,7 +3,7 @@
 //! Tests complex invariants and relationships that hold regardless of specific
 //! input sequences, without needing to predict exact outcomes (oracle problem).
 
-use super::waiter::{WaiterChain, WaiterId};
+use super::{WaiterChain, WaiterId};
 use proptest::prelude::*;
 use std::collections::HashSet;
 use std::task::Waker;
@@ -30,11 +30,11 @@ fn noop_waker() -> Waker {
 /// Generate random sequences of queue operations for property testing
 #[derive(Debug, Clone)]
 enum WaiterOp {
-    PushBack(String),      // tag
-    PushFront(String),     // tag
+    PushBack(String),  // tag
+    PushFront(String), // tag
     PopFront,
-    Remove(usize),         // index in operation sequence (converted to ID later)
-    UpdateWaker(usize),    // index in operation sequence
+    Remove(usize),      // index in operation sequence (converted to ID later)
+    UpdateWaker(usize), // index in operation sequence
 }
 
 impl Arbitrary for WaiterOp {
@@ -48,7 +48,8 @@ impl Arbitrary for WaiterOp {
             Just(WaiterOp::PopFront),
             (0usize..20).prop_map(WaiterOp::Remove),
             (0usize..20).prop_map(WaiterOp::UpdateWaker),
-        ].boxed()
+        ]
+        .boxed()
     }
 }
 
@@ -75,27 +76,27 @@ fn execute_ops(chain: &mut WaiterChain<String>, ops: &[WaiterOp]) -> Vec<Option<
             WaiterOp::PushBack(tag) => {
                 let id = chain.push_back_tagged(noop_waker(), tag.clone());
                 generated_ids.push(Some(id));
-            },
+            }
             WaiterOp::PushFront(tag) => {
                 let id = chain.push_front_tagged(noop_waker(), tag.clone());
                 generated_ids.push(Some(id));
-            },
+            }
             WaiterOp::PopFront => {
                 chain.pop_front();
                 generated_ids.push(None);
-            },
+            }
             WaiterOp::Remove(idx) => {
                 if let Some(Some(id)) = generated_ids.get(*idx) {
                     chain.remove(*id);
                 }
                 generated_ids.push(None);
-            },
+            }
             WaiterOp::UpdateWaker(idx) => {
                 if let Some(Some(id)) = generated_ids.get(*idx) {
                     chain.update_waker(*id, &noop_waker());
                 }
                 generated_ids.push(None);
-            },
+            }
         }
     }
 
@@ -124,7 +125,7 @@ mod metamorphic_tests {
                 popped_tags.push(tag);
             }
 
-            prop_assert_eq!(popped_tags, tags,
+            prop_assert_eq!(&popped_tags, &tags,
                 "FIFO order violated: expected {:?}, got {:?}", tags, popped_tags);
         }
     }
@@ -140,7 +141,7 @@ mod metamorphic_tests {
             let ids = execute_ops(&mut chain, &ops.0);
 
             // Count net additions
-            for (op, generated_id) in ops.0.iter().zip(ids.iter()) {
+            for (op, _generated_id) in ops.0.iter().zip(ids.iter()) {
                 match op {
                     WaiterOp::PushBack(_) | WaiterOp::PushFront(_) => expected_len += 1,
                     WaiterOp::PopFront => {
@@ -322,11 +323,11 @@ mod metamorphic_tests {
             }
 
             // Apply operations in different order
-            let id1_1 = chain1.push_back_tagged(noop_waker(), op1_tag.clone());
-            let id2_1 = chain1.push_back_tagged(noop_waker(), op2_tag.clone());
+            chain1.push_back_tagged(noop_waker(), op1_tag.clone());
+            chain1.push_back_tagged(noop_waker(), op2_tag.clone());
 
-            let id2_2 = chain2.push_back_tagged(noop_waker(), op2_tag.clone());
-            let id1_2 = chain2.push_back_tagged(noop_waker(), op1_tag.clone());
+            chain2.push_back_tagged(noop_waker(), op2_tag.clone());
+            chain2.push_back_tagged(noop_waker(), op1_tag.clone());
 
             // Final states should be equivalent (modulo ID values)
             prop_assert_eq!(chain1.len(), chain2.len(),
@@ -499,10 +500,10 @@ mod mutation_validation {
     }
 
     enum BugType {
-        DuplicateIds,      // Always return same ID
-        WrongFifoOrder,    // Insert in wrong position
-        IncorrectLength,   // Off-by-one in length tracking
-        InvalidRemoval,    // Don't actually remove items
+        DuplicateIds,    // Always return same ID
+        WrongFifoOrder,  // Insert in wrong position
+        IncorrectLength, // Off-by-one in length tracking
+        InvalidRemoval,  // Don't actually remove items
     }
 
     impl<T> BuggyWaiterChain<T> {
@@ -518,7 +519,8 @@ mod mutation_validation {
                 BugType::DuplicateIds => {
                     self.inner.push_back_tagged(waker, tag);
                     42 // Always return same ID (bug!)
-                },
+                }
+                BugType::WrongFifoOrder => self.inner.push_front_tagged(waker, tag),
                 _ => self.inner.push_back_tagged(waker, tag),
             }
         }
@@ -532,16 +534,24 @@ mod mutation_validation {
 
         fn remove(&mut self, id: WaiterId) -> Option<Waker> {
             match self.bug_type {
-                BugType::InvalidRemoval => Some(Waker::noop()), // Pretend to remove without actually doing it
+                BugType::InvalidRemoval => Some(Waker::noop().clone()), // Pretend to remove without actually doing it
                 _ => self.inner.remove(id),
             }
         }
 
         // Delegate other methods...
-        fn is_empty(&self) -> bool { self.inner.is_empty() }
-        fn pop_front(&mut self) -> Option<(WaiterId, Waker, T)> { self.inner.pop_front() }
-        fn front_id(&self) -> Option<WaiterId> { self.inner.front_id() }
-        fn contains(&self, id: WaiterId) -> bool { self.inner.contains(id) }
+        fn is_empty(&self) -> bool {
+            self.inner.is_empty()
+        }
+        fn pop_front(&mut self) -> Option<(WaiterId, Waker, T)> {
+            self.inner.pop_front()
+        }
+        fn front_id(&self) -> Option<WaiterId> {
+            self.inner.front_id()
+        }
+        fn contains(&self, id: WaiterId) -> bool {
+            self.inner.contains(id)
+        }
     }
 
     #[test]
@@ -549,6 +559,26 @@ mod mutation_validation {
         // This test would verify that our MR suite catches the planted bugs above
         // Due to type system constraints, this serves as documentation of what
         // a full mutation testing validation would look like
+        let mut duplicate_ids = BuggyWaiterChain::new(BugType::DuplicateIds);
+        let duplicate_id = duplicate_ids.push_back_tagged(noop_waker(), "first");
+        assert_eq!(duplicate_id, 42);
+        assert!(!duplicate_ids.is_empty());
+
+        let mut wrong_fifo = BuggyWaiterChain::new(BugType::WrongFifoOrder);
+        let first_id = wrong_fifo.push_back_tagged(noop_waker(), "first");
+        let second_id = wrong_fifo.push_back_tagged(noop_waker(), "second");
+        assert_eq!(wrong_fifo.front_id(), Some(second_id));
+        assert_eq!(wrong_fifo.pop_front().unwrap().0, second_id);
+        assert_ne!(first_id, second_id);
+
+        let mut incorrect_length = BuggyWaiterChain::new(BugType::IncorrectLength);
+        incorrect_length.push_back_tagged(noop_waker(), "only");
+        assert_eq!(incorrect_length.len(), 2);
+
+        let mut invalid_removal = BuggyWaiterChain::new(BugType::InvalidRemoval);
+        let id = invalid_removal.push_back_tagged(noop_waker(), "stays");
+        assert!(invalid_removal.remove(id).is_some());
+        assert!(invalid_removal.contains(id));
 
         println!("Mutation testing framework validated - MRs should detect:");
         println!("✓ Duplicate ID bug (caught by mr_id_uniqueness)");

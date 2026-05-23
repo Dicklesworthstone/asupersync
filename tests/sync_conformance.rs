@@ -4,9 +4,9 @@
 //! and other unique properties of asupersync synchronization.
 
 use asupersync::{
-    cx::{Cx, Scope},
+    cx::Cx,
     sync::{AcquireError, Barrier, BarrierWaitError, LockError, Mutex, Semaphore},
-    types::{Duration, Time},
+    types::{CancelKind, Time},
 };
 use std::sync::{
     Arc,
@@ -55,19 +55,14 @@ mod conformance_tests {
     }
 
     // Test helper to create a simple Cx for testing
-    async fn test_cx() -> Result<Cx, Box<dyn std::error::Error>> {
-        let scope = Scope::new();
-        let cx = scope.cx();
-        Ok(cx)
+    fn test_cx() -> Cx {
+        Cx::for_testing()
     }
 
-    // Test helper to create Cx with timeout
-    async fn test_cx_with_timeout(timeout: Duration) -> Result<Cx, Box<dyn std::error::Error>> {
-        let scope = Scope::new();
-        let now = Time::now();
-        let deadline = now + timeout;
-        let cx = scope.cx().with_deadline(deadline);
-        Ok(cx)
+    fn cancelled_cx() -> Cx {
+        let cx = Cx::for_testing();
+        cx.cancel_fast(CancelKind::User);
+        cx
     }
 
     /// MUTEX CONFORMANCE TESTS
@@ -76,7 +71,7 @@ mod conformance_tests {
     async fn mutex_two_phase_semantics() {
         // REQUIREMENT: Two-phase pattern - wait is cancel-safe, hold creates obligation
         let mutex = Arc::new(Mutex::new(42));
-        let cx = test_cx().await.unwrap();
+        let cx = test_cx();
 
         // Phase 1: Wait is cancel-safe (this should not panic or leak)
         let guard = mutex.lock(&cx).await.unwrap();
@@ -101,7 +96,7 @@ mod conformance_tests {
         let mutex_clone = mutex.clone();
         let barrier_clone = barrier.clone();
         tokio::spawn(async move {
-            let cx = test_cx().await.unwrap();
+            let cx = test_cx();
             let _guard = mutex_clone.lock(&cx).await.unwrap();
 
             // Signal that lock is held
@@ -112,17 +107,11 @@ mod conformance_tests {
         });
 
         // Wait for background task to acquire lock
-        let cx = test_cx().await.unwrap();
+        let cx = test_cx();
         let _ = barrier.wait(&cx).await.unwrap();
 
         // Now try to acquire with cancellable context
-        let cancelled_cx = {
-            let scope = Scope::new();
-            let cx = scope.cx();
-            // Immediately cancel the scope
-            scope.cancel();
-            cx
-        };
+        let cancelled_cx = cancelled_cx();
 
         // This should return Cancelled, not block or panic
         let result = mutex.lock(&cancelled_cx).await;
@@ -133,7 +122,7 @@ mod conformance_tests {
 
         // Mutex should still be usable after cancellation
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let cx2 = test_cx().await.unwrap();
+        let cx2 = test_cx();
         let _guard = mutex.lock(&cx2).await.unwrap();
     }
 
@@ -147,20 +136,18 @@ mod conformance_tests {
         let mutex_clone = mutex.clone();
         let barrier_clone = barrier.clone();
         tokio::spawn(async move {
-            let cx = test_cx().await.unwrap();
+            let cx = test_cx();
             let _guard = mutex_clone.lock(&cx).await.unwrap();
             let _ = barrier_clone.wait(&cx).await;
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         });
 
-        let cx = test_cx().await.unwrap();
+        let cx = test_cx();
         let _ = barrier.wait(&cx).await.unwrap();
 
         // Try to acquire with short timeout
-        let timeout_cx = test_cx_with_timeout(Duration::from_millis(50))
-            .await
-            .unwrap();
-        let result = mutex.lock(&timeout_cx).await;
+        let timeout_cx = test_cx();
+        let result = mutex.lock_until(&timeout_cx, Time::ZERO).await;
 
         match result {
             Err(LockError::TimedOut(_)) => {} // Expected
@@ -174,13 +161,13 @@ mod conformance_tests {
     async fn semaphore_two_phase_semantics() {
         // REQUIREMENT: Two-phase pattern for semaphore permits
         let sem = Arc::new(Semaphore::new(1));
-        let cx = test_cx().await.unwrap();
+        let cx = test_cx();
 
         // Phase 1: Wait for permit (cancel-safe)
         let permit = sem.acquire(&cx, 1).await.unwrap();
 
         // Phase 2: Hold permit (obligation exists)
-        assert_eq!(permit.permits(), 1);
+        assert_eq!(permit.count(), 1);
 
         // Permit should prevent another acquisition
         let result = sem.try_acquire(1);
@@ -197,14 +184,14 @@ mod conformance_tests {
     async fn semaphore_permit_count_accuracy() {
         // REQUIREMENT: Permit counts must be accurate
         let sem = Arc::new(Semaphore::new(5));
-        let cx = test_cx().await.unwrap();
+        let cx = test_cx();
 
         // Acquire multiple permits
         let permit1 = sem.acquire(&cx, 2).await.unwrap();
         let permit2 = sem.acquire(&cx, 1).await.unwrap();
 
-        assert_eq!(permit1.permits(), 2);
-        assert_eq!(permit2.permits(), 1);
+        assert_eq!(permit1.count(), 2);
+        assert_eq!(permit2.count(), 1);
         assert_eq!(sem.available_permits(), 2);
 
         // Can't acquire more than available
@@ -223,18 +210,13 @@ mod conformance_tests {
     async fn semaphore_cancel_safety() {
         // REQUIREMENT: Cancel safety during permit acquisition
         let sem = Arc::new(Semaphore::new(1));
-        let cx = test_cx().await.unwrap();
+        let cx = test_cx();
 
         // Acquire all permits
         let _permit = sem.acquire(&cx, 1).await.unwrap();
 
         // Try to acquire with cancelled context
-        let cancelled_cx = {
-            let scope = Scope::new();
-            let cx = scope.cx();
-            scope.cancel();
-            cx
-        };
+        let cancelled_cx = cancelled_cx();
 
         let result = sem.acquire(&cancelled_cx, 1).await;
         match result {
@@ -264,7 +246,7 @@ mod conformance_tests {
             let leader_count_clone = leader_count.clone();
 
             handles.push(tokio::spawn(async move {
-                let cx = test_cx().await.unwrap();
+                let cx = test_cx();
 
                 // All tasks increment counter before waiting
                 counter_clone.fetch_add(1, Ordering::SeqCst);
@@ -273,7 +255,7 @@ mod conformance_tests {
                 let result = barrier_clone.wait(&cx).await.unwrap();
 
                 // Check if this task was elected leader
-                if result.is_leader {
+                if result.is_leader() {
                     leader_count_clone.fetch_add(1, Ordering::SeqCst);
                 }
 
@@ -285,11 +267,9 @@ mod conformance_tests {
         }
 
         // Wait for all tasks
-        let results: Vec<_> = futures::future::join_all(handles).await;
-
         // All tasks should complete
-        for result in results {
-            result.unwrap();
+        for handle in handles {
+            handle.await.unwrap();
         }
 
         // Exactly one leader should be elected
@@ -306,8 +286,7 @@ mod conformance_tests {
         let barrier_clone = barrier.clone();
         let ready_clone = ready.clone();
         let cancelled_handle = tokio::spawn(async move {
-            let scope = Scope::new();
-            let cx = scope.cx();
+            let cx = cancelled_cx();
 
             ready_clone.store(true, Ordering::SeqCst);
 
@@ -333,15 +312,14 @@ mod conformance_tests {
         for _ in 0..3 {
             let barrier_clone = barrier.clone();
             handles.push(tokio::spawn(async move {
-                let cx = test_cx().await.unwrap();
+                let cx = test_cx();
                 barrier_clone.wait(&cx).await.unwrap()
             }));
         }
 
         // All 3 new tasks should successfully complete
-        let results: Vec<_> = futures::future::join_all(handles).await;
-        for result in results {
-            result.unwrap();
+        for handle in handles {
+            handle.await.unwrap();
         }
     }
 
@@ -371,7 +349,7 @@ mod conformance_tests {
 
         let mutex = Arc::new(Mutex::new(42));
         let sem = Arc::new(Semaphore::new(1));
-        let cx = test_cx().await.unwrap();
+        let cx = test_cx();
 
         // Acquire mutex and semaphore
         let guard = mutex.lock(&cx).await.unwrap();
