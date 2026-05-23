@@ -5707,3 +5707,6 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod symbol_cancel_metamorphic;
+
