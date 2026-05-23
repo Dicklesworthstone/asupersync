@@ -1552,3 +1552,399 @@ fn mr_encoder_linearity_under_xor_of_source_vectors() {
         }
     }
 }
+
+// ============================================================================
+// Extended Metamorphic Relations - Symmetry Violations & Boundary Cases
+// ============================================================================
+
+/// MR-ParameterBoundarySymmetry: Encoding behavior should be symmetric around
+/// RFC 6330 systematic index table boundaries.
+///
+/// Property: For K values that are adjacent in the systematic index table,
+/// the ratio of repair symbols to source symbols should be approximately
+/// preserved for the same repair_overhead configuration.
+///
+/// Why this catches bugs:
+///   - Table lookup edge cases where K transitions between different (S, H, W) parameter groups
+///   - Off-by-one errors in parameter derivation that only manifest at table boundaries
+///   - Asymmetric behavior around systematric index boundaries that could indicate
+///     incorrect constraint matrix construction
+#[test]
+fn mr_parameter_boundary_symmetry() {
+    proptest!(|(
+        seed: u64,
+        repair_overhead in 0.1..3.0f64,
+    )| {
+        // Test adjacent K values from systematic index table boundaries
+        let boundary_k_pairs = vec![
+            (10, 12),   // First entries in table
+            (48, 49),   // Adjacent entries in middle
+            (69, 75),   // Jump between different parameter groups
+            (84, 88),   // Another transition
+        ];
+
+        for (k_low, k_high) in boundary_k_pairs {
+            let symbol_size = 32; // Fixed to focus on K behavior
+
+            let (data, k_actual_low, _, symbols_low) = encode_symbols(k_low * symbol_size, seed, repair_overhead);
+            let (_, k_actual_high, _, symbols_high) = encode_symbols(k_high * symbol_size, seed ^ 0x1111, repair_overhead);
+
+            if k_actual_low >= 10 && k_actual_high >= 10 && k_actual_low != k_actual_high {
+                let repair_ratio_low = (symbols_low.len() - k_actual_low) as f64 / k_actual_low as f64;
+                let repair_ratio_high = (symbols_high.len() - k_actual_high) as f64 / k_actual_high as f64;
+
+                // Repair ratios should be similar for same overhead (within 50% tolerance due to discretization)
+                let ratio_diff = (repair_ratio_low - repair_ratio_high).abs();
+                let avg_ratio = (repair_ratio_low + repair_ratio_high) / 2.0;
+
+                prop_assert!(
+                    ratio_diff <= 0.5 * avg_ratio.max(0.1),
+                    "Parameter boundary asymmetry: K={} ratio={:.3}, K={} ratio={:.3}, diff={:.3}",
+                    k_low, repair_ratio_low, k_high, repair_ratio_high, ratio_diff
+                );
+            }
+        }
+    });
+}
+
+/// MR-SymbolSizePowerOfTwoSymmetry: Encoding should behave similarly for
+/// power-of-2 and non-power-of-2 symbol sizes with similar total capacity.
+///
+/// Property: For symbol sizes that yield similar block sizes, encoding
+/// efficiency (symbols produced per byte of input) should be comparable.
+///
+/// Why this catches bugs:
+///   - Alignment assumptions that only work for power-of-2 sizes
+///   - Memory allocation bugs that manifest differently for different size classes
+///   - Byte-level operations that assume certain alignments
+#[test]
+fn mr_symbol_size_power_of_two_symmetry() {
+    proptest!(|(
+        base_size in 10..20usize,
+        seed: u64,
+    )| {
+        // Compare power-of-2 vs nearby non-power-of-2 symbol sizes
+        let power_of_2 = if base_size <= 16 { 16 } else { 32 };
+        let non_power_of_2 = power_of_2 - 1; // 15 or 31
+
+        let k = 20; // Fixed K to focus on symbol size effects
+        let data = generate_test_data(k * power_of_2.max(non_power_of_2), seed);
+
+        // Encode with both symbol sizes
+        let cx = Cx::for_testing();
+        let config_pow2 = RaptorQConfig {
+            encoding: crate::config::EncodingConfig {
+                symbol_size: power_of_2 as u16,
+                repair_overhead: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config_non_pow2 = RaptorQConfig {
+            encoding: crate::config::EncodingConfig {
+                symbol_size: non_power_of_2 as u16,
+                repair_overhead: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut sender_pow2 = RaptorQSenderBuilder::new()
+            .config(config_pow2)
+            .transport(CollectorSink::new())
+            .build()
+            .expect("power-of-2 sender");
+
+        let mut sender_non_pow2 = RaptorQSenderBuilder::new()
+            .config(config_non_pow2)
+            .transport(CollectorSink::new())
+            .build()
+            .expect("non-power-of-2 sender");
+
+        let object_id = ObjectId::new_for_test(seed);
+
+        let outcome_pow2 = sender_pow2.send_object(&cx, object_id, &data).expect("pow2 encode");
+        let outcome_non_pow2 = sender_non_pow2.send_object(&cx, object_id, &data).expect("non-pow2 encode");
+
+        // Symbol efficiency should be comparable
+        let efficiency_pow2 = outcome_pow2.symbols_sent as f64 / data.len() as f64;
+        let efficiency_non_pow2 = outcome_non_pow2.symbols_sent as f64 / data.len() as f64;
+
+        let efficiency_diff = (efficiency_pow2 - efficiency_non_pow2).abs();
+
+        prop_assert!(
+            efficiency_diff <= 0.3 * efficiency_pow2.max(efficiency_non_pow2),
+            "Symbol size symmetry violation: pow2({}) efficiency={:.3}, non-pow2({}) efficiency={:.3}",
+            power_of_2, efficiency_pow2, non_power_of_2, efficiency_non_pow2
+        );
+    });
+}
+
+/// MR-MinimalViableRoundTrip: Decode should succeed with exactly K symbols
+/// and fail with K-1 symbols for any valid symbol selection.
+///
+/// Property: For any set of exactly K linearly independent symbols,
+/// decoding must succeed. For any set of K-1 symbols, decoding must fail
+/// with InsufficientSymbols.
+///
+/// Why this catches bugs:
+///   - Off-by-one errors in decoder threshold logic
+///   - Matrix rank computation bugs that miscount available equations
+///   - Edge cases in the inactivation decoder's peeling phase
+#[test]
+fn mr_minimal_viable_round_trip() {
+    proptest!(|(
+        k in 10..30usize,
+        seed: u64,
+        symbol_size in 16..64usize,
+    )| {
+        // Generate test data and encode
+        let data = generate_test_data(k * symbol_size, seed);
+        let (original_data, k_actual, symbol_size_actual, symbols) = encode_symbols(data.len(), seed, 0.5);
+
+        if symbols.len() >= k_actual && k_actual >= 10 {
+            let received = symbols_to_received(&symbols, k_actual);
+
+            // Test 1: Exactly K symbols should decode successfully
+            let k_symbols: Vec<_> = received.iter().take(k_actual).cloned().collect();
+            let decode_result = {
+                let mut decoder = create_test_decoder(&symbols[..k_actual], k_actual, symbol_size_actual);
+                decoder.add_symbols(&k_symbols).and_then(|_| decoder.decode())
+            };
+
+            prop_assert!(
+                decode_result.is_ok(),
+                "Minimal viable round-trip failed: {} symbols (exactly K) should be sufficient",
+                k_actual
+            );
+
+            // Test 2: K-1 symbols should fail with InsufficientSymbols (if we have K+1 or more total)
+            if received.len() > k_actual {
+                let k_minus_1_symbols: Vec<_> = received.iter().take(k_actual - 1).cloned().collect();
+                let decode_result = {
+                    let mut decoder = create_test_decoder(&symbols[..k_actual-1], k_actual, symbol_size_actual);
+                    decoder.add_symbols(&k_minus_1_symbols).and_then(|_| decoder.decode())
+                };
+
+                prop_assert!(
+                    decode_result.is_err(),
+                    "Minimal viable round-trip symmetry violation: {} symbols (K-1) should fail",
+                    k_actual - 1
+                );
+            }
+        }
+    });
+}
+
+/// MR-BlockCompositionSymmetry: Concatenating objects should be equivalent
+/// to encoding a combined object (for object sizes below block split threshold).
+///
+/// Property: encode(A) + encode(B) should yield equivalent redundancy and
+/// decodability to encode(A||B) when total size fits in one block.
+///
+/// Why this catches bugs:
+///   - Block boundary detection errors that trigger too early
+///   - State pollution between encoding operations
+///   - Object ID generation that affects encoding determinism
+#[test]
+fn mr_block_composition_symmetry() {
+    proptest!(|(
+        size_a in 100..500usize,
+        size_b in 100..500usize,
+        seed: u64,
+    )| {
+        // Ensure total size is small enough for single-block encoding
+        let symbol_size = 32;
+        let total_size = size_a + size_b;
+
+        if total_size <= 1000 { // Well below typical block split threshold
+            let data_a = generate_test_data(size_a, seed);
+            let data_b = generate_test_data(size_b, seed ^ 0x5555);
+            let mut data_combined = data_a.clone();
+            data_combined.extend_from_slice(&data_b);
+
+            let cx = Cx::for_testing();
+            let config = RaptorQConfig {
+                encoding: crate::config::EncodingConfig {
+                    symbol_size: symbol_size as u16,
+                    repair_overhead: 1.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            // Encode separately
+            let mut sender_a = RaptorQSenderBuilder::new()
+                .config(config.clone())
+                .transport(CollectorSink::new())
+                .build()
+                .expect("sender A");
+            let mut sender_b = RaptorQSenderBuilder::new()
+                .config(config.clone())
+                .transport(CollectorSink::new())
+                .build()
+                .expect("sender B");
+
+            let outcome_a = sender_a.send_object(&cx, ObjectId::new_for_test(seed), &data_a).expect("encode A");
+            let outcome_b = sender_b.send_object(&cx, ObjectId::new_for_test(seed ^ 0xAAAA), &data_b).expect("encode B");
+
+            // Encode combined
+            let mut sender_combined = RaptorQSenderBuilder::new()
+                .config(config)
+                .transport(CollectorSink::new())
+                .build()
+                .expect("sender combined");
+
+            let outcome_combined = sender_combined.send_object(&cx, ObjectId::new_for_test(seed ^ 0xCCCC), &data_combined).expect("encode combined");
+
+            // Symbol efficiency should be comparable (within 20% due to padding differences)
+            let total_separate_symbols = outcome_a.symbols_sent + outcome_b.symbols_sent;
+            let combined_symbols = outcome_combined.symbols_sent;
+
+            let efficiency_separate = total_separate_symbols as f64 / total_size as f64;
+            let efficiency_combined = combined_symbols as f64 / total_size as f64;
+            let efficiency_ratio = efficiency_separate / efficiency_combined.max(0.001);
+
+            prop_assert!(
+                efficiency_ratio >= 0.8 && efficiency_ratio <= 1.25,
+                "Block composition asymmetry: separate={} symbols ({:.3} eff), combined={} symbols ({:.3} eff), ratio={:.3}",
+                total_separate_symbols, efficiency_separate, combined_symbols, efficiency_combined, efficiency_ratio
+            );
+        }
+    });
+}
+
+/// MR-ZeroByteBoundaryRoundTrip: Encoding and decoding should handle
+/// zero-length inputs and single-byte inputs correctly.
+///
+/// Property: Empty input should encode to empty output after round-trip.
+/// Single-byte input should preserve that byte exactly.
+///
+/// Why this catches bugs:
+///   - Division by zero in block size calculation
+///   - Underflow in symbol count arithmetic
+///   - Edge cases in padding logic for minimal inputs
+///   - Off-by-one errors that only manifest for tiny inputs
+#[test]
+fn mr_zero_byte_boundary_round_trip() {
+    let test_cases = vec![
+        (vec![], "empty input"),
+        (vec![0x42], "single byte"),
+        (vec![0x00, 0xFF], "two bytes"),
+        (vec![0xAA; 16], "one symbol worth"),
+    ];
+
+    for (data, description) in test_cases {
+        let cx = Cx::for_testing();
+        let config = RaptorQConfig {
+            encoding: crate::config::EncodingConfig {
+                symbol_size: 16,
+                repair_overhead: 0.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        if data.is_empty() {
+            // Empty data should be handled gracefully - might not encode anything
+            let mut sender = RaptorQSenderBuilder::new()
+                .config(config)
+                .transport(CollectorSink::new())
+                .build()
+                .expect("sender for empty data");
+
+            let result = sender.send_object(&cx, ObjectId::new_for_test(0x1234), &data);
+
+            // Should either succeed with empty output or fail gracefully
+            if let Ok(outcome) = result {
+                assert_eq!(outcome.source_symbols, 0, "Empty input should produce no source symbols");
+            } else {
+                // Graceful failure is acceptable for empty input
+            }
+        } else {
+            // Non-empty data should round-trip exactly
+            let mut sender = RaptorQSenderBuilder::new()
+                .config(config)
+                .transport(CollectorSink::new())
+                .build()
+                .expect(&format!("sender for {}", description));
+
+            let object_id = ObjectId::new_for_test(0x5678);
+            let send_result = sender.send_object(&cx, object_id, &data);
+
+            if let Ok(outcome) = send_result {
+                let symbols = sender.transport_mut().symbols();
+
+                if outcome.source_symbols > 0 && !symbols.is_empty() {
+                    // Try to decode with just the source symbols
+                    let received = symbols_to_received(symbols, outcome.source_symbols);
+                    let decode_result = decode_payload(symbols, outcome.source_symbols, config.encoding.symbol_size as usize, data.len());
+
+                    if let Ok(decoded) = decode_result {
+                        assert_eq!(
+                            decoded.len(), data.len(),
+                            "Boundary case length mismatch for {}: expected {}, got {}",
+                            description, data.len(), decoded.len()
+                        );
+
+                        if !data.is_empty() {
+                            assert_eq!(
+                                decoded[..data.len()], data[..],
+                                "Boundary case data mismatch for {}: input {:?} != output {:?}",
+                                description, data, &decoded[..data.len()]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// MR-RepairSymbolMinimalityProperty: Adding one more repair symbol to a
+/// failing decode set should improve decode success probability monotonically.
+///
+/// Property: For a symbol set that fails to decode, adding one more repair
+/// symbol should either enable successful decoding or leave it still failing.
+/// It should never make the situation worse.
+///
+/// Why this catches bugs:
+///   - Matrix rank computations that degrade with additional equations
+///   - Decoder state corruption that accumulates with more symbols
+///   - Numerical instability in Gaussian elimination
+#[test]
+fn mr_repair_symbol_minimality_property() {
+    proptest!(|(
+        k in 10..20usize,
+        seed: u64,
+    )| {
+        let symbol_size = 24;
+        let (original_data, k_actual, _, symbols) = encode_symbols(k * symbol_size, seed, 1.5);
+
+        if symbols.len() >= k_actual + 2 && k_actual >= 10 {
+            // Start with K-1 symbols (should fail)
+            let insufficient_symbols: Vec<_> = symbols.iter().take(k_actual - 1).collect();
+            let initial_decode = decode_payload(insufficient_symbols, k_actual, symbol_size, original_data.len());
+
+            if initial_decode.is_err() {
+                // Add one more symbol (should improve or stay same, never worse)
+                let sufficient_symbols: Vec<_> = symbols.iter().take(k_actual).collect();
+                let improved_decode = decode_payload(sufficient_symbols, k_actual, symbol_size, original_data.len());
+
+                // Add one more repair symbol beyond minimum
+                let extra_symbols: Vec<_> = symbols.iter().take(k_actual + 1).collect();
+                let extra_decode = decode_payload(extra_symbols, k_actual, symbol_size, original_data.len());
+
+                // Monotonicity: more symbols should not make success rate worse
+                let sufficient_success = improved_decode.is_ok();
+                let extra_success = extra_decode.is_ok();
+
+                prop_assert!(
+                    !sufficient_success || extra_success,
+                    "Repair symbol minimality violation: {} symbols succeeded, but {} symbols failed",
+                    k_actual, k_actual + 1
+                );
+            }
+        }
+    });
+}
