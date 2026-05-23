@@ -526,9 +526,10 @@ mod conformance_tests {
 
         // Should preserve most mappings (< 50% change for good hash distribution)
         assert!(
-            changed_count as f64 / test_keys.len() as f64 < 0.5,
+            (changed_count as f64) / (test_keys.len() as f64) < 0.5,
             "Node addition should preserve most existing mappings. Changed: {}/{}",
-            changed_count, test_keys.len()
+            changed_count,
+            test_keys.len()
         );
     }
 
