@@ -82,16 +82,16 @@ impl AtpReplayCoordinator {
         }
 
         // Main replay command
+        let trace_file = shell_path_arg(&output_dir.join("transfer.atp-trace"));
+        let manifest = shell_path_arg(&output_dir.join("manifest"));
+        let journal_digest = shell_path_arg(&output_dir.join("journal.digest"));
+        let evidence_ledger = shell_path_arg(&output_dir.join("evidence-ledger.json"));
+        let pathlog = shell_path_arg(&output_dir.join("pathlog"));
+        let quiclog = shell_path_arg(&output_dir.join("quiclog"));
+        let repairlog = shell_path_arg(&output_dir.join("repairlog"));
         cmd.push_str("\n# Replay execution\n");
         cmd.push_str(&format!(
-            "atp replay --trace-file {} --manifest {} --journal-digest {} --evidence-ledger {} --pathlog {} --quiclog {} --repairlog {} --validate-oracles",
-            output_dir.join("transfer.atp-trace").display(),
-            output_dir.join("manifest").display(),
-            output_dir.join("journal.digest").display(),
-            output_dir.join("evidence-ledger.json").display(),
-            output_dir.join("pathlog").display(),
-            output_dir.join("quiclog").display(),
-            output_dir.join("repairlog").display()
+            "atp replay --trace-file {trace_file} --manifest {manifest} --journal-digest {journal_digest} --evidence-ledger {evidence_ledger} --pathlog {pathlog} --quiclog {quiclog} --repairlog {repairlog} --validate-oracles"
         ));
 
         // Add minimization if configured
@@ -595,6 +595,36 @@ fn env_suffix(name: &str) -> String {
     } else {
         suffix.to_string()
     }
+}
+
+fn shell_path_arg(path: &Path) -> String {
+    shell_arg(&path.display().to_string())
+}
+
+fn shell_arg(raw: &str) -> String {
+    if !raw.is_empty() && raw.bytes().all(shell_safe_byte) {
+        return raw.to_string();
+    }
+
+    let mut quoted = String::with_capacity(raw.len() + 2);
+    quoted.push('\'');
+    for ch in raw.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\"'\"'");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn shell_safe_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b'=' | b','
+        )
 }
 
 /// Result of ATP replay execution.

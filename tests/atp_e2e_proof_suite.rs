@@ -286,21 +286,21 @@ fn test_atp_replay_command_sanitizes_seed_and_oracle_env_names() {
         .expect("crashpack builds");
 
     let command = AtpReplayCoordinator::new(crashpack)
-        .generate_replay_command(PathBuf::from("artifacts").as_path())
+        .generate_replay_command(PathBuf::from("artifacts with space").as_path())
         .expect("replay command renders");
 
     assert!(command.contains("export ATP_SEED_LAB_SEED_V1=42"));
     assert!(command.contains("export ATP_ORACLE_PROOF_BUNDLE_VALIDITY=enabled"));
     assert!(command.contains(
-        "atp replay --trace-file artifacts/transfer.atp-trace --manifest artifacts/manifest"
+        "atp replay --trace-file 'artifacts with space/transfer.atp-trace' --manifest 'artifacts with space/manifest'"
     ));
-    assert!(command.contains("--journal-digest artifacts/journal.digest"));
-    assert!(command.contains("--evidence-ledger artifacts/evidence-ledger.json"));
-    assert!(command.contains("--pathlog artifacts/pathlog"));
-    assert!(command.contains("--quiclog artifacts/quiclog"));
-    assert!(command.contains("--repairlog artifacts/repairlog"));
+    assert!(command.contains("--journal-digest 'artifacts with space/journal.digest'"));
+    assert!(command.contains("--evidence-ledger 'artifacts with space/evidence-ledger.json'"));
+    assert!(command.contains("--pathlog 'artifacts with space/pathlog'"));
+    assert!(command.contains("--quiclog 'artifacts with space/quiclog'"));
+    assert!(command.contains("--repairlog 'artifacts with space/repairlog'"));
     assert!(command.contains("--validate-oracles"));
-    assert!(!command.contains("--trace-file artifacts/manifest"));
+    assert!(!command.contains("--trace-file artifacts with space"));
 }
 
 #[test]
@@ -443,6 +443,25 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
     assert!(quiclog.contains("QUIC UDP packet loss"));
     let repairlog = std::fs::read_to_string(temp_dir.path().join("repairlog"))?;
     assert!(repairlog.contains("RaptorQ symbol"));
+
+    Ok(())
+}
+
+#[test]
+fn test_atp_crashpack_quotes_oracle_replay_args() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(violation_result("manifest integrity's check"))
+        .with_seed("lab seed", 7)
+        .build()
+        .expect("crashpack builds");
+
+    crashpack.emit_atp_trace(temp_dir.path())?;
+
+    let replay_command = std::fs::read_to_string(temp_dir.path().join("replay_command.sh"))?;
+    assert!(replay_command.contains("export ATP_SEED_LAB_SEED=7"));
+    assert!(replay_command.contains("--oracle 'manifest integrity'\"'\"'s check'"));
+    assert!(!replay_command.contains("--oracle manifest integrity"));
 
     Ok(())
 }

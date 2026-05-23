@@ -606,7 +606,7 @@ impl AtpCrashpack {
 
         // Add oracle flags
         for result in &self.oracle_results {
-            cmd.push_str(&format!(" --oracle {}", result.oracle_name));
+            cmd.push_str(&format!(" --oracle {}", shell_arg(&result.oracle_name)));
         }
 
         cmd.push_str("\n");
@@ -630,6 +630,32 @@ fn seed_env_suffix(name: &str) -> String {
     } else {
         suffix.to_string()
     }
+}
+
+fn shell_arg(raw: &str) -> String {
+    if !raw.is_empty() && raw.bytes().all(shell_safe_byte) {
+        return raw.to_string();
+    }
+
+    let mut quoted = String::with_capacity(raw.len() + 2);
+    quoted.push('\'');
+    for ch in raw.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\"'\"'");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn shell_safe_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b'=' | b','
+        )
 }
 
 fn journal_digest_ref(journal_data: &str) -> String {
