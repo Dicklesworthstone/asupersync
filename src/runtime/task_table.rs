@@ -1504,7 +1504,7 @@ mod tests {
 
                         // Store in shared list for final verification
                         {
-                            let mut global_tasks = created_tasks.lock().unwrap();
+                            let mut global_tasks = created_tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             global_tasks.extend(local_tasks.iter());
                         }
 
@@ -1528,7 +1528,7 @@ mod tests {
             let final_guard = ShardGuard::tasks_only(&shards);
             let final_tasks = final_guard.tasks.as_ref().unwrap();
 
-            let created_task_list = created_tasks.lock().unwrap();
+            let created_task_list = created_tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(
                 created_task_list.len(),
                 100,

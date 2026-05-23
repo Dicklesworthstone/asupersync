@@ -519,12 +519,12 @@ mod tests {
                                 "phase": "first_started",
                             });
                             tracing::info!(event = %started, "spawn_blocking_lab_checkpoint");
-                            checkpoints.lock().unwrap().push(started);
+                            checkpoints.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(started);
 
                             let (lock, cvar) = &*gate;
-                            let mut released = lock.lock().unwrap();
+                            let mut released = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             while !*released {
-                                released = cvar.wait(released).expect("gate wait should succeed");
+                                released = cvar.wait(released).unwrap_or_else(std::sync::PoisonError::into_inner);
                             }
 
                             let completed = serde_json::json!({
@@ -532,7 +532,7 @@ mod tests {
                                 "value": 11,
                             });
                             tracing::info!(event = %completed, "spawn_blocking_lab_checkpoint");
-                            checkpoints.lock().unwrap().push(completed);
+                            checkpoints.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(completed);
                             11
                         })
                         .await
@@ -554,7 +554,7 @@ mod tests {
                                 "phase": "second_started",
                             });
                             tracing::info!(event = %started, "spawn_blocking_lab_checkpoint");
-                            checkpoints.lock().unwrap().push(started);
+                            checkpoints.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(started);
                             22
                         })
                         .await
@@ -570,11 +570,11 @@ mod tests {
                     "second_started": second_started.load(Ordering::SeqCst),
                 });
                 tracing::info!(event = %queued, "spawn_blocking_lab_checkpoint");
-                checkpoints.lock().unwrap().push(queued);
+                checkpoints.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(queued);
 
                 {
                     let (lock, cvar) = &*gate;
-                    let mut released = lock.lock().unwrap();
+                    let mut released = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     *released = true;
                     cvar.notify_all();
                 }
@@ -606,7 +606,7 @@ mod tests {
                     second_value,
                     queued_before_release,
                     second_started.load(Ordering::SeqCst),
-                    checkpoints.lock().unwrap().clone(),
+                    checkpoints.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
                 )
             });
 

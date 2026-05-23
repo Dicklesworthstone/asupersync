@@ -627,28 +627,28 @@ mod tests {
 
     impl CapturingMetrics {
         fn tasks_spawned(&self) -> Vec<(RegionId, TaskId)> {
-            self.tasks_spawned.lock().unwrap().clone()
+            self.tasks_spawned.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
 
         fn regions_created(&self) -> Vec<(RegionId, Option<RegionId>)> {
-            self.regions_created.lock().unwrap().clone()
+            self.regions_created.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
 
         fn regions_closed(&self) -> Vec<(RegionId, std::time::Duration)> {
-            self.regions_closed.lock().unwrap().clone()
+            self.regions_closed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
 
         fn obligations_created(&self) -> Vec<RegionId> {
-            self.obligations_created.lock().unwrap().clone()
+            self.obligations_created.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
 
         fn cancellation_requests(&self) -> Vec<(RegionId, crate::types::CancelKind)> {
-            self.cancellation_requests.lock().unwrap().clone()
+            self.cancellation_requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
 
         #[allow(dead_code)]
         fn panics_captured(&self) -> Vec<&'static str> {
-            self.panics.lock().unwrap().clone()
+            self.panics.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
     }
 
@@ -738,15 +738,15 @@ mod tests {
         }
 
         fn obligation_created(&self, region_id: RegionId) {
-            self.obligations_created.lock().unwrap().push(region_id);
+            self.obligations_created.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(region_id);
         }
 
         fn obligation_discharged(&self, region_id: RegionId) {
-            self.obligations_discharged.lock().unwrap().push(region_id);
+            self.obligations_discharged.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(region_id);
         }
 
         fn obligation_leaked(&self, region_id: RegionId) {
-            self.obligations_leaked.lock().unwrap().push(region_id);
+            self.obligations_leaked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(region_id);
         }
 
         fn scheduler_tick(&self, _ready_count: usize, _tick_duration: std::time::Duration) {
@@ -754,7 +754,7 @@ mod tests {
         }
 
         fn record_panic(&self, location: &'static str) {
-            self.panics.lock().unwrap().push(location);
+            self.panics.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(location);
         }
     }
 
@@ -954,27 +954,27 @@ mod tests {
         #[allow(dead_code)]
         impl CapturingMetrics {
             fn tasks_spawned(&self) -> Vec<(RegionId, TaskId)> {
-                self.tasks_spawned.lock().unwrap().clone()
+                self.tasks_spawned.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
             }
 
             fn regions_created(&self) -> Vec<(RegionId, Option<RegionId>)> {
-                self.regions_created.lock().unwrap().clone()
+                self.regions_created.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
             }
 
             fn regions_closed(&self) -> Vec<(RegionId, std::time::Duration)> {
-                self.regions_closed.lock().unwrap().clone()
+                self.regions_closed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
             }
 
             fn obligations_created(&self) -> Vec<RegionId> {
-                self.obligations_created.lock().unwrap().clone()
+                self.obligations_created.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
             }
 
             fn obligations_leaked(&self) -> Vec<RegionId> {
-                self.obligations_leaked.lock().unwrap().clone()
+                self.obligations_leaked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
             }
 
             fn cancellation_requests(&self) -> Vec<(RegionId, crate::types::CancelKind)> {
-                self.cancellation_requests.lock().unwrap().clone()
+                self.cancellation_requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
             }
         }
 
@@ -1064,15 +1064,15 @@ mod tests {
             }
 
             fn obligation_created(&self, region_id: RegionId) {
-                self.obligations_created.lock().unwrap().push(region_id);
+                self.obligations_created.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(region_id);
             }
 
             fn obligation_discharged(&self, region_id: RegionId) {
-                self.obligations_discharged.lock().unwrap().push(region_id);
+                self.obligations_discharged.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(region_id);
             }
 
             fn obligation_leaked(&self, region_id: RegionId) {
-                self.obligations_leaked.lock().unwrap().push(region_id);
+                self.obligations_leaked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(region_id);
             }
 
             fn scheduler_tick(&self, _ready_count: usize, _tick_duration: std::time::Duration) {
@@ -1080,7 +1080,7 @@ mod tests {
             }
 
             fn record_panic(&self, location: &'static str) {
-                self.panics.lock().unwrap().push(location);
+                self.panics.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(location);
             }
         }
 
@@ -1144,7 +1144,7 @@ mod tests {
             <CapturingMetrics as MetricsProviderPanicExt>::record_panic(&metrics, &ctx);
         }
 
-        let observed: Vec<&'static str> = metrics.panics.lock().unwrap().clone();
+        let observed: Vec<&'static str> = metrics.panics.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let expected: Vec<&'static str> = cases.iter().map(|(_, t)| *t).collect();
         assert_eq!(
             observed, expected,
