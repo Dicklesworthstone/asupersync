@@ -180,6 +180,254 @@ impl TransferProgress {
     }
 }
 
+/// Pressure source family required for a complete autotune snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferPressureSourceKind {
+    /// Actor-owned byte progress counters.
+    Progress,
+    /// QUIC recovery and path-pressure counters.
+    Transport,
+    /// Disk and journal latency counters.
+    Disk,
+    /// RaptorQ encode/decode backlog counters.
+    Coding,
+    /// Repair-symbol usefulness counters.
+    Repair,
+    /// Relay path cost counters.
+    Relay,
+    /// Path migration counters.
+    Migration,
+}
+
+impl TransferPressureSourceKind {
+    /// Stable source name for logs, receipts, and proof artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Progress => "progress",
+            Self::Transport => "transport",
+            Self::Disk => "disk",
+            Self::Coding => "coding",
+            Self::Repair => "repair",
+            Self::Relay => "relay",
+            Self::Migration => "migration",
+        }
+    }
+}
+
+impl fmt::Display for TransferPressureSourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// QUIC/path pressure counters sampled by transfer-owned state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferTransportPressure {
+    /// Trace id attached to this source sample.
+    pub trace_id: String,
+    /// Smoothed round-trip time in microseconds.
+    pub rtt_micros: u64,
+    /// Loss rate in packets per thousand.
+    pub loss_permille: u16,
+    /// Probe timeout in microseconds.
+    pub pto_micros: u64,
+    /// Congestion window in bytes.
+    pub congestion_window_bytes: u64,
+    /// Bytes queued in the sender buffer.
+    pub send_buffer_queued_bytes: u64,
+}
+
+/// Disk and journal pressure counters sampled by transfer-owned state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferDiskPressure {
+    /// Trace id attached to this source sample.
+    pub trace_id: String,
+    /// Disk read lag in microseconds.
+    pub read_lag_micros: u64,
+    /// Disk write lag in microseconds.
+    pub write_lag_micros: u64,
+}
+
+/// RaptorQ encode/decode pressure counters sampled by transfer-owned state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferCodingPressure {
+    /// Trace id attached to this source sample.
+    pub trace_id: String,
+    /// Pending encoder work in symbols.
+    pub encode_backlog_symbols: u32,
+    /// Pending decoder work in symbols.
+    pub decode_backlog_symbols: u32,
+}
+
+/// Repair-symbol pressure counters sampled by transfer-owned state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferRepairPressure {
+    /// Trace id attached to this source sample.
+    pub trace_id: String,
+    /// Repair symbols sent during this decision window.
+    pub symbols_sent: u32,
+    /// Repair symbols that helped decoding during this decision window.
+    pub useful_symbols: u32,
+}
+
+/// Relay path cost counters sampled by transfer-owned state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferRelayPressure {
+    /// Trace id attached to this source sample.
+    pub trace_id: String,
+    /// Relay path cost observed during this window.
+    pub cost_micros: u64,
+    /// Payload bytes forwarded through the relay during this window.
+    pub bytes: u64,
+}
+
+/// Path migration counters sampled by transfer-owned state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferMigrationPressure {
+    /// Trace id attached to this source sample.
+    pub trace_id: String,
+    /// Migration events during this decision window.
+    pub events: u32,
+}
+
+/// All source groups needed to produce a complete ATP-E3 pressure snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferPressureSources {
+    /// Trace id all source groups must match.
+    pub trace_id: String,
+    /// Samples represented by this complete source window.
+    pub sample_count: u32,
+    /// QUIC recovery and path-pressure counters.
+    pub transport: Option<TransferTransportPressure>,
+    /// Disk and journal latency counters.
+    pub disk: Option<TransferDiskPressure>,
+    /// RaptorQ encode/decode backlog counters.
+    pub coding: Option<TransferCodingPressure>,
+    /// Repair-symbol usefulness counters.
+    pub repair: Option<TransferRepairPressure>,
+    /// Relay path cost counters.
+    pub relay: Option<TransferRelayPressure>,
+    /// Path migration counters.
+    pub migration: Option<TransferMigrationPressure>,
+}
+
+impl TransferPressureSources {
+    /// Create an empty complete-source window for one trace id.
+    #[must_use]
+    pub fn new(trace_id: impl Into<String>, sample_count: u32) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+            sample_count,
+            transport: None,
+            disk: None,
+            coding: None,
+            repair: None,
+            relay: None,
+            migration: None,
+        }
+    }
+}
+
+/// Fail-closed reason for refusing to build a policy-ready pressure snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferPressureCollectionError {
+    /// A complete snapshot cannot represent zero source samples.
+    ZeroSamples,
+    /// A required source family is absent.
+    MissingSource {
+        /// Source family that was absent.
+        source: TransferPressureSourceKind,
+    },
+    /// A source was sampled for a different trace id.
+    StaleSourceTrace {
+        /// Source family that carried the stale trace id.
+        source: TransferPressureSourceKind,
+        /// Trace id expected for this decision window.
+        expected: String,
+        /// Trace id observed on the source sample.
+        observed: String,
+    },
+    /// Transfer progress counters moved backwards.
+    ContradictoryProgress {
+        /// Offered bytes.
+        offered_bytes: u64,
+        /// Verified bytes.
+        verified_bytes: u64,
+        /// Committed bytes.
+        committed_bytes: u64,
+    },
+    /// Repair counters claim more useful symbols than were sent.
+    ContradictoryRepair {
+        /// Repair symbols sent during this decision window.
+        symbols_sent: u32,
+        /// Repair symbols that helped decoding during this decision window.
+        useful_symbols: u32,
+    },
+    /// Relay counters record cost without forwarded payload.
+    ContradictoryRelay {
+        /// Relay path cost observed during this window.
+        cost_micros: u64,
+        /// Payload bytes forwarded through the relay during this window.
+        bytes: u64,
+    },
+}
+
+impl TransferPressureCollectionError {
+    /// Stable reason code suitable for decision receipts and operator logs.
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::ZeroSamples => "zero_pressure_samples",
+            Self::MissingSource { .. } => "missing_pressure_source",
+            Self::StaleSourceTrace { .. } => "stale_pressure_trace_id",
+            Self::ContradictoryProgress { .. } => "contradictory_progress_counters",
+            Self::ContradictoryRepair { .. } => "contradictory_repair_counters",
+            Self::ContradictoryRelay { .. } => "contradictory_relay_counters",
+        }
+    }
+}
+
+impl fmt::Display for TransferPressureCollectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroSamples => f.write_str("transfer pressure window has zero samples"),
+            Self::MissingSource { source } => {
+                write!(f, "missing transfer pressure source: {source}")
+            }
+            Self::StaleSourceTrace {
+                source,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "stale transfer pressure source {source}: expected trace {expected}, observed {observed}"
+            ),
+            Self::ContradictoryProgress {
+                offered_bytes,
+                verified_bytes,
+                committed_bytes,
+            } => write!(
+                f,
+                "contradictory transfer progress counters: offered={offered_bytes} verified={verified_bytes} committed={committed_bytes}"
+            ),
+            Self::ContradictoryRepair {
+                symbols_sent,
+                useful_symbols,
+            } => write!(
+                f,
+                "contradictory repair counters: useful={useful_symbols} sent={symbols_sent}"
+            ),
+            Self::ContradictoryRelay { cost_micros, bytes } => write!(
+                f,
+                "contradictory relay counters: cost_micros={cost_micros} bytes={bytes}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TransferPressureCollectionError {}
+
 /// Transfer actor states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TransferState {
@@ -524,6 +772,81 @@ impl TransferActor {
             .to_pressure_snapshot(trace_id, self.transfer_id, sample_count)
     }
 
+    /// Collect a complete, policy-ready transfer pressure snapshot.
+    ///
+    /// Unlike [`Self::pressure_snapshot`], this method is intentionally
+    /// fail-closed: every source family required by ATP-E3 must be present,
+    /// attached to the same trace id, and internally consistent.
+    pub fn collect_complete_pressure_snapshot(
+        &self,
+        sources: TransferPressureSources,
+    ) -> Result<AtpTransferPressureSnapshot, TransferPressureCollectionError> {
+        validate_complete_pressure_sources(&self.progress, &sources)?;
+
+        let transport =
+            sources
+                .transport
+                .as_ref()
+                .ok_or(TransferPressureCollectionError::MissingSource {
+                    source: TransferPressureSourceKind::Transport,
+                })?;
+        let disk = sources
+            .disk
+            .as_ref()
+            .ok_or(TransferPressureCollectionError::MissingSource {
+                source: TransferPressureSourceKind::Disk,
+            })?;
+        let coding =
+            sources
+                .coding
+                .as_ref()
+                .ok_or(TransferPressureCollectionError::MissingSource {
+                    source: TransferPressureSourceKind::Coding,
+                })?;
+        let repair =
+            sources
+                .repair
+                .as_ref()
+                .ok_or(TransferPressureCollectionError::MissingSource {
+                    source: TransferPressureSourceKind::Repair,
+                })?;
+        let relay =
+            sources
+                .relay
+                .as_ref()
+                .ok_or(TransferPressureCollectionError::MissingSource {
+                    source: TransferPressureSourceKind::Relay,
+                })?;
+        let migration =
+            sources
+                .migration
+                .as_ref()
+                .ok_or(TransferPressureCollectionError::MissingSource {
+                    source: TransferPressureSourceKind::Migration,
+                })?;
+
+        let mut snapshot = self.progress.to_pressure_snapshot(
+            sources.trace_id.clone(),
+            self.transfer_id,
+            sources.sample_count,
+        );
+        snapshot.rtt_micros = Some(transport.rtt_micros);
+        snapshot.loss_permille = Some(transport.loss_permille);
+        snapshot.pto_micros = Some(transport.pto_micros);
+        snapshot.congestion_window_bytes = Some(transport.congestion_window_bytes);
+        snapshot.send_buffer_queued_bytes = Some(transport.send_buffer_queued_bytes);
+        snapshot.disk_read_lag_micros = Some(disk.read_lag_micros);
+        snapshot.disk_write_lag_micros = Some(disk.write_lag_micros);
+        snapshot.encode_backlog_symbols = Some(coding.encode_backlog_symbols);
+        snapshot.decode_backlog_symbols = Some(coding.decode_backlog_symbols);
+        snapshot.repair_symbols_sent = Some(repair.symbols_sent);
+        snapshot.useful_repair_symbols = Some(repair.useful_symbols);
+        snapshot.relay_cost_micros = Some(relay.cost_micros);
+        snapshot.relay_bytes = Some(relay.bytes);
+        snapshot.migration_events = Some(migration.events);
+        Ok(snapshot)
+    }
+
     /// Apply a command to the actor.
     pub fn apply(&mut self, command: TransferCommand) -> Result<TransferReply, TransferActorError> {
         if self.applied_keys.contains(&command.key) {
@@ -808,6 +1131,107 @@ fn command_name(command: &TransferCommandKind) -> &'static str {
     }
 }
 
+fn validate_complete_pressure_sources(
+    progress: &TransferProgress,
+    sources: &TransferPressureSources,
+) -> Result<(), TransferPressureCollectionError> {
+    if sources.sample_count == 0 {
+        return Err(TransferPressureCollectionError::ZeroSamples);
+    }
+    if progress.verified_bytes > progress.offered_bytes
+        || progress.committed_bytes > progress.verified_bytes
+    {
+        return Err(TransferPressureCollectionError::ContradictoryProgress {
+            offered_bytes: progress.offered_bytes,
+            verified_bytes: progress.verified_bytes,
+            committed_bytes: progress.committed_bytes,
+        });
+    }
+
+    let transport = require_source(
+        TransferPressureSourceKind::Transport,
+        sources.transport.as_ref(),
+    )?;
+    validate_source_trace(
+        TransferPressureSourceKind::Transport,
+        &sources.trace_id,
+        &transport.trace_id,
+    )?;
+
+    let disk = require_source(TransferPressureSourceKind::Disk, sources.disk.as_ref())?;
+    validate_source_trace(
+        TransferPressureSourceKind::Disk,
+        &sources.trace_id,
+        &disk.trace_id,
+    )?;
+
+    let coding = require_source(TransferPressureSourceKind::Coding, sources.coding.as_ref())?;
+    validate_source_trace(
+        TransferPressureSourceKind::Coding,
+        &sources.trace_id,
+        &coding.trace_id,
+    )?;
+
+    let repair = require_source(TransferPressureSourceKind::Repair, sources.repair.as_ref())?;
+    validate_source_trace(
+        TransferPressureSourceKind::Repair,
+        &sources.trace_id,
+        &repair.trace_id,
+    )?;
+    if repair.useful_symbols > repair.symbols_sent {
+        return Err(TransferPressureCollectionError::ContradictoryRepair {
+            symbols_sent: repair.symbols_sent,
+            useful_symbols: repair.useful_symbols,
+        });
+    }
+
+    let relay = require_source(TransferPressureSourceKind::Relay, sources.relay.as_ref())?;
+    validate_source_trace(
+        TransferPressureSourceKind::Relay,
+        &sources.trace_id,
+        &relay.trace_id,
+    )?;
+    if relay.cost_micros > 0 && relay.bytes == 0 {
+        return Err(TransferPressureCollectionError::ContradictoryRelay {
+            cost_micros: relay.cost_micros,
+            bytes: relay.bytes,
+        });
+    }
+
+    let migration = require_source(
+        TransferPressureSourceKind::Migration,
+        sources.migration.as_ref(),
+    )?;
+    validate_source_trace(
+        TransferPressureSourceKind::Migration,
+        &sources.trace_id,
+        &migration.trace_id,
+    )
+}
+
+fn require_source<'a, T>(
+    source: TransferPressureSourceKind,
+    value: Option<&'a T>,
+) -> Result<&'a T, TransferPressureCollectionError> {
+    value.ok_or(TransferPressureCollectionError::MissingSource { source })
+}
+
+fn validate_source_trace(
+    source: TransferPressureSourceKind,
+    expected: &str,
+    observed: &str,
+) -> Result<(), TransferPressureCollectionError> {
+    if expected == observed {
+        Ok(())
+    } else {
+        Err(TransferPressureCollectionError::StaleSourceTrace {
+            source,
+            expected: expected.to_string(),
+            observed: observed.to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::actor::{TransferActorTopology, TransferChildRole, TransferRegionId};
@@ -843,6 +1267,43 @@ mod tests {
             topology(),
         )
         .unwrap()
+    }
+
+    fn complete_sources(trace_id: &str) -> TransferPressureSources {
+        let mut sources = TransferPressureSources::new(trace_id, 5);
+        sources.transport = Some(TransferTransportPressure {
+            trace_id: trace_id.to_string(),
+            rtt_micros: 42_000,
+            loss_permille: 8,
+            pto_micros: 120_000,
+            congestion_window_bytes: 64_000,
+            send_buffer_queued_bytes: 2_048,
+        });
+        sources.disk = Some(TransferDiskPressure {
+            trace_id: trace_id.to_string(),
+            read_lag_micros: 9_000,
+            write_lag_micros: 11_000,
+        });
+        sources.coding = Some(TransferCodingPressure {
+            trace_id: trace_id.to_string(),
+            encode_backlog_symbols: 7,
+            decode_backlog_symbols: 3,
+        });
+        sources.repair = Some(TransferRepairPressure {
+            trace_id: trace_id.to_string(),
+            symbols_sent: 20,
+            useful_symbols: 10,
+        });
+        sources.relay = Some(TransferRelayPressure {
+            trace_id: trace_id.to_string(),
+            cost_micros: 250_000,
+            bytes: 1_048_576,
+        });
+        sources.migration = Some(TransferMigrationPressure {
+            trace_id: trace_id.to_string(),
+            events: 2,
+        });
+        sources
     }
 
     #[test]
@@ -935,6 +1396,144 @@ mod tests {
 
         assert_eq!(snapshot.in_flight_bytes, Some(0));
         assert_eq!(snapshot.receive_buffer_queued_bytes, Some(0));
+    }
+
+    #[test]
+    fn complete_pressure_snapshot_collects_every_metric_family() {
+        let mut actor = actor();
+        actor.progress.offered_bytes = 4_096;
+        actor.progress.verified_bytes = 1_024;
+        actor.progress.committed_bytes = 256;
+
+        let snapshot = actor
+            .collect_complete_pressure_snapshot(complete_sources("trace-complete"))
+            .expect("complete pressure sources");
+
+        assert_eq!(snapshot.trace_id, "trace-complete");
+        assert_eq!(snapshot.transfer_id, actor.transfer_id.to_hex());
+        assert_eq!(snapshot.sample_count, 5);
+        assert_eq!(snapshot.in_flight_bytes, Some(3_072));
+        assert_eq!(snapshot.receive_buffer_queued_bytes, Some(768));
+        assert_eq!(snapshot.repair_roi_permille(), Some(500));
+        assert_eq!(snapshot.relay_cost_micros_per_mib(), Some(250_000));
+
+        let report = snapshot.to_report();
+        assert_eq!(
+            report.samples,
+            vec![
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::RttMicros, 42_000),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::LossPermille, 8),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::PtoMicros, 120_000),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::CongestionWindowBytes, 64_000,),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::InFlightBytes, 3_072),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::SendBufferQueuedBytes, 2_048,),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::ReceiveBufferQueuedBytes, 768,),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::DiskReadLagMicros, 9_000),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::DiskWriteLagMicros, 11_000),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::EncodeBacklogSymbols, 7),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::DecodeBacklogSymbols, 3),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::RepairRoiPermille, 500),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::RelayCostMicrosPerMiB, 250_000,),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::MigrationEvents, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn complete_pressure_snapshot_fails_closed_for_missing_source() {
+        let mut sources = complete_sources("trace-missing");
+        sources.disk = None;
+
+        let err = actor()
+            .collect_complete_pressure_snapshot(sources)
+            .expect_err("missing disk source must fail closed");
+
+        assert_eq!(err.reason_code(), "missing_pressure_source");
+        assert!(matches!(
+            err,
+            TransferPressureCollectionError::MissingSource {
+                source: TransferPressureSourceKind::Disk
+            }
+        ));
+    }
+
+    #[test]
+    fn complete_pressure_snapshot_fails_closed_for_stale_trace_id() {
+        let mut sources = complete_sources("trace-current");
+        sources.repair.as_mut().expect("repair source").trace_id = "trace-stale".to_string();
+
+        let err = actor()
+            .collect_complete_pressure_snapshot(sources)
+            .expect_err("stale repair trace must fail closed");
+
+        assert_eq!(err.reason_code(), "stale_pressure_trace_id");
+        assert!(matches!(
+            err,
+            TransferPressureCollectionError::StaleSourceTrace {
+                source: TransferPressureSourceKind::Repair,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn complete_pressure_snapshot_fails_closed_for_zero_samples() {
+        let mut sources = complete_sources("trace-zero");
+        sources.sample_count = 0;
+
+        let err = actor()
+            .collect_complete_pressure_snapshot(sources)
+            .expect_err("zero-sample complete source must fail closed");
+
+        assert_eq!(err.reason_code(), "zero_pressure_samples");
+        assert!(matches!(err, TransferPressureCollectionError::ZeroSamples));
+    }
+
+    #[test]
+    fn complete_pressure_snapshot_fails_closed_for_contradictory_progress() {
+        let mut actor = actor();
+        actor.progress.offered_bytes = 10;
+        actor.progress.verified_bytes = 20;
+        actor.progress.committed_bytes = 5;
+
+        let err = actor
+            .collect_complete_pressure_snapshot(complete_sources("trace-progress"))
+            .expect_err("backwards progress counters must fail closed");
+
+        assert_eq!(err.reason_code(), "contradictory_progress_counters");
+        assert!(matches!(
+            err,
+            TransferPressureCollectionError::ContradictoryProgress {
+                offered_bytes: 10,
+                verified_bytes: 20,
+                committed_bytes: 5,
+            }
+        ));
+    }
+
+    #[test]
+    fn complete_pressure_snapshot_fails_closed_for_contradictory_repair_or_relay() {
+        let mut repair_sources = complete_sources("trace-repair");
+        repair_sources
+            .repair
+            .as_mut()
+            .expect("repair source")
+            .useful_symbols = 21;
+
+        let repair_err = actor()
+            .collect_complete_pressure_snapshot(repair_sources)
+            .expect_err("useful repair cannot exceed sent repair");
+        assert_eq!(repair_err.reason_code(), "contradictory_repair_counters");
+
+        let mut relay_sources = complete_sources("trace-relay");
+        let relay = relay_sources.relay.as_mut().expect("relay source");
+        relay.bytes = 0;
+        relay.cost_micros = 1;
+
+        let relay_err = actor()
+            .collect_complete_pressure_snapshot(relay_sources)
+            .expect_err("relay cost without payload must fail closed");
+        assert_eq!(relay_err.reason_code(), "contradictory_relay_counters");
     }
 
     fn cmd(key: u128, kind: TransferCommandKind) -> TransferCommand {
