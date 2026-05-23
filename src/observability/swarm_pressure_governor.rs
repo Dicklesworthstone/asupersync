@@ -3559,8 +3559,9 @@ mod tests {
     }
 
     #[test]
-    fn test_workload_admission_rejects_declared_cpu_and_io_over_envelope_budget() {
+    fn test_workload_admission_rejects_declared_memory_cpu_and_io_over_envelope_budget() {
         let mut config = SwarmPressureGovernorConfig::default();
+        config.default_memory_budget_bytes = 1024;
         config.default_cpu_budget_ns_per_sec = 100;
         config.default_io_budget_ops_per_sec = 10;
 
@@ -3579,6 +3580,36 @@ mod tests {
         let governor =
             SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let memory_request = SwarmWorkloadAdmissionRequest::new(
+            "oversized-memory",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_declared_resources(Some(1025), Some(10), Some(1))
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib);
+        let memory_decision = governor
+            .check_workload_admission(&cx, &memory_request)
+            .expect("oversized memory request should classify");
+        assert!(matches!(
+            memory_decision.decision,
+            AdmissionDecision::Reject
+        ));
+        assert!(memory_decision.envelope.is_none());
+        assert!(
+            memory_decision
+                .reason
+                .contains("Requested memory 1025 exceeds")
+        );
+        assert!(
+            memory_decision
+                .reason
+                .contains("workload_id=oversized-memory")
+        );
+        assert!(
+            memory_decision
+                .reason
+                .contains("proof_lane=cargo_check_lib")
+        );
 
         let cpu_request = SwarmWorkloadAdmissionRequest::new(
             "oversized-cpu",
@@ -3615,8 +3646,8 @@ mod tests {
         assert!(io_decision.reason.contains("proof_lane=test"));
 
         let metrics = governor.metrics();
-        assert_eq!(metrics.regions_rejected, 2);
-        assert_eq!(metrics.envelope_budget_violations, 2);
+        assert_eq!(metrics.regions_rejected, 3);
+        assert_eq!(metrics.envelope_budget_violations, 3);
     }
 
     #[test]

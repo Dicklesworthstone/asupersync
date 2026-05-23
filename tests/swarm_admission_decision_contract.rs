@@ -340,8 +340,16 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
         workload_count,
         "schedule must contain exactly one bounded row per live workload lease"
     );
+    let mut last_effective_priority_rank = 0;
     for (expected_rank, entry) in schedule.iter().enumerate() {
         assert_eq!(entry.scheduling_rank, expected_rank as u64);
+        assert!(
+            entry.effective_priority_rank >= last_effective_priority_rank,
+            "effective priority ranks must be monotonic to avoid priority inversion: {} after {}",
+            entry.effective_priority_rank,
+            last_effective_priority_rank
+        );
+        last_effective_priority_rank = entry.effective_priority_rank;
         assert!(entry.pressure_feedback_present);
         assert!(
             entry
