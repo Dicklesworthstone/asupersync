@@ -2261,3 +2261,34 @@ mod tests {
         crate::test_complete!("oneshot_close_before_rearm_no_leak");
     }
 }
+
+#[cfg(test)]
+pub mod epoll_conformance_tests;
+
+#[cfg(test)]
+mod epoll_conformance_integration {
+    use super::epoll_conformance_tests::*;
+
+    #[test]
+    fn run_epoll_conformance_suite() {
+        let harness = EpollConformanceHarness::new();
+        let report = harness.run_all_tests();
+
+        // Generate detailed compliance report
+        let compliance_matrix = report.generate_compliance_matrix();
+        println!("\nEpoll Conformance Report:\n{}", compliance_matrix);
+
+        // Verify critical requirements pass
+        let must_failures: Vec<_> = report.results.iter()
+            .filter(|r| r.level == RequirementLevel::Must && !r.passed)
+            .collect();
+
+        if !must_failures.is_empty() {
+            panic!("Critical conformance failures: {:#?}", must_failures);
+        }
+
+        let pass_rate = report.pass_rate();
+        println!("Overall pass rate: {:.1}%", pass_rate * 100.0);
+        assert!(pass_rate >= 0.95, "Conformance pass rate below 95%: {:.1}%", pass_rate * 100.0);
+    }
+}
