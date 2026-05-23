@@ -129,12 +129,12 @@ impl ScheduledSet {
     #[inline]
     fn contains(&self, task: TaskId) -> bool {
         let idx = task.0.index() as usize;
-        let gen = u64::from(task.0.generation());
+        let generation = u64::from(task.0.generation());
         // Avoid overflow collision with DENSE_COLLISION sentinel
-        let tag = if gen == u64::MAX {
-            Self::DENSE_COLLISION  // Force overflow handling for max generation
+        let tag = if generation == u64::MAX {
+            Self::DENSE_COLLISION // Force overflow handling for max generation
         } else {
-            gen + 1
+            generation + 1
         };
 
         if idx >= self.dense.len() {
@@ -151,12 +151,12 @@ impl ScheduledSet {
     #[inline]
     fn insert(&mut self, task: TaskId) -> bool {
         let idx = task.0.index() as usize;
-        let gen = u64::from(task.0.generation());
+        let generation = u64::from(task.0.generation());
         // Avoid overflow collision with DENSE_COLLISION sentinel
-        let tag = if gen == u64::MAX {
-            Self::DENSE_COLLISION  // Force overflow handling for max generation
+        let tag = if generation == u64::MAX {
+            Self::DENSE_COLLISION // Force overflow handling for max generation
         } else {
-            gen + 1
+            generation + 1
         };
 
         if idx < Self::MAX_DENSE_LEN && idx >= self.dense.len() {
@@ -210,12 +210,12 @@ impl ScheduledSet {
 
     fn remove(&mut self, task: TaskId) -> bool {
         let idx = task.0.index() as usize;
-        let gen = u64::from(task.0.generation());
+        let generation = u64::from(task.0.generation());
         // Avoid overflow collision with DENSE_COLLISION sentinel
-        let tag = if gen == u64::MAX {
-            Self::DENSE_COLLISION  // Force overflow handling for max generation
+        let tag = if generation == u64::MAX {
+            Self::DENSE_COLLISION // Force overflow handling for max generation
         } else {
-            gen + 1
+            generation + 1
         };
 
         if idx >= self.dense.len() {

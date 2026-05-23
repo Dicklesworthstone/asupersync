@@ -340,6 +340,12 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
 
     crashpack.emit_atp_trace(temp_dir.path())?;
 
+    let replay_report = AtpReplayCoordinator::validate_replay_artifacts(temp_dir.path())?;
+    assert!(replay_report.replay_ready);
+    assert_eq!(replay_report.trace_events, 4);
+    assert_eq!(replay_report.ledger_entries, 1);
+    assert_eq!(replay_report.violation_entries, 1);
+
     for artifact in [
         "transfer.atp-trace",
         "manifest",
@@ -380,6 +386,7 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
     let journal_digest = std::fs::read_to_string(temp_dir.path().join("journal.digest"))?;
     assert!(journal_digest.contains(&format!("digest: {expected_journal_digest}")));
     assert!(journal_digest.contains(&format!("bytes: {}", journal.len())));
+    assert_eq!(replay_report.journal_digest, expected_journal_digest);
 
     let evidence_ledger = std::fs::read_to_string(temp_dir.path().join("evidence-ledger.json"))?;
     let evidence_ledger =
@@ -443,6 +450,26 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
     assert!(quiclog.contains("QUIC UDP packet loss"));
     let repairlog = std::fs::read_to_string(temp_dir.path().join("repairlog"))?;
     assert!(repairlog.contains("RaptorQ symbol"));
+
+    Ok(())
+}
+
+#[test]
+fn test_atp_replay_artifacts_require_trace_witnesses() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(violation_result("manifest_integrity"))
+        .build()
+        .expect("crashpack builds");
+
+    crashpack.emit_atp_trace(temp_dir.path())?;
+
+    let err = AtpReplayCoordinator::validate_replay_artifacts(temp_dir.path())
+        .expect_err("violation replay artifacts without trace witnesses must fail closed");
+    assert!(
+        err.to_string().contains("no trace failure witnesses"),
+        "unexpected replay artifact validation error: {err}"
+    );
 
     Ok(())
 }

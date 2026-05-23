@@ -3,12 +3,14 @@
 //! Extends the existing replay infrastructure in `lab/replay.rs` with ATP-specific
 //! trace minimization and failure reproduction capabilities.
 
+use crate::lab::crashpack::evidence_ledger::AtpEvidenceLedger;
 use crate::lab::crashpack::{ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, TransferViolation};
 use crate::lab::oracle::{OracleEntryReport, OracleReport};
 use crate::trace::{TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// ATP replay coordinator for deterministic failure reproduction.
@@ -104,6 +106,136 @@ impl AtpReplayCoordinator {
 
         cmd.push_str("\n");
         Ok(cmd)
+    }
+
+    /// Validate emitted ATP replay artifacts before an operator runs the script.
+    pub fn validate_replay_artifacts(
+        output_dir: &Path,
+    ) -> Result<AtpReplayArtifactReport, ReplayError> {
+        for artifact in REQUIRED_REPLAY_ARTIFACTS {
+            let path = output_dir.join(artifact);
+            if !path.is_file() {
+                return Err(replay_validation_failed(format!(
+                    "missing replay artifact {}",
+                    path.display()
+                )));
+            }
+        }
+
+        let trace_path = output_dir.join("transfer.atp-trace");
+        let trace_json = read_replay_artifact(&trace_path)?;
+        let trace_events = serde_json::from_str::<Vec<TraceEvent>>(&trace_json).map_err(|err| {
+            replay_validation_failed(format!(
+                "transfer.atp-trace is not a TraceEvent list: {err}"
+            ))
+        })?;
+
+        let journal_path = output_dir.join("journal");
+        let journal = read_replay_artifact(&journal_path)?;
+        let computed_journal_digest = journal_digest_ref(&journal);
+
+        let digest_path = output_dir.join("journal.digest");
+        let digest_file = read_replay_artifact(&digest_path)?;
+        let recorded_journal_digest = keyed_value(&digest_file, "digest")
+            .ok_or_else(|| replay_validation_failed("journal.digest is missing digest field"))?;
+        if recorded_journal_digest != computed_journal_digest {
+            return Err(replay_validation_failed(format!(
+                "journal.digest mismatch: recorded {recorded_journal_digest}, computed {computed_journal_digest}"
+            )));
+        }
+
+        let recorded_journal_bytes = keyed_value(&digest_file, "bytes")
+            .ok_or_else(|| replay_validation_failed("journal.digest is missing bytes field"))?
+            .parse::<usize>()
+            .map_err(|err| {
+                replay_validation_failed(format!("journal.digest bytes field is invalid: {err}"))
+            })?;
+        if recorded_journal_bytes != journal.len() {
+            return Err(replay_validation_failed(format!(
+                "journal.digest byte count mismatch: recorded {recorded_journal_bytes}, computed {}",
+                journal.len()
+            )));
+        }
+
+        let manifest_path = output_dir.join("manifest");
+        let manifest = read_replay_artifact(&manifest_path)?;
+        validate_manifest_reference(
+            &manifest,
+            "schema_version",
+            &ATP_CRASHPACK_SCHEMA_VERSION.to_string(),
+        )?;
+        validate_manifest_reference(&manifest, "journal_digest", &computed_journal_digest)?;
+        validate_manifest_reference(&manifest, "journal_digest_artifact", "journal.digest")?;
+        validate_manifest_reference(&manifest, "evidence_ledger", "evidence-ledger.json")?;
+        let manifest_violations = keyed_value(&manifest, "violations")
+            .ok_or_else(|| replay_validation_failed("manifest is missing violations field"))?
+            .parse::<usize>()
+            .map_err(|err| {
+                replay_validation_failed(format!("manifest violations field is invalid: {err}"))
+            })?;
+
+        let ledger_path = output_dir.join("evidence-ledger.json");
+        let ledger_json = read_replay_artifact(&ledger_path)?;
+        let ledger = AtpEvidenceLedger::import_json(&ledger_json).map_err(|err| {
+            replay_validation_failed(format!("evidence-ledger.json is invalid: {err}"))
+        })?;
+        if ledger.schema_version != ATP_CRASHPACK_SCHEMA_VERSION {
+            return Err(replay_validation_failed(format!(
+                "unsupported evidence ledger schema version {}",
+                ledger.schema_version
+            )));
+        }
+
+        for artifact in REQUIRED_LEDGER_ARTIFACT_PATHS {
+            let artifact = PathBuf::from(artifact);
+            if !ledger.artifact_paths.contains(&artifact) {
+                return Err(replay_validation_failed(format!(
+                    "evidence ledger is missing artifact path {}",
+                    artifact.display()
+                )));
+            }
+        }
+
+        let violation_entries = ledger.violation_entries().len();
+        if manifest_violations < violation_entries {
+            return Err(replay_validation_failed(format!(
+                "manifest understates evidence ledger violations: manifest {manifest_violations}, ledger {violation_entries}"
+            )));
+        }
+        if violation_entries > 0 && failure_witness_counts(&trace_events).is_empty() {
+            return Err(replay_validation_failed(
+                "replay artifact has violation evidence but no trace failure witnesses",
+            ));
+        }
+
+        let replay_command = read_replay_artifact(&output_dir.join("replay_command.sh"))?;
+        for token in [
+            "atp replay",
+            "--trace-file",
+            "transfer.atp-trace",
+            "--manifest",
+            "manifest",
+            "--journal-digest",
+            "journal.digest",
+            "--evidence-ledger",
+            "evidence-ledger.json",
+            "--validate-oracles",
+        ] {
+            if !replay_command.contains(token) {
+                return Err(replay_validation_failed(format!(
+                    "replay command is missing required token {token}"
+                )));
+            }
+        }
+
+        Ok(AtpReplayArtifactReport {
+            trace_events: trace_events.len(),
+            ledger_entries: ledger.entries.len(),
+            violation_entries,
+            artifact_paths: ledger.artifact_paths,
+            journal_digest: computed_journal_digest,
+            replay_ready: true,
+        })
     }
 
     fn count_original_violations(&self) -> usize {
@@ -597,6 +729,71 @@ fn env_suffix(name: &str) -> String {
     }
 }
 
+const REQUIRED_REPLAY_ARTIFACTS: &[&str] = &[
+    "transfer.atp-trace",
+    "manifest",
+    "journal",
+    "journal.digest",
+    "evidence-ledger.json",
+    "pathlog",
+    "quiclog",
+    "repairlog",
+    "replay_command.sh",
+];
+
+const REQUIRED_LEDGER_ARTIFACT_PATHS: &[&str] = &[
+    "transfer.atp-trace",
+    "manifest",
+    "journal",
+    "journal.digest",
+    "evidence-ledger.json",
+    "pathlog",
+    "quiclog",
+    "repairlog",
+    "replay_command.sh",
+];
+
+fn read_replay_artifact(path: &Path) -> Result<String, ReplayError> {
+    std::fs::read_to_string(path).map_err(|err| {
+        replay_validation_failed(format!(
+            "failed to read replay artifact {}: {err}",
+            path.display()
+        ))
+    })
+}
+
+fn journal_digest_ref(journal_data: &str) -> String {
+    let digest = Sha256::digest(journal_data.as_bytes());
+    format!("sha256:{}", hex::encode(digest))
+}
+
+fn keyed_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|line| {
+        let (candidate, value) = line.split_once(':')?;
+        (candidate.trim() == key).then_some(value.trim())
+    })
+}
+
+fn validate_manifest_reference(
+    manifest: &str,
+    key: &str,
+    expected: &str,
+) -> Result<(), ReplayError> {
+    let actual = keyed_value(manifest, key)
+        .ok_or_else(|| replay_validation_failed(format!("manifest is missing {key} field")))?;
+    if actual != expected {
+        return Err(replay_validation_failed(format!(
+            "manifest {key} mismatch: recorded {actual}, expected {expected}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn replay_validation_failed(message: impl Into<String>) -> ReplayError {
+    ReplayError::ReplayValidationFailed(message.into())
+}
+
 fn shell_path_arg(path: &Path) -> String {
     shell_arg(&path.display().to_string())
 }
@@ -635,6 +832,23 @@ pub struct AtpReplayResult {
     pub replay_successful: bool,
     pub oracle_results: Vec<OracleReport>,
     pub minimization_stats: MinimizationStats,
+}
+
+/// Summary of an emitted ATP replay artifact bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AtpReplayArtifactReport {
+    /// Number of trace events loaded from `transfer.atp-trace`.
+    pub trace_events: usize,
+    /// Number of evidence ledger entries loaded from `evidence-ledger.json`.
+    pub ledger_entries: usize,
+    /// Number of evidence entries indicating violations.
+    pub violation_entries: usize,
+    /// Artifact paths recorded by the evidence ledger.
+    pub artifact_paths: Vec<PathBuf>,
+    /// Computed SHA-256 digest of the emitted journal.
+    pub journal_digest: String,
+    /// Whether the artifact bundle passed replay readiness checks.
+    pub replay_ready: bool,
 }
 
 /// Result of trace minimization.
