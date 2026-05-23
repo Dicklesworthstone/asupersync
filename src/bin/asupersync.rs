@@ -18,6 +18,9 @@ use asupersync::atp::doctor::{
 use asupersync::atp::identity::directory::{
     DirectorySubject, PeerDirectory, peer_id_from_hex, peer_id_to_hex,
 };
+use asupersync::atp::sdk::StreamEarlyUsabilityReport;
+use asupersync::atp::stream_object::ByteRange;
+use asupersync::atp::sync::DirectoryEarlyUsabilityReport;
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
     AdvancedRemediationDelta, AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
@@ -161,6 +164,8 @@ enum AtpCommand {
     Doctor(AtpDoctorArgs),
     /// Peer directory operations
     Directory(AtpDirectoryArgs),
+    /// Render ATP usable-early report artifacts
+    EarlyUsability(AtpEarlyUsabilityArgs),
     /// Verify ATP proof bundle offline
     Verify(AtpVerifyArgs),
     /// Replay emitted ATP crashpack artifacts
@@ -176,6 +181,13 @@ struct AtpDirectoryArgs {
     file: PathBuf,
     #[command(subcommand)]
     command: AtpDirectoryCommand,
+}
+
+#[derive(Args, Debug)]
+struct AtpEarlyUsabilityArgs {
+    /// JSON report emitted by SDK, proof, or transfer artifact code.
+    #[arg(long, value_name = "PATH")]
+    report: PathBuf,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1013,6 +1025,7 @@ fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         AtpCommand::Doctor(args) => atp_doctor(&args, output),
         AtpCommand::Directory(args) => atp_directory(&args, output),
+        AtpCommand::EarlyUsability(args) => atp_early_usability(&args, output),
         AtpCommand::Verify(args) => atp_verify(&args, output),
         AtpCommand::Replay(args) => atp_replay(&args, output),
         AtpCommand::Proof(args) => atp_proof(&args, output),
@@ -1172,6 +1185,50 @@ fn directory_io_error(err: impl std::error::Error) -> CliError {
     CliError::new("atp_directory_io_error", "ATP peer directory I/O failed")
         .detail(err.to_string())
         .exit_code(ExitCode::RUNTIME_ERROR)
+}
+
+fn atp_early_usability(args: &AtpEarlyUsabilityArgs, output: &mut Output) -> Result<(), CliError> {
+    let raw_report = fs::read_to_string(&args.report)
+        .map_err(atp_early_usability_io_error)
+        .map_err(|err| err.context("report", args.report.display().to_string()))?;
+    let report: AtpEarlyUsabilityReportInput = serde_json::from_str(&raw_report)
+        .map_err(atp_early_usability_parse_error)
+        .map_err(|err| err.context("report", args.report.display().to_string()))?;
+
+    let payload = match report {
+        AtpEarlyUsabilityReportInput::Directory(report) => AtpEarlyUsabilityOutput::Directory {
+            report_path: args.report.display().to_string(),
+            report,
+        },
+        AtpEarlyUsabilityReportInput::Stream(report) => AtpEarlyUsabilityOutput::Stream {
+            report_path: args.report.display().to_string(),
+            report,
+        },
+    };
+
+    output
+        .write(&payload)
+        .map_err(output_write_error("ATP early-usability report"))?;
+
+    Ok(())
+}
+
+fn atp_early_usability_io_error(err: impl std::error::Error) -> CliError {
+    CliError::new(
+        "atp_early_usability_report_read_error",
+        "Failed to read ATP early-usability report",
+    )
+    .detail(err.to_string())
+    .exit_code(ExitCode::RUNTIME_ERROR)
+}
+
+fn atp_early_usability_parse_error(err: impl std::error::Error) -> CliError {
+    CliError::new(
+        "atp_early_usability_report_parse_error",
+        "Failed to parse ATP early-usability report",
+    )
+    .detail(err.to_string())
+    .exit_code(ExitCode::USER_ERROR)
 }
 
 fn atp_replay(args: &AtpReplayArgs, output: &mut Output) -> Result<(), CliError> {
@@ -1340,7 +1397,6 @@ fn atp_replay_error(err: asupersync::lab::crashpack::ReplayError) -> CliError {
 }
 
 fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError> {
-    use asupersync::atp::proof::AtpProofBundle;
     use asupersync::atp::verify::{AtpBundleVerifier, VerificationPolicy};
 
     // Validate arguments
@@ -1361,7 +1417,7 @@ fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError>
         .exit_code(ExitCode::USER_ERROR)
     })?;
 
-    let serializable_bundle: asupersync::atp::proof::SerializableAtpProofBundle =
+    let serializable_bundle: asupersync::atp::proof::bundle::SerializableAtpProofBundle =
         serde_json::from_slice(&bundle_data).map_err(|e| {
             CliError::new("parse_error", &format!("failed to parse proof bundle: {e}"))
                 .exit_code(ExitCode::USER_ERROR)
@@ -1387,6 +1443,7 @@ fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError>
     // Perform verification
     let verifier = AtpBundleVerifier::with_policy(policy);
     let result = verifier.verify_bundle(&bundle);
+    let verification_failed = result.status.is_failure();
 
     // Prepare output
     let payload = if args.verbose {
@@ -1417,7 +1474,7 @@ fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError>
         .map_err(output_write_error("ATP verification result"))?;
 
     // Exit with error code if verification failed
-    if result.status.is_failure() {
+    if verification_failed {
         return Err(CliError::new(
             "verification_failed",
             "ATP proof bundle verification failed",
@@ -1429,8 +1486,6 @@ fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError>
 }
 
 fn atp_proof(args: &AtpProofArgs, output: &mut Output) -> Result<(), CliError> {
-    use asupersync::atp::proof::AtpProofBundle;
-
     // Read and deserialize the proof bundle
     let bundle_data = std::fs::read(&args.bundle_path).map_err(|e| {
         CliError::new(
@@ -1440,7 +1495,7 @@ fn atp_proof(args: &AtpProofArgs, output: &mut Output) -> Result<(), CliError> {
         .exit_code(ExitCode::USER_ERROR)
     })?;
 
-    let serializable_bundle: asupersync::atp::proof::SerializableAtpProofBundle =
+    let serializable_bundle: asupersync::atp::proof::bundle::SerializableAtpProofBundle =
         serde_json::from_slice(&bundle_data).map_err(|e| {
             CliError::new("parse_error", &format!("failed to parse proof bundle: {e}"))
                 .exit_code(ExitCode::USER_ERROR)
@@ -1530,6 +1585,126 @@ impl<T: serde::Serialize> Outputtable for JsonOutputValue<T> {
     fn human_format(&self) -> String {
         serde_json::to_string_pretty(&self.value)
             .unwrap_or_else(|err| format!("{{\"output_error\":\"{err}\"}}"))
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum AtpEarlyUsabilityReportInput {
+    Stream(StreamEarlyUsabilityReport),
+    Directory(DirectoryEarlyUsabilityReport),
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AtpEarlyUsabilityOutput {
+    Stream {
+        report_path: String,
+        report: StreamEarlyUsabilityReport,
+    },
+    Directory {
+        report_path: String,
+        report: DirectoryEarlyUsabilityReport,
+    },
+}
+
+impl Outputtable for AtpEarlyUsabilityOutput {
+    fn human_format(&self) -> String {
+        match self {
+            Self::Stream {
+                report_path,
+                report,
+            } => {
+                let mut lines = vec![
+                    "ATP Early Usability Report".to_string(),
+                    format!("Report: {report_path}"),
+                    "Type: stream".to_string(),
+                    format!("Stream ID: {}", report.stream_id),
+                    format!("Usable state: {:?}", report.usable_state),
+                    format!("Final commit state: {:?}", report.final_commit_state),
+                    format!("Consumption policy: {:?}", report.consumption_policy),
+                    format!("Verified prefix end: {}", report.verified_prefix_end),
+                    format!("Policy prefix end: {}", report.policy_prefix_end),
+                    format!(
+                        "Policy exposed prefix: {}",
+                        format_optional_byte_range(report.policy_exposed_prefix)
+                    ),
+                    format!("Total bytes: {}", report.total_bytes),
+                    format!("Bytes sent: {}", report.bytes_sent),
+                    format!(
+                        "Verified prefix ranges: {}",
+                        format_byte_ranges(&report.verified_prefix_ranges)
+                    ),
+                ];
+
+                append_named_list(&mut lines, "Safety caveats", &report.safety_caveats);
+                lines.join("\n")
+            }
+            Self::Directory {
+                report_path,
+                report,
+            } => {
+                let mut lines = vec![
+                    "ATP Early Usability Report".to_string(),
+                    format!("Report: {report_path}"),
+                    "Type: directory".to_string(),
+                    format!("Schema: {}", report.schema_version),
+                    format!("Usable state: {:?}", report.usability_state),
+                    format!("Final commit state: {:?}", report.final_commit_state),
+                    format!("Manifest tree root: {}", report.manifest_tree_root),
+                    format!("Replay pointer: {}", report.replay_pointer),
+                    format!("Metadata paths: {}", report.metadata_paths.len()),
+                    format!("Small file paths: {}", report.small_file_paths.len()),
+                    format!(
+                        "Withheld content paths: {}",
+                        report.withheld_content_paths.len()
+                    ),
+                    format!("Entry decisions: {}", report.entries.len()),
+                ];
+
+                append_named_list(&mut lines, "Metadata", &report.metadata_paths);
+                append_named_list(&mut lines, "Small files", &report.small_file_paths);
+                append_named_list(
+                    &mut lines,
+                    "Withheld content",
+                    &report.withheld_content_paths,
+                );
+                append_named_list(&mut lines, "Safety caveats", &report.safety_caveats);
+                lines.join("\n")
+            }
+        }
+    }
+}
+
+fn format_optional_byte_range(range: Option<ByteRange>) -> String {
+    range.map_or_else(|| "none".to_string(), |range| format_byte_range(range))
+}
+
+fn format_byte_ranges(ranges: &[ByteRange]) -> String {
+    if ranges.is_empty() {
+        return "none".to_string();
+    }
+
+    ranges
+        .iter()
+        .map(|range| format_byte_range(*range))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_byte_range(range: ByteRange) -> String {
+    format!("{}..{} ({} bytes)", range.start, range.end, range.size())
+}
+
+fn append_named_list(lines: &mut Vec<String>, label: &str, values: &[String]) {
+    if values.is_empty() {
+        lines.push(format!("{label}: none"));
+        return;
+    }
+
+    lines.push(format!("{label}:"));
+    for value in values {
+        lines.push(format!("  - {value}"));
     }
 }
 
@@ -8363,6 +8538,8 @@ mod tests {
     )]
     use super::*;
     use asupersync::atp::doctor::build_platform_doctor_document;
+    use asupersync::atp::sdk::{StreamEarlyUsabilityState, StreamFinalCommitState};
+    use asupersync::atp::stream_object::ConsumptionPolicy;
     use asupersync::observability::{TaskRegionCountWire, TaskStateInfo};
     use asupersync::trace::{TraceMetadata, TraceWriter};
     use clap::Parser;
@@ -8685,6 +8862,119 @@ mod tests {
         );
         assert!(args.minimize);
         assert_eq!(args.reduction_target, 0.8);
+    }
+
+    #[test]
+    fn atp_early_usability_args_parse_report_path() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "atp",
+            "early-usability",
+            "--report",
+            "artifacts/early-usability.json",
+        ])
+        .expect("parse atp early-usability args");
+
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::EarlyUsability(args),
+        }) = cli.command
+        else {
+            panic!("expected atp early-usability command");
+        };
+
+        assert_eq!(
+            args.report.as_path(),
+            Path::new("artifacts/early-usability.json")
+        );
+    }
+
+    #[test]
+    fn atp_early_usability_renders_stream_report_fields_separately() {
+        let file = NamedTempFile::new().expect("create report file");
+        let report = StreamEarlyUsabilityReport {
+            stream_id: "stream-early".to_string(),
+            usable_state: StreamEarlyUsabilityState::VerifiedPrefixAvailable,
+            final_commit_state: StreamFinalCommitState::Pending,
+            consumption_policy: ConsumptionPolicy::VerifiedOnly,
+            verified_prefix_ranges: vec![ByteRange::new(0, 4096)],
+            policy_exposed_prefix: Some(ByteRange::new(0, 4096)),
+            verified_prefix_end: 4096,
+            policy_prefix_end: 4096,
+            total_bytes: 8192,
+            bytes_sent: 4096,
+            safety_caveats: vec![
+                "final manifest not committed; expose early bytes separately".to_string(),
+            ],
+        };
+        fs::write(
+            file.path(),
+            serde_json::to_vec(&report).expect("serialize stream report"),
+        )
+        .expect("write stream report");
+
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        atp_early_usability(
+            &AtpEarlyUsabilityArgs {
+                report: file.path().to_path_buf(),
+            },
+            &mut output,
+        )
+        .expect("render stream early usability report");
+
+        let rendered = capture.contents();
+        assert!(rendered.contains("Type: stream"));
+        assert!(rendered.contains("Usable state: VerifiedPrefixAvailable"));
+        assert!(rendered.contains("Final commit state: Pending"));
+        assert!(rendered.contains("Verified prefix ranges: 0..4096 (4096 bytes)"));
+        assert!(rendered.contains("Policy exposed prefix: 0..4096 (4096 bytes)"));
+        assert!(rendered.contains("final manifest not committed"));
+    }
+
+    #[test]
+    fn atp_early_usability_renders_directory_report_fields_separately() {
+        let file = NamedTempFile::new().expect("create report file");
+        let report = DirectoryEarlyUsabilityReport {
+            schema_version: "asupersync.atp.directory_early_usability.v1".to_string(),
+            usability_state:
+                asupersync::atp::sync::DirectoryEarlyUsabilityState::SmallFilesAvailable,
+            final_commit_state: asupersync::atp::sync::DirectoryFinalCommitState::Pending,
+            manifest_tree_root: "tree-root".to_string(),
+            replay_pointer: "replay:directory".to_string(),
+            metadata_paths: vec!["README.md".to_string(), "model.bin".to_string()],
+            small_file_paths: vec!["README.md".to_string()],
+            withheld_content_paths: vec!["model.bin".to_string()],
+            entries: Vec::new(),
+            safety_caveats: vec![
+                "final directory commit not complete; expose early entries separately".to_string(),
+            ],
+        };
+        fs::write(
+            file.path(),
+            serde_json::to_vec(&report).expect("serialize directory report"),
+        )
+        .expect("write directory report");
+
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        atp_early_usability(
+            &AtpEarlyUsabilityArgs {
+                report: file.path().to_path_buf(),
+            },
+            &mut output,
+        )
+        .expect("render directory early usability report");
+
+        let rendered = capture.contents();
+        assert!(rendered.contains("Type: directory"));
+        assert!(rendered.contains("Usable state: SmallFilesAvailable"));
+        assert!(rendered.contains("Final commit state: Pending"));
+        assert!(rendered.contains("Replay pointer: replay:directory"));
+        assert!(rendered.contains("Small files:"));
+        assert!(rendered.contains("  - README.md"));
+        assert!(rendered.contains("Withheld content:"));
+        assert!(rendered.contains("  - model.bin"));
+        assert!(rendered.contains("final directory commit not complete"));
     }
 
     #[test]

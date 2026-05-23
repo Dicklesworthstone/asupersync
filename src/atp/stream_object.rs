@@ -654,7 +654,7 @@ impl PrefixConsumer {
 }
 
 /// Policy for prefix consumption safety.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsumptionPolicy {
     /// Only consume verified epochs.
     VerifiedOnly,

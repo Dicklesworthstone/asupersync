@@ -967,7 +967,7 @@ pub struct StreamHandle {
 }
 
 /// Final commit state reported separately from early usability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StreamFinalCommitState {
     /// The stream has no manifest yet, so final commit state is unknown.
     UnknownNoManifest,
@@ -978,7 +978,7 @@ pub enum StreamFinalCommitState {
 }
 
 /// Usable-early state exposed by the SDK for a stream handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StreamEarlyUsabilityState {
     /// No manifest exists, so no early range can be exposed.
     NoManifest,
@@ -993,7 +993,7 @@ pub enum StreamEarlyUsabilityState {
 }
 
 /// SDK report for prefix-first stream consumption.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StreamEarlyUsabilityReport {
     /// Stream identifier.
     pub stream_id: String,
