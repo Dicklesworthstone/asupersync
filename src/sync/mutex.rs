@@ -287,17 +287,25 @@ impl<T> Mutex<T> {
     }
 
     /// Returns a mutable reference to the underlying data.
+    ///
+    /// Returns an error if the mutex is poisoned.
     #[inline]
-    pub fn get_mut(&mut self) -> &mut T {
-        assert!(!self.is_poisoned(), "mutex is poisoned");
-        self.data.get_mut()
+    pub fn get_mut(&mut self) -> Result<&mut T, LockError> {
+        if self.is_poisoned() {
+            return Err(LockError::Poisoned);
+        }
+        Ok(self.data.get_mut())
     }
 
     /// Consumes the mutex, returning the underlying data.
+    ///
+    /// Returns an error if the mutex is poisoned.
     #[inline]
-    pub fn into_inner(self) -> T {
-        assert!(!self.is_poisoned(), "mutex is poisoned");
-        self.data.into_inner()
+    pub fn into_inner(self) -> Result<T, LockError> {
+        if self.is_poisoned() {
+            return Err(LockError::Poisoned);
+        }
+        Ok(self.data.into_inner())
     }
 
     #[inline]

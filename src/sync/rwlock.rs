@@ -249,14 +249,15 @@ impl<T> RwLock<T> {
 
     /// Consumes the lock and returns the inner value.
     ///
-    /// # Panics
+    /// Consumes this lock, returning the underlying data.
     ///
-    /// Panics if the lock is poisoned.
+    /// Returns an error if the lock is poisoned.
     #[inline]
-    #[must_use]
-    pub fn into_inner(self) -> T {
-        assert!(!self.is_poisoned(), "rwlock poisoned");
-        self.data.into_inner()
+    pub fn into_inner(self) -> Result<T, RwLockError> {
+        if self.is_poisoned() {
+            return Err(RwLockError::Poisoned);
+        }
+        Ok(self.data.into_inner())
     }
 }
 
@@ -313,13 +314,13 @@ impl<T> RwLock<T> {
 
     /// Returns a mutable reference to the inner value.
     ///
-    /// # Panics
-    ///
-    /// Panics if the lock is poisoned.
+    /// Returns an error if the lock is poisoned.
     #[inline]
-    pub fn get_mut(&mut self) -> &mut T {
-        assert!(!self.is_poisoned(), "rwlock poisoned");
-        self.data.get_mut()
+    pub fn get_mut(&mut self) -> Result<&mut T, RwLockError> {
+        if self.is_poisoned() {
+            return Err(RwLockError::Poisoned);
+        }
+        Ok(self.data.get_mut())
     }
 
     #[inline]
