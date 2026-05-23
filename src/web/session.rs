@@ -305,14 +305,15 @@ impl SessionStore for MemoryStore {
 // ─── Session ID generation ──────────────────────────────────────────────────
 
 /// Generate a cryptographically random session ID (16 random bytes as hex).
-fn generate_session_id() -> String {
+/// Returns `None` if OS entropy source is unavailable.
+fn generate_session_id() -> Option<String> {
     let mut buf = [0u8; 16];
-    getrandom::fill(&mut buf).expect("OS entropy source unavailable");
+    getrandom::fill(&mut buf).ok()?;
     let mut hex = String::with_capacity(32);
     for b in &buf {
         let _ = write!(hex, "{b:02x}");
     }
-    hex
+    Some(hex)
 }
 
 /// Validate that a session ID looks legitimate (hex, correct length).
@@ -670,7 +671,13 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         //    could plant a chosen ID and later hijack it).
         let (mut session_id, mut is_new) = match get_cookie(&req, &self.config.cookie_name) {
             Some(id) if is_valid_session_id(&id) => (id, false),
-            _ => (generate_session_id(), true),
+            _ => {
+                let Some(id) = generate_session_id() else {
+                    return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
+                        .with_body("Session initialization failed: OS entropy unavailable".to_string());
+                };
+                (id, true)
+            }
         };
 
         // 2. Load existing session data.
@@ -683,14 +690,22 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         } else if let Some(data) = self.store.load(&session_id) {
             if self.is_idle_expired(&data) {
                 self.store.delete(&session_id);
-                session_id = generate_session_id();
+                let Some(new_id) = generate_session_id() else {
+                    return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
+                        .with_body("Session renewal failed: OS entropy unavailable".to_string());
+                };
+                session_id = new_id;
                 is_new = true;
                 SessionData::new()
             } else {
                 data
             }
         } else {
-            session_id = generate_session_id();
+            let Some(new_id) = generate_session_id() else {
+                return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_body("Session creation failed: OS entropy unavailable".to_string());
+            };
+            session_id = new_id;
             is_new = true;
             SessionData::new()
         };
@@ -704,7 +719,11 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         //     touch; existing sessions that pre-date this commit get one
         //     lazily on first access. (br-asupersync-7udumi)
         if self.config.csrf_protection && session_data.get(CSRF_TOKEN_KEY).is_none() {
-            session_data.insert(CSRF_TOKEN_KEY, generate_session_id());
+            let Some(csrf_token) = generate_session_id() else {
+                return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_body("CSRF token generation failed: OS entropy unavailable".to_string());
+            };
+            session_data.insert(CSRF_TOKEN_KEY, csrf_token);
         }
 
         // 2d. CSRF validation — state-changing requests must present the
@@ -818,7 +837,11 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             if !is_new {
                 self.store.delete(&session_id);
             }
-            session_id = generate_session_id();
+            let Some(new_id) = generate_session_id() else {
+                return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_body("Session regeneration failed: OS entropy unavailable".to_string());
+            };
+            session_id = new_id;
             // Treat as a freshly-issued cookie (must be Set-Cookie'd to
             // the client); the old client cookie is implicitly replaced
             // by the new one in the response.
@@ -1009,14 +1032,16 @@ impl Session {
     ///
     /// User data is preserved — only the ID and CSRF token change.
     /// To clear data, call [`Self::clear`] before or after
-    /// `regenerate()`.
-    pub fn regenerate(&self) {
+    /// `regenerate()`. Returns `None` if OS entropy is unavailable.
+    pub fn regenerate(&self) -> Option<()> {
         let mut guard = self.0.lock();
         guard.insert(REGENERATE_FLAG_KEY, "1");
         // Rotate CSRF token alongside ID — a session ID rotation that
         // doesn't rotate the bound CSRF token leaves a trust-boundary
         // hole. (br-asupersync-3cvnmo)
-        guard.insert(CSRF_TOKEN_KEY, generate_session_id());
+        let csrf_token = generate_session_id()?;
+        guard.insert(CSRF_TOKEN_KEY, csrf_token);
+        Some(())
     }
 
     /// br-asupersync-3cvnmo — Mint a fresh CSRF token for this session
@@ -1027,11 +1052,11 @@ impl Session {
     /// before the old one becomes invalid.
     ///
     /// Most callers should prefer [`Self::regenerate`], which rotates
-    /// both ID and CSRF in lockstep.
-    pub fn rotate_csrf_token(&self) -> String {
-        let token = generate_session_id();
+    /// both ID and CSRF in lockstep. Returns `None` if OS entropy is unavailable.
+    pub fn rotate_csrf_token(&self) -> Option<String> {
+        let token = generate_session_id()?;
         self.0.lock().insert(CSRF_TOKEN_KEY, token.clone());
-        token
+        Some(token)
     }
 }
 
