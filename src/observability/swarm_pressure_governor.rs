@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD: f64 = 0.80;
+const DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD: f64 = 0.80;
 
 /// Errors specific to swarm pressure governance.
 #[derive(Debug, Error)]
@@ -300,6 +301,10 @@ pub struct SwarmPressureGovernorConfig {
     pub default_workload_lease_ttl: Duration,
     /// Maximum lease time-to-live that a workload may hold after any renewal.
     pub max_workload_lease_ttl: Duration,
+    /// Maximum age for workload pressure feedback to influence admission.
+    pub workload_feedback_max_age: Duration,
+    /// Workload pressure ratio that triggers admission backpressure rules.
+    pub workload_feedback_backpressure_threshold: f64,
 }
 
 impl Default for SwarmPressureGovernorConfig {
@@ -317,6 +322,9 @@ impl Default for SwarmPressureGovernorConfig {
             peer_pressure_backpressure_threshold: DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD,
             default_workload_lease_ttl: Duration::from_secs(30 * 60),
             max_workload_lease_ttl: Duration::from_secs(2 * 60 * 60),
+            workload_feedback_max_age: Duration::from_secs(5),
+            workload_feedback_backpressure_threshold:
+                DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD,
         }
     }
 }
@@ -346,6 +354,131 @@ impl SwarmPeerPressureSummary {
         live_report_count: 0,
         max_overall_pressure: 0.0,
         max_degradation_level: DegradationLevel::None,
+    };
+
+    #[must_use]
+    fn has_live_pressure(self) -> bool {
+        self.live_report_count > 0
+    }
+}
+
+/// Explicit pressure feedback for one agent-swarm workload.
+#[derive(Debug, Clone)]
+pub struct SwarmWorkloadPressureFeedback {
+    /// Workload id that this feedback describes.
+    pub workload_id: String,
+    /// Owner metadata for accountability and audit traces.
+    pub owner: SwarmAdmissionOwner,
+    /// Proof or validation lane associated with the workload.
+    pub proof_lane: SwarmProofLaneKind,
+    /// Runtime queue pressure ratio reported by the workload controller.
+    pub queue_pressure: f64,
+    /// Disk or artifact-cache IO pressure ratio.
+    pub disk_io_pressure: f64,
+    /// RCH or remote-worker queue pressure ratio.
+    pub rch_queue_pressure: f64,
+    /// Validation-frontier blocker pressure ratio.
+    pub validation_frontier_pressure: f64,
+    /// Cancellation/drain tail-latency pressure ratio.
+    pub cancellation_tail_pressure: f64,
+    /// Local timestamp when this feedback was recorded.
+    pub reported_at: Instant,
+}
+
+impl SwarmWorkloadPressureFeedback {
+    /// Build zero-pressure feedback for a workload.
+    #[must_use]
+    pub fn new(
+        workload_id: impl Into<String>,
+        owner: SwarmAdmissionOwner,
+        proof_lane: SwarmProofLaneKind,
+    ) -> Self {
+        Self {
+            workload_id: workload_id.into(),
+            owner,
+            proof_lane,
+            queue_pressure: 0.0,
+            disk_io_pressure: 0.0,
+            rch_queue_pressure: 0.0,
+            validation_frontier_pressure: 0.0,
+            cancellation_tail_pressure: 0.0,
+            reported_at: Instant::now(),
+        }
+    }
+
+    /// Set all explicit pressure ratios.
+    #[must_use]
+    pub fn with_pressures(
+        mut self,
+        queue_pressure: f64,
+        disk_io_pressure: f64,
+        rch_queue_pressure: f64,
+        validation_frontier_pressure: f64,
+        cancellation_tail_pressure: f64,
+    ) -> Self {
+        self.queue_pressure = queue_pressure;
+        self.disk_io_pressure = disk_io_pressure;
+        self.rch_queue_pressure = rch_queue_pressure;
+        self.validation_frontier_pressure = validation_frontier_pressure;
+        self.cancellation_tail_pressure = cancellation_tail_pressure;
+        self
+    }
+
+    /// Override the local feedback timestamp.
+    #[must_use]
+    pub fn with_reported_at(mut self, reported_at: Instant) -> Self {
+        self.reported_at = reported_at;
+        self
+    }
+
+    /// Highest reported pressure ratio across all explicit feedback dimensions.
+    #[must_use]
+    pub fn max_pressure(&self) -> f64 {
+        self.queue_pressure
+            .max(self.disk_io_pressure)
+            .max(self.rch_queue_pressure)
+            .max(self.validation_frontier_pressure)
+            .max(self.cancellation_tail_pressure)
+    }
+
+    fn validate(&self) -> Option<String> {
+        if self.workload_id.trim().is_empty() {
+            return Some("workload pressure feedback workload_id must be non-empty".to_string());
+        }
+        if let Some(reason) = self.owner.validate() {
+            return Some(reason);
+        }
+        for (name, pressure) in [
+            ("queue_pressure", self.queue_pressure),
+            ("disk_io_pressure", self.disk_io_pressure),
+            ("rch_queue_pressure", self.rch_queue_pressure),
+            (
+                "validation_frontier_pressure",
+                self.validation_frontier_pressure,
+            ),
+            (
+                "cancellation_tail_pressure",
+                self.cancellation_tail_pressure,
+            ),
+        ] {
+            if !pressure.is_finite() || pressure < 0.0 {
+                return Some(format!("{name} must be finite and non-negative"));
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SwarmWorkloadPressureSummary {
+    live_report_count: u64,
+    max_overall_pressure: f64,
+}
+
+impl SwarmWorkloadPressureSummary {
+    const EMPTY: Self = Self {
+        live_report_count: 0,
+        max_overall_pressure: 0.0,
     };
 
     #[must_use]
@@ -741,11 +874,13 @@ pub struct SwarmPressureGovernor {
     workload_leases_aborted: AtomicU64,
     workload_leases_expired: AtomicU64,
     workload_lease_conflicts: AtomicU64,
+    workload_feedback_reports_recorded: AtomicU64,
     next_workload_lease_id: AtomicU64,
 
     // Resource envelope and workload lease tracking.
     active_regions: std::sync::Mutex<HashMap<RegionId, ResourceEnvelope>>,
     workload_leases: std::sync::Mutex<HashMap<SwarmWorkloadLeaseId, SwarmWorkloadLease>>,
+    workload_pressure_feedback: std::sync::Mutex<HashMap<String, SwarmWorkloadPressureFeedback>>,
     peer_pressure_reports: std::sync::Mutex<HashMap<String, SwarmPeerPressureReport>>,
 }
 
@@ -772,9 +907,11 @@ impl SwarmPressureGovernor {
             workload_leases_aborted: AtomicU64::new(0),
             workload_leases_expired: AtomicU64::new(0),
             workload_lease_conflicts: AtomicU64::new(0),
+            workload_feedback_reports_recorded: AtomicU64::new(0),
             next_workload_lease_id: AtomicU64::new(1),
             active_regions: std::sync::Mutex::new(HashMap::new()),
             workload_leases: std::sync::Mutex::new(HashMap::new()),
+            workload_pressure_feedback: std::sync::Mutex::new(HashMap::new()),
             peer_pressure_reports: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -804,9 +941,11 @@ impl SwarmPressureGovernor {
             workload_leases_aborted: AtomicU64::new(0),
             workload_leases_expired: AtomicU64::new(0),
             workload_lease_conflicts: AtomicU64::new(0),
+            workload_feedback_reports_recorded: AtomicU64::new(0),
             next_workload_lease_id: AtomicU64::new(1),
             active_regions: std::sync::Mutex::new(HashMap::new()),
             workload_leases: std::sync::Mutex::new(HashMap::new()),
+            workload_pressure_feedback: std::sync::Mutex::new(HashMap::new()),
             peer_pressure_reports: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -844,12 +983,15 @@ impl SwarmPressureGovernor {
             return Ok(self.rejected_workload_decision(decision_start, request, reason));
         }
 
-        let mut decision = self.check_region_admission_with_declared_resources(
+        let workload_pressure =
+            self.workload_pressure_summary(decision_start, Some(request.workload_id.trim()));
+        let mut decision = self.check_region_admission_with_feedback(
             cx,
             request.priority,
             request.requested_memory_bytes,
             request.requested_cpu_ns_per_sec,
             request.requested_io_ops_per_sec,
+            workload_pressure,
         )?;
         decision.reason = request.context_reason(&decision.reason);
         Ok(decision)
@@ -862,6 +1004,25 @@ impl SwarmPressureGovernor {
         requested_memory: Option<u64>,
         requested_cpu_ns_per_sec: Option<u64>,
         requested_io_ops_per_sec: Option<u64>,
+    ) -> Result<SwarmAdmissionDecision, SwarmPressureError> {
+        self.check_region_admission_with_feedback(
+            cx,
+            priority,
+            requested_memory,
+            requested_cpu_ns_per_sec,
+            requested_io_ops_per_sec,
+            SwarmWorkloadPressureSummary::EMPTY,
+        )
+    }
+
+    fn check_region_admission_with_feedback(
+        &self,
+        cx: &Cx,
+        priority: RegionPriority,
+        requested_memory: Option<u64>,
+        requested_cpu_ns_per_sec: Option<u64>,
+        requested_io_ops_per_sec: Option<u64>,
+        workload_pressure: SwarmWorkloadPressureSummary,
     ) -> Result<SwarmAdmissionDecision, SwarmPressureError> {
         let decision_start = Instant::now();
         self.total_admission_checks.fetch_add(1, Ordering::Relaxed);
@@ -950,6 +1111,7 @@ impl SwarmPressureGovernor {
             degradation_level,
             requested_memory,
             peer_pressure,
+            workload_pressure,
         )?;
 
         // Create resource envelope if admitted
@@ -1258,6 +1420,48 @@ impl SwarmPressureGovernor {
         )
     }
 
+    /// Record explicit pressure feedback for a workload.
+    pub fn record_workload_pressure_feedback(
+        &self,
+        mut feedback: SwarmWorkloadPressureFeedback,
+    ) -> Result<(), SwarmPressureError> {
+        if let Some(reason) = feedback.validate() {
+            return Err(SwarmPressureError::SwarmCoordinationFailed { reason });
+        }
+
+        feedback.workload_id = feedback.workload_id.trim().to_string();
+        let now = Instant::now();
+        let mut reports = self.workload_pressure_feedback.lock().unwrap();
+        prune_stale_workload_pressure_feedback_locked(
+            &mut reports,
+            self.config.workload_feedback_max_age,
+            now,
+        );
+        reports.insert(feedback.workload_id.clone(), feedback);
+        self.workload_feedback_reports_recorded
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Remove pressure feedback for a workload.
+    pub fn clear_workload_pressure_feedback(
+        &self,
+        workload_id: &str,
+    ) -> Option<SwarmWorkloadPressureFeedback> {
+        let mut reports = self.workload_pressure_feedback.lock().unwrap();
+        reports.remove(workload_id.trim())
+    }
+
+    /// Remove stale workload pressure feedback and return the number pruned.
+    pub fn prune_stale_workload_pressure_feedback(&self) -> usize {
+        let mut reports = self.workload_pressure_feedback.lock().unwrap();
+        prune_stale_workload_pressure_feedback_locked(
+            &mut reports,
+            self.config.workload_feedback_max_age,
+            Instant::now(),
+        )
+    }
+
     /// Returns current swarm governance metrics.
     pub fn metrics(&self) -> SwarmPressureMetrics {
         let (
@@ -1295,6 +1499,7 @@ impl SwarmPressureGovernor {
             (active, leases.len() as u64 - active)
         };
         let peer_pressure = self.peer_pressure_summary(Instant::now());
+        let workload_pressure = self.workload_pressure_summary(Instant::now(), None);
         SwarmPressureMetrics {
             total_admission_checks: self.total_admission_checks.load(Ordering::Relaxed),
             regions_admitted: self.regions_admitted.load(Ordering::Relaxed),
@@ -1314,6 +1519,13 @@ impl SwarmPressureGovernor {
             workload_lease_conflicts: self.workload_lease_conflicts.load(Ordering::Relaxed),
             active_workload_lease_count,
             terminal_workload_lease_count,
+            workload_feedback_reports_recorded: self
+                .workload_feedback_reports_recorded
+                .load(Ordering::Relaxed),
+            live_workload_feedback_reports: workload_pressure.live_report_count,
+            max_workload_feedback_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_overall_pressure,
+            ),
             live_peer_pressure_reports: peer_pressure.live_report_count,
             max_peer_pressure_scaled: scale_pressure_for_metrics(
                 peer_pressure.max_overall_pressure,
@@ -1437,6 +1649,7 @@ impl SwarmPressureGovernor {
         degradation_level: DegradationLevel,
         _requested_memory: Option<u64>,
         peer_pressure: SwarmPeerPressureSummary,
+        workload_pressure: SwarmWorkloadPressureSummary,
     ) -> Result<SwarmAdmissionDecisionInternal, SwarmPressureError> {
         // Check region count limits
         let active_count = {
@@ -1457,6 +1670,8 @@ impl SwarmPressureGovernor {
         let effective_degradation = degradation_level.max(peer_pressure.max_degradation_level);
         let peer_pressure_high =
             peer_pressure.max_overall_pressure >= self.peer_pressure_backpressure_threshold();
+        let workload_pressure_high = workload_pressure.max_overall_pressure
+            >= self.workload_feedback_backpressure_threshold();
 
         // Combine pressure governor decision with system degradation
         let decision = match (pressure_decision, effective_degradation, priority) {
@@ -1473,6 +1688,16 @@ impl SwarmPressureGovernor {
                 AdmissionDecision::Reject
             }
             (_, _, RegionPriority::Normal) if peer_pressure_high => {
+                AdmissionDecision::AdmitWithBackpressure
+            }
+
+            // Explicit workload feedback is scoped to the requesting workload:
+            // keep background proof lanes out and slow normal work when its
+            // own queues, RCH lane, frontier, or cancellation tail are hot.
+            (_, _, RegionPriority::Low | RegionPriority::BestEffort) if workload_pressure_high => {
+                AdmissionDecision::Reject
+            }
+            (_, _, RegionPriority::Normal) if workload_pressure_high => {
                 AdmissionDecision::AdmitWithBackpressure
             }
 
@@ -1504,18 +1729,21 @@ impl SwarmPressureGovernor {
                 degradation_level,
                 priority,
                 peer_pressure,
+                workload_pressure,
             ),
             AdmissionDecision::Reject => Self::format_swarm_admission_reason(
                 "Rejected due to pressure",
                 effective_degradation,
                 priority,
                 peer_pressure,
+                workload_pressure,
             ),
             AdmissionDecision::AdmitWithBackpressure => Self::format_swarm_admission_reason(
                 "Admitted with backpressure",
                 effective_degradation,
                 priority,
                 peer_pressure,
+                workload_pressure,
             ),
         };
 
@@ -1552,6 +1780,34 @@ impl SwarmPressureGovernor {
         summary
     }
 
+    fn workload_pressure_summary(
+        &self,
+        now: Instant,
+        workload_id: Option<&str>,
+    ) -> SwarmWorkloadPressureSummary {
+        let reports = self.workload_pressure_feedback.lock().unwrap();
+        let mut summary = SwarmWorkloadPressureSummary::EMPTY;
+        let workload_id = workload_id.map(str::trim).filter(|id| !id.is_empty());
+
+        for report in reports.values() {
+            if now.saturating_duration_since(report.reported_at)
+                > self.config.workload_feedback_max_age
+            {
+                continue;
+            }
+            if let Some(workload_id) = workload_id
+                && report.workload_id != workload_id
+            {
+                continue;
+            }
+
+            summary.live_report_count += 1;
+            summary.max_overall_pressure = summary.max_overall_pressure.max(report.max_pressure());
+        }
+
+        summary
+    }
+
     fn peer_pressure_backpressure_threshold(&self) -> f64 {
         let threshold = self.config.peer_pressure_backpressure_threshold;
         if threshold.is_finite() && threshold >= 0.0 {
@@ -1561,18 +1817,30 @@ impl SwarmPressureGovernor {
         }
     }
 
+    fn workload_feedback_backpressure_threshold(&self) -> f64 {
+        let threshold = self.config.workload_feedback_backpressure_threshold;
+        if threshold.is_finite() && threshold >= 0.0 {
+            threshold
+        } else {
+            DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD
+        }
+    }
+
     fn format_swarm_admission_reason(
         base: &str,
         degradation_level: DegradationLevel,
         priority: RegionPriority,
         peer_pressure: SwarmPeerPressureSummary,
+        workload_pressure: SwarmWorkloadPressureSummary,
     ) -> String {
-        if peer_pressure.has_live_pressure() {
+        if peer_pressure.has_live_pressure() || workload_pressure.has_live_pressure() {
             format!(
-                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, max peer degradation {:?}",
+                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, max peer degradation {:?}, {} live workload feedback reports, max workload pressure {:.3}",
                 peer_pressure.live_report_count,
                 peer_pressure.max_overall_pressure,
-                peer_pressure.max_degradation_level
+                peer_pressure.max_degradation_level,
+                workload_pressure.live_report_count,
+                workload_pressure.max_overall_pressure
             )
         } else if base == "Admission approved" {
             base.to_string()
@@ -1770,6 +2038,12 @@ pub struct SwarmPressureMetrics {
     pub active_workload_lease_count: u64,
     /// Number of terminal workload leases retained for audit.
     pub terminal_workload_lease_count: u64,
+    /// Total workload pressure feedback reports recorded.
+    pub workload_feedback_reports_recorded: u64,
+    /// Number of live workload pressure feedback reports considered by admission.
+    pub live_workload_feedback_reports: u64,
+    /// Maximum live workload feedback pressure ratio scaled by 10_000.
+    pub max_workload_feedback_pressure_scaled: i64,
     /// Number of live peer pressure reports considered by admission.
     pub live_peer_pressure_reports: u64,
     /// Maximum live peer pressure ratio scaled by 10_000.
@@ -1816,6 +2090,16 @@ fn optional_u64_reason_field(value: Option<u64>) -> String {
 
 fn prune_stale_peer_pressure_reports_locked(
     reports: &mut HashMap<String, SwarmPeerPressureReport>,
+    max_age: Duration,
+    now: Instant,
+) -> usize {
+    let before = reports.len();
+    reports.retain(|_, report| now.saturating_duration_since(report.reported_at) <= max_age);
+    before.saturating_sub(reports.len())
+}
+
+fn prune_stale_workload_pressure_feedback_locked(
+    reports: &mut HashMap<String, SwarmWorkloadPressureFeedback>,
     max_age: Duration,
     now: Instant,
 ) -> usize {
@@ -2744,6 +3028,122 @@ mod tests {
     }
 
     #[test]
+    fn test_workload_pressure_feedback_backpressures_matching_workload_only() {
+        let governor = create_test_swarm_governor();
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "hot-proof",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::CargoCheckLib,
+                )
+                .with_pressures(0.20, 0.30, 0.85, 0.40, 0.10),
+            )
+            .expect("workload feedback should be accepted");
+
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let hot_request =
+            SwarmWorkloadAdmissionRequest::new("hot-proof", SwarmAdmissionOwner::new("DustyGorge"));
+        let hot_decision = governor
+            .check_workload_admission(&cx, &hot_request)
+            .expect("hot workload admission should classify");
+        assert!(matches!(
+            hot_decision.decision,
+            AdmissionDecision::AdmitWithBackpressure
+        ));
+        assert!(
+            hot_decision
+                .reason
+                .contains("live workload feedback reports")
+        );
+        assert!(hot_decision.reason.contains("max workload pressure 0.850"));
+
+        let cold_request = SwarmWorkloadAdmissionRequest::new(
+            "cold-proof",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        );
+        let cold_decision = governor
+            .check_workload_admission(&cx, &cold_request)
+            .expect("cold workload admission should classify");
+        assert!(matches!(cold_decision.decision, AdmissionDecision::Admit));
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.workload_feedback_reports_recorded, 1);
+        assert_eq!(metrics.live_workload_feedback_reports, 1);
+        assert!(
+            (metrics.max_workload_feedback_pressure_scaled - 8500).abs() <= 1,
+            "scaled workload feedback should round near 8500, got {}",
+            metrics.max_workload_feedback_pressure_scaled
+        );
+    }
+
+    #[test]
+    fn test_workload_pressure_feedback_rejects_background_and_prunes_stale_reports() {
+        let governor = create_test_swarm_governor();
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "background-proof",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::Test,
+                )
+                .with_pressures(0.10, 0.20, 0.30, 0.90, 0.40),
+            )
+            .expect("workload feedback should be accepted");
+        assert!(matches!(
+            governor.record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "bad-feedback",
+                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmProofLaneKind::Test,
+                )
+                .with_pressures(f64::NAN, 0.0, 0.0, 0.0, 0.0),
+            ),
+            Err(SwarmPressureError::SwarmCoordinationFailed { .. })
+        ));
+
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let request = SwarmWorkloadAdmissionRequest::new(
+            "background-proof",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        )
+        .with_priority(RegionPriority::BestEffort);
+        let decision = governor
+            .check_workload_admission(&cx, &request)
+            .expect("background workload admission should classify");
+        assert!(matches!(decision.decision, AdmissionDecision::Reject));
+        assert!(decision.envelope.is_none());
+        assert!(decision.reason.contains("live workload feedback reports"));
+
+        {
+            let mut reports = governor.workload_pressure_feedback.lock().unwrap();
+            reports
+                .get_mut("background-proof")
+                .expect("feedback should exist before forced stale pruning")
+                .reported_at = Instant::now()
+                - governor
+                    .config
+                    .workload_feedback_max_age
+                    .checked_mul(2)
+                    .expect("test feedback max age should double");
+        }
+        assert_eq!(governor.prune_stale_workload_pressure_feedback(), 1);
+        assert_eq!(governor.metrics().live_workload_feedback_reports, 0);
+    }
+
+    #[test]
     fn test_hard_pressure_reject_is_not_downgraded_by_moderate_degradation() {
         let runtime = std::sync::Arc::new(
             RuntimeBuilder::new()
@@ -2838,6 +3238,7 @@ mod tests {
                         level,
                         None,
                         SwarmPeerPressureSummary::EMPTY,
+                        SwarmWorkloadPressureSummary::EMPTY,
                     )
                     .expect("metamorphic degradation admission should classify");
                 let rank = admission_rank(decision.decision);
@@ -2857,6 +3258,7 @@ mod tests {
                 DegradationLevel::Emergency,
                 None,
                 SwarmPeerPressureSummary::EMPTY,
+                SwarmWorkloadPressureSummary::EMPTY,
             )
             .expect("critical admission should classify");
         assert!(matches!(critical.decision, AdmissionDecision::Admit));
@@ -2931,6 +3333,7 @@ mod tests {
                         DegradationLevel::None,
                         None,
                         governor.peer_pressure_summary(Instant::now()),
+                        SwarmWorkloadPressureSummary::EMPTY,
                     )
                     .expect("peer-pressure admission should classify");
                 let rank = admission_rank(decision.decision);
