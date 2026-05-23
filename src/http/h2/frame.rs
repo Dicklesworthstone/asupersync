@@ -751,13 +751,13 @@ impl SettingsFrame {
         }
 
         let mut settings = Vec::new();
-        let mut cursor = 0;
-        while cursor + 6 <= payload.len() {
-            let id = ((u16::from(payload[cursor])) << 8) | u16::from(payload[cursor + 1]);
-            let value = ((u32::from(payload[cursor + 2])) << 24)
-                | ((u32::from(payload[cursor + 3])) << 16)
-                | ((u32::from(payload[cursor + 4])) << 8)
-                | u32::from(payload[cursor + 5]);
+        let mut cursor: usize = 0;
+        while cursor.saturating_add(6) <= payload.len() {
+            let id = ((u16::from(payload[cursor])) << 8) | u16::from(payload[cursor.saturating_add(1)]);
+            let value = ((u32::from(payload[cursor.saturating_add(2)])) << 24)
+                | ((u32::from(payload[cursor.saturating_add(3)])) << 16)
+                | ((u32::from(payload[cursor.saturating_add(4)])) << 8)
+                | u32::from(payload[cursor.saturating_add(5)]);
 
             // RFC 7540 Section 6.5.2: SETTINGS_ENABLE_PUSH MUST be 0 or 1.
             if id == 0x2 && value > 1 {
@@ -779,7 +779,7 @@ impl SettingsFrame {
             if let Some(setting) = Setting::from_id_value(id, value) {
                 settings.push(setting);
             }
-            cursor += 6;
+            cursor = cursor.saturating_add(6);
         }
 
         Ok(Self { settings, ack })
@@ -2272,11 +2272,11 @@ mod tests {
             (WindowUpdateFrame::new(0, 0), None),
             (WindowUpdateFrame::new(3, 0), Some(3)),
             (
-                WindowUpdateFrame::new(0, MAX_WINDOW_UPDATE_INCREMENT + 1),
+                WindowUpdateFrame::new(0, MAX_WINDOW_UPDATE_INCREMENT.saturating_add(1)),
                 None,
             ),
             (
-                WindowUpdateFrame::new(3, MAX_WINDOW_UPDATE_INCREMENT + 1),
+                WindowUpdateFrame::new(3, MAX_WINDOW_UPDATE_INCREMENT.saturating_add(1)),
                 Some(3),
             ),
         ];
@@ -2456,7 +2456,7 @@ mod tests {
 
     #[test]
     fn test_try_frame_length_rejects_above_max() {
-        let err = try_frame_length(MAX_FRAME_SIZE as usize + 1).unwrap_err();
+        let err = try_frame_length((MAX_FRAME_SIZE as usize).saturating_add(1)).unwrap_err();
         assert_eq!(err.code, ErrorCode::FrameSizeError);
         assert!(err.to_string().contains("payload length"));
     }
@@ -2465,7 +2465,7 @@ mod tests {
     fn test_data_frame_encode_rejects_payload_above_max() {
         let original = DataFrame::new(
             1,
-            Bytes::from(vec![0_u8; MAX_FRAME_SIZE as usize + 1]),
+            Bytes::from(vec![0_u8; (MAX_FRAME_SIZE as usize).saturating_add(1)]),
             true,
         );
 
@@ -2587,8 +2587,8 @@ mod tests {
         };
         let cases = [
             (0x04_u16, 0x8000_0000_u32, ErrorCode::FlowControlError),
-            (0x05, MIN_MAX_FRAME_SIZE - 1, ErrorCode::ProtocolError),
-            (0x05, MAX_FRAME_SIZE + 1, ErrorCode::ProtocolError),
+            (0x05, MIN_MAX_FRAME_SIZE.saturating_sub(1), ErrorCode::ProtocolError),
+            (0x05, MAX_FRAME_SIZE.saturating_add(1), ErrorCode::ProtocolError),
         ];
 
         for (id, value, expected_code) in cases {
@@ -2605,15 +2605,15 @@ mod tests {
     fn settings_frame_encode_rejects_invalid_wire_bounds_without_partial_write() {
         let cases = [
             (
-                Setting::InitialWindowSize(MAX_INITIAL_WINDOW_SIZE + 1),
+                Setting::InitialWindowSize(MAX_INITIAL_WINDOW_SIZE.saturating_add(1)),
                 ErrorCode::FlowControlError,
             ),
             (
-                Setting::MaxFrameSize(MIN_MAX_FRAME_SIZE - 1),
+                Setting::MaxFrameSize(MIN_MAX_FRAME_SIZE.saturating_sub(1)),
                 ErrorCode::ProtocolError,
             ),
             (
-                Setting::MaxFrameSize(MAX_FRAME_SIZE + 1),
+                Setting::MaxFrameSize(MAX_FRAME_SIZE.saturating_add(1)),
                 ErrorCode::ProtocolError,
             ),
         ];

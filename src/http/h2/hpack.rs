@@ -190,7 +190,7 @@ static STATIC_EXACT_INDEX: LazyLock<HashMap<(&'static str, &'static str), usize>
         STATIC_TABLE
             .iter()
             .enumerate()
-            .map(|(i, &(n, v))| ((n, v), i + 1))
+            .map(|(i, &(n, v))| ((n, v), i.saturating_add(1)))
             .collect()
     });
 
@@ -198,7 +198,7 @@ static STATIC_EXACT_INDEX: LazyLock<HashMap<(&'static str, &'static str), usize>
 static STATIC_NAME_INDEX: LazyLock<HashMap<&'static str, usize>> = LazyLock::new(|| {
     let mut map = HashMap::with_capacity(STATIC_TABLE.len());
     for (i, &(name, _)) in STATIC_TABLE.iter().enumerate() {
-        map.entry(name).or_insert(i + 1);
+        map.entry(name).or_insert(i.saturating_add(1));
     }
     map
 });
@@ -297,7 +297,7 @@ impl Header {
     /// Size = name bytes + value bytes + 32 overhead.
     #[must_use]
     pub fn size(&self) -> usize {
-        self.name.len() + self.value.len() + 32
+        self.name.len().saturating_add(self.value.len()).saturating_add(32)
     }
 }
 
@@ -353,7 +353,7 @@ impl DynamicTableEntry {
     }
 
     fn size(&self) -> usize {
-        self.name.len() + self.value.len() + 32
+        self.name.len().saturating_add(self.value.len()).saturating_add(32)
     }
 }
 
@@ -570,7 +570,7 @@ impl DynamicTable {
         if index == 0 || index > self.entries.len() {
             None
         } else {
-            Some(self.entries[index - 1].to_header())
+            Some(self.entries[index.saturating_sub(1)].to_header())
         }
     }
 
@@ -646,7 +646,7 @@ fn get_static(index: usize) -> Option<(&'static str, &'static str)> {
     if index == 0 || index > STATIC_TABLE.len() {
         None
     } else {
-        Some(STATIC_TABLE[index - 1])
+        Some(STATIC_TABLE[index.saturating_sub(1)])
     }
 }
 
@@ -895,9 +895,9 @@ impl Decoder {
         // RFC 7541 §4.2: dynamic table size updates are valid at the beginning
         // of a header block and MAY appear multiple times there.
         // Accept update-only blocks as valid.
-        let mut size_update_count = 0;
+        let mut size_update_count: usize = 0;
         while !src.is_empty() && (src[0] & 0xe0 == 0x20) {
-            size_update_count += 1;
+            size_update_count = size_update_count.saturating_add(1);
             if size_update_count > MAX_SIZE_UPDATES {
                 return Err(H2Error::compression(
                     "too many consecutive dynamic table size updates",
@@ -916,7 +916,7 @@ impl Decoder {
         while !src.is_empty() {
             let remaining_budget = self.max_header_list_size.saturating_sub(total_size);
             let header = self.decode_header(src, remaining_budget)?;
-            total_size += header.size();
+            total_size = total_size.saturating_add(header.size());
             if total_size > self.max_header_list_size {
                 return Err(H2Error::compression("header list too large"));
             }
@@ -1054,7 +1054,7 @@ impl Default for Decoder {
 /// Encode an integer using HPACK integer encoding.
 #[inline]
 fn encode_integer(dst: &mut BytesMut, value: usize, prefix_bits: u8, prefix: u8) {
-    let max_first = (1 << prefix_bits) - 1;
+    let max_first = (1_usize << prefix_bits).saturating_sub(1);
 
     if value < max_first {
         dst.put_u8(prefix | value as u8);
@@ -1075,7 +1075,7 @@ fn decode_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, H2Error> {
         return Err(H2Error::compression("unexpected end of integer"));
     }
 
-    let max_first = (1 << prefix_bits) - 1;
+    let max_first = (1_usize << prefix_bits).saturating_sub(1);
     let first = src[0] & max_first as u8;
     let _ = src.split_to(1);
 
@@ -1127,7 +1127,7 @@ const fn build_bit_masks() -> [u64; 65] {
     let mut masks = [0u64; 65];
     let mut i = 0usize;
     while i <= 64 {
-        masks[i] = if i == 64 { u64::MAX } else { (1u64 << i) - 1 };
+        masks[i] = if i == 64 { u64::MAX } else { (1u64 << i).saturating_sub(1) };
         i += 1;
     }
     masks
@@ -1794,28 +1794,28 @@ mod tests {
 
     #[test]
     fn test_decoder_caps_allowed_table_size() {
-        let decoder = Decoder::with_max_size(MAX_ALLOWED_TABLE_SIZE + 1);
+        let decoder = Decoder::with_max_size(MAX_ALLOWED_TABLE_SIZE.saturating_add(1));
         assert_eq!(decoder.allowed_table_size, MAX_ALLOWED_TABLE_SIZE);
         assert_eq!(decoder.dynamic_table.max_size(), MAX_ALLOWED_TABLE_SIZE);
     }
 
     #[test]
     fn test_encoder_with_max_size_caps_to_allowed_maximum() {
-        let encoder = Encoder::with_max_size(MAX_ALLOWED_TABLE_SIZE + 1);
+        let encoder = Encoder::with_max_size(MAX_ALLOWED_TABLE_SIZE.saturating_add(1));
         assert_eq!(encoder.dynamic_table_max_size(), MAX_ALLOWED_TABLE_SIZE);
     }
 
     #[test]
     fn test_dynamic_table_set_max_size_caps_to_allowed_maximum() {
         let mut table = DynamicTable::new();
-        table.set_max_size(MAX_ALLOWED_TABLE_SIZE + 1);
+        table.set_max_size(MAX_ALLOWED_TABLE_SIZE.saturating_add(1));
         assert_eq!(table.max_size(), MAX_ALLOWED_TABLE_SIZE);
     }
 
     #[test]
     fn test_set_allowed_table_size_caps() {
         let mut decoder = Decoder::new();
-        decoder.set_allowed_table_size(MAX_ALLOWED_TABLE_SIZE + 1);
+        decoder.set_allowed_table_size(MAX_ALLOWED_TABLE_SIZE.saturating_add(1));
         assert_eq!(decoder.allowed_table_size, MAX_ALLOWED_TABLE_SIZE);
     }
 

@@ -299,8 +299,8 @@ where
         if self.prefetched_pos < self.prefetched.len() && buf.remaining() > 0 {
             let remaining_prefetched = self.prefetched.len() - self.prefetched_pos;
             let to_copy = remaining_prefetched.min(buf.remaining());
-            buf.put_slice(&self.prefetched[self.prefetched_pos..self.prefetched_pos + to_copy]);
-            self.prefetched_pos += to_copy;
+            buf.put_slice(&self.prefetched[self.prefetched_pos..self.prefetched_pos.saturating_add(to_copy)]);
+            self.prefetched_pos = self.prefetched_pos.saturating_add(to_copy);
             return Poll::Ready(Ok(()));
         }
         Pin::new(&mut self.io).poll_read(cx, buf)
@@ -371,7 +371,7 @@ impl ParsedUrl {
                 ClientError::InvalidUrl("unclosed bracket in IPv6 address".into())
             })?;
             let host_str = &authority[..=bracket_end];
-            let rest = &authority[bracket_end + 1..];
+            let rest = &authority[bracket_end.saturating_add(1)..];
             if let Some(port_str) = rest.strip_prefix(':') {
                 let port: u16 = port_str
                     .parse()
@@ -395,7 +395,7 @@ impl ParsedUrl {
             };
             (authority.to_owned(), default_port)
         } else if let Some(i) = authority.rfind(':') {
-            let port_str = &authority[i + 1..];
+            let port_str = &authority[i.saturating_add(1)..];
             let port: u16 = port_str
                 .parse()
                 .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
@@ -876,7 +876,7 @@ impl HttpClient {
                     RedirectPolicy::Limited(max) => {
                         if redirect_count >= *max {
                             return Err(ClientError::TooManyRedirects {
-                                count: redirect_count + 1,
+                                count: redirect_count.saturating_add(1),
                                 max: *max,
                             });
                         }
@@ -908,7 +908,7 @@ impl HttpClient {
                                     next_parsed,
                                     next_headers,
                                     next_body,
-                                    redirect_count + 1,
+                                    redirect_count.saturating_add(1),
                                 )
                                 .await;
                         }
@@ -949,7 +949,7 @@ impl HttpClient {
                     RedirectPolicy::Limited(max) => {
                         if redirect_count >= *max {
                             return Err(ClientError::TooManyRedirects {
-                                count: redirect_count + 1,
+                                count: redirect_count.saturating_add(1),
                                 max: *max,
                             });
                         }
@@ -985,7 +985,7 @@ impl HttpClient {
                                     next_parsed,
                                     next_headers,
                                     next_body,
-                                    redirect_count + 1,
+                                    redirect_count.saturating_add(1),
                                 )
                                 .await;
                         }
@@ -1968,7 +1968,7 @@ async fn socks5_negotiate_auth(
         methods.push(SOCKS5_AUTH_USER_PASS);
     }
 
-    let mut greeting = Vec::with_capacity(2 + methods.len());
+    let mut greeting = Vec::with_capacity(2_usize.saturating_add(methods.len()));
     greeting.push(SOCKS5_VERSION);
     greeting.push(
         u8::try_from(methods.len()).map_err(|_| {
@@ -2014,7 +2014,7 @@ async fn socks5_authenticate_user_pass(
     let pass_len = u8::try_from(password.len())
         .map_err(|_| ClientError::ProxyError("SOCKS5 password exceeds 255 bytes".into()))?;
 
-    let mut auth = Vec::with_capacity(3 + username.len() + password.len());
+    let mut auth = Vec::with_capacity(3_usize.saturating_add(username.len()).saturating_add(password.len()));
     auth.push(0x01);
     auth.push(user_len);
     auth.extend_from_slice(username.as_bytes());
@@ -2271,7 +2271,7 @@ fn strip_sensitive_headers_on_redirect(
 }
 
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
-    memmem::find(buf, b"\r\n\r\n").map(|idx| idx + 4)
+    memmem::find(buf, b"\r\n\r\n").map(|idx| idx.saturating_add(4))
 }
 
 fn contains_ctl_line_break(s: &str) -> bool {
@@ -3434,8 +3434,8 @@ mod tests {
             }
             let remaining = self.read_data.len() - self.read_pos;
             let to_copy = remaining.min(buf.remaining());
-            buf.put_slice(&self.read_data[self.read_pos..self.read_pos + to_copy]);
-            self.read_pos += to_copy;
+            buf.put_slice(&self.read_data[self.read_pos..self.read_pos.saturating_add(to_copy)]);
+            self.read_pos = self.read_pos.saturating_add(to_copy);
             Poll::Ready(Ok(()))
         }
     }

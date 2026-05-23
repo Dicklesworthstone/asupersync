@@ -2076,9 +2076,9 @@ mod tests {
         log_case(
             "multi_member_first_member_only",
             multi_member.len(),
-            first_member.len() + second_member.len(),
+            first_member.len().saturating_add(second_member.len()),
             multi_member_outcome.output.len(),
-            Some((first_member.len() + second_member.len()) as f64 / multi_member.len() as f64),
+            Some((first_member.len().saturating_add(second_member.len())) as f64 / multi_member.len() as f64),
             "single-member-fail-closed",
             &gzip_trailer_fields_for_log(&multi_member),
             multi_member_outcome.error_kind,
