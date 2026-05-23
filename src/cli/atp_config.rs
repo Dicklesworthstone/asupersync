@@ -3,11 +3,99 @@
 //! Implements the ATP-I1 configuration precedence:
 //! CLI flags > local config > daemon policy > defaults
 
-use crate::cli::atp_command_tree::{AtpConfig, AtpProfile};
+use crate::cli::atp_command_tree::{AtpConfig as CommandAtpConfig, AtpProfile};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Schema version for the persisted ATP installation config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigVersion {
+    /// Monotonic schema version for `config.toml`.
+    pub schema: u32,
+}
+
+impl ConfigVersion {
+    /// Current persisted installation config schema.
+    #[must_use]
+    pub const fn current() -> Self {
+        Self { schema: 1 }
+    }
+}
+
+/// Receive safety policy selected during first-run setup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiveSafetyPolicy {
+    /// Ask before accepting every transfer.
+    AlwaysAsk,
+    /// Auto-accept transfers only from known peers.
+    KnownPeersOnly,
+    /// Auto-accept all incoming transfers.
+    AutoAcceptAll,
+}
+
+/// How long ATP should retain transfer proof logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProofRetentionPolicy {
+    /// Retain proof logs for the given number of days.
+    Days(u64),
+}
+
+/// Persisted first-run ATP installation configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpInstallConfig {
+    /// Schema version for this config file.
+    pub schema_version: ConfigVersion,
+    /// ATP binary version that last wrote this configuration.
+    pub version: Option<Version>,
+    /// Durable identity key-store path.
+    pub identity_path: PathBuf,
+    /// Inbox directory for received transfers.
+    pub inbox_dir: PathBuf,
+    /// Known-peer directory path.
+    pub peer_dir: PathBuf,
+    /// Daemon state directory path.
+    pub daemon_state_dir: PathBuf,
+    /// Receive safety policy.
+    pub receive_safety_policy: ReceiveSafetyPolicy,
+    /// Proof retention policy.
+    pub proof_retention_policy: ProofRetentionPolicy,
+    /// Whether Tailscale candidate discovery is enabled.
+    pub enable_tailscale: bool,
+    /// Whether ATP-managed relays are allowed.
+    pub allow_relays: bool,
+    /// CLI/daemon logging level.
+    pub logging_level: String,
+    /// Stable platform label used for service integration.
+    pub service_platform: String,
+    /// Whether daemon service integration was requested.
+    pub service_daemon_enabled: bool,
+    /// Whether daemon auto-start was requested.
+    pub service_auto_start: bool,
+}
+
+impl AtpInstallConfig {
+    /// Read a persisted ATP installation config from TOML.
+    pub fn read_from_file(path: &Path) -> Result<Self, ConfigError> {
+        let content =
+            fs::read_to_string(path).map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
+        toml::from_str(&content).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))
+    }
+
+    /// Write a persisted ATP installation config to TOML.
+    pub fn write_to_file(&self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| ConfigError::FileWrite(path.to_path_buf(), e))?;
+        }
+
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| ConfigError::Serialize(path.to_path_buf(), e))?;
+        fs::write(path, content).map_err(|e| ConfigError::FileWrite(path.to_path_buf(), e))
+    }
+}
 
 /// Configuration source and precedence level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -26,7 +114,7 @@ pub enum ConfigSource {
 #[derive(Debug)]
 pub struct AtpConfigManager {
     /// Configuration layers by precedence.
-    layers: BTreeMap<ConfigSource, AtpConfig>,
+    layers: BTreeMap<ConfigSource, CommandAtpConfig>,
     /// Configuration file paths.
     config_paths: ConfigPaths,
 }
@@ -103,7 +191,7 @@ impl AtpConfigManager {
         // Load default configuration
         manager
             .layers
-            .insert(ConfigSource::Defaults, AtpConfig::default());
+            .insert(ConfigSource::Defaults, CommandAtpConfig::default());
 
         manager
     }
@@ -117,7 +205,7 @@ impl AtpConfigManager {
 
         manager
             .layers
-            .insert(ConfigSource::Defaults, AtpConfig::default());
+            .insert(ConfigSource::Defaults, CommandAtpConfig::default());
         manager
     }
 
@@ -145,13 +233,13 @@ impl AtpConfigManager {
     }
 
     /// Set CLI flag overrides.
-    pub fn set_cli_overrides(&mut self, cli_config: AtpConfig) {
+    pub fn set_cli_overrides(&mut self, cli_config: CommandAtpConfig) {
         self.layers.insert(ConfigSource::CliFlags, cli_config);
     }
 
     /// Get the final merged configuration with full precedence.
-    pub fn merged_config(&self) -> AtpConfig {
-        let mut merged = AtpConfig::default();
+    pub fn merged_config(&self) -> CommandAtpConfig {
+        let mut merged = CommandAtpConfig::default();
 
         // Apply layers in precedence order (lowest to highest)
         for (_source, config) in &self.layers {
@@ -172,7 +260,11 @@ impl AtpConfigManager {
     }
 
     /// Save configuration to specified scope.
-    pub fn save_config(&self, scope: ConfigScope, config: &AtpConfig) -> Result<(), ConfigError> {
+    pub fn save_config(
+        &self,
+        scope: ConfigScope,
+        config: &CommandAtpConfig,
+    ) -> Result<(), ConfigError> {
         let path = match scope {
             ConfigScope::User => &self.config_paths.user_config,
             ConfigScope::Local => &self.config_paths.local_config,
@@ -183,18 +275,18 @@ impl AtpConfigManager {
     }
 
     /// Load configuration from TOML file.
-    fn load_config_file(&self, path: &Path) -> Result<AtpConfig, ConfigError> {
+    fn load_config_file(&self, path: &Path) -> Result<CommandAtpConfig, ConfigError> {
         let content =
             fs::read_to_string(path).map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
 
-        let config: AtpConfig =
+        let config: CommandAtpConfig =
             toml::from_str(&content).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
 
         Ok(config)
     }
 
     /// Save configuration to TOML file.
-    fn save_config_file(&self, path: &Path, config: &AtpConfig) -> Result<(), ConfigError> {
+    fn save_config_file(&self, path: &Path, config: &CommandAtpConfig) -> Result<(), ConfigError> {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -330,7 +422,7 @@ pub enum ConfigError {
 }
 
 /// Merge two configurations with precedence (second overrides first).
-fn merge_configs(mut base: AtpConfig, overlay: AtpConfig) -> AtpConfig {
+fn merge_configs(mut base: CommandAtpConfig, overlay: CommandAtpConfig) -> CommandAtpConfig {
     if overlay.profile.is_some() {
         base.profile = overlay.profile;
     }
@@ -369,7 +461,7 @@ fn merge_configs(mut base: AtpConfig, overlay: AtpConfig) -> AtpConfig {
 }
 
 /// Extract configuration value by key name.
-fn get_config_value(config: &AtpConfig, key: &str) -> Option<serde_json::Value> {
+fn get_config_value(config: &CommandAtpConfig, key: &str) -> Option<serde_json::Value> {
     match key {
         "profile" => config.profile.map(|p| serde_json::to_value(p).unwrap()),
         "chunk_size" => config
@@ -439,6 +531,7 @@ impl<'de> Deserialize<'de> for ConfigSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::atp_command_tree::AtpConfig;
     use tempfile::TempDir;
 
     #[test]

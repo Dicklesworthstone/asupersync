@@ -3,11 +3,62 @@
 //! Handles initial ATP installation, identity creation, configuration setup,
 //! and capability/privacy choices for new users.
 
-use crate::atp::config::{AtpConfig, ProofRetentionPolicy, ReceiveSafetyPolicy};
-use crate::atp::identity::{AtpIdentity, IdentityKeyStore};
-use crate::types::outcome::Outcome;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use crate::cli::atp_config::{AtpInstallConfig, ConfigError, ConfigVersion};
+pub use crate::cli::atp_config::{ProofRetentionPolicy, ReceiveSafetyPolicy};
+use crate::security::keys::{IdentityKeyStore, KeyStoreError};
+use semver::Version;
+use std::path::PathBuf;
+use std::time::{SystemTime, SystemTimeError};
+
+const LINUX_SYSTEMD_SERVICE_TEMPLATE: &str = r#"[Unit]
+Description=ATP daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={binary_path} atpd serve --config {config_dir}
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target
+"#;
+
+const MACOS_LAUNCHD_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.asupersync.atp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{binary_path}</string>
+    <string>atpd</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>{config_dir}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+"#;
+
+const WINDOWS_SERVICE_SCRIPT_TEMPLATE: &str = r#"$ErrorActionPreference = "Stop"
+$binary = "{binary_path}"
+$config = "{config_dir}"
+New-Service -Name "ATP" -DisplayName "Asupersync Transfer Protocol" -BinaryPathName "`"$binary`" atpd serve --config `"$config`"" -StartupType Automatic
+"#;
+
+fn render_service_template(template: &str, binary_path: &str, config_dir: &str) -> String {
+    template
+        .replace("{binary_path}", binary_path)
+        .replace("{config_dir}", config_dir)
+}
 
 /// First-run setup configuration and prompts
 #[derive(Debug, Clone)]
@@ -192,17 +243,27 @@ impl FirstRunSetup {
     }
 
     fn initialize_configuration(&self) -> Result<SetupResult, FirstRunError> {
-        // Generate ATP identity
-        let mut key_store = IdentityKeyStore::new(&self.identity_path)?;
-        let identity = key_store.generate_identity()?;
+        let key_store = if self.identity_path.exists() {
+            IdentityKeyStore::load(&self.identity_path)?
+        } else {
+            IdentityKeyStore::create(
+                &self.identity_path,
+                generate_identity_seed()?,
+                unix_time_micros()?,
+            )?
+        };
+        let identity = key_store.export_public()?;
+        let identity_fingerprint = identity.fingerprint.to_hex();
 
-        println!(
-            "🔑 Generated ATP identity: {}",
-            identity.public_key_fingerprint()
-        );
+        println!("🔑 Generated ATP identity: {}", identity_fingerprint);
 
         // Create ATP configuration
-        let config = AtpConfig {
+        let config = AtpInstallConfig {
+            schema_version: ConfigVersion::current(),
+            version: Some(
+                Version::parse(env!("CARGO_PKG_VERSION"))
+                    .map_err(|e| FirstRunError::ConfigError(e.to_string()))?,
+            ),
             identity_path: self.identity_path.clone(),
             inbox_dir: self.inbox_dir.clone(),
             peer_dir: self.peer_dir.clone(),
@@ -212,7 +273,9 @@ impl FirstRunSetup {
             enable_tailscale: self.privacy_choices.enable_tailscale,
             allow_relays: self.privacy_choices.allow_relays,
             logging_level: self.privacy_choices.logging_level.clone(),
-            service_integration: self.service_integration.clone(),
+            service_platform: self.service_integration.platform.as_str().to_string(),
+            service_daemon_enabled: self.service_integration.enable_daemon,
+            service_auto_start: self.service_integration.auto_start,
         };
 
         // Write configuration
@@ -229,7 +292,7 @@ impl FirstRunSetup {
 
         Ok(SetupResult {
             config_path,
-            identity_fingerprint: identity.public_key_fingerprint(),
+            identity_fingerprint,
             service_installed: self.service_integration.enable_daemon,
             platform: self.service_integration.platform.clone(),
         })
@@ -243,7 +306,7 @@ impl FirstRunSetup {
             &self.daemon_state_dir,
         ] {
             std::fs::create_dir_all(dir)
-                .map_err(|e| FirstRunError::DirectoryCreation(dir.clone(), e))?;
+                .map_err(|e| FirstRunError::DirectoryCreation((*dir).clone(), e))?;
         }
         Ok(())
     }
@@ -301,16 +364,14 @@ impl FirstRunSetup {
     }
 
     fn setup_systemd_service(&self) -> Result<(), FirstRunError> {
-        let service_dir = dirs::home_dir()
-            .ok_or(FirstRunError::PlatformNotSupported)?
-            .join(".config/systemd/user");
+        let service_dir = home_dir()?.join(".config/systemd/user");
 
         std::fs::create_dir_all(&service_dir)?;
 
-        let service_content = format!(
-            include_str!("../packaging/linux/atp.service"),
-            binary_path = std::env::current_exe()?.display(),
-            config_dir = self.config_dir.display()
+        let service_content = render_service_template(
+            LINUX_SYSTEMD_SERVICE_TEMPLATE,
+            &std::env::current_exe()?.display().to_string(),
+            &self.config_dir.display().to_string(),
         );
 
         let service_path = service_dir.join("atp.service");
@@ -328,16 +389,14 @@ impl FirstRunSetup {
     }
 
     fn setup_launchd_service(&self) -> Result<(), FirstRunError> {
-        let agents_dir = dirs::home_dir()
-            .ok_or(FirstRunError::PlatformNotSupported)?
-            .join("Library/LaunchAgents");
+        let agents_dir = home_dir()?.join("Library/LaunchAgents");
 
         std::fs::create_dir_all(&agents_dir)?;
 
-        let plist_content = format!(
-            include_str!("../packaging/macos/com.asupersync.atp.plist"),
-            binary_path = std::env::current_exe()?.display(),
-            config_dir = self.config_dir.display()
+        let plist_content = render_service_template(
+            MACOS_LAUNCHD_TEMPLATE,
+            &std::env::current_exe()?.display().to_string(),
+            &self.config_dir.display().to_string(),
         );
 
         let plist_path = agents_dir.join("com.asupersync.atp.plist");
@@ -355,10 +414,10 @@ impl FirstRunSetup {
         let scripts_dir = self.config_dir.join("scripts");
         std::fs::create_dir_all(&scripts_dir)?;
 
-        let install_script = format!(
-            include_str!("../packaging/windows/install-service.ps1"),
-            binary_path = std::env::current_exe()?.display(),
-            config_dir = self.config_dir.display()
+        let install_script = render_service_template(
+            WINDOWS_SERVICE_SCRIPT_TEMPLATE,
+            &std::env::current_exe()?.display().to_string(),
+            &self.config_dir.display().to_string(),
         );
 
         let script_path = scripts_dir.join("install-service.ps1");
@@ -380,12 +439,15 @@ impl FirstRunSetup {
         use std::io::{self, BufRead};
 
         let stdin = io::stdin();
-        let line = stdin
+        let Some(line) = stdin
             .lock()
             .lines()
             .next()
-            .ok_or(FirstRunError::InputError)?
-            .map_err(FirstRunError::InputError)?;
+            .transpose()
+            .map_err(FirstRunError::InputError)?
+        else {
+            return Ok(None);
+        };
 
         if line.trim().is_empty() {
             Ok(None)
@@ -404,18 +466,56 @@ impl FirstRunSetup {
     }
 
     fn default_config_dir() -> Result<PathBuf, FirstRunError> {
-        dirs::config_dir()
-            .map(|dir| dir.join("atp"))
-            .or_else(|| dirs::home_dir().map(|dir| dir.join(".atp")))
-            .ok_or(FirstRunError::PlatformNotSupported)
+        if cfg!(windows) {
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                return Ok(PathBuf::from(appdata).join("Asupersync").join("atp"));
+            }
+        } else if cfg!(target_os = "macos") {
+            return Ok(home_dir()?
+                .join("Library")
+                .join("Application Support")
+                .join("Asupersync")
+                .join("atp"));
+        } else if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Ok(PathBuf::from(xdg_config_home)
+                .join("asupersync")
+                .join("atp"));
+        }
+
+        Ok(home_dir()?.join(".config").join("asupersync").join("atp"))
     }
 
     fn default_inbox_dir() -> Result<PathBuf, FirstRunError> {
-        dirs::download_dir()
-            .map(|dir| dir.join("ATP"))
-            .or_else(|| dirs::home_dir().map(|dir| dir.join("Downloads/ATP")))
-            .ok_or(FirstRunError::PlatformNotSupported)
+        Ok(home_dir()?.join("Downloads").join("ATP"))
     }
+}
+
+fn home_dir() -> Result<PathBuf, FirstRunError> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(profile));
+    }
+    match (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+        (Some(drive), Some(path)) => Ok(PathBuf::from(drive).join(path)),
+        _ => Err(FirstRunError::PlatformNotSupported),
+    }
+}
+
+fn generate_identity_seed() -> Result<[u8; 32], FirstRunError> {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).map_err(|e| FirstRunError::IdentityError(e.to_string()))?;
+    Ok(seed)
+}
+
+fn unix_time_micros() -> Result<u64, FirstRunError> {
+    let micros = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_micros();
+    u64::try_from(micros).map_err(|_| {
+        FirstRunError::ConfigError("system time exceeds u64 microsecond range".to_string())
+    })
 }
 
 /// User privacy and capability choices
@@ -498,6 +598,18 @@ pub enum ServicePlatform {
     Other,
 }
 
+impl ServicePlatform {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::MacOS => "macos",
+            Self::Windows => "windows",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// Result of first-run setup
 #[derive(Debug)]
 pub struct SetupResult {
@@ -532,6 +644,24 @@ pub enum FirstRunError {
 impl From<std::io::Error> for FirstRunError {
     fn from(e: std::io::Error) -> Self {
         Self::InputError(e)
+    }
+}
+
+impl From<ConfigError> for FirstRunError {
+    fn from(e: ConfigError) -> Self {
+        Self::ConfigError(e.to_string())
+    }
+}
+
+impl From<KeyStoreError> for FirstRunError {
+    fn from(e: KeyStoreError) -> Self {
+        Self::IdentityError(e.to_string())
+    }
+}
+
+impl From<SystemTimeError> for FirstRunError {
+    fn from(e: SystemTimeError) -> Self {
+        Self::ConfigError(format!("system clock is before UNIX_EPOCH: {e}"))
     }
 }
 
@@ -576,6 +706,29 @@ mod tests {
         assert!(setup.inbox_dir.exists());
         assert!(setup.peer_dir.exists());
         assert!(setup.daemon_state_dir.exists());
+    }
+
+    #[test]
+    fn initialize_configuration_writes_install_config_and_reuses_identity() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut setup = FirstRunSetup::new().unwrap();
+        setup.config_dir = temp_dir.path().join("atp");
+        setup.inbox_dir = temp_dir.path().join("inbox");
+        setup.identity_path = setup.config_dir.join("identity.key");
+        setup.peer_dir = setup.config_dir.join("peers");
+        setup.daemon_state_dir = setup.config_dir.join("daemon");
+        setup.service_integration.enable_daemon = false;
+        setup.create_directories().unwrap();
+
+        let first = setup.initialize_configuration().unwrap();
+        let second = setup.initialize_configuration().unwrap();
+        let config = AtpInstallConfig::read_from_file(&first.config_path).unwrap();
+
+        assert_eq!(first.identity_fingerprint, second.identity_fingerprint);
+        assert_eq!(config.schema_version, ConfigVersion::current());
+        assert_eq!(config.identity_path, setup.identity_path);
+        assert_eq!(config.inbox_dir, setup.inbox_dir);
+        assert!(first.config_path.exists());
     }
 
     /// Test that all completion assets referenced in generate_shell_completions exist.
