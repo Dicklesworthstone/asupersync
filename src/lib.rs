@@ -253,6 +253,8 @@ pub mod cli_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod database_grpc_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod deterministic_state_golden_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod database_pool_transaction_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_obligation_metamorphic_tests;
