@@ -249,6 +249,8 @@ pub mod database_pool_transaction_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_service_messaging_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod fs_config_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod http_grpc_protocol_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod lab_trace_observability_security_metamorphic_tests;
