@@ -11,6 +11,13 @@ pub mod codec_round_trip;
 pub mod cx_capability_semantics;
 pub mod messaging_broker_parity;
 pub mod tls_handshake;
+
+// Runtime+Scheduler Conformance Test Harnesses
+pub mod harness;
+pub mod remote_conformance;
+pub mod kernel_conformance;
+pub mod reactor_conformance;
+pub mod scheduler_conformance;
 // pub mod codec_framing;
 // codec_framing.rs would collide with the codec_framing/ directory;
 // the new exhaustive-properties suite lives in codec_framing_properties.rs.
@@ -195,6 +202,20 @@ pub use trace_replay_idempotency_metamorphic::{
 pub use websocket_extension_negotiation_rfc6455::WsExtensionConformanceHarness;
 pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
+// Runtime+Scheduler Conformance Test Harnesses
+pub use harness::{
+    ConformanceTestResult as RuntimeConformanceTestResult,
+    CoverageStats as RuntimeCoverageStats,
+    RequirementLevel as RuntimeRequirementLevel,
+    RuntimeConformanceHarness,
+    TestCategory as RuntimeTestCategory,
+    TestVerdict as RuntimeTestVerdict,
+};
+pub use remote_conformance::RemoteConformanceHarness;
+pub use kernel_conformance::KernelConformanceHarness;
+pub use reactor_conformance::ReactorConformanceHarness;
+pub use scheduler_conformance::SchedulerConformanceHarness;
+
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -341,6 +362,30 @@ pub enum TestCategory {
     RaceBudgetExhaustion,
     FinalizerInvocation,
     RegionQuiescence,
+    // Runtime+Scheduler conformance categories
+    DistributedStructuredConcurrency,
+    NamedComputationContract,
+    RemoteCapabilityModel,
+    RemoteLeaseManagement,
+    RemoteMessageProtocol,
+    RemoteTaskLifecycle,
+    SnapshotContract,
+    ControllerRegistration,
+    VersionCompatibility,
+    ObservabilityContract,
+    IoEventNotification,
+    RegistrationLifecycle,
+    EdgeTriggeredMode,
+    ThreadSafety,
+    PlatformAbstraction,
+    TaskExecution,
+    WorkStealing,
+    LoadBalancing,
+    PriorityScheduling,
+    CancellationLane,
+    TaskPoolManagement,
+    PanicIsolation,
+    MetricsCollection,
 }
 
 // Unified conformance test result
@@ -1121,6 +1166,59 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         })
         .collect();
     results.extend(grpc_trailer_results);
+
+    // Runtime+Scheduler Conformance Tests
+    let runtime_results: Vec<ConformanceTestResult> = harness::run_full_runtime_conformance_suite()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_name.to_owned(),
+            description: format!("Runtime+Scheduler: {}", r.test_name),
+            category: match r.category {
+                harness::TestCategory::DistributedStructuredConcurrency => TestCategory::DistributedStructuredConcurrency,
+                harness::TestCategory::NamedComputationContract => TestCategory::NamedComputationContract,
+                harness::TestCategory::RemoteCapabilityModel => TestCategory::RemoteCapabilityModel,
+                harness::TestCategory::RemoteLeaseManagement => TestCategory::RemoteLeaseManagement,
+                harness::TestCategory::RemoteMessageProtocol => TestCategory::RemoteMessageProtocol,
+                harness::TestCategory::RemoteTaskLifecycle => TestCategory::RemoteTaskLifecycle,
+                harness::TestCategory::SnapshotContract => TestCategory::SnapshotContract,
+                harness::TestCategory::ControllerRegistration => TestCategory::ControllerRegistration,
+                harness::TestCategory::VersionCompatibility => TestCategory::VersionCompatibility,
+                harness::TestCategory::ObservabilityContract => TestCategory::ObservabilityContract,
+                harness::TestCategory::IoEventNotification => TestCategory::IoEventNotification,
+                harness::TestCategory::RegistrationLifecycle => TestCategory::RegistrationLifecycle,
+                harness::TestCategory::EdgeTriggeredMode => TestCategory::EdgeTriggeredMode,
+                harness::TestCategory::ThreadSafety => TestCategory::ThreadSafety,
+                harness::TestCategory::PlatformAbstraction => TestCategory::PlatformAbstraction,
+                harness::TestCategory::TaskExecution => TestCategory::TaskExecution,
+                harness::TestCategory::WorkStealing => TestCategory::WorkStealing,
+                harness::TestCategory::LoadBalancing => TestCategory::LoadBalancing,
+                harness::TestCategory::PriorityScheduling => TestCategory::PriorityScheduling,
+                harness::TestCategory::CancellationLane => TestCategory::CancellationLane,
+                harness::TestCategory::TaskPoolManagement => TestCategory::TaskPoolManagement,
+                harness::TestCategory::PanicIsolation => TestCategory::PanicIsolation,
+                harness::TestCategory::MetricsCollection => TestCategory::MetricsCollection,
+            },
+            requirement_level: match r.requirement_level {
+                harness::RequirementLevel::Must => RequirementLevel::Must,
+                harness::RequirementLevel::Should => RequirementLevel::Should,
+                harness::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                harness::TestVerdict::Pass => TestVerdict::Pass,
+                harness::TestVerdict::Fail(_) => TestVerdict::Fail,
+                harness::TestVerdict::XFail(_) => TestVerdict::ExpectedFailure,
+                harness::TestVerdict::Skip(_) => TestVerdict::Skipped,
+            },
+            error_message: match &r.verdict {
+                harness::TestVerdict::Fail(msg) => Some(msg.clone()),
+                harness::TestVerdict::XFail(msg) => Some(msg.clone()),
+                harness::TestVerdict::Skip(msg) => Some(msg.clone()),
+                _ => None,
+            },
+            execution_time_ms: r.duration_micros.map(|d| d / 1000).unwrap_or(0),
+        })
+        .collect();
+    results.extend(runtime_results);
 
     // Additional conformance suites will be added here:
     // - WebSocket RFC 6455 (close frames)
