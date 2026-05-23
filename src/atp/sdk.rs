@@ -24,12 +24,14 @@ use crate::net::atp::protocol::outcome::{
 };
 use crate::sync::ContendedMutex;
 use crate::types::outcome::Outcome;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, PoisonError};
 
 const TRANSFER_REGISTRY_SHARDS: usize = 64;
+const CANCEL_IDEMPOTENCY_DOMAIN: &[u8] = b"ATP-SDK-CANCEL-IDEMPOTENCY-V1\0";
 
 type TransferActorHandle = Arc<ContendedMutex<TransferActor>>;
 
@@ -122,10 +124,22 @@ fn transfer_shard_index(transfer_id: TransferId, shard_count: usize) -> usize {
     }
 }
 
+fn cancel_idempotency_key(transfer_id: TransferId) -> IdempotencyKey {
+    let mut hasher = Sha256::new();
+    hasher.update(CANCEL_IDEMPOTENCY_DOMAIN);
+    hasher.update(transfer_id.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut raw = [0_u8; 16];
+    raw.copy_from_slice(&digest[..16]);
+    let value = u128::from_be_bytes(raw).max(1);
+    IdempotencyKey::new(value)
+}
+
 fn request_transfer_cancel(actor: &TransferActorHandle) {
     let mut actor = actor.lock().unwrap_or_else(PoisonError::into_inner);
     let cancel_cmd = TransferCommand::new(
-        IdempotencyKey::new(0), // TODO: Generate proper key
+        cancel_idempotency_key(actor.transfer_id),
         TransferCommandKind::Cancel {
             phase: crate::atp::transfer::TransferCancelPhase::Requested,
         },
@@ -1338,6 +1352,40 @@ mod tests {
         request_transfer_cancel(&removed.actor);
         let actor = actor.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(actor.state(), TransferState::Cancelling);
+    }
+
+    #[test]
+    fn transfer_cancel_key_is_bound_to_transfer_id() {
+        let first_id = TransferId::new([11; 32]);
+        let second_id = TransferId::new([12; 32]);
+        let first_actor = registry_actor(first_id);
+        let second_actor = registry_actor(second_id);
+
+        request_transfer_cancel(&first_actor);
+        request_transfer_cancel(&second_actor);
+
+        let first_actor = first_actor.lock().unwrap_or_else(PoisonError::into_inner);
+        let second_actor = second_actor.lock().unwrap_or_else(PoisonError::into_inner);
+        let first_key = first_actor.journal()[0].key;
+        let second_key = second_actor.journal()[0].key;
+
+        assert_ne!(first_key, IdempotencyKey::new(0));
+        assert_ne!(second_key, IdempotencyKey::new(0));
+        assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn transfer_cancel_key_is_stable_for_duplicate_cancel() {
+        let transfer_id = TransferId::new([13; 32]);
+        let actor = registry_actor(transfer_id);
+
+        request_transfer_cancel(&actor);
+        request_transfer_cancel(&actor);
+
+        let actor = actor.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(actor.state(), TransferState::Cancelling);
+        assert_eq!(actor.journal().len(), 1);
+        assert_eq!(actor.journal()[0].key, cancel_idempotency_key(transfer_id));
     }
 
     #[test]
