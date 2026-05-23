@@ -3,11 +3,11 @@
 //! Extends the existing replay infrastructure in `lab/replay.rs` with ATP-specific
 //! trace minimization and failure reproduction capabilities.
 
-use crate::lab::crashpack::AtpCrashpack;
+use crate::lab::crashpack::{ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack};
 use crate::lab::oracle::OracleReport;
-use crate::trace::TraceEvent;
+use crate::trace::{TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use thiserror::Error;
 
@@ -37,13 +37,14 @@ impl AtpReplayCoordinator {
 
     /// Execute ATP replay with the given seeds and oracle configuration.
     pub fn replay(&self) -> Result<AtpReplayResult, ReplayError> {
-        // TODO: Integrate with actual lab runtime for deterministic replay
-        // This is a placeholder implementation showing the interface
+        let original_violations = self.count_original_violations();
+        self.validate_crashpack_for_replay(original_violations)?;
 
         let mut result = AtpReplayResult {
-            original_violations: self.count_original_violations(),
+            original_violations,
             minimized_trace_length: self.crashpack.trace_events.len(),
-            replay_successful: true,
+            replay_successful: original_violations == 0
+                || !failure_witness_counts(&self.crashpack.trace_events).is_empty(),
             oracle_results: Vec::new(),
             minimization_stats: MinimizationStats::default(),
         };
@@ -68,13 +69,20 @@ impl AtpReplayCoordinator {
 
         // Set environment variables for seeds
         for (name, seed) in &self.crashpack.seeds {
-            cmd.push_str(&format!("export ATP_SEED_{}={}\n", name.to_uppercase(), seed));
+            cmd.push_str(&format!(
+                "export ATP_SEED_{}={}\n",
+                name.to_uppercase(),
+                seed
+            ));
         }
 
         // Add oracle configuration
         cmd.push_str("\n# Oracle configuration\n");
         for result in &self.crashpack.oracle_results {
-            cmd.push_str(&format!("export ATP_ORACLE_{}=enabled\n", result.oracle_name.to_uppercase()));
+            cmd.push_str(&format!(
+                "export ATP_ORACLE_{}=enabled\n",
+                result.oracle_name.to_uppercase()
+            ));
         }
 
         // Main replay command
@@ -87,7 +95,10 @@ impl AtpReplayCoordinator {
 
         // Add minimization if configured
         if self.minimizer_config.enabled {
-            cmd.push_str(&format!(" --minimize --reduction-target {}", self.minimizer_config.reduction_target));
+            cmd.push_str(&format!(
+                " --minimize --reduction-target {}",
+                self.minimizer_config.reduction_target
+            ));
         }
 
         cmd.push_str("\n");
@@ -100,6 +111,33 @@ impl AtpReplayCoordinator {
             .iter()
             .map(|r| r.violations.len())
             .sum()
+    }
+
+    fn validate_crashpack_for_replay(&self, original_violations: usize) -> Result<(), ReplayError> {
+        if self.crashpack.schema_version != ATP_CRASHPACK_SCHEMA_VERSION {
+            return Err(ReplayError::ReplayValidationFailed(format!(
+                "unsupported ATP crashpack schema version {}",
+                self.crashpack.schema_version
+            )));
+        }
+
+        if original_violations == 0 {
+            return Ok(());
+        }
+
+        if self.crashpack.trace_events.is_empty() {
+            return Err(ReplayError::ReplayValidationFailed(
+                "crashpack has oracle violations but no trace events".to_string(),
+            ));
+        }
+
+        if failure_witness_counts(&self.crashpack.trace_events).is_empty() {
+            return Err(ReplayError::ReplayValidationFailed(
+                "crashpack has oracle violations but no trace failure witnesses".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -158,14 +196,17 @@ impl TraceMinimizer {
         let mut minimized = events.to_vec();
         let mut attempts = 0;
         let original_length = events.len();
-        let target_length = (original_length as f64 * (1.0 - self.config.reduction_target)) as usize;
+        let target_length =
+            (original_length as f64 * (1.0 - self.config.reduction_target)) as usize;
 
-        // Identify essential events that must be preserved
-        let essential_indices = self.identify_essential_events(events);
+        // Identify essential events that must be preserved.
+        let essential_events = self.identify_essential_events(events);
+        let mut protected_events = BTreeSet::new();
 
         // Attempt to remove non-essential events
         while minimized.len() > target_length && attempts < self.config.max_attempts {
-            let candidates_for_removal = self.find_removal_candidates(&minimized, &essential_indices);
+            let candidates_for_removal =
+                self.find_removal_candidates(&minimized, &essential_events, &protected_events);
 
             if candidates_for_removal.is_empty() {
                 break; // No more events can be safely removed
@@ -180,8 +221,7 @@ impl TraceMinimizer {
                 if self.validate_trace_preserves_failure(&test_trace, events) {
                     minimized = test_trace;
                 } else {
-                    // Mark this event as essential for future iterations
-                    // (In a full implementation, we'd track this state)
+                    protected_events.insert(event_identity(&minimized[*candidate_idx]));
                 }
             }
 
@@ -189,7 +229,8 @@ impl TraceMinimizer {
         }
 
         let minimized_length = minimized.len();
-        let reduction_percentage = (original_length - minimized_length) as f64 / original_length as f64;
+        let reduction_percentage =
+            (original_length - minimized_length) as f64 / original_length as f64;
 
         Ok(MinimizationResult {
             minimized_events: minimized,
@@ -202,35 +243,38 @@ impl TraceMinimizer {
         })
     }
 
-    fn identify_essential_events(&self, events: &[TraceEvent]) -> BTreeSet<usize> {
+    fn identify_essential_events(&self, events: &[TraceEvent]) -> BTreeSet<String> {
         let mut essential = BTreeSet::new();
 
-        for (idx, event) in events.iter().enumerate() {
-            // Always preserve certain critical event types based on event content
-            let event_str = event.to_string();
-            if (event_str.contains("spawn") || event_str.contains("complete"))
-                && self.config.preserve_oracle_events {
-                essential.insert(idx);
+        for event in events {
+            if self.config.preserve_oracle_events
+                && (is_structural_replay_event(event) || failure_witness_signature(event).is_some())
+            {
+                essential.insert(event_identity(event));
             }
         }
 
         // Preserve timing-sensitive sequences if configured
         if self.config.preserve_timing {
-            // This would analyze timing-dependent patterns
-            // For now, just preserve all events
-            for idx in 0..events.len() {
-                essential.insert(idx);
+            for event in events {
+                essential.insert(event_identity(event));
             }
         }
 
         essential
     }
 
-    fn find_removal_candidates(&self, events: &[TraceEvent], essential: &BTreeSet<usize>) -> Vec<usize> {
+    fn find_removal_candidates(
+        &self,
+        events: &[TraceEvent],
+        essential: &BTreeSet<String>,
+        protected: &BTreeSet<String>,
+    ) -> Vec<usize> {
         let mut candidates = Vec::new();
 
-        for (idx, _event) in events.iter().enumerate() {
-            if !essential.contains(&idx) {
+        for (idx, event) in events.iter().enumerate() {
+            let identity = event_identity(event);
+            if !essential.contains(&identity) && !protected.contains(&identity) {
                 // This event is not marked as essential, so it's a candidate for removal
                 candidates.push(idx);
             }
@@ -242,14 +286,89 @@ impl TraceMinimizer {
         candidates
     }
 
-    fn validate_trace_preserves_failure(&self, test_trace: &[TraceEvent], original_trace: &[TraceEvent]) -> bool {
-        // This would need to actually run the minimized trace and verify that
-        // the same oracle violations are triggered. For now, return a placeholder.
+    fn validate_trace_preserves_failure(
+        &self,
+        test_trace: &[TraceEvent],
+        original_trace: &[TraceEvent],
+    ) -> bool {
+        let original_witnesses = failure_witness_counts(original_trace);
+        if original_witnesses.is_empty() {
+            return test_trace == original_trace;
+        }
 
-        // Simple heuristic: if we've removed too much, probably not valid
-        let reduction = 1.0 - (test_trace.len() as f64 / original_trace.len() as f64);
-        reduction < 0.9 // Don't remove more than 90% of events
+        let test_witnesses = failure_witness_counts(test_trace);
+        original_witnesses
+            .iter()
+            .all(|(signature, count)| test_witnesses.get(signature).unwrap_or(&0) >= count)
     }
+}
+
+fn is_structural_replay_event(event: &TraceEvent) -> bool {
+    matches!(
+        event.kind,
+        TraceEventKind::Spawn
+            | TraceEventKind::Complete
+            | TraceEventKind::CancelRequest
+            | TraceEventKind::CancelAck
+            | TraceEventKind::RegionCancelled
+            | TraceEventKind::RegionCloseBegin
+            | TraceEventKind::RegionCloseComplete
+            | TraceEventKind::ObligationReserve
+            | TraceEventKind::ObligationCommit
+            | TraceEventKind::ObligationAbort
+            | TraceEventKind::ObligationLeak
+    )
+}
+
+fn failure_witness_counts(events: &[TraceEvent]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for signature in events.iter().filter_map(failure_witness_signature) {
+        *counts.entry(signature).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn failure_witness_signature(event: &TraceEvent) -> Option<String> {
+    match event.kind {
+        TraceEventKind::ObligationLeak
+        | TraceEventKind::FuturelockDetected
+        | TraceEventKind::IoError
+        | TraceEventKind::ChaosInjection => {
+            Some(format!("{}:{:?}", event.kind.stable_name(), event.data))
+        }
+        TraceEventKind::UserTrace => match &event.data {
+            TraceData::Message(message) if message_marks_failure(message) => {
+                Some(format!("{}:{message}", event.kind.stable_name()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn message_marks_failure(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "atp violation",
+        "oracle violation",
+        "violation",
+        "failure",
+        "panic",
+        "corrupt",
+        "leak",
+        "error",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn event_identity(event: &TraceEvent) -> String {
+    format!(
+        "{}:{}:{:?}",
+        event.seq,
+        event.kind.stable_name(),
+        event.data
+    )
 }
 
 /// Result of ATP replay execution.

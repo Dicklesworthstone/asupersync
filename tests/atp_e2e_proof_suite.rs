@@ -4,10 +4,18 @@
 
 mod atp;
 
+use asupersync::lab::crashpack::{
+    AtpReplayCoordinator, CrashpackBuilder, TraceMinimizer, TraceMinimizerConfig,
+    TransferOracleResult, TransferViolation, ViolationSeverity,
+};
+use asupersync::lab::oracle::OracleStats;
+use asupersync::trace::{TraceBuffer, TraceEvent};
+use asupersync::types::Time;
 use atp::{
     AtpCrashPoint, AtpE2EContext, AtpForensics, AtpObligationTracker, FaultConfig, FaultInjector,
     FaultPoint, FaultType, ObligationType,
 };
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -137,6 +145,88 @@ fn test_atp_forensics_basic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_atp_replay_rejects_violation_crashpack_without_trace_witness() {
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(violation_result("manifest_integrity"))
+        .build()
+        .expect("crashpack builds");
+
+    let err = AtpReplayCoordinator::new(crashpack)
+        .replay()
+        .expect_err("violation crashpack without trace must fail closed");
+
+    assert!(
+        err.to_string().contains("no trace events"),
+        "unexpected replay error: {err}"
+    );
+}
+
+#[test]
+fn test_atp_replay_minimizer_preserves_failure_witness() {
+    let events = vec![
+        TraceEvent::user_trace(1, Time::from_nanos(1), "setup event"),
+        TraceEvent::user_trace(2, Time::from_nanos(2), "ATP violation: manifest corruption"),
+        TraceEvent::user_trace(3, Time::from_nanos(3), "noise after failure"),
+    ];
+    let minimizer = TraceMinimizer::new(TraceMinimizerConfig {
+        enabled: true,
+        reduction_target: 0.9,
+        max_attempts: 16,
+        preserve_oracle_events: true,
+        preserve_timing: false,
+    });
+
+    let minimized = minimizer.minimize(&events).expect("minimization succeeds");
+
+    assert!(
+        minimized.minimized_events.len() < events.len(),
+        "noise events should be removable"
+    );
+    assert!(
+        minimized
+            .minimized_events
+            .iter()
+            .any(|event| event.to_string().contains("manifest corruption")),
+        "failure witness must be retained"
+    );
+}
+
+#[test]
+fn test_atp_replay_accepts_violation_crashpack_with_trace_witness() {
+    let mut trace = TraceBuffer::new(4);
+    trace.push(TraceEvent::user_trace(
+        1,
+        Time::from_nanos(1),
+        "ATP violation: proof bundle invalid",
+    ));
+    trace.push(TraceEvent::user_trace(
+        2,
+        Time::from_nanos(2),
+        "diagnostic noise",
+    ));
+
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(violation_result("proof_bundle_validity"))
+        .with_trace(trace)
+        .build()
+        .expect("crashpack builds");
+    let result = AtpReplayCoordinator::new(crashpack)
+        .with_minimizer_config(TraceMinimizerConfig {
+            enabled: true,
+            reduction_target: 0.5,
+            max_attempts: 8,
+            preserve_oracle_events: true,
+            preserve_timing: false,
+        })
+        .replay()
+        .expect("witnessed violation crashpack replays structurally");
+
+    assert_eq!(result.original_violations, 1);
+    assert!(result.replay_successful);
+    assert_eq!(result.minimized_trace_length, 1);
+}
+
+#[test]
 fn test_atp_obligation_tracking_basic() -> Result<(), Box<dyn std::error::Error>> {
     let tracker = std::sync::Arc::new(AtpObligationTracker::new());
 
@@ -164,4 +254,21 @@ fn test_atp_obligation_tracking_basic() -> Result<(), Box<dyn std::error::Error>
 
     println!("ATP obligation tracking basic test completed successfully");
     Ok(())
+}
+
+fn violation_result(oracle_name: &str) -> TransferOracleResult {
+    TransferOracleResult {
+        oracle_name: oracle_name.to_string(),
+        violations: vec![TransferViolation {
+            violation_type: oracle_name.to_string(),
+            description: format!("{oracle_name} failed"),
+            severity: ViolationSeverity::High,
+            evidence: BTreeMap::from([("source".to_string(), "test".to_string())]),
+        }],
+        stats: OracleStats {
+            entities_tracked: 1,
+            events_recorded: 1,
+        },
+        passed: false,
+    }
 }
