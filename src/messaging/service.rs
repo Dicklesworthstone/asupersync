@@ -825,7 +825,7 @@ impl ChunkedReplyObligation {
             if self.received_chunks >= expected {
                 return Err(ServiceObligationError::ChunkedReplyOverflow {
                     expected,
-                    received: self.received_chunks + 1,
+                    received: self.received_chunks.saturating_add(1),
                 });
             }
         }
@@ -1985,7 +1985,9 @@ fn duration_to_monitor_nanos(duration: Duration) -> u64 {
 }
 
 fn duration_to_millis(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1000.0
+    let millis = duration.as_secs_f64() * 1000.0;
+    // Ensure we don't pass infinity to calibrators
+    if millis.is_finite() { millis } else { f64::MAX }
 }
 
 fn duration_from_millis(millis: f64) -> Duration {
@@ -3496,7 +3498,7 @@ impl SagaState {
             .steps
             .iter()
             .enumerate()
-            .skip(index + 1)
+            .skip(index.saturating_add(1))
             .find(|(_, step)| !step.status.is_terminal())
             .map(|(next, _)| next);
         Ok(())
