@@ -231,6 +231,48 @@ fn test_atp_replay_accepts_violation_crashpack_with_trace_witness() {
 }
 
 #[test]
+fn test_atp_replay_rejects_unrelated_failure_witness() {
+    let mut trace = TraceBuffer::new(4);
+    trace.push(TraceEvent::user_trace(
+        1,
+        Time::from_nanos(1),
+        "ATP violation: manifest corruption",
+    ));
+
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(violation_result("proof_bundle_validity"))
+        .with_trace(trace)
+        .build()
+        .expect("crashpack builds");
+
+    let err = AtpReplayCoordinator::new(crashpack)
+        .replay()
+        .expect_err("unrelated trace failure must not satisfy proof-bundle replay");
+
+    assert!(
+        err.to_string()
+            .contains("without matching trace failure witnesses: proof_bundle_validity"),
+        "unexpected replay error: {err}"
+    );
+}
+
+#[test]
+fn test_atp_replay_command_sanitizes_seed_and_oracle_env_names() {
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(violation_result("proof-bundle.validity"))
+        .with_seed("lab-seed.v1", 42)
+        .build()
+        .expect("crashpack builds");
+
+    let command = AtpReplayCoordinator::new(crashpack)
+        .generate_replay_command(PathBuf::from("artifacts").as_path())
+        .expect("replay command renders");
+
+    assert!(command.contains("export ATP_SEED_LAB_SEED_V1=42"));
+    assert!(command.contains("export ATP_ORACLE_PROOF_BUNDLE_VALIDITY=enabled"));
+}
+
+#[test]
 fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let mut trace = TraceBuffer::new(8);

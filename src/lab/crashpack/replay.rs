@@ -3,7 +3,7 @@
 //! Extends the existing replay infrastructure in `lab/replay.rs` with ATP-specific
 //! trace minimization and failure reproduction capabilities.
 
-use crate::lab::crashpack::{ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack};
+use crate::lab::crashpack::{ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, TransferViolation};
 use crate::lab::oracle::OracleReport;
 use crate::trace::{TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
@@ -69,11 +69,7 @@ impl AtpReplayCoordinator {
 
         // Set environment variables for seeds
         for (name, seed) in &self.crashpack.seeds {
-            cmd.push_str(&format!(
-                "export ATP_SEED_{}={}\n",
-                name.to_uppercase(),
-                seed
-            ));
+            cmd.push_str(&format!("export ATP_SEED_{}={}\n", env_suffix(name), seed));
         }
 
         // Add oracle configuration
@@ -81,7 +77,7 @@ impl AtpReplayCoordinator {
         for result in &self.crashpack.oracle_results {
             cmd.push_str(&format!(
                 "export ATP_ORACLE_{}=enabled\n",
-                result.oracle_name.to_uppercase()
+                env_suffix(&result.oracle_name)
             ));
         }
 
@@ -131,13 +127,34 @@ impl AtpReplayCoordinator {
             ));
         }
 
-        if failure_witness_counts(&self.crashpack.trace_events).is_empty() {
-            return Err(ReplayError::ReplayValidationFailed(
-                "crashpack has oracle violations but no trace failure witnesses".to_string(),
-            ));
+        let missing_witnesses = self.missing_violation_witnesses();
+        if !missing_witnesses.is_empty() {
+            return Err(ReplayError::ReplayValidationFailed(format!(
+                "crashpack has oracle violations without matching trace failure witnesses: {}",
+                missing_witnesses.join(", ")
+            )));
         }
 
         Ok(())
+    }
+
+    fn missing_violation_witnesses(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+
+        for result in &self.crashpack.oracle_results {
+            for violation in &result.violations {
+                if !self
+                    .crashpack
+                    .trace_events
+                    .iter()
+                    .any(|event| event_witnesses_violation(event, &result.oracle_name, violation))
+                {
+                    missing.push(violation_label(&result.oracle_name, violation));
+                }
+            }
+        }
+
+        missing
     }
 }
 
@@ -346,6 +363,141 @@ fn failure_witness_signature(event: &TraceEvent) -> Option<String> {
     }
 }
 
+fn event_witnesses_violation(
+    event: &TraceEvent,
+    oracle_name: &str,
+    violation: &TransferViolation,
+) -> bool {
+    if structural_event_witnesses_violation(event, oracle_name, violation) {
+        return true;
+    }
+
+    let TraceData::Message(message) = &event.data else {
+        return false;
+    };
+    if !message_marks_failure(message) {
+        return false;
+    }
+
+    let message = message.to_ascii_lowercase();
+    violation_aliases(oracle_name, violation)
+        .iter()
+        .any(|alias| message.contains(alias))
+}
+
+fn structural_event_witnesses_violation(
+    event: &TraceEvent,
+    oracle_name: &str,
+    violation: &TransferViolation,
+) -> bool {
+    let aliases = violation_aliases(oracle_name, violation);
+    match event.kind {
+        TraceEventKind::ObligationLeak => aliases
+            .iter()
+            .any(|alias| alias.contains("obligation") || alias.contains("leak")),
+        TraceEventKind::FuturelockDetected => aliases.iter().any(|alias| {
+            alias.contains("quiescence")
+                || alias.contains("pending")
+                || alias.contains("obligation")
+                || alias.contains("leak")
+        }),
+        TraceEventKind::IoError => aliases
+            .iter()
+            .any(|alias| alias.contains("path") || alias.contains("journal")),
+        TraceEventKind::ChaosInjection => aliases
+            .iter()
+            .any(|alias| alias.contains("crash") || alias.contains("journal")),
+        _ => false,
+    }
+}
+
+fn violation_aliases(oracle_name: &str, violation: &TransferViolation) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::new();
+    push_alias(&mut aliases, oracle_name);
+    push_alias(&mut aliases, &violation.violation_type);
+    push_alias(&mut aliases, &violation.description);
+
+    let known = format!(
+        "{} {}",
+        normalized_identifier(oracle_name),
+        normalized_identifier(&violation.violation_type)
+    );
+
+    if known.contains("manifest") {
+        aliases.extend([
+            "manifest".to_string(),
+            "manifest integrity".to_string(),
+            "manifest corruption".to_string(),
+            "hash".to_string(),
+        ]);
+    }
+    if known.contains("journal") {
+        aliases.extend([
+            "journal".to_string(),
+            "journal consistency".to_string(),
+            "journal gap".to_string(),
+        ]);
+    }
+    if known.contains("quiescence") {
+        aliases.extend([
+            "quiescence".to_string(),
+            "non quiescence".to_string(),
+            "pending operation".to_string(),
+        ]);
+    }
+    if known.contains("obligation") || known.contains("leak") {
+        aliases.extend([
+            "obligation".to_string(),
+            "obligation leak".to_string(),
+            "leak".to_string(),
+        ]);
+    }
+    if known.contains("path") {
+        aliases.extend([
+            "path".to_string(),
+            "path consistency".to_string(),
+            "route".to_string(),
+        ]);
+    }
+    if known.contains("proof") {
+        aliases.extend([
+            "proof".to_string(),
+            "proof bundle".to_string(),
+            "invalid proof".to_string(),
+            "proof invalid".to_string(),
+        ]);
+    }
+
+    aliases
+}
+
+fn push_alias(aliases: &mut BTreeSet<String>, raw: &str) {
+    let normalized = normalized_identifier(raw);
+    if normalized.is_empty() {
+        return;
+    }
+
+    aliases.insert(normalized.clone());
+    aliases.insert(normalized.replace('_', " "));
+}
+
+fn normalized_identifier(raw: &str) -> String {
+    let mut normalized = String::with_capacity(raw.len());
+    let mut last_was_separator = false;
+
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator {
+            normalized.push('_');
+            last_was_separator = true;
+        }
+    }
+
+    normalized.trim_matches('_').to_string()
+}
+
 fn message_marks_failure(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     [
@@ -369,6 +521,32 @@ fn event_identity(event: &TraceEvent) -> String {
         event.kind.stable_name(),
         event.data
     )
+}
+
+fn violation_label(oracle_name: &str, violation: &TransferViolation) -> String {
+    if violation.violation_type.is_empty() || violation.violation_type == oracle_name {
+        oracle_name.to_string()
+    } else {
+        format!("{}/{}", oracle_name, violation.violation_type)
+    }
+}
+
+fn env_suffix(name: &str) -> String {
+    let mut suffix = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            suffix.push(ch.to_ascii_uppercase());
+        } else {
+            suffix.push('_');
+        }
+    }
+
+    let suffix = suffix.trim_matches('_');
+    if suffix.is_empty() {
+        "VALUE".to_string()
+    } else {
+        suffix.to_string()
+    }
 }
 
 /// Result of ATP replay execution.
