@@ -231,6 +231,92 @@ fn test_atp_replay_accepts_violation_crashpack_with_trace_witness() {
 }
 
 #[test]
+fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let mut trace = TraceBuffer::new(8);
+    trace.push(TraceEvent::user_trace(
+        1,
+        Time::from_nanos(1),
+        "ATP path selected: relay route",
+    ));
+    trace.push(TraceEvent::user_trace(
+        2,
+        Time::from_nanos(2),
+        "QUIC UDP packet loss observed",
+    ));
+    trace.push(TraceEvent::user_trace(
+        3,
+        Time::from_nanos(3),
+        "repair RaptorQ symbol recovered",
+    ));
+    trace.push(TraceEvent::user_trace(
+        4,
+        Time::from_nanos(4),
+        "ATP violation: manifest_integrity",
+    ));
+
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(violation_result("manifest_integrity"))
+        .with_trace(trace)
+        .with_seed("lab-seed", 42)
+        .with_artifact_path("artifacts/pathlog")
+        .with_artifact_path("artifacts/pathlog")
+        .with_metadata("transfer_id", "tx-emit")
+        .build()
+        .expect("crashpack builds");
+
+    crashpack.emit_atp_trace(temp_dir.path())?;
+
+    for artifact in [
+        "transfer.atp-trace",
+        "manifest",
+        "journal",
+        "pathlog",
+        "quiclog",
+        "repairlog",
+        "replay_command.sh",
+    ] {
+        assert!(
+            temp_dir.path().join(artifact).exists(),
+            "expected emitted artifact {artifact}"
+        );
+    }
+
+    let manifest = std::fs::read_to_string(temp_dir.path().join("manifest"))?;
+    assert!(manifest.contains("schema_version: 1"));
+    assert!(manifest.contains("violations: 1"));
+    assert!(manifest.contains("metadata.transfer_id: tx-emit"));
+    assert!(manifest.contains("seeds:"));
+    assert!(manifest.contains("lab-seed: 42"));
+    assert!(manifest.contains("artifact_paths:"));
+    assert_eq!(
+        manifest.matches("artifacts/pathlog").count(),
+        1,
+        "artifact paths should be de-duplicated"
+    );
+
+    let journal = std::fs::read_to_string(temp_dir.path().join("journal"))?;
+    assert!(journal.contains("oracle: manifest_integrity"));
+    assert!(journal.contains("type: manifest_integrity"));
+    assert!(journal.contains("severity: High"));
+    assert!(journal.contains("source: test"));
+
+    let replay_command = std::fs::read_to_string(temp_dir.path().join("replay_command.sh"))?;
+    assert!(replay_command.contains("export ATP_SEED_LAB_SEED=42"));
+    assert!(replay_command.contains("atp replay transfer.atp-trace"));
+    assert!(replay_command.contains("--oracle manifest_integrity"));
+
+    let pathlog = std::fs::read_to_string(temp_dir.path().join("pathlog"))?;
+    assert!(pathlog.contains("relay route"));
+    let quiclog = std::fs::read_to_string(temp_dir.path().join("quiclog"))?;
+    assert!(quiclog.contains("QUIC UDP packet loss"));
+    let repairlog = std::fs::read_to_string(temp_dir.path().join("repairlog"))?;
+    assert!(repairlog.contains("RaptorQ symbol"));
+
+    Ok(())
+}
+
+#[test]
 fn test_atp_evidence_ledger_records_deterministic_artifact_metadata() {
     let mut ledger = AtpEvidenceLedger::new();
     let artifact_path = PathBuf::from("artifacts/transfer.atp-trace");

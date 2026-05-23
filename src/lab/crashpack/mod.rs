@@ -33,12 +33,14 @@ pub mod oracle;
 pub mod replay;
 
 // Re-export key types for convenience
-pub use evidence_ledger::{AtpEvidenceLedger, AtpEvidenceEntry, EvidenceSummary};
-pub use oracle::{AtpTransferOracle, AtpTransferState, AtpOracleResult, AtpOracleChecks};
-pub use replay::{AtpReplayCoordinator, TraceMinimizer, TraceMinimizerConfig, ReplayError, AtpReplayResult};
+pub use evidence_ledger::{AtpEvidenceEntry, AtpEvidenceLedger, EvidenceSummary};
+pub use oracle::{AtpOracleChecks, AtpOracleResult, AtpTransferOracle, AtpTransferState};
+pub use replay::{
+    AtpReplayCoordinator, AtpReplayResult, ReplayError, TraceMinimizer, TraceMinimizerConfig,
+};
 
 use crate::lab::oracle::OracleStats;
-use crate::trace::{TraceBuffer, TraceEvent};
+use crate::trace::{TraceBuffer, TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -151,7 +153,10 @@ impl TransferOracle {
                 ),
                 severity: ViolationSeverity::High,
                 evidence: BTreeMap::from([
-                    ("expected_hash".to_string(), state.expected_manifest_hash.clone()),
+                    (
+                        "expected_hash".to_string(),
+                        state.expected_manifest_hash.clone(),
+                    ),
                     ("actual_hash".to_string(), state.manifest_hash.clone()),
                 ]),
             });
@@ -164,11 +169,15 @@ impl TransferOracle {
         if state.journal_gaps > 0 {
             return Some(TransferViolation {
                 violation_type: "journal_consistency".to_string(),
-                description: format!("Journal has {} gaps or ordering violations", state.journal_gaps),
+                description: format!(
+                    "Journal has {} gaps or ordering violations",
+                    state.journal_gaps
+                ),
                 severity: ViolationSeverity::High,
-                evidence: BTreeMap::from([
-                    ("gap_count".to_string(), state.journal_gaps.to_string()),
-                ]),
+                evidence: BTreeMap::from([(
+                    "gap_count".to_string(),
+                    state.journal_gaps.to_string(),
+                )]),
             });
         }
         None
@@ -179,11 +188,15 @@ impl TransferOracle {
         if state.pending_operations > 0 {
             return Some(TransferViolation {
                 violation_type: "quiescence".to_string(),
-                description: format!("Transfer attempted with {} pending operations", state.pending_operations),
+                description: format!(
+                    "Transfer attempted with {} pending operations",
+                    state.pending_operations
+                ),
                 severity: ViolationSeverity::Medium,
-                evidence: BTreeMap::from([
-                    ("pending_count".to_string(), state.pending_operations.to_string()),
-                ]),
+                evidence: BTreeMap::from([(
+                    "pending_count".to_string(),
+                    state.pending_operations.to_string(),
+                )]),
             });
         }
         None
@@ -196,9 +209,10 @@ impl TransferOracle {
                 violation_type: "obligation_leak".to_string(),
                 description: format!("Found {} leaked obligations", state.leaked_obligations),
                 severity: ViolationSeverity::High,
-                evidence: BTreeMap::from([
-                    ("leak_count".to_string(), state.leaked_obligations.to_string()),
-                ]),
+                evidence: BTreeMap::from([(
+                    "leak_count".to_string(),
+                    state.leaked_obligations.to_string(),
+                )]),
             });
         }
         None
@@ -319,7 +333,10 @@ impl CrashpackBuilder {
     }
 
     pub fn with_artifact_path(mut self, path: impl Into<String>) -> Self {
-        self.artifact_paths.push(path.into()); // ubs:ignore - pushing to vector, not path join
+        let path = path.into();
+        if !self.artifact_paths.contains(&path) {
+            self.artifact_paths.push(path); // ubs:ignore - pushing to vector, not path join
+        }
         self
     }
 
@@ -332,7 +349,8 @@ impl CrashpackBuilder {
         Ok(AtpCrashpack {
             schema_version: ATP_CRASHPACK_SCHEMA_VERSION,
             oracle_results: self.oracle_results,
-            trace_events: self.trace_buffer
+            trace_events: self
+                .trace_buffer
                 .as_ref()
                 .map(|buf| buf.iter().cloned().collect())
                 .unwrap_or_default(),
@@ -390,11 +408,28 @@ impl AtpCrashpack {
         let mut manifest = format!(
             "# ATP Crashpack Manifest\nschema_version: {}\nviolations: {}\n",
             self.schema_version,
-            self.oracle_results.iter().map(|r| r.violations.len()).sum::<usize>()
+            self.oracle_results
+                .iter()
+                .map(|r| r.violations.len())
+                .sum::<usize>()
         );
 
         for (key, value) in &self.metadata {
-            manifest.push_str(&format!("{}: {}\n", key, value));
+            manifest.push_str(&format!("metadata.{key}: {value}\n"));
+        }
+
+        if !self.seeds.is_empty() {
+            manifest.push_str("seeds:\n");
+            for (name, seed) in &self.seeds {
+                manifest.push_str(&format!("  {name}: {seed}\n"));
+            }
+        }
+
+        if !self.artifact_paths.is_empty() {
+            manifest.push_str("artifact_paths:\n");
+            for path in &self.artifact_paths {
+                manifest.push_str(&format!("  - {path}\n"));
+            }
         }
 
         Ok(manifest)
@@ -405,43 +440,90 @@ impl AtpCrashpack {
 
         for result in &self.oracle_results {
             journal.push_str(&format!("oracle: {}\n", result.oracle_name));
-            journal.push_str(&format!("  events_recorded: {}\n", result.stats.events_recorded));
-            journal.push_str(&format!("  entities_tracked: {}\n", result.stats.entities_tracked));
+            journal.push_str(&format!(
+                "  events_recorded: {}\n",
+                result.stats.events_recorded
+            ));
+            journal.push_str(&format!(
+                "  entities_tracked: {}\n",
+                result.stats.entities_tracked
+            ));
             journal.push_str(&format!("  passed: {}\n", result.passed));
+            if !result.violations.is_empty() {
+                journal.push_str("  violations:\n");
+                for violation in &result.violations {
+                    journal.push_str(&format!("    - type: {}\n", violation.violation_type));
+                    journal.push_str(&format!("      severity: {:?}\n", violation.severity));
+                    journal.push_str(&format!("      description: {}\n", violation.description));
+                    if !violation.evidence.is_empty() {
+                        journal.push_str("      evidence:\n");
+                        for (key, value) in &violation.evidence {
+                            journal.push_str(&format!("        {key}: {value}\n"));
+                        }
+                    }
+                }
+            }
         }
 
         Ok(journal)
     }
 
     fn emit_specialized_logs(&self, output_dir: &Path) -> Result<(), CrashpackError> {
-        // Pathlog
-        let pathlog = self.trace_events
-            .iter()
-            .filter(|e| e.to_string().contains("spawn") || e.to_string().contains("complete"))
-            .map(|e| format!("{:?}", e))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(output_dir.join("pathlog"), pathlog)?;
-
-        // Quiclog (placeholder for QUIC events)
-        let quiclog = self.trace_events
-            .iter()
-            .filter(|e| e.to_string().contains("quic") || e.to_string().contains("QUIC"))
-            .map(|e| format!("{:?}", e))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(output_dir.join("quiclog"), quiclog)?;
-
-        // Repairlog (placeholder for repair events)
-        let repairlog = self.trace_events
-            .iter()
-            .filter(|e| e.to_string().contains("repair") || e.to_string().contains("raptorq"))
-            .map(|e| format!("{:?}", e))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(output_dir.join("repairlog"), repairlog)?;
+        self.write_specialized_log(output_dir, "pathlog", Self::is_path_event)?;
+        self.write_specialized_log(output_dir, "quiclog", Self::is_quic_event)?;
+        self.write_specialized_log(output_dir, "repairlog", Self::is_repair_event)?;
 
         Ok(())
+    }
+
+    fn write_specialized_log(
+        &self,
+        output_dir: &Path,
+        file_name: &str,
+        include: impl Fn(&TraceEvent) -> bool,
+    ) -> Result<(), CrashpackError> {
+        let log = self
+            .trace_events
+            .iter()
+            .filter(|event| include(event))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(output_dir.join(file_name), log)?;
+        Ok(())
+    }
+
+    fn is_path_event(event: &TraceEvent) -> bool {
+        matches!(
+            event.kind,
+            TraceEventKind::Spawn
+                | TraceEventKind::Schedule
+                | TraceEventKind::Yield
+                | TraceEventKind::Wake
+                | TraceEventKind::Poll
+                | TraceEventKind::Complete
+                | TraceEventKind::RegionCreated
+                | TraceEventKind::RegionCloseBegin
+                | TraceEventKind::RegionCloseComplete
+                | TraceEventKind::RegionCancelled
+                | TraceEventKind::Checkpoint
+        ) || Self::message_contains_any(event, &["path", "route", "racing"])
+    }
+
+    fn is_quic_event(event: &TraceEvent) -> bool {
+        Self::message_contains_any(event, &["quic", "udp", "packet", "connection id"])
+    }
+
+    fn is_repair_event(event: &TraceEvent) -> bool {
+        Self::message_contains_any(event, &["repair", "raptorq", "fec", "symbol"])
+    }
+
+    fn message_contains_any(event: &TraceEvent, needles: &[&str]) -> bool {
+        let TraceData::Message(message) = &event.data else {
+            return false;
+        };
+        let message = message.to_ascii_lowercase();
+        needles.iter().any(|needle| message.contains(needle))
     }
 
     fn generate_replay_command(&self) -> Result<String, CrashpackError> {
@@ -451,7 +533,11 @@ impl AtpCrashpack {
 
         // Add seed information
         for (name, seed) in &self.seeds {
-            cmd.push_str(&format!("export ATP_SEED_{}={}\n", name.to_uppercase(), seed));
+            cmd.push_str(&format!(
+                "export ATP_SEED_{}={}\n",
+                seed_env_suffix(name),
+                seed
+            ));
         }
 
         cmd.push_str("\n# Replay command\n");
@@ -464,6 +550,24 @@ impl AtpCrashpack {
 
         cmd.push_str("\n");
         Ok(cmd)
+    }
+}
+
+fn seed_env_suffix(name: &str) -> String {
+    let mut suffix = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            suffix.push(ch.to_ascii_uppercase());
+        } else {
+            suffix.push('_');
+        }
+    }
+
+    let suffix = suffix.trim_matches('_');
+    if suffix.is_empty() {
+        "SEED".to_string()
+    } else {
+        suffix.to_string()
     }
 }
 
