@@ -893,6 +893,59 @@ pub struct StreamHandle {
     pub manifest: Option<StreamManifest>,
 }
 
+/// Final commit state reported separately from early usability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamFinalCommitState {
+    /// The stream has no manifest yet, so final commit state is unknown.
+    UnknownNoManifest,
+    /// A manifest exists, but no final manifest has been committed.
+    Pending,
+    /// The stream manifest contains a final committed epoch.
+    Committed,
+}
+
+/// Usable-early state exposed by the SDK for a stream handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEarlyUsabilityState {
+    /// No manifest exists, so no early range can be exposed.
+    NoManifest,
+    /// A manifest exists, but no prefix is currently safe under the policy.
+    NotUsableYet,
+    /// A verified prefix is available and the final commit is still pending.
+    VerifiedPrefixAvailable,
+    /// A provisional tail is exposed by explicit policy and carries caveats.
+    ProvisionalPrefixAvailable,
+    /// The stream has reached final committed state.
+    FinalCommitted,
+}
+
+/// SDK report for prefix-first stream consumption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamEarlyUsabilityReport {
+    /// Stream identifier.
+    pub stream_id: String,
+    /// Current usable-early state.
+    pub usable_state: StreamEarlyUsabilityState,
+    /// Final commit state, reported independently of early usability.
+    pub final_commit_state: StreamFinalCommitState,
+    /// Policy used to decide which prefix may be exposed.
+    pub consumption_policy: ConsumptionPolicy,
+    /// Verified contiguous prefix ranges, never crossing gaps or provisional epochs.
+    pub verified_prefix_ranges: Vec<ByteRange>,
+    /// Prefix exposed under the requested policy.
+    pub policy_exposed_prefix: Option<ByteRange>,
+    /// Verified prefix end offset.
+    pub verified_prefix_end: u64,
+    /// Policy-specific exposed prefix end offset.
+    pub policy_prefix_end: u64,
+    /// Total stream bytes advertised by the handle.
+    pub total_bytes: u64,
+    /// Bytes sent so far according to the handle.
+    pub bytes_sent: u64,
+    /// Safety caveats callers must surface before consuming early bytes.
+    pub safety_caveats: Vec<String>,
+}
+
 impl StreamHandle {
     /// Check if the stream is complete.
     pub fn is_complete(&self) -> bool {
@@ -934,6 +987,105 @@ impl StreamHandle {
             .as_ref()
             .map(|m| m.is_complete())
             .unwrap_or(false)
+    }
+
+    /// Build a structured SDK report for prefix-first consumption.
+    ///
+    /// This deliberately reports the usable-early state, verified-prefix map,
+    /// policy caveats, and final commit state as separate fields so callers do
+    /// not infer safety from a single progress number.
+    #[must_use]
+    pub fn early_usability_report(
+        &self,
+        consumption_policy: ConsumptionPolicy,
+    ) -> StreamEarlyUsabilityReport {
+        let Some(manifest) = self.manifest.as_ref() else {
+            return StreamEarlyUsabilityReport {
+                stream_id: self.stream_id.clone(),
+                usable_state: StreamEarlyUsabilityState::NoManifest,
+                final_commit_state: StreamFinalCommitState::UnknownNoManifest,
+                consumption_policy,
+                verified_prefix_ranges: Vec::new(),
+                policy_exposed_prefix: None,
+                verified_prefix_end: 0,
+                policy_prefix_end: 0,
+                total_bytes: self.total_bytes,
+                bytes_sent: self.bytes_sent,
+                safety_caveats: vec![
+                    "stream manifest unavailable; early usability is disabled".to_string(),
+                ],
+            };
+        };
+
+        let final_commit_state = if manifest.is_complete() {
+            StreamFinalCommitState::Committed
+        } else {
+            StreamFinalCommitState::Pending
+        };
+        let verified_prefix_ranges = Self::verified_prefix_ranges(manifest);
+        let verified_prefix_end = manifest.verified_prefix_end();
+        let policy_prefix_end = manifest.consumable_prefix_end(consumption_policy);
+        let policy_exposed_prefix =
+            (policy_prefix_end > 0).then(|| ByteRange::new(0, policy_prefix_end));
+
+        let mut safety_caveats = Vec::new();
+        if final_commit_state == StreamFinalCommitState::Pending {
+            safety_caveats
+                .push("final manifest not committed; expose early bytes separately".to_string());
+        }
+
+        if consumption_policy == ConsumptionPolicy::AllowProvisional
+            && policy_prefix_end > verified_prefix_end
+        {
+            safety_caveats
+                .push("provisional tail is exposed by policy and may be invalidated".to_string());
+        }
+
+        if manifest.latest_verified_offset() > verified_prefix_end {
+            safety_caveats.push(
+                "verified epochs after a gap or non-consumable epoch are withheld".to_string(),
+            );
+        }
+
+        let usable_state = if final_commit_state == StreamFinalCommitState::Committed {
+            StreamEarlyUsabilityState::FinalCommitted
+        } else if policy_prefix_end == 0 {
+            StreamEarlyUsabilityState::NotUsableYet
+        } else if policy_prefix_end > verified_prefix_end {
+            StreamEarlyUsabilityState::ProvisionalPrefixAvailable
+        } else {
+            StreamEarlyUsabilityState::VerifiedPrefixAvailable
+        };
+
+        StreamEarlyUsabilityReport {
+            stream_id: self.stream_id.clone(),
+            usable_state,
+            final_commit_state,
+            consumption_policy,
+            verified_prefix_ranges,
+            policy_exposed_prefix,
+            verified_prefix_end,
+            policy_prefix_end,
+            total_bytes: self.total_bytes,
+            bytes_sent: self.bytes_sent,
+            safety_caveats,
+        }
+    }
+
+    fn verified_prefix_ranges(manifest: &StreamManifest) -> Vec<ByteRange> {
+        let mut expected_start = 0;
+        let mut ranges = Vec::new();
+
+        for epoch in &manifest.epochs {
+            if epoch.byte_range.start != expected_start || !epoch.is_verified() {
+                break;
+            }
+
+            ranges.push(epoch.byte_range);
+            expected_start = epoch.byte_range.end;
+        }
+
+        ranges
     }
 }
 
@@ -1145,6 +1297,190 @@ mod tests {
 
         assert!(handle.is_complete());
         assert_eq!(handle.progress_percent(), 100.0);
+    }
+
+    #[test]
+    fn stream_handle_report_disables_early_use_without_manifest() {
+        let handle = StreamHandle {
+            stream_id: "stream-no-manifest".to_string(),
+            total_bytes: 1000,
+            bytes_sent: 250,
+            manifest: None,
+        };
+
+        let report = handle.early_usability_report(ConsumptionPolicy::VerifiedOnly);
+
+        assert_eq!(report.usable_state, StreamEarlyUsabilityState::NoManifest);
+        assert_eq!(
+            report.final_commit_state,
+            StreamFinalCommitState::UnknownNoManifest
+        );
+        assert!(report.verified_prefix_ranges.is_empty());
+        assert_eq!(report.policy_exposed_prefix, None);
+        assert_eq!(report.verified_prefix_end, 0);
+        assert_eq!(report.policy_prefix_end, 0);
+        assert!(
+            report
+                .safety_caveats
+                .contains(&"stream manifest unavailable; early usability is disabled".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_handle_report_separates_verified_prefix_from_provisional_policy_tail() {
+        let object_id = ObjectId::content(ContentId::new([3; 32]));
+        let mut manifest = StreamManifest::new(object_id.clone());
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id,
+                ByteRange::new(100, 200),
+                EpochState::Provisional,
+                vec![],
+            ))
+            .unwrap();
+
+        let handle = StreamHandle {
+            stream_id: "stream-provisional-tail".to_string(),
+            total_bytes: 300,
+            bytes_sent: 200,
+            manifest: Some(manifest),
+        };
+
+        let verified_only = handle.early_usability_report(ConsumptionPolicy::VerifiedOnly);
+        assert_eq!(
+            verified_only.usable_state,
+            StreamEarlyUsabilityState::VerifiedPrefixAvailable
+        );
+        assert_eq!(
+            verified_only.final_commit_state,
+            StreamFinalCommitState::Pending
+        );
+        assert_eq!(
+            verified_only.verified_prefix_ranges,
+            vec![ByteRange::new(0, 100)]
+        );
+        assert_eq!(
+            verified_only.policy_exposed_prefix,
+            Some(ByteRange::new(0, 100))
+        );
+        assert_eq!(verified_only.verified_prefix_end, 100);
+        assert_eq!(verified_only.policy_prefix_end, 100);
+
+        let provisional = handle.early_usability_report(ConsumptionPolicy::AllowProvisional);
+        assert_eq!(
+            provisional.usable_state,
+            StreamEarlyUsabilityState::ProvisionalPrefixAvailable
+        );
+        assert_eq!(
+            provisional.verified_prefix_ranges,
+            vec![ByteRange::new(0, 100)]
+        );
+        assert_eq!(
+            provisional.policy_exposed_prefix,
+            Some(ByteRange::new(0, 200))
+        );
+        assert_eq!(provisional.verified_prefix_end, 100);
+        assert_eq!(provisional.policy_prefix_end, 200);
+        assert!(
+            provisional.safety_caveats.contains(
+                &"provisional tail is exposed by policy and may be invalidated".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn stream_handle_report_withholds_verified_epochs_after_invalidated_gap() {
+        let object_id = ObjectId::content(ContentId::new([4; 32]));
+        let mut manifest = StreamManifest::new(object_id.clone());
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Invalidated,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                3,
+                object_id,
+                ByteRange::new(200, 300),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+
+        let handle = StreamHandle {
+            stream_id: "stream-gap".to_string(),
+            total_bytes: 300,
+            bytes_sent: 300,
+            manifest: Some(manifest),
+        };
+
+        let report = handle.early_usability_report(ConsumptionPolicy::VerifiedOnly);
+
+        assert_eq!(
+            report.usable_state,
+            StreamEarlyUsabilityState::VerifiedPrefixAvailable
+        );
+        assert_eq!(report.verified_prefix_ranges, vec![ByteRange::new(0, 100)]);
+        assert_eq!(report.policy_exposed_prefix, Some(ByteRange::new(0, 100)));
+        assert!(report.safety_caveats.contains(
+            &"verified epochs after a gap or non-consumable epoch are withheld".to_string()
+        ));
+    }
+
+    #[test]
+    fn stream_handle_report_marks_final_commit_separately() {
+        let object_id = ObjectId::content(ContentId::new([5; 32]));
+        let mut manifest = StreamManifest::new(object_id.clone());
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id,
+                ByteRange::new(0, 100),
+                EpochState::Final,
+                vec![],
+            ))
+            .unwrap();
+
+        let handle = StreamHandle {
+            stream_id: "stream-final".to_string(),
+            total_bytes: 100,
+            bytes_sent: 100,
+            manifest: Some(manifest),
+        };
+
+        let report = handle.early_usability_report(ConsumptionPolicy::VerifiedOnly);
+
+        assert_eq!(
+            report.usable_state,
+            StreamEarlyUsabilityState::FinalCommitted
+        );
+        assert_eq!(report.final_commit_state, StreamFinalCommitState::Committed);
+        assert_eq!(report.verified_prefix_ranges, vec![ByteRange::new(0, 100)]);
+        assert_eq!(report.policy_exposed_prefix, Some(ByteRange::new(0, 100)));
+        assert!(report.safety_caveats.is_empty());
     }
 
     #[test]
