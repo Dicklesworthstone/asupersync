@@ -47,8 +47,8 @@
 mod tests {
     #[cfg(test)]
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use std::cmp::Ordering;
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use std::time::{Duration, Instant, SystemTime};
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -74,7 +74,10 @@ mod tests {
                 offset,
                 key: None,
                 value,
-                timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64,
+                timestamp: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
                 headers: HashMap::new(),
             }
         }
@@ -117,26 +120,43 @@ mod tests {
             Ok(())
         }
 
-        pub fn send_message(&mut self, topic: &str, partition: u32, message: MockKafkaMessage) -> Result<u64, String> {
+        pub fn send_message(
+            &mut self,
+            topic: &str,
+            partition: u32,
+            message: MockKafkaMessage,
+        ) -> Result<u64, String> {
             if self.transaction_active {
                 // In transaction: messages are staged but not committed
-                let offset = *self.next_offset.entry((topic.to_string(), partition)).or_insert(0);
+                let offset = *self
+                    .next_offset
+                    .entry((topic.to_string(), partition))
+                    .or_insert(0);
                 let mut msg = message;
                 msg.topic = topic.to_string();
                 msg.partition = partition;
                 msg.offset = offset;
                 self.sent_messages.push(msg);
-                *self.next_offset.get_mut(&(topic.to_string(), partition)).unwrap() += 1;
+                *self
+                    .next_offset
+                    .get_mut(&(topic.to_string(), partition))
+                    .unwrap() += 1;
                 Ok(offset)
             } else {
                 // Non-transactional: immediate commit
-                let offset = *self.next_offset.entry((topic.to_string(), partition)).or_insert(0);
+                let offset = *self
+                    .next_offset
+                    .entry((topic.to_string(), partition))
+                    .or_insert(0);
                 let mut msg = message;
                 msg.topic = topic.to_string();
                 msg.partition = partition;
                 msg.offset = offset;
                 self.sent_messages.push(msg);
-                *self.next_offset.get_mut(&(topic.to_string(), partition)).unwrap() += 1;
+                *self
+                    .next_offset
+                    .get_mut(&(topic.to_string(), partition))
+                    .unwrap() += 1;
                 Ok(offset)
             }
         }
@@ -193,7 +213,10 @@ mod tests {
                 if consumed >= max_messages {
                     break;
                 }
-                if self.assigned_partitions.contains(&(message.topic.clone(), message.partition)) {
+                if self
+                    .assigned_partitions
+                    .contains(&(message.topic.clone(), message.partition))
+                {
                     self.consumed_messages.push(message.clone());
                     consumed += 1;
                 }
@@ -201,7 +224,8 @@ mod tests {
         }
 
         pub fn commit_offset(&mut self, topic: &str, partition: u32, offset: u64) {
-            self.committed_offsets.insert((topic.to_string(), partition), offset);
+            self.committed_offsets
+                .insert((topic.to_string(), partition), offset);
         }
     }
 
@@ -279,7 +303,8 @@ mod tests {
         }
 
         pub fn subscribe(&mut self, subject: &str) {
-            self.subscriptions.insert(subject.to_string(), MockNATSSubject::new(subject));
+            self.subscriptions
+                .insert(subject.to_string(), MockNATSSubject::new(subject));
         }
 
         pub fn publish(&mut self, subject: &str, data: Vec<u8>) {
@@ -300,7 +325,13 @@ mod tests {
         }
 
         pub fn request(&mut self, subject: &str, data: Vec<u8>) -> String {
-            let reply_subject = format!("_INBOX.{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos());
+            let reply_subject = format!(
+                "_INBOX.{}",
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
             let message = MockNATSMessage {
                 subject: subject.to_string(),
                 reply_to: Some(reply_subject.clone()),
@@ -414,11 +445,16 @@ mod tests {
                 b'$' => {
                     if let Some(len_end) = data[1..].windows(2).position(|w| w == b"\r\n") {
                         let len_str = String::from_utf8_lossy(&data[1..len_end + 1]);
-                        let length = len_str.parse::<usize>().map_err(|_| "Invalid bulk string length")?;
+                        let length = len_str
+                            .parse::<usize>()
+                            .map_err(|_| "Invalid bulk string length")?;
                         let data_start = len_end + 3;
                         if data.len() >= data_start + length + 2 {
                             let bulk_data = data[data_start..data_start + length].to_vec();
-                            Ok((MockRedisValue::BulkString(bulk_data), data_start + length + 2))
+                            Ok((
+                                MockRedisValue::BulkString(bulk_data),
+                                data_start + length + 2,
+                            ))
                         } else {
                             Err("Incomplete bulk string".to_string())
                         }
@@ -427,7 +463,7 @@ mod tests {
                     }
                 }
                 b'#' => {
-                    if data.len() >= 3 && &data[data.len()-2..] == b"\r\n" {
+                    if data.len() >= 3 && &data[data.len() - 2..] == b"\r\n" {
                         let bool_val = match data[1] {
                             b't' => true,
                             b'f' => false,
@@ -452,7 +488,7 @@ mod tests {
 
     #[derive(Debug, Clone)]
     pub struct MockRedisCluster {
-        pub slots: HashMap<u16, String>, // slot -> node_id
+        pub slots: HashMap<u16, String>,    // slot -> node_id
         pub nodes: HashMap<String, String>, // node_id -> address
     }
 
@@ -489,7 +525,10 @@ mod tests {
 
         pub fn route_key(&self, key: &str) -> Option<String> {
             let slot = self.key_to_slot(key);
-            self.slots.get(&slot).and_then(|node_id| self.nodes.get(node_id)).cloned()
+            self.slots
+                .get(&slot)
+                .and_then(|node_id| self.nodes.get(node_id))
+                .cloned()
         }
     }
 
@@ -645,7 +684,9 @@ mod tests {
                 self.cancel_lane.push_back(task);
             } else if task.deadline.is_some() {
                 // Timed lane - insert in EDF order
-                let insert_pos = self.timed_lane.iter()
+                let insert_pos = self
+                    .timed_lane
+                    .iter()
                     .position(|t| t.deadline > task.deadline)
                     .unwrap_or(self.timed_lane.len());
                 self.timed_lane.insert(insert_pos, task);
@@ -767,14 +808,18 @@ mod tests {
         }
 
         pub fn get_load_balance_variance(&self) -> f64 {
-            let worker_loads: Vec<usize> = self.workers.iter()
+            let worker_loads: Vec<usize> = self
+                .workers
+                .iter()
                 .map(|w| w.executed_tasks.len())
                 .collect();
 
             let mean = worker_loads.iter().sum::<usize>() as f64 / worker_loads.len() as f64;
-            let variance = worker_loads.iter()
+            let variance = worker_loads
+                .iter()
                 .map(|&load| (load as f64 - mean).powi(2))
-                .sum::<f64>() / worker_loads.len() as f64;
+                .sum::<f64>()
+                / worker_loads.len() as f64;
 
             variance
         }
