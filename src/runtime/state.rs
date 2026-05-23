@@ -6758,14 +6758,7 @@ mod tests {
             state.region_finalizer_count(region)
         };
 
-        eprintln!(
-            "QUIESCENCE_OBSERVATION scenario_id={scenario_id} observation_tick={observation_tick} caller_surface={caller_surface} region_count={} task_count={} close_state={} finalizer_count={} quiescent={} artifact_paths=none",
-            snapshot.regions.len(),
-            snapshot.tasks.len(),
-            close_state,
-            finalizer_count,
-            quiescent
-        );
+        // Quiescence observation completed
 
         quiescent
     }
@@ -8926,12 +8919,7 @@ mod tests {
 
             let quiescence_tick =
                 first_quiescent_tick.map_or_else(|| "pending".to_string(), |tick| tick.to_string());
-            eprintln!(
-                "CLOSE_REENTRY_OBSERVATION scenario_id={scenario_id} close_attempt_index={close_attempt_index} region_id={root:?} pending_child_count={pending_child_count} finalizer_count={finalizer_count} close_state={close_state} state_transition_sequence={} quiescence_tick={quiescence_tick} close_begin_count={} close_complete_count={} artifact_paths=none",
-                state_transition_sequence.join("->"),
-                close_begin_count_for_root(state),
-                close_complete_count_for_root(state)
-            );
+            // Close reentry observation completed
 
             quiescent
         };
@@ -13399,14 +13387,7 @@ mod tests {
             let report = selected_report
                 .expect("selected read-biased region snapshot scenario should emit a report");
             maybe_write_read_biased_region_snapshot_report(&report_path, &report);
-            println!("read_biased_region_snapshot_report_path={report_path}");
-            println!("READ_BIASED_REGION_SNAPSHOT_REPORT_JSON_BEGIN");
-            println!(
-                "{}",
-                serde_json::to_string(&report)
-                    .expect("serialize compact read-biased region snapshot report")
-            );
-            println!("READ_BIASED_REGION_SNAPSHOT_REPORT_JSON_END");
+            // Read-biased region snapshot report written
         }
 
         crate::test_complete!("read_biased_region_snapshot_smoke_contract_emits_report");

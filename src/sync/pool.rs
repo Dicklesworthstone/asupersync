@@ -5355,12 +5355,7 @@ mod tests {
             "final_acquire_drop_equivalence_verdict": "pass"
         });
 
-        println!("ASUPERSYNC_POOL_ACQUIRE_DROP_EQUIVALENCE_REPORT_BEGIN");
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&report).expect("serialize pool equivalence report")
-        );
-        println!("ASUPERSYNC_POOL_ACQUIRE_DROP_EQUIVALENCE_REPORT_END");
+        // Pool acquire-drop equivalence report completed
 
         crate::test_complete!("pool_acquire_drop_equivalence_report_logs_capacity_counters");
     }

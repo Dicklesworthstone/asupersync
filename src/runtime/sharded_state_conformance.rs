@@ -232,23 +232,18 @@ impl ShardedStateConformanceSuite {
             match result {
                 ConformanceResult::Pass => {
                     passed += 1;
-                    println!("✓ {}: {} ({})", case.id, case.description, case.section);
                 }
                 ConformanceResult::Fail { reason } => {
                     failed += 1;
-                    eprintln!("✗ {}: {} - FAILED: {}", case.id, case.description, reason);
                 }
                 ConformanceResult::Skip { reason } => {
-                    println!("◦ {}: {} - SKIPPED: {}", case.id, case.description, reason);
+                    // Test skipped
                 }
             }
         }
 
         let total = passed + failed;
-        println!("\nShardedState Conformance: {passed}/{total} passed, {failed} failed");
-        if failed > 0 {
-            eprintln!("ERROR: {failed} conformance tests failed");
-        }
+        // ShardedState Conformance: tests completed
 
         (passed, failed)
     }

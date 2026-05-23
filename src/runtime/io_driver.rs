@@ -2910,7 +2910,7 @@ mod io_driver_conformance_integration {
 
         // Generate detailed compliance report
         let compliance_matrix = report.generate_compliance_matrix();
-        println!("\nIoDriver Event Loop Conformance Report:\n{}", compliance_matrix);
+        // IoDriver Event Loop Conformance Report generated
 
         // Verify critical requirements pass
         let must_failures: Vec<_> = report.results.iter()
@@ -2924,8 +2924,7 @@ mod io_driver_conformance_integration {
         let must_pass_rate = report.must_pass_rate();
         let overall_pass_rate = report.pass_rate();
 
-        println!("MUST requirements pass rate: {:.1}%", must_pass_rate * 100.0);
-        println!("Overall pass rate: {:.1}%", overall_pass_rate * 100.0);
+        // MUST requirements and overall pass rate calculated
 
         // Event loop conformance requires 100% MUST pass rate
         assert!(must_pass_rate >= 1.0, "Event loop MUST requirements below 100%: {:.1}%", must_pass_rate * 100.0);
