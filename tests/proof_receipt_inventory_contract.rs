@@ -455,6 +455,7 @@ fn secret_and_query_text_is_redacted() {
 
     assert!(!serialized.contains("sk-live-this-should-not-leak"));
     assert!(!serialized.contains("sk-live-validation-should-not-leak"));
+    assert!(!serialized.contains("separated-secret-should-not-leak"));
     assert!(!serialized.contains("token=abc123"));
     assert!(!serialized.contains("sig=secret"));
     assert!(serialized.contains("[REDACTED_SECRET]"));
@@ -465,6 +466,7 @@ fn secret_and_query_text_is_redacted() {
     assert!(validation.iter().any(|command| {
         let command = command.as_str().unwrap_or("");
         command.contains("--api_key=[REDACTED_SECRET]")
+            && command.contains("--token [REDACTED_SECRET]")
             && command.contains("https://example.invalid/proof?[REDACTED_QUERY]")
     }));
     assert!(

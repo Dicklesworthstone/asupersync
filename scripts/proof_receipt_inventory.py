@@ -26,6 +26,9 @@ TOKEN_RE = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}")
 KEY_VALUE_SECRET_RE = re.compile(
     r"(?i)\b(token|secret|password|api[_-]?key|authorization)(\s*[:=]\s*)([^\s,;]+)"
 )
+SECRET_FLAG_RE = re.compile(
+    r"(?i)(--(?:token|secret|password|api[_-]?key|authorization)\b\s+)(?!-)([^\s,;]+)"
+)
 URL_QUERY_RE = re.compile(r"(https?://[^\s?#)>\]]+)\?[^ \n)>\]]+")
 LONG_WORD_RE = re.compile(r"\b[A-Za-z0-9._~/+=-]{96,}\b")
 SPACE_RE = re.compile(r"\s+")
@@ -120,6 +123,7 @@ def redact_text(text: str, counts: dict[str, int]) -> str:
     text = replace(URL_QUERY_RE, r"\1?[REDACTED_QUERY]", "url_query", text)
     text = replace(TOKEN_RE, r"\1[REDACTED_TOKEN]", "token", text)
     text = replace(KEY_VALUE_SECRET_RE, r"\1\2[REDACTED_SECRET]", "secret", text)
+    text = replace(SECRET_FLAG_RE, r"\1[REDACTED_SECRET]", "secret", text)
     text = replace(LONG_WORD_RE, "[REDACTED_LONG_TOKEN]", "long_token", text)
     return text
 

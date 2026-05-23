@@ -32,15 +32,15 @@
       "superseded_by": "",
       "test_path": "",
       "validation": [
-        "python3 scripts/operator_token_audit_receipt.py --api_key=[REDACTED_SECRET] --endpoint https://example.invalid/proof?[REDACTED_QUERY]"
+        "python3 scripts/operator_token_audit_receipt.py --api_key=[REDACTED_SECRET] --token [REDACTED_SECRET] --endpoint https://example.invalid/proof?[REDACTED_QUERY]"
       ]
     }
   ],
   "redaction_counts": {
     "long_token": 0,
-    "secret": 2,
+    "secret": 3,
     "token": 1,
-    "total": 5,
+    "total": 6,
     "url_query": 2
   },
   "repo_path": "/repo",
