@@ -631,10 +631,8 @@ impl FabricState {
             capacity,
         } = prepared;
         let sequence = self.next_sequence;
-        self.next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .expect("fabric publish sequence counter exhausted");
+        // Use saturating arithmetic to prevent overflow panic
+        self.next_sequence = self.next_sequence.saturating_add(1);
         let local_candidates = self.local_candidates.clone();
 
         for cell_key in routed_cells {
@@ -693,7 +691,8 @@ impl FabricState {
 
         let next = next?;
         let subscriber_state = self.subscribers.get_mut(&subscription_id)?;
-        subscriber_state.next_sequence = next.sequence + 1;
+        // Use saturating arithmetic to prevent overflow
+        subscriber_state.next_sequence = next.sequence.saturating_add(1);
         self.prune_cells(cx);
         Some(next.message)
     }
