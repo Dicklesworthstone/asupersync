@@ -308,6 +308,8 @@ pub struct SwarmPressureGovernorConfig {
     pub workload_feedback_backpressure_threshold: f64,
     /// Maximum live workload leases allowed per proof lane; zero means unlimited.
     pub max_live_workload_leases_per_proof_lane: usize,
+    /// Maximum live workload leases allowed per owner agent; zero means unlimited.
+    pub max_live_workload_leases_per_owner: usize,
     /// Wait time per priority-rank aging step for live workload leases.
     pub workload_lease_starvation_aging_step: Duration,
 }
@@ -331,6 +333,7 @@ impl Default for SwarmPressureGovernorConfig {
             workload_feedback_backpressure_threshold:
                 DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD,
             max_live_workload_leases_per_proof_lane: 0,
+            max_live_workload_leases_per_owner: 0,
             workload_lease_starvation_aging_step: DEFAULT_WORKLOAD_LEASE_STARVATION_AGING_STEP,
         }
     }
@@ -1641,6 +1644,13 @@ impl SwarmPressureGovernor {
                 self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
                 return Err(workload_lease_error(reason));
             }
+            if let Some(reason) = self.workload_lease_owner_capacity_reason(&leases, request) {
+                self.workload_lease_conflicts
+                    .fetch_add(1, Ordering::Relaxed);
+                drop(leases);
+                self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+                return Err(workload_lease_error(reason));
+            }
 
             leases.insert(lease_id, lease);
             expired_receipts
@@ -2221,6 +2231,31 @@ impl SwarmPressureGovernor {
             "proof_lane {} already has {live_lane_count} live workload leases; \
              max_live_workload_leases_per_proof_lane={limit}",
             request.proof_lane.as_str()
+        ))
+    }
+
+    fn workload_lease_owner_capacity_reason(
+        &self,
+        leases: &HashMap<SwarmWorkloadLeaseId, SwarmWorkloadLease>,
+        request: &SwarmWorkloadAdmissionRequest,
+    ) -> Option<String> {
+        let limit = self.config.max_live_workload_leases_per_owner;
+        if limit == 0 {
+            return None;
+        }
+
+        let owner_agent = request.owner.agent_name.trim();
+        let live_owner_count = leases
+            .values()
+            .filter(|lease| lease.state.is_live() && lease.owner.agent_name == owner_agent)
+            .count();
+        if live_owner_count < limit {
+            return None;
+        }
+
+        Some(format!(
+            "owner_agent {owner_agent} already has {live_owner_count} live workload leases; \
+             max_live_workload_leases_per_owner={limit}"
         ))
     }
 
@@ -4387,6 +4422,89 @@ mod tests {
             )
             .expect("released proof-lane capacity should allow the next lease");
         assert_eq!(second.workload_id, "proof-lane-b");
+    }
+
+    #[test]
+    fn test_workload_lease_owner_capacity_rejects_over_cap_and_releases() {
+        let mut config = SwarmPressureGovernorConfig::default();
+        config.max_live_workload_leases_per_owner = 1;
+        let governor = create_test_swarm_governor_with_config(config);
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let first_request = SwarmWorkloadAdmissionRequest::new(
+            "owner-cap-a",
+            SwarmAdmissionOwner::new(" DustyGorge ").with_reservation_scope("owner/a"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib);
+        let second_request = SwarmWorkloadAdmissionRequest::new(
+            "owner-cap-b",
+            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope("owner/b"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::RustfmtCheck);
+        let other_owner_request = SwarmWorkloadAdmissionRequest::new(
+            "owner-cap-other",
+            SwarmAdmissionOwner::new("TealBass").with_reservation_scope("owner/other"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::RustfmtCheck);
+
+        let first_decision = governor
+            .check_workload_admission(&cx, &first_request)
+            .expect("first owner workload admission should classify");
+        let second_decision = governor
+            .check_workload_admission(&cx, &second_request)
+            .expect("second owner workload admission should classify");
+        let other_owner_decision = governor
+            .check_workload_admission(&cx, &other_owner_request)
+            .expect("different owner workload admission should classify");
+
+        let first = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(60, 1),
+                &first_request,
+                &first_decision,
+            )
+            .expect("first workload for capped owner should acquire");
+        let conflict = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(60, 2),
+                &second_request,
+                &second_decision,
+            )
+            .expect_err("same owner should reject over the live lease cap");
+        assert!(matches!(
+            conflict,
+            SwarmPressureError::WorkloadLease { ref reason }
+                if reason.contains("owner_agent DustyGorge already has 1 live workload leases")
+                    && reason.contains("max_live_workload_leases_per_owner=1")
+        ));
+
+        let other_owner = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(60, 3),
+                &other_owner_request,
+                &other_owner_decision,
+            )
+            .expect("different owner should not consume DustyGorge capacity");
+        assert_eq!(other_owner.workload_id, "owner-cap-other");
+        assert_eq!(governor.metrics().workload_lease_conflicts, 1);
+
+        governor
+            .release_workload_lease(first.lease_id)
+            .expect("releasing first owner lease should free owner capacity");
+        let second = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(60, 4),
+                &second_request,
+                &second_decision,
+            )
+            .expect("released owner capacity should allow the next lease");
+        assert_eq!(second.workload_id, "owner-cap-b");
     }
 
     #[test]
