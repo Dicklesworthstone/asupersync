@@ -9,6 +9,7 @@ use super::actor::{
     TransferActorId, TransferActorTopology, TransferChildRegion, TransferObligationId,
     TransferRegionId, TransferTopologyError,
 };
+use super::autotune::AtpTransferPressureSnapshot;
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use std::fmt;
@@ -79,6 +80,18 @@ impl TransferId {
     pub const fn as_bytes(self) -> [u8; 32] {
         self.0
     }
+
+    /// Return a stable lowercase hex id for logs, reports, and proof artifacts.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut output = String::with_capacity(64);
+        for byte in self.0 {
+            output.push(char::from(HEX[usize::from(byte >> 4)]));
+            output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        output
+    }
 }
 
 /// Idempotency key for replay-safe transfer commands.
@@ -141,6 +154,30 @@ pub struct TransferProgress {
     pub repair_symbols: u64,
     /// Selected path id, if a path has won.
     pub selected_path: Option<u64>,
+}
+
+impl TransferProgress {
+    /// Collect transfer-owned pressure metrics into the autotune snapshot shape.
+    ///
+    /// This method only records fields owned by the transfer actor itself:
+    /// offered-but-unverified bytes become in-flight pressure, and
+    /// verified-but-uncommitted bytes become receiver buffer pressure. Transport,
+    /// disk, CPU, repair, and relay collectors can merge their own observations
+    /// into the returned snapshot before policy evaluation.
+    #[must_use]
+    pub fn to_pressure_snapshot(
+        self,
+        trace_id: impl Into<String>,
+        transfer_id: TransferId,
+        sample_count: u32,
+    ) -> AtpTransferPressureSnapshot {
+        let mut snapshot = AtpTransferPressureSnapshot::new(trace_id, transfer_id.to_hex())
+            .with_sample_count(sample_count);
+        snapshot.in_flight_bytes = Some(self.offered_bytes.saturating_sub(self.verified_bytes));
+        snapshot.receive_buffer_queued_bytes =
+            Some(self.verified_bytes.saturating_sub(self.committed_bytes));
+        snapshot
+    }
 }
 
 /// Transfer actor states.
@@ -476,6 +513,17 @@ impl TransferActor {
         self.open_obligations.len()
     }
 
+    /// Collect actor-owned transfer pressure for an autotune decision window.
+    #[must_use]
+    pub fn pressure_snapshot(
+        &self,
+        trace_id: impl Into<String>,
+        sample_count: u32,
+    ) -> AtpTransferPressureSnapshot {
+        self.progress
+            .to_pressure_snapshot(trace_id, self.transfer_id, sample_count)
+    }
+
     /// Apply a command to the actor.
     pub fn apply(&mut self, command: TransferCommand) -> Result<TransferReply, TransferActorError> {
         if self.applied_keys.contains(&command.key) {
@@ -763,6 +811,7 @@ fn command_name(command: &TransferCommandKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::super::actor::{TransferActorTopology, TransferChildRole, TransferRegionId};
+    use super::super::autotune::{AtpAutotuneMetric, AtpAutotuneMetricSample};
     use super::*;
 
     fn manifest() -> TransferManifestRef {
@@ -830,6 +879,62 @@ mod tests {
             baseline,
             TransferId::derive_with_policy([1; 32], [2; 32], [3; 32], [4; 32], [9; 32])
         );
+    }
+
+    #[test]
+    fn transfer_id_hex_is_stable_lowercase() {
+        let mut bytes = [0_u8; 32];
+        bytes[0] = 0xab;
+        bytes[1] = 0xcd;
+        bytes[30] = 0x12;
+        bytes[31] = 0x34;
+
+        assert_eq!(
+            TransferId::new(bytes).to_hex(),
+            "abcd000000000000000000000000000000000000000000000000000000001234"
+        );
+    }
+
+    #[test]
+    fn transfer_progress_collects_actor_owned_pressure_metrics() {
+        let mut actor = actor();
+        actor.progress.offered_bytes = 8_192;
+        actor.progress.verified_bytes = 3_072;
+        actor.progress.committed_bytes = 1_024;
+
+        let snapshot = actor.pressure_snapshot("trace-transfer-actor", 4);
+
+        assert_eq!(snapshot.trace_id, "trace-transfer-actor");
+        assert_eq!(snapshot.transfer_id, actor.transfer_id.to_hex());
+        assert_eq!(snapshot.sample_count, 4);
+        assert_eq!(snapshot.in_flight_bytes, Some(5_120));
+        assert_eq!(snapshot.receive_buffer_queued_bytes, Some(2_048));
+
+        let report = snapshot.to_report();
+        assert_eq!(
+            report.samples,
+            vec![
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::InFlightBytes, 5_120),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::ReceiveBufferQueuedBytes, 2_048,),
+            ]
+        );
+    }
+
+    #[test]
+    fn transfer_progress_pressure_snapshot_saturates_inconsistent_counters() {
+        let progress = TransferProgress {
+            offered_bytes: 10,
+            verified_bytes: 20,
+            committed_bytes: 30,
+            repair_symbols: 0,
+            selected_path: None,
+        };
+
+        let snapshot =
+            progress.to_pressure_snapshot("trace-saturating", TransferId::from_u128(7), 1);
+
+        assert_eq!(snapshot.in_flight_bytes, Some(0));
+        assert_eq!(snapshot.receive_buffer_queued_bytes, Some(0));
     }
 
     fn cmd(key: u128, kind: TransferCommandKind) -> TransferCommand {
