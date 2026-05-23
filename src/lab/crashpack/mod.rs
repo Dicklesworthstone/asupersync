@@ -526,9 +526,9 @@ impl AtpCrashpack {
     }
 
     fn emit_specialized_logs(&self, output_dir: &Path) -> Result<(), CrashpackError> {
-        self.write_specialized_log(output_dir, "pathlog", Self::is_path_event)?;
-        self.write_specialized_log(output_dir, "quiclog", Self::is_quic_event)?;
-        self.write_specialized_log(output_dir, "repairlog", Self::is_repair_event)?;
+        self.write_specialized_log(output_dir, "pathlog", is_atp_path_event)?;
+        self.write_specialized_log(output_dir, "quiclog", is_atp_quic_event)?;
+        self.write_specialized_log(output_dir, "repairlog", is_atp_repair_event)?;
 
         Ok(())
     }
@@ -539,50 +539,58 @@ impl AtpCrashpack {
         file_name: &str,
         include: impl Fn(&TraceEvent) -> bool,
     ) -> Result<(), CrashpackError> {
-        let log = self
-            .trace_events
-            .iter()
-            .filter(|event| include(event))
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let log = atp_specialized_log(&self.trace_events, include);
         std::fs::write(output_dir.join(file_name), log)?;
         Ok(())
     }
+}
 
-    fn is_path_event(event: &TraceEvent) -> bool {
-        matches!(
-            event.kind,
-            TraceEventKind::Spawn
-                | TraceEventKind::Schedule
-                | TraceEventKind::Yield
-                | TraceEventKind::Wake
-                | TraceEventKind::Poll
-                | TraceEventKind::Complete
-                | TraceEventKind::RegionCreated
-                | TraceEventKind::RegionCloseBegin
-                | TraceEventKind::RegionCloseComplete
-                | TraceEventKind::RegionCancelled
-                | TraceEventKind::Checkpoint
-        ) || Self::message_contains_any(event, &["path", "route", "racing"])
-    }
+pub(crate) fn atp_specialized_log(
+    trace_events: &[TraceEvent],
+    include: impl Fn(&TraceEvent) -> bool,
+) -> String {
+    trace_events
+        .iter()
+        .filter(|event| include(event))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-    fn is_quic_event(event: &TraceEvent) -> bool {
-        Self::message_contains_any(event, &["quic", "udp", "packet", "connection id"])
-    }
+pub(crate) fn is_atp_path_event(event: &TraceEvent) -> bool {
+    matches!(
+        event.kind,
+        TraceEventKind::Spawn
+            | TraceEventKind::Schedule
+            | TraceEventKind::Yield
+            | TraceEventKind::Wake
+            | TraceEventKind::Poll
+            | TraceEventKind::Complete
+            | TraceEventKind::RegionCreated
+            | TraceEventKind::RegionCloseBegin
+            | TraceEventKind::RegionCloseComplete
+            | TraceEventKind::RegionCancelled
+            | TraceEventKind::Checkpoint
+    ) || message_contains_any(event, &["path", "route", "racing"])
+}
 
-    fn is_repair_event(event: &TraceEvent) -> bool {
-        Self::message_contains_any(event, &["repair", "raptorq", "fec", "symbol"])
-    }
+pub(crate) fn is_atp_quic_event(event: &TraceEvent) -> bool {
+    message_contains_any(event, &["quic", "udp", "packet", "connection id"])
+}
 
-    fn message_contains_any(event: &TraceEvent, needles: &[&str]) -> bool {
-        let TraceData::Message(message) = &event.data else {
-            return false;
-        };
-        let message = message.to_ascii_lowercase();
-        needles.iter().any(|needle| message.contains(needle))
-    }
+pub(crate) fn is_atp_repair_event(event: &TraceEvent) -> bool {
+    message_contains_any(event, &["repair", "raptorq", "fec", "symbol"])
+}
 
+fn message_contains_any(event: &TraceEvent, needles: &[&str]) -> bool {
+    let TraceData::Message(message) = &event.data else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    needles.iter().any(|needle| message.contains(needle))
+}
+
+impl AtpCrashpack {
     fn generate_replay_command(&self) -> Result<String, CrashpackError> {
         let mut cmd = String::from("#!/bin/bash\n");
         cmd.push_str("# ATP Replay Command\n");

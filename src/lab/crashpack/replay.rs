@@ -6,7 +6,8 @@
 use crate::lab::crashpack::evidence_ledger::{AtpEvidenceEntry, AtpEvidenceLedger};
 use crate::lab::crashpack::{
     ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, TransferOracleResult, TransferViolation,
-    ViolationSeverity,
+    ViolationSeverity, atp_specialized_log, is_atp_path_event, is_atp_quic_event,
+    is_atp_repair_event,
 };
 use crate::lab::oracle::evidence::EvidenceStrength;
 use crate::lab::oracle::{OracleEntryReport, OracleReport, OracleStats};
@@ -127,6 +128,14 @@ impl AtpReplayCoordinator {
         }
 
         let trace_events = read_trace_events(output_dir)?;
+        validate_specialized_replay_log(output_dir, "pathlog", &trace_events, is_atp_path_event)?;
+        validate_specialized_replay_log(output_dir, "quiclog", &trace_events, is_atp_quic_event)?;
+        validate_specialized_replay_log(
+            output_dir,
+            "repairlog",
+            &trace_events,
+            is_atp_repair_event,
+        )?;
 
         let journal_path = output_dir.join("journal");
         let journal = read_replay_artifact(&journal_path)?;
@@ -797,6 +806,23 @@ fn read_trace_events(output_dir: &Path) -> Result<Vec<TraceEvent>, ReplayError> 
             "transfer.atp-trace is not a TraceEvent list: {err}"
         ))
     })
+}
+
+fn validate_specialized_replay_log(
+    output_dir: &Path,
+    artifact: &str,
+    trace_events: &[TraceEvent],
+    include: impl Fn(&TraceEvent) -> bool,
+) -> Result<(), ReplayError> {
+    let actual = read_replay_artifact(&output_dir.join(artifact))?;
+    let expected = atp_specialized_log(trace_events, include);
+    if actual != expected {
+        return Err(replay_validation_failed(format!(
+            "{artifact} mismatch: emitted log does not match transfer.atp-trace projection"
+        )));
+    }
+
+    Ok(())
 }
 
 fn read_evidence_ledger(output_dir: &Path) -> Result<AtpEvidenceLedger, ReplayError> {

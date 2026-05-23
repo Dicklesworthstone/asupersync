@@ -9,6 +9,9 @@
 //! supporting work-stealing for load balancing across workers.
 
 pub mod autotuner;
+pub mod content;
+#[cfg(test)]
+pub mod content_tests;
 pub mod decision_contract;
 #[cfg(test)]
 pub mod edf_priority_metamorphic;
@@ -35,6 +38,7 @@ pub mod shutdown_behavior_audit_test;
 /// Tracks br-asupersync-30atgp.1.
 pub mod state_backing;
 pub mod stealing;
+pub mod stream_priority;
 /// Versioned swarm-evidence artifacts and offline tuning contracts.
 pub mod swarm_evidence;
 pub mod three_lane;
@@ -46,6 +50,10 @@ pub mod worker;
 pub use autotuner::{
     AutotunerConfig, AutotunerRecommendation, HotPathObservation, SchedulerAutotuner,
     extract_observation,
+};
+pub use content::{
+    ContentId, ContentItem, ContentScheduler, PressureSnapshot, PriorityClass, ScheduleEvidence,
+    ScheduleReason,
 };
 pub use global_injector::GlobalInjector;
 pub use global_queue::GlobalQueue;
@@ -76,6 +84,10 @@ pub use swarm_evidence::{
     SwarmDiskPressureLevel, SwarmLaneAdmission, SwarmMemoryBudgetPlan, SwarmMemoryCapacity,
     SwarmMemoryHostTier, SwarmMemoryPressureTier, SwarmRchAdmissibility, SwarmRchCapacity,
     SwarmValidationClass,
+};
+pub use stream_priority::{
+    SchedulerIntegration, SchedulerStats, StreamAssignment, StreamPriority,
+    StreamPriorityScheduler,
 };
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use work_stealing_checker::{

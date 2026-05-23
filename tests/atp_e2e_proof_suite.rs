@@ -661,6 +661,51 @@ fn test_atp_replay_artifacts_reject_replay_command_detached_from_log_artifact()
 }
 
 #[test]
+fn test_atp_replay_artifacts_reject_specialized_log_projection_drift()
+-> Result<(), Box<dyn std::error::Error>> {
+    for artifact in ["pathlog", "quiclog", "repairlog"] {
+        let temp_dir = TempDir::new()?;
+        let mut trace = TraceBuffer::new(8);
+        trace.push(TraceEvent::user_trace(
+            1,
+            Time::from_nanos(1),
+            "ATP path selected: relay route",
+        ));
+        trace.push(TraceEvent::user_trace(
+            2,
+            Time::from_nanos(2),
+            "QUIC UDP packet loss observed",
+        ));
+        trace.push(TraceEvent::user_trace(
+            3,
+            Time::from_nanos(3),
+            "repair RaptorQ symbol recovered",
+        ));
+
+        let crashpack = CrashpackBuilder::new()
+            .with_trace(trace)
+            .build()
+            .expect("crashpack builds");
+
+        crashpack.emit_atp_trace(temp_dir.path())?;
+
+        std::fs::write(
+            temp_dir.path().join(artifact),
+            format!("detached stale {artifact}\n"),
+        )?;
+
+        let err = AtpReplayCoordinator::validate_replay_artifacts(temp_dir.path())
+            .expect_err("specialized log must remain derived from transfer.atp-trace");
+        assert!(
+            err.to_string().contains(&format!("{artifact} mismatch")),
+            "unexpected replay artifact validation error for {artifact}: {err}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_atp_crashpack_quotes_oracle_replay_args() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let crashpack = CrashpackBuilder::new()
