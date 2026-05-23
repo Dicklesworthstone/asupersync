@@ -352,6 +352,10 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
         last_effective_priority_rank = entry.effective_priority_rank;
         assert!(entry.pressure_feedback_present);
         assert!(
+            entry.reason.contains("dominant_pressure_source="),
+            "live workload lease should expose the dominant pressure source in its schedule reason"
+        );
+        assert!(
             entry
                 .replay_pointer
                 .starts_with("swarm-workload-lease://lease/")
@@ -386,12 +390,13 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
         .iter()
         .map(|entry| {
             format!(
-                "{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}",
                 entry.scheduling_rank,
                 entry.workload_id,
                 entry.proof_lane.as_str(),
                 entry.priority,
                 entry.effective_priority_rank,
+                entry.dominant_pressure_source.as_str(),
                 entry.queue_pressure_scaled,
                 entry.disk_io_pressure_scaled,
                 entry.rch_queue_pressure_scaled,

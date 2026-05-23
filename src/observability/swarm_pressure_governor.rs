@@ -366,6 +366,38 @@ impl SwarmPeerPressureSummary {
     }
 }
 
+/// Explicit workload pressure axis that dominated an admission or schedule decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwarmWorkloadPressureSource {
+    /// No live workload feedback pressure was present.
+    None,
+    /// Runtime queue pressure was the dominant workload feedback axis.
+    Queue,
+    /// Disk or artifact-cache IO pressure was the dominant workload feedback axis.
+    DiskIo,
+    /// RCH or remote-worker queue pressure was the dominant workload feedback axis.
+    RchQueue,
+    /// Validation-frontier blocker pressure was the dominant workload feedback axis.
+    ValidationFrontier,
+    /// Cancellation/drain tail-latency pressure was the dominant workload feedback axis.
+    CancellationTail,
+}
+
+impl SwarmWorkloadPressureSource {
+    /// Stable snake-case label for structured logs and proof artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Queue => "queue",
+            Self::DiskIo => "disk_io",
+            Self::RchQueue => "rch_queue",
+            Self::ValidationFrontier => "validation_frontier",
+            Self::CancellationTail => "cancellation_tail",
+        }
+    }
+}
+
 /// Explicit pressure feedback for one agent-swarm workload.
 #[derive(Debug, Clone)]
 pub struct SwarmWorkloadPressureFeedback {
@@ -445,6 +477,18 @@ impl SwarmWorkloadPressureFeedback {
             .max(self.cancellation_tail_pressure)
     }
 
+    /// Dominant pressure axis for structured decision and schedule receipts.
+    #[must_use]
+    pub fn dominant_pressure_source(&self) -> SwarmWorkloadPressureSource {
+        dominant_workload_pressure_source_from_values(
+            self.queue_pressure,
+            self.disk_io_pressure,
+            self.rch_queue_pressure,
+            self.validation_frontier_pressure,
+            self.cancellation_tail_pressure,
+        )
+    }
+
     fn validate(&self) -> Option<String> {
         if self.workload_id.trim().is_empty() {
             return Some("workload pressure feedback workload_id must be non-empty".to_string());
@@ -482,6 +526,7 @@ struct SwarmWorkloadPressureSummary {
     max_validation_frontier_pressure: f64,
     max_cancellation_tail_pressure: f64,
     max_overall_pressure: f64,
+    dominant_pressure_source: SwarmWorkloadPressureSource,
 }
 
 impl SwarmWorkloadPressureSummary {
@@ -493,6 +538,7 @@ impl SwarmWorkloadPressureSummary {
         max_validation_frontier_pressure: 0.0,
         max_cancellation_tail_pressure: 0.0,
         max_overall_pressure: 0.0,
+        dominant_pressure_source: SwarmWorkloadPressureSource::None,
     };
 
     #[must_use]
@@ -965,6 +1011,8 @@ pub struct SwarmWorkloadLeaseScheduleEntry {
     pub cancellation_tail_pressure_scaled: i64,
     /// Maximum live workload pressure ratio scaled by 10_000.
     pub max_pressure_scaled: i64,
+    /// Dominant live workload pressure axis used by schedule ordering.
+    pub dominant_pressure_source: SwarmWorkloadPressureSource,
     /// Structured explanation for logs and replay receipts.
     pub reason: String,
 }
@@ -1091,6 +1139,8 @@ pub struct SwarmAdmissionDecisionReceipt {
     pub workload_feedback_report_count: u64,
     /// Maximum workload feedback pressure ratio scaled by 10_000.
     pub workload_feedback_max_pressure_scaled: i64,
+    /// Dominant workload feedback axis used by this admission decision.
+    pub workload_feedback_dominant_pressure_source: SwarmWorkloadPressureSource,
     /// Workload queue feedback pressure ratio scaled by 10_000.
     pub workload_queue_pressure_scaled: i64,
     /// Workload disk or artifact-cache IO feedback pressure ratio scaled by 10_000.
@@ -2286,6 +2336,9 @@ impl SwarmPressureGovernor {
             cancellation_tail_pressure_scaled,
             max_pressure_scaled,
         ) = Self::schedule_pressure_fields(feedback);
+        let dominant_pressure_source = feedback
+            .map(SwarmWorkloadPressureFeedback::dominant_pressure_source)
+            .unwrap_or(SwarmWorkloadPressureSource::None);
         let wait_age_ms = duration_as_u64_ms(now.saturating_duration_since(lease.issued_at));
         let time_to_expiry_ms = duration_as_u64_ms(lease.expires_at.saturating_duration_since(now));
         SwarmWorkloadLeaseScheduleEntry {
@@ -2316,6 +2369,7 @@ impl SwarmPressureGovernor {
             validation_frontier_pressure_scaled,
             cancellation_tail_pressure_scaled,
             max_pressure_scaled,
+            dominant_pressure_source,
             reason: Self::workload_lease_schedule_reason(lease, feedback, now, aging_step),
         }
     }
@@ -2424,7 +2478,8 @@ impl SwarmPressureGovernor {
     ) -> String {
         let mut base = if let Some(feedback) = feedback {
             format!(
-                "live workload lease scheduled with pressure feedback queue={} disk_io={} rch_queue={} validation_frontier={} cancellation_tail={} max={}",
+                "live workload lease scheduled with pressure feedback dominant_pressure_source={} queue={} disk_io={} rch_queue={} validation_frontier={} cancellation_tail={} max={}",
+                feedback.dominant_pressure_source().as_str(),
                 scale_pressure_for_metrics(feedback.queue_pressure),
                 scale_pressure_for_metrics(feedback.disk_io_pressure),
                 scale_pressure_for_metrics(feedback.rch_queue_pressure),
@@ -2699,6 +2754,7 @@ impl SwarmPressureGovernor {
             workload_feedback_max_pressure_scaled: scale_pressure_for_metrics(
                 workload_pressure.max_overall_pressure,
             ),
+            workload_feedback_dominant_pressure_source: workload_pressure.dominant_pressure_source,
             workload_queue_pressure_scaled: scale_pressure_for_metrics(
                 workload_pressure.max_queue_pressure,
             ),
@@ -2774,6 +2830,14 @@ impl SwarmPressureGovernor {
             summary.max_overall_pressure = summary.max_overall_pressure.max(report.max_pressure());
         }
 
+        summary.dominant_pressure_source = dominant_workload_pressure_source_from_values(
+            summary.max_queue_pressure,
+            summary.max_disk_io_pressure,
+            summary.max_rch_queue_pressure,
+            summary.max_validation_frontier_pressure,
+            summary.max_cancellation_tail_pressure,
+        );
+
         summary
     }
 
@@ -2804,12 +2868,13 @@ impl SwarmPressureGovernor {
     ) -> String {
         if peer_pressure.has_live_pressure() || workload_pressure.has_live_pressure() {
             format!(
-                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, max peer degradation {:?}, {} live workload feedback reports, max workload pressure {:.3} (queue {:.3}, disk_io {:.3}, rch_queue {:.3}, validation_frontier {:.3}, cancellation_tail {:.3})",
+                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, max peer degradation {:?}, {} live workload feedback reports, max workload pressure {:.3}, dominant workload pressure source {} (queue {:.3}, disk_io {:.3}, rch_queue {:.3}, validation_frontier {:.3}, cancellation_tail {:.3})",
                 peer_pressure.live_report_count,
                 peer_pressure.max_overall_pressure,
                 peer_pressure.max_degradation_level,
                 workload_pressure.live_report_count,
                 workload_pressure.max_overall_pressure,
+                workload_pressure.dominant_pressure_source.as_str(),
                 workload_pressure.max_queue_pressure,
                 workload_pressure.max_disk_io_pressure,
                 workload_pressure.max_rch_queue_pressure,
@@ -3047,6 +3112,34 @@ fn scale_pressure_for_metrics(pressure: f64) -> i64 {
     } else {
         (pressure * PRESSURE_SCALE) as i64
     }
+}
+
+fn dominant_workload_pressure_source_from_values(
+    queue_pressure: f64,
+    disk_io_pressure: f64,
+    rch_queue_pressure: f64,
+    validation_frontier_pressure: f64,
+    cancellation_tail_pressure: f64,
+) -> SwarmWorkloadPressureSource {
+    let mut dominant = (SwarmWorkloadPressureSource::None, 0.0);
+    for (source, pressure) in [
+        (SwarmWorkloadPressureSource::Queue, queue_pressure),
+        (SwarmWorkloadPressureSource::DiskIo, disk_io_pressure),
+        (SwarmWorkloadPressureSource::RchQueue, rch_queue_pressure),
+        (
+            SwarmWorkloadPressureSource::ValidationFrontier,
+            validation_frontier_pressure,
+        ),
+        (
+            SwarmWorkloadPressureSource::CancellationTail,
+            cancellation_tail_pressure,
+        ),
+    ] {
+        if pressure.is_finite() && pressure > dominant.1 {
+            dominant = (source, pressure);
+        }
+    }
+    dominant.0
 }
 
 fn workload_lease_error(reason: impl Into<String>) -> SwarmPressureError {
@@ -4711,10 +4804,18 @@ mod tests {
         );
         assert_eq!(schedule[0].workload_id, "cool-rch-lane");
         assert!(schedule[0].pressure_feedback_present);
+        assert_eq!(
+            schedule[0].dominant_pressure_source,
+            SwarmWorkloadPressureSource::RchQueue
+        );
         assert_eq!(schedule[0].max_pressure_scaled, 2000);
         assert_eq!(schedule[0].rch_queue_pressure_scaled, 2000);
         assert_eq!(schedule[1].workload_id, "hot-rch-lane");
         assert!(schedule[1].pressure_feedback_present);
+        assert_eq!(
+            schedule[1].dominant_pressure_source,
+            SwarmWorkloadPressureSource::RchQueue
+        );
         assert_eq!(schedule[1].queue_pressure_scaled, 2000);
         assert_eq!(schedule[1].disk_io_pressure_scaled, 4000);
         assert_eq!(schedule[1].rch_queue_pressure_scaled, 9500);
@@ -4725,6 +4826,11 @@ mod tests {
             schedule[1]
                 .reason
                 .contains("scheduled with pressure feedback")
+        );
+        assert!(
+            schedule[1]
+                .reason
+                .contains("dominant_pressure_source=rch_queue")
         );
     }
 
@@ -4946,6 +5052,11 @@ mod tests {
                 .contains("live workload feedback reports")
         );
         assert!(hot_decision.reason.contains("max workload pressure 0.850"));
+        assert!(
+            hot_decision
+                .reason
+                .contains("dominant workload pressure source rch_queue")
+        );
         assert_eq!(
             hot_decision.decision_receipt.workload_feedback_report_count,
             1
@@ -4955,6 +5066,12 @@ mod tests {
                 .decision_receipt
                 .workload_feedback_max_pressure_scaled,
             8500
+        );
+        assert_eq!(
+            hot_decision
+                .decision_receipt
+                .workload_feedback_dominant_pressure_source,
+            SwarmWorkloadPressureSource::RchQueue
         );
         assert_eq!(
             hot_decision.decision_receipt.workload_queue_pressure_scaled,
@@ -5004,6 +5121,12 @@ mod tests {
                 .decision_receipt
                 .workload_feedback_max_pressure_scaled,
             0
+        );
+        assert_eq!(
+            cold_decision
+                .decision_receipt
+                .workload_feedback_dominant_pressure_source,
+            SwarmWorkloadPressureSource::None
         );
 
         let metrics = governor.metrics();

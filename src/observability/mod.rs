@@ -247,6 +247,7 @@ pub use swarm_pressure_governor::{
     SwarmPressureGovernorConfig, SwarmPressureMetrics, SwarmProofLaneKind,
     SwarmWorkloadAdmissionRequest, SwarmWorkloadLeaseId, SwarmWorkloadLeaseReceipt,
     SwarmWorkloadLeaseScheduleEntry, SwarmWorkloadLeaseState, SwarmWorkloadPressureFeedback,
+    SwarmWorkloadPressureSource,
 };
 pub use task_inspector::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire,
