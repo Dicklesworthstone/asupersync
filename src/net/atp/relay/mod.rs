@@ -4497,6 +4497,60 @@ mod tests {
     }
 
     #[test]
+    fn tcp_tls_egress_peek_does_not_consume_before_commit() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(43),
+                "path-relay-43",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                125,
+                reservation_id(43),
+                peer(1),
+                packet_sent_at(RelayTransport::TcpTls443, b"tcp-peek-ciphertext", 1, 90),
+            )
+            .expect("tcp fallback packet forwards");
+
+        let first = service
+            .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+            .expect("peek queued tcp")
+            .expect("queued tcp packet");
+        let second = service
+            .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+            .expect("peek queued tcp again")
+            .expect("queue remains intact after tcp peek");
+        assert_eq!(first, second);
+        assert_eq!(
+            service
+                .commit_tcp_tls_record_for_peer(peer(2), reservation_id(999))
+                .expect_err("wrong reservation does not consume tcp queue"),
+            RelayError::UnknownReservation
+        );
+        assert!(
+            service
+                .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+                .expect("peek after failed tcp commit")
+                .is_some()
+        );
+
+        service
+            .commit_tcp_tls_record_for_peer(peer(2), reservation_id(43))
+            .expect("commit sent tcp record");
+        assert!(
+            service
+                .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+                .expect("empty tcp queue after commit")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn endpoint_admission_helpers_reject_unknown_or_mismatched_socket_sources() {
         let mut service = RelayService::new(RelayServiceConfig::default());
         service
