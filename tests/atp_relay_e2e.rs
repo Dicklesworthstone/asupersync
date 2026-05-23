@@ -10,7 +10,7 @@ use asupersync::atp::path::{
 };
 use asupersync::net::atp::relay::{
     OpaqueRelayPacket, ProofTag, RelayError, RelayEventKind, RelayQuota, RelayReservationGrant,
-    RelayReservationId, RelayService, RelayServiceConfig, RelayTransport,
+    RelayReservationId, RelayService, RelayServiceConfig, RelayTransport, RelayWireFrame,
 };
 use asupersync::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 
@@ -286,6 +286,143 @@ fn relay_candidate_feeds_path_race_and_preserves_proof_evidence() {
     );
     assert_eq!(proof.fallback_reason, Some("udp_unavailable_tcp_tls_443"));
     assert!(proof.e2e_proof_preserved);
+}
+
+#[test]
+fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() {
+    let test = "relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext";
+    let mut udp_service = RelayService::new(
+        RelayServiceConfig::new("relay-wire-udp", 4)
+            .expect("udp config")
+            .with_log_peer_ids(true),
+    );
+
+    log_stage(
+        test,
+        "udp-wire-frame",
+        "encode canonical relay tunnel frame and submit through UDP relay model",
+    );
+    udp_service
+        .reserve(
+            100,
+            reservation_id(500),
+            "wire-udp-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve udp relay");
+    let wrong_nonce_frame = RelayWireFrame::new(
+        reservation_id(500),
+        nonce(0xdead_beef),
+        peer(1),
+        packet_sent_at(RelayTransport::Udp, b"wrong-transfer", 9, 91),
+    );
+    assert_eq!(
+        wrong_nonce_frame
+            .forward_into(&mut udp_service, 126)
+            .expect_err("wrong transfer nonce"),
+        RelayError::InvalidAuthorization
+    );
+    assert!(udp_service.events().iter().any(|event| {
+        event.kind == RelayEventKind::AuthorizationRejected
+            && event.quota_decision == "transfer_nonce_mismatch_rejected"
+            && event.opaque_bytes == 14
+    }));
+
+    let udp_frame = RelayWireFrame::new(
+        reservation_id(500),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(RelayTransport::Udp, b"encrypted-wire-udp", 1, 90),
+    );
+    let udp_encoded = udp_frame
+        .encode(RelayQuota::default().max_packet_bytes)
+        .expect("encode udp wire frame");
+    let udp_decoded = RelayWireFrame::decode(&udp_encoded, RelayQuota::default().max_packet_bytes)
+        .expect("decode udp wire frame");
+    let udp_forwarded = udp_decoded
+        .forward_into(&mut udp_service, 125)
+        .expect("forward decoded udp frame");
+    assert_eq!(udp_forwarded.to_peer_id(), peer(2));
+    assert_eq!(udp_forwarded.packet().opaque_bytes(), b"encrypted-wire-udp");
+    let udp_proof = udp_service
+        .proof_artifact(reservation_id(500))
+        .expect("udp proof");
+    assert_eq!(udp_proof.opaque_bytes_forwarded, 18);
+    assert_eq!(udp_proof.fallback_reason, None);
+    assert!(udp_proof.e2e_proof_preserved);
+
+    log_stage(
+        test,
+        "tcp-tls-wire-frame",
+        "same frame codec carries locked-down tcp_tls_443 fallback traffic",
+    );
+    let mut tcp_service = RelayService::new(
+        RelayServiceConfig::new("relay-wire-tcp", 4)
+            .expect("tcp config")
+            .with_udp_enabled(false)
+            .with_log_peer_ids(true),
+    );
+    tcp_service
+        .reserve(
+            200,
+            reservation_id(501),
+            "wire-tcp-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve tcp fallback relay");
+    let tcp_frame = RelayWireFrame::new(
+        reservation_id(501),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(
+            RelayTransport::TcpTls443,
+            b"encrypted-wire-tcp-fallback",
+            1,
+            205,
+        ),
+    );
+    let tcp_encoded = tcp_frame
+        .encode(RelayQuota::default().max_packet_bytes)
+        .expect("encode tcp wire frame");
+    assert_ne!(
+        udp_encoded, tcp_encoded,
+        "transport and reservation metadata must be encoded deterministically"
+    );
+    let tcp_decoded = RelayWireFrame::decode(&tcp_encoded, RelayQuota::default().max_packet_bytes)
+        .expect("decode tcp wire frame");
+    let tcp_forwarded = tcp_decoded
+        .forward_into(&mut tcp_service, 240)
+        .expect("forward decoded tcp frame");
+    assert_eq!(
+        tcp_forwarded.packet().transport(),
+        RelayTransport::TcpTls443
+    );
+    assert_eq!(
+        tcp_forwarded.packet().opaque_bytes(),
+        b"encrypted-wire-tcp-fallback"
+    );
+    let tcp_proof = tcp_service
+        .proof_artifact(reservation_id(501))
+        .expect("tcp proof");
+    assert_eq!(
+        tcp_proof.fallback_reason,
+        Some("udp_unavailable_tcp_tls_443")
+    );
+    assert_eq!(
+        tcp_proof
+            .latency_summary
+            .expect("tcp latency")
+            .latest_latency_micros,
+        35
+    );
+    assert!(tcp_service.events().iter().any(|event| {
+        event.kind == RelayEventKind::PacketForwarded
+            && event.transport == Some(RelayTransport::TcpTls443)
+            && event.fallback_reason == Some("udp_unavailable_tcp_tls_443")
+            && event.quota_decision == "packet_accepted"
+    }));
 }
 
 #[test]

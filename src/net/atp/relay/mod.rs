@@ -15,6 +15,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// TCP/TLS fallback port used by locked-down egress networks.
 pub const TCP_TLS_443_PORT: u16 = 443;
 
+/// ATP relay tunnel frame magic.
+pub const RELAY_WIRE_MAGIC: [u8; 4] = *b"ATPR";
+
+/// Current ATP relay tunnel frame format version.
+pub const RELAY_WIRE_VERSION: u8 = 1;
+
+const RELAY_WIRE_FORWARD_FRAME_KIND: u8 = 1;
+const RELAY_WIRE_HEADER_LEN: usize = 4 + 1 + 1 + 1 + 16 + 16 + 32 + 8 + 8 + 32 + 4;
+
 /// Relay transport policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RelayTransport {
@@ -58,6 +67,21 @@ impl RelayTransport {
         match self {
             Self::Udp => PathKind::AtpRelayUdp,
             Self::TcpTls443 => PathKind::AtpRelayTcpTls443,
+        }
+    }
+
+    const fn wire_code(self) -> u8 {
+        match self {
+            Self::Udp => 0,
+            Self::TcpTls443 => 1,
+        }
+    }
+
+    const fn from_wire_code(code: u8) -> Result<Self, RelayError> {
+        match code {
+            0 => Ok(Self::Udp),
+            1 => Ok(Self::TcpTls443),
+            _ => Err(RelayError::InvalidRelayWireFrame),
         }
     }
 }
@@ -187,6 +211,178 @@ impl OpaqueRelayPacket {
     #[must_use]
     pub const fn sent_at_micros(&self) -> u64 {
         self.sent_at_micros
+    }
+}
+
+/// Transport-neutral relay tunnel frame.
+///
+/// The same canonical frame is carried over UDP relay datagrams and the
+/// TCP/TLS 443 fallback stream. It contains only routing/proof metadata plus
+/// opaque encrypted ATP bytes; object paths, manifests, and plaintext chunks
+/// remain end-to-end encrypted outside relay authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayWireFrame {
+    reservation_id: RelayReservationId,
+    transfer_nonce: TransferNonce,
+    from_peer_id: PeerId,
+    packet: OpaqueRelayPacket,
+}
+
+impl RelayWireFrame {
+    /// Construct a relay tunnel frame for one opaque ATP packet.
+    #[must_use]
+    pub const fn new(
+        reservation_id: RelayReservationId,
+        transfer_nonce: TransferNonce,
+        from_peer_id: PeerId,
+        packet: OpaqueRelayPacket,
+    ) -> Self {
+        Self {
+            reservation_id,
+            transfer_nonce,
+            from_peer_id,
+            packet,
+        }
+    }
+
+    /// Reservation id carried on the relay tunnel frame.
+    #[must_use]
+    pub const fn reservation_id(&self) -> RelayReservationId {
+        self.reservation_id
+    }
+
+    /// Transfer nonce bound into the relay reservation grant.
+    #[must_use]
+    pub const fn transfer_nonce(&self) -> TransferNonce {
+        self.transfer_nonce
+    }
+
+    /// Peer that submitted this frame to the relay.
+    #[must_use]
+    pub const fn from_peer_id(&self) -> PeerId {
+        self.from_peer_id
+    }
+
+    /// Opaque packet carried by this frame.
+    #[must_use]
+    pub const fn packet(&self) -> &OpaqueRelayPacket {
+        &self.packet
+    }
+
+    /// Encode this frame into the canonical relay tunnel wire format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidQuota`] when `max_payload_bytes` is zero and
+    /// [`RelayError::PacketTooLarge`] when the opaque packet cannot fit within
+    /// the caller's transport policy.
+    pub fn encode(&self, max_payload_bytes: usize) -> Result<Vec<u8>, RelayError> {
+        let payload = self.packet.opaque_bytes();
+        let payload_len = payload.len();
+        if max_payload_bytes == 0 {
+            return Err(RelayError::InvalidQuota);
+        }
+        if payload_len > max_payload_bytes || payload_len > u32::MAX as usize {
+            return Err(RelayError::PacketTooLarge);
+        }
+
+        let encoded_len = RELAY_WIRE_HEADER_LEN
+            .checked_add(payload_len)
+            .ok_or(RelayError::PacketTooLarge)?;
+        let mut encoded = Vec::with_capacity(encoded_len);
+        encoded.extend_from_slice(&RELAY_WIRE_MAGIC);
+        encoded.push(RELAY_WIRE_VERSION);
+        encoded.push(RELAY_WIRE_FORWARD_FRAME_KIND);
+        encoded.push(self.packet.transport().wire_code());
+        encoded.extend_from_slice(&self.reservation_id.get().to_be_bytes());
+        encoded.extend_from_slice(&self.transfer_nonce.get().to_be_bytes());
+        encoded.extend_from_slice(&self.from_peer_id.bytes());
+        encoded.extend_from_slice(&self.packet.sequence().to_be_bytes());
+        encoded.extend_from_slice(&self.packet.sent_at_micros().to_be_bytes());
+        encoded.extend_from_slice(&self.packet.proof_tag().bytes());
+        encoded.extend_from_slice(&(payload_len as u32).to_be_bytes());
+        encoded.extend_from_slice(payload);
+        Ok(encoded)
+    }
+
+    /// Decode a canonical relay tunnel frame from one complete datagram or
+    /// length-delimited TCP/TLS record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::TruncatedRelayWireFrame`] for short input,
+    /// [`RelayError::UnsupportedRelayWireVersion`] for future versions,
+    /// [`RelayError::UnsupportedRelayWireFrameKind`] for unknown frame kinds,
+    /// and validation errors for invalid identifiers, proof tags, or payloads.
+    pub fn decode(bytes: &[u8], max_payload_bytes: usize) -> Result<Self, RelayError> {
+        if max_payload_bytes == 0 {
+            return Err(RelayError::InvalidQuota);
+        }
+        if bytes.len() < RELAY_WIRE_HEADER_LEN {
+            return Err(RelayError::TruncatedRelayWireFrame);
+        }
+        if bytes[0..4] != RELAY_WIRE_MAGIC {
+            return Err(RelayError::InvalidRelayWireFrame);
+        }
+        if bytes[4] != RELAY_WIRE_VERSION {
+            return Err(RelayError::UnsupportedRelayWireVersion);
+        }
+        if bytes[5] != RELAY_WIRE_FORWARD_FRAME_KIND {
+            return Err(RelayError::UnsupportedRelayWireFrameKind);
+        }
+
+        let transport = RelayTransport::from_wire_code(bytes[6])?;
+        let reservation_id = RelayReservationId::new(read_u128(bytes, 7)?)?;
+        let transfer_nonce = TransferNonce::new(read_u128(bytes, 23)?)
+            .map_err(|_| RelayError::InvalidRelayWireFrame)?;
+        let from_peer_id = PeerId::new(read_array::<32>(bytes, 39)?)
+            .map_err(|_| RelayError::InvalidRelayWireFrame)?;
+        let sequence = read_u64(bytes, 71)?;
+        let sent_at_micros = read_u64(bytes, 79)?;
+        let proof_tag = ProofTag::new(read_array::<32>(bytes, 87)?)?;
+        let payload_len = read_u32(bytes, 119)? as usize;
+        if payload_len == 0 {
+            return Err(RelayError::EmptyPacket);
+        }
+        if payload_len > max_payload_bytes {
+            return Err(RelayError::PacketTooLarge);
+        }
+        let expected_len = RELAY_WIRE_HEADER_LEN
+            .checked_add(payload_len)
+            .ok_or(RelayError::PacketTooLarge)?;
+        if bytes.len() < expected_len {
+            return Err(RelayError::TruncatedRelayWireFrame);
+        }
+        if bytes.len() != expected_len {
+            return Err(RelayError::InvalidRelayWireFrame);
+        }
+        let packet = OpaqueRelayPacket::new(
+            sequence,
+            transport,
+            bytes[RELAY_WIRE_HEADER_LEN..expected_len].to_vec(),
+            proof_tag,
+            sent_at_micros,
+        )?;
+
+        Ok(Self {
+            reservation_id,
+            transfer_nonce,
+            from_peer_id,
+            packet,
+        })
+    }
+
+    /// Submit this decoded frame into the relay service forwarding path.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`RelayService::forward`] validation errors.
+    pub fn forward_into(
+        self,
+        service: &mut RelayService,
+        now_micros: u64,
+    ) -> Result<ForwardedPacket, RelayError> {
+        service.forward_wire_frame(now_micros, self)
     }
 }
 
@@ -1040,6 +1236,49 @@ impl RelayService {
         Ok(forwarded)
     }
 
+    /// Authenticate and forward a decoded relay tunnel frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidAuthorization`] when the frame nonce does
+    /// not match the reservation grant. Otherwise propagates [`Self::forward`]
+    /// validation errors.
+    pub fn forward_wire_frame(
+        &mut self,
+        now_micros: u64,
+        frame: RelayWireFrame,
+    ) -> Result<ForwardedPacket, RelayError> {
+        let state = self
+            .reservations
+            .get(&frame.reservation_id)
+            .cloned()
+            .ok_or(RelayError::UnknownReservation)?;
+        if state.grant.transfer_nonce != frame.transfer_nonce {
+            self.push_event(RelayEventDraft {
+                kind: RelayEventKind::AuthorizationRejected,
+                reservation_id: Some(frame.reservation_id),
+                transfer_nonce: Some(frame.transfer_nonce),
+                path_id: Some(state.path_id),
+                from_peer: Some(frame.from_peer_id),
+                to_peer: None,
+                transport: Some(frame.packet.transport),
+                opaque_bytes: frame.packet.opaque_len() as u64,
+                loss_summary: None,
+                latency_summary: None,
+                quota_decision: "transfer_nonce_mismatch_rejected",
+                fallback_reason: None,
+            });
+            return Err(RelayError::InvalidAuthorization);
+        }
+
+        self.forward(
+            now_micros,
+            frame.reservation_id,
+            frame.from_peer_id,
+            frame.packet,
+        )
+    }
+
     /// Dequeue the next forwarded packet for a peer.
     #[must_use]
     pub fn dequeue_for_peer(&mut self, peer_id: PeerId) -> Option<ForwardedPacket> {
@@ -1622,6 +1861,18 @@ pub enum RelayError {
     /// Packet loss summary is invalid.
     #[error("invalid relay loss summary")]
     InvalidLossSummary,
+    /// Relay tunnel frame is malformed.
+    #[error("invalid relay wire frame")]
+    InvalidRelayWireFrame,
+    /// Relay tunnel frame ended before all required fields were available.
+    #[error("truncated relay wire frame")]
+    TruncatedRelayWireFrame,
+    /// Relay tunnel frame version is not supported by this implementation.
+    #[error("unsupported relay wire frame version")]
+    UnsupportedRelayWireVersion,
+    /// Relay tunnel frame kind is not supported by this implementation.
+    #[error("unsupported relay wire frame kind")]
+    UnsupportedRelayWireFrameKind,
 }
 
 impl RelayError {
@@ -1644,9 +1895,37 @@ impl RelayError {
             | Self::InvalidProofTag
             | Self::LoopbackReservation
             | Self::DuplicateReservation
-            | Self::InvalidLossSummary => PathFailureKind::ProtocolError,
+            | Self::InvalidLossSummary
+            | Self::InvalidRelayWireFrame
+            | Self::TruncatedRelayWireFrame
+            | Self::UnsupportedRelayWireVersion
+            | Self::UnsupportedRelayWireFrameKind => PathFailureKind::ProtocolError,
         }
     }
+}
+
+fn read_array<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], RelayError> {
+    let end = offset
+        .checked_add(N)
+        .ok_or(RelayError::TruncatedRelayWireFrame)?;
+    let Some(slice) = bytes.get(offset..end) else {
+        return Err(RelayError::TruncatedRelayWireFrame);
+    };
+    slice
+        .try_into()
+        .map_err(|_| RelayError::TruncatedRelayWireFrame)
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, RelayError> {
+    Ok(u32::from_be_bytes(read_array::<4>(bytes, offset)?))
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, RelayError> {
+    Ok(u64::from_be_bytes(read_array::<8>(bytes, offset)?))
+}
+
+fn read_u128(bytes: &[u8], offset: usize) -> Result<u128, RelayError> {
+    Ok(u128::from_be_bytes(read_array::<16>(bytes, offset)?))
 }
 
 #[cfg(test)]
@@ -1896,6 +2175,120 @@ mod tests {
         assert_eq!(latency.max_latency_micros, 15);
         assert_eq!(latency.total_latency_micros, 23);
         assert_eq!(latency.average_latency_micros, 11);
+    }
+
+    #[test]
+    fn relay_wire_frame_round_trips_and_forwards_through_service() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(36),
+                "path-relay-36",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        let frame = RelayWireFrame::new(
+            reservation_id(36),
+            transfer_nonce(9),
+            peer(1),
+            packet_sent_at(RelayTransport::Udp, b"encrypted-relay-payload", 7, 70),
+        );
+        let encoded = frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode relay frame");
+        assert!(encoded.starts_with(&RELAY_WIRE_MAGIC));
+        assert!(!encoded.windows(10).any(|window| window == b"object-path"));
+
+        let wrong_nonce_frame = RelayWireFrame::new(
+            reservation_id(36),
+            transfer_nonce(99),
+            peer(1),
+            packet_sent_at(RelayTransport::Udp, b"wrong-transfer", 8, 72),
+        );
+        assert_eq!(
+            wrong_nonce_frame
+                .forward_into(&mut service, 91)
+                .expect_err("wrong transfer nonce"),
+            RelayError::InvalidAuthorization
+        );
+        assert_eq!(
+            service.usage(reservation_id(36)).expect("usage"),
+            RelayUsage::default()
+        );
+        assert!(service.events().iter().any(|event| {
+            event.kind == RelayEventKind::AuthorizationRejected
+                && event.quota_decision == "transfer_nonce_mismatch_rejected"
+        }));
+
+        let decoded = RelayWireFrame::decode(&encoded, RelayQuota::default().max_packet_bytes)
+            .expect("decode relay frame");
+        assert_eq!(decoded.reservation_id(), reservation_id(36));
+        assert_eq!(decoded.transfer_nonce(), transfer_nonce(9));
+        assert_eq!(decoded.from_peer_id(), peer(1));
+        assert_eq!(decoded.packet().opaque_bytes(), b"encrypted-relay-payload");
+        assert_eq!(decoded.packet().sequence(), 7);
+
+        let forwarded = decoded
+            .forward_into(&mut service, 90)
+            .expect("decoded relay frame forwards");
+        assert_eq!(forwarded.to_peer_id(), peer(2));
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(36))
+                .expect("proof")
+                .latency_summary
+                .expect("latency")
+                .latest_latency_micros,
+            20
+        );
+    }
+
+    #[test]
+    fn relay_wire_frame_rejects_truncated_trailing_oversize_and_unknown_headers() {
+        let frame = RelayWireFrame::new(
+            reservation_id(37),
+            transfer_nonce(9),
+            peer(1),
+            packet(RelayTransport::TcpTls443, b"encrypted", 8),
+        );
+        let encoded = frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode relay frame");
+
+        assert_eq!(
+            RelayWireFrame::decode(&encoded[..RELAY_WIRE_HEADER_LEN - 1], 1024)
+                .expect_err("truncated"),
+            RelayError::TruncatedRelayWireFrame
+        );
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            RelayWireFrame::decode(&trailing, 1024).expect_err("trailing bytes"),
+            RelayError::InvalidRelayWireFrame
+        );
+
+        assert_eq!(
+            RelayWireFrame::decode(&encoded, 4).expect_err("payload too large"),
+            RelayError::PacketTooLarge
+        );
+
+        let mut unsupported_version = encoded.clone();
+        unsupported_version[4] = RELAY_WIRE_VERSION.saturating_add(1);
+        assert_eq!(
+            RelayWireFrame::decode(&unsupported_version, 1024).expect_err("version"),
+            RelayError::UnsupportedRelayWireVersion
+        );
+
+        let mut unsupported_kind = encoded;
+        unsupported_kind[5] = RELAY_WIRE_FORWARD_FRAME_KIND.saturating_add(1);
+        assert_eq!(
+            RelayWireFrame::decode(&unsupported_kind, 1024).expect_err("kind"),
+            RelayError::UnsupportedRelayWireFrameKind
+        );
     }
 
     #[test]
