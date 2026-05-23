@@ -241,6 +241,8 @@ pub mod signal;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cancel_cx_runtime_channel_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod bytes_io_time_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod cli_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod database_grpc_metamorphic_tests;
