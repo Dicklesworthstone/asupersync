@@ -2275,8 +2275,8 @@ mod tests {
         let large_payload = vec![0x44u8; large_message_size];
         let mut large_codec = FramedCodec::with_message_size_limits(
             IdentityCodec,
-            large_message_size + 1024, // Allow slightly larger to test framing
-            large_message_size + 1024,
+            large_message_size.saturating_add(1024), // Allow slightly larger to test framing
+            large_message_size.saturating_add(1024),
         );
 
         let mut large_buf = BytesMut::new();

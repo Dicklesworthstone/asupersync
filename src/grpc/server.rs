@@ -2801,6 +2801,10 @@ mod tests {
             for d in samples {
                 let formatted = format_grpc_timeout(*d);
                 // Last char is the unit; rest must be 1..=8 ASCII digits.
+                // Defensive check to prevent underflow in test
+                if formatted.is_empty() {
+                    panic!("format_grpc_timeout returned empty string for duration {:?}", d);
+                }
                 let (digits, unit) = formatted.split_at(formatted.len() - 1);
                 assert!(
                     matches!(unit, "H" | "M" | "S" | "m" | "u" | "n"),
@@ -3708,7 +3712,8 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>();
 
-            let mismatch_count = mismatches.len() + leaked_key_list.len();
+            // Calculate total count with overflow protection
+            let mismatch_count = mismatches.len().saturating_add(leaked_key_list.len());
             assert_eq!(
                 mismatch_count, 0,
                 "{}: metadata isolation mismatches={:?} leaked={:?}",
@@ -5115,8 +5120,10 @@ mod tests {
 
             // AUDIT VERIFICATION: grpc-status should be positioned last
             // This test documents the expected behavior per gRPC spec
+            // Defensive check to prevent underflow in assertion
+            let last_pos = headers.len().saturating_sub(1);
             crate::assert_with_log!(
-                grpc_status_pos == headers.len() - 1,
+                grpc_status_pos == last_pos,
                 "grpc-status must be final trailer per gRPC HTTP/2 spec",
                 true,
                 grpc_status_pos == headers.len() - 1
@@ -5241,8 +5248,10 @@ mod tests {
                 .expect("grpc-status must be present in cancellation");
 
             // Even in cancellation, grpc-status should be last
+            // Defensive check to prevent underflow in assertion
+            let last_pos = headers.len().saturating_sub(1);
             crate::assert_with_log!(
-                grpc_status_pos == headers.len() - 1 || headers.len() == 2,
+                grpc_status_pos == last_pos || headers.len() == 2,
                 "grpc-status ordering maintained even in cancellation",
                 true,
                 grpc_status_pos == headers.len() - 1 || headers.len() == 2

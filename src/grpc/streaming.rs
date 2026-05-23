@@ -927,7 +927,8 @@ mod tests {
     fn bytes_fingerprint(bytes: &Bytes) -> String {
         use std::fmt::Write as _;
 
-        let mut hex = String::with_capacity(bytes.len() * 2);
+        // Calculate capacity with overflow protection for hex encoding (2 chars per byte)
+        let mut hex = String::with_capacity(bytes.len().saturating_mul(2));
         for byte in bytes.as_ref() {
             let _ = write!(&mut hex, "{byte:02x}");
         }
