@@ -1204,7 +1204,14 @@ impl CompiledSupervisor {
         let mut out = vec![Vec::<usize>::new(); builder.children.len()];
 
         for (idx, child) in builder.children.iter().enumerate() {
+            // Deduplicate dependencies to prevent incorrect indegree calculation
+            let mut seen_deps = std::collections::HashSet::new();
             for dep in &child.depends_on {
+                // Skip duplicate dependencies
+                if !seen_deps.insert(dep) {
+                    continue;
+                }
+
                 let Some(&dep_idx) = name_to_idx.get(dep) else {
                     return Err(SupervisorCompileError::UnknownDependency {
                         child: child.name.clone(),
