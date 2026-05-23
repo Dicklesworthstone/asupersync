@@ -62,6 +62,11 @@ DEFAULT_FALLBACK_CANDIDATES = [
             "python3 -m py_compile scripts/proof_receipt_inventory.py",
             "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract",
         ],
+        "completion_aliases": [
+            "harden proof receipt safety cues",
+            "proof receipt inventory",
+            "proof_receipt_inventory",
+        ],
     },
     {
         "candidate_id": "mock-code-finder:proof-runner-contracts",
@@ -76,6 +81,12 @@ DEFAULT_FALLBACK_CANDIDATES = [
         "proof_commands": [
             "python3 -m py_compile scripts/proof_runner.py",
             "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_proof_runner cargo test -p asupersync --test proof_runner_contract",
+        ],
+        "completion_aliases": [
+            "block unsafe proof runner fallback commands",
+            "block unsafe proof-runner fallback commands",
+            "proof runner contracts",
+            "proof_runner_contract",
         ],
     },
 ]
@@ -612,6 +623,7 @@ def completed_issues(source: dict[str, Any]) -> list[dict[str, Any]]:
     rows.extend(issue_rows(beads.get("closed", [])))
     rows.extend(issue_rows(beads.get("completed", [])))
     rows.extend(rows_from(beads, ("closed_issues", "completed_issues")))
+    rows.extend(completed_git_commits(source))
     for row in rows_from(beads, ("issues",)):
         if str(row.get("status") or "") == "closed":
             rows.append(row)
@@ -624,6 +636,29 @@ def completed_issues(source: dict[str, Any]) -> list[dict[str, Any]]:
             seen.add(issue_id)
             unique.append(row)
     return unique
+
+
+def completed_git_commits(source: dict[str, Any]) -> list[dict[str, Any]]:
+    git = source.get("git", {}) if isinstance(source, dict) else {}
+    rows = rows_from(git, ("recent_commits", "commits"))
+    completed = []
+    for row in rows:
+        commit_id = str(row.get("id") or row.get("commit") or row.get("sha") or row.get("hash") or "")
+        subject = str(row.get("subject") or row.get("title") or row.get("message") or "")
+        body = str(row.get("body") or row.get("description") or "")
+        if not commit_id and not subject:
+            continue
+        completed.append(
+            {
+                "id": commit_id,
+                "title": subject or commit_id,
+                "description": body,
+                "close_reason": "recent git commit",
+                "labels": ["git-log"],
+                "status": "closed",
+            }
+        )
+    return completed
 
 
 def normalized_search_text(*values: Any) -> str:
@@ -1360,6 +1395,21 @@ def status_paths(status: str, path: str) -> list[str]:
     return [normalize_path(path)]
 
 
+def parse_git_oneline(raw: str) -> list[dict[str, str]]:
+    rows = []
+    for line in raw.splitlines():
+        commit_id, separator, subject = line.strip().partition(" ")
+        if not commit_id or not separator:
+            continue
+        rows.append(
+            {
+                "id": commit_id,
+                "subject": subject,
+            }
+        )
+    return rows
+
+
 def closed_issues_from_jsonl(repo_path: Path) -> list[dict[str, Any]]:
     path = repo_path / ".beads" / "issues.jsonl"
     if not path.exists():
@@ -1388,11 +1438,16 @@ def live_probe(
     status, raw_status = run_text(repo_path, ["git", "status", "--porcelain=v1"], timeout)
     ready_status, ready = run_json(repo_path, ["br", "ready", "--json"], timeout)
     df_status, raw_df = run_text(repo_path, ["df", "-B1", "/", "/tmp"], timeout)
+    log_status, raw_log = run_text(repo_path, ["git", "log", "--oneline", "-50"], timeout)
     return {
         "beads": {
             "ready": ready if ready_status == "ok" and isinstance(ready, list) else [],
             "closed": closed_issues_from_jsonl(repo_path),
             "status": ready_status,
+        },
+        "git": {
+            "status": log_status,
+            "recent_commits": parse_git_oneline(raw_log if log_status == "ok" else ""),
         },
         "agent_mail": {
             "status": "snapshot" if reservations else "snapshot-unavailable",

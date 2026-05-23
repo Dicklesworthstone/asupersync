@@ -485,6 +485,56 @@ fn completed_default_fallback_is_skipped_for_next_safe_candidate() {
 }
 
 #[test]
+fn recent_commit_subjects_block_completed_default_fallbacks() {
+    let receipt = finder_json("recent_commit_completed_fallback.json");
+    let handoff = candidate(
+        &receipt,
+        "testing-conformance-harnesses:session-handoff-receipt",
+    );
+    let proof_receipt = candidate(&receipt, "testing-golden-artifacts:proof-receipt-inventory");
+    let proof_runner = candidate(&receipt, "mock-code-finder:proof-runner-contracts");
+
+    assert_eq!(receipt["summary"]["ready_count"].as_u64(), Some(0));
+    assert_eq!(handoff["status"].as_str(), Some("blocked"));
+    assert_eq!(proof_receipt["status"].as_str(), Some("blocked"));
+    assert_eq!(proof_runner["status"].as_str(), Some("blocked"));
+
+    let proof_receipt_blocker = proof_receipt["blockers"]
+        .as_array()
+        .expect("proof receipt blockers")
+        .iter()
+        .find(|row| row["kind"].as_str() == Some("fallback-already-completed"))
+        .expect("proof receipt completion blocker");
+    assert_eq!(
+        proof_receipt_blocker["closed_issue_id"].as_str(),
+        Some("efb254d06")
+    );
+    assert_eq!(
+        proof_receipt_blocker["matched_alias"].as_str(),
+        Some("harden proof receipt safety cues")
+    );
+
+    let proof_runner_blocker = proof_runner["blockers"]
+        .as_array()
+        .expect("proof runner blockers")
+        .iter()
+        .find(|row| row["kind"].as_str() == Some("fallback-already-completed"))
+        .expect("proof runner completion blocker");
+    assert_eq!(
+        proof_runner_blocker["closed_issue_id"].as_str(),
+        Some("9f4978b1d")
+    );
+    assert_eq!(
+        proof_runner_blocker["matched_alias"].as_str(),
+        Some("block unsafe proof runner fallback commands")
+    );
+    assert_eq!(
+        receipt["recommendation"]["category"].as_str(),
+        Some("blocked-no-safe-work")
+    );
+}
+
+#[test]
 fn unapproved_fallback_lane_is_blocked_by_policy() {
     let receipt = finder_json("unapproved_lane.json");
     let custom_scan = candidate(&receipt, "custom-scan:src");

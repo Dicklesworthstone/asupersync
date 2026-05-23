@@ -1,0 +1,34 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": []
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": [],
+    "closed": [
+      {
+        "id": "asupersync-c8thc8.11",
+        "title": "[testing-conformance] Harden session handoff receipt contracts",
+        "status": "closed"
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  },
+  "git": {
+    "status": "fixture",
+    "recent_commits": [
+      {
+        "id": "efb254d06",
+        "subject": "test: harden proof receipt safety cues"
+      },
+      {
+        "id": "9f4978b1d",
+        "subject": "test: block unsafe proof-runner fallback commands"
+      }
+    ]
+  }
+}
