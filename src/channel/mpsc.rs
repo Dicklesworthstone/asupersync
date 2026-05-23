@@ -722,15 +722,12 @@ impl<T> Drop for Sender<T> {
         let old = self.shared.sender_count.fetch_sub(1, Ordering::Release);
         debug_assert!(old > 0, "sender_count underflow in Sender::drop");
         if old == 1 {
-            // Last sender dropped — acquire lock to take recv_waker.
-            // Re-check under lock in case a WeakSender::upgrade raced.
+            // Last sender dropped — always wake the receiver regardless of races.
+            // Even if a WeakSender::upgrade increments the count back up after our
+            // decrement, the receiver should still be woken for the transition to zero.
             let recv_waker = {
                 let mut inner = self.shared.inner.lock();
-                if self.shared.sender_count.load(Ordering::Acquire) == 0 {
-                    inner.recv_waker.take()
-                } else {
-                    None
-                }
+                inner.recv_waker.take()
             };
             if let Some(waker) = recv_waker {
                 waker.wake();
