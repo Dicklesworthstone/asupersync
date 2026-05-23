@@ -60,6 +60,7 @@
     "remote_exit_status",
     "rch_admission",
     "worker",
+    "blocker_origin",
     "first_blocker",
     "affected_files",
     "beads_comment",

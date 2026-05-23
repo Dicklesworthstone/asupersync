@@ -66,6 +66,10 @@ RCH_LOCAL_FALLBACK_RE = re.compile(
     r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
 )
+ASUPERSYNC_BEAD_RE = re.compile(
+    r"\b(?:br-)?(?P<bead>asupersync-[a-z0-9]+(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
 CARGO_LOCATION_RE = re.compile(r"^\s*-->\s+([^:\s]+):(\d+):(\d+)")
 RUST_ERROR_RE = re.compile(
     r"^\s*error(?:\[(?P<code>[^\]]+)\])?:\s*(?P<message>.+)"
@@ -1290,6 +1294,74 @@ def affected_files_from_blocker(file: str) -> List[str]:
     return [normalized]
 
 
+def bead_id_from_text(text: str) -> Optional[str]:
+    """Extract the first asupersync bead id from commit subjects or closeout text."""
+    match = ASUPERSYNC_BEAD_RE.search(text or "")
+    if not match:
+        return None
+    return match.group("bead").lower()
+
+
+def default_blocker_origin(path: str = "") -> Dict[str, Any]:
+    """Return the stable empty shape for blocker origin metadata."""
+    return {
+        "source": "unmapped",
+        "path": normalize_repo_path(path),
+        "commit": "",
+        "commit_full": "",
+        "subject": "",
+        "author": "",
+        "author_email": "",
+        "bead_id": None,
+        "bead_commit": "",
+        "bead_subject": "",
+        "bead_author": "",
+    }
+
+
+def blocker_origin_from_git_log_line(path: str, line: str) -> Dict[str, Any]:
+    """Parse one git-log row into deterministic blocker provenance metadata."""
+    parts = (line or "").rstrip("\n").split("\x1f", 3)
+    if len(parts) != 4 or not parts[0].strip():
+        return default_blocker_origin(path)
+    commit_full, author, author_email, subject = (part.strip() for part in parts)
+    return {
+        "source": "git-log",
+        "path": normalize_repo_path(path),
+        "commit": commit_full[:12],
+        "commit_full": commit_full,
+        "subject": subject,
+        "author": author,
+        "author_email": author_email,
+        "bead_id": bead_id_from_text(subject),
+        "bead_commit": commit_full[:12] if bead_id_from_text(subject) else "",
+        "bead_subject": subject if bead_id_from_text(subject) else "",
+        "bead_author": author if bead_id_from_text(subject) else "",
+    }
+
+
+def blocker_origin_from_git_log_lines(path: str, lines: List[str]) -> Dict[str, Any]:
+    """Parse recent git-log rows, preserving latest commit and first bead-bearing subject."""
+    parsed = [
+        blocker_origin_from_git_log_line(path, line)
+        for line in lines
+        if (line or "").strip()
+    ]
+    if not parsed:
+        return default_blocker_origin(path)
+    origin = parsed[0]
+    if origin.get("bead_id"):
+        return origin
+    for candidate in parsed[1:]:
+        if candidate.get("bead_id"):
+            origin["bead_id"] = candidate["bead_id"]
+            origin["bead_commit"] = candidate["commit"]
+            origin["bead_subject"] = candidate["subject"]
+            origin["bead_author"] = candidate["author"]
+            break
+    return origin
+
+
 def error_buckets_from_blocker(
     error_class: str,
     file: str,
@@ -1299,6 +1371,7 @@ def error_buckets_from_blocker(
     likely_bead: Optional[str],
     touched_files: List[str],
     error_code: str = "",
+    blocker_origin: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Build the stable one-bucket summary used by ASW-1 ledger records."""
     normalized = normalize_repo_path(file)
@@ -1306,6 +1379,7 @@ def error_buckets_from_blocker(
         return []
     touched = {normalize_repo_path(path) for path in touched_files}
     module = normalized.removesuffix(".rs").replace("/", "::")
+    origin = blocker_origin or default_blocker_origin(normalized)
     return [
         {
             "file": normalized,
@@ -1316,6 +1390,7 @@ def error_buckets_from_blocker(
             "summary": summary,
             "likely_owner": owner,
             "likely_bead": likely_bead,
+            "blocker_origin": origin,
             "owned_slice_overlap": normalized in touched,
         }
     ]
@@ -1337,6 +1412,7 @@ def closeout_summary_from_frontier(
 
     proof_claim = "green-proof" if green_proof_claimed else "no-green-proof"
     bead_id = frontier.get("likely_bead") or None
+    blocker_origin = frontier.get("blocker_origin") or default_blocker_origin(blocker_file)
     likely_owner = str(frontier.get("likely_owner") or "")
     decision = str(frontier.get("decision") or "")
     error_class = str(frontier.get("error_class") or "")
@@ -1352,6 +1428,7 @@ def closeout_summary_from_frontier(
         f"{prefix} bead={bead_id or 'unmapped'} lane={proof_lane_id} "
         f"decision={decision} error_class={error_class} "
         f"first_blocker={blocker_ref} rch_admission={rch_admission} "
+        f"origin_commit={blocker_origin.get('commit') or 'unmapped'} "
         f"remote_exit={remote_exit_status if remote_exit_status is not None else 'unknown'} "
         f"green_proof_claimed={str(green_proof_claimed).lower()}"
     )
@@ -1375,6 +1452,7 @@ def closeout_summary_from_frontier(
         "remote_exit_status": remote_exit_status,
         "rch_admission": rch_admission,
         "worker": rch_result.get("worker"),
+        "blocker_origin": blocker_origin,
         "first_blocker": frontier.get("first_blocker"),
         "affected_files": frontier.get("affected_files") or [],
         "beads_comment": beads_comment,
@@ -1396,6 +1474,7 @@ class ValidationFrontierRecord:
         exit_status: Optional[int] = None,
         likely_bead: Optional[str] = None,
         likely_owner: str = "",
+        blocker_origin: Optional[Dict[str, Any]] = None,
     ):
         self.command = command
         self.proof_lane_id = proof_lane_id
@@ -1415,6 +1494,7 @@ class ValidationFrontierRecord:
         }
         self.likely_owner = likely_owner
         self.likely_bead = likely_bead
+        self.blocker_origin = blocker_origin or default_blocker_origin()
         self.supplemental_proof_command = ""
         self.summary = ""
 
@@ -1454,6 +1534,7 @@ class ValidationFrontierRecord:
             "affected_files": affected_files or [],
             "likely_owner": likely_owner,
             "likely_bead": self.likely_bead,
+            "blocker_origin": self.blocker_origin,
             "external_to_narrow_fuzz_target_work": decision == "blocked-external",
             "green_proof_claimed": decision == "pass",
             "supplemental_proof_command": supplemental,
@@ -1501,6 +1582,7 @@ class ValidationFrontierRecord:
                 self.likely_bead,
                 self.touched_files,
                 error_code=error_code,
+                blocker_origin=self.blocker_origin,
             ),
             affected_files_from_blocker(normalized_file),
             exit_status=exit_status,
@@ -1564,6 +1646,7 @@ class ValidationFrontierRecord:
                 self.likely_bead,
                 self.touched_files,
                 error_code=error_code,
+                blocker_origin=self.blocker_origin,
             ),
             affected_files_from_blocker(normalized_file),
             exit_status=exit_status,
@@ -1643,6 +1726,30 @@ class GitStatus:
         except subprocess.CalledProcessError:
             return "unknown"
         return result.stdout.strip() or "unknown"
+
+    def recent_commit_hint_for_path(self, path: str) -> Dict[str, Any]:
+        """Return the most recent commit metadata for a blocker path when available."""
+        normalized = normalize_repo_path(path)
+        if not normalized or normalized.startswith(("rch-", "build-slot:")):
+            return default_blocker_origin(normalized)
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "log",
+                    "-20",
+                    "--format=%H%x1f%an%x1f%ae%x1f%s",
+                    "--",
+                    normalized,
+                ],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_root,
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            return default_blocker_origin(normalized)
+        return blocker_origin_from_git_log_lines(normalized, result.stdout.splitlines())
 
     def dirty_tree_summary(self, touched_files: List[str]) -> Dict[str, Any]:
         """Summarize dirty shared-main state without mutating the index."""
@@ -2141,6 +2248,7 @@ class ProofRunner:
         exit_status: Optional[int] = None,
         likely_bead: Optional[str] = None,
         likely_owner: str = "",
+        blocker_origin: Optional[Dict[str, Any]] = None,
     ) -> ValidationFrontierRecord:
         """Build a frontier record with live shared-main context attached."""
         normalized_touched = [normalize_repo_path(path) for path in touched_files]
@@ -2154,6 +2262,7 @@ class ProofRunner:
             exit_status=exit_status,
             likely_bead=likely_bead,
             likely_owner=likely_owner,
+            blocker_origin=blocker_origin,
         )
 
     def _repo_json(self, relative_path: str) -> Dict[str, Any]:
@@ -3278,16 +3387,19 @@ class ProofRunner:
         outcome["source_log_path"] = str(source_log)
         outcome["source_log_sha256"] = file_hash(source_log)
         outcome["source_log_bytes"] = source_log.stat().st_size
+        blocker = outcome["first_blocker"]
+        blocker_origin = self.git.recent_commit_hint_for_path(str(blocker.get("file", "")))
+        inferred_bead = likely_bead or blocker_origin.get("bead_id")
         record = self._frontier_record(
             command,
             touched_files,
             infer_proof_lane_id(command, "rch-classified"),
             rch_result=rch_result_from_outcome(outcome),
             exit_status=outcome.get("remote_exit_status"),
-            likely_bead=likely_bead,
+            likely_bead=inferred_bead,
             likely_owner=likely_owner,
+            blocker_origin=blocker_origin,
         )
-        blocker = outcome["first_blocker"]
         scope = outcome["command_scope"]
         diagnostic_class = str(outcome.get("diagnostic_class") or outcome["outcome_class"])
         crate_or_surface, target = diagnostic_target(scope, diagnostic_class)

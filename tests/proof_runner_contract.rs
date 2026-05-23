@@ -1655,6 +1655,10 @@ fn proof_runner_emits_validation_frontier_compatible_records() {
         "record must have likely_owner"
     );
     assert!(
+        record["blocker_origin"].is_object(),
+        "record must have blocker_origin"
+    );
+    assert!(
         record["external_to_narrow_fuzz_target_work"].is_boolean(),
         "record must have external_to_narrow_fuzz_target_work"
     );
@@ -1992,6 +1996,7 @@ fn proof_runner_rch_outcome_contract_names_required_fixtures() {
         "likely_owner",
         "proof_claim",
         "green_proof_claimed",
+        "blocker_origin",
         "first_blocker",
         "beads_comment",
         "agent_mail_body",
@@ -2197,6 +2202,101 @@ fn proof_runner_classify_rch_log_emits_bead_owner_closeout_summary() {
             .as_str()
             .expect("agent mail body")
             .contains("green_proof_claimed=false")
+    );
+}
+
+#[test]
+fn proof_runner_infers_blocker_origin_from_recent_git_commit_metadata() {
+    let snippet = r#"
+import importlib.util
+import json
+
+spec = importlib.util.spec_from_file_location("proof_runner", "scripts/proof_runner.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture"
+git_line = "0123456789abcdef0123456789abcdef01234567\x1fNavyWillow\x1fnavy@example.invalid\x1fFix blocker br-asupersync-nod48i"
+scanned_origin = module.blocker_origin_from_git_log_lines("tests/proof_runner_contract.rs", [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x1fLatestAuthor\x1flatest@example.invalid\x1fRecent cleanup without tracker id",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\x1fOlderAuthor\x1folder@example.invalid\x1fWire proof br-asupersync-older7",
+])
+
+runner = module.ProofRunner(skip_build_slot_check=True)
+runner.git._status_lines = []
+runner.git.head_commit = lambda: "abc123def456"
+runner.git.recent_commit_hint_for_path = lambda path: module.blocker_origin_from_git_log_line(path, git_line)
+result = runner.classify_rch_log(
+    command,
+    "tests/fixtures/proof_runner/cargo_error.log",
+    ["tests/proof_runner_contract.rs"],
+)
+print(json.dumps({
+    "bead_from_text": module.bead_id_from_text("close br-asupersync-oxqrae.1 after proof"),
+    "frontier_bead": result["validation_frontier_record"]["likely_bead"],
+    "frontier_origin": result["validation_frontier_record"]["blocker_origin"],
+    "bucket_origin": result["validation_frontier_record"]["error_buckets"][0]["blocker_origin"],
+    "closeout_origin": result["closeout_summary"]["blocker_origin"],
+    "beads_comment": result["closeout_summary"]["beads_comment"],
+    "scanned_origin": scanned_origin,
+}, sort_keys=True))
+"#;
+    let output = run_python_snippet(snippet);
+    assert!(
+        output.status.success(),
+        "blocker origin snippet should execute\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).expect("blocker origin output should be JSON");
+
+    assert_eq!(
+        parsed["bead_from_text"].as_str(),
+        Some("asupersync-oxqrae.1")
+    );
+    assert_eq!(parsed["frontier_bead"].as_str(), Some("asupersync-nod48i"));
+    assert_eq!(
+        parsed["frontier_origin"]["commit"].as_str(),
+        Some("0123456789ab")
+    );
+    assert_eq!(
+        parsed["frontier_origin"]["bead_id"].as_str(),
+        Some("asupersync-nod48i")
+    );
+    assert_eq!(
+        parsed["frontier_origin"]["bead_commit"].as_str(),
+        Some("0123456789ab")
+    );
+    assert_eq!(
+        parsed["frontier_origin"]["author"].as_str(),
+        Some("NavyWillow")
+    );
+    assert_eq!(
+        parsed["bucket_origin"]["subject"].as_str(),
+        Some("Fix blocker br-asupersync-nod48i")
+    );
+    assert_eq!(
+        parsed["closeout_origin"]["author_email"].as_str(),
+        Some("navy@example.invalid")
+    );
+    assert!(
+        parsed["beads_comment"]
+            .as_str()
+            .expect("beads comment")
+            .contains("origin_commit=0123456789ab")
+    );
+    assert_eq!(
+        parsed["scanned_origin"]["commit"].as_str(),
+        Some("aaaaaaaaaaaa")
+    );
+    assert_eq!(
+        parsed["scanned_origin"]["bead_id"].as_str(),
+        Some("asupersync-older7")
+    );
+    assert_eq!(
+        parsed["scanned_origin"]["bead_commit"].as_str(),
+        Some("bbbbbbbbbbbb")
     );
 }
 

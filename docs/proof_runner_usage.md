@@ -142,6 +142,15 @@ strings are safe to paste as summaries. They use `NO_GREEN_PROOF` whenever the
 classified transcript is failed or externally blocked, even when a blocker is
 well identified, so closeouts do not accidentally overstate evidence.
 
+If no explicit bead id is supplied, the classifier best-effort maps the first
+blocker path to `git log -20 -- <path>`. The resulting
+`validation_frontier_record.blocker_origin` and
+`closeout_summary.blocker_origin` include the recent commit, subject, author,
+and the first `asupersync-*` bead id parsed from that recent history. This is
+provenance evidence only: it helps route a blocker to a recent slice, but the
+`decision` and `green_proof_claimed` fields remain authoritative for whether a
+closeout may claim a green proof.
+
 ## Available Proof Lanes
 
 The proof runner reads from `artifacts/proof_lane_manifest_v1.json`. Common lanes:

@@ -166,6 +166,11 @@
       "description": "Best current bead hint when known."
     },
     {
+      "name": "blocker_origin",
+      "type": "object",
+      "description": "Best-effort recent git commit metadata for the first blocker path, including commit, subject, author, and parsed bead id when available."
+    },
+    {
       "name": "external_to_narrow_fuzz_target_work",
       "type": "boolean",
       "description": "Whether the blocker is outside the owned narrow fuzz-target or artifact slice and should be cited as external frontier debt."
