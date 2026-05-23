@@ -129,7 +129,13 @@ impl ScheduledSet {
     #[inline]
     fn contains(&self, task: TaskId) -> bool {
         let idx = task.0.index() as usize;
-        let tag = u64::from(task.0.generation()) + 1;
+        let gen = u64::from(task.0.generation());
+        // Avoid overflow collision with DENSE_COLLISION sentinel
+        let tag = if gen == u64::MAX {
+            Self::DENSE_COLLISION  // Force overflow handling for max generation
+        } else {
+            gen + 1
+        };
 
         if idx >= self.dense.len() {
             return self.overflow.contains(&task);
@@ -145,7 +151,13 @@ impl ScheduledSet {
     #[inline]
     fn insert(&mut self, task: TaskId) -> bool {
         let idx = task.0.index() as usize;
-        let tag = u64::from(task.0.generation()) + 1;
+        let gen = u64::from(task.0.generation());
+        // Avoid overflow collision with DENSE_COLLISION sentinel
+        let tag = if gen == u64::MAX {
+            Self::DENSE_COLLISION  // Force overflow handling for max generation
+        } else {
+            gen + 1
+        };
 
         if idx < Self::MAX_DENSE_LEN && idx >= self.dense.len() {
             self.grow_dense_to_fit(idx);
@@ -198,7 +210,13 @@ impl ScheduledSet {
 
     fn remove(&mut self, task: TaskId) -> bool {
         let idx = task.0.index() as usize;
-        let tag = u64::from(task.0.generation()) + 1;
+        let gen = u64::from(task.0.generation());
+        // Avoid overflow collision with DENSE_COLLISION sentinel
+        let tag = if gen == u64::MAX {
+            Self::DENSE_COLLISION  // Force overflow handling for max generation
+        } else {
+            gen + 1
+        };
 
         if idx >= self.dense.len() {
             let removed = self.overflow.remove(&task);
