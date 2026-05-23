@@ -527,6 +527,12 @@ impl QuicTransportMachine {
         self.recovery.ssthresh_bytes
     }
 
+    /// Current PTO backoff count.
+    #[must_use]
+    pub fn pto_count(&self) -> u32 {
+        self.recovery.pto_count
+    }
+
     /// Whether another in-flight packet can be sent under congestion limits.
     #[must_use]
     pub fn can_send(&self, in_flight_bytes: u64) -> bool {
@@ -811,7 +817,9 @@ mod tests {
         let mut t = QuicTransportMachine::new();
         t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
         let first = t.pto_deadline_micros(2_000).expect("first deadline");
+        assert_eq!(t.pto_count(), 0);
         t.on_pto_expired();
+        assert_eq!(t.pto_count(), 1);
         let second = t.pto_deadline_micros(2_000).expect("second deadline");
         assert!(second > first);
     }

@@ -5,6 +5,8 @@
 
 #![allow(clippy::pedantic, clippy::nursery)]
 
+use asupersync::net::atp::quic::AtpTransportMetricsCollector;
+use asupersync::net::quic_native::QuicTransportMachine;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
@@ -433,4 +435,22 @@ fn validation_commands_preserve_rch_cargo_policy_and_detailed_proof_surface() {
     assert!(saw_contract_test, "contract test command is required");
     assert!(saw_check, "feature compile command is required");
     assert!(saw_fmt, "format check command is required");
+}
+
+#[test]
+fn native_transport_metrics_report_pto_backoff_from_transport() {
+    let mut transport = QuicTransportMachine::new();
+    let collector =
+        AtpTransportMetricsCollector::new("native-quic-contract".into(), "path-a".into());
+
+    assert_eq!(collector.current_metrics(&transport).pto_count, 0);
+
+    transport.on_pto_expired();
+    transport.on_pto_expired();
+
+    let metrics = collector.current_metrics(&transport);
+    assert_eq!(
+        metrics.pto_count, 2,
+        "ATP transfer metrics must expose the native transport PTO backoff count"
+    );
 }

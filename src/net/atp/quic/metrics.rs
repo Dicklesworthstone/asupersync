@@ -271,7 +271,7 @@ impl AtpTransportMetricsCollector {
             bytes_in_flight: transport.bytes_in_flight(),
             congestion_window_bytes: transport.congestion_window_bytes(),
             ssthresh_bytes: transport.ssthresh_bytes(),
-            pto_count: 0,                                  // TODO: Get from transport
+            pto_count: transport.pto_count(),
             congestion_limited: !transport.can_send(1200), // Typical packet size
             anti_amplification_limited: self.is_anti_amplification_limited(),
             packets_sent,
@@ -582,7 +582,7 @@ mod tests {
         let mut collector =
             AtpTransportMetricsCollector::new("conn123".to_string(), "path456".to_string());
 
-        let transport = QuicTransportMachine::new();
+        let mut transport = QuicTransportMachine::new();
 
         // Send some packets
         collector.on_packet_sent(1200);
@@ -594,11 +594,18 @@ mod tests {
         // Lose one packet
         collector.on_packet_lost(1200);
 
+        // Record PTO backoff in both the transport machine and collector.
+        transport.on_pto_expired();
+        transport.on_pto_expired();
+        collector.on_pto_expired();
+        collector.on_pto_expired();
+
         let metrics = collector.current_metrics(&transport);
 
         assert_eq!(metrics.packets_sent, 2);
         assert_eq!(metrics.packets_acked, 1);
         assert_eq!(metrics.packets_lost, 1);
+        assert_eq!(metrics.pto_count, 2);
         assert_eq!(metrics.loss_rate, 0.5);
         assert_eq!(metrics.connection_id, "conn123");
         assert_eq!(metrics.path_id, "path456");
