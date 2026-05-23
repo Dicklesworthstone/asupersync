@@ -52,12 +52,21 @@ fn grant(expires_at_micros: u64, quota: RelayQuota) -> RelayReservationGrant {
 }
 
 fn packet(transport: RelayTransport, payload: &[u8], sequence: u64) -> OpaqueRelayPacket {
+    packet_sent_at(transport, payload, sequence, 1_000 + sequence)
+}
+
+fn packet_sent_at(
+    transport: RelayTransport,
+    payload: &[u8],
+    sequence: u64,
+    sent_at_micros: u64,
+) -> OpaqueRelayPacket {
     OpaqueRelayPacket::new(
         sequence,
         transport,
         payload.to_vec(),
         ProofTag::new([0x5a; 32]).expect("proof tag"),
-        1_000 + sequence,
+        sent_at_micros,
     )
     .expect("opaque relay packet")
 }
@@ -99,7 +108,7 @@ fn relay_only_locked_down_tcp_tls_fallback_produces_complete_proof_logs() {
             120,
             reservation_id(100),
             peer(1),
-            packet(RelayTransport::TcpTls443, b"encrypted-atp-frame", 1),
+            packet_sent_at(RelayTransport::TcpTls443, b"encrypted-atp-frame", 1, 100),
         )
         .expect("forward over tcp fallback");
     assert_eq!(forwarded.to_peer_id(), peer(2));
@@ -127,6 +136,12 @@ fn relay_only_locked_down_tcp_tls_fallback_produces_complete_proof_logs() {
     assert_eq!(proof.opaque_bytes_forwarded, 19);
     assert_eq!(proof.packets_forwarded, 1);
     assert_eq!(proof.loss_summary, Some(loss));
+    let latency = proof.latency_summary.expect("latency summary");
+    assert_eq!(latency.sample_count, 1);
+    assert_eq!(latency.latest_latency_micros, 20);
+    assert_eq!(latency.min_latency_micros, 20);
+    assert_eq!(latency.max_latency_micros, 20);
+    assert_eq!(latency.average_latency_micros, 20);
     assert_eq!(proof.fallback_reason, Some("udp_unavailable_tcp_tls_443"));
     assert!(proof.e2e_proof_preserved);
     assert_eq!(proof.redacted_source_peer, "peer:0101...");
@@ -141,7 +156,17 @@ fn relay_only_locked_down_tcp_tls_fallback_produces_complete_proof_logs() {
             && event.relay_id == "relay-f5-e2e"
             && event.path_id.as_deref() == Some("relay-only-path")
             && event.fallback_reason == Some("udp_unavailable_tcp_tls_443")
+            && event
+                .latency_summary
+                .is_some_and(|summary| summary.latest_latency_micros == 20)
             && event.replay_pointer > 0
+    }));
+    assert!(service.events().iter().any(|event| {
+        event.kind == RelayEventKind::PacketLossRecorded
+            && event.loss_summary == Some(loss)
+            && event
+                .latency_summary
+                .is_some_and(|summary| summary.average_latency_micros == 20)
     }));
 }
 
@@ -202,13 +227,25 @@ fn relay_candidate_feeds_path_race_and_preserves_proof_evidence() {
             160,
             reservation_id(400),
             peer(1),
-            packet(RelayTransport::TcpTls443, b"encrypted-path-race-frame", 1),
+            packet_sent_at(
+                RelayTransport::TcpTls443,
+                b"encrypted-path-race-frame",
+                1,
+                140,
+            ),
         )
         .expect("relay forward");
     assert_eq!(forwarded.to_peer_id(), peer(2));
     let proof = service
         .proof_artifact(reservation_id(400))
         .expect("relay proof");
+    assert_eq!(
+        proof
+            .latency_summary
+            .expect("path-race latency")
+            .latest_latency_micros,
+        20
+    );
     let relay_outcome = proof.to_path_success_outcome(175, Some(25));
     race.record_outcome(relay_id, relay_outcome)
         .expect("record relay win");

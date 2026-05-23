@@ -126,6 +126,10 @@ pub struct OpaqueRelayPacket {
 impl OpaqueRelayPacket {
     /// Build an opaque packet.
     ///
+    /// `sent_at_micros` is a transfer-local monotonic timestamp. Relay latency
+    /// summaries compare it with the relay's receive timestamp and saturate at
+    /// zero if an out-of-domain timestamp is observed.
+    ///
     /// # Errors
     ///
     /// Returns [`RelayError::EmptyPacket`] when the payload is empty.
@@ -179,7 +183,7 @@ impl OpaqueRelayPacket {
         &self.proof_tag
     }
 
-    /// Sender-side timestamp used for latency summaries.
+    /// Sender-side transfer-local timestamp used for latency summaries.
     #[must_use]
     pub const fn sent_at_micros(&self) -> u64 {
         self.sent_at_micros
@@ -597,6 +601,45 @@ pub struct RelayLossSummary {
     pub loss_ppm: u32,
 }
 
+/// Per-reservation relay latency summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayLatencySummary {
+    /// Number of latency samples included.
+    pub sample_count: u64,
+    /// Latest observed relay latency.
+    pub latest_latency_micros: u64,
+    /// Minimum observed relay latency.
+    pub min_latency_micros: u64,
+    /// Maximum observed relay latency.
+    pub max_latency_micros: u64,
+    /// Sum of all observed relay latencies.
+    pub total_latency_micros: u64,
+    /// Truncated arithmetic mean of observed relay latencies.
+    pub average_latency_micros: u64,
+}
+
+impl RelayLatencySummary {
+    fn first(latency_micros: u64) -> Self {
+        Self {
+            sample_count: 1,
+            latest_latency_micros: latency_micros,
+            min_latency_micros: latency_micros,
+            max_latency_micros: latency_micros,
+            total_latency_micros: latency_micros,
+            average_latency_micros: latency_micros,
+        }
+    }
+
+    fn record(&mut self, latency_micros: u64) {
+        self.sample_count = self.sample_count.saturating_add(1);
+        self.latest_latency_micros = latency_micros;
+        self.min_latency_micros = self.min_latency_micros.min(latency_micros);
+        self.max_latency_micros = self.max_latency_micros.max(latency_micros);
+        self.total_latency_micros = self.total_latency_micros.saturating_add(latency_micros);
+        self.average_latency_micros = self.total_latency_micros / self.sample_count.max(1);
+    }
+}
+
 /// Per-reservation forwarding counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RelayUsage {
@@ -612,6 +655,17 @@ pub struct RelayUsage {
     pub tcp_tls_443_packets: u64,
     /// Most recent loss summary.
     pub loss_summary: Option<RelayLossSummary>,
+    /// Relay receive latency summary.
+    pub latency_summary: Option<RelayLatencySummary>,
+}
+
+impl RelayUsage {
+    fn record_latency(&mut self, latency_micros: u64) {
+        match &mut self.latency_summary {
+            Some(summary) => summary.record(latency_micros),
+            None => self.latency_summary = Some(RelayLatencySummary::first(latency_micros)),
+        }
+    }
 }
 
 /// Redaction-safe relay event kind.
@@ -656,6 +710,10 @@ pub struct RelayEvent {
     pub transport: Option<RelayTransport>,
     /// Opaque byte count.
     pub opaque_bytes: u64,
+    /// Loss summary visible in this log event, if known.
+    pub loss_summary: Option<RelayLossSummary>,
+    /// Relay latency summary visible in this log event, if known.
+    pub latency_summary: Option<RelayLatencySummary>,
     /// Stable quota decision code.
     pub quota_decision: &'static str,
     /// Fallback reason, when TCP/TLS 443 is used.
@@ -691,6 +749,8 @@ pub struct RelayProofArtifact {
     pub packets_forwarded: u64,
     /// Loss summary, if recorded.
     pub loss_summary: Option<RelayLossSummary>,
+    /// Relay latency summary, if packets were forwarded.
+    pub latency_summary: Option<RelayLatencySummary>,
     /// Redacted source peer id.
     pub redacted_source_peer: String,
     /// Redacted destination peer id.
@@ -815,6 +875,8 @@ impl RelayService {
                 to_peer: Some(grant.destination_peer_id),
                 transport: None,
                 opaque_bytes: 0,
+                loss_summary: None,
+                latency_summary: None,
                 quota_decision: "grant_authorization_rejected",
                 fallback_reason: None,
             });
@@ -837,6 +899,8 @@ impl RelayService {
                 to_peer: Some(grant.destination_peer_id),
                 transport: None,
                 opaque_bytes: 0,
+                loss_summary: None,
+                latency_summary: None,
                 quota_decision: "active_reservation_quota_rejected",
                 fallback_reason: None,
             });
@@ -863,6 +927,8 @@ impl RelayService {
             to_peer: Some(state.grant.destination_peer_id),
             transport: Some(primary_transport),
             opaque_bytes: 0,
+            loss_summary: None,
+            latency_summary: None,
             quota_decision: "reservation_accepted",
             fallback_reason: primary_transport.fallback_reason(),
         });
@@ -912,6 +978,8 @@ impl RelayService {
                 to_peer: None,
                 transport: Some(packet.transport),
                 opaque_bytes: packet.opaque_len() as u64,
+                loss_summary: None,
+                latency_summary: None,
                 quota_decision: "peer_authorization_rejected",
                 fallback_reason: None,
             });
@@ -932,7 +1000,14 @@ impl RelayService {
             return Err(RelayError::TransportUnavailable);
         }
 
-        self.apply_quota(reservation_id, &state, from_peer_id, to_peer_id, &packet)?;
+        let usage_snapshot = self.apply_quota(
+            reservation_id,
+            &state,
+            from_peer_id,
+            to_peer_id,
+            &packet,
+            now_micros,
+        )?;
 
         let forwarded = ForwardedPacket {
             reservation_id,
@@ -956,6 +1031,8 @@ impl RelayService {
             to_peer: Some(to_peer_id),
             transport: Some(forwarded.packet.transport),
             opaque_bytes: forwarded.packet.opaque_len() as u64,
+            loss_summary: usage_snapshot.loss_summary,
+            latency_summary: usage_snapshot.latency_summary,
             quota_decision: "packet_accepted",
             fallback_reason: forwarded.packet.transport.fallback_reason(),
         });
@@ -1018,6 +1095,8 @@ impl RelayService {
                 } else {
                     "reservation_cancelled_queued_packets_drained"
                 },
+                loss_summary: usage_snapshot.loss_summary,
+                latency_summary: usage_snapshot.latency_summary,
                 fallback_reason: Self::fallback_reason_for_usage(state, usage_snapshot),
             }
         };
@@ -1104,6 +1183,8 @@ impl RelayService {
             to_peer: Some(state.grant.destination_peer_id),
             transport: Some(state.primary_transport),
             opaque_bytes: usage_snapshot.forwarded_bytes,
+            loss_summary: usage_snapshot.loss_summary,
+            latency_summary: usage_snapshot.latency_summary,
             quota_decision: "loss_summary_recorded",
             fallback_reason: Self::fallback_reason_for_usage(&state, usage_snapshot),
         });
@@ -1188,6 +1269,8 @@ impl RelayService {
             to_peer: None,
             transport: None,
             opaque_bytes: 0,
+            loss_summary: None,
+            latency_summary: None,
             quota_decision: "restart_restored",
             fallback_reason: None,
         });
@@ -1226,6 +1309,7 @@ impl RelayService {
             opaque_bytes_forwarded: usage.forwarded_bytes,
             packets_forwarded: usage.forwarded_packets,
             loss_summary: usage.loss_summary,
+            latency_summary: usage.latency_summary,
             redacted_source_peer: self.redact_peer(state.grant.source_peer_id),
             redacted_destination_peer: self.redact_peer(state.grant.destination_peer_id),
             replay_pointer: self.replay_pointer,
@@ -1306,6 +1390,8 @@ impl RelayService {
                 } else {
                     "reservation_expired_queued_packets_drained"
                 },
+                loss_summary: usage_snapshot.loss_summary,
+                latency_summary: usage_snapshot.latency_summary,
                 fallback_reason: Self::fallback_reason_for_usage(state, usage_snapshot),
             }
         };
@@ -1327,7 +1413,8 @@ impl RelayService {
         from_peer_id: PeerId,
         to_peer_id: PeerId,
         packet: &OpaqueRelayPacket,
-    ) -> Result<(), RelayError> {
+        now_micros: u64,
+    ) -> Result<RelayUsage, RelayError> {
         let packet_len = packet.opaque_len();
         if packet_len > state.grant.quota.max_packet_bytes {
             self.push_quota_rejected(reservation_id, state, from_peer_id, to_peer_id, packet);
@@ -1359,7 +1446,8 @@ impl RelayService {
             RelayTransport::Udp => usage.udp_packets += 1,
             RelayTransport::TcpTls443 => usage.tcp_tls_443_packets += 1,
         }
-        Ok(())
+        usage.record_latency(now_micros.saturating_sub(packet.sent_at_micros()));
+        Ok(*usage)
     }
 
     fn drain_queued_packets_for_reservation(
@@ -1410,6 +1498,8 @@ impl RelayService {
             to_peer: Some(to_peer_id),
             transport: Some(packet.transport),
             opaque_bytes: packet.opaque_len() as u64,
+            loss_summary: None,
+            latency_summary: None,
             quota_decision: "packet_quota_rejected",
             fallback_reason: packet.transport.fallback_reason(),
         });
@@ -1427,6 +1517,8 @@ impl RelayService {
             to_peer: draft.to_peer.map(|peer| self.redact_peer(peer)),
             transport: draft.transport,
             opaque_bytes: draft.opaque_bytes,
+            loss_summary: draft.loss_summary,
+            latency_summary: draft.latency_summary,
             quota_decision: draft.quota_decision,
             fallback_reason: draft.fallback_reason,
             replay_pointer: self.replay_pointer,
@@ -1470,6 +1562,8 @@ struct RelayEventDraft {
     to_peer: Option<PeerId>,
     transport: Option<RelayTransport>,
     opaque_bytes: u64,
+    loss_summary: Option<RelayLossSummary>,
+    latency_summary: Option<RelayLatencySummary>,
     quota_decision: &'static str,
     fallback_reason: Option<&'static str>,
 }
@@ -1592,8 +1686,23 @@ mod tests {
     }
 
     fn packet(transport: RelayTransport, payload: &[u8], sequence: u64) -> OpaqueRelayPacket {
-        OpaqueRelayPacket::new(sequence, transport, payload.to_vec(), proof_tag(7), 10)
-            .expect("packet")
+        packet_sent_at(transport, payload, sequence, 10)
+    }
+
+    fn packet_sent_at(
+        transport: RelayTransport,
+        payload: &[u8],
+        sequence: u64,
+        sent_at_micros: u64,
+    ) -> OpaqueRelayPacket {
+        OpaqueRelayPacket::new(
+            sequence,
+            transport,
+            payload.to_vec(),
+            proof_tag(7),
+            sent_at_micros,
+        )
+        .expect("packet")
     }
 
     #[test]
@@ -1693,6 +1802,9 @@ mod tests {
         let proof = service
             .proof_artifact(reservation_id(34))
             .expect("proof artifact");
+        let latency = proof.latency_summary.expect("latency summary");
+        assert_eq!(latency.sample_count, 1);
+        assert_eq!(latency.latest_latency_micros, 10);
         let outcome = proof.to_path_success_outcome(30, Some(10));
         assert!(outcome.is_success());
         assert_eq!(outcome.observed_rtt_micros, Some(10));
@@ -1742,6 +1854,48 @@ mod tests {
             service.dequeue_for_peer(peer(2)).expect("queued packet"),
             forwarded
         );
+    }
+
+    #[test]
+    fn latency_summary_tracks_min_max_latest_and_average() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(35),
+                "path-relay-35",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+
+        service
+            .forward(
+                20,
+                reservation_id(35),
+                peer(1),
+                packet_sent_at(RelayTransport::Udp, b"first", 1, 12),
+            )
+            .expect("first forward");
+        service
+            .forward(
+                35,
+                reservation_id(35),
+                peer(2),
+                packet_sent_at(RelayTransport::Udp, b"second", 2, 20),
+            )
+            .expect("second forward");
+
+        let proof = service
+            .proof_artifact(reservation_id(35))
+            .expect("proof artifact");
+        let latency = proof.latency_summary.expect("latency summary");
+        assert_eq!(latency.sample_count, 2);
+        assert_eq!(latency.latest_latency_micros, 15);
+        assert_eq!(latency.min_latency_micros, 8);
+        assert_eq!(latency.max_latency_micros, 15);
+        assert_eq!(latency.total_latency_micros, 23);
+        assert_eq!(latency.average_latency_micros, 11);
     }
 
     #[test]
@@ -2686,6 +2840,14 @@ mod tests {
         assert_eq!(snapshot.reservation_count(), 1);
 
         let mut restored = RelayService::restore(snapshot);
+        let restored_proof = restored
+            .proof_artifact(reservation_id(9))
+            .expect("restored proof");
+        let restored_latency = restored_proof
+            .latency_summary
+            .expect("restored latency summary");
+        assert_eq!(restored_latency.sample_count, 1);
+        assert_eq!(restored_latency.latest_latency_micros, 10);
         assert_eq!(
             restored.dequeue_for_peer(peer(2)).expect("restored packet"),
             forwarded
