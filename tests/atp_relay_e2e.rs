@@ -1430,7 +1430,7 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
         1024,
     )
     .expect("socket loop");
-    let source_accept = socket_loop
+    let mut source_accept = socket_loop
         .accept_tcp_tls_stream_once(&source_listener, peer(1))
         .expect("accept source tcp stream")
         .expect("source tcp stream accepted");
@@ -1439,12 +1439,12 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
         source_client.local_addr().expect("source client addr")
     );
     let source_stream_id = source_accept.stream_id();
-    let mut relay_source_stream = source_accept.into_stream();
-    relay_source_stream
+    source_accept
+        .stream()
         .set_nonblocking(true)
         .expect("relay source stream nonblocking");
 
-    let destination_accept = socket_loop
+    let mut destination_accept = socket_loop
         .accept_tcp_tls_stream_once(&destination_listener, peer(2))
         .expect("accept destination tcp stream")
         .expect("destination tcp stream accepted");
@@ -1455,7 +1455,6 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
             .expect("destination client addr")
     );
     let destination_stream_id = destination_accept.stream_id();
-    let mut relay_destination_stream = destination_accept.into_stream();
 
     log_stage(
         test,
@@ -1465,13 +1464,7 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
     let mut scratch = vec![0; 1024];
     assert_eq!(
         socket_loop
-            .recv_tcp_tls_stream_once(
-                &mut service,
-                701,
-                source_stream_id,
-                &mut relay_source_stream,
-                &mut scratch,
-            )
+            .recv_accepted_tcp_tls_stream_once(&mut service, 701, &mut source_accept, &mut scratch,)
             .expect("empty nonblocking tcp stream read"),
         None
     );
@@ -1482,10 +1475,12 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
             .packets_forwarded,
         0
     );
-    relay_source_stream
+    source_accept
+        .stream()
         .set_nonblocking(false)
         .expect("relay source stream blocking for deterministic read");
-    relay_source_stream
+    source_accept
+        .stream()
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("relay source read timeout");
 
@@ -1512,13 +1507,7 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
         .write_all(&tcp_record)
         .expect("source writes tcp relay record");
     let forwarded = socket_loop
-        .recv_tcp_tls_stream_once(
-            &mut service,
-            740,
-            source_stream_id,
-            &mut relay_source_stream,
-            &mut scratch,
-        )
+        .recv_accepted_tcp_tls_stream_once(&mut service, 740, &mut source_accept, &mut scratch)
         .expect("read relay tcp stream")
         .expect("forwarded tcp packets");
     assert_eq!(forwarded.len(), 1);
@@ -1539,12 +1528,16 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
     log_stage(
         test,
         "empty-egress",
-        "tcp stream write helper distinguishes empty source queues from sends",
+        "tcp stream write helper keys egress by admitted stream id before queue drain",
     );
     assert_eq!(
         socket_loop
-            .send_tcp_tls_stream_once(&mut service, &mut relay_destination_stream, peer(1))
-            .expect("no queued source tcp write"),
+            .send_tcp_tls_stream_once(
+                &mut service,
+                source_stream_id,
+                destination_accept.stream_mut()
+            )
+            .expect("source stream id cannot drain destination queue"),
         None
     );
 
@@ -1556,7 +1549,7 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
     let mut total_written = 0usize;
     for _ in 0..8 {
         let Some(written) = socket_loop
-            .send_tcp_tls_stream_once(&mut service, &mut relay_destination_stream, peer(2))
+            .send_accepted_tcp_tls_stream_once(&mut service, &mut destination_accept)
             .expect("relay tcp stream write")
         else {
             break;
@@ -1624,13 +1617,7 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
         .shutdown(Shutdown::Write)
         .expect("source half closes write side");
     let err = socket_loop
-        .recv_tcp_tls_stream_once(
-            &mut service,
-            780,
-            source_stream_id,
-            &mut relay_source_stream,
-            &mut scratch,
-        )
+        .recv_accepted_tcp_tls_stream_once(&mut service, 780, &mut source_accept, &mut scratch)
         .expect_err("tcp stream eof closes the admitted stream");
     match err {
         RelaySocketIoError::TcpTlsStreamClosed { stream_id } => {

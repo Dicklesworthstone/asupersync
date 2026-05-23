@@ -1070,6 +1070,32 @@ impl RelaySocketLoop {
             .map_err(Into::into)
     }
 
+    /// Read and forward at most one chunk from an accepted TCP/TLS stream.
+    ///
+    /// This is the preferred concrete-stream entry point because the stream id
+    /// and `TcpStream` stay bundled in the value returned by
+    /// [`Self::accept_tcp_tls_stream_once`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::recv_tcp_tls_stream_once`] errors.
+    pub fn recv_accepted_tcp_tls_stream_once(
+        &mut self,
+        service: &mut RelayService,
+        now_micros: u64,
+        accepted: &mut RelayAcceptedTcpTlsStream,
+        scratch: &mut [u8],
+    ) -> Result<Option<Vec<ForwardedPacket>>, RelaySocketIoError> {
+        let stream_id = accepted.stream_id();
+        self.recv_tcp_tls_stream_once(
+            service,
+            now_micros,
+            stream_id,
+            accepted.stream_mut(),
+            scratch,
+        )
+    }
+
     /// Ingest bytes read from an admitted TCP/TLS 443 stream.
     ///
     /// Unknown streams are rejected before buffering. Admitted streams fail
@@ -1190,7 +1216,9 @@ impl RelaySocketLoop {
     /// the record. The socket loop therefore stages a full relay record in an
     /// internal pending-write buffer before removing it from the service queue,
     /// and later calls continue writing the retained suffix before another
-    /// record can be dequeued for that stream.
+    /// record can be dequeued for that stream. The explicit stream id resolves
+    /// the authenticated peer before the queue is inspected, so a caller cannot
+    /// drain another peer's queued record by passing an unrelated writer.
     ///
     /// # Errors
     ///
@@ -1201,10 +1229,10 @@ impl RelaySocketLoop {
     pub fn send_tcp_tls_stream_once<W: io::Write>(
         &mut self,
         service: &mut RelayService,
+        stream_id: RelayTcpTlsStreamId,
         stream: &mut W,
-        peer_id: PeerId,
     ) -> Result<Option<usize>, RelaySocketIoError> {
-        let stream_id = self.endpoints.first_tcp_tls_stream_for_peer(peer_id)?;
+        let peer_id = self.endpoints.peer_for_tcp_tls_stream(stream_id)?;
         if !self.tcp_tls_pending_writes.contains_key(&stream_id) {
             let Some(record) =
                 service.peek_tcp_tls_record_for_peer(peer_id, self.max_payload_bytes)?
@@ -1246,6 +1274,23 @@ impl RelaySocketLoop {
         }
 
         Ok(Some(written))
+    }
+
+    /// Write queued TCP/TLS relay bytes to an accepted concrete stream.
+    ///
+    /// This is the preferred concrete-stream entry point because the stream id
+    /// and writer stay bundled in the accepted-stream value.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::send_tcp_tls_stream_once`] errors.
+    pub fn send_accepted_tcp_tls_stream_once(
+        &mut self,
+        service: &mut RelayService,
+        accepted: &mut RelayAcceptedTcpTlsStream,
+    ) -> Result<Option<usize>, RelaySocketIoError> {
+        let stream_id = accepted.stream_id();
+        self.send_tcp_tls_stream_once(service, stream_id, accepted.stream_mut())
     }
 
     fn allocate_tcp_tls_stream_id(&mut self) -> Result<RelayTcpTlsStreamId, RelayError> {
@@ -4655,6 +4700,81 @@ mod tests {
             service
                 .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
                 .expect("empty tcp queue after commit")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tcp_tls_socket_write_uses_explicit_stream_binding_before_dequeue() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(44),
+                "path-relay-44",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                125,
+                reservation_id(44),
+                peer(1),
+                packet_sent_at(RelayTransport::TcpTls443, b"stream-bound-ciphertext", 1, 90),
+            )
+            .expect("tcp fallback packet forwards");
+
+        let mut socket_loop = RelaySocketLoop::new(
+            RelayEndpointDirectoryQuota {
+                max_udp_endpoints: 1,
+                max_tcp_tls_streams: 2,
+            },
+            RelayQuota::default().max_packet_bytes,
+            1024,
+        )
+        .expect("socket loop");
+        let source_stream = RelayTcpTlsStreamId::new(44).expect("source stream");
+        let destination_stream = RelayTcpTlsStreamId::new(45).expect("destination stream");
+        socket_loop
+            .admit_tcp_tls_stream(peer(1), source_stream)
+            .expect("admit source stream");
+        socket_loop
+            .admit_tcp_tls_stream(peer(2), destination_stream)
+            .expect("admit destination stream");
+
+        let mut wrong_writer = Vec::new();
+        assert_eq!(
+            socket_loop
+                .send_tcp_tls_stream_once(&mut service, source_stream, &mut wrong_writer)
+                .expect("source stream has no outbound record"),
+            None
+        );
+        assert!(wrong_writer.is_empty());
+        assert!(
+            service
+                .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+                .expect("destination queue remains after wrong stream id")
+                .is_some()
+        );
+
+        let mut destination_writer = Vec::new();
+        let written = socket_loop
+            .send_tcp_tls_stream_once(&mut service, destination_stream, &mut destination_writer)
+            .expect("destination stream writes queued record")
+            .expect("bytes written");
+        assert_eq!(written, destination_writer.len());
+        let decoded = RelayWireFrame::decode_complete_tcp_tls_record(
+            &destination_writer,
+            RelayQuota::default().max_packet_bytes,
+        )
+        .expect("decode written record");
+        assert_eq!(decoded.from_peer_id(), peer(1));
+        assert_eq!(decoded.packet().opaque_bytes(), b"stream-bound-ciphertext");
+        assert!(
+            service
+                .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+                .expect("queue drained only after destination stream write")
                 .is_none()
         );
     }
