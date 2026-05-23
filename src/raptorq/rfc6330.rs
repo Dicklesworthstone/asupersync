@@ -279,27 +279,22 @@ pub struct LtTuple {
 const RFC6330_MAX_LT_DEGREE: usize = 30;
 
 /// Return the smallest prime number greater than or equal to `n`.
+/// Returns `None` if no prime >= n fits in usize.
 #[must_use]
-pub fn next_prime_ge(n: usize) -> usize {
-    const PRIME_SEARCH_OVERFLOW_MSG: &str =
-        "next_prime_ge overflow: no prime >= input fits in usize";
-
+pub fn next_prime_ge(n: usize) -> Option<usize> {
     if n <= 2 {
-        return 2;
+        return Some(2);
     }
 
     let mut candidate = if n.is_multiple_of(2) {
-        n.checked_add(1)
-            .unwrap_or_else(|| panic!("{PRIME_SEARCH_OVERFLOW_MSG}: n={n}"))
+        n.checked_add(1)?
     } else {
         n
     };
     while !is_prime(candidate) {
-        candidate = candidate
-            .checked_add(2)
-            .unwrap_or_else(|| panic!("{PRIME_SEARCH_OVERFLOW_MSG}: n={n}"));
+        candidate = candidate.checked_add(2)?;
     }
-    candidate
+    Some(candidate)
 }
 
 // br-asupersync-pphjvo: removed `require_rfc_u32` panic helper.
@@ -377,7 +372,7 @@ pub fn try_tuple(
     pi_modulus: usize,
     encoding_symbol_id: u32,
 ) -> Option<LtTuple> {
-    let expected_pi_modulus = next_prime_ge(pi_count);
+    let expected_pi_modulus = next_prime_ge(pi_count)?;
     let valid = lt_width > 1
         && pi_count > 0
         && pi_modulus > 1
@@ -424,9 +419,10 @@ pub fn try_tuple(
 }
 
 /// Compute RFC 6330 LT tuple using `P1 = smallest_prime_ge(P)`.
+/// Returns `None` if prime computation overflows.
 #[must_use]
-pub fn tuple_with_prime_p1(j: usize, w: usize, p: usize, x: u32) -> LtTuple {
-    tuple(j, w, p, next_prime_ge(p), x)
+pub fn tuple_with_prime_p1(j: usize, w: usize, p: usize, x: u32) -> Option<LtTuple> {
+    Some(tuple(j, w, p, next_prime_ge(p)?, x))
 }
 
 /// Build RFC 6330 repair-symbol intermediate indices for an ESI.
@@ -440,7 +436,9 @@ pub fn repair_indices_for_esi(
     pi_count: usize,
     encoding_symbol_id: u32,
 ) -> Vec<usize> {
-    let pi_modulus = next_prime_ge(pi_count);
+    let Some(pi_modulus) = next_prime_ge(pi_count) else {
+        return Vec::new();
+    };
     let lt_tuple = tuple(
         systematic_index,
         lt_width,
@@ -469,7 +467,9 @@ pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize
     // an empty schedule and naturally surfaces an "invalid
     // encoding" error up the public boundary instead of crashing
     // the process.
-    let expected_p1 = next_prime_ge(p);
+    let Some(expected_p1) = next_prime_ge(p) else {
+        return Vec::new();
+    };
     let valid = w > 1
         && p > 0
         && p1 >= p
@@ -948,12 +948,12 @@ mod tests {
 
     #[test]
     fn next_prime_ge_basic() {
-        assert_eq!(next_prime_ge(1), 2);
-        assert_eq!(next_prime_ge(2), 2);
-        assert_eq!(next_prime_ge(3), 3);
-        assert_eq!(next_prime_ge(4), 5);
-        assert_eq!(next_prime_ge(17), 17);
-        assert_eq!(next_prime_ge(18), 19);
+        assert_eq!(next_prime_ge(1), Some(2));
+        assert_eq!(next_prime_ge(2), Some(2));
+        assert_eq!(next_prime_ge(3), Some(3));
+        assert_eq!(next_prime_ge(4), Some(5));
+        assert_eq!(next_prime_ge(17), Some(17));
+        assert_eq!(next_prime_ge(18), Some(19));
     }
 
     #[test]
@@ -961,7 +961,7 @@ mod tests {
         for n in [usize::MAX - 1, usize::MAX] {
             let result = std::panic::catch_unwind(|| next_prime_ge(n));
             assert!(
-                result.is_err(),
+                result.is_ok() && result.unwrap().is_none(),
                 "next_prime_ge({n}) should fail closed instead of wrapping"
             );
         }
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn tuple_deterministic_and_bounded() {
-        let p1 = next_prime_ge(17);
+        let p1 = next_prime_ge(17).expect("test P1 must fit");
         let t1 = tuple(5, 101, 17, p1, 1234);
         let t2 = tuple(5, 101, 17, p1, 1234);
         assert_eq!(t1, t2);
@@ -986,7 +986,7 @@ mod tests {
     fn tuple_indices_are_in_range() {
         let w = 257;
         let p = 29;
-        let p1 = next_prime_ge(p);
+        let p1 = next_prime_ge(p).expect("test P1 must fit");
         let t = tuple(3, w, p, p1, 77);
         let idx = tuple_indices(t, w, p, p1);
 
@@ -1146,7 +1146,7 @@ mod tests {
     #[test]
     fn tuple_scenario_matrix_golden_vectors() {
         for scenario in tuple_scenarios() {
-            let p1 = next_prime_ge(scenario.p);
+            let p1 = next_prime_ge(scenario.p).expect("scenario P1 must fit");
             let actual_tuple = tuple(scenario.j, scenario.w, scenario.p, p1, scenario.x);
             let actual_indices = tuple_indices(actual_tuple, scenario.w, scenario.p, p1);
             let context = tuple_context(&scenario, "golden_vector_compare");
@@ -1165,7 +1165,7 @@ mod tests {
     #[test]
     fn tuple_scenario_matrix_deterministic_replay() {
         for scenario in tuple_scenarios() {
-            let p1 = next_prime_ge(scenario.p);
+            let p1 = next_prime_ge(scenario.p).expect("scenario P1 must fit");
 
             let tuple_first = tuple(scenario.j, scenario.w, scenario.p, p1, scenario.x);
             let tuple_second = tuple(scenario.j, scenario.w, scenario.p, p1, scenario.x);
@@ -1508,7 +1508,7 @@ mod tests {
             // Find systematic parameters for this K
             let params = crate::raptorq::systematic::SystematicParams::for_source_block(k, 1024);
 
-            let p1 = next_prime_ge(params.l - params.w);
+            let p1 = next_prime_ge(params.l - params.w).expect("params P1 must fit");
             let actual = tuple(params.j, params.w, params.l - params.w, p1, esi);
 
             assert_eq!(
@@ -1530,7 +1530,7 @@ mod tests {
         for &(k_prime, j, s, h, w) in SYSTEMATIC_INDEX_TABLE_K256 {
             let l = k_prime + u32::from(s) + u32::from(h);
             let p = l - w;
-            let p1 = next_prime_ge(p as usize) as u32;
+            let p1 = next_prime_ge(p as usize).expect("table P1 must fit") as u32;
 
             // Test ESI values: 0, 1, 100, 1000, 65535
             for esi in [0u32, 1, 100, 1000, 65535] {
@@ -1623,7 +1623,7 @@ mod tests {
 
         for &(k, esi, ref expected_bytes) in &reference_cases {
             let params = crate::raptorq::systematic::SystematicParams::for_source_block(k, 1024);
-            let p1 = next_prime_ge(params.l - params.w);
+            let p1 = next_prime_ge(params.l - params.w).expect("params P1 must fit");
             let actual_tuple = tuple(params.j, params.w, params.l - params.w, p1, esi);
 
             // Serialize tuple to bytes for comparison
@@ -1644,7 +1644,7 @@ mod tests {
         for &(k_prime, j, s, h, w) in SYSTEMATIC_INDEX_TABLE_K256.iter().take(10) {
             let l = k_prime + u32::from(s) + u32::from(h);
             let p = l - w;
-            let p1 = next_prime_ge(p as usize);
+            let p1 = next_prime_ge(p as usize).expect("table P1 must fit");
 
             let mut seen_tuples = std::collections::HashSet::new();
 
@@ -1678,7 +1678,7 @@ mod tests {
 
             let l = k_prime + u32::from(s) + u32::from(h);
             let p = l - w;
-            let p1 = next_prime_ge(p as usize);
+            let p1 = next_prime_ge(p as usize).expect("table P1 must fit");
 
             // Test a representative ESI
             let result = tuple(j as usize, w as usize, p as usize, p1, 42);

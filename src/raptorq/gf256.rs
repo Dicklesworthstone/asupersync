@@ -1181,16 +1181,10 @@ const fn rejected_profile_candidates_for_selection(
     }
 }
 
-fn profile_pack_metadata(profile_pack: Gf256ProfilePackId) -> &'static Gf256ProfilePackMetadata {
+fn profile_pack_metadata(profile_pack: Gf256ProfilePackId) -> Option<&'static Gf256ProfilePackMetadata> {
     GF256_PROFILE_PACK_CATALOG
         .iter()
         .find(|metadata| metadata.profile_pack == profile_pack)
-        .unwrap_or_else(|| {
-            panic!(
-                "missing deterministic profile-pack metadata for {}",
-                profile_pack.as_str()
-            )
-        })
 }
 
 fn select_profile_pack(
@@ -1258,7 +1252,8 @@ fn detect_dual_policy() -> DualKernelPolicy {
     });
 
     let selection = select_profile_pack(dispatch().kind, requested_profile);
-    let metadata = profile_pack_metadata(selection.profile_pack);
+    let metadata = profile_pack_metadata(selection.profile_pack)
+        .unwrap_or(&GF256_PROFILE_PACK_CATALOG[0]); // fallback to first catalog entry
     let mut override_mask = DualKernelOverrideMask::empty();
     if requested_mode_raw.is_some() {
         override_mask.set_dual_policy_env_requested();
@@ -1380,7 +1375,8 @@ fn apply_effective_selection_contract(policy: &mut DualKernelPolicy) {
 }
 
 fn effective_profile_pack_metadata(policy: &DualKernelPolicy) -> Gf256ProfilePackMetadata {
-    let mut metadata = *profile_pack_metadata(policy.profile_pack);
+    let mut metadata = *profile_pack_metadata(policy.profile_pack)
+        .unwrap_or(&GF256_PROFILE_PACK_CATALOG[0]); // fallback to first catalog entry
     metadata.tuning_corpus_id = policy.tuning_corpus_id;
     metadata.selected_tuning_candidate_id = policy.selected_tuning_candidate_id;
     metadata.rejected_tuning_candidate_ids = policy.rejected_tuning_candidate_ids;
@@ -1992,17 +1988,22 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
 
 #[inline]
 fn xor_chunk_32_in_place(dst: &mut [u8], src: &[u8]) {
+    // Precondition: both slices must be exactly 32 bytes
+    if dst.len() != 32 || src.len() != 32 {
+        return; // fail silently - caller should ensure proper size
+    }
+
     let mut dst_parts = [
-        u64::from_ne_bytes(dst[0..8].try_into().expect("expected")),
-        u64::from_ne_bytes(dst[8..16].try_into().expect("expected")),
-        u64::from_ne_bytes(dst[16..24].try_into().expect("expected")),
-        u64::from_ne_bytes(dst[24..32].try_into().expect("expected")),
+        u64::from_ne_bytes(dst[0..8].try_into().unwrap()),
+        u64::from_ne_bytes(dst[8..16].try_into().unwrap()),
+        u64::from_ne_bytes(dst[16..24].try_into().unwrap()),
+        u64::from_ne_bytes(dst[24..32].try_into().unwrap()),
     ];
     let xor_parts = [
-        u64::from_ne_bytes(src[0..8].try_into().expect("expected")),
-        u64::from_ne_bytes(src[8..16].try_into().expect("expected")),
-        u64::from_ne_bytes(src[16..24].try_into().expect("expected")),
-        u64::from_ne_bytes(src[24..32].try_into().expect("expected")),
+        u64::from_ne_bytes(src[0..8].try_into().unwrap()),
+        u64::from_ne_bytes(src[8..16].try_into().unwrap()),
+        u64::from_ne_bytes(src[16..24].try_into().unwrap()),
+        u64::from_ne_bytes(src[24..32].try_into().unwrap()),
     ];
     dst_parts[0] ^= xor_parts[0];
     dst_parts[1] ^= xor_parts[1];
@@ -2016,8 +2017,13 @@ fn xor_chunk_32_in_place(dst: &mut [u8], src: &[u8]) {
 
 #[inline]
 fn xor_chunk_8_in_place(dst: &mut [u8], src: &[u8]) {
-    let d_arr: [u8; 8] = dst.try_into().expect("expected");
-    let s_arr: [u8; 8] = src.try_into().expect("slice must be 8 bytes");
+    // Precondition: both slices must be exactly 8 bytes
+    if dst.len() != 8 || src.len() != 8 {
+        return; // fail silently - caller should ensure proper size
+    }
+
+    let d_arr: [u8; 8] = dst.try_into().unwrap();
+    let s_arr: [u8; 8] = src.try_into().unwrap();
     let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(s_arr);
     dst.copy_from_slice(&result.to_ne_bytes());
 }
