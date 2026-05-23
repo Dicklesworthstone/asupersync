@@ -33,8 +33,8 @@ impl Ord for SchedulerEntry {
         self.priority
             .cmp(&other.priority)
             .then_with(|| {
-                let diff = other.generation.wrapping_sub(self.generation) as i64;
-                diff.cmp(&0)
+                // Safe comparison without overflow: earlier generation wins
+                self.generation.cmp(&other.generation).reverse()
             })
             .then_with(|| other.task.cmp(&self.task))
     }
@@ -67,8 +67,8 @@ impl Ord for TimedEntry {
             .deadline
             .cmp(&self.deadline)
             .then_with(|| {
-                let diff = other.generation.wrapping_sub(self.generation) as i64;
-                diff.cmp(&0)
+                // Safe comparison without overflow: earlier generation wins
+                self.generation.cmp(&other.generation).reverse()
             })
             .then_with(|| other.task.cmp(&self.task))
     }
