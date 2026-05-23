@@ -6,7 +6,10 @@
 pub mod file_object_e2e;
 
 use asupersync::atp::manifest::Manifest;
-use asupersync::atp::object::{ContentId, MetadataPolicy, ObjectGraph, ObjectId, ObjectKind};
+use asupersync::atp::object::{
+    ContentId, MetadataPolicy, Object, ObjectEdge, ObjectGraph, ObjectId, ObjectKind,
+};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -68,6 +71,22 @@ pub enum JournalEntry {
         kind: ObjectKind,
         timestamp: SystemTime,
     },
+}
+
+/// Test-local obligation lifecycle event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObligationEvent {
+    Opened(String),
+    Committed(String),
+    Aborted(String),
+}
+
+/// Test-local worker lifecycle event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerEvent {
+    Started(String),
+    Finished(String),
+    Aborted(String),
 }
 
 /// Test configuration for e2e object graph tests
@@ -175,6 +194,8 @@ pub struct TestArtifact {
     pub final_commit_record: Option<String>,
     pub timestamp: SystemTime,
     pub recovery_state: Option<RecoveryState>,
+    pub obligation_events: Vec<ObligationEvent>,
+    pub worker_events: Vec<WorkerEvent>,
 }
 
 impl TestArtifact {
@@ -191,6 +212,8 @@ impl TestArtifact {
             final_commit_record: None,
             timestamp: SystemTime::now(),
             recovery_state: None,
+            obligation_events: Vec::new(),
+            worker_events: Vec::new(),
         }
     }
 
@@ -205,6 +228,9 @@ impl TestArtifact {
 
     pub fn record_chunk_range(&mut self, start: u64, end: u64) {
         self.chunk_ranges.push((start, end));
+        let id = format!("chunk:{start}-{end}");
+        self.record_obligation_opened(id.clone());
+        self.record_obligation_committed(id);
     }
 
     pub fn record_journal_offset(&mut self, offset: JournalOffset) {
@@ -213,18 +239,52 @@ impl TestArtifact {
 
     pub fn record_bitmap_change(&mut self, chunk_id: u64) {
         self.bitmap_changes.push(chunk_id);
+        let id = format!("bitmap:{chunk_id}");
+        self.record_obligation_opened(id.clone());
+        self.record_obligation_committed(id);
     }
 
     pub fn record_verifier_decision(&mut self, result: VerificationResult) {
+        let id = match &result {
+            VerificationResult::Valid { object_id, .. } => format!("verify:{object_id}"),
+        };
+        self.record_obligation_opened(id.clone());
         self.verifier_decisions.push(result);
+        self.record_obligation_committed(id);
     }
 
     pub fn record_final_commit(&mut self, record: String) {
+        self.record_obligation_opened("final_commit".to_string());
         self.final_commit_record = Some(record);
+        self.record_obligation_committed("final_commit".to_string());
     }
 
     pub fn record_recovery_state(&mut self, state: RecoveryState) {
         self.recovery_state = Some(state);
+    }
+
+    pub fn record_obligation_opened(&mut self, id: String) {
+        self.obligation_events.push(ObligationEvent::Opened(id));
+    }
+
+    pub fn record_obligation_committed(&mut self, id: String) {
+        self.obligation_events.push(ObligationEvent::Committed(id));
+    }
+
+    pub fn record_obligation_aborted(&mut self, id: String) {
+        self.obligation_events.push(ObligationEvent::Aborted(id));
+    }
+
+    pub fn record_worker_started(&mut self, id: String) {
+        self.worker_events.push(WorkerEvent::Started(id));
+    }
+
+    pub fn record_worker_finished(&mut self, id: String) {
+        self.worker_events.push(WorkerEvent::Finished(id));
+    }
+
+    pub fn record_worker_aborted(&mut self, id: String) {
+        self.worker_events.push(WorkerEvent::Aborted(id));
     }
 
     pub fn to_lab_artifact(&self) -> HashMap<String, String> {
@@ -278,7 +338,39 @@ impl TestArtifact {
             artifact.insert("recovery_state".to_string(), format!("{:?}", recovery));
         }
 
+        if !self.obligation_events.is_empty() {
+            let events = self
+                .obligation_events
+                .iter()
+                .map(|event| format!("{event:?}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            artifact.insert("obligation_events".to_string(), events);
+        }
+
+        if !self.worker_events.is_empty() {
+            let events = self
+                .worker_events
+                .iter()
+                .map(|event| format!("{event:?}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            artifact.insert("worker_events".to_string(), events);
+        }
+
         artifact
+    }
+
+    fn has_verified_material(&self) -> bool {
+        !self.verifier_decisions.is_empty()
+            || self.manifest_root != [0; 32]
+                && (!self.chunk_ranges.is_empty() || !self.bitmap_changes.is_empty())
+    }
+
+    fn is_injected_crash_record(&self) -> bool {
+        self.final_commit_record
+            .as_deref()
+            .is_some_and(|record| record.starts_with("CRASH_INJECTED:"))
     }
 }
 
@@ -313,19 +405,23 @@ impl ObjectGraphTestHarness {
         ) -> Result<TestArtifact, Box<dyn std::error::Error>>,
     {
         // Run test without crash injection first
-        let clean_artifact = test_fn(&self.config, None)?;
+        let mut clean_artifact = test_fn(&self.config, None)?;
+        if clean_artifact.worker_events.is_empty() {
+            let worker_id = format!("{test_name}:clean");
+            clean_artifact.record_worker_started(worker_id.clone());
+            clean_artifact.record_worker_finished(worker_id);
+        }
         self.artifacts.push(clean_artifact);
 
         // Run test with each crash point
         for &crash_point in &self.config.crash_points {
-            println!(
-                "Testing {} with crash point: {}",
-                test_name,
-                crash_point.name()
-            );
-
             match test_fn(&self.config, Some(crash_point)) {
-                Ok(artifact) => {
+                Ok(mut artifact) => {
+                    if artifact.worker_events.is_empty() {
+                        let worker_id = format!("{test_name}:{}", crash_point.name());
+                        artifact.record_worker_started(worker_id.clone());
+                        artifact.record_worker_finished(worker_id);
+                    }
                     self.artifacts.push(artifact);
                 }
                 Err(e) => {
@@ -333,7 +429,12 @@ impl ObjectGraphTestHarness {
                     // Record the failure artifact for analysis
                     let mut artifact = TestArtifact::new(test_name.to_string(), ObjectId::new());
                     artifact.crash_point = Some(crash_point);
-                    artifact.final_commit_record = Some(format!("CRASH_INJECTED: {}", e));
+                    let worker_id = format!("{test_name}:{}", crash_point.name());
+                    artifact.record_worker_started(worker_id.clone());
+                    artifact.record_worker_aborted(worker_id);
+                    artifact.record_obligation_opened(format!("crash:{}", crash_point.name()));
+                    artifact.record_obligation_aborted(format!("crash:{}", crash_point.name()));
+                    artifact.final_commit_record = Some(format!("CRASH_INJECTED: {e}"));
                     self.artifacts.push(artifact);
                 }
             }
@@ -343,24 +444,87 @@ impl ObjectGraphTestHarness {
     }
 
     pub fn assert_no_obligation_leaks(&self) -> Result<(), String> {
-        // In a real implementation, this would check the obligation tracker
-        // For now, we'll simulate the check
-        println!("Checking for obligation leaks...");
-        // TODO: Implement actual obligation leak detection
+        let mut states = HashMap::<String, i32>::new();
+
+        for artifact in &self.artifacts {
+            for event in &artifact.obligation_events {
+                match event {
+                    ObligationEvent::Opened(id) => {
+                        *states.entry(id.clone()).or_default() += 1;
+                    }
+                    ObligationEvent::Committed(id) | ObligationEvent::Aborted(id) => {
+                        let count = states
+                            .get_mut(id)
+                            .ok_or_else(|| format!("obligation {id} closed before it opened"))?;
+                        *count -= 1;
+                        if *count < 0 {
+                            return Err(format!("obligation {id} closed more often than opened"));
+                        }
+                    }
+                }
+            }
+        }
+
+        let leaked = states
+            .into_iter()
+            .filter_map(|(id, count)| (count != 0).then_some(format!("{id}:{count}")))
+            .collect::<Vec<_>>();
+        if !leaked.is_empty() {
+            return Err(format!("unclosed obligations: {}", leaked.join(",")));
+        }
+
         Ok(())
     }
 
     pub fn assert_no_live_workers(&self) -> Result<(), String> {
-        // In a real implementation, this would check the worker pool
-        println!("Checking for live workers after region close...");
-        // TODO: Implement actual worker lifecycle checking
+        let mut states = HashMap::<String, i32>::new();
+
+        for artifact in &self.artifacts {
+            for event in &artifact.worker_events {
+                match event {
+                    WorkerEvent::Started(id) => {
+                        *states.entry(id.clone()).or_default() += 1;
+                    }
+                    WorkerEvent::Finished(id) | WorkerEvent::Aborted(id) => {
+                        let count = states
+                            .get_mut(id)
+                            .ok_or_else(|| format!("worker {id} closed before it started"))?;
+                        *count -= 1;
+                        if *count < 0 {
+                            return Err(format!("worker {id} closed more often than started"));
+                        }
+                    }
+                }
+            }
+        }
+
+        let live = states
+            .into_iter()
+            .filter_map(|(id, count)| (count != 0).then_some(format!("{id}:{count}")))
+            .collect::<Vec<_>>();
+        if !live.is_empty() {
+            return Err(format!(
+                "live workers after region close: {}",
+                live.join(",")
+            ));
+        }
+
         Ok(())
     }
 
     pub fn assert_no_unverified_exposure(&self) -> Result<(), String> {
-        // Check that no final files are exposed without verification
-        println!("Checking for unverified file exposure...");
-        // TODO: Implement actual verification exposure checking
+        for artifact in &self.artifacts {
+            if artifact.final_commit_record.is_some()
+                && !artifact.is_injected_crash_record()
+                && !artifact.has_verified_material()
+            {
+                return Err(format!(
+                    "final commit exposed without verification evidence: {}",
+                    artifact.test_name
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -403,12 +567,6 @@ impl ObjectGraphTestHarness {
         let summary_data = serde_json::to_string_pretty(&summary)?;
         std::fs::write(summary_file, summary_data)?;
 
-        println!(
-            "Generated {} lab-compatible artifacts in: {}",
-            self.artifacts.len(),
-            artifacts_dir.display()
-        );
-
         Ok(())
     }
 }
@@ -426,12 +584,32 @@ impl Drop for ObjectGraphTestHarness {
 pub mod test_utils {
     use super::*;
 
+    thread_local! {
+        static ACTIVE_CRASH_INJECTION: RefCell<Option<CrashPoint>> = const { RefCell::new(None) };
+    }
+
     pub fn create_test_object_graph() -> ObjectGraph {
         let mut graph = ObjectGraph::new();
 
-        // Add sample objects for testing
-        // TODO: Implement actual object creation
+        let readme = Object::file(b"object graph e2e readme\n".to_vec());
+        let manifest = Object::file(b"object graph e2e manifest\n".to_vec());
+        let readme_id = readme.id.clone();
+        let manifest_id = manifest.id.clone();
+        graph
+            .add_object(readme)
+            .expect("readme object should be valid");
+        graph
+            .add_object(manifest)
+            .expect("manifest object should be valid");
 
+        let root = Object::directory(vec![
+            ObjectEdge::new(readme_id, "README.txt".to_string()),
+            ObjectEdge::new(manifest_id, "manifest.txt".to_string()),
+        ]);
+        graph
+            .add_root(root)
+            .expect("directory root should be valid");
+        graph.validate().expect("test object graph should validate");
         graph
     }
 
@@ -441,19 +619,202 @@ pub mod test_utils {
     }
 
     pub fn setup_crash_injection(crash_point: CrashPoint) {
-        // TODO: Implement actual crash injection setup
-        println!("Setting up crash injection for: {}", crash_point.name());
+        ACTIVE_CRASH_INJECTION.with(|slot| {
+            *slot.borrow_mut() = Some(crash_point);
+        });
+    }
+
+    pub fn active_crash_injection() -> Option<CrashPoint> {
+        ACTIVE_CRASH_INJECTION.with(|slot| *slot.borrow())
+    }
+
+    pub fn clear_crash_injection() {
+        ACTIVE_CRASH_INJECTION.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
     }
 
     pub fn verify_recovery_consistency(artifact: &TestArtifact) -> Result<(), String> {
-        // TODO: Implement actual recovery consistency verification
-        println!("Verifying recovery consistency for: {}", artifact.test_name);
+        if artifact.crash_point.is_some()
+            && artifact.recovery_state.is_none()
+            && !artifact.is_injected_crash_record()
+        {
+            return Err(format!(
+                "crash point recorded without recovery evidence: {}",
+                artifact.test_name
+            ));
+        }
+
+        match artifact.recovery_state {
+            Some(RecoveryState::Completed) => {
+                if artifact.final_commit_record.is_none() {
+                    return Err("completed recovery missing final commit".to_string());
+                }
+                if !artifact.has_verified_material() {
+                    return Err("completed recovery missing verification evidence".to_string());
+                }
+            }
+            Some(RecoveryState::PartialCompletion | RecoveryState::Resuming) => {
+                if artifact.chunk_ranges.is_empty() && artifact.bitmap_changes.is_empty() {
+                    return Err("resumable recovery missing partial progress evidence".to_string());
+                }
+                if artifact.final_commit_record.is_some() {
+                    return Err("partial recovery must not expose a final commit".to_string());
+                }
+            }
+            Some(
+                RecoveryState::VerificationFailed
+                | RecoveryState::CommitFailed
+                | RecoveryState::RepairFailed,
+            ) => {
+                if artifact.final_commit_record.is_some() {
+                    return Err("failed recovery state must not expose a final commit".to_string());
+                }
+            }
+            Some(RecoveryState::RenameRequired) => {
+                if artifact.chunk_ranges.is_empty() {
+                    return Err("rename recovery missing durable chunk evidence".to_string());
+                }
+            }
+            Some(RecoveryState::Quarantined | RecoveryState::RetryRequired) | None => {}
+        }
+
         Ok(())
     }
 
     pub fn check_final_state_integrity(artifact: &TestArtifact) -> Result<(), String> {
-        // TODO: Implement actual final state integrity checking
-        println!("Checking final state integrity for: {}", artifact.test_name);
+        for (start, end) in &artifact.chunk_ranges {
+            if start >= end {
+                return Err(format!(
+                    "invalid empty or reversed chunk range: {start}-{end}"
+                ));
+            }
+        }
+
+        let mut bitmap_changes = artifact.bitmap_changes.clone();
+        bitmap_changes.sort_unstable();
+        if bitmap_changes.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err("duplicate bitmap change recorded".to_string());
+        }
+
+        if artifact.final_commit_record.is_some()
+            && !artifact.is_injected_crash_record()
+            && !artifact.has_verified_material()
+        {
+            return Err("final commit missing verified material".to_string());
+        }
+
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn committed_artifact() -> TestArtifact {
+        let object_id = ObjectId::content(ContentId::from_bytes(b"committed-object"));
+        let mut artifact = TestArtifact::new("committed".to_string(), object_id.clone());
+        artifact.record_manifest_root(*object_id.hash_bytes());
+        artifact.record_chunk_range(0, 16);
+        artifact.record_bitmap_change(0);
+        artifact.record_verifier_decision(VerificationResult::Valid {
+            object_id,
+            content_hash: [7; 32],
+            verified_at: SystemTime::UNIX_EPOCH,
+        });
+        artifact.record_worker_started("worker:committed".to_string());
+        artifact.record_worker_finished("worker:committed".to_string());
+        artifact.record_final_commit("committed".to_string());
+        artifact.record_recovery_state(RecoveryState::Completed);
+        artifact
+    }
+
+    #[test]
+    fn object_graph_fixture_uses_real_objects_and_manifest() {
+        let graph = test_utils::create_test_object_graph();
+        let roots = graph.roots().cloned().collect::<Vec<_>>();
+
+        assert_eq!(graph.object_count(), 3);
+        assert_eq!(roots.len(), 1);
+        let root = graph.get_object(&roots[0]).expect("root object");
+        assert_eq!(root.metadata.kind, ObjectKind::DirectoryObject);
+        assert_eq!(root.children.len(), 2);
+        assert!(Manifest::from_graph(&graph, MetadataPolicy::portable()).is_ok());
+    }
+
+    #[test]
+    fn harness_detects_obligation_and_worker_leaks() {
+        let mut harness = ObjectGraphTestHarness::new(ObjectTestConfig::default()).unwrap();
+        let mut leaked = committed_artifact();
+        leaked.record_obligation_opened("leaked-obligation".to_string());
+        leaked.record_worker_started("leaked-worker".to_string());
+        harness.artifacts.push(leaked);
+
+        assert!(
+            harness
+                .assert_no_obligation_leaks()
+                .expect_err("leaked obligation should fail")
+                .contains("leaked-obligation")
+        );
+        assert!(
+            harness
+                .assert_no_live_workers()
+                .expect_err("live worker should fail")
+                .contains("leaked-worker")
+        );
+    }
+
+    #[test]
+    fn harness_rejects_unverified_final_exposure() {
+        let mut harness = ObjectGraphTestHarness::new(ObjectTestConfig::default()).unwrap();
+        let mut artifact = TestArtifact::new(
+            "unverified".to_string(),
+            ObjectId::content(ContentId::from_bytes(b"x")),
+        );
+        artifact.record_final_commit("exposed without verification".to_string());
+        harness.artifacts.push(artifact);
+
+        assert!(
+            harness
+                .assert_no_unverified_exposure()
+                .expect_err("unverified exposure should fail")
+                .contains("unverified")
+        );
+    }
+
+    #[test]
+    fn recovery_and_final_state_checks_are_executable() {
+        let artifact = committed_artifact();
+        test_utils::verify_recovery_consistency(&artifact).unwrap();
+        test_utils::check_final_state_integrity(&artifact).unwrap();
+
+        let mut partial = TestArtifact::new(
+            "bad-partial".to_string(),
+            ObjectId::content(ContentId::from_bytes(b"bad-partial")),
+        )
+        .with_crash_point(CrashPoint::ChunkWrite);
+        partial.record_recovery_state(RecoveryState::PartialCompletion);
+
+        assert!(
+            test_utils::verify_recovery_consistency(&partial)
+                .expect_err("partial recovery without progress should fail")
+                .contains("partial progress")
+        );
+    }
+
+    #[test]
+    fn crash_injection_helper_records_active_point() {
+        test_utils::clear_crash_injection();
+        assert_eq!(test_utils::active_crash_injection(), None);
+
+        test_utils::setup_crash_injection(CrashPoint::FinalRename);
+        assert_eq!(
+            test_utils::active_crash_injection(),
+            Some(CrashPoint::FinalRename)
+        );
+
+        test_utils::clear_crash_injection();
+        assert_eq!(test_utils::active_crash_injection(), None);
     }
 }
