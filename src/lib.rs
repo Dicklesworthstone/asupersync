@@ -243,6 +243,8 @@ pub mod cancel_cx_runtime_channel_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod database_grpc_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod database_pool_transaction_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_service_messaging_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod lab_trace_observability_security_metamorphic_tests;
