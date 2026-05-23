@@ -1050,7 +1050,9 @@ impl SystematicEncoder {
                     // If the index is too large for u32, stop generating symbols
                     // to avoid panic - this is a graceful degradation
                     #[cfg(feature = "tracing-integration")]
-                    tracing::warn!("repair count index {i} exceeds u32, stopping symbol generation");
+                    tracing::warn!(
+                        "repair count index {i} exceeds u32, stopping symbol generation"
+                    );
                     break;
                 }
             };
@@ -1059,7 +1061,9 @@ impl SystematicEncoder {
                 None => {
                     // If ESI overflows, stop generating symbols to avoid panic
                     #[cfg(feature = "tracing-integration")]
-                    tracing::warn!("repair ESI overflow at start_esi={start_esi} + i={i_u32}, stopping symbol generation");
+                    tracing::warn!(
+                        "repair ESI overflow at start_esi={start_esi} + i={i_u32}, stopping symbol generation"
+                    );
                     break;
                 }
             };
@@ -1160,7 +1164,10 @@ impl SystematicEncoder {
             return 0;
         };
 
-        let pi_modulus = next_prime_ge(self.params.p);
+        let Some(pi_modulus) = next_prime_ge(self.params.p) else {
+            debug_assert!(false, "RFC repair PI modulus must fit for encoder params");
+            return 0;
+        };
         let Some(lt_tuple) = try_tuple(
             self.params.j,
             self.params.w,

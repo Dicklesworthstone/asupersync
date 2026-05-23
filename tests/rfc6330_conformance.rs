@@ -344,7 +344,7 @@ fn test_deg_function(vector: &GoldenVector<u32, usize>) -> ConformanceResult {
 }
 
 fn test_tuple_function(vector: &TupleGoldenVector) -> ConformanceResult {
-    let p1 = next_prime_ge(vector.pi_count);
+    let p1 = next_prime_ge(vector.pi_count).expect("RFC tuple golden vector P1 must fit");
     let actual_tuple = tuple(
         vector.systematic_index,
         vector.lt_width,

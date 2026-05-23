@@ -212,7 +212,7 @@ impl ConformanceTest for SystematicTupleGenerationTest {
                         };
                     }
                 };
-            let p1 = rfc6330::next_prime_ge(params.p);
+            let p1 = rfc6330::next_prime_ge(params.p).expect("RFC tuple fixture P1 must fit");
             let actual =
                 rfc6330::try_tuple(params.j, params.w, params.p, p1, test_vector.symbol_index);
             let expected = LtTuple {

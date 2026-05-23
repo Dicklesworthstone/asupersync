@@ -90,7 +90,7 @@ fn build_tuple_vector(
 ) -> TestVector<TupleInput, TupleExpectation> {
     let params = SystematicParams::try_for_source_block(k, 1024)
         .expect("tuple test case must derive RFC parameters");
-    let pi_modulus = next_prime_ge(params.p);
+    let pi_modulus = next_prime_ge(params.p).expect("tuple test case P1 must fit");
     let live_tuple = tuple(params.j, params.w, params.p, pi_modulus, x);
     let indices = repair_indices_for_esi(params.j, params.w, params.p, x);
 
