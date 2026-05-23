@@ -2506,9 +2506,10 @@ impl SwarmPressureGovernor {
             cancellation_tail_pressure_scaled,
             max_pressure_scaled,
         ) = Self::schedule_pressure_fields(feedback);
-        let dominant_pressure_source = feedback
-            .map(SwarmWorkloadPressureFeedback::dominant_pressure_source)
-            .unwrap_or(SwarmWorkloadPressureSource::None);
+        let dominant_pressure_source = feedback.map_or(
+            SwarmWorkloadPressureSource::None,
+            SwarmWorkloadPressureFeedback::dominant_pressure_source,
+        );
         let resource_pressure_deferral =
             Self::resource_pressure_schedule_penalty(lease.priority, resource_degradation_level)
                 > 0;
@@ -2618,10 +2619,9 @@ impl SwarmPressureGovernor {
     }
 
     fn feedback_max_pressure_scaled(feedback: Option<&SwarmWorkloadPressureFeedback>) -> i64 {
-        feedback
-            .map(SwarmWorkloadPressureFeedback::max_pressure)
-            .map(scale_pressure_for_metrics)
-            .unwrap_or(0)
+        feedback.map_or(0, |feedback| {
+            scale_pressure_for_metrics(feedback.max_pressure())
+        })
     }
 
     fn effective_priority_schedule_rank(
