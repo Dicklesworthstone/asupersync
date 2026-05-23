@@ -106,12 +106,14 @@ Broad proof commands stop for two very different reasons: the owned slice failed
 
 Ledger rows are meant to be pasted into bead close reasons and Agent Mail updates instead of claiming broad green proof from a proxy command. Each row records:
 
-1. The intended proof or coordination command.
-2. The touched files that motivated the attempt.
-3. The normalized decision: `pass`, `blocked-external`, or `failed-local`.
-4. The first failing crate or coordination surface, target, file, line, and error class.
-5. The likely owner or bead when known.
-6. The narrower supplemental proof that still covered the local change.
+1. The proof lane id, intended proof or coordination command, target commit, and exit status.
+2. The touched files that motivated the attempt plus affected files found in the output.
+3. The shared-main dirty-tree summary, including whether peer dirt overlapped the touched files.
+4. The RCH admission result, worker when admitted, and whether `RCH_REQUIRE_REMOTE=1` refused local fallback.
+5. The normalized decision: `pass`, `blocked-external`, or `failed-local`.
+6. The first failing crate or coordination surface, target, file, line, and error class.
+7. Error buckets grouped by file, module, stable rustc/clippy/RCH code, likely commit/bead, and owner.
+8. The narrower supplemental proof that still covered the local change.
 
 Close reasons should cite the frontier row directly. The minimum paste-ready shape is:
 
@@ -119,6 +121,8 @@ Close reasons should cite the frontier row directly. The minimum paste-ready sha
 - intended command
 - first blocker file and line
 - error class plus short summary
+- RCH admission and exit status
+- dirty-tree overlap state
 - supplemental proof command
 
 Example:
@@ -130,7 +134,7 @@ blocked-external: intended `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch
 Validation for the ledger contract is also `rch`-scoped:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_ledger cargo test -p asupersync --test validation_frontier_ledger_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_ledger cargo test -p asupersync --test validation_frontier_ledger_contract -- --nocapture
 ```
 
 ## Validation
