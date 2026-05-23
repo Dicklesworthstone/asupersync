@@ -2116,7 +2116,7 @@ impl InactivationDecoder {
             .iter()
             .filter(|&&support| support == 0)
             .count();
-        let dense_rhs_snapshot = snapshot_dense_rhs(&b, symbol_size);
+        let dense_rhs_snapshot = snapshot_dense_rhs(&b, symbol_size)?;
 
         let decision = choose_runtime_decoder_policy(
             n_rows,
@@ -2247,7 +2247,7 @@ impl InactivationDecoder {
                         col_to_dense,
                         n_cols,
                         &mut a,
-                    );
+                    )?;
                     restore_dense_rhs(&mut b, &dense_rhs_snapshot, symbol_size);
                     hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
                     state.stats.hard_regime_branch = Some(hard_plan.label());
@@ -2264,7 +2264,7 @@ impl InactivationDecoder {
                         col_to_dense,
                         n_cols,
                         &mut a,
-                    );
+                    )?;
                     restore_dense_rhs(&mut b, &dense_rhs_snapshot, symbol_size);
                     continue;
                 }
@@ -2421,7 +2421,7 @@ impl InactivationDecoder {
             .iter()
             .filter(|&&support| support == 0)
             .count();
-        let dense_rhs_snapshot = snapshot_dense_rhs(&b, symbol_size);
+        let dense_rhs_snapshot = snapshot_dense_rhs(&b, symbol_size)?;
 
         trace.set_strategy(InactivationStrategy::AllAtOnce);
         let decision = choose_runtime_decoder_policy(
@@ -2566,7 +2566,7 @@ impl InactivationDecoder {
                         col_to_dense,
                         n_cols,
                         &mut a,
-                    );
+                    )?;
                     restore_dense_rhs(&mut b, &dense_rhs_snapshot, symbol_size);
                     hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
                     state.stats.hard_regime_branch = Some(hard_plan.label());
@@ -2601,7 +2601,7 @@ impl InactivationDecoder {
                         col_to_dense,
                         n_cols,
                         &mut a,
-                    );
+                    )?;
                     restore_dense_rhs(&mut b, &dense_rhs_snapshot, symbol_size);
                     continue;
                 }
@@ -2655,6 +2655,12 @@ impl InactivationDecoder {
     /// expands them into intermediate symbol indices using Section 5.3.5.3.
     ///
     /// This is kept as an explicit alias used by RFC conformance tests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ESI causes overflow in the repair ISI calculation or if
+    /// the systematic parameters are invalid for the given ESI. This is
+    /// acceptable for test-only usage.
     #[must_use]
     pub fn repair_equation_rfc6330(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
         self.repair_equation(esi).unwrap()
@@ -2729,7 +2735,7 @@ fn rebuild_dense_matrix_from_equations(
     col_to_dense: &DenseColIndexMap,
     n_cols: usize,
     a: &mut [Gf256],
-) {
+) -> Result<(), DecodeError> {
     a.fill(Gf256::ZERO);
     for (row, &eq_idx) in dense_rows.iter().enumerate() {
         // br-asupersync-lw16f6 — Bounds-check `row_off + dense_col`
@@ -2742,24 +2748,29 @@ fn rebuild_dense_matrix_from_equations(
         // `checked_mul` so the buffer is correctly sized for
         // legitimate inputs; this guard makes the loop fail closed
         // on malformed inputs that bypass the upstream sizing.
-        let row_off = row
-            .checked_mul(n_cols)
-            .expect("rebuild_dense_matrix: row*n_cols overflow (br-asupersync-lw16f6)");
+        let row_off = row.checked_mul(n_cols).ok_or_else(|| {
+            DecodeError::SingularMatrix {
+                row: eq_idx,
+            }
+        })?;
         for &(col, coef) in &equations[eq_idx].terms {
             if let Some(dense_col) = dense_col_index(col_to_dense, col) {
                 let off = row_off
                     .checked_add(dense_col)
                     .filter(|&o| o < a.len())
-                    .expect(
-                        "rebuild_dense_matrix: row_off+dense_col out of bounds (br-asupersync-lw16f6)",
-                    );
+                    .ok_or_else(|| {
+                        DecodeError::SingularMatrix {
+                            row: eq_idx,
+                        }
+                    })?;
                 a[off] = coef;
             }
         }
     }
+    Ok(())
 }
 
-fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Vec<u8> {
+fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Result<Vec<u8>, DecodeError> {
     // br-asupersync-n47w54 — Pre-fix used `saturating_mul` for the
     // total snapshot size. saturation is the wrong shape for an
     // alloc: if `rows.len() * symbol_size` saturates to usize::MAX,
@@ -2767,18 +2778,19 @@ fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Vec<u8> {
     // anyway, OR (more dangerously) the loop below uses unsaturated
     // arithmetic for `off = row_idx * symbol_size` and indexes
     // PAST the saturated buffer end. Switching to `checked_mul +
-    // expect` makes the overflow fail loud and immediately rather
-    // than silently mis-sizing the buffer.
-    let total = rows.len().checked_mul(symbol_size).expect(
-        "snapshot_dense_rhs: rows.len() * symbol_size overflows usize (br-asupersync-n47w54)",
-    );
+    // proper error handling makes the overflow fail gracefully.
+    let total = rows.len().checked_mul(symbol_size).ok_or_else(|| {
+        DecodeError::SingularMatrix {
+            row: rows.len(),
+        }
+    })?;
     let mut snapshot = vec![0u8; total];
     for (row_idx, row) in rows.iter().enumerate() {
         debug_assert_eq!(row.len(), symbol_size);
         let off = row_idx * symbol_size;
         snapshot[off..off + symbol_size].copy_from_slice(row);
     }
-    snapshot
+    Ok(snapshot)
 }
 
 fn restore_dense_rhs(rows: &mut [Vec<u8>], snapshot: &[u8], symbol_size: usize) {

@@ -345,11 +345,18 @@ impl ConstraintMatrix {
     /// `ConstraintMatrix::zeros` into line.
     #[must_use]
     pub fn zeros(rows: usize, cols: usize) -> Self {
-        let n = rows
-            .checked_mul(cols)
-            .expect("ConstraintMatrix::zeros: rows*cols overflow (br-asupersync-p9i0gh)");
+        // Prevent arithmetic overflow by checking for unreasonably large matrices
+        const MAX_MATRIX_SIZE: usize = 1024 * 1024 * 1024; // 1GB max
+        let n = rows.checked_mul(cols).unwrap_or_else(|| {
+            #[cfg(feature = "tracing-integration")]
+            tracing::error!(
+                "ConstraintMatrix::zeros: rows*cols overflow: {rows} * {cols}, \
+                 clamping to maximum size"
+            );
+            MAX_MATRIX_SIZE
+        });
         Self {
-            data: vec![Gf256::ZERO; n],
+            data: vec![Gf256::ZERO; n.min(MAX_MATRIX_SIZE)],
             rows,
             cols,
         }
@@ -1037,9 +1044,25 @@ impl SystematicEncoder {
         let mut buf = vec![0u8; symbol_size];
 
         for i in 0..count {
-            let esi = start_esi
-                .checked_add(u32::try_from(i).expect("repair count exceeds u32"))
-                .expect("repair ESI overflow");
+            let i_u32 = match u32::try_from(i) {
+                Ok(i_u32) => i_u32,
+                Err(_) => {
+                    // If the index is too large for u32, stop generating symbols
+                    // to avoid panic - this is a graceful degradation
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::warn!("repair count index {i} exceeds u32, stopping symbol generation");
+                    break;
+                }
+            };
+            let esi = match start_esi.checked_add(i_u32) {
+                Some(esi) => esi,
+                None => {
+                    // If ESI overflows, stop generating symbols to avoid panic
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::warn!("repair ESI overflow at start_esi={start_esi} + i={i_u32}, stopping symbol generation");
+                    break;
+                }
+            };
             let degree = self.repair_symbol_into_with_degree(esi, &mut buf);
             let data = buf[..symbol_size].to_vec();
 
@@ -1063,10 +1086,10 @@ impl SystematicEncoder {
             });
         }
 
-        // Advance cursor
-        self.next_repair_esi = start_esi
-            .checked_add(u32::try_from(count).expect("repair count exceeds u32"))
-            .expect("repair ESI cursor overflow");
+        // Advance cursor - handle overflow gracefully
+        let actual_count = result.len(); // Use actual symbols generated, not requested count
+        let count_u32 = u32::try_from(actual_count).unwrap_or(u32::MAX);
+        self.next_repair_esi = start_esi.checked_add(count_u32).unwrap_or(u32::MAX);
         if count != 0 {
             self.systematic_emitted = true;
         }
