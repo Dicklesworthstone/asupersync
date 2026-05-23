@@ -631,6 +631,135 @@ pub struct AtpAutotuneDecision {
     pub reason_code: String,
 }
 
+/// Stable schema version for ATP autotune decision receipts.
+pub const ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION: &str = "atp-autotune-decision-receipt-v1";
+
+/// High-level outcome class for one autotune decision receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpAutotuneDecisionOutcome {
+    /// Inputs were healthy enough for conservative growth.
+    ConservativeGrowth,
+    /// Pressure signals forced at least one throughput or repair knob change.
+    PressureBackoff,
+    /// The policy held bounded settings because no safe improvement was available.
+    HoldNoWin,
+    /// Missing or malformed identity evidence made the telemetry unsafe to apply.
+    MalformedTelemetry,
+}
+
+/// Transfer knob described by an autotune decision receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpAutotuneKnob {
+    /// Maximum bytes allowed in flight for this transfer.
+    InFlightBytes,
+    /// Maximum concurrent streams for this transfer.
+    StreamCount,
+    /// Target chunk size in bytes.
+    ChunkSizeBytes,
+    /// Repair symbols allowed per second.
+    RepairSymbolsPerSecond,
+}
+
+impl AtpAutotuneKnob {
+    /// Return the stable knob name used in receipt JSON and status output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InFlightBytes => "in_flight_bytes",
+            Self::StreamCount => "stream_count",
+            Self::ChunkSizeBytes => "chunk_size_bytes",
+            Self::RepairSymbolsPerSecond => "repair_symbols_per_second",
+        }
+    }
+}
+
+/// Direction of a knob change in a decision receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpAutotuneKnobDirection {
+    /// The knob value increased.
+    Increase,
+    /// The knob value decreased.
+    Decrease,
+    /// The knob value stayed unchanged.
+    Hold,
+}
+
+/// Per-knob evidence for a decision receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneKnobChange {
+    /// Knob being described.
+    pub knob: AtpAutotuneKnob,
+    /// Bounded value before the decision.
+    pub previous: u64,
+    /// Bounded value after the decision.
+    pub next: u64,
+    /// Direction selected by the decision.
+    pub direction: AtpAutotuneKnobDirection,
+    /// Absolute value delta.
+    pub delta: u64,
+}
+
+impl AtpAutotuneKnobChange {
+    fn new(knob: AtpAutotuneKnob, previous: u64, next: u64) -> Self {
+        let direction = match next.cmp(&previous) {
+            std::cmp::Ordering::Greater => AtpAutotuneKnobDirection::Increase,
+            std::cmp::Ordering::Less => AtpAutotuneKnobDirection::Decrease,
+            std::cmp::Ordering::Equal => AtpAutotuneKnobDirection::Hold,
+        };
+        Self {
+            knob,
+            previous,
+            next,
+            direction,
+            delta: previous.abs_diff(next),
+        }
+    }
+}
+
+/// Deterministic, replay-friendly receipt for one ATP autotune decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneDecisionReceipt {
+    /// Receipt schema version.
+    pub schema_version: String,
+    /// Stable trace id linking this decision to path/proof logs.
+    pub trace_id: String,
+    /// Stable workload or transfer id.
+    pub workload_id: String,
+    /// Samples represented by the decision window.
+    pub sample_count: u32,
+    /// Bounded settings before the decision was applied.
+    pub current_settings: AtpAutotuneSettings,
+    /// Full policy decision.
+    pub decision: AtpAutotuneDecision,
+    /// High-level outcome class.
+    pub outcome: AtpAutotuneDecisionOutcome,
+    /// Stable per-knob changes in a fixed order.
+    pub changes: Vec<AtpAutotuneKnobChange>,
+}
+
+impl AtpAutotuneDecisionReceipt {
+    /// Build a receipt from a policy decision and telemetry identifiers.
+    #[must_use]
+    pub fn from_decision(
+        telemetry: &AtpAutotuneTelemetry,
+        current_settings: AtpAutotuneSettings,
+        decision: AtpAutotuneDecision,
+    ) -> Self {
+        let changes = knob_changes(current_settings, decision.settings);
+        let outcome = classify_decision_outcome(&decision, &changes);
+        Self {
+            schema_version: String::from(ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION),
+            trace_id: telemetry.trace_id.clone(),
+            workload_id: telemetry.workload_id.clone(),
+            sample_count: telemetry.sample_count,
+            current_settings,
+            decision,
+            outcome,
+            changes,
+        }
+    }
+}
+
 /// Deterministic conservative autotune policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtpAutotunePolicy {
@@ -709,6 +838,18 @@ impl AtpAutotunePolicy {
             fail_closed,
             reason_code: String::from("conservative_growth"),
         }
+    }
+
+    /// Produce a conservative decision plus a deterministic receipt.
+    #[must_use]
+    pub fn decide_with_receipt(
+        self,
+        current: AtpAutotuneSettings,
+        telemetry: &AtpAutotuneTelemetry,
+    ) -> AtpAutotuneDecisionReceipt {
+        let current_settings = self.limits.clamp(current);
+        let decision = self.decide(current, telemetry);
+        AtpAutotuneDecisionReceipt::from_decision(telemetry, current_settings, decision)
     }
 
     fn detect_bottlenecks(
@@ -972,6 +1113,64 @@ fn increase_by_eighth_u32(value: u32, max: u32) -> u32 {
 
 fn increase_by_quarter_u32(value: u32, max: u32) -> u32 {
     value.saturating_add(value / 4).min(max)
+}
+
+fn knob_changes(
+    current: AtpAutotuneSettings,
+    next: AtpAutotuneSettings,
+) -> Vec<AtpAutotuneKnobChange> {
+    vec![
+        AtpAutotuneKnobChange::new(
+            AtpAutotuneKnob::InFlightBytes,
+            current.in_flight_bytes,
+            next.in_flight_bytes,
+        ),
+        AtpAutotuneKnobChange::new(
+            AtpAutotuneKnob::StreamCount,
+            u64::from(current.stream_count),
+            u64::from(next.stream_count),
+        ),
+        AtpAutotuneKnobChange::new(
+            AtpAutotuneKnob::ChunkSizeBytes,
+            u64::from(current.chunk_size_bytes),
+            u64::from(next.chunk_size_bytes),
+        ),
+        AtpAutotuneKnobChange::new(
+            AtpAutotuneKnob::RepairSymbolsPerSecond,
+            u64::from(current.repair_symbols_per_second),
+            u64::from(next.repair_symbols_per_second),
+        ),
+    ]
+}
+
+fn classify_decision_outcome(
+    decision: &AtpAutotuneDecision,
+    changes: &[AtpAutotuneKnobChange],
+) -> AtpAutotuneDecisionOutcome {
+    if decision
+        .bottlenecks
+        .iter()
+        .any(|signal| signal.kind == AtpBottleneckKind::ContradictoryTelemetry)
+    {
+        return AtpAutotuneDecisionOutcome::MalformedTelemetry;
+    }
+
+    if changes
+        .iter()
+        .any(|change| change.direction == AtpAutotuneKnobDirection::Decrease)
+    {
+        return AtpAutotuneDecisionOutcome::PressureBackoff;
+    }
+
+    if !decision.fail_closed
+        && changes
+            .iter()
+            .any(|change| change.direction == AtpAutotuneKnobDirection::Increase)
+    {
+        return AtpAutotuneDecisionOutcome::ConservativeGrowth;
+    }
+
+    AtpAutotuneDecisionOutcome::HoldNoWin
 }
 
 #[cfg(test)]
@@ -1270,5 +1469,72 @@ mod tests {
         assert_eq!(decision.settings.stream_count, 3);
         assert_eq!(decision.settings.chunk_size_bytes, 12);
         assert_eq!(decision.settings.repair_symbols_per_second, 4);
+    }
+
+    #[test]
+    fn decision_receipt_records_stable_knob_changes_and_outcome() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let mut telemetry = healthy_telemetry();
+        telemetry.loss_permille = Some(100);
+
+        let receipt = policy.decide_with_receipt(current, &telemetry);
+
+        assert_eq!(
+            receipt.schema_version,
+            ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION
+        );
+        assert_eq!(receipt.trace_id, "trace-a");
+        assert_eq!(receipt.workload_id, "workload-a");
+        assert_eq!(receipt.sample_count, 16);
+        assert_eq!(receipt.current_settings, current);
+        assert_eq!(receipt.outcome, AtpAutotuneDecisionOutcome::PressureBackoff);
+        assert_eq!(receipt.changes.len(), 4);
+        assert_eq!(receipt.changes[0].knob, AtpAutotuneKnob::InFlightBytes);
+        assert_eq!(
+            receipt.changes[0].direction,
+            AtpAutotuneKnobDirection::Decrease
+        );
+        assert_eq!(receipt.changes[1].knob.as_str(), "stream_count");
+        assert_eq!(
+            receipt.changes[3].direction,
+            AtpAutotuneKnobDirection::Increase
+        );
+    }
+
+    #[test]
+    fn decision_receipt_classifies_malformed_and_no_win_outcomes() {
+        let policy = AtpAutotunePolicy {
+            limits: AtpAutotuneLimits {
+                min_in_flight_bytes: 8 * 1_048_576,
+                max_in_flight_bytes: 8 * 1_048_576,
+                min_stream_count: 4,
+                max_stream_count: 4,
+                min_chunk_size_bytes: 256 * 1_024,
+                max_chunk_size_bytes: 256 * 1_024,
+                min_repair_symbols_per_second: 256,
+                max_repair_symbols_per_second: 256,
+            },
+            ..AtpAutotunePolicy::default()
+        };
+
+        let malformed = policy.decide_with_receipt(
+            AtpAutotuneSettings::default(),
+            &AtpAutotuneTelemetry::new("", "workload-a").with_sample_count(16),
+        );
+        assert_eq!(
+            malformed.outcome,
+            AtpAutotuneDecisionOutcome::MalformedTelemetry
+        );
+
+        let bounded =
+            policy.decide_with_receipt(AtpAutotuneSettings::default(), &healthy_telemetry());
+        assert_eq!(bounded.outcome, AtpAutotuneDecisionOutcome::HoldNoWin);
+        assert!(
+            bounded
+                .changes
+                .iter()
+                .all(|change| change.direction == AtpAutotuneKnobDirection::Hold)
+        );
     }
 }

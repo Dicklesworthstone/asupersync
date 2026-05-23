@@ -22,8 +22,9 @@ use asupersync::atp::sdk::StreamEarlyUsabilityReport;
 use asupersync::atp::stream_object::ByteRange;
 use asupersync::atp::sync::DirectoryEarlyUsabilityReport;
 use asupersync::atp::{
-    ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotunePolicy, AtpAutotuneSettings,
-    AtpAutotuneTelemetry, AtpAutotuneTelemetryReport,
+    ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotuneDecisionReceipt,
+    AtpAutotuneKnobDirection, AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry,
+    AtpAutotuneTelemetryReport,
 };
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
@@ -1123,7 +1124,8 @@ fn atp_status(args: &AtpStatusArgs, output: &mut Output) -> Result<(), CliError>
         args.chunk_size_bytes,
         args.repair_symbols_per_second,
     );
-    let decision = AtpAutotunePolicy::default().decide(current, &telemetry);
+    let receipt = AtpAutotunePolicy::default().decide_with_receipt(current, &telemetry);
+    let decision = receipt.decision.clone();
     let payload = AtpStatusOutput {
         telemetry_path: args.telemetry.display().to_string(),
         trace_id: telemetry.trace_id,
@@ -1135,6 +1137,7 @@ fn atp_status(args: &AtpStatusArgs, output: &mut Output) -> Result<(), CliError>
             .map(|metric| metric.as_str())
             .collect(),
         decision,
+        receipt,
     };
 
     output
@@ -1716,6 +1719,7 @@ struct AtpStatusOutput {
     explain: bool,
     metric_names: Vec<&'static str>,
     decision: AtpAutotuneDecision,
+    receipt: AtpAutotuneDecisionReceipt,
 }
 
 impl Outputtable for AtpStatusOutput {
@@ -1726,6 +1730,7 @@ impl Outputtable for AtpStatusOutput {
             format!("Trace ID: {}", self.trace_id),
             format!("Workload ID: {}", self.workload_id),
             format!("Samples: {}", self.sample_count),
+            format!("Outcome: {:?}", self.receipt.outcome),
             format!("Reason: {}", self.decision.reason_code),
             format!("Fail closed: {}", self.decision.fail_closed),
             format!(
@@ -1739,6 +1744,18 @@ impl Outputtable for AtpStatusOutput {
         ];
 
         if self.explain {
+            for change in &self.receipt.changes {
+                if change.direction != AtpAutotuneKnobDirection::Hold {
+                    lines.push(format!(
+                        "- knob {}: {:?} {} -> {} (delta={})",
+                        change.knob.as_str(),
+                        change.direction,
+                        change.previous,
+                        change.next,
+                        change.delta
+                    ));
+                }
+            }
             for signal in &self.decision.bottlenecks {
                 let metric = signal
                     .metric
@@ -9122,7 +9139,10 @@ mod tests {
         assert!(rendered.contains("Trace ID: trace-status"));
         assert!(rendered.contains("Workload ID: workload-status"));
         assert!(rendered.contains("Reason: hold_or_backoff_on_pressure"));
+        assert!(rendered.contains("Outcome: PressureBackoff"));
         assert!(rendered.contains("Fail closed: true"));
+        assert!(rendered.contains("- knob in_flight_bytes: Decrease"));
+        assert!(rendered.contains("- knob repair_symbols_per_second: Increase"));
         assert!(rendered.contains("NetworkLoss"));
         assert!(rendered.contains("SendBufferPressure"));
         assert!(rendered.contains("atp.autotune.loss_permille"));

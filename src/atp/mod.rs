@@ -34,9 +34,11 @@ pub mod verify;
 pub mod writer;
 
 pub use autotune::{
-    ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotuneLimits, AtpAutotuneMetric,
-    AtpAutotuneMetricSample, AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry,
-    AtpAutotuneTelemetryError, AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
+    ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION, ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision,
+    AtpAutotuneDecisionOutcome, AtpAutotuneDecisionReceipt, AtpAutotuneKnob, AtpAutotuneKnobChange,
+    AtpAutotuneKnobDirection, AtpAutotuneLimits, AtpAutotuneMetric, AtpAutotuneMetricSample,
+    AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryError,
+    AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
 };
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};
