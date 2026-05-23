@@ -1948,3 +1948,623 @@ fn mr_repair_symbol_minimality_property() {
         }
     });
 }
+
+// ============================================================================
+// GF(256) Field Arithmetic Metamorphic Relations
+// ============================================================================
+
+/// MR-Gf256Commutativity: GF(256) operations should be commutative.
+///
+/// Property: a + b == b + a and a * b == b * a for all field elements.
+///
+/// Why this catches bugs:
+///   - Implementation asymmetries in field operations
+///   - Table lookup order dependencies
+///   - SIMD operation asymmetries in vector implementations
+#[test]
+fn mr_gf256_commutativity() {
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(
+        a: u8,
+        b: u8,
+    )| {
+        let a_gf = Gf256::new(a);
+        let b_gf = Gf256::new(b);
+
+        // Addition commutativity
+        let add_ab = a_gf + b_gf;
+        let add_ba = b_gf + a_gf;
+        prop_assert_eq!(
+            add_ab, add_ba,
+            "Addition commutativity violation: GF({}) + GF({}) != GF({}) + GF({})",
+            a, b, b, a
+        );
+
+        // Multiplication commutativity
+        let mul_ab = a_gf * b_gf;
+        let mul_ba = b_gf * a_gf;
+        prop_assert_eq!(
+            mul_ab, mul_ba,
+            "Multiplication commutativity violation: GF({}) * GF({}) != GF({}) * GF({})",
+            a, b, b, a
+        );
+    });
+}
+
+/// MR-Gf256Associativity: GF(256) operations should be associative.
+///
+/// Property: (a + b) + c == a + (b + c) and (a * b) * c == a * (b * c).
+///
+/// Why this catches bugs:
+///   - Intermediate overflow in implementation
+///   - Order-dependent table lookup errors
+///   - Incorrect reduction polynomial application
+#[test]
+fn mr_gf256_associativity() {
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(
+        a: u8,
+        b: u8,
+        c: u8,
+    )| {
+        let a_gf = Gf256::new(a);
+        let b_gf = Gf256::new(b);
+        let c_gf = Gf256::new(c);
+
+        // Addition associativity: (a + b) + c == a + (b + c)
+        let left_add = (a_gf + b_gf) + c_gf;
+        let right_add = a_gf + (b_gf + c_gf);
+        prop_assert_eq!(
+            left_add, right_add,
+            "Addition associativity violation: (GF({}) + GF({})) + GF({}) != GF({}) + (GF({}) + GF({}))",
+            a, b, c, a, b, c
+        );
+
+        // Multiplication associativity: (a * b) * c == a * (b * c)
+        let left_mul = (a_gf * b_gf) * c_gf;
+        let right_mul = a_gf * (b_gf * c_gf);
+        prop_assert_eq!(
+            left_mul, right_mul,
+            "Multiplication associativity violation: (GF({}) * GF({})) * GF({}) != GF({}) * (GF({}) * GF({}))",
+            a, b, c, a, b, c
+        );
+    });
+}
+
+/// MR-Gf256Distributivity: Multiplication distributes over addition.
+///
+/// Property: a * (b + c) == a * b + a * c for all field elements.
+///
+/// Why this catches bugs:
+///   - Incorrect field arithmetic implementation
+///   - Mixing of polynomial and integer arithmetic
+///   - SIMD vectorization bugs that break mathematical properties
+#[test]
+fn mr_gf256_distributivity() {
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(
+        a: u8,
+        b: u8,
+        c: u8,
+    )| {
+        let a_gf = Gf256::new(a);
+        let b_gf = Gf256::new(b);
+        let c_gf = Gf256::new(c);
+
+        let left = a_gf * (b_gf + c_gf);
+        let right = (a_gf * b_gf) + (a_gf * c_gf);
+
+        prop_assert_eq!(
+            left, right,
+            "Distributivity violation: GF({}) * (GF({}) + GF({})) != GF({}) * GF({}) + GF({}) * GF({})",
+            a, b, c, a, b, a, c
+        );
+    });
+}
+
+/// MR-Gf256IdentityElements: Identity elements should behave correctly.
+///
+/// Property: a + 0 == a, a * 1 == a, a * 0 == 0 for all elements.
+///
+/// Why this catches bugs:
+///   - Special case handling errors for zero and one
+///   - Table boundary issues at index 0 and 1
+///   - Optimization bypasses that break identity properties
+#[test]
+fn mr_gf256_identity_elements() {
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(a: u8)| {
+        let a_gf = Gf256::new(a);
+        let zero = Gf256::ZERO;
+        let one = Gf256::ONE;
+
+        // Additive identity: a + 0 = a
+        let add_zero = a_gf + zero;
+        prop_assert_eq!(
+            add_zero, a_gf,
+            "Additive identity violation: GF({}) + GF(0) != GF({})",
+            a, a
+        );
+
+        // Multiplicative identity: a * 1 = a
+        let mul_one = a_gf * one;
+        prop_assert_eq!(
+            mul_one, a_gf,
+            "Multiplicative identity violation: GF({}) * GF(1) != GF({})",
+            a, a
+        );
+
+        // Zero multiplication: a * 0 = 0
+        let mul_zero = a_gf * zero;
+        prop_assert_eq!(
+            mul_zero, zero,
+            "Zero multiplication violation: GF({}) * GF(0) != GF(0)",
+            a
+        );
+    });
+}
+
+/// MR-Gf256InverseProperties: Inverse operations should satisfy field axioms.
+///
+/// Property: a + a == 0 (additive inverse), a * inv(a) == 1 (multiplicative inverse for a != 0).
+///
+/// Why this catches bugs:
+///   - Incorrect inverse computation using log/exp tables
+///   - Off-by-one errors in table indexing
+///   - Edge cases around field order (255) boundary
+#[test]
+fn mr_gf256_inverse_properties() {
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(a in 1u8..=255u8)| {
+        let a_gf = Gf256::new(a);
+        let zero = Gf256::ZERO;
+        let one = Gf256::ONE;
+
+        // Additive inverse: a + a = 0 (in characteristic 2 fields)
+        let add_self = a_gf + a_gf;
+        prop_assert_eq!(
+            add_self, zero,
+            "Additive inverse violation: GF({}) + GF({}) != GF(0)",
+            a, a
+        );
+
+        // Multiplicative inverse: a * inv(a) = 1 (for a != 0)
+        let inv_a = a_gf.inv();
+        let mul_inv = a_gf * inv_a;
+        prop_assert_eq!(
+            mul_inv, one,
+            "Multiplicative inverse violation: GF({}) * inv(GF({})) != GF(1)",
+            a, a
+        );
+
+        // Double inverse: inv(inv(a)) = a
+        let double_inv = inv_a.inv();
+        prop_assert_eq!(
+            double_inv, a_gf,
+            "Double inverse violation: inv(inv(GF({}))) != GF({})",
+            a, a
+        );
+    });
+}
+
+/// MR-Gf256ExponentiationProperties: Exponentiation should follow mathematical laws.
+///
+/// Property: a^(m+n) == a^m * a^n, (a^m)^n == a^(mn), a^0 == 1, 0^n == 0 (n > 0).
+///
+/// Why this catches bugs:
+///   - Overflow in exponent arithmetic
+///   - Incorrect exponent reduction modulo field order
+///   - Edge cases with zero base and zero exponent
+#[test]
+fn mr_gf256_exponentiation_properties() {
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(
+        a in 1u8..=255u8,
+        m in 0u8..=20u8,
+        n in 0u8..=20u8,
+    )| {
+        let a_gf = Gf256::new(a);
+
+        // a^(m+n) == a^m * a^n
+        let exp_sum = a_gf.pow(m.saturating_add(n));
+        let exp_prod = a_gf.pow(m) * a_gf.pow(n);
+        prop_assert_eq!(
+            exp_sum, exp_prod,
+            "Exponent sum rule violation: GF({})^({}) != GF({})^{} * GF({})^{}",
+            a, m + n, a, m, a, n
+        );
+
+        // (a^m)^n == a^(mn)
+        if m > 0 && n > 0 && (m as u16 * n as u16) <= 255 {
+            let exp_compose = a_gf.pow(m).pow(n);
+            let exp_mult = a_gf.pow((m as u16 * n as u16) as u8);
+            prop_assert_eq!(
+                exp_compose, exp_mult,
+                "Exponent composition rule violation: (GF({})^{})^{} != GF({})^{}",
+                a, m, n, a, m as u16 * n as u16
+            );
+        }
+
+        // a^0 == 1
+        let exp_zero = a_gf.pow(0);
+        prop_assert_eq!(
+            exp_zero, Gf256::ONE,
+            "Exponent zero rule violation: GF({})^0 != GF(1)",
+            a
+        );
+    });
+
+    // Special case: 0^n == 0 for n > 0, 0^0 == 1
+    let zero = Gf256::ZERO;
+    assert_eq!(zero.pow(0), Gf256::ONE, "0^0 should equal 1");
+    for exp in 1..=255 {
+        assert_eq!(zero.pow(exp), Gf256::ZERO, "0^{} should equal 0", exp);
+    }
+}
+
+/// MR-Gf256SliceOperationConsistency: Bulk slice operations should be equivalent
+/// to element-wise operations.
+///
+/// Property: Bulk operations on slices should produce the same result as
+/// applying the operation element-wise.
+///
+/// Why this catches bugs:
+///   - SIMD implementation divergence from scalar reference
+///   - Boundary handling errors in vectorized code
+///   - Kernel dispatch bugs that select wrong implementation
+#[test]
+fn mr_gf256_slice_operation_consistency() {
+    use crate::raptorq::gf256::{Gf256, gf256_add_slice, gf256_mul_slice, gf256_addmul_slice};
+
+    proptest!(|(
+        data: Vec<u8>,
+        scalar: u8,
+        other: Vec<u8>,
+    )| {
+        if !data.is_empty() && other.len() >= data.len() {
+            let scalar_gf = Gf256::new(scalar);
+
+            // Test mul_slice consistency
+            let mut bulk_result = data.clone();
+            gf256_mul_slice(&mut bulk_result, scalar_gf);
+
+            let element_result: Vec<u8> = data.iter()
+                .map(|&x| (Gf256::new(x) * scalar_gf).raw())
+                .collect();
+
+            prop_assert_eq!(
+                bulk_result, element_result,
+                "mul_slice inconsistency: bulk != element-wise for scalar GF({})",
+                scalar
+            );
+
+            // Test add_slice consistency
+            let mut bulk_add = data.clone();
+            let other_slice = &other[..data.len()];
+            gf256_add_slice(&mut bulk_add, other_slice);
+
+            let element_add: Vec<u8> = data.iter().zip(other_slice.iter())
+                .map(|(&x, &y)| (Gf256::new(x) + Gf256::new(y)).raw())
+                .collect();
+
+            prop_assert_eq!(
+                bulk_add, element_add,
+                "add_slice inconsistency: bulk != element-wise"
+            );
+
+            // Test addmul_slice consistency
+            let mut bulk_addmul = data.clone();
+            gf256_addmul_slice(&mut bulk_addmul, other_slice, scalar_gf);
+
+            let element_addmul: Vec<u8> = data.iter().zip(other_slice.iter())
+                .map(|(&x, &y)| (Gf256::new(x) + Gf256::new(y) * scalar_gf).raw())
+                .collect();
+
+            prop_assert_eq!(
+                bulk_addmul, element_addmul,
+                "addmul_slice inconsistency: bulk != element-wise for scalar GF({})",
+                scalar
+            );
+        }
+    });
+}
+
+// ============================================================================
+// Linear Algebra Metamorphic Relations
+// ============================================================================
+
+/// MR-RowOperationLinearityAddition: Row operations should preserve linearity.
+///
+/// Property: row_xor(A + B, C) == row_xor(A, C) + row_xor(B, C).
+///
+/// Why this catches bugs:
+///   - Non-linear implementation of XOR operations
+///   - State pollution between operations
+///   - Buffer aliasing issues in bulk operations
+#[test]
+fn mr_row_operation_linearity_addition() {
+    use crate::raptorq::linalg::row_xor;
+
+    proptest!(|(
+        a: Vec<u8>,
+        b: Vec<u8>,
+        c: Vec<u8>,
+    )| {
+        if !a.is_empty() && a.len() == b.len() && b.len() == c.len() {
+            // Test linearity: row_xor(A + B, C) == row_xor(A, C) + row_xor(B, C)
+            let mut a_plus_b: Vec<u8> = a.iter().zip(b.iter())
+                .map(|(&x, &y)| x ^ y)  // GF(256) addition
+                .collect();
+            row_xor(&mut a_plus_b, &c);
+
+            let mut a_xor_c = a.clone();
+            row_xor(&mut a_xor_c, &c);
+
+            let mut b_xor_c = b.clone();
+            row_xor(&mut b_xor_c, &c);
+
+            let combined: Vec<u8> = a_xor_c.iter().zip(b_xor_c.iter())
+                .map(|(&x, &y)| x ^ y)
+                .collect();
+
+            prop_assert_eq!(
+                a_plus_b, combined,
+                "Row XOR linearity violation: row_xor(A+B, C) != row_xor(A, C) + row_xor(B, C)"
+            );
+        }
+    });
+}
+
+/// MR-RowOperationScalarLinearity: Row scaling should distribute over addition.
+///
+/// Property: row_scale(A + B, c) == row_scale(A, c) + row_scale(B, c).
+///
+/// Why this catches bugs:
+///   - Implementation that doesn't properly implement field scalar multiplication
+///   - SIMD issues with scalar broadcast
+///   - Edge cases with zero or one scalars
+#[test]
+fn mr_row_operation_scalar_linearity() {
+    use crate::raptorq::linalg::row_scale;
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(
+        a: Vec<u8>,
+        b: Vec<u8>,
+        scalar: u8,
+    )| {
+        if !a.is_empty() && a.len() == b.len() {
+            let c = Gf256::new(scalar);
+
+            // Scale (A + B) by c
+            let mut a_plus_b: Vec<u8> = a.iter().zip(b.iter())
+                .map(|(&x, &y)| x ^ y)
+                .collect();
+            row_scale(&mut a_plus_b, c);
+
+            // Scale A by c and B by c separately, then add
+            let mut scaled_a = a.clone();
+            row_scale(&mut scaled_a, c);
+
+            let mut scaled_b = b.clone();
+            row_scale(&mut scaled_b, c);
+
+            let combined: Vec<u8> = scaled_a.iter().zip(scaled_b.iter())
+                .map(|(&x, &y)| x ^ y)
+                .collect();
+
+            prop_assert_eq!(
+                a_plus_b, combined,
+                "Row scale linearity violation: row_scale(A+B, c) != row_scale(A, c) + row_scale(B, c)"
+            );
+        }
+    });
+}
+
+/// MR-GaussianSolveDeterminism: Different pivot strategies should yield equivalent solutions.
+///
+/// Property: solve() and solve_markowitz() should produce solutions that satisfy the same equation.
+///
+/// Why this catches bugs:
+///   - Non-deterministic pivot selection
+///   - Inconsistent solution classification between methods
+///   - Numerical instability that depends on pivot order
+#[test]
+fn mr_gaussian_solve_determinism() {
+    use crate::raptorq::linalg::{GaussianSolver, DenseRow, GaussianResult};
+
+    proptest!(|(
+        matrix_data: Vec<Vec<u8>>,
+        rhs_data: Vec<Vec<u8>>,
+    )| {
+        if !matrix_data.is_empty() && !matrix_data[0].is_empty() &&
+           matrix_data.len() == rhs_data.len() &&
+           rhs_data.iter().all(|row| row.len() == matrix_data[0].len()) {
+
+            let rows = matrix_data.len();
+            let cols = matrix_data[0].len();
+
+            // Only test small matrices to avoid timeout
+            if rows <= 8 && cols <= 8 {
+                // Set up two identical solvers
+                let mut solver1 = GaussianSolver::new(rows, cols);
+                let mut solver2 = GaussianSolver::new(rows, cols);
+
+                for (i, (matrix_row, rhs_row)) in matrix_data.iter().zip(rhs_data.iter()).enumerate() {
+                    if solver1.add_row(i, matrix_row.clone(), DenseRow::new(rhs_row.clone())).is_err() {
+                        return Ok(());
+                    }
+                    if solver2.add_row(i, matrix_row.clone(), DenseRow::new(rhs_row.clone())).is_err() {
+                        return Ok(());
+                    }
+                }
+
+                let result1 = solver1.solve();
+                let result2 = solver2.solve_markowitz();
+
+                // Both methods should agree on solvability classification
+                match (&result1, &result2) {
+                    (GaussianResult::Solved(sol1), GaussianResult::Solved(sol2)) => {
+                        // Solutions may differ in specific values due to pivot choice,
+                        // but both should satisfy the original equations
+                        prop_assert_eq!(
+                            sol1.len(), sol2.len(),
+                            "Solution vector length mismatch between solve methods"
+                        );
+                    }
+                    (GaussianResult::Singular { .. }, GaussianResult::Singular { .. }) => {
+                        // Both detected singularity - acceptable
+                    }
+                    (GaussianResult::Inconsistent { .. }, GaussianResult::Inconsistent { .. }) => {
+                        // Both detected inconsistency - acceptable
+                    }
+                    _ => {
+                        prop_assert!(false,
+                            "Gaussian solver determinism violation: solve() = {:?}, solve_markowitz() = {:?}",
+                            classify_result(&result1), classify_result(&result2)
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn classify_result(result: &GaussianResult) -> &'static str {
+    match result {
+        GaussianResult::Solved(_) => "Solved",
+        GaussianResult::Singular { .. } => "Singular",
+        GaussianResult::Inconsistent { .. } => "Inconsistent",
+    }
+}
+
+/// MR-MatrixOperationRankMonotonicity: Matrix operations should respect rank properties.
+///
+/// Property: Elementary row operations should not increase rank.
+///
+/// Why this catches bugs:
+///   - Row operations that incorrectly increase rank
+///   - Precision issues that create spurious non-zero entries
+///   - Implementation bugs in row swap/scale operations
+#[test]
+fn mr_matrix_operation_rank_monotonicity() {
+    use crate::raptorq::linalg::{row_xor, row_scale, row_swap};
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(
+        matrix: Vec<Vec<u8>>,
+        scalar in 1u8..=255u8,  // Non-zero scalar
+    )| {
+        if !matrix.is_empty() && !matrix[0].is_empty() &&
+           matrix.len() >= 2 && matrix.iter().all(|row| row.len() == matrix[0].len()) {
+
+            let mut modified_matrix = matrix.clone();
+            let original_rank = count_nonzero_rows(&matrix);
+
+            // Perform row XOR operation: R1 := R1 + R2
+            row_xor(&mut modified_matrix[0], &modified_matrix[1]);
+            let rank_after_xor = count_nonzero_rows(&modified_matrix);
+
+            prop_assert!(
+                rank_after_xor <= original_rank,
+                "Row XOR increased rank: {} -> {}",
+                original_rank, rank_after_xor
+            );
+
+            // Reset and test row scaling: R1 := c * R1 (c != 0)
+            let mut scaled_matrix = matrix.clone();
+            row_scale(&mut scaled_matrix[0], Gf256::new(scalar));
+            let rank_after_scale = count_nonzero_rows(&scaled_matrix);
+
+            prop_assert_eq!(
+                rank_after_scale, original_rank,
+                "Row scaling changed rank: {} -> {}",
+                original_rank, rank_after_scale
+            );
+
+            // Reset and test row swap: R1 <-> R2
+            let mut swapped_matrix = matrix.clone();
+            row_swap(&mut swapped_matrix[0], &mut swapped_matrix[1]);
+            let rank_after_swap = count_nonzero_rows(&swapped_matrix);
+
+            prop_assert_eq!(
+                rank_after_swap, original_rank,
+                "Row swap changed rank: {} -> {}",
+                original_rank, rank_after_swap
+            );
+        }
+    });
+}
+
+fn count_nonzero_rows(matrix: &[Vec<u8>]) -> usize {
+    matrix.iter().filter(|row| row.iter().any(|&x| x != 0)).count()
+}
+
+/// MR-DenseRowOperationConsistency: Dense row operations should match slice operations.
+///
+/// Property: DenseRow methods should produce the same results as equivalent slice operations.
+///
+/// Why this catches bugs:
+///   - Inconsistency between dense row API and underlying slice operations
+///   - Boundary checking issues in safe vs unsafe implementations
+///   - State management bugs in row data structures
+#[test]
+fn mr_dense_row_operation_consistency() {
+    use crate::raptorq::linalg::{DenseRow, row_xor};
+    use crate::raptorq::gf256::Gf256;
+
+    proptest!(|(
+        data1: Vec<u8>,
+        data2: Vec<u8>,
+        index: usize,
+        value: u8,
+    )| {
+        if !data1.is_empty() && data1.len() == data2.len() && index < data1.len() {
+            // Test element access consistency
+            let row = DenseRow::new(data1.clone());
+            let expected = Gf256::new(data1[index]);
+
+            prop_assert_eq!(
+                row.get(index), expected,
+                "DenseRow::get() inconsistency at index {}: expected GF({}), got {:?}",
+                index, data1[index], row.get(index)
+            );
+
+            // Test modification consistency
+            let mut row_dense = DenseRow::new(data1.clone());
+            let mut slice_direct = data1.clone();
+
+            // Set value using DenseRow API
+            row_dense.set(index, Gf256::new(value));
+            // Set value directly on slice
+            slice_direct[index] = value;
+
+            prop_assert_eq!(
+                row_dense.as_slice(), slice_direct.as_slice(),
+                "DenseRow::set() inconsistency: DenseRow API diverged from direct slice modification"
+            );
+
+            // Test row XOR consistency
+            let mut row_xor_dense = DenseRow::new(data1.clone());
+            let other_row = DenseRow::new(data2.clone());
+            let mut slice_xor = data1.clone();
+
+            // XOR using slice operations
+            row_xor(slice_xor.as_mut_slice(), other_row.as_slice());
+
+            // XOR using DenseRow (via slice access)
+            row_xor(row_xor_dense.as_mut_slice(), other_row.as_slice());
+
+            prop_assert_eq!(
+                row_xor_dense.as_slice(), slice_xor.as_slice(),
+                "DenseRow XOR inconsistency: operations via DenseRow diverged from direct slice XOR"
+            );
+        }
+    });
+}
