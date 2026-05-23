@@ -43,30 +43,18 @@ fn take_finished_fallbacks(state: &mut SleepState) -> Vec<std::thread::JoinHandl
     let mut finished = Vec::new();
 
     // Move logically completed but not yet fully exited threads to zombies
-    if state
-        .fallback
-        .as_ref()
-        .is_some_and(|fallback| fallback.completed.load(Ordering::Acquire))
-    {
-        state.zombie_fallbacks.push(
-            state
-                .fallback
-                .take()
-                .expect("completed implies fallback exists")
-                .join,
-        );
-    } else if state
-        .fallback
-        .as_ref()
-        .is_some_and(|fallback| fallback.join.is_finished())
-    {
-        finished.push(
-            state
-                .fallback
-                .take()
-                .expect("finished implies fallback exists")
-                .join,
-        );
+    if let Some(fallback) = state.fallback.as_ref() {
+        if fallback.completed.load(Ordering::Acquire) {
+            if let Some(fallback) = state.fallback.take() {
+                state.zombie_fallbacks.push(fallback.join);
+            }
+        }
+    } else if let Some(fallback) = state.fallback.as_ref() {
+        if fallback.join.is_finished() {
+            if let Some(fallback) = state.fallback.take() {
+                finished.push(fallback.join);
+            }
+        }
     }
 
     let mut i = 0;

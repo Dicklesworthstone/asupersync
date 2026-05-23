@@ -23,20 +23,26 @@
 //! - **MR7: Waker Determinism** - Equivalent waking patterns produce equivalent outcomes
 //! - **MR8: Batch Processing Invariance** - Batched vs individual operations equivalent
 
-use crate::runtime::TaskTable;
-use crate::runtime::scheduler::WorkerId;
-use crate::runtime::scheduler::priority::{PriorityClass, PriorityTask};
-use crate::runtime::scheduler::three_lane::ThreeLaneScheduler;
-use crate::runtime::state::RuntimeState;
 use crate::types::{RegionId, TaskId, Time};
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAX_WORKERS: usize = 8;
 const MAX_TASKS_PER_TEST: usize = 20;
-const TIME_EPSILON_NANOS: u64 = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PriorityClass {
+    Cancel,
+    Timed,
+    Ready,
+}
+
+fn test_task_id(index: u64) -> TaskId {
+    TaskId::new_for_test(index as u32, 0)
+}
+
+fn test_region_id(index: u32) -> RegionId {
+    RegionId::new_for_test(index, 0)
+}
 
 /// Mock task for testing scheduler behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -58,17 +64,6 @@ impl TestTask {
             spawn_time: Time::from_nanos(1_000_000_000),
         }
     }
-
-    fn to_priority_task(&self) -> PriorityTask {
-        PriorityTask::new(self.id, self.priority, self.region, self.spawn_time)
-    }
-}
-
-/// Helper to create test scheduler configuration.
-fn test_scheduler_config(worker_count: usize) -> (Arc<RuntimeState>, Option<Arc<TaskTable>>) {
-    let state = Arc::new(RuntimeState::new());
-    let task_table = None; // Simplified for testing
-    (state, task_table)
 }
 
 /// MR1: Priority Ordering Preservation
@@ -86,7 +81,7 @@ fn mr1_priority_ordering_preservation() {
     )| {
         prop_assume!(!task_priorities.is_empty() && task_priorities.len() <= MAX_TASKS_PER_TEST);
 
-        let (state, task_table) = test_scheduler_config(worker_count);
+        prop_assert!(worker_count > 0);
 
         // Create tasks with different priorities
         let mut tasks = Vec::new();
@@ -99,9 +94,9 @@ fn mr1_priority_ordering_preservation() {
             };
 
             let task = TestTask::new(
-                TaskId::from(i as u64 + 1),
+                test_task_id(i as u64 + 1),
                 priority,
-                RegionId::from(1),
+                test_region_id(1),
                 true, // Send task for simplicity
             );
             tasks.push(task);
@@ -221,9 +216,9 @@ fn mr3_work_conservation() {
             };
 
             let task = TestTask::new(
-                TaskId::from(next_task_id),
+                test_task_id(next_task_id),
                 priority,
-                RegionId::from(1),
+                test_region_id(1),
                 true,
             );
             task_set.insert(task.id);
@@ -237,7 +232,7 @@ fn mr3_work_conservation() {
             match op % 4 {
                 0 => {
                     // Spawn new task
-                    let task_id = TaskId::from(next_task_id);
+                    let task_id = test_task_id(next_task_id);
                     task_set.insert(task_id);
                     next_task_id += 1;
                 }
@@ -363,6 +358,18 @@ fn mr5_stealing_locality_preservation() {
 
             let stealer_cohort = stealer_worker / cohort_size;
             let target_cohort = target_worker / cohort_size;
+            prop_assert!(
+                stealer_cohort < cohort_count,
+                "Stealer cohort {} should be < cohort count {}",
+                stealer_cohort,
+                cohort_count
+            );
+            prop_assert!(
+                target_cohort < cohort_count,
+                "Target cohort {} should be < cohort count {}",
+                target_cohort,
+                cohort_count
+            );
 
             if stealer_cohort == target_cohort {
                 same_cohort_steals += 1;
@@ -377,12 +384,9 @@ fn mr5_stealing_locality_preservation() {
 
         if total_steals > 0 {
             // This property depends on the specific stealing algorithm,
-            // but we can verify that the cohort calculation is consistent
-            prop_assert!(stealer_cohort < cohort_count,
-                "Stealer cohort {} should be < cohort count {}", stealer_cohort, cohort_count);
-
-            prop_assert!(target_cohort < cohort_count,
-                "Target cohort {} should be < cohort count {}", target_cohort, cohort_count);
+            // but the per-attempt assertions above verify that cohort
+            // calculation remains in range for every valid steal attempt.
+            prop_assert!(same_cohort_steals + cross_cohort_steals == total_steals);
         }
     });
 }

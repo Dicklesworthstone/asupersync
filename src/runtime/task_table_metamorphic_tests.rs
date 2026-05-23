@@ -181,7 +181,7 @@ impl TableSnapshot {
 /// (for commutative operations like independent insertions).
 #[test]
 fn mr_operation_order_invariance() {
-    proptest!(|(ops: Vec<TableOperation>)| {
+    proptest!(|(ops in prop::collection::vec(arb_table_operation(), 0..=30))| {
         // Only test with operations that should be commutative
         let commutative_ops: Vec<_> = ops.into_iter()
             .filter(|op| matches!(op,
@@ -222,7 +222,7 @@ fn mr_operation_order_invariance() {
 /// Arena capacity should never decrease during any sequence of operations.
 #[test]
 fn mr_capacity_monotonicity() {
-    proptest!(|(ops: Vec<TableOperation>)| {
+    proptest!(|(ops in prop::collection::vec(arb_table_operation(), 0..=30))| {
         let mut table = TaskTable::with_capacity(64);
         let mut task_indices = Vec::new();
         let mut prev_capacity = table.capacity();
@@ -244,7 +244,7 @@ fn mr_capacity_monotonicity() {
 /// live_task_count() must always equal the actual count of non-terminal tasks.
 #[test]
 fn mr_live_task_count_consistency() {
-    proptest!(|(ops: Vec<TableOperation>)| {
+    proptest!(|(ops in prop::collection::vec(arb_table_operation(), 0..=30))| {
         let mut table = TaskTable::new();
         let mut task_indices = Vec::new();
 
@@ -267,7 +267,7 @@ fn mr_live_task_count_consistency() {
 /// Removing a task must also clean up its stored future (subset relation).
 #[test]
 fn mr_remove_task_cleans_future() {
-    proptest!(|(owner: RegionId, deadline: Option<Time>)| {
+    proptest!(|(owner in arb_region_id(), deadline in arb_deadline())| {
         let mut table = TaskTable::new();
 
         // Insert task and store future
@@ -294,7 +294,7 @@ fn mr_remove_task_cleans_future() {
 /// stored_futures[slot] should exist iff tasks[slot] exists.
 #[test]
 fn mr_arena_future_parallel_indexing() {
-    proptest!(|(ops: Vec<TableOperation>)| {
+    proptest!(|(ops in prop::collection::vec(arb_table_operation(), 0..=30))| {
         let mut table = TaskTable::new();
         let mut task_indices = Vec::new();
 
@@ -324,7 +324,7 @@ fn mr_arena_future_parallel_indexing() {
 /// Pool hits + misses should equal total acquisition attempts.
 #[test]
 fn mr_pool_stats_conservation() {
-    proptest!(|(ops: Vec<TableOperation>)| {
+    proptest!(|(ops in prop::collection::vec(arb_table_operation(), 0..=30))| {
         let mut table = TaskTable::with_capacity(32);
         let mut task_indices = Vec::new();
 
@@ -361,7 +361,7 @@ fn mr_pool_stats_conservation() {
 /// Scaling all deadlines by factor k should scale deadline_sum by k.
 #[test]
 fn mr_deadline_sum_scaling() {
-    proptest!(|(base_deadlines: Vec<u64>, scale_factor: u64)| {
+    proptest!(|(base_deadlines in prop::collection::vec(1u64..1_000_000, 0..=20), scale_factor in 1u64..=10)| {
         let scale_factor = (scale_factor % 10) + 1; // 1-10 to avoid overflow
         let base_deadlines: Vec<_> = base_deadlines.into_iter()
             .take(5)
@@ -410,7 +410,7 @@ fn mr_deadline_sum_scaling() {
 /// insert(task) followed by remove(task) should restore table to original state.
 #[test]
 fn mr_insert_remove_round_trip() {
-    proptest!(|(owner: RegionId, deadline: Option<Time>)| {
+    proptest!(|(owner in arb_region_id(), deadline in arb_deadline())| {
         let mut table = TaskTable::new();
 
         // Capture initial state
@@ -448,7 +448,7 @@ fn mr_insert_remove_round_trip() {
 /// TaskRecord.id must always match its arena slot index after insertion.
 #[test]
 fn mr_id_canonicalization() {
-    proptest!(|(owner: RegionId, stale_id_value: u32)| {
+    proptest!(|(owner in arb_region_id(), stale_id_value in any::<u32>())| {
         let mut table = TaskTable::new();
 
         // Create record with intentionally stale/wrong TaskId
@@ -472,7 +472,7 @@ fn mr_id_canonicalization() {
 /// Valid phase transitions should maintain bookkeeping consistency.
 #[test]
 fn mr_phase_transition_consistency() {
-    proptest!(|(owner: RegionId, transition_sequence: Vec<u8>)| {
+    proptest!(|(owner in arb_region_id(), transition_sequence in prop::collection::vec(any::<u8>(), 0..=20))| {
         let mut table = TaskTable::new();
 
         // Insert task in Created phase
@@ -530,7 +530,7 @@ fn mr_phase_transition_consistency() {
 /// Number of recycled items should never exceed pool capacity.
 #[test]
 fn mr_pool_capacity_bounds() {
-    proptest!(|(ops: Vec<TableOperation>)| {
+    proptest!(|(ops in prop::collection::vec(arb_table_operation(), 0..=30))| {
         let pool_capacity = 16;
         let mut table = TaskTable::with_capacity_and_pool_limit(64, pool_capacity);
         let mut task_indices = Vec::new();
@@ -550,10 +550,10 @@ fn mr_pool_capacity_bounds() {
 /// stored_future_count() must match actual number of Some(_) slots.
 #[test]
 fn mr_future_count_accuracy() {
-    proptest!(|(ops: Vec<TableOperation>)| {
+    proptest!(|(ops in prop::collection::vec(arb_table_operation(), 0..=30))| {
         let mut table = TaskTable::new();
         let mut task_indices = Vec::new();
-        let mut actual_future_count = 0;
+        let mut actual_future_count: usize = 0;
 
         for op in ops.iter().take(15) {
             match op {
@@ -600,7 +600,7 @@ mod composition_tests {
     /// This tests the composition of MR4 (remove cleans future) + MR8 (insert-remove round trip).
     #[test]
     fn mr_composite_insert_store_remove() {
-        proptest!(|(owner: RegionId, deadline: Option<Time>)| {
+        proptest!(|(owner in arb_region_id(), deadline in arb_deadline())| {
             let mut table = TaskTable::new();
             let initial_state = TableSnapshot::capture(&table);
 

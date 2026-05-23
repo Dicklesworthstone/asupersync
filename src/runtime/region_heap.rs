@@ -923,6 +923,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     #[derive(Clone, Copy, Debug)]
     enum HeapOp {
         AllocU32(u32),
@@ -1082,7 +1083,7 @@ mod tests {
 
             // MR: String and Vec accessibility should be unaffected by u32 deallocs
             for (i, idx) in str_indices.iter().enumerate() {
-                prop_assert_eq!(heap.get::<String>(*idx).as_deref(), Some(strs[i].as_str()),
+                prop_assert_eq!(heap.get::<String>(*idx).map(String::as_str), Some(strs[i].as_str()),
                     "String {} accessibility affected by u32 operations", i);
             }
             for (i, idx) in vec_indices.iter().enumerate() {

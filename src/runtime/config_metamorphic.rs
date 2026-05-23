@@ -5,9 +5,7 @@
 //! constraint relationships, and config composition.
 
 use crate::runtime::config::*;
-use crate::types::CancelAttributionConfig;
 use proptest::prelude::*;
-use std::time::Duration;
 
 /// MR1: Validation Consistency
 ///
@@ -19,8 +17,8 @@ use std::time::Duration;
 #[test]
 fn mr1_validation_consistency() {
     proptest!(|(
-        worker_threads in 1u32..=64,
-        stack_size_mb in 1u32..=64,
+        worker_threads in 1usize..=64,
+        stack_size_mb in 1usize..=64,
         poll_budget in 1u32..=1000
     )| {
         // Direct construction
@@ -56,7 +54,7 @@ fn mr1_validation_consistency() {
 /// Relation: Default::default() is deterministic and valid
 #[test]
 fn mr2_default_stability() {
-    proptest!(|_dummy in 0..10u32| {
+    proptest!(|(_dummy in 0..10u32)| {
         let default1 = RuntimeConfig::default();
         let default2 = RuntimeConfig::default();
 
@@ -87,9 +85,9 @@ fn mr2_default_stability() {
 #[test]
 fn mr3_constraint_relationships() {
     proptest!(|(
-        base_workers in 1u32..=16,
-        multiplier in 1u32..=4,
-        batch_size in 1u32..=64
+        base_workers in 1usize..=16,
+        multiplier in 1usize..=4,
+        batch_size in 1usize..=64
     )| {
         let mut config = RuntimeConfig::default();
         config.worker_threads = base_workers;
@@ -129,8 +127,8 @@ fn mr3_constraint_relationships() {
 #[test]
 fn mr4_config_composition() {
     proptest!(|(
-        base_workers in 1u32..=8,
-        override_stack_mb in 2u32..=16,
+        base_workers in 1usize..=8,
+        override_stack_mb in 2usize..=16,
         override_budget in 32u32..=512
     )| {
         // Base config
@@ -176,9 +174,9 @@ fn mr4_config_composition() {
 #[test]
 fn mr5_scale_invariance() {
     proptest!(|(
-        base_workers in 2u32..=8,
-        base_batch in 4u32..=32,
-        scale_factor in 2u32..=4
+        base_workers in 2usize..=8,
+        base_batch in 4usize..=32,
+        scale_factor in 2usize..=4
     )| {
         let base_config = RuntimeConfig {
             worker_threads: base_workers,
@@ -217,9 +215,7 @@ fn mr5_scale_invariance() {
 /// Relation: boundary behavior is consistent and predictable
 #[test]
 fn mr6_boundary_behavior() {
-    proptest!(|(
-        test_cases: Vec<(u32, u32)>
-    )| {
+    proptest!(|(test_cases in prop::collection::vec((0usize..=2_000, 0u32..=2_000), 1..=10))| {
         prop_assume!(!test_cases.is_empty() && test_cases.len() <= 10);
 
         for (workers, budget) in test_cases {

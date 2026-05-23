@@ -1217,7 +1217,7 @@ mod tests {
     prop_compose! {
         fn arb_region_sequence()
                               (size in 1usize..20)
-                              (count in prop::just(size)) -> usize {
+                              (count in Just(size)) -> usize {
             count
         }
     }
@@ -1225,14 +1225,15 @@ mod tests {
     prop_compose! {
         fn arb_budget_components()
                                (deadline_secs in 10u64..1000,
-                                poll_quota in 100u64..10000,
+                                poll_quota in 100u32..10000,
                                 cost_quota in 50u64..5000,
-                                priority in 1u32..255)
-                               -> (u64, u64, u64, u32) {
+                                priority in 1u8..=254)
+                               -> (u64, u32, u64, u8) {
             (deadline_secs, poll_quota, cost_quota, priority)
         }
     }
 
+    #[allow(dead_code)]
     #[derive(Clone, Copy, Debug)]
     enum WorkType {
         Task,
@@ -1286,7 +1287,7 @@ mod tests {
 
             // MR: Parent-child relationships must be consistent
             for (parent, child) in &all_children {
-                prop_assert_eq!(table.parent(child), Some(Some(*parent)),
+                prop_assert_eq!(table.parent(*child), Some(Some(*parent)),
                     "Child {:?} should have parent {:?}", child, parent);
 
                 let parent_children = table.child_ids(*parent).unwrap();
@@ -1296,7 +1297,7 @@ mod tests {
 
             // MR: Root regions should have no parent
             for root in &roots {
-                prop_assert_eq!(table.parent(root), Some(None),
+                prop_assert_eq!(table.parent(*root), Some(None),
                     "Root region {:?} should have no parent", root);
             }
 
@@ -1324,16 +1325,19 @@ mod tests {
             let (task_count, child_count, obligation_count) = work_mix;
             let mut table = RegionTable::new();
             let root = table.create_root(Budget::default(), Time::ZERO);
-            let root_record = table.get(root.arena_index()).unwrap();
 
             // Add work to the region
             let mut tasks = Vec::new();
             let mut children = Vec::new();
 
-            for i in 0..task_count {
-                let task = crate::types::TaskId::from_arena(crate::util::ArenaIndex::new(i as u32, 0));
-                prop_assert!(root_record.add_task(task).is_ok());
-                tasks.push(task);
+            {
+                let root_record = table.get(root.arena_index()).unwrap();
+                for i in 0..task_count {
+                    let task =
+                        crate::types::TaskId::from_arena(crate::util::ArenaIndex::new(i as u32, 0));
+                    prop_assert!(root_record.add_task(task).is_ok());
+                    tasks.push(task);
+                }
             }
 
             for _ in 0..child_count {
@@ -1341,6 +1345,7 @@ mod tests {
                 children.push(child);
             }
 
+            let root_record = table.get(root.arena_index()).unwrap();
             for _ in 0..obligation_count {
                 prop_assert!(root_record.try_reserve_obligation().is_ok());
             }
@@ -1488,7 +1493,7 @@ mod tests {
                 .with_deadline(Time::from_secs(c_deadline))
                 .with_poll_quota(c_poll)
                 .with_cost_quota(c_cost)
-                .with_priority(p_priority);
+                .with_priority(c_priority);
 
             let expected_effective = parent_budget.meet(child_budget);
 
@@ -1580,7 +1585,7 @@ mod tests {
                     prop_assert_eq!(children.len(), children_count);
 
                     for child in &children {
-                        prop_assert_eq!(table.parent(child), Some(Some(*parent)));
+                        prop_assert_eq!(table.parent(*child), Some(Some(*parent)));
                     }
                 }
 
@@ -1638,7 +1643,7 @@ mod tests {
                 .create_child(parent, Budget::default(), Time::ZERO)
                 .unwrap();
 
-            assert_eq!(table.parent(&child), Some(Some(parent)));
+            assert_eq!(table.parent(child), Some(Some(parent)));
         }
 
         // Bug 3: Obligation count tracking errors

@@ -12,8 +12,9 @@
 //! - DownReason mapping and predicates
 //! - Monitor removal and lifecycle management
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+#![allow(dead_code)]
+
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use crate::monitor::{DownBatch, DownNotification, DownReason, MonitorRef, MonitorSet};
@@ -78,7 +79,7 @@ impl MockTime {
 
     fn advance_nanos(&self, nanos: u64) {
         let mut current = self.current.lock().unwrap();
-        *current = current.add_nanos(nanos);
+        *current = current.saturating_add_nanos(nanos);
     }
 
     fn set(&self, time: Time) {
@@ -243,7 +244,9 @@ impl MonitorConformanceHarness {
         } else {
             TestVerdict::Fail(format!(
                 "Multiple monitors failed: count={}, has_w1={}, has_w2={}",
-                watchers.len(), contains_watcher1, contains_watcher2
+                watchers.len(),
+                contains_watcher1,
+                contains_watcher2
             ))
         };
 
@@ -517,7 +520,8 @@ impl MonitorConformanceHarness {
         };
 
         let correct_task = notification.monitored == test_task_id(42);
-        let correct_reason = matches!(&notification.reason, DownReason::Error(msg) if msg == "test error");
+        let correct_reason =
+            matches!(&notification.reason, DownReason::Error(msg) if msg == "test error");
         let correct_ref = notification.monitor_ref.id() == 123;
 
         let verdict = if correct_task && correct_reason && correct_ref {
@@ -577,7 +581,8 @@ impl MonitorConformanceHarness {
         } else {
             TestVerdict::Fail(format!(
                 "Monitored task not preserved: expected={:?}, got={:?}",
-                Some(monitored), retrieved_monitored
+                Some(monitored),
+                retrieved_monitored
             ))
         };
 
@@ -609,12 +614,21 @@ impl MonitorConformanceHarness {
         let no_ref2 = !removed.contains(&ref2);
         let region2_still_monitored = monitor_set.watcher_of(ref2).is_some();
 
-        let verdict = if correct_removal_count && contains_ref1 && contains_ref3 && no_ref2 && region2_still_monitored {
+        let verdict = if correct_removal_count
+            && contains_ref1
+            && contains_ref3
+            && no_ref2
+            && region2_still_monitored
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail(format!(
                 "Region cleanup failed: removed_count={}, has_ref1={}, has_ref3={}, no_ref2={}, region2_active={}",
-                removed.len(), contains_ref1, contains_ref3, no_ref2, region2_still_monitored
+                removed.len(),
+                contains_ref1,
+                contains_ref3,
+                no_ref2,
+                region2_still_monitored
             ))
         };
 
@@ -758,7 +772,8 @@ impl MonitorConformanceHarness {
         let correct_count = removed.len() == 2;
         let contains_both = removed.contains(&ref1) && removed.contains(&ref2);
         let no_watchers = monitor_set.watchers_of(monitored).is_empty();
-        let no_ref_lookup = monitor_set.watcher_of(ref1).is_none() && monitor_set.watcher_of(ref2).is_none();
+        let no_ref_lookup =
+            monitor_set.watcher_of(ref1).is_none() && monitor_set.watcher_of(ref2).is_none();
 
         let verdict = if correct_count && contains_both && no_watchers && no_ref_lookup {
             TestVerdict::Pass
@@ -778,7 +793,10 @@ impl MonitorConformanceHarness {
     fn test_down_reason_from_outcome(&mut self) -> ConformanceTestResult {
         // MUST: DownReason correctly maps from task outcomes
         let normal = DownReason::from_task_outcome(&Outcome::Ok(()));
-        let error = DownReason::from_task_outcome(&Outcome::Err(crate::error::Error::InvalidName("test".into())));
+        let error = DownReason::from_task_outcome(&Outcome::Err(
+            crate::error::Error::new(crate::error::ErrorKind::InvalidStateTransition)
+                .with_message("test"),
+        ));
         let cancelled = DownReason::from_task_outcome(&Outcome::Cancelled(CancelReason::default()));
         let panicked = DownReason::from_task_outcome(&Outcome::Panicked(PanicPayload::new("test")));
 
@@ -809,10 +827,20 @@ impl MonitorConformanceHarness {
         let cancelled = DownReason::Cancelled(CancelReason::default());
         let panicked = DownReason::Panicked(PanicPayload::new("test"));
 
-        let normal_checks = normal.is_normal() && !normal.is_error() && !normal.is_cancelled() && !normal.is_panicked();
-        let error_checks = !error.is_normal() && error.is_error() && !error.is_cancelled() && !error.is_panicked();
-        let cancelled_checks = !cancelled.is_normal() && !cancelled.is_error() && cancelled.is_cancelled() && !cancelled.is_panicked();
-        let panicked_checks = !panicked.is_normal() && !panicked.is_error() && !panicked.is_cancelled() && panicked.is_panicked();
+        let normal_checks = normal.is_normal()
+            && !normal.is_error()
+            && !normal.is_cancelled()
+            && !normal.is_panicked();
+        let error_checks =
+            !error.is_normal() && error.is_error() && !error.is_cancelled() && !error.is_panicked();
+        let cancelled_checks = !cancelled.is_normal()
+            && !cancelled.is_error()
+            && cancelled.is_cancelled()
+            && !cancelled.is_panicked();
+        let panicked_checks = !panicked.is_normal()
+            && !panicked.is_error()
+            && !panicked.is_cancelled()
+            && panicked.is_panicked();
 
         let verdict = if normal_checks && error_checks && cancelled_checks && panicked_checks {
             TestVerdict::Pass
@@ -934,7 +962,11 @@ impl MonitorConformanceHarness {
         let no_watchers_left = monitor_set.watchers_of(terminated_task).is_empty();
         let other_task_unaffected = monitor_set.watcher_of(other_ref).is_some();
 
-        let verdict = if correct_removal_count && correct_total_count && no_watchers_left && other_task_unaffected {
+        let verdict = if correct_removal_count
+            && correct_total_count
+            && no_watchers_left
+            && other_task_unaffected
+        {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail("Termination cleanup failed".into())

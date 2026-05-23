@@ -923,7 +923,7 @@ mod tests {
         /// Category: Invertive (f(T(T(x))) = f(x))
         #[test]
         fn mr_push_pop_roundtrip_invertibility() {
-            proptest!(|(task_id: u32, priority: u8)| {
+            proptest!(|(task_id in any::<u32>(), priority in any::<u8>())| {
                 let task_id = task_id % 100; // Bound to reasonable range
                 let mut arena = setup_arena(100);
                 let mut heap = IntrusivePriorityHeap::new();

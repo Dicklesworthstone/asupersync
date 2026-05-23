@@ -22,14 +22,14 @@
 
 use crate::observability::ObservabilityConfig;
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
-use crate::runtime::config::{CancelAttributionConfig, ObligationLeakResponse};
+use crate::runtime::config::ObligationLeakResponse;
 use crate::runtime::sharded_state::{
     ShardGuard, ShardedConfig, ShardedObservability, ShardedState,
     lock_order::{held_count, held_labels},
 };
 use crate::trace::TraceBufferHandle;
 use crate::trace::distributed::LogicalClockMode;
-use crate::types::{RegionId, TaskId, Time};
+use crate::types::{CancelAttributionConfig, RegionId, TaskId, Time};
 use crate::util::{ArenaIndex, OsEntropy};
 use std::sync::{Arc, Barrier};
 use std::thread;

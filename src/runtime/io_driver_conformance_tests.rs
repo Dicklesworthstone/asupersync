@@ -18,10 +18,10 @@ use super::IoDriver;
 use crate::runtime::reactor::{Event, Events, Interest, Reactor, Source, Token};
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::task::{RawWaker, RawWakerVTable, Waker};
+use std::task::{Wake, Waker};
 use std::time::{Duration, Instant};
 
 /// Requirement levels for conformance testing.
@@ -221,6 +221,10 @@ impl Reactor for MockReactor {
         self.wake_calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+
+    fn registration_count(&self) -> usize {
+        MockReactor::registration_count(self)
+    }
 }
 
 /// Mock I/O source for testing.
@@ -235,20 +239,9 @@ impl MockSource {
     }
 }
 
-impl Source for MockSource {
-    type SourceId = RawFd;
-
-    fn source_id(&self) -> Self::SourceId {
+impl AsRawFd for MockSource {
+    fn as_raw_fd(&self) -> RawFd {
         self.fd
-    }
-
-    fn register_with_reactor(
-        &self,
-        reactor: &dyn Reactor,
-        token: Token,
-        interests: Interest,
-    ) -> io::Result<()> {
-        reactor.register(self, token, interests)
     }
 }
 
@@ -272,35 +265,21 @@ impl TestWaker {
     pub fn into_waker(self) -> Waker {
         let wake_count = Arc::clone(&self.wake_count);
 
-        unsafe fn wake_fn(data: *const ()) {
-            let wake_count = Arc::from_raw(data as *const AtomicUsize);
-            wake_count.fetch_add(1, Ordering::Relaxed);
-            // Leak the Arc back to keep it alive
-            std::mem::forget(wake_count);
+        struct CountingWaker {
+            wake_count: Arc<AtomicUsize>,
         }
 
-        unsafe fn wake_by_ref_fn(data: *const ()) {
-            let wake_count = &*(data as *const AtomicUsize);
-            wake_count.fetch_add(1, Ordering::Relaxed);
+        impl Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.wake_count.fetch_add(1, Ordering::Relaxed);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wake_count.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
-        unsafe fn drop_fn(data: *const ()) {
-            let _ = Arc::from_raw(data as *const AtomicUsize);
-        }
-
-        unsafe fn clone_fn(data: *const ()) -> RawWaker {
-            let wake_count = &*(data as *const AtomicUsize);
-            let cloned = Arc::new(AtomicUsize::new(wake_count.load(Ordering::Relaxed)));
-            RawWaker::new(
-                Arc::into_raw(cloned) as *const (),
-                &RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn),
-            )
-        }
-
-        let vtable = &RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn);
-        let raw_waker = RawWaker::new(Arc::into_raw(wake_count) as *const (), vtable);
-
-        unsafe { Waker::from_raw(raw_waker) }
+        Arc::new(CountingWaker { wake_count }).into()
     }
 }
 
@@ -692,10 +671,14 @@ impl ConformanceTest for BasicRegistrationTest {
 
         let result = driver.register(&source, Interest::READABLE, test_waker.into_waker());
 
-        let passed = result.is_ok()
-            && reactor.is_registered(result.unwrap())
-            && driver.stats().registrations == 1
-            && !driver.is_empty();
+        let passed = match result.as_ref() {
+            Ok(token) => {
+                reactor.is_registered(*token)
+                    && driver.stats().registrations == 1
+                    && !driver.is_empty()
+            }
+            Err(_) => false,
+        };
 
         let error_message = if !passed {
             Some(format!(
@@ -1190,7 +1173,9 @@ impl ConformanceTest for ModifyUnknownTokenTest {
         let unknown_token = Token::new(999);
         let result = driver.modify_interest(unknown_token, Interest::WRITABLE);
 
-        let passed = result.is_err() && result.unwrap_err().kind() == ErrorKind::NotFound;
+        let passed = result
+            .as_ref()
+            .is_err_and(|error| error.kind() == ErrorKind::NotFound);
 
         let error_message = if !passed {
             Some(format!("Expected NotFound error. Got: {:?}", result))

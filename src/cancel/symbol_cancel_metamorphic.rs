@@ -26,9 +26,7 @@ use crate::cancel::symbol_cancel::{CancelListener, SymbolCancelToken};
 use crate::types::{Budget, CancelKind, CancelReason, ObjectId, Time};
 use crate::util::DetRng;
 use proptest::prelude::*;
-use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const EPSILON_NANOS: u64 = 1000; // 1µs tolerance for timing
 
@@ -76,8 +74,23 @@ impl CancelListener for TestListener {
 }
 
 /// Helper to create cancel reasons with different severities.
-fn create_reason(kind: CancelKind, message: &str) -> CancelReason {
-    CancelReason::new(kind, message.to_string())
+fn create_reason(kind: CancelKind, _message: &str) -> CancelReason {
+    CancelReason::new(kind)
+}
+
+fn object_id_from_u64(value: u64) -> ObjectId {
+    ObjectId::from_u128(u128::from(value))
+}
+
+fn cancel_kind_strategy() -> impl Strategy<Value = CancelKind> {
+    prop_oneof![
+        Just(CancelKind::User),
+        Just(CancelKind::Timeout),
+        Just(CancelKind::Deadline),
+        Just(CancelKind::Shutdown),
+        Just(CancelKind::ParentCancelled),
+        Just(CancelKind::ResourceUnavailable),
+    ]
 }
 
 /// MR1: Hierarchical Propagation
@@ -102,17 +115,16 @@ fn mr1_hierarchical_propagation() {
         prop_assume!(!child_ids.is_empty() && child_ids.len() <= 10);
         prop_assume!(child_ids.iter().all(|&id| id != parent_id && id > 0));
 
-        let mut rng = DetRng::from_seed(42);
+        let mut rng = DetRng::new(42);
         let now = Time::from_nanos(1_000_000_000);
 
         // Create parent token
-        let parent = SymbolCancelToken::new(ObjectId::from(parent_id), &mut rng);
+        let parent = SymbolCancelToken::new(object_id_from_u64(parent_id), &mut rng);
 
         // Create child tokens and establish hierarchy
         let mut children = Vec::new();
-        for child_id in &child_ids {
-            let child = SymbolCancelToken::new(ObjectId::from(*child_id), &mut rng);
-            parent.add_child(child.clone());
+        for _child_id in &child_ids {
+            let child = parent.child(&mut rng);
             children.push(child);
         }
 
@@ -135,7 +147,7 @@ fn mr1_hierarchical_propagation() {
             prop_assert!(child.is_cancelled(),
                 "Child {} must be cancelled when parent is cancelled", i);
 
-            if let Some(child_reason) = child.cancel_reason() {
+            if let Some(child_reason) = child.reason() {
                 // Child should have ParentCancelled or stronger reason
                 prop_assert!(
                     child_reason.kind == CancelKind::ParentCancelled ||
@@ -159,12 +171,12 @@ fn mr1_hierarchical_propagation() {
 fn mr2_reason_strengthening_monotonicity() {
     proptest!(|(
         object_id in 1u64..1000,
-        reasons: Vec<(CancelKind, String)>
+        reasons in prop::collection::vec((cancel_kind_strategy(), ".*"), 1..=8)
     )| {
         prop_assume!(!reasons.is_empty() && reasons.len() <= 8);
 
-        let mut rng = DetRng::from_seed(42);
-        let token = SymbolCancelToken::new(ObjectId::from(object_id), &mut rng);
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(object_id_from_u64(object_id), &mut rng);
         let base_time = Time::from_nanos(1_000_000_000);
 
         let mut previous_severity = 0u8;
@@ -181,7 +193,7 @@ fn mr2_reason_strengthening_monotonicity() {
             prop_assert!(token.is_cancelled(),
                 "Token should be cancelled after attempt {}", i);
 
-            if let Some(stored_reason) = token.cancel_reason() {
+            if let Some(stored_reason) = token.reason() {
                 let current_severity = stored_reason.kind.severity();
 
                 prop_assert!(current_severity >= previous_severity,
@@ -210,8 +222,8 @@ fn mr3_timing_monotonicity() {
         prop_assume!(!timestamps.is_empty() && timestamps.len() <= 5);
         prop_assume!(timestamps.iter().all(|&t| t > 0 && t < u64::MAX / 2));
 
-        let mut rng = DetRng::from_seed(42);
-        let token = SymbolCancelToken::new(ObjectId::from(object_id), &mut rng);
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(object_id_from_u64(object_id), &mut rng);
 
         let mut first_cancel_time = None;
 
@@ -257,8 +269,8 @@ fn mr4_token_identity_invariance() {
     )| {
         prop_assume!(!operations.is_empty() && operations.len() <= 10);
 
-        let mut rng = DetRng::from_seed(object_id);
-        let token = SymbolCancelToken::new(ObjectId::from(object_id), &mut rng);
+        let mut rng = DetRng::new(object_id);
+        let token = SymbolCancelToken::new(object_id_from_u64(object_id), &mut rng);
 
         let initial_token_id = token.token_id();
         let initial_object_id = token.object_id();
@@ -279,13 +291,12 @@ fn mr4_token_identity_invariance() {
                 }
                 2 => {
                     // Add child
-                    let child = SymbolCancelToken::new(ObjectId::from(object_id + i as u64 + 1), &mut rng);
-                    token.add_child(child);
+                    let _child = token.child(&mut rng);
                 }
                 3 => {
                     // Add listener
                     let listener = TestListener::new();
-                    token.register_listener(Box::new(listener));
+                    token.add_listener(listener);
                 }
                 _ => unreachable!(),
             }
@@ -311,15 +322,15 @@ fn mr5_listener_notification_completeness() {
         object_id in 1u64..1000,
         listener_count in 1usize..8
     )| {
-        let mut rng = DetRng::from_seed(42);
-        let token = SymbolCancelToken::new(ObjectId::from(object_id), &mut rng);
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(object_id_from_u64(object_id), &mut rng);
 
         // Register multiple listeners
         let mut listeners = Vec::new();
         for i in 0..listener_count {
             let listener = TestListener::new();
             let listener_clone = listener.clone();
-            token.register_listener(Box::new(listener_clone));
+            token.add_listener(listener_clone);
             listeners.push(listener);
         }
 
@@ -371,17 +382,17 @@ fn mr6_cancellation_idempotence() {
         object_id in 1u64..1000,
         repeat_count in 2usize..10
     )| {
-        let mut rng = DetRng::from_seed(42);
+        let mut rng = DetRng::new(42);
 
         // Token A: Single cancellation
-        let token_a = SymbolCancelToken::new(ObjectId::from(object_id), &mut rng);
+        let token_a = SymbolCancelToken::new(object_id_from_u64(object_id), &mut rng);
         let listener_a = TestListener::new();
-        token_a.register_listener(Box::new(listener_a.clone()));
+        token_a.add_listener(listener_a.clone());
 
         // Token B: Multiple identical cancellations
-        let token_b = SymbolCancelToken::new(ObjectId::from(object_id), &mut rng);
+        let token_b = SymbolCancelToken::new(object_id_from_u64(object_id), &mut rng);
         let listener_b = TestListener::new();
-        token_b.register_listener(Box::new(listener_b.clone()));
+        token_b.add_listener(listener_b.clone());
 
         let reason = create_reason(CancelKind::Deadline, "test deadline");
         let now = Time::from_nanos(1_000_000_000);
@@ -406,7 +417,7 @@ fn mr6_cancellation_idempotence() {
         prop_assert_eq!(token_a.is_cancelled(), token_b.is_cancelled(),
             "Both tokens should have same cancellation state");
 
-        if let (Some(reason_a), Some(reason_b)) = (token_a.cancel_reason(), token_b.cancel_reason()) {
+        if let (Some(reason_a), Some(reason_b)) = (token_a.reason(), token_b.reason()) {
             prop_assert_eq!(reason_a.kind, reason_b.kind,
                 "Both tokens should have same cancel reason");
         }
@@ -434,14 +445,13 @@ fn mr7_child_independence() {
         prop_assume!(child_ids.len() >= 2 && child_ids.len() <= 6);
         prop_assume!(child_ids.iter().all(|&id| id != parent_id && id > 0));
 
-        let mut rng = DetRng::from_seed(42);
-        let parent = SymbolCancelToken::new(ObjectId::from(parent_id), &mut rng);
+        let mut rng = DetRng::new(42);
+        let parent = SymbolCancelToken::new(object_id_from_u64(parent_id), &mut rng);
 
         // Create sibling tokens
         let mut children = Vec::new();
-        for child_id in &child_ids {
-            let child = SymbolCancelToken::new(ObjectId::from(*child_id), &mut rng);
-            parent.add_child(child.clone());
+        for _child_id in &child_ids {
+            let child = parent.child(&mut rng);
             children.push(child);
         }
 
@@ -486,12 +496,13 @@ fn mr8_budget_preservation() {
         object_id in 1u64..1000,
         initial_budget in 1u64..1000000
     )| {
-        let mut rng = DetRng::from_seed(42);
-        let budget = Budget::new(initial_budget);
-        let token = SymbolCancelToken::with_budget(ObjectId::from(object_id), budget.clone(), &mut rng);
+        let mut rng = DetRng::new(42);
+        let budget = Budget::new().with_cost_quota(initial_budget);
+        let token =
+            SymbolCancelToken::with_budget(object_id_from_u64(object_id), budget, &mut rng);
 
         // Record initial budget
-        let initial_budget_value = token.cleanup_budget().remaining();
+        let initial_budget_value = token.cleanup_budget().remaining_cost();
 
         // Perform various operations
         let reason1 = create_reason(CancelKind::User, "first cancel");
@@ -503,14 +514,13 @@ fn mr8_budget_preservation() {
         let _ = token.cancel(&reason2, now);
 
         // Add children and listeners
-        let child = SymbolCancelToken::new(ObjectId::from(object_id + 1), &mut rng);
-        token.add_child(child);
+        let _child = token.child(&mut rng);
 
         let listener = TestListener::new();
-        token.register_listener(Box::new(listener));
+        token.add_listener(listener);
 
         // Budget should be preserved
-        let final_budget_value = token.cleanup_budget().remaining();
+        let final_budget_value = token.cleanup_budget().remaining_cost();
         prop_assert_eq!(initial_budget_value, final_budget_value,
             "Cleanup budget should be preserved across operations");
     });
@@ -523,10 +533,9 @@ mod integration_tests {
     #[test]
     fn mr_composition_hierarchical_with_strengthening() {
         // Composite MR: Combines hierarchical propagation with reason strengthening
-        let mut rng = DetRng::from_seed(42);
-        let parent = SymbolCancelToken::new(ObjectId::from(1), &mut rng);
-        let child = SymbolCancelToken::new(ObjectId::from(2), &mut rng);
-        parent.add_child(child.clone());
+        let mut rng = DetRng::new(42);
+        let parent = SymbolCancelToken::new(object_id_from_u64(1), &mut rng);
+        let child = parent.child(&mut rng);
 
         let weak_reason = create_reason(CancelKind::User, "weak");
         let strong_reason = create_reason(CancelKind::Shutdown, "strong");
@@ -540,19 +549,19 @@ mod integration_tests {
         parent.cancel(&strong_reason, now);
 
         // Child should reflect the stronger cascaded reason
-        if let Some(child_reason) = child.cancel_reason() {
+        if let Some(child_reason) = child.reason() {
             assert!(child_reason.kind.severity() >= CancelKind::ParentCancelled.severity());
         }
     }
 
     #[test]
     fn mr_validation_catches_listener_panics() {
-        let mut rng = DetRng::from_seed(42);
-        let token = SymbolCancelToken::new(ObjectId::from(1), &mut rng);
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(object_id_from_u64(1), &mut rng);
 
         // Register panic listener
         let panic_listener = TestListener::with_panic();
-        token.register_listener(Box::new(panic_listener));
+        token.add_listener(panic_listener);
 
         let initial_panic_count = token.listener_panic_count();
 

@@ -22,28 +22,57 @@
 //! - **MR7: Obligation Conservation** - Obligations neither lost nor duplicated
 //! - **MR8: Instance Identity Invariance** - Runtime instance ID never changes
 
-use crate::record::{ObligationKind, RegionLimits, SourceLocation};
-use crate::runtime::config::ObligationLeakResponse;
+use crate::record::{ObligationKind, SourceLocation};
+use crate::runtime::obligation_table::ObligationCreateArgs;
 use crate::runtime::state::RuntimeState;
 use crate::types::{Budget, ObligationId, RegionId, TaskId, Time};
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-const TIME_EPSILON_NANOS: u64 = 1000; // 1µs tolerance
 
 /// Helper to create test source location
 fn test_source_location() -> SourceLocation {
-    SourceLocation::new("test_file.rs", 42, 12)
+    SourceLocation::unknown()
 }
 
-/// Helper to create region limits
-fn test_region_limits() -> RegionLimits {
-    RegionLimits {
-        max_tasks: Some(1000),
-        max_obligations: Some(1000),
-        max_children: Some(100),
+fn create_test_region(
+    state: &mut RuntimeState,
+    parent: Option<RegionId>,
+) -> Result<RegionId, crate::runtime::region_table::RegionCreateError> {
+    match parent {
+        Some(parent) => state
+            .regions
+            .create_child(parent, Budget::INFINITE, state.now),
+        None => Ok(state.regions.create_root(Budget::INFINITE, state.now)),
     }
+}
+
+fn request_test_close(state: &RuntimeState, region_id: RegionId) {
+    if let Some(record) = state.regions.get(region_id.arena_index()) {
+        let _ = record.begin_close(None);
+    }
+}
+
+fn create_test_obligation(
+    state: &mut RuntimeState,
+    region: RegionId,
+    description: String,
+) -> Result<ObligationId, ()> {
+    if let Some(region_record) = state.regions.get(region.arena_index()) {
+        region_record.try_reserve_obligation().map_err(|_| ())?;
+    } else {
+        return Err(());
+    }
+
+    let holder = TaskId::new_for_test((state.obligations.len() as u32).saturating_add(1), 0);
+    Ok(state.obligations.create(ObligationCreateArgs {
+        kind: ObligationKind::Lease,
+        holder,
+        region,
+        now: state.now,
+        description: Some(description),
+        acquired_at: test_source_location(),
+        acquire_backtrace: None,
+    }))
 }
 
 /// MR1: State Machine Monotonicity
@@ -66,12 +95,7 @@ fn mr1_state_machine_monotonicity() {
         // Create regions and track their initial states
         let mut region_ids = Vec::new();
         for i in 0..region_count {
-            let region_result = state.regions.create_region(
-                None, // root region
-                format!("test_region_{}", i),
-                test_region_limits(),
-                test_source_location(),
-            );
+            let region_result = create_test_region(&mut state, None);
 
             if let Ok(region_id) = region_result {
                 region_ids.push(region_id);
@@ -85,8 +109,8 @@ fn mr1_state_machine_monotonicity() {
 
         // Initialize state levels
         for &region_id in &region_ids {
-            if let Some(record) = state.regions.get(region_id) {
-                region_state_levels.insert(region_id, state_level(&record.state));
+            if let Some(record) = state.regions.get(region_id.arena_index()) {
+                region_state_levels.insert(region_id, state_level(&record.state()));
             }
         }
 
@@ -99,7 +123,7 @@ fn mr1_state_machine_monotonicity() {
                 match op % 3 {
                     0 => {
                         // Request close
-                        let _ = state.regions.request_close(region_id);
+                        request_test_close(&state, region_id);
                     }
                     1 => {
                         // Advance region state
@@ -107,9 +131,9 @@ fn mr1_state_machine_monotonicity() {
                     }
                     2 => {
                         // Mark as finalizing (if possible)
-                        if let Some(mut record) = state.regions.get_mut(region_id) {
+                        if let Some(record) = state.regions.get(region_id.arena_index()) {
                             // Only advance if currently in Ready state
-                            if matches!(record.state, crate::record::region::RegionState::Ready) {
+                            if matches!(record.state(), crate::record::region::RegionState::Open) {
                                 // This would be done by proper close mechanism
                             }
                         }
@@ -118,8 +142,8 @@ fn mr1_state_machine_monotonicity() {
                 }
 
                 // Check monotonicity
-                if let Some(record) = state.regions.get(region_id) {
-                    let current_level = state_level(&record.state);
+                if let Some(record) = state.regions.get(region_id.arena_index()) {
+                    let current_level = state_level(&record.state());
                     let previous_level = region_state_levels.get(&region_id).copied().unwrap_or(0);
 
                     prop_assert!(current_level >= previous_level,
@@ -136,9 +160,11 @@ fn mr1_state_machine_monotonicity() {
 /// Helper to convert region state to monotonic level
 fn state_level(state: &crate::record::region::RegionState) -> u8 {
     match state {
-        crate::record::region::RegionState::Ready => 0,
-        crate::record::region::RegionState::Finalizing => 1,
-        crate::record::region::RegionState::Closed(_) => 2,
+        crate::record::region::RegionState::Open => 0,
+        crate::record::region::RegionState::Closing => 1,
+        crate::record::region::RegionState::Draining => 2,
+        crate::record::region::RegionState::Finalizing => 3,
+        crate::record::region::RegionState::Closed => 4,
     }
 }
 
@@ -158,12 +184,7 @@ fn mr2_epoch_consistency() {
         let mut state = RuntimeState::new();
 
         // Create a region to work with
-        let region_id = state.regions.create_region(
-            None,
-            "test_region".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create region");
+        let region_id = create_test_region(&mut state, None).expect("Failed to create region");
 
         let mut last_region_epoch = state.region_table_epoch;
         let mut last_task_epoch = state.task_table_epoch;
@@ -173,12 +194,7 @@ fn mr2_epoch_consistency() {
             match op % 4 {
                 0 => {
                     // Create child region (should advance region epoch)
-                    let _ = state.regions.create_region(
-                        Some(region_id),
-                        format!("child_{}", op),
-                        test_region_limits(),
-                        test_source_location(),
-                    );
+                    let _ = create_test_region(&mut state, Some(region_id));
                 }
                 1 => {
                     // Advance region state (may advance epochs)
@@ -186,10 +202,10 @@ fn mr2_epoch_consistency() {
                 }
                 2 => {
                     // Create obligation (should advance obligation epoch)
-                    if let Ok(obligation_id) = state.obligations.create_obligation(
+                    if let Ok(obligation_id) = create_test_obligation(
+                        &mut state,
                         region_id,
-                        ObligationKind::Generic { description: format!("test_obligation_{}", op) },
-                        test_source_location(),
+                        format!("test_obligation_{}", op),
                     ) {
                         // Mark as leaked to advance state
                         let _ = state.mark_obligation_leaked(obligation_id);
@@ -277,12 +293,7 @@ fn mr4_leak_count_additivity() {
         let mut state = RuntimeState::new();
 
         // Create a region to hold obligations
-        let region_id = state.regions.create_region(
-            None,
-            "leak_test_region".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create region");
+        let region_id = create_test_region(&mut state, None).expect("Failed to create region");
 
         let initial_leak_count = state.leak_count;
         let mut expected_total_leaks = 0;
@@ -292,12 +303,10 @@ fn mr4_leak_count_additivity() {
 
             // Create and leak obligations
             for i in 0..leak_count {
-                if let Ok(obligation_id) = state.obligations.create_obligation(
+                if let Ok(obligation_id) = create_test_obligation(
+                    &mut state,
                     region_id,
-                    ObligationKind::Generic {
-                        description: format!("leak_test_{}_{}", batch_idx, i)
-                    },
-                    test_source_location(),
+                    format!("leak_test_{}_{}", batch_idx, i),
                 ) {
                     let _ = state.mark_obligation_leaked(obligation_id);
                 }
@@ -336,12 +345,7 @@ fn mr5_region_hierarchy_conservation() {
         let mut state = RuntimeState::new();
 
         // Create root region
-        let root_id = state.regions.create_region(
-            None,
-            "root_region".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create root region");
+        let root_id = create_test_region(&mut state, None).expect("Failed to create root region");
 
         let mut hierarchy_map: HashMap<RegionId, Option<RegionId>> = HashMap::new();
         hierarchy_map.insert(root_id, None);
@@ -353,12 +357,7 @@ fn mr5_region_hierarchy_conservation() {
 
             for &parent_id in &current_parents {
                 for i in 0..child_count {
-                    if let Ok(child_id) = state.regions.create_region(
-                        Some(parent_id),
-                        format!("child_{}_{}", level, i),
-                        test_region_limits(),
-                        test_source_location(),
-                    ) {
+                    if let Ok(child_id) = create_test_region(&mut state, Some(parent_id)) {
                         hierarchy_map.insert(child_id, Some(parent_id));
                         next_parents.push(child_id);
                     }
@@ -370,7 +369,7 @@ fn mr5_region_hierarchy_conservation() {
 
         // Verify initial hierarchy
         for (child_id, expected_parent) in &hierarchy_map {
-            if let Some(record) = state.regions.get(*child_id) {
+            if let Some(record) = state.regions.get(child_id.arena_index()) {
                 prop_assert_eq!(record.parent, *expected_parent,
                     "Initial hierarchy mismatch for region {:?}", child_id);
             }
@@ -384,9 +383,9 @@ fn mr5_region_hierarchy_conservation() {
 
         // Verify hierarchy preservation for non-closed regions
         for (child_id, expected_parent) in &hierarchy_map {
-            if let Some(record) = state.regions.get(*child_id) {
+            if let Some(record) = state.regions.get(child_id.arena_index()) {
                 // Only check if region is still alive
-                if !matches!(record.state, crate::record::region::RegionState::Closed(_)) {
+                if !matches!(record.state(), crate::record::region::RegionState::Closed) {
                     prop_assert_eq!(record.parent, *expected_parent,
                         "Hierarchy changed for live region {:?}", child_id);
                 }
@@ -412,24 +411,14 @@ fn mr6_instance_identity_invariance() {
         let initial_instance_id = state.instance_id;
 
         // Create some initial state
-        let region_id = state.regions.create_region(
-            None,
-            "test_region".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create region");
+        let region_id = create_test_region(&mut state, None).expect("Failed to create region");
 
         // Perform various operations
         for (i, &op) in operations.iter().enumerate() {
             match op % 5 {
                 0 => {
                     // Create child region
-                    let _ = state.regions.create_region(
-                        Some(region_id),
-                        format!("child_{}", i),
-                        test_region_limits(),
-                        test_source_location(),
-                    );
+                    let _ = create_test_region(&mut state, Some(region_id));
                 }
                 1 => {
                     // Advance time
@@ -437,10 +426,10 @@ fn mr6_instance_identity_invariance() {
                 }
                 2 => {
                     // Create and leak obligation
-                    if let Ok(obligation_id) = state.obligations.create_obligation(
+                    if let Ok(obligation_id) = create_test_obligation(
+                        &mut state,
                         region_id,
-                        ObligationKind::Generic { description: format!("test_{}", i) },
-                        test_source_location(),
+                        format!("test_{}", i),
                     ) {
                         let _ = state.mark_obligation_leaked(obligation_id);
                     }
@@ -451,7 +440,7 @@ fn mr6_instance_identity_invariance() {
                 }
                 4 => {
                     // Request close
-                    let _ = state.regions.request_close(region_id);
+                    request_test_close(&state, region_id);
                 }
                 _ => unreachable!(),
             }
@@ -482,12 +471,7 @@ fn mr7_obligation_conservation() {
         let mut state = RuntimeState::new();
 
         // Create region for obligations
-        let region_id = state.regions.create_region(
-            None,
-            "obligation_test_region".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create region");
+        let region_id = create_test_region(&mut state, None).expect("Failed to create region");
 
         let mut created_obligations = HashSet::new();
         let mut leaked_obligations = HashSet::new();
@@ -498,12 +482,10 @@ fn mr7_obligation_conservation() {
 
             // Create obligations
             for i in 0..count {
-                if let Ok(obligation_id) = state.obligations.create_obligation(
+                if let Ok(obligation_id) = create_test_obligation(
+                    &mut state,
                     region_id,
-                    ObligationKind::Generic {
-                        description: format!("obligation_{}_{}", batch_idx, i)
-                    },
-                    test_source_location(),
+                    format!("obligation_{}_{}", batch_idx, i),
                 ) {
                     prop_assert!(created_obligations.insert(obligation_id),
                         "Obligation ID {:?} was duplicated", obligation_id);
@@ -513,7 +495,7 @@ fn mr7_obligation_conservation() {
             // Leak some obligations
             let obligations_to_leak: Vec<_> = created_obligations
                 .iter()
-                .filter(|id| !leaked_obligations.contains(id))
+                .filter(|id| !leaked_obligations.contains(*id))
                 .take(count / 2)
                 .copied()
                 .collect();
@@ -556,18 +538,13 @@ fn mr8_state_transition_validity() {
         let mut state = RuntimeState::new();
 
         // Create a region to test transitions
-        let region_id = state.regions.create_region(
-            None,
-            "transition_test_region".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create region");
+        let region_id = create_test_region(&mut state, None).expect("Failed to create region");
 
         let mut last_state_level = 0u8;
 
         for &transition in &transition_sequences {
-            let before_state = if let Some(record) = state.regions.get(region_id) {
-                state_level(&record.state)
+            let before_state = if let Some(record) = state.regions.get(region_id.arena_index()) {
+                state_level(&record.state())
             } else {
                 // Region no longer exists (closed)
                 break;
@@ -576,7 +553,7 @@ fn mr8_state_transition_validity() {
             match transition % 3 {
                 0 => {
                     // Request close (valid from Ready)
-                    let _ = state.regions.request_close(region_id);
+                    request_test_close(&state, region_id);
                 }
                 1 => {
                     // Advance state (should follow valid transitions)
@@ -584,19 +561,14 @@ fn mr8_state_transition_validity() {
                 }
                 2 => {
                     // Try to create child (should succeed if parent is Ready)
-                    let _ = state.regions.create_region(
-                        Some(region_id),
-                        "child_region".to_string(),
-                        test_region_limits(),
-                        test_source_location(),
-                    );
+                    let _ = create_test_region(&mut state, Some(region_id));
                 }
                 _ => unreachable!(),
             }
 
             // Check that transitions are monotonic (no regression)
-            if let Some(record) = state.regions.get(region_id) {
-                let after_state = state_level(&record.state);
+            if let Some(record) = state.regions.get(region_id.arena_index()) {
+                let after_state = state_level(&record.state());
 
                 prop_assert!(after_state >= before_state,
                     "Invalid state regression detected: {} -> {}", before_state, after_state);
@@ -616,36 +588,12 @@ mod integration_tests {
         // Composite MR: Region hierarchy + leak tracking
         let mut state = RuntimeState::new();
 
-        let root = state
-            .regions
-            .create_region(
-                None,
-                "root".to_string(),
-                test_region_limits(),
-                test_source_location(),
-            )
-            .expect("Failed to create root");
+        let root = create_test_region(&mut state, None).expect("Failed to create root");
 
-        let child = state
-            .regions
-            .create_region(
-                Some(root),
-                "child".to_string(),
-                test_region_limits(),
-                test_source_location(),
-            )
-            .expect("Failed to create child");
+        let child = create_test_region(&mut state, Some(root)).expect("Failed to create child");
 
         // Create obligation in child
-        let obligation = state
-            .obligations
-            .create_obligation(
-                child,
-                ObligationKind::Generic {
-                    description: "test".to_string(),
-                },
-                test_source_location(),
-            )
+        let obligation = create_test_obligation(&mut state, child, "test".to_string())
             .expect("Failed to create obligation");
 
         // Leak obligation
@@ -656,7 +604,7 @@ mod integration_tests {
 
         // Verify both hierarchy and leak count
         assert_eq!(state.leak_count, initial_leaks + 1);
-        if let Some(child_record) = state.regions.get(child) {
+        if let Some(child_record) = state.regions.get(child.arena_index()) {
             assert_eq!(child_record.parent, Some(root));
         }
     }
@@ -670,15 +618,7 @@ mod integration_tests {
         let initial_time = state.now;
 
         // These operations should preserve invariants
-        let region = state
-            .regions
-            .create_region(
-                None,
-                "test".to_string(),
-                test_region_limits(),
-                test_source_location(),
-            )
-            .expect("Failed to create region");
+        let region = create_test_region(&mut state, None).expect("Failed to create region");
 
         state.advance_region_state(region);
 

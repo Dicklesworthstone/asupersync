@@ -12,6 +12,8 @@
 //! - **Error Handling**: Graceful degradation when reactor disappears
 //! - **Panic Safety**: Registration cleanup survives reactor panics
 
+#![allow(dead_code)]
+
 use super::{Interest, ReactorHandle, Registration, Token};
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
@@ -537,8 +539,9 @@ impl ConformanceTest for ModifyWithDeadReactorTest {
         }; // reactor dropped
 
         let modify_result = registration.set_interest(Interest::WRITABLE);
-        let passed =
-            modify_result.is_err() && modify_result.unwrap_err().kind() == ErrorKind::NotConnected;
+        let passed = modify_result
+            .as_ref()
+            .is_err_and(|error| error.kind() == ErrorKind::NotConnected);
 
         let error_message = if !passed {
             Some(format!(

@@ -5,15 +5,17 @@
 //! configuration validation logic. Each test focuses on a specific metamorphic
 //! relation derived from configuration system domain properties.
 
-#![allow(clippy::pedantic, clippy::nursery, clippy::unwrap_used)]
+#![allow(dead_code, clippy::pedantic, clippy::nursery, clippy::unwrap_used)]
 
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::env;
+use std::sync::{Mutex, MutexGuard};
 
 use super::*;
-use crate::runtime::config::{BlockingPoolOptions, RuntimeConfig};
-use crate::types::builder::BuildError;
+use crate::runtime::config::RuntimeConfig;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Test environment variable setting for controlled testing.
 #[derive(Debug, Clone)]
@@ -126,6 +128,7 @@ fn arb_config_operation() -> impl Strategy<Value = ConfigOperation> {
 
 /// Helper to set environment variables with cleanup.
 struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
     vars_to_unset: Vec<String>,
     vars_to_restore: HashMap<String, String>,
 }
@@ -133,11 +136,13 @@ struct EnvGuard {
 impl EnvGuard {
     fn new() -> Self {
         Self {
+            _lock: ENV_LOCK.lock().unwrap(),
             vars_to_unset: Vec::new(),
             vars_to_restore: HashMap::new(),
         }
     }
 
+    #[allow(unsafe_code)]
     fn set(&mut self, name: &str, value: &str) {
         // Save original value for restoration
         if let Ok(original) = env::var(name) {
@@ -145,25 +150,34 @@ impl EnvGuard {
         } else {
             self.vars_to_unset.push(name.to_string());
         }
-        env::set_var(name, value);
+        // SAFETY: These tests serialize all environment mutation through
+        // ENV_LOCK, use crate-scoped variable names, and do not spawn worker
+        // threads while the guard is live.
+        unsafe { env::set_var(name, value) };
     }
 
+    #[allow(unsafe_code)]
     fn unset(&mut self, name: &str) {
         if let Ok(original) = env::var(name) {
             self.vars_to_restore.insert(name.to_string(), original);
         }
-        env::remove_var(name);
+        // SAFETY: See EnvGuard::set; the same serialized test-only mutation
+        // discipline applies to removal.
+        unsafe { env::remove_var(name) };
     }
 }
 
 impl Drop for EnvGuard {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         // Restore original environment
         for name in &self.vars_to_unset {
-            env::remove_var(name);
+            // SAFETY: EnvGuard owns the module-wide environment mutation lock.
+            unsafe { env::remove_var(name) };
         }
         for (name, value) in &self.vars_to_restore {
-            env::set_var(name, value);
+            // SAFETY: EnvGuard owns the module-wide environment mutation lock.
+            unsafe { env::set_var(name, value) };
         }
     }
 }
@@ -212,7 +226,7 @@ impl ConfigSnapshot {
 /// Default config should be identical regardless of construction path.
 #[test]
 fn mr_default_consistency() {
-    proptest!(|()| {
+    proptest!(|(_case in Just(()))| {
         let mut env_guard = EnvGuard::new();
 
         // Clear all asupersync env vars for clean test
@@ -325,7 +339,7 @@ fn mr_whitespace_invariance() {
 /// Boolean values should be case-insensitive.
 #[test]
 fn mr_case_insensitive_boolean_parsing() {
-    proptest!(|(base_bool in prop::sample::select(["true", "false", "yes", "no", "on", "off", "1", "0"]).prop_map(|s| s.to_string()))| {
+    proptest!(|(base_bool in prop::sample::select(vec!["true", "false", "yes", "no", "on", "off", "1", "0"]).prop_map(|s| s.to_string()))| {
         let mut env_guard = EnvGuard::new();
 
         // Test original case
@@ -470,7 +484,7 @@ fn mr_precedence_override_consistency() {
 /// Boundary values (min/max) should be handled consistently.
 #[test]
 fn mr_boundary_value_consistency() {
-    proptest!(|()| {
+    proptest!(|(_case in Just(()))| {
         let mut env_guard = EnvGuard::new();
 
         // Test minimum valid values

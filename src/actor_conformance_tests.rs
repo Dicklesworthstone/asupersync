@@ -15,20 +15,16 @@
 //! - Graceful stop vs immediate abort behavior
 //! - Drop abort safety for cleanup guarantee
 
-use std::collections::VecDeque;
+#![allow(dead_code)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-use std::time::Duration;
 
-use crate::actor::{Actor, ActorHandle, ActorId, ActorRef, ActorState};
-use crate::channel::mpsc::SendError;
+use crate::actor::Actor;
 use crate::cx::Cx;
-use crate::lab::LabRuntime;
-use crate::runtime::{JoinError, SpawnError};
-use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
+use crate::types::Time;
 
 /// Test verdict for conformance checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +193,10 @@ impl Actor for CounterActor {
 
     fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            self.lifecycle_events.lock().unwrap().push("on_start".into());
+            self.lifecycle_events
+                .lock()
+                .unwrap()
+                .push("on_start".into());
         })
     }
 
@@ -208,7 +207,10 @@ impl Actor for CounterActor {
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             self.count += msg;
-            self.lifecycle_events.lock().unwrap().push(format!("handle({})", msg));
+            self.lifecycle_events
+                .lock()
+                .unwrap()
+                .push(format!("handle({})", msg));
         })
     }
 
@@ -234,7 +236,7 @@ impl MockTime {
 
     fn advance_ms(&self, milliseconds: u64) {
         let mut current = self.current.lock().unwrap();
-        *current = current.add_nanos(milliseconds * 1_000_000);
+        *current = current.saturating_add_nanos(milliseconds.saturating_mul(1_000_000));
     }
 
     fn now(&self) -> Time {
@@ -352,7 +354,8 @@ impl ActorConformanceHarness {
         let actor = MockActor::new("test_message_type");
 
         // String implements Send + 'static
-        let message_is_send = std::any::type_name::<<MockActor as Actor>::Message>().contains("String");
+        let message_is_send =
+            std::any::type_name::<<MockActor as Actor>::Message>().contains("String");
 
         let verdict = if message_is_send {
             TestVerdict::Pass

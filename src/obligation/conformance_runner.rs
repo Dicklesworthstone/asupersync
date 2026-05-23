@@ -12,8 +12,8 @@
 //! of mathematical and safety requirements.
 
 use super::eprocess::conformance::EProcessConformanceHarness;
-use super::leak_check_conformance::LeakCheckConformanceHarness;
 use super::graded_conformance::GradedConformanceHarness;
+use super::leak_check_conformance::LeakCheckConformanceHarness;
 
 /// Unified conformance test runner for all obligation system components.
 pub struct ObligationConformanceRunner {
@@ -114,11 +114,11 @@ impl ObligationConformanceRunner {
                 ComplianceVerdict::NonConformant => {
                     overall_conformant = false;
                     "❌ NON-CONFORMANT"
-                },
+                }
                 ComplianceVerdict::Inconclusive => {
                     overall_conformant = false;
                     "⚠️ INCONCLUSIVE"
-                },
+                }
             };
 
             report.push_str(&format!(
@@ -162,19 +162,33 @@ impl ObligationConformanceRunner {
         let total_should: usize = self.overall_results.iter().map(|r| r.should_tests).sum();
         let total_tests: usize = self.overall_results.iter().map(|r| r.total_tests).sum();
 
-        report.push_str(&format!("- **MUST requirements**: {} ({:.1}% of total)\n", total_must, (total_must as f64 / total_tests as f64) * 100.0));
-        report.push_str(&format!("- **SHOULD requirements**: {} ({:.1}% of total)\n", total_should, (total_should as f64 / total_tests as f64) * 100.0));
+        report.push_str(&format!(
+            "- **MUST requirements**: {} ({:.1}% of total)\n",
+            total_must,
+            (total_must as f64 / total_tests as f64) * 100.0
+        ));
+        report.push_str(&format!(
+            "- **SHOULD requirements**: {} ({:.1}% of total)\n",
+            total_should,
+            (total_should as f64 / total_tests as f64) * 100.0
+        ));
         report.push_str(&format!("- **Total requirements**: {}\n\n", total_tests));
 
         // Failure Analysis
         let total_failures: usize = self.overall_results.iter().map(|r| r.failed_tests).sum();
         if total_failures > 0 {
             report.push_str("### Failure Analysis\n\n");
-            report.push_str(&format!("❌ **{} requirements failing** - requires immediate attention\n\n", total_failures));
+            report.push_str(&format!(
+                "❌ **{} requirements failing** - requires immediate attention\n\n",
+                total_failures
+            ));
 
             for result in &self.overall_results {
                 if result.failed_tests > 0 {
-                    report.push_str(&format!("**{}**: {} failures\n", result.component, result.failed_tests));
+                    report.push_str(&format!(
+                        "**{}**: {} failures\n",
+                        result.component, result.failed_tests
+                    ));
                 }
             }
             report.push_str("\n");
@@ -190,7 +204,9 @@ impl ObligationConformanceRunner {
             report.push_str("- Monitor for performance regressions in e-process calculations\n");
             report.push_str("- Review and update test cases when new obligation kinds are added\n");
         } else {
-            report.push_str("❌ **CRITICAL**: The obligation system has failing safety requirements.\n\n");
+            report.push_str(
+                "❌ **CRITICAL**: The obligation system has failing safety requirements.\n\n",
+            );
             report.push_str("**Immediate Actions Required:**\n");
             report.push_str("- Fix all failing MUST requirements before deployment\n");
             report.push_str("- Investigate root causes of non-conformance\n");
@@ -202,12 +218,16 @@ impl ObligationConformanceRunner {
 
     /// Returns results for a specific component.
     pub fn component_result(&self, component: &str) -> Option<&ComponentResult> {
-        self.overall_results.iter().find(|r| r.component == component)
+        self.overall_results
+            .iter()
+            .find(|r| r.component == component)
     }
 
     /// Returns true if all components are conformant.
     pub fn is_system_conformant(&self) -> bool {
-        self.overall_results.iter().all(|r| r.verdict == ComplianceVerdict::Conformant)
+        self.overall_results
+            .iter()
+            .all(|r| r.verdict == ComplianceVerdict::Conformant)
     }
 
     /// Returns the total number of failing requirements across all components.
@@ -217,29 +237,32 @@ impl ObligationConformanceRunner {
 
     fn analyze_eprocess_results(&self) -> ComponentResult {
         let results = self.eprocess_harness.results();
-        self.analyze_component_results("E-Process Martingales", results.iter().map(|r| {
-            (r.level, r.status)
-        }).collect())
+        self.analyze_component_results(
+            "E-Process Martingales",
+            results.iter().map(|r| (r.level, r.status)).collect(),
+        )
     }
 
     fn analyze_leak_check_results(&self) -> ComponentResult {
         let results = self.leak_check_harness.results();
-        self.analyze_component_results("Static Leak Checker", results.iter().map(|r| {
-            (r.level, r.status)
-        }).collect())
+        self.analyze_component_results(
+            "Static Leak Checker",
+            results.iter().map(|r| (r.level, r.status)).collect(),
+        )
     }
 
     fn analyze_graded_results(&self) -> ComponentResult {
         let results = self.graded_harness.results();
-        self.analyze_component_results("Graded Types", results.iter().map(|r| {
-            (r.level, r.status)
-        }).collect())
+        self.analyze_component_results(
+            "Graded Types",
+            results.iter().map(|r| (r.level, r.status)).collect(),
+        )
     }
 
     fn analyze_component_results<Level, Status>(
         &self,
         component: &'static str,
-        results: Vec<(Level, Status)>
+        results: Vec<(Level, Status)>,
     ) -> ComponentResult
     where
         Level: RequirementLevelTrait,
@@ -263,7 +286,7 @@ impl ObligationConformanceRunner {
                     }
                 }
                 LevelType::Should => should_tests += 1,
-                LevelType::May => {},
+                LevelType::May => {}
             }
 
             match status.status_type() {
@@ -432,9 +455,7 @@ mod tests {
         // Should have results for all three components
         assert_eq!(runner.overall_results.len(), 3);
 
-        let component_names: Vec<_> = runner.overall_results.iter()
-            .map(|r| r.component)
-            .collect();
+        let component_names: Vec<_> = runner.overall_results.iter().map(|r| r.component).collect();
 
         assert!(component_names.contains(&"E-Process Martingales"));
         assert!(component_names.contains(&"Static Leak Checker"));

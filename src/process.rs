@@ -82,7 +82,8 @@ fn drain_nonblocking<R: Read>(reader: &mut R, out: &mut Vec<u8>) -> io::Result<(
                 any = true;
                 out.extend_from_slice(&buf[..n]);
                 iterations += 1;
-                if iterations >= 64 { // 256KB max per poll
+                if iterations >= 64 {
+                    // 256KB max per poll
                     return Ok((false, any));
                 }
             }

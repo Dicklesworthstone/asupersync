@@ -32,7 +32,7 @@ pub enum RequirementLevel {
 }
 
 /// Categories of conformance tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TestCategory {
     /// Unit-level behavior verification.
     Unit,
@@ -1209,7 +1209,7 @@ impl ConformanceTest for ConcurrentOperationsConformanceTest {
                     let _ = handle.join();
                 }
 
-                Ok(())
+                Ok::<(), io::Error>(())
             })?;
 
             // Verify reactor is in consistent state

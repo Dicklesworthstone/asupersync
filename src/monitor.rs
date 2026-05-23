@@ -1464,16 +1464,16 @@ mod tests {
 // ============================================================================
 
 #[cfg(test)]
+#[path = "monitor_conformance_tests.rs"]
 mod monitor_conformance_tests;
 
 #[cfg(test)]
 mod conformance_integration {
-    use super::monitor_conformance_tests::MonitorConformanceHarness;
-    use crate::test_utils::init_test;
+    use super::monitor_conformance_tests::{MonitorConformanceHarness, TestVerdict};
 
     #[test]
     fn monitor_conformance_suite() {
-        init_test("monitor_conformance_suite");
+        crate::test_utils::init_test_logging();
 
         let mut harness = MonitorConformanceHarness::new();
 
@@ -1485,10 +1485,10 @@ mod conformance_integration {
 
         for result in results {
             match result.verdict {
-                crate::monitor_conformance_tests::TestVerdict::Pass => {
+                TestVerdict::Pass => {
                     passes += 1;
                 }
-                crate::monitor_conformance_tests::TestVerdict::Fail(reason) => {
+                TestVerdict::Fail(reason) => {
                     failures.push(format!("{}: {}", result.test_name, reason));
                 }
             }
@@ -1498,7 +1498,10 @@ mod conformance_integration {
             panic!("Monitor conformance failures:\n{}", failures.join("\n"));
         }
 
-        assert!(passes > 0, "No conformance tests passed - harness may be broken");
+        assert!(
+            passes > 0,
+            "No conformance tests passed - harness may be broken"
+        );
 
         crate::test_complete!("monitor_conformance_suite");
     }

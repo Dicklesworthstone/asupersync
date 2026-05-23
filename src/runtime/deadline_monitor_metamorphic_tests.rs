@@ -13,57 +13,18 @@ use super::deadline_monitor::{
 };
 use crate::types::{RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
-/// Controlled time source for deterministic testing.
-#[derive(Clone)]
-struct MockTimeSource {
-    current: Arc<AtomicU64>,
-}
-
-impl MockTimeSource {
-    fn new(initial_nanos: u64) -> Self {
-        Self {
-            current: Arc::new(AtomicU64::new(initial_nanos)),
-        }
-    }
-
-    fn get(&self) -> Instant {
-        let nanos = self.current.load(Ordering::Relaxed);
-        // Create a fake instant based on our controlled time
-        Instant::now() + Duration::from_nanos(nanos)
-    }
-
-    fn advance(&self, duration: Duration) {
-        self.current
-            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
-    }
-
-    fn set(&self, nanos: u64) {
-        self.current.store(nanos, Ordering::Relaxed);
-    }
-
-    fn as_fn(&self) -> fn() -> Instant {
-        let source = self.clone();
-        Box::leak(Box::new(move || source.get())) as &'static _ as fn() -> Instant
-    }
-}
+use std::time::Duration;
 
 /// Test fixture for creating consistent deadline monitoring scenarios.
 struct DeadlineMonitorFixture {
     monitor: DeadlineMonitor,
-    time_source: MockTimeSource,
     warnings: Arc<std::sync::Mutex<Vec<super::deadline_monitor::DeadlineWarning>>>,
 }
 
 impl DeadlineMonitorFixture {
     fn new(config: MonitorConfig) -> Self {
-        let time_source = MockTimeSource::new(0);
-        let time_fn = time_source.as_fn();
-        let mut monitor = DeadlineMonitor::with_time_getter(config, time_fn);
+        let mut monitor = DeadlineMonitor::new(config);
 
         let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
         let warnings_capture = Arc::clone(&warnings);
@@ -71,11 +32,7 @@ impl DeadlineMonitorFixture {
             warnings_capture.lock().unwrap().push(warning);
         });
 
-        Self {
-            monitor,
-            time_source,
-            warnings,
-        }
+        Self { monitor, warnings }
     }
 
     fn create_task_snapshot(
@@ -86,17 +43,17 @@ impl DeadlineMonitorFixture {
         last_checkpoint: Option<Time>,
         checkpoint_count: u64,
     ) -> DeadlineTaskSnapshot {
-        DeadlineTaskSnapshot {
+        DeadlineTaskSnapshot::new_for_test(
             task_id,
             region_id,
-            is_terminal: false,
+            false,
             created_at,
             deadline,
             last_checkpoint,
-            last_checkpoint_message: Some("test checkpoint".to_string()),
+            Some("test checkpoint".to_string()),
             checkpoint_count,
-            task_type: Some("test".to_string()),
-        }
+            Some("test".to_string()),
+        )
     }
 
     fn get_warnings(&self) -> Vec<super::deadline_monitor::DeadlineWarning> {
@@ -123,8 +80,8 @@ fn time_scaling_invariance() {
     };
 
     // Test scenario: Task approaching deadline
-    let base_fixture = DeadlineMonitorFixture::new(base_config.clone());
-    let scaled_fixture = DeadlineMonitorFixture::new(base_config);
+    let mut base_fixture = DeadlineMonitorFixture::new(base_config.clone());
+    let mut scaled_fixture = DeadlineMonitorFixture::new(base_config);
 
     let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
     let region_id = RegionId::from_arena(ArenaIndex::new(1, 0));
@@ -211,8 +168,8 @@ fn threshold_proportionality() {
         enabled: true,
     };
 
-    let fixture1 = DeadlineMonitorFixture::new(config.clone());
-    let fixture2 = DeadlineMonitorFixture::new(config);
+    let mut fixture1 = DeadlineMonitorFixture::new(config.clone());
+    let mut fixture2 = DeadlineMonitorFixture::new(config);
 
     let task_id1 = TaskId::from_arena(ArenaIndex::new(1, 0));
     let task_id2 = TaskId::from_arena(ArenaIndex::new(2, 0));
@@ -287,7 +244,7 @@ fn progress_monotonicity() {
         enabled: true,
     };
 
-    let fixture = DeadlineMonitorFixture::new(config);
+    let mut fixture = DeadlineMonitorFixture::new(config);
     let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
     let region_id = RegionId::from_arena(ArenaIndex::new(1, 0));
 
@@ -359,8 +316,22 @@ fn progress_monotonicity() {
 fn duration_history_order_independence() {
     use super::deadline_monitor::MonitorConfig;
 
-    let mut monitor1 = DeadlineMonitor::new(MonitorConfig::default());
-    let mut monitor2 = DeadlineMonitor::new(MonitorConfig::default());
+    let config_adaptive = MonitorConfig {
+        check_interval: Duration::from_secs(1),
+        warning_threshold_fraction: 0.2,
+        checkpoint_timeout: Duration::from_secs(5),
+        adaptive: AdaptiveDeadlineConfig {
+            adaptive_enabled: true,
+            warning_percentile: 0.9,
+            min_samples: 3,
+            max_history: 1000,
+            fallback_threshold: Duration::from_secs(30),
+        },
+        enabled: true,
+    };
+
+    let mut monitor1 = DeadlineMonitor::new(config_adaptive.clone());
+    let mut monitor2 = DeadlineMonitor::new(config_adaptive.clone());
 
     let task_id1 = TaskId::from_arena(ArenaIndex::new(1, 0));
     let task_id2 = TaskId::from_arena(ArenaIndex::new(2, 0));
@@ -382,8 +353,8 @@ fn duration_history_order_independence() {
             task_id1,
             "test",
             duration,
-            Some(base_time + Time::from_nanos(duration.as_nanos() as u64)),
-            base_time + Time::from_nanos(duration.as_nanos() as u64),
+            Some(base_time + duration),
+            base_time + duration,
         );
     }
 
@@ -393,8 +364,8 @@ fn duration_history_order_independence() {
             task_id2,
             "test",
             duration,
-            Some(base_time + Time::from_nanos(duration.as_nanos() as u64)),
-            base_time + Time::from_nanos(duration.as_nanos() as u64),
+            Some(base_time + duration),
+            base_time + duration,
         );
     }
 
@@ -403,23 +374,6 @@ fn duration_history_order_independence() {
 
     // Both monitors should have same history and produce same adaptive thresholds
     // We test this indirectly by checking that both produce the same warning behavior
-
-    let config_adaptive = MonitorConfig {
-        check_interval: Duration::from_secs(1),
-        warning_threshold_fraction: 0.2,
-        checkpoint_timeout: Duration::from_secs(5),
-        adaptive: AdaptiveDeadlineConfig {
-            adaptive_enabled: true,
-            warning_percentile: 0.9,
-            min_samples: 3,
-            max_history: 1000,
-            fallback_threshold: Duration::from_secs(30),
-        },
-        enabled: true,
-    };
-
-    monitor1.config = config_adaptive.clone();
-    monitor2.config = config_adaptive;
 
     // Both should now produce equivalent adaptive thresholds
     let task_id_test1 = TaskId::from_arena(ArenaIndex::new(10, 0));
@@ -510,8 +464,8 @@ fn adaptive_fallback_consistency() {
         enabled: true,
     };
 
-    let fixture_fixed = DeadlineMonitorFixture::new(config_fixed);
-    let fixture_adaptive = DeadlineMonitorFixture::new(config_adaptive_fallback);
+    let mut fixture_fixed = DeadlineMonitorFixture::new(config_fixed);
+    let mut fixture_adaptive = DeadlineMonitorFixture::new(config_adaptive_fallback);
 
     let task_id1 = TaskId::from_arena(ArenaIndex::new(1, 0));
     let task_id2 = TaskId::from_arena(ArenaIndex::new(2, 0));
@@ -586,7 +540,7 @@ fn combined_metamorphic_properties() {
         enabled: true,
     };
 
-    let fixture = DeadlineMonitorFixture::new(config);
+    let mut fixture = DeadlineMonitorFixture::new(config);
 
     // Build up history first
     let base_time = Time::from_nanos(0);
@@ -604,8 +558,8 @@ fn combined_metamorphic_properties() {
             TaskId::from_arena(ArenaIndex::new(i as u32, 0)),
             "integration",
             duration,
-            Some(base_time + Time::from_nanos(duration.as_nanos() as u64)),
-            base_time + Time::from_nanos(duration.as_nanos() as u64),
+            Some(base_time + duration),
+            base_time + duration,
         );
     }
 
@@ -681,8 +635,8 @@ mod property_tests {
             progress_fraction in 0.1f64..0.9f64,
         ) {
             let config = MonitorConfig::default();
-            let fixture1 = DeadlineMonitorFixture::new(config.clone());
-            let fixture2 = DeadlineMonitorFixture::new(config);
+            let mut fixture1 = DeadlineMonitorFixture::new(config.clone());
+            let mut fixture2 = DeadlineMonitorFixture::new(config);
 
             let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
             let region_id = RegionId::from_arena(ArenaIndex::new(1, 0));
@@ -695,7 +649,11 @@ mod property_tests {
             // Scaled scenario
             let scaled_created = Time::from_nanos(0);
             let scaled_deadline = Time::from_nanos(base_deadline_secs * scale_factor * 1_000_000_000);
-            let scaled_now = Time::from_nanos((base_deadline_secs * scale_factor) as f64 * progress_fraction as u64 * 1_000_000_000);
+            let scaled_now = Time::from_nanos(
+                ((base_deadline_secs * scale_factor) as f64
+                    * progress_fraction
+                    * 1_000_000_000.0) as u64,
+            );
 
             let task1 = DeadlineMonitorFixture::create_task_snapshot(
                 task_id, region_id, base_created, Some(base_deadline), Some(base_created), 1

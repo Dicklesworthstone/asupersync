@@ -9,7 +9,7 @@
 //! broader coverage of thread pool invariants, resource management, and
 //! concurrent state properties.
 
-#![allow(clippy::pedantic, clippy::nursery, clippy::unwrap_used)]
+#![allow(dead_code, clippy::pedantic, clippy::nursery, clippy::unwrap_used)]
 
 use proptest::prelude::*;
 use std::sync::Arc;
@@ -43,13 +43,15 @@ impl TestPoolConfig {
         };
 
         BlockingPoolOptions {
-            min_threads: self.min_threads,
-            max_threads: self.max_threads,
             idle_timeout: Duration::from_millis(self.idle_timeout_ms),
             affinity_profile,
             cohort_count: self.cohort_count,
             ..Default::default()
         }
+    }
+
+    fn create_pool(&self) -> BlockingPool {
+        BlockingPool::with_config(self.min_threads, self.max_threads, self.to_options())
     }
 }
 
@@ -75,7 +77,7 @@ fn arb_pool_config() -> impl Strategy<Value = TestPoolConfig> {
 }
 
 /// Test task that can be tracked for completion.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TestTask {
     id: u32,
     work_duration_ms: u64,
@@ -126,7 +128,6 @@ fn arb_pool_operation() -> impl Strategy<Value = PoolOperation> {
 }
 
 /// Tracked state for a spawned task.
-#[derive(Debug)]
 struct TrackedTask {
     id: u32,
     handle: BlockingTaskHandle,
@@ -152,22 +153,25 @@ struct PoolSnapshot {
 }
 
 impl PoolSnapshot {
-    fn capture(pool: &BlockingPool, tracked_tasks: &[TrackedTask]) -> Self {
-        let metrics = pool.metrics();
+    fn capture(
+        pool: &BlockingPool,
+        config: &TestPoolConfig,
+        tracked_tasks: &[TrackedTask],
+    ) -> Self {
         let total_spawned = tracked_tasks.len();
         let total_completed = tracked_tasks.iter().filter(|t| t.completed).count();
         let total_cancelled = tracked_tasks.iter().filter(|t| t.cancelled).count();
 
         Self {
-            active_threads: metrics.active_threads,
-            pending_tasks: metrics.pending_tasks,
-            busy_threads: metrics.busy_threads,
+            active_threads: pool.active_threads(),
+            pending_tasks: pool.pending_count(),
+            busy_threads: pool.busy_threads(),
             total_spawned,
             total_completed,
             total_cancelled,
-            min_threads: pool.min_threads(),
-            max_threads: pool.max_threads(),
-            affinity_enabled: pool.affinity_metrics().is_some(),
+            min_threads: config.min_threads,
+            max_threads: config.max_threads,
+            affinity_enabled: pool.affinity_metrics().enabled,
         }
     }
 }
@@ -187,7 +191,7 @@ fn apply_operation(
             let should_fail = task.should_fail;
 
             let handle = if let Some(cohort) = task.preferred_cohort {
-                pool.spawn_with_options(cohort, move || {
+                pool.spawn_on_cohort(cohort, move || {
                     thread::sleep(work_duration);
                     if should_fail {
                         panic!("Simulated task failure");
@@ -215,7 +219,8 @@ fn apply_operation(
             });
         }
         PoolOperation::CancelTask { task_index } => {
-            if let Some(task) = tracked_tasks.get_mut(*task_index % tracked_tasks.len().max(1)) {
+            let len = tracked_tasks.len().max(1);
+            if let Some(task) = tracked_tasks.get_mut(*task_index % len) {
                 if !task.completed && !task.cancelled {
                     task.handle.cancel();
                     task.cancelled = true;
@@ -226,16 +231,17 @@ fn apply_operation(
             task_index,
             timeout_ms,
         } => {
-            if let Some(task) = tracked_tasks.get_mut(*task_index % tracked_tasks.len().max(1)) {
+            let len = tracked_tasks.len().max(1);
+            if let Some(task) = tracked_tasks.get_mut(*task_index % len) {
                 if !task.completed {
                     let timeout = Duration::from_millis(*timeout_ms);
                     let _ = task.handle.wait_timeout(timeout);
-                    task.completed = task.handle.is_completed();
+                    task.completed = task.handle.is_done();
                 }
             }
         }
         PoolOperation::DrainAndShutdown => {
-            pool.drain_and_shutdown();
+            pool.shutdown_and_wait(Duration::from_secs(5));
             // Mark all remaining tasks as completed
             for task in tracked_tasks.iter_mut() {
                 if !task.completed {
@@ -245,7 +251,11 @@ fn apply_operation(
         }
         PoolOperation::CheckMetrics => {
             // Just trigger metrics collection - used for state observation
-            let _ = pool.metrics();
+            let _ = (
+                pool.active_threads(),
+                pool.pending_count(),
+                pool.busy_threads(),
+            );
         }
     }
 }
@@ -259,15 +269,14 @@ fn apply_operation(
 #[test]
 fn mr_thread_count_bounds() {
     proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
-        let pool_options = config.to_options();
-        let pool = BlockingPool::new(pool_options);
+        let pool = config.create_pool();
         let mut tracked_tasks = Vec::new();
         let completion_counter = Arc::new(AtomicUsize::new(0));
 
         for op in operations.iter().take(15) {
             apply_operation(&pool, op, &mut tracked_tasks, completion_counter.clone());
 
-            let snapshot = PoolSnapshot::capture(&pool, &tracked_tasks);
+            let snapshot = PoolSnapshot::capture(&pool, &config, &tracked_tasks);
 
             prop_assert!(snapshot.active_threads >= snapshot.min_threads,
                 "Active threads {} below minimum {} after operation {:?}",
@@ -279,7 +288,7 @@ fn mr_thread_count_bounds() {
         }
 
         // Cleanup
-        pool.drain_and_shutdown();
+        pool.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -288,15 +297,14 @@ fn mr_thread_count_bounds() {
 #[test]
 fn mr_task_conservation() {
     proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
-        let pool_options = config.to_options();
-        let pool = BlockingPool::new(pool_options);
+        let pool = config.create_pool();
         let mut tracked_tasks = Vec::new();
         let completion_counter = Arc::new(AtomicUsize::new(0));
 
         for op in operations.iter().take(12) {
             apply_operation(&pool, op, &mut tracked_tasks, completion_counter.clone());
 
-            let snapshot = PoolSnapshot::capture(&pool, &tracked_tasks);
+            let snapshot = PoolSnapshot::capture(&pool, &config, &tracked_tasks);
             let accounted_tasks = snapshot.total_completed + snapshot.total_cancelled + snapshot.pending_tasks;
 
             prop_assert_eq!(snapshot.total_spawned, accounted_tasks,
@@ -304,7 +312,7 @@ fn mr_task_conservation() {
                 op, snapshot.total_spawned, snapshot.total_completed, snapshot.total_cancelled, snapshot.pending_tasks);
         }
 
-        pool.drain_and_shutdown();
+        pool.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -313,22 +321,21 @@ fn mr_task_conservation() {
 #[test]
 fn mr_busy_threads_constraint() {
     proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
-        let pool_options = config.to_options();
-        let pool = BlockingPool::new(pool_options);
+        let pool = config.create_pool();
         let mut tracked_tasks = Vec::new();
         let completion_counter = Arc::new(AtomicUsize::new(0));
 
         for op in operations.iter().take(10) {
             apply_operation(&pool, op, &mut tracked_tasks, completion_counter.clone());
 
-            let snapshot = PoolSnapshot::capture(&pool, &tracked_tasks);
+            let snapshot = PoolSnapshot::capture(&pool, &config, &tracked_tasks);
 
             prop_assert!(snapshot.busy_threads <= snapshot.active_threads,
                 "Busy threads {} exceeds active threads {} after operation {:?}",
                 snapshot.busy_threads, snapshot.active_threads, op);
         }
 
-        pool.drain_and_shutdown();
+        pool.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -347,10 +354,8 @@ fn mr_scaling_linearity() {
             cohort_count: None,
         };
 
-        let pool_options1 = config.to_options();
-        let pool1 = BlockingPool::new(pool_options1);
-        let pool_options2 = config.to_options();
-        let pool2 = BlockingPool::new(pool_options2);
+        let pool1 = config.create_pool();
+        let pool2 = config.create_pool();
 
         // Submit base_task_count tasks to pool1
         for i in 0..base_task_count {
@@ -369,19 +374,19 @@ fn mr_scaling_linearity() {
         // Allow some time for queue buildup
         thread::sleep(Duration::from_millis(50));
 
-        let metrics1 = pool1.metrics();
-        let metrics2 = pool2.metrics();
+        let pending1 = pool1.pending_count();
+        let pending2 = pool2.pending_count();
 
         // Under saturation, pending tasks should scale approximately linearly
-        if metrics1.pending_tasks > 0 && metrics2.pending_tasks > 0 {
-            let ratio = metrics2.pending_tasks as f64 / metrics1.pending_tasks as f64;
+        if pending1 > 0 && pending2 > 0 {
+            let ratio = pending2 as f64 / pending1 as f64;
             prop_assert!(ratio >= 1.5 && ratio <= 2.5,
                 "Scaling linearity violated: base_pending={}, doubled_pending={}, ratio={}",
-                metrics1.pending_tasks, metrics2.pending_tasks, ratio);
+                pending1, pending2, ratio);
         }
 
-        pool1.drain_and_shutdown();
-        pool2.drain_and_shutdown();
+        pool1.shutdown_and_wait(Duration::from_secs(5));
+        pool2.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -400,10 +405,8 @@ fn mr_cancellation_commutativity() {
             cohort_count: None,
         };
 
-        let pool_options1 = config.to_options();
-        let pool1 = BlockingPool::new(pool_options1);
-        let pool_options2 = config.to_options();
-        let pool2 = BlockingPool::new(pool_options2);
+        let pool1 = config.create_pool();
+        let pool2 = config.create_pool();
 
         // Pool1: Submit A, B, then Cancel A, Cancel B
         let handle1a = pool1.spawn(move || thread::sleep(Duration::from_millis(task_duration_ms)));
@@ -420,16 +423,16 @@ fn mr_cancellation_commutativity() {
         // Allow time for cancellation processing
         thread::sleep(Duration::from_millis(50));
 
-        let metrics1 = pool1.metrics();
-        let metrics2 = pool2.metrics();
+        let pending1 = pool1.pending_count();
+        let pending2 = pool2.pending_count();
 
         // Both pools should have equivalent final states
-        prop_assert_eq!(metrics1.pending_tasks, metrics2.pending_tasks,
+        prop_assert_eq!(pending1, pending2,
             "Cancellation commutativity violated: pool1_pending={}, pool2_pending={}",
-            metrics1.pending_tasks, metrics2.pending_tasks);
+            pending1, pending2);
 
-        pool1.drain_and_shutdown();
-        pool2.drain_and_shutdown();
+        pool1.shutdown_and_wait(Duration::from_secs(5));
+        pool2.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -447,11 +450,10 @@ fn mr_spawn_shutdown_round_trip() {
             cohort_count: None,
         };
 
-        let pool_options = config.to_options();
-        let pool = BlockingPool::new(pool_options);
+        let pool = config.create_pool();
 
         // Capture initial state
-        let initial_metrics = pool.metrics();
+        let initial_active_threads = pool.active_threads();
 
         // Spawn tasks
         let handles: Vec<_> = (0..task_count)
@@ -461,24 +463,24 @@ fn mr_spawn_shutdown_round_trip() {
             .collect();
 
         // Verify tasks were spawned
-        let spawned_metrics = pool.metrics();
-        prop_assert!(spawned_metrics.pending_tasks > 0 || spawned_metrics.busy_threads > 0,
+        prop_assert!(pool.pending_count() > 0 || pool.busy_threads() > 0,
             "No evidence of spawned tasks in metrics");
 
         // Shutdown and drain
-        pool.drain_and_shutdown();
+        pool.shutdown_and_wait(Duration::from_secs(5));
 
         // Verify all tasks completed
         for handle in handles {
-            prop_assert!(handle.is_completed(), "Task should be completed after shutdown");
+            prop_assert!(handle.is_done(), "Task should be completed after shutdown");
         }
 
         // Final state should show no pending work
-        let final_metrics = pool.metrics();
-        prop_assert_eq!(final_metrics.pending_tasks, 0,
+        prop_assert_eq!(pool.pending_count(), 0,
             "Pending tasks should be 0 after drain_and_shutdown");
-        prop_assert_eq!(final_metrics.busy_threads, 0,
+        prop_assert_eq!(pool.busy_threads(), 0,
             "Busy threads should be 0 after drain_and_shutdown");
+        prop_assert!(pool.active_threads() <= initial_active_threads,
+            "Active threads should not grow after shutdown");
     });
 }
 
@@ -490,10 +492,8 @@ fn mr_configuration_invariance() {
         let task_count = (task_count % 4) + 1; // 1-4 tasks
 
         // Create two identical pools
-        let pool_options1 = config.to_options();
-        let pool1 = BlockingPool::new(pool_options1);
-        let pool_options2 = config.to_options();
-        let pool2 = BlockingPool::new(pool_options2);
+        let pool1 = config.create_pool();
+        let pool2 = config.create_pool();
 
         // Submit identical workloads
         for i in 0..task_count {
@@ -504,22 +504,22 @@ fn mr_configuration_invariance() {
         // Allow some processing time
         thread::sleep(Duration::from_millis(50));
 
-        let metrics1 = pool1.metrics();
-        let metrics2 = pool2.metrics();
+        let active1 = pool1.active_threads();
+        let active2 = pool2.active_threads();
 
         // Core configuration-derived properties should be identical
-        prop_assert_eq!(metrics1.active_threads, metrics2.active_threads,
+        prop_assert_eq!(active1, active2,
             "Active thread counts differ for identical configurations");
 
         // Under identical load, pools should behave similarly
-        let total_work1 = metrics1.pending_tasks + metrics1.busy_threads;
-        let total_work2 = metrics2.pending_tasks + metrics2.busy_threads;
+        let total_work1 = pool1.pending_count() + pool1.busy_threads();
+        let total_work2 = pool2.pending_count() + pool2.busy_threads();
         prop_assert_eq!(total_work1, total_work2,
             "Total work distribution differs for identical configurations: pool1={}, pool2={}",
             total_work1, total_work2);
 
-        pool1.drain_and_shutdown();
-        pool2.drain_and_shutdown();
+        pool1.shutdown_and_wait(Duration::from_secs(5));
+        pool2.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -537,30 +537,30 @@ fn mr_affinity_conservation() {
             cohort_count: Some(3),
         };
 
-        let pool_options = config.to_options();
-        let pool = BlockingPool::new(pool_options);
+        let pool = config.create_pool();
 
         // Submit tasks with cohort preferences
         for i in 0..task_count {
             let cohort = cohort_preferences.get(i).unwrap_or(&0) % 3;
-            pool.spawn_with_options(*cohort, move || {
+            pool.spawn_on_cohort(cohort, move || {
                 thread::sleep(Duration::from_millis(100));
             });
         }
 
         thread::sleep(Duration::from_millis(50));
 
-        if let Some(affinity_metrics) = pool.affinity_metrics() {
+        let affinity_metrics = pool.affinity_metrics();
+        if affinity_metrics.enabled {
             let cohort_total: usize = affinity_metrics.cohort_pending_counts.iter().sum();
             let total_tracked = cohort_total + affinity_metrics.global_pending_count;
-            let global_pending = pool.metrics().pending_tasks;
+            let global_pending = pool.pending_count();
 
             prop_assert_eq!(total_tracked, global_pending,
                 "Affinity conservation violated: cohort_total={}, global_spill={}, tracked_total={}, global_pending={}",
                 cohort_total, affinity_metrics.global_pending_count, total_tracked, global_pending);
         }
 
-        pool.drain_and_shutdown();
+        pool.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -578,8 +578,7 @@ fn mr_task_ordering_fifo() {
             cohort_count: None,
         };
 
-        let pool_options = config.to_options();
-        let pool = BlockingPool::new(pool_options);
+        let pool = config.create_pool();
 
         let execution_order = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
@@ -599,11 +598,11 @@ fn mr_task_ordering_fifo() {
 
         // Verify FIFO ordering (should be 0, 1, 2, ...)
         let expected_order: Vec<_> = (0..task_count).collect();
-        prop_assert_eq!(final_order, expected_order,
+        prop_assert_eq!(&final_order, &expected_order,
             "FIFO ordering violated: expected {:?}, got {:?}",
             expected_order, final_order);
 
-        pool.drain_and_shutdown();
+        pool.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -621,8 +620,7 @@ fn mr_completion_consistency() {
             cohort_count: None,
         };
 
-        let pool_options = config.to_options();
-        let pool = BlockingPool::new(pool_options);
+        let pool = config.create_pool();
 
         let handle = pool.spawn(move || {
             thread::sleep(Duration::from_millis(task_duration_ms));
@@ -631,7 +629,7 @@ fn mr_completion_consistency() {
         // Poll completion status over time
         let mut was_completed = false;
         for _ in 0..10 {
-            let is_completed = handle.is_completed();
+            let is_completed = handle.is_done();
 
             if was_completed {
                 prop_assert!(is_completed,
@@ -642,7 +640,7 @@ fn mr_completion_consistency() {
             thread::sleep(Duration::from_millis(20));
         }
 
-        pool.drain_and_shutdown();
+        pool.shutdown_and_wait(Duration::from_secs(5));
     });
 }
 
@@ -655,15 +653,14 @@ mod composition_tests {
     #[test]
     fn mr_composite_pool_invariants() {
         proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
-            let pool_options = config.to_options();
-            let pool = BlockingPool::new(pool_options);
+            let pool = config.create_pool();
             let mut tracked_tasks = Vec::new();
             let completion_counter = Arc::new(AtomicUsize::new(0));
 
             for op in operations.iter().take(8) {
                 apply_operation(&pool, op, &mut tracked_tasks, completion_counter.clone());
 
-                let snapshot = PoolSnapshot::capture(&pool, &tracked_tasks);
+                let snapshot = PoolSnapshot::capture(&pool, &config, &tracked_tasks);
 
                 // MR1: Thread bounds
                 prop_assert!(snapshot.active_threads >= snapshot.min_threads &&
@@ -685,7 +682,7 @@ mod composition_tests {
                 }
             }
 
-            pool.drain_and_shutdown();
+            pool.shutdown_and_wait(Duration::from_secs(5));
         });
     }
 }

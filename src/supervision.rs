@@ -10117,33 +10117,33 @@ mod tests {
 // ============================================================================
 
 #[cfg(test)]
+#[path = "supervision_conformance_tests.rs"]
 mod supervision_conformance_tests;
 
 #[cfg(test)]
 mod conformance_integration {
     use super::supervision_conformance_tests::SupervisionConformanceHarness;
-    use crate::test_utils::init_test;
 
     #[test]
     fn supervision_conformance_suite() {
-        init_test("supervision_conformance_suite");
+        crate::test_utils::init_test_logging();
 
         let harness = SupervisionConformanceHarness::new();
 
         // Run the full conformance test suite
-        let results = harness.run_full_suite();
+        let report = harness.run_all_tests();
 
         let mut failures = Vec::new();
         let mut passes = 0;
 
-        for result in results {
-            match result.verdict {
-                crate::supervision_conformance_tests::TestVerdict::Pass => {
-                    passes += 1;
-                }
-                crate::supervision_conformance_tests::TestVerdict::Fail(reason) => {
-                    failures.push(format!("{}: {}", result.test_name, reason));
-                }
+        for result in report.results {
+            if result.passed {
+                passes += 1;
+            } else {
+                let reason = result
+                    .error_message
+                    .unwrap_or_else(|| "no failure reason reported".to_string());
+                failures.push(format!("{}: {}", result.name, reason));
             }
         }
 
@@ -10151,7 +10151,10 @@ mod conformance_integration {
             panic!("Supervision conformance failures:\n{}", failures.join("\n"));
         }
 
-        assert!(passes > 0, "No conformance tests passed - harness may be broken");
+        assert!(
+            passes > 0,
+            "No conformance tests passed - harness may be broken"
+        );
 
         crate::test_complete!("supervision_conformance_suite");
     }

@@ -13,6 +13,8 @@
 //! - Deterministic ordering
 //! - Type safety contracts
 
+#![allow(dead_code)]
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -22,11 +24,10 @@ use std::time::Duration;
 
 use crate::cx::Cx;
 use crate::gen_server::{
-    CallError, CastError, CastOverflowPolicy, GenServer, InfoError, Reply, ReplyOutcome, SystemMsg,
+    CallError, CastError, CastOverflowPolicy, GenServer, InfoError, Reply, SystemMsg,
 };
 use crate::lab::LabRuntime;
-use crate::monitor::DownReason;
-use crate::types::{Budget, CancelReason, Outcome, TaskId, Time};
+use crate::types::{Budget, CancelKind, CancelReason, Time};
 
 /// Test verdict for conformance checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,9 +182,9 @@ impl GenServer for MockGenServer {
         request: Self::Call,
         reply: Reply<Self::Reply>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        cx.trace("mock_gen_server::handle_call");
         Box::pin(async move {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            cx.trace("mock_gen_server::handle_call");
 
             if self.should_panic_in_call.load(Ordering::SeqCst) {
                 panic!("Intentional panic in handle_call");
@@ -226,9 +227,9 @@ impl GenServer for MockGenServer {
         cx: &Cx,
         msg: Self::Cast,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        cx.trace("mock_gen_server::handle_cast");
         Box::pin(async move {
             self.cast_count.fetch_add(1, Ordering::SeqCst);
-            cx.trace("mock_gen_server::handle_cast");
 
             if self.should_panic_in_cast.load(Ordering::SeqCst) {
                 panic!("Intentional panic in handle_cast");
@@ -253,16 +254,16 @@ impl GenServer for MockGenServer {
         cx: &Cx,
         _msg: Self::Info,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        cx.trace("mock_gen_server::handle_info");
         Box::pin(async move {
             self.info_count.fetch_add(1, Ordering::SeqCst);
-            cx.trace("mock_gen_server::handle_info");
         })
     }
 
     fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        cx.trace("mock_gen_server::on_start");
         Box::pin(async move {
             self.on_start_called.store(true, Ordering::SeqCst);
-            cx.trace("mock_gen_server::on_start");
         })
     }
 
@@ -271,9 +272,9 @@ impl GenServer for MockGenServer {
     }
 
     fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        cx.trace("mock_gen_server::on_stop");
         Box::pin(async move {
             self.on_stop_called.store(true, Ordering::SeqCst);
-            cx.trace("mock_gen_server::on_stop");
         })
     }
 
@@ -301,7 +302,7 @@ impl MockTime {
 
     fn advance(&self, duration: Duration) {
         let mut current = self.current.lock().unwrap();
-        *current = current.add_duration(duration);
+        *current = *current + duration;
     }
 
     fn now(&self) -> Time {
@@ -318,8 +319,7 @@ pub struct GenServerConformanceHarness {
 impl GenServerConformanceHarness {
     /// Create a new GenServer conformance test harness.
     pub fn new() -> Self {
-        let mut runtime = LabRuntime::with_wall_clock_seed(42);
-        runtime.set_virtual_time_source();
+        let runtime = LabRuntime::with_seed(42);
 
         Self {
             runtime,
@@ -519,7 +519,7 @@ impl GenServerConformanceHarness {
     /// Test budget compliance in lifecycle phases.
     fn test_lifecycle_budget_compliance(&mut self) -> ConformanceTestResult {
         // MUST: Lifecycle hooks respect configured budgets
-        let start_budget = Budget::with_cost_quota(1000);
+        let start_budget = Budget::new().with_cost_quota(1000);
         let stop_budget = Budget::MINIMAL;
         let server = MockGenServer::new("test_budgets").with_budgets(start_budget, stop_budget);
 
@@ -552,7 +552,7 @@ impl GenServerConformanceHarness {
         let has_server_stopped = matches!(CallError::ServerStopped, CallError::ServerStopped);
         let has_no_reply = matches!(CallError::NoReply, CallError::NoReply);
         let has_cancelled = matches!(
-            CallError::Cancelled(CancelReason::Explicit),
+            CallError::Cancelled(CancelReason::new(CancelKind::User)),
             CallError::Cancelled(_)
         );
 
@@ -578,7 +578,10 @@ impl GenServerConformanceHarness {
         // Verify cast error types
         let has_server_stopped = matches!(CastError::ServerStopped, CastError::ServerStopped);
         let has_full = matches!(CastError::Full, CastError::Full);
-        let has_cancelled = matches!(CastError::Cancelled(CancelReason::Explicit), CastError::Cancelled(_));
+        let has_cancelled = matches!(
+            CastError::Cancelled(CancelReason::new(CancelKind::User)),
+            CastError::Cancelled(_)
+        );
 
         let verdict = if has_server_stopped && has_full && has_cancelled {
             TestVerdict::Pass
@@ -602,7 +605,10 @@ impl GenServerConformanceHarness {
         // Verify info error types
         let has_server_stopped = matches!(InfoError::ServerStopped, InfoError::ServerStopped);
         let has_full = matches!(InfoError::Full, InfoError::Full);
-        let has_cancelled = matches!(InfoError::Cancelled(CancelReason::Explicit), InfoError::Cancelled(_));
+        let has_cancelled = matches!(
+            InfoError::Cancelled(CancelReason::new(CancelKind::User)),
+            InfoError::Cancelled(_)
+        );
 
         let verdict = if has_server_stopped && has_full && has_cancelled {
             TestVerdict::Pass
@@ -621,7 +627,8 @@ impl GenServerConformanceHarness {
     /// Test cast overflow with Reject policy.
     fn test_cast_overflow_reject(&mut self) -> ConformanceTestResult {
         // MUST: Reject policy returns CastError::Full when mailbox full
-        let server = MockGenServer::new("test_reject").with_overflow_policy(CastOverflowPolicy::Reject);
+        let server =
+            MockGenServer::new("test_reject").with_overflow_policy(CastOverflowPolicy::Reject);
 
         let correct_policy = server.cast_overflow_policy() == CastOverflowPolicy::Reject;
 
@@ -642,7 +649,8 @@ impl GenServerConformanceHarness {
     /// Test cast overflow with DropOldest policy.
     fn test_cast_overflow_drop_oldest(&mut self) -> ConformanceTestResult {
         // MUST: DropOldest policy evicts old casts to make room for new ones
-        let server = MockGenServer::new("test_drop_oldest").with_overflow_policy(CastOverflowPolicy::DropOldest);
+        let server = MockGenServer::new("test_drop_oldest")
+            .with_overflow_policy(CastOverflowPolicy::DropOldest);
 
         let correct_policy = server.cast_overflow_policy() == CastOverflowPolicy::DropOldest;
 
@@ -664,7 +672,8 @@ impl GenServerConformanceHarness {
     fn test_backpressure_policy_configuration(&mut self) -> ConformanceTestResult {
         // SHOULD: Servers can configure cast overflow policy
         let server1 = MockGenServer::new("test1").with_overflow_policy(CastOverflowPolicy::Reject);
-        let server2 = MockGenServer::new("test2").with_overflow_policy(CastOverflowPolicy::DropOldest);
+        let server2 =
+            MockGenServer::new("test2").with_overflow_policy(CastOverflowPolicy::DropOldest);
 
         let policy1_correct = server1.cast_overflow_policy() == CastOverflowPolicy::Reject;
         let policy2_correct = server2.cast_overflow_policy() == CastOverflowPolicy::DropOldest;
@@ -856,10 +865,16 @@ mod tests {
     fn mock_gen_server_configuration() {
         let server = MockGenServer::new("test")
             .with_overflow_policy(CastOverflowPolicy::DropOldest)
-            .with_budgets(Budget::with_cost_quota(1000), Budget::MINIMAL);
+            .with_budgets(Budget::new().with_cost_quota(1000), Budget::MINIMAL);
 
-        assert_eq!(server.cast_overflow_policy(), CastOverflowPolicy::DropOldest);
-        assert_eq!(server.on_start_budget(), Budget::with_cost_quota(1000));
+        assert_eq!(
+            server.cast_overflow_policy(),
+            CastOverflowPolicy::DropOldest
+        );
+        assert_eq!(
+            server.on_start_budget(),
+            Budget::new().with_cost_quota(1000)
+        );
         assert_eq!(server.on_stop_budget(), Budget::MINIMAL);
     }
 

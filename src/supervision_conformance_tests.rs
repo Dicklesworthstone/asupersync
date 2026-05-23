@@ -14,6 +14,8 @@
 //! - **Storm Detection Contract**: Intensity-based restart storm prevention
 //! - **ChildName Performance Contract**: Reference-counted names for hot-path O(1) cloning
 
+#![allow(dead_code)]
+
 use super::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -158,7 +160,11 @@ impl MockRestartTracker {
         match &self.config.backoff {
             BackoffStrategy::None => Duration::ZERO,
             BackoffStrategy::Fixed(delay) => *delay,
-            BackoffStrategy::Exponential { initial, max, multiplier } => {
+            BackoffStrategy::Exponential {
+                initial,
+                max,
+                multiplier,
+            } => {
                 if restart_count == 0 {
                     return *initial;
                 }
@@ -184,7 +190,9 @@ impl MockRestartTracker {
     fn restarts_in_window(&self, window: Duration) -> usize {
         let now = self.time.now();
         let window_start = now.saturating_sub(window);
-        self.restarts.lock().unwrap()
+        self.restarts
+            .lock()
+            .unwrap()
             .iter()
             .filter(|&&restart_time| restart_time >= window_start)
             .count()
@@ -280,7 +288,9 @@ impl ConformanceReport {
     }
 
     pub fn must_pass_rate(&self) -> f64 {
-        let must_tests: Vec<_> = self.results.iter()
+        let must_tests: Vec<_> = self
+            .results
+            .iter()
             .filter(|r| r.level == RequirementLevel::Must)
             .collect();
         if must_tests.is_empty() {
@@ -297,7 +307,11 @@ impl ConformanceReport {
         matrix.push_str("|------|----------|-------|--------|------|\n");
 
         for result in &self.results {
-            let status = if result.passed { "✅ PASS" } else { "❌ FAIL" };
+            let status = if result.passed {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
             let level = match result.level {
                 RequirementLevel::Must => "MUST",
                 RequirementLevel::Should => "SHOULD",
@@ -321,8 +335,14 @@ impl ConformanceReport {
         }
 
         matrix.push_str(&format!("\n## Summary\n"));
-        matrix.push_str(&format!("- **Overall Pass Rate**: {:.1}%\n", self.pass_rate() * 100.0));
-        matrix.push_str(&format!("- **MUST Requirements**: {:.1}%\n", self.must_pass_rate() * 100.0));
+        matrix.push_str(&format!(
+            "- **Overall Pass Rate**: {:.1}%\n",
+            self.pass_rate() * 100.0
+        ));
+        matrix.push_str(&format!(
+            "- **MUST Requirements**: {:.1}%\n",
+            self.must_pass_rate() * 100.0
+        ));
         matrix.push_str(&format!("- **Total Tests**: {}\n", self.results.len()));
 
         matrix
@@ -335,9 +355,15 @@ impl ConformanceReport {
 struct ChildNameCloningPerformanceTest;
 
 impl ConformanceTest for ChildNameCloningPerformanceTest {
-    fn name(&self) -> &str { "child_name_cloning_performance" }
-    fn category(&self) -> TestCategory { TestCategory::Performance }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "child_name_cloning_performance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Performance
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let name = ChildName::new("test-child");
@@ -355,8 +381,10 @@ impl ConformanceTest for ChildNameCloningPerformanceTest {
         let passed = clone_time < Duration::from_millis(10) && final_count > initial_count;
 
         let error_message = if !passed {
-            Some(format!("Cloning performance poor. Time: {:?}, ref counts: {} -> {}",
-                        clone_time, initial_count, final_count))
+            Some(format!(
+                "Cloning performance poor. Time: {:?}, ref counts: {} -> {}",
+                clone_time, initial_count, final_count
+            ))
         } else {
             None
         };
@@ -376,19 +404,26 @@ impl ConformanceTest for ChildNameCloningPerformanceTest {
 struct ChildNameEqualityTest;
 
 impl ConformanceTest for ChildNameEqualityTest {
-    fn name(&self) -> &str { "child_name_equality" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "child_name_equality"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let name1 = ChildName::new("test");
         let name2 = ChildName::new("test");
         let name3 = ChildName::new("other");
+        let borrowed_name: &str = "test";
 
         let passed = name1 == name2
             && name1 != name3
             && name1 == "test"
-            && name1 == &"test"
+            && name1 == borrowed_name
             && name1 == String::from("test")
             && "test" == name1
             && String::from("test") == name1;
@@ -414,9 +449,15 @@ impl ConformanceTest for ChildNameEqualityTest {
 struct ChildNameStringInteropTest;
 
 impl ConformanceTest for ChildNameStringInteropTest {
-    fn name(&self) -> &str { "child_name_string_interop" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "child_name_string_interop"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let name = ChildName::new("hello-world");
@@ -448,9 +489,15 @@ impl ConformanceTest for ChildNameStringInteropTest {
 struct StopStrategyTest;
 
 impl ConformanceTest for StopStrategyTest {
-    fn name(&self) -> &str { "stop_strategy" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "stop_strategy"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let strategy = SupervisionStrategy::Stop;
@@ -479,9 +526,15 @@ impl ConformanceTest for StopStrategyTest {
 struct RestartStrategyTest;
 
 impl ConformanceTest for RestartStrategyTest {
-    fn name(&self) -> &str { "restart_strategy" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "restart_strategy"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = RestartConfig::new(3, Duration::from_secs(60));
@@ -515,9 +568,15 @@ impl ConformanceTest for RestartStrategyTest {
 struct EscalateStrategyTest;
 
 impl ConformanceTest for EscalateStrategyTest {
-    fn name(&self) -> &str { "escalate_strategy" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "escalate_strategy"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let strategy = SupervisionStrategy::Escalate;
@@ -545,9 +604,15 @@ impl ConformanceTest for EscalateStrategyTest {
 struct RestartRateLimitingTest;
 
 impl ConformanceTest for RestartRateLimitingTest {
-    fn name(&self) -> &str { "restart_rate_limiting" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "restart_rate_limiting"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig::new(2, Duration::from_secs(10));
@@ -566,8 +631,11 @@ impl ConformanceTest for RestartRateLimitingTest {
         let passed = should_deny && tracker.restart_count() == 2;
 
         let error_message = if !passed {
-            Some(format!("Rate limiting failed. Deny: {}, count: {}",
-                        should_deny, tracker.restart_count()))
+            Some(format!(
+                "Rate limiting failed. Deny: {}, count: {}",
+                should_deny,
+                tracker.restart_count()
+            ))
         } else {
             None
         };
@@ -587,9 +655,15 @@ impl ConformanceTest for RestartRateLimitingTest {
 struct SlidingWindowBehaviorTest;
 
 impl ConformanceTest for SlidingWindowBehaviorTest {
-    fn name(&self) -> &str { "sliding_window_behavior" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "sliding_window_behavior"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig::new(1, Duration::from_secs(5));
@@ -610,8 +684,10 @@ impl ConformanceTest for SlidingWindowBehaviorTest {
         let passed = can_restart_again && restart_count == 0;
 
         let error_message = if !passed {
-            Some(format!("Sliding window failed. Can restart: {}, count: {}",
-                        can_restart_again, restart_count))
+            Some(format!(
+                "Sliding window failed. Can restart: {}, count: {}",
+                can_restart_again, restart_count
+            ))
         } else {
             None
         };
@@ -631,9 +707,15 @@ impl ConformanceTest for SlidingWindowBehaviorTest {
 struct MaxRestartsEnforcementTest;
 
 impl ConformanceTest for MaxRestartsEnforcementTest {
-    fn name(&self) -> &str { "max_restarts_enforcement" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "max_restarts_enforcement"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig::new(0, Duration::from_secs(10)); // No restarts allowed
@@ -664,9 +746,15 @@ impl ConformanceTest for MaxRestartsEnforcementTest {
 struct NoBackoffTest;
 
 impl ConformanceTest for NoBackoffTest {
-    fn name(&self) -> &str { "no_backoff" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "no_backoff"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig {
@@ -699,9 +787,15 @@ impl ConformanceTest for NoBackoffTest {
 struct FixedBackoffTest;
 
 impl ConformanceTest for FixedBackoffTest {
-    fn name(&self) -> &str { "fixed_backoff" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "fixed_backoff"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let fixed_delay = Duration::from_millis(500);
@@ -717,8 +811,10 @@ impl ConformanceTest for FixedBackoffTest {
         let passed = delay1 == fixed_delay && delay2 == fixed_delay;
 
         let error_message = if !passed {
-            Some(format!("Fixed backoff incorrect. Expected: {:?}, got: {:?}, {:?}",
-                        fixed_delay, delay1, delay2))
+            Some(format!(
+                "Fixed backoff incorrect. Expected: {:?}, got: {:?}, {:?}",
+                fixed_delay, delay1, delay2
+            ))
         } else {
             None
         };
@@ -738,9 +834,15 @@ impl ConformanceTest for FixedBackoffTest {
 struct ExponentialBackoffTest;
 
 impl ConformanceTest for ExponentialBackoffTest {
-    fn name(&self) -> &str { "exponential_backoff" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "exponential_backoff"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig {
@@ -762,8 +864,10 @@ impl ConformanceTest for ExponentialBackoffTest {
             && delay2 == Duration::from_millis(200); // Second restart doubles
 
         let error_message = if !passed {
-            Some(format!("Exponential backoff incorrect. Got: {:?}, {:?}, {:?}",
-                        delay0, delay1, delay2))
+            Some(format!(
+                "Exponential backoff incorrect. Got: {:?}, {:?}, {:?}",
+                delay0, delay1, delay2
+            ))
         } else {
             None
         };
@@ -783,9 +887,15 @@ impl ConformanceTest for ExponentialBackoffTest {
 struct BackoffCapTest;
 
 impl ConformanceTest for BackoffCapTest {
-    fn name(&self) -> &str { "backoff_cap" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "backoff_cap"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let max_delay = Duration::from_secs(2);
@@ -805,7 +915,10 @@ impl ConformanceTest for BackoffCapTest {
         let passed = delay <= max_delay;
 
         let error_message = if !passed {
-            Some(format!("Backoff not capped. Max: {:?}, actual: {:?}", max_delay, delay))
+            Some(format!(
+                "Backoff not capped. Max: {:?}, actual: {:?}",
+                max_delay, delay
+            ))
         } else {
             None
         };
@@ -825,9 +938,15 @@ impl ConformanceTest for BackoffCapTest {
 struct OneForOnePolicyTest;
 
 impl ConformanceTest for OneForOnePolicyTest {
-    fn name(&self) -> &str { "one_for_one_policy" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "one_for_one_policy"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig {
@@ -859,9 +978,15 @@ impl ConformanceTest for OneForOnePolicyTest {
 struct OneForAllPolicyTest;
 
 impl ConformanceTest for OneForAllPolicyTest {
-    fn name(&self) -> &str { "one_for_all_policy" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "one_for_all_policy"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig {
@@ -892,9 +1017,15 @@ impl ConformanceTest for OneForAllPolicyTest {
 struct RestForOnePolicyTest;
 
 impl ConformanceTest for RestForOnePolicyTest {
-    fn name(&self) -> &str { "rest_for_one_policy" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "rest_for_one_policy"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig {
@@ -925,9 +1056,15 @@ impl ConformanceTest for RestForOnePolicyTest {
 struct StopEscalationTest;
 
 impl ConformanceTest for StopEscalationTest {
-    fn name(&self) -> &str { "stop_escalation" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "stop_escalation"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig {
@@ -959,9 +1096,15 @@ impl ConformanceTest for StopEscalationTest {
 struct EscalateEscalationTest;
 
 impl ConformanceTest for EscalateEscalationTest {
-    fn name(&self) -> &str { "escalate_escalation" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "escalate_escalation"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig {
@@ -992,9 +1135,15 @@ impl ConformanceTest for EscalateEscalationTest {
 struct ResetCounterEscalationTest;
 
 impl ConformanceTest for ResetCounterEscalationTest {
-    fn name(&self) -> &str { "reset_counter_escalation" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "reset_counter_escalation"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig {
@@ -1025,18 +1174,26 @@ impl ConformanceTest for ResetCounterEscalationTest {
 struct RestartCostAccountingTest;
 
 impl ConformanceTest for RestartCostAccountingTest {
-    fn name(&self) -> &str { "restart_cost_accounting" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "restart_cost_accounting"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
-        let config = RestartConfig::new(5, Duration::from_secs(60))
-            .with_restart_cost(100);
+        let config = RestartConfig::new(5, Duration::from_secs(60)).with_restart_cost(100);
 
         let passed = config.restart_cost == 100;
 
         let error_message = if !passed {
-            Some(format!("Restart cost incorrect. Expected: 100, got: {}", config.restart_cost))
+            Some(format!(
+                "Restart cost incorrect. Expected: 100, got: {}",
+                config.restart_cost
+            ))
         } else {
             None
         };
@@ -1056,20 +1213,27 @@ impl ConformanceTest for RestartCostAccountingTest {
 struct MinRemainingTimeConstraintTest;
 
 impl ConformanceTest for MinRemainingTimeConstraintTest {
-    fn name(&self) -> &str { "min_remaining_time_constraint" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "min_remaining_time_constraint"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let min_time = Duration::from_secs(5);
-        let config = RestartConfig::new(3, Duration::from_secs(60))
-            .with_min_remaining(min_time);
+        let config = RestartConfig::new(3, Duration::from_secs(60)).with_min_remaining(min_time);
 
         let passed = config.min_remaining_for_restart == Some(min_time);
 
         let error_message = if !passed {
-            Some(format!("Min remaining time incorrect. Expected: Some({:?}), got: {:?}",
-                        min_time, config.min_remaining_for_restart))
+            Some(format!(
+                "Min remaining time incorrect. Expected: Some({:?}), got: {:?}",
+                min_time, config.min_remaining_for_restart
+            ))
         } else {
             None
         };
@@ -1089,20 +1253,27 @@ impl ConformanceTest for MinRemainingTimeConstraintTest {
 struct MinPollsConstraintTest;
 
 impl ConformanceTest for MinPollsConstraintTest {
-    fn name(&self) -> &str { "min_polls_constraint" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "min_polls_constraint"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let min_polls = 50;
-        let config = RestartConfig::new(3, Duration::from_secs(60))
-            .with_min_polls(min_polls);
+        let config = RestartConfig::new(3, Duration::from_secs(60)).with_min_polls(min_polls);
 
         let passed = config.min_polls_for_restart == min_polls;
 
         let error_message = if !passed {
-            Some(format!("Min polls constraint incorrect. Expected: {}, got: {}",
-                        min_polls, config.min_polls_for_restart))
+            Some(format!(
+                "Min polls constraint incorrect. Expected: {}, got: {}",
+                min_polls, config.min_polls_for_restart
+            ))
         } else {
             None
         };
@@ -1122,13 +1293,18 @@ impl ConformanceTest for MinPollsConstraintTest {
 struct StormDetectionTest;
 
 impl ConformanceTest for StormDetectionTest {
-    fn name(&self) -> &str { "storm_detection" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "storm_detection"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
-        let config = SupervisionConfig::new(10, Duration::from_secs(60))
-            .with_storm_threshold(5.0); // 5 restarts/second
+        let config = SupervisionConfig::new(10, Duration::from_secs(60)).with_storm_threshold(5.0); // 5 restarts/second
 
         let time = MockTime::new();
         let tracker = MockRestartTracker::with_time_source(config, time.clone());
@@ -1164,20 +1340,28 @@ impl ConformanceTest for StormDetectionTest {
 struct StormThresholdTest;
 
 impl ConformanceTest for StormThresholdTest {
-    fn name(&self) -> &str { "storm_threshold" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "storm_threshold"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let threshold = 10.5;
-        let config = SupervisionConfig::new(3, Duration::from_secs(60))
-            .with_storm_threshold(threshold);
+        let config =
+            SupervisionConfig::new(3, Duration::from_secs(60)).with_storm_threshold(threshold);
 
         let passed = config.storm_threshold == Some(threshold);
 
         let error_message = if !passed {
-            Some(format!("Storm threshold incorrect. Expected: Some({}), got: {:?}",
-                        threshold, config.storm_threshold))
+            Some(format!(
+                "Storm threshold incorrect. Expected: Some({}), got: {:?}",
+                threshold, config.storm_threshold
+            ))
         } else {
             None
         };
@@ -1197,9 +1381,15 @@ impl ConformanceTest for StormThresholdTest {
 struct DefaultConfigurationTest;
 
 impl ConformanceTest for DefaultConfigurationTest {
-    fn name(&self) -> &str { "default_configuration" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "default_configuration"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig::default();
@@ -1235,9 +1425,15 @@ impl ConformanceTest for DefaultConfigurationTest {
 struct ConfigurationBuilderTest;
 
 impl ConformanceTest for ConfigurationBuilderTest {
-    fn name(&self) -> &str { "configuration_builder" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "configuration_builder"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let config = SupervisionConfig::new(5, Duration::from_secs(30))
@@ -1279,9 +1475,15 @@ impl ConformanceTest for ConfigurationBuilderTest {
 struct ConfigurationValidationTest;
 
 impl ConformanceTest for ConfigurationValidationTest {
-    fn name(&self) -> &str { "configuration_validation" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "configuration_validation"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Test that configurations can be created without panics
@@ -1315,6 +1517,9 @@ impl ConformanceTest for ConfigurationValidationTest {
 
 // Helper function used by the supervision module
 fn validate_storm_threshold(threshold: f64) {
-    assert!(threshold.is_finite() && threshold > 0.0,
-        "Storm threshold must be finite and positive, got: {}", threshold);
+    assert!(
+        threshold.is_finite() && threshold > 0.0,
+        "Storm threshold must be finite and positive, got: {}",
+        threshold
+    );
 }
