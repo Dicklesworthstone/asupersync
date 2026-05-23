@@ -414,13 +414,22 @@ impl StreamManifest {
     /// Get resumption checkpoint for a given byte offset.
     #[must_use]
     pub fn resumption_checkpoint(&self, target_offset: u64) -> Option<ResumptionCheckpoint> {
-        // Find the last verified epoch that covers or precedes the target offset
-        let mut best_epoch: Option<&StreamEpoch> = None;
+        // Resume checkpoints must follow the same prefix-safety rule as
+        // consumers: a later verified epoch is not safe if an earlier epoch was
+        // invalidated or is still provisional.
+        let mut expected_start = 0;
+        let mut best_epoch = None;
 
-        for epoch in self.verified_epochs() {
+        for epoch in &self.epochs {
+            if epoch.byte_range.start != expected_start || !epoch.is_verified() {
+                break;
+            }
+
             if epoch.byte_range.end <= target_offset {
                 best_epoch = Some(epoch);
             }
+
+            expected_start = epoch.byte_range.end;
         }
 
         best_epoch.map(|epoch| ResumptionCheckpoint {
@@ -484,6 +493,19 @@ pub struct PrefixConsumer {
     safety_policy: ConsumptionPolicy,
 }
 
+/// Result of refreshing a consumer against a newer stream manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixRefresh {
+    /// Safe prefix before the manifest refresh.
+    pub previous_prefix_end: u64,
+    /// Safe prefix after the manifest refresh.
+    pub available_prefix_end: u64,
+    /// Consumer offset after the refresh.
+    pub consumption_offset: u64,
+    /// Previously consumed range that is no longer safe under the new manifest.
+    pub invalidated_consumed_range: Option<ByteRange>,
+}
+
 impl PrefixConsumer {
     /// Create a new prefix consumer.
     #[must_use]
@@ -497,6 +519,42 @@ impl PrefixConsumer {
 
     fn available_prefix_end(&self) -> u64 {
         self.manifest.consumable_prefix_end(self.safety_policy)
+    }
+
+    /// Refresh this consumer with a newer manifest for the same stream.
+    ///
+    /// If the new manifest invalidates bytes that were already consumed, the
+    /// consumer rewinds to the new safe prefix and reports the invalidated
+    /// range so callers can discard or replay side effects.
+    pub fn refresh_manifest(&mut self, manifest: StreamManifest) -> AtpOutcome<PrefixRefresh> {
+        if manifest.object_id != self.manifest.object_id {
+            return Outcome::err(AtpError::Protocol(
+                crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch,
+            ));
+        }
+
+        let previous_prefix_end = self.available_prefix_end();
+        self.manifest = manifest;
+        let available_prefix_end = self.available_prefix_end();
+        let invalidated_consumed_range = if self.consumption_offset > available_prefix_end {
+            Some(ByteRange::new(
+                available_prefix_end,
+                self.consumption_offset,
+            ))
+        } else {
+            None
+        };
+
+        if invalidated_consumed_range.is_some() {
+            self.consumption_offset = available_prefix_end;
+        }
+
+        Outcome::ok(PrefixRefresh {
+            previous_prefix_end,
+            available_prefix_end,
+            consumption_offset: self.consumption_offset,
+            invalidated_consumed_range,
+        })
     }
 
     /// Check if data is available for consumption at the current offset.
@@ -881,6 +939,149 @@ mod tests {
 
         assert_eq!(consumer.consumption_progress(), 100.0);
         assert_eq!(consumer.next_safe_range(), None);
+    }
+
+    #[test]
+    fn prefix_consumer_refresh_reports_invalidated_consumed_bytes() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Provisional,
+                vec![],
+            ))
+            .unwrap();
+
+        let mut consumer =
+            PrefixConsumer::new(manifest.clone(), ConsumptionPolicy::AllowProvisional);
+        assert_eq!(consumer.next_safe_range(), Some(ByteRange::new(0, 200)));
+        consumer.advance_consumption(200);
+
+        manifest.invalidate_epoch(2).unwrap();
+        let refresh = consumer.refresh_manifest(manifest).unwrap();
+
+        assert_eq!(refresh.previous_prefix_end, 200);
+        assert_eq!(refresh.available_prefix_end, 100);
+        assert_eq!(
+            refresh.invalidated_consumed_range,
+            Some(ByteRange::new(100, 200))
+        );
+        assert_eq!(refresh.consumption_offset, 100);
+        assert_eq!(consumer.next_safe_range(), None);
+    }
+
+    #[test]
+    fn prefix_consumer_refresh_rejects_different_object() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id,
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+
+        let mut consumer = PrefixConsumer::new(manifest, ConsumptionPolicy::VerifiedOnly);
+        let other_manifest = StreamManifest::new(ObjectId::content(ContentId::new([2u8; 32])));
+
+        assert!(consumer.refresh_manifest(other_manifest).is_err());
+    }
+
+    #[test]
+    fn resumption_checkpoint_stops_before_invalidated_gap() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Invalidated,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                3,
+                object_id,
+                ByteRange::new(200, 300),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+
+        let checkpoint = manifest.resumption_checkpoint(300).unwrap();
+        assert_eq!(checkpoint.epoch_sequence, 1);
+        assert_eq!(checkpoint.byte_offset, 100);
+    }
+
+    #[test]
+    fn resumption_checkpoint_advances_after_provisional_gap_is_verified() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Provisional,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                3,
+                object_id,
+                ByteRange::new(200, 300),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+
+        let checkpoint_before = manifest.resumption_checkpoint(300).unwrap();
+        assert_eq!(checkpoint_before.epoch_sequence, 1);
+        assert_eq!(checkpoint_before.byte_offset, 100);
+
+        manifest.verify_epoch(2).unwrap();
+        let checkpoint_after = manifest.resumption_checkpoint(300).unwrap();
+        assert_eq!(checkpoint_after.epoch_sequence, 3);
+        assert_eq!(checkpoint_after.byte_offset, 300);
     }
 
     #[test]
