@@ -302,7 +302,6 @@ impl Semaphore {
     /// Acquires the given number of permits asynchronously.
     #[inline]
     pub fn acquire<'a, 'b>(&'a self, cx: &'b Cx, count: usize) -> AcquireFuture<'a, 'b> {
-        assert!(count > 0, "cannot acquire 0 permits");
         AcquireFuture {
             semaphore: self,
             cx,
@@ -315,7 +314,15 @@ impl Semaphore {
     /// Tries to acquire the given number of permits without waiting.
     #[inline]
     pub fn try_acquire(&self, count: usize) -> Result<SemaphorePermit<'_>, TryAcquireError> {
-        assert!(count > 0, "cannot acquire 0 permits");
+        // Acquiring 0 permits succeeds immediately (no resources needed)
+        if count == 0 {
+            return Ok(SemaphorePermit {
+                semaphore: self,
+                count: 0,
+                obligation: None,
+                release_lock_order_on_drop: false,
+            });
+        }
 
         // Check lock ordering before acquisition (debug builds only)
         if let Some(rank) = self.rank {
@@ -417,6 +424,17 @@ impl<'a> Future for AcquireFuture<'a, '_> {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.completed {
             return Poll::Ready(Err(AcquireError::PolledAfterCompletion));
+        }
+
+        // Acquiring 0 permits succeeds immediately (no resources needed)
+        if self.count == 0 {
+            self.completed = true;
+            return Poll::Ready(Ok(SemaphorePermit {
+                semaphore: self.semaphore,
+                count: 0,
+                obligation: None,
+                release_lock_order_on_drop: false,
+            }));
         }
 
         if self.cx.checkpoint().is_err() {
@@ -623,7 +641,14 @@ impl OwnedSemaphorePermit {
         cx: &Cx,
         count: usize,
     ) -> Result<Self, AcquireError> {
-        assert!(count > 0, "cannot acquire 0 permits");
+        // Acquiring 0 permits succeeds immediately (no resources needed)
+        if count == 0 {
+            return Ok(Self {
+                obligation: None,
+                semaphore,
+                count: 0,
+            });
+        }
         OwnedAcquireFuture {
             semaphore,
             cx: Some(cx.clone()),
@@ -731,7 +756,7 @@ impl OwnedAcquireFuture {
     /// This avoids the lifetime issue with the `async fn acquire` signature
     /// which borrows `&Cx` (and thus ties the future's lifetime to the borrow).
     pub(crate) fn new(semaphore: Arc<Semaphore>, cx: Cx, count: usize) -> Self {
-        assert!(count > 0, "cannot acquire 0 permits");
+        // Note: count=0 is handled at the future poll level
         Self {
             semaphore,
             cx: Some(cx),
@@ -747,7 +772,7 @@ impl OwnedAcquireFuture {
     /// register a real semaphore waiter even when no task-local [`Cx`] is
     /// available.
     pub(crate) fn new_uncancelable(semaphore: Arc<Semaphore>, count: usize) -> Self {
-        assert!(count > 0, "cannot acquire 0 permits");
+        // Note: count=0 is handled at the future poll level
         Self {
             semaphore,
             cx: None,
@@ -782,6 +807,16 @@ impl Future for OwnedAcquireFuture {
         let this = self.get_mut();
         if this.completed {
             return Poll::Ready(Err(AcquireError::PolledAfterCompletion));
+        }
+
+        // Acquiring 0 permits succeeds immediately (no resources needed)
+        if this.count == 0 {
+            this.completed = true;
+            return Poll::Ready(Ok(OwnedSemaphorePermit {
+                obligation: None,
+                semaphore: this.semaphore.clone(),
+                count: 0,
+            }));
         }
 
         if this.cx.as_ref().is_some_and(|cx| cx.checkpoint().is_err()) {
