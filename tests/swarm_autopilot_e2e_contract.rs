@@ -49,6 +49,32 @@ fn fixture_json(path: &str) -> Value {
     serde_json::from_str(&text).expect("fixture must be JSON")
 }
 
+fn script_text() -> String {
+    fs::read_to_string(repo_root().join(SCRIPT_PATH)).expect("read swarm autopilot helper")
+}
+
+fn python_block<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+    let start_index = text.find(start).expect("start marker should exist");
+    let rest = &text[start_index..];
+    let end_index = rest.find(end).expect("end marker should exist");
+    &rest[..end_index]
+}
+
+fn helper_kind_from_mapping_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let after_key = rest[end + 1..].trim_start();
+    after_key.starts_with(':').then(|| rest[..end].to_owned())
+}
+
+fn observed_kind_from_branch(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("if kind == ")?;
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
 fn stage<'a>(receipt: &'a Value, stage_id: &str) -> &'a Value {
     receipt["stage_logs"]
         .as_array()
@@ -80,6 +106,45 @@ fn script_exists_and_help_is_non_mutating() {
         .output()
         .expect("run helper --help");
     assert!(output.status.success(), "--help should succeed");
+}
+
+#[test]
+fn helper_kind_observers_are_exhaustive_and_fail_closed() {
+    let script = script_text();
+    let helper_block = python_block(&script, "HELPERS = {", "\n}");
+    let helper_kinds: BTreeSet<String> = helper_block
+        .lines()
+        .filter_map(helper_kind_from_mapping_line)
+        .collect();
+    assert!(
+        !helper_kinds.is_empty(),
+        "helper registry must not be empty"
+    );
+
+    let observer_block = python_block(
+        &script,
+        "def observed_values",
+        "\ndef add_kind_specific_checks",
+    );
+    assert!(
+        observer_block.contains("raise ValueError"),
+        "observed_values must fail closed for helper kinds without observers"
+    );
+    assert!(
+        !observer_block
+            .lines()
+            .any(|line| line.trim() == "return {}"),
+        "observed_values must not silently emit empty observations for unknown helper kinds"
+    );
+    let observed_kinds: BTreeSet<String> = observer_block
+        .lines()
+        .filter_map(observed_kind_from_branch)
+        .collect();
+
+    assert_eq!(
+        observed_kinds, helper_kinds,
+        "every helper kind needs an explicit observed_values mapper"
+    );
 }
 
 #[test]
