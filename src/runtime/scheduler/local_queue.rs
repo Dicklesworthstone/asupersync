@@ -247,8 +247,8 @@ impl LocalQueue {
         // SmallVec::contains scan.
         if inner.presence.insert(task) {
             inner.queue.push(task);
-            self.cached_len.store(inner.queue.len(), Ordering::Release);
         }
+        self.cached_len.store(inner.queue.len(), Ordering::Release);
     }
 
     /// Pushes multiple tasks to the local queue under one arena/queue lock.
