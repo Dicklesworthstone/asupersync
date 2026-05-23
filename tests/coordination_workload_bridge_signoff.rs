@@ -307,6 +307,64 @@ fn list_and_dry_run_modes_emit_signoff_plan_without_child_execution() {
         assert_eq!(row["expected_status"].as_str(), Some("dry_run"));
         assert_eq!(row["detail"]["planned"].as_bool(), Some(true));
     }
+
+    let artifact_paths = &report["artifact_paths"];
+    let child = load_path_json(Path::new(
+        artifact_paths["child_evidence_matrix"]
+            .as_str()
+            .expect("child matrix path"),
+    ));
+    let fingerprint = load_path_json(Path::new(
+        artifact_paths["fingerprint_comparison"]
+            .as_str()
+            .expect("fingerprint path"),
+    ));
+    let field_map = load_path_json(Path::new(
+        artifact_paths["field_derivation_map"]
+            .as_str()
+            .expect("field map path"),
+    ));
+    let fail_closed = load_path_json(Path::new(
+        artifact_paths["fail_closed_diagnostics"]
+            .as_str()
+            .expect("fail closed path"),
+    ));
+    let boundary = load_path_json(Path::new(
+        artifact_paths["dependency_boundary"]
+            .as_str()
+            .expect("dependency boundary path"),
+    ));
+
+    for artifact in [&child, &fingerprint, &field_map, &fail_closed, &boundary] {
+        let schema = artifact["schema_version"].as_str().expect("schema version");
+        assert!(
+            schema.ends_with("-dry-run-v1"),
+            "dry-run artifact schema should be artifact-specific: {schema}"
+        );
+        assert!(
+            !schema.contains("placeholder"),
+            "dry-run artifact must not use the old placeholder schema: {schema}"
+        );
+        assert_eq!(
+            artifact["execution_performed"].as_bool(),
+            Some(false),
+            "dry-run artifact must document that no child execution occurred"
+        );
+    }
+
+    assert_eq!(child["child_count"].as_u64(), Some(7));
+    assert_eq!(child["children"].as_array().expect("children").len(), 7);
+    assert_eq!(fingerprint["comparison_performed"].as_bool(), Some(false));
+    assert_eq!(fingerprint["planned_row_count"].as_u64(), Some(8));
+    assert_eq!(field_map["required_workload_count"].as_u64(), Some(7));
+    assert_eq!(field_map["required_field_count"].as_u64(), Some(15));
+    assert_eq!(field_map["planned_row_count"].as_u64(), Some(105));
+
+    let refusals = string_set(&fail_closed["required_refusal_reasons"]);
+    assert!(refusals.contains("unsupported_dirty_paths"));
+    let forbidden = string_set(&boundary["forbidden_dependency_keys"]);
+    assert!(forbidden.contains("agent-mail"));
+    assert_eq!(boundary["scan_performed"].as_bool(), Some(false));
 }
 
 #[test]

@@ -401,8 +401,9 @@ def list_rows():
 
 
 def dry_run_rows():
+    data = contract()
     planned = []
-    for item in contract()["signoff_rows"]:
+    for item in data["signoff_rows"]:
         planned.append(
             row(
                 row_id=item["row_id"],
@@ -418,18 +419,92 @@ def dry_run_rows():
                 },
             )
         )
-    placeholder = {
-        "schema_version": "coordination-workload-bridge-signoff-dry-run-placeholder-v1",
-        "planned": True,
+    write_dry_run_artifacts(data, planned)
+    return planned
+
+
+def write_dry_run_artifacts(data, planned_rows):
+    base = {
         "run_id": RUN_ID,
         "generated_at": GENERATED_AT,
+        "mode": "dry-run",
+        "execution_performed": False,
     }
-    write_json(CHILD_MATRIX_PATH, placeholder | {"artifact": "child-evidence-matrix"})
-    write_json(FINGERPRINT_PATH, placeholder | {"artifact": "fingerprint-comparison"})
-    write_json(FIELD_MAP_PATH, placeholder | {"artifact": "field-derivation-map"})
-    write_json(FAIL_CLOSED_PATH, placeholder | {"artifact": "fail-closed-diagnostics"})
-    write_json(DEPENDENCY_BOUNDARY_PATH, placeholder | {"artifact": "dependency-boundary"})
-    return planned
+    child_rows = []
+    for child in data["child_evidence"]:
+        paths = []
+        for key in ["artifacts", "scripts", "docs", "tests"]:
+            for item in child.get(key, []):
+                paths.append({"path": item, "kind": key[:-1]})
+        child_rows.append(
+            {
+                "bead_id": child["bead_id"],
+                "expected_status": child["status"],
+                "purpose": child["purpose"],
+                "signoff_requirement": child["signoff_requirement"],
+                "planned_paths": paths,
+            }
+        )
+    write_json(
+        CHILD_MATRIX_PATH,
+        base
+        | {
+            "schema_version": "coordination-workload-bridge-child-evidence-matrix-dry-run-v1",
+            "child_count": len(child_rows),
+            "children": child_rows,
+            "evaluation": "planned-only; child paths are not probed in dry-run mode",
+        },
+    )
+
+    write_json(
+        FINGERPRINT_PATH,
+        base
+        | {
+            "schema_version": "coordination-workload-bridge-fingerprint-comparison-dry-run-v1",
+            "planned_smoke_run_ids": ["stable-a", "stable-b"],
+            "planned_row_count": len(planned_rows),
+            "comparison_performed": False,
+            "evaluation": "planned-only; bridge smoke scripts are not executed in dry-run mode",
+        },
+    )
+
+    required_fields = data["field_derivation_contract"]["required_workload_fields"]
+    required_workloads = data["field_derivation_contract"]["required_workload_count"]
+    write_json(
+        FIELD_MAP_PATH,
+        base
+        | {
+            "schema_version": "coordination-workload-bridge-field-derivation-map-dry-run-v1",
+            "required_workload_count": required_workloads,
+            "required_field_count": len(required_fields),
+            "required_fields": required_fields,
+            "planned_row_count": required_workloads * len(required_fields),
+            "evaluation": "planned-only; generated workload artifacts are not read in dry-run mode",
+        },
+    )
+
+    write_json(
+        FAIL_CLOSED_PATH,
+        base
+        | {
+            "schema_version": "coordination-workload-bridge-fail-closed-diagnostics-dry-run-v1",
+            "required_refusal_reasons": data["fail_closed_diagnostics"]["required_refusal_reasons"],
+            "diagnostics_performed": False,
+            "evaluation": "planned-only; malformed and stale fixture cases are not executed in dry-run mode",
+        },
+    )
+
+    write_json(
+        DEPENDENCY_BOUNDARY_PATH,
+        base
+        | {
+            "schema_version": "coordination-workload-bridge-dependency-boundary-dry-run-v1",
+            "forbidden_dependency_keys": data["core_runtime_dependency_boundary"]["forbidden_dependency_keys"],
+            "policy_source": "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+            "scan_performed": False,
+            "evaluation": "planned-only; Cargo dependency keys are not scanned in dry-run mode",
+        },
+    )
 
 
 def verify_child_evidence():
