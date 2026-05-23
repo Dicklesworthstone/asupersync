@@ -23,6 +23,7 @@ pub const RELAY_WIRE_VERSION: u8 = 1;
 
 const RELAY_WIRE_FORWARD_FRAME_KIND: u8 = 1;
 const RELAY_WIRE_HEADER_LEN: usize = 4 + 1 + 1 + 1 + 16 + 16 + 32 + 8 + 8 + 32 + 4;
+const RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN: usize = 4;
 
 /// Relay transport policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -228,6 +229,23 @@ pub struct RelayWireFrame {
     packet: OpaqueRelayPacket,
 }
 
+/// Result of decoding from a TCP/TLS 443 relay byte stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayWireRecordDecode {
+    /// More stream bytes are required before a complete record can be decoded.
+    NeedMore {
+        /// Minimum total buffered bytes required to retry decoding this record.
+        minimum_len: usize,
+    },
+    /// A complete record was decoded from the start of the input buffer.
+    Complete {
+        /// Decoded relay tunnel frame.
+        frame: RelayWireFrame,
+        /// Number of bytes consumed from the start of the input buffer.
+        consumed: usize,
+    },
+}
+
 impl RelayWireFrame {
     /// Construct a relay tunnel frame for one opaque ATP packet.
     #[must_use]
@@ -305,8 +323,32 @@ impl RelayWireFrame {
         Ok(encoded)
     }
 
-    /// Decode a canonical relay tunnel frame from one complete datagram or
-    /// length-delimited TCP/TLS record.
+    /// Encode this frame as one TCP/TLS 443 stream record.
+    ///
+    /// TCP/TLS fallback is a byte stream, so it needs an explicit record
+    /// boundary around the canonical relay frame. UDP callers should use
+    /// [`Self::encode`] directly.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::encode`] validation errors.
+    pub fn encode_tcp_tls_record(&self, max_payload_bytes: usize) -> Result<Vec<u8>, RelayError> {
+        let encoded_frame = self.encode(max_payload_bytes)?;
+        let frame_len =
+            u32::try_from(encoded_frame.len()).map_err(|_| RelayError::PacketTooLarge)?;
+        let mut record =
+            Vec::with_capacity(RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN + encoded_frame.len());
+        record.extend_from_slice(&frame_len.to_be_bytes());
+        record.extend_from_slice(&encoded_frame);
+        Ok(record)
+    }
+
+    /// Decode a canonical relay tunnel frame from one complete datagram or an
+    /// already isolated TCP/TLS record payload.
+    ///
+    /// Callers reading the TCP/TLS 443 byte stream should use
+    /// [`Self::decode_tcp_tls_record`] so the length prefix is handled before
+    /// this frame decoder runs.
     ///
     /// # Errors
     ///
@@ -370,6 +412,82 @@ impl RelayWireFrame {
             from_peer_id,
             packet,
         })
+    }
+
+    /// Decode the next TCP/TLS 443 stream record from the start of `bytes`.
+    ///
+    /// The decoder accepts coalesced records by reporting the number of bytes
+    /// consumed, and it treats short buffers as [`RelayWireRecordDecode::NeedMore`]
+    /// instead of an error so stream readers can accumulate bytes without
+    /// conflating partial network delivery with malformed peer input.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors for malformed record lengths or malformed
+    /// relay frames.
+    pub fn decode_tcp_tls_record(
+        bytes: &[u8],
+        max_payload_bytes: usize,
+    ) -> Result<RelayWireRecordDecode, RelayError> {
+        if max_payload_bytes == 0 {
+            return Err(RelayError::InvalidQuota);
+        }
+        if bytes.len() < RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN {
+            return Ok(RelayWireRecordDecode::NeedMore {
+                minimum_len: RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN,
+            });
+        }
+
+        let frame_len = read_u32(bytes, 0)? as usize;
+        if frame_len < RELAY_WIRE_HEADER_LEN {
+            return Err(RelayError::InvalidRelayWireFrame);
+        }
+        let max_frame_len = RELAY_WIRE_HEADER_LEN
+            .checked_add(max_payload_bytes)
+            .ok_or(RelayError::PacketTooLarge)?;
+        if frame_len > max_frame_len {
+            return Err(RelayError::PacketTooLarge);
+        }
+        let record_len = RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN
+            .checked_add(frame_len)
+            .ok_or(RelayError::PacketTooLarge)?;
+        if bytes.len() < record_len {
+            return Ok(RelayWireRecordDecode::NeedMore {
+                minimum_len: record_len,
+            });
+        }
+
+        Ok(RelayWireRecordDecode::Complete {
+            frame: Self::decode(
+                &bytes[RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN..record_len],
+                max_payload_bytes,
+            )?,
+            consumed: record_len,
+        })
+    }
+
+    /// Decode exactly one TCP/TLS 443 stream record.
+    ///
+    /// This helper is useful for tests and length-delimited readers that have
+    /// already isolated one record. Stream readers that may hold partial or
+    /// coalesced bytes should use [`Self::decode_tcp_tls_record`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::TruncatedRelayWireFrame`] for incomplete records,
+    /// [`RelayError::InvalidRelayWireFrame`] for trailing bytes after the first
+    /// complete record, and validation errors for malformed frames.
+    pub fn decode_complete_tcp_tls_record(
+        bytes: &[u8],
+        max_payload_bytes: usize,
+    ) -> Result<Self, RelayError> {
+        match Self::decode_tcp_tls_record(bytes, max_payload_bytes)? {
+            RelayWireRecordDecode::NeedMore { .. } => Err(RelayError::TruncatedRelayWireFrame),
+            RelayWireRecordDecode::Complete { frame, consumed } if consumed == bytes.len() => {
+                Ok(frame)
+            }
+            RelayWireRecordDecode::Complete { .. } => Err(RelayError::InvalidRelayWireFrame),
+        }
     }
 
     /// Submit this decoded frame into the relay service forwarding path.
@@ -2288,6 +2406,95 @@ mod tests {
         assert_eq!(
             RelayWireFrame::decode(&unsupported_kind, 1024).expect_err("kind"),
             RelayError::UnsupportedRelayWireFrameKind
+        );
+    }
+
+    #[test]
+    fn relay_wire_tcp_tls_records_decode_partial_and_coalesced_stream_bytes() {
+        let first = RelayWireFrame::new(
+            reservation_id(38),
+            transfer_nonce(9),
+            peer(1),
+            packet(RelayTransport::TcpTls443, b"first-stream-record", 1),
+        );
+        let second = RelayWireFrame::new(
+            reservation_id(38),
+            transfer_nonce(9),
+            peer(2),
+            packet(RelayTransport::TcpTls443, b"second-stream-record", 2),
+        );
+        let first_record = first
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect("encode first record");
+        let second_record = second
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect("encode second record");
+
+        assert_eq!(
+            RelayWireFrame::decode_tcp_tls_record(&first_record[..2], 1024)
+                .expect("partial prefix"),
+            RelayWireRecordDecode::NeedMore { minimum_len: 4 }
+        );
+        assert_eq!(
+            RelayWireFrame::decode_tcp_tls_record(&first_record[..8], 1024).expect("partial frame"),
+            RelayWireRecordDecode::NeedMore {
+                minimum_len: first_record.len()
+            }
+        );
+
+        let mut coalesced = first_record.clone();
+        coalesced.extend_from_slice(&second_record);
+        let RelayWireRecordDecode::Complete {
+            frame: decoded_first,
+            consumed: first_consumed,
+        } = RelayWireFrame::decode_tcp_tls_record(&coalesced, 1024).expect("decode first record")
+        else {
+            panic!("first coalesced record should be complete");
+        };
+        assert_eq!(first_consumed, first_record.len());
+        assert_eq!(
+            decoded_first.packet().opaque_bytes(),
+            b"first-stream-record"
+        );
+        assert_eq!(
+            RelayWireFrame::decode_complete_tcp_tls_record(&coalesced, 1024)
+                .expect_err("coalesced bytes are not exactly one record"),
+            RelayError::InvalidRelayWireFrame
+        );
+
+        let RelayWireRecordDecode::Complete {
+            frame: decoded_second,
+            consumed: second_consumed,
+        } = RelayWireFrame::decode_tcp_tls_record(&coalesced[first_consumed..], 1024)
+            .expect("decode second record")
+        else {
+            panic!("second coalesced record should be complete");
+        };
+        assert_eq!(second_consumed, second_record.len());
+        assert_eq!(decoded_second.from_peer_id(), peer(2));
+        assert_eq!(decoded_second.packet().sequence(), 2);
+
+        let exact = RelayWireFrame::decode_complete_tcp_tls_record(&second_record, 1024)
+            .expect("decode exactly one record");
+        assert_eq!(exact.packet().opaque_bytes(), b"second-stream-record");
+
+        let mut invalid_short_record = first_record;
+        let invalid_short_len =
+            u32::try_from(RELAY_WIRE_HEADER_LEN - 1).expect("relay header len fits in u32");
+        invalid_short_record[..4].copy_from_slice(&invalid_short_len.to_be_bytes());
+        assert_eq!(
+            RelayWireFrame::decode_tcp_tls_record(&invalid_short_record, 1024)
+                .expect_err("invalid frame length"),
+            RelayError::InvalidRelayWireFrame
+        );
+        let mut oversize_record = second_record;
+        let oversize_len =
+            u32::try_from(RELAY_WIRE_HEADER_LEN + 5).expect("relay header len fits in u32");
+        oversize_record[..4].copy_from_slice(&oversize_len.to_be_bytes());
+        assert_eq!(
+            RelayWireFrame::decode_tcp_tls_record(&oversize_record, 4)
+                .expect_err("oversize record"),
+            RelayError::PacketTooLarge
         );
     }
 
