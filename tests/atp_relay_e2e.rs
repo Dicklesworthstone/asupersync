@@ -413,7 +413,7 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
     let followup_frame = RelayWireFrame::new(
         reservation_id(501),
         nonce(0xfeed_f500),
-        peer(2),
+        peer(1),
         packet_sent_at(
             RelayTransport::TcpTls443,
             b"encrypted-wire-tcp-followup",
@@ -432,12 +432,12 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
     )
     .expect("bounded TCP/TLS stream buffer");
     let partial_forwarded = tcp_service
-        .forward_tcp_tls_stream_bytes(300, &mut tcp_stream_buffer, &tcp_stream[..2])
+        .forward_tcp_tls_stream_bytes(300, peer(1), &mut tcp_stream_buffer, &tcp_stream[..2])
         .expect("partial tcp stream prefix is buffered");
     assert!(partial_forwarded.is_empty());
     assert_eq!(tcp_stream_buffer.pending_len(), 2);
     let forwarded_batch = tcp_service
-        .forward_tcp_tls_stream_bytes(300, &mut tcp_stream_buffer, &tcp_stream[2..])
+        .forward_tcp_tls_stream_bytes(300, peer(1), &mut tcp_stream_buffer, &tcp_stream[2..])
         .expect("coalesced tcp stream records are forwarded");
     assert_eq!(forwarded_batch.len(), 2);
     assert_eq!(tcp_stream_buffer.pending_len(), 0);
@@ -451,7 +451,7 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
         b"encrypted-wire-tcp-fallback"
     );
     let followup_forwarded = &forwarded_batch[1];
-    assert_eq!(followup_forwarded.to_peer_id(), peer(1));
+    assert_eq!(followup_forwarded.to_peer_id(), peer(2));
     assert_eq!(
         followup_forwarded.packet().opaque_bytes(),
         b"encrypted-wire-tcp-followup"
@@ -465,7 +465,7 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
             .expect("undersized stream buffer still accepts relay header");
     assert_eq!(
         tcp_service
-            .forward_tcp_tls_stream_bytes(325, &mut undersized_stream_buffer, &tcp_record)
+            .forward_tcp_tls_stream_bytes(325, peer(1), &mut undersized_stream_buffer, &tcp_record)
             .expect_err("record larger than pending buffer fails closed"),
         RelayError::PacketTooLarge
     );
@@ -536,9 +536,38 @@ fn relay_socket_adapters_bridge_udp_datagrams_and_tcp_records() {
     let udp_datagram_bytes = udp_frame
         .encode(RelayQuota::default().max_packet_bytes)
         .expect("encode inbound udp datagram");
+    log_stage(
+        test,
+        "udp-peer-mismatch",
+        "socket endpoint identity must match the datagram's relay frame source peer",
+    );
+    assert_eq!(
+        udp_service
+            .forward_udp_datagram(
+                199,
+                peer(3),
+                &udp_datagram_bytes,
+                RelayQuota::default().max_packet_bytes,
+            )
+            .expect_err("udp endpoint peer mismatch must fail closed"),
+        RelayError::UnauthorizedPeer
+    );
+    assert_eq!(
+        udp_service
+            .proof_artifact(reservation_id(700))
+            .expect("udp proof after rejected peer mismatch")
+            .packets_forwarded,
+        0
+    );
+    assert!(udp_service.events().iter().any(|event| {
+        event.kind == RelayEventKind::AuthorizationRejected
+            && event.transport == Some(RelayTransport::Udp)
+            && event.quota_decision == "endpoint_peer_mismatch_rejected"
+    }));
     let udp_forwarded = udp_service
         .forward_udp_datagram(
             200,
+            peer(1),
             &udp_datagram_bytes,
             RelayQuota::default().max_packet_bytes,
         )
@@ -608,13 +637,41 @@ fn relay_socket_adapters_bridge_udp_datagrams_and_tcp_records() {
     let tcp_record_bytes = tcp_frame
         .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
         .expect("encode inbound tcp record");
+    log_stage(
+        test,
+        "tcp-peer-mismatch",
+        "tcp/tls endpoint identity must match each stream record's relay frame source peer",
+    );
+    let mut rejected_stream = RelayTcpTlsStreamBuffer::new(
+        RelayQuota::default().max_packet_bytes,
+        tcp_record_bytes.len(),
+    )
+    .expect("rejected tcp stream buffer");
+    assert_eq!(
+        tcp_service
+            .forward_tcp_tls_stream_bytes(349, peer(3), &mut rejected_stream, &tcp_record_bytes)
+            .expect_err("tcp endpoint peer mismatch must fail closed"),
+        RelayError::UnauthorizedPeer
+    );
+    assert_eq!(
+        tcp_service
+            .proof_artifact(reservation_id(701))
+            .expect("tcp proof after rejected peer mismatch")
+            .packets_forwarded,
+        0
+    );
+    assert!(tcp_service.events().iter().any(|event| {
+        event.kind == RelayEventKind::AuthorizationRejected
+            && event.transport == Some(RelayTransport::TcpTls443)
+            && event.quota_decision == "endpoint_peer_mismatch_rejected"
+    }));
     let mut stream = RelayTcpTlsStreamBuffer::new(
         RelayQuota::default().max_packet_bytes,
         tcp_record_bytes.len(),
     )
     .expect("tcp stream buffer");
     let tcp_forwarded = tcp_service
-        .forward_tcp_tls_stream_bytes(350, &mut stream, &tcp_record_bytes)
+        .forward_tcp_tls_stream_bytes(350, peer(1), &mut stream, &tcp_record_bytes)
         .expect("forward inbound tcp record");
     assert_eq!(tcp_forwarded.len(), 1);
     assert!(

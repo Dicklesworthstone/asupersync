@@ -1577,6 +1577,11 @@ impl RelayService {
 
     /// Authenticate and forward a decoded relay tunnel frame.
     ///
+    /// This is the transport-neutral boundary for already authenticated frame
+    /// sources. Socket adapters that know the physical endpoint identity should
+    /// call [`Self::forward_wire_frame_from_peer`] so the frame source cannot be
+    /// self-declared by untrusted bytes.
+    ///
     /// # Errors
     ///
     /// Returns [`RelayError::InvalidAuthorization`] when the frame nonce does
@@ -1618,12 +1623,39 @@ impl RelayService {
         )
     }
 
+    /// Authenticate and forward a decoded frame from an endpoint-admitted peer.
+    ///
+    /// Socket loops should use this boundary after UDP address admission, TLS
+    /// session authentication, or peer-directory lookup has mapped the physical
+    /// endpoint to `from_peer_id`. The frame's self-declared source must match
+    /// that authenticated peer identity before reservation auth, quota, usage, or
+    /// queue state can be mutated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnauthorizedPeer`] when endpoint admission and frame
+    /// metadata disagree. Otherwise propagates [`Self::forward_wire_frame`]
+    /// validation errors.
+    pub fn forward_wire_frame_from_peer(
+        &mut self,
+        now_micros: u64,
+        from_peer_id: PeerId,
+        frame: RelayWireFrame,
+    ) -> Result<ForwardedPacket, RelayError> {
+        if frame.from_peer_id() != from_peer_id {
+            self.push_endpoint_peer_mismatch(from_peer_id, &frame);
+            return Err(RelayError::UnauthorizedPeer);
+        }
+        self.forward_wire_frame(now_micros, frame)
+    }
+
     /// Decode and forward one UDP relay datagram.
     ///
     /// Real UDP socket loops can feed received datagram bytes into this method
-    /// after endpoint admission has mapped the sender address to the peer id
-    /// carried in the frame. TCP/TLS frames wrapped into UDP datagrams fail
-    /// closed before quota, usage, or queue state is mutated.
+    /// after endpoint admission has mapped the sender address to `from_peer_id`.
+    /// TCP/TLS frames wrapped into UDP datagrams, or datagrams whose self-declared
+    /// peer id disagrees with endpoint admission, fail closed before quota,
+    /// usage, or queue state is mutated.
     ///
     /// # Errors
     ///
@@ -1631,6 +1663,7 @@ impl RelayService {
     pub fn forward_udp_datagram(
         &mut self,
         now_micros: u64,
+        from_peer_id: PeerId,
         datagram: &[u8],
         max_payload_bytes: usize,
     ) -> Result<ForwardedPacket, RelayError> {
@@ -1638,7 +1671,7 @@ impl RelayService {
         if frame.packet.transport() != RelayTransport::Udp {
             return Err(RelayError::InvalidRelayWireFrame);
         }
-        self.forward_wire_frame(now_micros, frame)
+        self.forward_wire_frame_from_peer(now_micros, from_peer_id, frame)
     }
 
     /// Append TCP/TLS stream bytes, decode complete relay records, and forward
@@ -1647,9 +1680,12 @@ impl RelayService {
     /// Partial records remain in `stream` for the next socket read. The stream
     /// bound applies to bytes retained between decodes, so a single socket read
     /// may contain multiple valid records as long as each record can be drained
-    /// under the configured pending-byte limit. Malformed records or forwarding
-    /// failures stop processing immediately; any already forwarded earlier
-    /// records have gone through the normal quota, auth, and proof/log path.
+    /// under the configured pending-byte limit. `from_peer_id` must be the peer
+    /// identity authenticated for the TCP/TLS stream; any decoded record claiming
+    /// a different source peer fails closed before quota, usage, or queue state
+    /// is mutated for that record. Malformed records or forwarding failures stop
+    /// processing immediately; any already forwarded earlier records have gone
+    /// through the normal quota, auth, and proof/log path.
     ///
     /// # Errors
     ///
@@ -1657,6 +1693,7 @@ impl RelayService {
     pub fn forward_tcp_tls_stream_bytes(
         &mut self,
         now_micros: u64,
+        from_peer_id: PeerId,
         stream: &mut RelayTcpTlsStreamBuffer,
         bytes: &[u8],
     ) -> Result<Vec<ForwardedPacket>, RelayError> {
@@ -1665,7 +1702,11 @@ impl RelayService {
         let mut remaining = bytes;
         loop {
             while let Some(frame) = stream.pop_next_frame()? {
-                forwarded.push(self.forward_wire_frame(now_micros, frame)?);
+                forwarded.push(self.forward_wire_frame_from_peer(
+                    now_micros,
+                    from_peer_id,
+                    frame,
+                )?);
             }
 
             if remaining.is_empty() {
@@ -2235,6 +2276,26 @@ impl RelayService {
         }
 
         (dropped_packets, dropped_bytes)
+    }
+
+    fn push_endpoint_peer_mismatch(&mut self, endpoint_peer_id: PeerId, frame: &RelayWireFrame) {
+        let Some(state) = self.reservations.get(&frame.reservation_id).cloned() else {
+            return;
+        };
+        self.push_event(RelayEventDraft {
+            kind: RelayEventKind::AuthorizationRejected,
+            reservation_id: Some(frame.reservation_id),
+            transfer_nonce: Some(frame.transfer_nonce),
+            path_id: Some(state.path_id),
+            from_peer: Some(endpoint_peer_id),
+            to_peer: None,
+            transport: Some(frame.packet.transport),
+            opaque_bytes: frame.packet.opaque_len() as u64,
+            loss_summary: None,
+            latency_summary: None,
+            quota_decision: "endpoint_peer_mismatch_rejected",
+            fallback_reason: None,
+        });
     }
 
     fn push_quota_rejected(
@@ -3066,8 +3127,36 @@ mod tests {
         let encoded = frame
             .encode(RelayQuota::default().max_packet_bytes)
             .expect("encode udp datagram");
+        assert_eq!(
+            service
+                .forward_udp_datagram(
+                    124,
+                    peer(3),
+                    &encoded,
+                    RelayQuota::default().max_packet_bytes
+                )
+                .expect_err("endpoint peer mismatch must not forward"),
+            RelayError::UnauthorizedPeer
+        );
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(40))
+                .expect("proof after rejected endpoint mismatch")
+                .packets_forwarded,
+            0
+        );
+        assert!(service.events().iter().any(|event| {
+            event.kind == RelayEventKind::AuthorizationRejected
+                && event.transport == Some(RelayTransport::Udp)
+                && event.quota_decision == "endpoint_peer_mismatch_rejected"
+        }));
         let forwarded = service
-            .forward_udp_datagram(125, &encoded, RelayQuota::default().max_packet_bytes)
+            .forward_udp_datagram(
+                125,
+                peer(1),
+                &encoded,
+                RelayQuota::default().max_packet_bytes,
+            )
             .expect("udp datagram forwards");
         assert_eq!(forwarded.to_peer_id(), peer(2));
         assert_eq!(forwarded.packet().opaque_bytes(), b"udp-socket-ciphertext");
@@ -3136,6 +3225,7 @@ mod tests {
             service
                 .forward_udp_datagram(
                     100,
+                    peer(1),
                     &canonical_tcp_frame,
                     RelayQuota::default().max_packet_bytes
                 )
@@ -3153,11 +3243,32 @@ mod tests {
         let tcp_record = tcp_frame
             .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
             .expect("encode tcp record");
+        let mut mismatched_stream =
+            RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
+                .expect("mismatched stream buffer");
+        assert_eq!(
+            service
+                .forward_tcp_tls_stream_bytes(124, peer(3), &mut mismatched_stream, &tcp_record)
+                .expect_err("endpoint peer mismatch must not forward tcp record"),
+            RelayError::UnauthorizedPeer
+        );
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(41))
+                .expect("proof after rejected tcp endpoint mismatch")
+                .packets_forwarded,
+            0
+        );
+        assert!(service.events().iter().any(|event| {
+            event.kind == RelayEventKind::AuthorizationRejected
+                && event.transport == Some(RelayTransport::TcpTls443)
+                && event.quota_decision == "endpoint_peer_mismatch_rejected"
+        }));
         let mut stream =
             RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len())
                 .expect("stream buffer");
         let forwarded = service
-            .forward_tcp_tls_stream_bytes(125, &mut stream, &tcp_record)
+            .forward_tcp_tls_stream_bytes(125, peer(1), &mut stream, &tcp_record)
             .expect("tcp stream forwards");
         assert_eq!(forwarded.len(), 1);
 
