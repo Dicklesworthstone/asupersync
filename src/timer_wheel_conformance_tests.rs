@@ -29,9 +29,6 @@
 #[cfg(any(test, feature = "test-internals"))]
 use std::collections::{BinaryHeap, HashMap, HashSet};
 #[cfg(any(test, feature = "test-internals"))]
-use std::time::{Duration, Instant};
-
-#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimerId(u64);
 
@@ -58,11 +55,11 @@ impl Ord for MockDeadline {
 
 #[cfg(any(test, feature = "test-internals"))]
 impl MockDeadline {
-    fn from_nanos(nanos: u64) -> Self {
+    pub fn from_nanos(nanos: u64) -> Self {
         Self { nanos }
     }
 
-    fn nanos(&self) -> u64 {
+    pub fn nanos(&self) -> u64 {
         self.nanos
     }
 }
@@ -97,7 +94,8 @@ impl PartialOrd for MockTimer {
 impl Ord for MockTimer {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Min-heap: earliest deadline first, then by insertion order for ties
-        self.deadline.cmp(&other.deadline)
+        self.deadline
+            .cmp(&other.deadline)
             .then_with(|| self.insertion_order.cmp(&other.insertion_order))
     }
 }
@@ -118,7 +116,7 @@ pub struct MockTimerWheel {
 
 #[cfg(any(test, feature = "test-internals"))]
 impl MockTimerWheel {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             heap: BinaryHeap::new(),
             timer_map: HashMap::new(),
@@ -128,7 +126,7 @@ impl MockTimerWheel {
     }
 
     /// Insert timer with given deadline. Returns assigned TimerId.
-    fn insert(&mut self, deadline: MockDeadline) -> TimerId {
+    pub fn insert(&mut self, deadline: MockDeadline) -> TimerId {
         let timer_id = TimerId(self.next_insertion_order);
         let timer = MockTimer {
             id: timer_id,
@@ -144,7 +142,7 @@ impl MockTimerWheel {
     }
 
     /// Extract earliest timer, if any. Returns None if wheel is empty.
-    fn extract_earliest(&mut self) -> Option<MockTimer> {
+    pub fn extract_earliest(&mut self) -> Option<MockTimer> {
         loop {
             let std::cmp::Reverse(timer) = self.heap.pop()?;
 
@@ -162,7 +160,7 @@ impl MockTimerWheel {
     }
 
     /// Cancel timer by ID. Idempotent - cancelling non-existent timer is safe.
-    fn cancel(&mut self, timer_id: TimerId) -> bool {
+    pub fn cancel(&mut self, timer_id: TimerId) -> bool {
         if self.timer_map.remove(&timer_id).is_some() {
             self.cancelled.insert(timer_id);
             true
@@ -173,12 +171,12 @@ impl MockTimerWheel {
     }
 
     /// Return count of active (non-cancelled) timers
-    fn active_count(&self) -> usize {
+    pub fn active_count(&self) -> usize {
         self.timer_map.len()
     }
 
     /// Return earliest deadline without removing timer
-    fn peek_earliest_deadline(&self) -> Option<MockDeadline> {
+    pub fn peek_earliest_deadline(&self) -> Option<MockDeadline> {
         // Find first non-cancelled timer in heap
         for std::cmp::Reverse(timer) in &self.heap {
             if !self.cancelled.contains(&timer.id) && self.timer_map.contains_key(&timer.id) {
@@ -189,7 +187,7 @@ impl MockTimerWheel {
     }
 
     /// Verify internal invariants (for testing)
-    fn verify_invariants(&self) -> Result<(), String> {
+    pub fn verify_invariants(&self) -> Result<(), String> {
         // Check heap property is maintained
         let mut heap_clone = self.heap.clone();
         let mut prev_deadline: Option<MockDeadline> = None;
@@ -222,7 +220,10 @@ impl MockTimerWheel {
         // Verify map consistency
         for (id, timer) in &self.timer_map {
             if timer.id != *id {
-                return Err(format!("Map key/timer ID mismatch: {:?} != {:?}", id, timer.id));
+                return Err(format!(
+                    "Map key/timer ID mismatch: {:?} != {:?}",
+                    id, timer.id
+                ));
             }
         }
 
@@ -237,7 +238,6 @@ pub enum TimerOperation {
     ExtractEarliest,
     Cancel(TimerId),
 }
-
 
 #[cfg(test)]
 mod conformance_tests {
@@ -268,7 +268,8 @@ mod conformance_tests {
                 Just(TimerOperation::ExtractEarliest),
                 // 25% cancels (will generate timer IDs during test execution)
                 (0u64..100u64).prop_map(|id| TimerOperation::Cancel(TimerId(id))),
-            ].boxed()
+            ]
+            .boxed()
         }
     }
 
@@ -288,7 +289,9 @@ mod conformance_tests {
 
         for deadline in deadlines {
             wheel.insert(deadline);
-            wheel.verify_invariants().expect("Invariants violated after insert");
+            wheel
+                .verify_invariants()
+                .expect("Invariants violated after insert");
         }
 
         // Extract all timers - should come out in deadline order
@@ -300,7 +303,10 @@ mod conformance_tests {
         // Verify ascending order
         let mut sorted = extracted_deadlines.clone();
         sorted.sort();
-        assert_eq!(extracted_deadlines, sorted, "Timers not extracted in deadline order");
+        assert_eq!(
+            extracted_deadlines, sorted,
+            "Timers not extracted in deadline order"
+        );
     }
 
     /// TW-002: Extract operation returns earliest deadline first (min-heap property)
@@ -336,8 +342,13 @@ mod conformance_tests {
         let id3 = wheel.insert(MockDeadline::from_nanos(300));
 
         // Cancel middle timer
-        assert!(wheel.cancel(id2), "Cancel should return true for existing timer");
-        wheel.verify_invariants().expect("Invariants violated after cancel");
+        assert!(
+            wheel.cancel(id2),
+            "Cancel should return true for existing timer"
+        );
+        wheel
+            .verify_invariants()
+            .expect("Invariants violated after cancel");
 
         // Extract remaining timers
         let timer1 = wheel.extract_earliest().expect("Should have timer");
@@ -355,12 +366,22 @@ mod conformance_tests {
         let mut wheel = MockTimerWheel::new();
 
         // Cancel non-existent timer
-        assert!(!wheel.cancel(TimerId(99999)), "Cancel should return false for non-existent timer");
-        wheel.verify_invariants().expect("Invariants violated after cancel");
+        assert!(
+            !wheel.cancel(TimerId(99999)),
+            "Cancel should return false for non-existent timer"
+        );
+        wheel
+            .verify_invariants()
+            .expect("Invariants violated after cancel");
 
         // Multiple cancels of same non-existent timer
-        assert!(!wheel.cancel(TimerId(99999)), "Repeated cancel should be idempotent");
-        wheel.verify_invariants().expect("Invariants violated after repeated cancel");
+        assert!(
+            !wheel.cancel(TimerId(99999)),
+            "Repeated cancel should be idempotent"
+        );
+        wheel
+            .verify_invariants()
+            .expect("Invariants violated after repeated cancel");
 
         // Wheel should still be usable
         let id = wheel.insert(MockDeadline::from_nanos(100));
@@ -375,8 +396,13 @@ mod conformance_tests {
 
         // Multiple extracts from empty wheel
         for _ in 0..10 {
-            assert!(wheel.extract_earliest().is_none(), "Extract from empty wheel should return None");
-            wheel.verify_invariants().expect("Invariants violated on empty wheel");
+            assert!(
+                wheel.extract_earliest().is_none(),
+                "Extract from empty wheel should return None"
+            );
+            wheel
+                .verify_invariants()
+                .expect("Invariants violated on empty wheel");
         }
     }
 
@@ -555,7 +581,9 @@ mod conformance_tests {
     #[test]
     fn stress_test_timer_wheel_operations() {
         let mut wheel = MockTimerWheel::new();
-        let mut rng = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
+        let mut rng = proptest::test_runner::TestRng::deterministic_rng(
+            proptest::test_runner::RngAlgorithm::ChaCha,
+        );
 
         // Insert 1000 timers with random deadlines
         let mut timer_ids = Vec::new();
@@ -656,8 +684,10 @@ mod benchmark_tests {
 
         println!(
             "Timer wheel performance: {} inserts in {}ms, {} extracts in {}ms",
-            10_000, insert_time.as_millis(),
-            count, extract_time.as_millis()
+            10_000,
+            insert_time.as_millis(),
+            count,
+            extract_time.as_millis()
         );
     }
 }

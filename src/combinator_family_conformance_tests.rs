@@ -32,13 +32,9 @@
 //! - CB-S03: Quorum memory usage is proportional to input count
 
 #[cfg(any(test, feature = "test-internals"))]
-use std::collections::{HashMap, HashSet};
-#[cfg(any(test, feature = "test-internals"))]
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(any(test, feature = "test-internals"))]
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-internals"))]
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -51,15 +47,15 @@ pub enum MockResult<T> {
 
 #[cfg(any(test, feature = "test-internals"))]
 impl<T> MockResult<T> {
-    fn is_retryable(&self) -> bool {
+    pub fn is_retryable(&self) -> bool {
         matches!(self, Self::RetryableError(_))
     }
 
-    fn is_success(&self) -> bool {
+    pub fn is_success(&self) -> bool {
         matches!(self, Self::Ok(_))
     }
 
-    fn is_permanent_failure(&self) -> bool {
+    pub fn is_permanent_failure(&self) -> bool {
         matches!(self, Self::PermanentError(_) | Self::Timeout)
     }
 }
@@ -96,7 +92,7 @@ pub struct MockRetryHandler<T> {
 
 #[cfg(any(test, feature = "test-internals"))]
 impl<T: Clone> MockRetryHandler<T> {
-    fn new(results: Vec<MockResult<T>>) -> Self {
+    pub fn new(results: Vec<MockResult<T>>) -> Self {
         Self {
             results,
             attempt_count: Arc::new(AtomicU64::new(0)),
@@ -108,7 +104,10 @@ impl<T: Clone> MockRetryHandler<T> {
         let attempt = self.attempt_count.fetch_add(1, Ordering::SeqCst) as usize;
 
         // Side effect should only happen on success or permanent failure
-        let result = self.results.get(attempt).cloned()
+        let result = self
+            .results
+            .get(attempt)
+            .cloned()
             .unwrap_or(MockResult::PermanentError("Exhausted attempts".to_string()));
 
         if result.is_success() || result.is_permanent_failure() {
@@ -118,21 +117,18 @@ impl<T: Clone> MockRetryHandler<T> {
         result
     }
 
-    fn get_attempt_count(&self) -> u64 {
+    pub fn get_attempt_count(&self) -> u64 {
         self.attempt_count.load(Ordering::SeqCst)
     }
 
-    fn get_side_effect_count(&self) -> u64 {
+    pub fn get_side_effect_count(&self) -> u64 {
         self.side_effect_count.load(Ordering::SeqCst)
     }
 }
 
 #[cfg(any(test, feature = "test-internals"))]
 /// Mock retry implementation for testing retry idempotency
-pub fn mock_retry<T: Clone>(
-    handler: &MockRetryHandler<T>,
-    config: &RetryConfig,
-) -> MockResult<T> {
+pub fn mock_retry<T: Clone>(handler: &MockRetryHandler<T>, config: &RetryConfig) -> MockResult<T> {
     let mut last_result = MockResult::PermanentError("No attempts made".to_string());
     let mut delay_ms = config.base_delay_ms;
 
@@ -147,7 +143,7 @@ pub fn mock_retry<T: Clone>(
                     // Simulate delay (in real implementation this would sleep)
                     delay_ms = std::cmp::min(
                         (delay_ms as f64 * config.multiplier) as u64,
-                        config.max_delay_ms
+                        config.max_delay_ms,
                     );
                 }
             }
@@ -175,9 +171,7 @@ pub struct RaceResult<T> {
 
 #[cfg(any(test, feature = "test-internals"))]
 /// Mock race implementation for testing race symmetry
-pub fn mock_race<T: Clone + PartialEq + Eq>(
-    inputs: Vec<RaceInput<T>>,
-) -> Option<RaceResult<T>> {
+pub fn mock_race<T: Clone + PartialEq + Eq>(inputs: Vec<RaceInput<T>>) -> Option<RaceResult<T>> {
     if inputs.is_empty() {
         return None;
     }
@@ -187,10 +181,12 @@ pub fn mock_race<T: Clone + PartialEq + Eq>(
     sorted_inputs.sort_by_key(|input| (input.delay_ms, input.id));
 
     // Find first successful result
-    let winner = sorted_inputs.into_iter()
+    let winner = sorted_inputs
+        .into_iter()
         .find(|input| input.result.is_success())?;
 
-    let loser_ids: Vec<u32> = inputs.iter()
+    let loser_ids: Vec<u32> = inputs
+        .iter()
         .filter(|input| input.id != winner.id)
         .map(|input| input.id)
         .collect();
@@ -222,12 +218,27 @@ pub struct QuorumResult<T> {
 
 #[cfg(any(test, feature = "test-internals"))]
 /// Mock quorum implementation for testing threshold behavior
-pub fn mock_quorum<T: Clone>(
-    inputs: Vec<MockResult<T>>,
-    config: &QuorumConfig,
-) -> QuorumResult<T> {
+pub fn mock_quorum<T: Clone>(inputs: Vec<MockResult<T>>, config: &QuorumConfig) -> QuorumResult<T> {
+    if config.threshold == 0 {
+        return QuorumResult {
+            success: true,
+            successful_results: Vec::new(),
+            failed_count: 0,
+            timed_out: false,
+        };
+    }
+
     let mut successful_results = Vec::new();
     let mut failed_count = 0;
+
+    if config.timeout_ms == 0 {
+        return QuorumResult {
+            success: false,
+            successful_results,
+            failed_count: inputs.len() as u32,
+            timed_out: true,
+        };
+    }
 
     for result in inputs {
         match result {
@@ -259,7 +270,6 @@ pub fn mock_quorum<T: Clone>(
     }
 }
 
-
 #[cfg(test)]
 mod conformance_tests {
     use super::*;
@@ -278,7 +288,8 @@ mod conformance_tests {
                 "[a-z]{1,10}".prop_map(MockResult::RetryableError),
                 "[A-Z]{1,10}".prop_map(MockResult::PermanentError),
                 Just(MockResult::Timeout),
-            ].boxed()
+            ]
+            .boxed()
         }
     }
 
@@ -294,8 +305,13 @@ mod conformance_tests {
                 any::<u32>(),
                 MockResult::<T>::arbitrary_with(args),
                 0u64..5000u64,
-            ).prop_map(|(id, result, delay_ms)| RaceInput { id, result, delay_ms })
-            .boxed()
+            )
+                .prop_map(|(id, result, delay_ms)| RaceInput {
+                    id,
+                    result,
+                    delay_ms,
+                })
+                .boxed()
         }
     }
 
@@ -341,8 +357,16 @@ mod conformance_tests {
         mock_retry(&handler, &config);
 
         // Side effect should only happen once (on success)
-        assert_eq!(handler.get_side_effect_count(), 1, "Side effect should occur exactly once");
-        assert_eq!(handler.get_attempt_count(), 3, "Should have made 3 attempts");
+        assert_eq!(
+            handler.get_side_effect_count(),
+            1,
+            "Side effect should occur exactly once"
+        );
+        assert_eq!(
+            handler.get_attempt_count(),
+            3,
+            "Should have made 3 attempts"
+        );
     }
 
     /// CB-R03: Retry count limits are respected and enforced
@@ -365,7 +389,11 @@ mod conformance_tests {
         let result = mock_retry(&handler, &config);
 
         assert_eq!(result, MockResult::RetryableError("fail".to_string()));
-        assert_eq!(handler.get_attempt_count(), 3, "Should respect max_attempts limit");
+        assert_eq!(
+            handler.get_attempt_count(),
+            3,
+            "Should respect max_attempts limit"
+        );
     }
 
     /// CB-R05: Permanent failures terminate retry loop immediately
@@ -383,15 +411,31 @@ mod conformance_tests {
         let result = mock_retry(&handler, &config);
 
         assert_eq!(result, MockResult::PermanentError("permanent".to_string()));
-        assert_eq!(handler.get_attempt_count(), 2, "Should terminate on permanent failure");
+        assert_eq!(
+            handler.get_attempt_count(),
+            2,
+            "Should terminate on permanent failure"
+        );
     }
 
     /// CB-RS01: Race outcome is independent of input order permutation
     #[test]
     fn cb_rs01_race_order_independence() {
-        let input1 = RaceInput { id: 1, result: MockResult::Ok(10), delay_ms: 100 };
-        let input2 = RaceInput { id: 2, result: MockResult::Ok(20), delay_ms: 200 };
-        let input3 = RaceInput { id: 3, result: MockResult::Ok(30), delay_ms: 150 };
+        let input1 = RaceInput {
+            id: 1,
+            result: MockResult::Ok(10),
+            delay_ms: 100,
+        };
+        let input2 = RaceInput {
+            id: 2,
+            result: MockResult::Ok(20),
+            delay_ms: 200,
+        };
+        let input3 = RaceInput {
+            id: 3,
+            result: MockResult::Ok(30),
+            delay_ms: 150,
+        };
 
         // Test different permutations
         let permutations = vec![
@@ -415,7 +459,10 @@ mod conformance_tests {
         // All results should be identical
         let first_result = &results[0];
         for result in &results[1..] {
-            assert_eq!(result, first_result, "Race result should be order-independent");
+            assert_eq!(
+                result, first_result,
+                "Race result should be order-independent"
+            );
         }
     }
 
@@ -423,9 +470,21 @@ mod conformance_tests {
     #[test]
     fn cb_rs02_winner_selection_deterministic() {
         let inputs = vec![
-            RaceInput { id: 1, result: MockResult::Ok(10), delay_ms: 100 },
-            RaceInput { id: 2, result: MockResult::RetryableError("fail".to_string()), delay_ms: 50 },
-            RaceInput { id: 3, result: MockResult::Ok(30), delay_ms: 150 },
+            RaceInput {
+                id: 1,
+                result: MockResult::Ok(10),
+                delay_ms: 100,
+            },
+            RaceInput {
+                id: 2,
+                result: MockResult::RetryableError("fail".to_string()),
+                delay_ms: 50,
+            },
+            RaceInput {
+                id: 3,
+                result: MockResult::Ok(30),
+                delay_ms: 150,
+            },
         ];
 
         // Run race multiple times with same inputs
@@ -440,16 +499,36 @@ mod conformance_tests {
     #[test]
     fn cb_rs03_loser_cleanup() {
         let inputs = vec![
-            RaceInput { id: 1, result: MockResult::Ok(10), delay_ms: 100 },
-            RaceInput { id: 2, result: MockResult::Ok(20), delay_ms: 200 },
-            RaceInput { id: 3, result: MockResult::Ok(30), delay_ms: 300 },
-            RaceInput { id: 4, result: MockResult::RetryableError("fail".to_string()), delay_ms: 50 },
+            RaceInput {
+                id: 1,
+                result: MockResult::Ok(10),
+                delay_ms: 100,
+            },
+            RaceInput {
+                id: 2,
+                result: MockResult::Ok(20),
+                delay_ms: 200,
+            },
+            RaceInput {
+                id: 3,
+                result: MockResult::Ok(30),
+                delay_ms: 300,
+            },
+            RaceInput {
+                id: 4,
+                result: MockResult::RetryableError("fail".to_string()),
+                delay_ms: 50,
+            },
         ];
 
         let result = mock_race(inputs).unwrap();
 
         assert_eq!(result.winner.id, 1, "Fastest success should win");
-        assert_eq!(result.loser_ids, vec![2, 3, 4], "All non-winners should be cleaned up");
+        assert_eq!(
+            result.loser_ids,
+            vec![2, 3, 4],
+            "All non-winners should be cleaned up"
+        );
         assert_eq!(result.cleanup_count, 3, "Should track cleanup count");
     }
 
@@ -463,7 +542,10 @@ mod conformance_tests {
             MockResult::Ok(3),
         ];
 
-        let config = QuorumConfig { threshold: 3, timeout_ms: 1000 };
+        let config = QuorumConfig {
+            threshold: 3,
+            timeout_ms: 1000,
+        };
         let result = mock_quorum(inputs, &config);
 
         assert!(result.success, "Quorum should succeed with 3 successes");
@@ -482,10 +564,16 @@ mod conformance_tests {
             MockResult::Ok(2),
         ];
 
-        let config = QuorumConfig { threshold: 3, timeout_ms: 1000 };
+        let config = QuorumConfig {
+            threshold: 3,
+            timeout_ms: 1000,
+        };
         let result = mock_quorum(inputs, &config);
 
-        assert!(!result.success, "Quorum should fail with insufficient successes");
+        assert!(
+            !result.success,
+            "Quorum should fail with insufficient successes"
+        );
         assert_eq!(result.successful_results, vec![1, 2]);
         assert_eq!(result.failed_count, 2);
         assert!(result.timed_out, "Should be marked as timed out");
@@ -503,7 +591,10 @@ mod conformance_tests {
             MockResult::Ok(400),
         ];
 
-        let config = QuorumConfig { threshold: 4, timeout_ms: 1000 };
+        let config = QuorumConfig {
+            threshold: 4,
+            timeout_ms: 1000,
+        };
         let result = mock_quorum(inputs, &config);
 
         assert!(result.success, "Should succeed with 4 successes");
@@ -678,7 +769,10 @@ mod conformance_tests {
                             MockResult::RetryableError("partial_fail".to_string()),
                         ];
 
-                        let quorum_config = QuorumConfig { threshold: 2, timeout_ms: 1000 };
+                        let quorum_config = QuorumConfig {
+                            threshold: 2,
+                            timeout_ms: 1000,
+                        };
                         let quorum_result = mock_quorum(quorum_inputs, &quorum_config);
 
                         if quorum_result.success {
@@ -695,7 +789,10 @@ mod conformance_tests {
 
         // First call should fail and be retryable
         let first_result = operation.execute();
-        assert_eq!(first_result, MockResult::RetryableError("network_error".to_string()));
+        assert_eq!(
+            first_result,
+            MockResult::RetryableError("network_error".to_string())
+        );
 
         // Second call should succeed with quorum results
         let second_result = operation.execute();
@@ -742,10 +839,16 @@ mod edge_case_tests {
     fn edge_case_retry_zero_attempts() {
         let results = vec![MockResult::Ok(42)];
         let handler = MockRetryHandler::new(results);
-        let config = RetryConfig { max_attempts: 0, ..Default::default() };
+        let config = RetryConfig {
+            max_attempts: 0,
+            ..Default::default()
+        };
 
         let result = mock_retry(&handler, &config);
-        assert_eq!(result, MockResult::PermanentError("No attempts made".to_string()));
+        assert_eq!(
+            result,
+            MockResult::PermanentError("No attempts made".to_string())
+        );
         assert_eq!(handler.get_attempt_count(), 0);
     }
 
@@ -753,30 +856,44 @@ mod edge_case_tests {
     #[test]
     fn edge_case_race_empty_inputs() {
         let result = mock_race::<u32>(vec![]);
-        assert!(result.is_none(), "Race with empty inputs should return None");
+        assert!(
+            result.is_none(),
+            "Race with empty inputs should return None"
+        );
     }
 
     /// Test race with all failures
     #[test]
     fn edge_case_race_all_failures() {
         let inputs = vec![
-            RaceInput { id: 1, result: MockResult::RetryableError("fail1".to_string()), delay_ms: 100 },
-            RaceInput { id: 2, result: MockResult::PermanentError("fail2".to_string()), delay_ms: 200 },
+            RaceInput {
+                id: 1,
+                result: MockResult::RetryableError("fail1".to_string()),
+                delay_ms: 100,
+            },
+            RaceInput {
+                id: 2,
+                result: MockResult::PermanentError("fail2".to_string()),
+                delay_ms: 200,
+            },
         ];
 
         let result = mock_race(inputs);
-        assert!(result.is_none(), "Race with all failures should return None");
+        assert!(
+            result.is_none(),
+            "Race with all failures should return None"
+        );
     }
 
     /// Test quorum with threshold higher than input count
     #[test]
     fn edge_case_quorum_impossible_threshold() {
-        let inputs = vec![
-            MockResult::Ok(1),
-            MockResult::Ok(2),
-        ];
+        let inputs = vec![MockResult::Ok(1), MockResult::Ok(2)];
 
-        let config = QuorumConfig { threshold: 5, timeout_ms: 1000 };
+        let config = QuorumConfig {
+            threshold: 5,
+            timeout_ms: 1000,
+        };
         let result = mock_quorum(inputs, &config);
 
         assert!(!result.success, "Impossible threshold should fail");
@@ -792,10 +909,30 @@ mod edge_case_tests {
             MockResult::PermanentError("fail2".to_string()),
         ];
 
-        let config = QuorumConfig { threshold: 0, timeout_ms: 1000 };
+        let config = QuorumConfig {
+            threshold: 0,
+            timeout_ms: 1000,
+        };
         let result = mock_quorum(inputs, &config);
 
         assert!(result.success, "Zero threshold should always succeed");
         assert!(result.successful_results.is_empty());
+    }
+
+    /// Test quorum with an already-expired timeout budget.
+    #[test]
+    fn edge_case_quorum_zero_timeout_fails_before_success_counting() {
+        let inputs = vec![MockResult::Ok(1), MockResult::Ok(2)];
+
+        let config = QuorumConfig {
+            threshold: 2,
+            timeout_ms: 0,
+        };
+        let result = mock_quorum(inputs, &config);
+
+        assert!(!result.success, "Expired timeout should fail quorum");
+        assert!(result.successful_results.is_empty());
+        assert_eq!(result.failed_count, 2);
+        assert!(result.timed_out);
     }
 }
