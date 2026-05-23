@@ -506,9 +506,9 @@ fn percent_decode(input: &str) -> String {
 
 fn hex_val(b: u8) -> Option<u8> {
     match b {
-        b'0'..=b'9' => Some(b.saturating_sub(b'0')),
-        b'a'..=b'f' => Some((b.saturating_sub(b'a')).saturating_add(10)),
-        b'A'..=b'F' => Some((b.saturating_sub(b'A')).saturating_add(10)),
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
 }

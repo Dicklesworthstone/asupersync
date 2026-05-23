@@ -238,9 +238,6 @@ where
     Ok((t1, t2, t3, t4))
 }
 
-thread_local! {
-    static HANDLER_RUNTIME: std::cell::OnceCell<Runtime> = std::cell::OnceCell::new();
-}
 
 #[inline]
 pub(crate) fn run_async_handler_with_runtime_cx<F, Fut, Res>(f: F) -> Response
