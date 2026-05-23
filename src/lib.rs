@@ -287,6 +287,8 @@ pub mod public_api_golden_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod raptorq_deep_dive_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod raptorq_rfc6330_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod supervision_genserver_actor_io_fs_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod server_session_evidence_epoch_spork_metamorphic_tests;
