@@ -444,6 +444,34 @@ def tracker_blockers(
     ]
 
 
+def tracker_dirty_blockers(
+    candidate: dict[str, Any],
+    dirty: list[dict[str, Any]],
+    reservations: list[dict[str, Any]],
+    agent: str,
+) -> list[dict[str, str]]:
+    if not candidate_requires_tracker(candidate):
+        return []
+
+    blockers = []
+    for row in dirty:
+        if not any_path_matches(list(TRACKER_PATHS), row["path"]):
+            continue
+        owner, source = owner_for_dirty_path(row, reservations)
+        if owner == agent:
+            continue
+        blockers.append(
+            {
+                "kind": "tracker-dirty-peer-path" if owner else "tracker-dirty-unattributed-path",
+                "path": row["path"],
+                "holder": owner or "unknown",
+                "source": source,
+                "reason": "candidate requires a Beads tracker mutation while a tracker path is already dirty",
+            }
+        )
+    return blockers
+
+
 def dirty_blockers(
     paths: list[str],
     dirty: list[dict[str, Any]],
@@ -730,6 +758,7 @@ def classify_candidate(
     blockers.extend(disk_pressure_blockers(candidate, disk_pressure))
     blockers.extend(bead_blockers(candidate))
     blockers.extend(tracker_blockers(candidate, tracker_lock))
+    blockers.extend(tracker_dirty_blockers(candidate, dirty, reservations, agent))
     blockers.extend(reservation_blockers(paths, reservations, agent))
     blockers.extend(dirty_blockers(paths, dirty, reservations, agent))
 

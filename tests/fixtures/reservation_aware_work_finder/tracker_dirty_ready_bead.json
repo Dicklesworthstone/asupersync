@@ -1,0 +1,44 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": []
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": [
+      {
+        "id": "asupersync-ready-needs-dirty-tracker",
+        "title": "Claimable bead while tracker has peer dirt",
+        "priority": 1,
+        "paths": [
+          "scripts/reservation_aware_work_finder.py"
+        ]
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": [
+      {
+        "status": " M",
+        "path": ".beads/issues.jsonl",
+        "owner": "PlumCreek"
+      }
+    ]
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "mock-code-finder:safe-script",
+      "lane": "mock-code-finder",
+      "title": "Inspect reservation-aware finder without tracker mutation",
+      "priority": 2,
+      "no_build_validation": true,
+      "paths": [
+        "scripts/reservation_aware_work_finder.py"
+      ],
+      "proof_commands": [
+        "python3 -m py_compile scripts/reservation_aware_work_finder.py"
+      ]
+    }
+  ]
+}

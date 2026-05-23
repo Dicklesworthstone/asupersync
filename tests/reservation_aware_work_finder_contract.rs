@@ -157,6 +157,50 @@ fn dirty_rename_target_blocks_candidate_surface() {
 }
 
 #[test]
+fn dirty_tracker_blocks_tracker_mutating_ready_bead() {
+    let receipt = finder_json("tracker_dirty_ready_bead.json");
+    let tracker_claim = candidate(&receipt, "asupersync-ready-needs-dirty-tracker");
+    let source_only = candidate(&receipt, "mock-code-finder:safe-script");
+    let blockers = tracker_claim["blockers"].as_array().expect("blockers");
+    let tracker_blocker = blockers
+        .iter()
+        .find(|row| row["kind"].as_str() == Some("tracker-dirty-peer-path"))
+        .expect("tracker dirty blocker");
+
+    assert_eq!(tracker_claim["status"].as_str(), Some("blocked"));
+    assert_eq!(
+        tracker_blocker["path"].as_str(),
+        Some(".beads/issues.jsonl")
+    );
+    assert_eq!(tracker_blocker["holder"].as_str(), Some("PlumCreek"));
+    assert_eq!(tracker_blocker["source"].as_str(), Some("dirty-entry"));
+    assert_eq!(
+        tracker_blocker["reason"].as_str(),
+        Some("candidate requires a Beads tracker mutation while a tracker path is already dirty")
+    );
+    assert_eq!(
+        tracker_claim["files_to_reserve"][0].as_str(),
+        Some(".beads/issues.jsonl")
+    );
+
+    assert_eq!(source_only["status"].as_str(), Some("ready-fallback"));
+    assert_eq!(
+        receipt["recommendation"]["category"].as_str(),
+        Some("run-fallback-lane")
+    );
+    assert_eq!(
+        receipt["recommendation"]["candidate_id"].as_str(),
+        Some("mock-code-finder:safe-script")
+    );
+    assert!(
+        receipt["recommendation"]["safety_reason"]
+            .as_str()
+            .expect("safety reason")
+            .contains("no tracker mutation required")
+    );
+}
+
+#[test]
 fn clean_workspace_selects_highest_priority_fallback_candidate() {
     let receipt = finder_json("clean_workspace_candidates.json");
 
