@@ -1409,10 +1409,6 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("source listener");
     let source_addr = source_listener.local_addr().expect("source listener addr");
     let mut source_client = TcpStream::connect(source_addr).expect("source client connects");
-    let (mut relay_source_stream, _) = source_listener.accept().expect("accept source stream");
-    relay_source_stream
-        .set_nonblocking(true)
-        .expect("relay source stream nonblocking");
 
     let destination_listener =
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("destination listener");
@@ -1421,9 +1417,6 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
         .expect("destination listener addr");
     let mut destination_client =
         TcpStream::connect(destination_addr).expect("destination client connects");
-    let (mut relay_destination_stream, _) = destination_listener
-        .accept()
-        .expect("accept destination stream");
     destination_client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("destination read timeout");
@@ -1437,14 +1430,32 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
         1024,
     )
     .expect("socket loop");
-    let source_stream_id = RelayTcpTlsStreamId::new(801).expect("source stream id");
-    let destination_stream_id = RelayTcpTlsStreamId::new(802).expect("destination stream id");
-    socket_loop
-        .admit_tcp_tls_stream(peer(1), source_stream_id)
-        .expect("admit source tcp stream");
-    socket_loop
-        .admit_tcp_tls_stream(peer(2), destination_stream_id)
-        .expect("admit destination tcp stream");
+    let source_accept = socket_loop
+        .accept_tcp_tls_stream_once(&source_listener, peer(1))
+        .expect("accept source tcp stream")
+        .expect("source tcp stream accepted");
+    assert_eq!(
+        source_accept.peer_addr(),
+        source_client.local_addr().expect("source client addr")
+    );
+    let source_stream_id = source_accept.stream_id();
+    let mut relay_source_stream = source_accept.into_stream();
+    relay_source_stream
+        .set_nonblocking(true)
+        .expect("relay source stream nonblocking");
+
+    let destination_accept = socket_loop
+        .accept_tcp_tls_stream_once(&destination_listener, peer(2))
+        .expect("accept destination tcp stream")
+        .expect("destination tcp stream accepted");
+    assert_eq!(
+        destination_accept.peer_addr(),
+        destination_client
+            .local_addr()
+            .expect("destination client addr")
+    );
+    let destination_stream_id = destination_accept.stream_id();
+    let mut relay_destination_stream = destination_accept.into_stream();
 
     log_stage(
         test,

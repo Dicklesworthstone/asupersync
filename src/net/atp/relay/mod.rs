@@ -12,7 +12,7 @@ use crate::atp::path::{
 use crate::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 
 /// TCP/TLS fallback port used by locked-down egress networks.
 pub const TCP_TLS_443_PORT: u16 = 443;
@@ -607,6 +607,58 @@ impl RelayTcpTlsStreamWrite {
     }
 }
 
+/// TCP/TLS stream accepted by the relay socket loop.
+///
+/// The relay socket loop allocates the relay-local stream id and admits the
+/// stream to an already-authenticated peer in one operation. The returned
+/// `TcpStream` is still the caller's responsibility to configure for blocking,
+/// nonblocking, TLS wrapping, and readiness integration.
+#[derive(Debug)]
+pub struct RelayAcceptedTcpTlsStream {
+    stream_id: RelayTcpTlsStreamId,
+    peer_id: PeerId,
+    peer_addr: SocketAddr,
+    stream: TcpStream,
+}
+
+impl RelayAcceptedTcpTlsStream {
+    /// Relay-local stream id allocated for this accepted connection.
+    #[must_use]
+    pub const fn stream_id(&self) -> RelayTcpTlsStreamId {
+        self.stream_id
+    }
+
+    /// Authenticated peer id bound to this accepted stream.
+    #[must_use]
+    pub const fn peer_id(&self) -> PeerId {
+        self.peer_id
+    }
+
+    /// Socket peer address reported by `TcpListener::accept`.
+    #[must_use]
+    pub const fn peer_addr(&self) -> SocketAddr {
+        self.peer_addr
+    }
+
+    /// Borrow the accepted TCP stream.
+    #[must_use]
+    pub fn stream(&self) -> &TcpStream {
+        &self.stream
+    }
+
+    /// Mutably borrow the accepted TCP stream.
+    #[must_use]
+    pub fn stream_mut(&mut self) -> &mut TcpStream {
+        &mut self.stream
+    }
+
+    /// Consume this value and return the accepted TCP stream.
+    #[must_use]
+    pub fn into_stream(self) -> TcpStream {
+        self.stream
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RelayTcpTlsPendingWrite {
     peer_id: PeerId,
@@ -737,6 +789,7 @@ pub struct RelaySocketLoop {
     tcp_tls_pending_writes: BTreeMap<RelayTcpTlsStreamId, RelayTcpTlsPendingWrite>,
     max_payload_bytes: usize,
     max_tcp_tls_buffered_bytes: usize,
+    next_tcp_tls_stream_id: u128,
 }
 
 impl RelaySocketLoop {
@@ -759,6 +812,7 @@ impl RelaySocketLoop {
             tcp_tls_pending_writes: BTreeMap::new(),
             max_payload_bytes,
             max_tcp_tls_buffered_bytes,
+            next_tcp_tls_stream_id: 1,
         })
     }
 
@@ -845,6 +899,42 @@ impl RelaySocketLoop {
         self.tcp_tls_streams.remove(&stream_id);
         self.tcp_tls_pending_writes.remove(&stream_id);
         self.endpoints.unbind_tcp_tls_stream(stream_id)
+    }
+
+    /// Accept one TCP/TLS stream from a concrete listener and bind it to a peer.
+    ///
+    /// The peer id must already come from the caller's authenticated admission
+    /// layer, such as TLS/session capability validation. This helper only joins
+    /// the OS accept boundary to the relay-local stream id and endpoint
+    /// directory. A nonblocking listener with no pending connection returns
+    /// `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Ok(None)` for an empty nonblocking listener, OS I/O errors from
+    /// `accept`, or relay admission errors such as quota exhaustion.
+    pub fn accept_tcp_tls_stream_once(
+        &mut self,
+        listener: &TcpListener,
+        peer_id: PeerId,
+    ) -> Result<Option<RelayAcceptedTcpTlsStream>, RelaySocketIoError> {
+        if self.endpoints.tcp_tls_stream_count() >= self.endpoints.quota.max_tcp_tls_streams {
+            return Err(RelayError::QuotaExceeded.into());
+        }
+
+        let (stream, peer_addr) = match listener.accept() {
+            Ok(accepted) => accepted,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let stream_id = self.allocate_tcp_tls_stream_id()?;
+        self.admit_tcp_tls_stream(peer_id, stream_id)?;
+        Ok(Some(RelayAcceptedTcpTlsStream {
+            stream_id,
+            peer_id,
+            peer_addr,
+            stream,
+        }))
     }
 
     /// Return pending incomplete bytes for an admitted TCP/TLS stream.
@@ -1156,6 +1246,25 @@ impl RelaySocketLoop {
         }
 
         Ok(Some(written))
+    }
+
+    fn allocate_tcp_tls_stream_id(&mut self) -> Result<RelayTcpTlsStreamId, RelayError> {
+        let start = self.next_tcp_tls_stream_id.max(1);
+        let mut raw = start;
+        loop {
+            let stream_id = RelayTcpTlsStreamId::new(raw)?;
+            self.next_tcp_tls_stream_id = raw.checked_add(1).unwrap_or(1);
+            if !self.tcp_tls_streams.contains_key(&stream_id)
+                && !self.endpoints.tcp_tls_streams.contains_key(&stream_id)
+                && !self.tcp_tls_pending_writes.contains_key(&stream_id)
+            {
+                return Ok(stream_id);
+            }
+            raw = self.next_tcp_tls_stream_id;
+            if raw == start {
+                return Err(RelayError::QuotaExceeded);
+            }
+        }
     }
 }
 
@@ -4697,6 +4806,68 @@ mod tests {
             .expect("forward admitted tcp stream");
         assert_eq!(tcp_forwarded.len(), 1);
         assert_eq!(tcp_forwarded[0].to_peer_id(), peer(2));
+    }
+
+    #[test]
+    fn tcp_listener_accept_allocates_and_admits_stream_ids() {
+        let mut socket_loop = RelaySocketLoop::new(
+            RelayEndpointDirectoryQuota {
+                max_udp_endpoints: 1,
+                max_tcp_tls_streams: 1,
+            },
+            RelayQuota::default().max_packet_bytes,
+            1024,
+        )
+        .expect("socket loop");
+        let listener =
+            TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind listener");
+        listener
+            .set_nonblocking(true)
+            .expect("listener nonblocking");
+        assert!(
+            socket_loop
+                .accept_tcp_tls_stream_once(&listener, peer(1))
+                .expect("empty nonblocking accept")
+                .is_none()
+        );
+        listener
+            .set_nonblocking(false)
+            .expect("listener blocking for deterministic accept");
+
+        let client = TcpStream::connect(listener.local_addr().expect("listener addr"))
+            .expect("client connects");
+        let accepted = socket_loop
+            .accept_tcp_tls_stream_once(&listener, peer(1))
+            .expect("accept stream")
+            .expect("accepted stream");
+        assert_eq!(accepted.stream_id().get(), 1);
+        assert_eq!(accepted.peer_id(), peer(1));
+        assert_eq!(
+            accepted.peer_addr(),
+            client.local_addr().expect("client local addr")
+        );
+        assert_eq!(
+            socket_loop
+                .endpoints()
+                .peer_for_tcp_tls_stream(accepted.stream_id())
+                .expect("accepted stream admitted"),
+            peer(1)
+        );
+        assert_eq!(socket_loop.tcp_tls_stream_buffer_count(), 1);
+
+        let _second_client = TcpStream::connect(listener.local_addr().expect("listener addr"))
+            .expect("second client connects");
+        let err = socket_loop
+            .accept_tcp_tls_stream_once(&listener, peer(2))
+            .expect_err("quota prevents second accepted stream");
+        match err {
+            RelaySocketIoError::Relay {
+                source: RelayError::QuotaExceeded,
+            } => {}
+            other => panic!("unexpected accept error: {other:?}"),
+        }
+        assert_eq!(socket_loop.endpoints().tcp_tls_stream_count(), 1);
+        assert_eq!(socket_loop.tcp_tls_stream_buffer_count(), 1);
     }
 
     #[test]
