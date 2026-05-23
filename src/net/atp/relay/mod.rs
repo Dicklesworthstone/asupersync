@@ -472,7 +472,11 @@ impl RelayEndpointDirectory {
 
 impl Default for RelayEndpointDirectory {
     fn default() -> Self {
-        Self::new(RelayEndpointDirectoryQuota::default()).expect("default relay endpoint quota")
+        Self {
+            udp_endpoints: BTreeMap::new(),
+            tcp_tls_streams: BTreeMap::new(),
+            quota: RelayEndpointDirectoryQuota::default(),
+        }
     }
 }
 
