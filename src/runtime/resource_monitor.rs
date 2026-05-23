@@ -5867,4 +5867,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "resource_monitor_metamorphic.rs"]
 mod resource_monitor_metamorphic;

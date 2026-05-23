@@ -23,16 +23,22 @@
 //! - **MR8: Subset Consistency** - Partial resource sets behave consistently
 
 use crate::runtime::resource_monitor::{
-    DegradationEngine, DegradationLevel, MonitorConfig, ResourceMeasurement, ResourceMonitor,
-    ResourcePressure, ResourceType, TriggerConfig,
+    DegradationLevel, MonitorConfig, ResourceMeasurement, ResourceMonitor, ResourcePressure,
+    ResourceType,
 };
-use crate::types::RegionId;
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 const EPSILON: f64 = 1e-10;
+
+fn measurement(current: u64, max_limit: u64) -> ResourceMeasurement {
+    let max_limit = max_limit.max(1);
+    let soft_limit = ((max_limit as u128 * 70) / 100).max(1) as u64;
+    let hard_limit = ((max_limit as u128 * 85) / 100).max(soft_limit as u128) as u64;
+
+    ResourceMeasurement::new(current, soft_limit, hard_limit, max_limit)
+}
 
 /// MR1: Measurement Additivity
 ///
@@ -58,12 +64,7 @@ fn mr1_measurement_additivity() {
         let final_usage_a = base_usage.saturating_add(total_increment);
         monitor_a.pressure().update_measurement(
             ResourceType::Memory,
-            ResourceMeasurement {
-                current: final_usage_a,
-                peak: final_usage_a,
-                threshold: final_usage_a * 2,
-                last_updated: Instant::now(),
-            },
+            measurement(final_usage_a, final_usage_a * 2),
         );
 
         // Path B: Incremental updates
@@ -71,24 +72,14 @@ fn mr1_measurement_additivity() {
         let mut current_usage = base_usage;
         monitor_b.pressure().update_measurement(
             ResourceType::Memory,
-            ResourceMeasurement {
-                current: current_usage,
-                peak: current_usage,
-                threshold: final_usage_a * 2,
-                last_updated: Instant::now(),
-            },
+            measurement(current_usage, final_usage_a * 2),
         );
 
         for increment in increments {
             current_usage = current_usage.saturating_add(increment);
             monitor_b.pressure().update_measurement(
                 ResourceType::Memory,
-                ResourceMeasurement {
-                    current: current_usage,
-                    peak: current_usage,
-                    threshold: final_usage_a * 2,
-                    last_updated: Instant::now(),
-                },
+                measurement(current_usage, final_usage_a * 2),
             );
         }
 
@@ -130,12 +121,7 @@ fn mr2_pressure_monotonicity() {
         let monitor_base = ResourceMonitor::new(config.clone());
         monitor_base.pressure().update_measurement(
             ResourceType::CpuLoad,
-            ResourceMeasurement {
-                current: base_usage,
-                peak: base_usage,
-                threshold,
-                last_updated: Instant::now(),
-            },
+            measurement(base_usage, threshold),
         );
 
         // Update degradation engine to process the measurement
@@ -145,12 +131,7 @@ fn mr2_pressure_monotonicity() {
         let monitor_scaled = ResourceMonitor::new(config);
         monitor_scaled.pressure().update_measurement(
             ResourceType::CpuLoad,
-            ResourceMeasurement {
-                current: scaled_usage,
-                peak: scaled_usage,
-                threshold,
-                last_updated: Instant::now(),
-            },
+            measurement(scaled_usage, threshold),
         );
 
         let _ = monitor_scaled.engine().process_measurements();
@@ -188,12 +169,7 @@ fn mr3_configuration_scaling_invariance() {
         let monitor_base = ResourceMonitor::new(config.clone());
         monitor_base.pressure().update_measurement(
             ResourceType::FileDescriptors,
-            ResourceMeasurement {
-                current: usage,
-                peak: usage,
-                threshold: base_threshold,
-                last_updated: Instant::now(),
-            },
+            measurement(usage, base_threshold),
         );
         let _ = monitor_base.engine().process_measurements();
 
@@ -201,12 +177,7 @@ fn mr3_configuration_scaling_invariance() {
         let monitor_scaled = ResourceMonitor::new(config);
         monitor_scaled.pressure().update_measurement(
             ResourceType::FileDescriptors,
-            ResourceMeasurement {
-                current: usage,
-                peak: usage,
-                threshold: scaled_threshold,
-                last_updated: Instant::now(),
-            },
+            measurement(usage, scaled_threshold),
         );
         let _ = monitor_scaled.engine().process_measurements();
 
@@ -244,12 +215,7 @@ fn mr4_temporal_idempotence() {
         let config = MonitorConfig::default();
         let monitor = ResourceMonitor::new(config);
 
-        let measurement = ResourceMeasurement {
-            current: usage,
-            peak: usage,
-            threshold,
-            last_updated: Instant::now(),
-        };
+        let measurement = measurement(usage, threshold);
 
         // Apply measurement once
         monitor.pressure().update_measurement(ResourceType::NetworkConnections, measurement.clone());
@@ -269,9 +235,12 @@ fn mr4_temporal_idempotence() {
         prop_assert_eq!(degradation_after_one, degradation_after_many,
             "Temporal idempotence violation: degradation changed from {:?} to {:?} after {} repetitions",
             degradation_after_one, degradation_after_many, repeat_count);
-        prop_assert_eq!(measurement_after_one.unwrap().current, measurement_after_many.unwrap().current,
+        let measurement_after_one_current = measurement_after_one.as_ref().unwrap().current;
+        let measurement_after_many_current = measurement_after_many.as_ref().unwrap().current;
+
+        prop_assert_eq!(measurement_after_one_current, measurement_after_many_current,
             "Temporal idempotence violation: measurement changed from {} to {} after {} repetitions",
-            measurement_after_one.unwrap().current, measurement_after_many.unwrap().current, repeat_count);
+            measurement_after_one_current, measurement_after_many_current, repeat_count);
     });
 }
 
@@ -299,12 +268,7 @@ fn mr5_cross_resource_independence() {
         // Update memory first
         monitor.pressure().update_measurement(
             ResourceType::Memory,
-            ResourceMeasurement {
-                current: memory_usage,
-                peak: memory_usage,
-                threshold: memory_threshold,
-                last_updated: Instant::now(),
-            },
+            measurement(memory_usage, memory_threshold),
         );
         let _ = monitor.engine().process_measurements();
         let memory_degradation_before = monitor.pressure().get_degradation_level(&ResourceType::Memory);
@@ -312,12 +276,7 @@ fn mr5_cross_resource_independence() {
         // Update file descriptors - should not affect memory degradation
         monitor.pressure().update_measurement(
             ResourceType::FileDescriptors,
-            ResourceMeasurement {
-                current: fd_usage,
-                peak: fd_usage,
-                threshold: fd_threshold,
-                last_updated: Instant::now(),
-            },
+            measurement(fd_usage, fd_threshold),
         );
         let _ = monitor.engine().process_measurements();
         let memory_degradation_after = monitor.pressure().get_degradation_level(&ResourceType::Memory);
@@ -344,7 +303,7 @@ fn mr5_cross_resource_independence() {
 #[test]
 fn mr6_reset_equivalence() {
     proptest!(|(
-        operations: Vec<(ResourceType, u64, u64)> // (resource_type, usage, threshold)
+        operations in generators::degradation_scenario() // (resource_type, usage, threshold)
     )| {
         prop_assume!(!operations.is_empty() && operations.len() <= 5);
 
@@ -358,12 +317,7 @@ fn mr6_reset_equivalence() {
         // Add some prior state
         existing_monitor.pressure().update_measurement(
             ResourceType::Task,
-            ResourceMeasurement {
-                current: 9999,
-                peak: 9999,
-                threshold: 10000,
-                last_updated: Instant::now(),
-            },
+            measurement(9999, 10000),
         );
 
         // Reset existing monitor by creating a new pressure/engine state
@@ -374,12 +328,7 @@ fn mr6_reset_equivalence() {
         for (resource_type, usage, threshold) in &operations {
             if *threshold == 0 { continue; }
 
-            let measurement = ResourceMeasurement {
-                current: *usage,
-                peak: *usage,
-                threshold: *threshold,
-                last_updated: Instant::now(),
-            };
+            let measurement = measurement(*usage, *threshold);
 
             fresh_monitor.pressure().update_measurement(resource_type.clone(), measurement.clone());
             reset_pressure.update_measurement(resource_type.clone(), measurement);
@@ -390,7 +339,6 @@ fn mr6_reset_equivalence() {
 
         // Compare final states for each resource type used
         for (resource_type, _, _) in &operations {
-            let fresh_degradation = fresh_monitor.pressure().get_degradation_level(resource_type);
             let fresh_measurement = fresh_monitor.pressure().get_measurement(resource_type);
             let reset_measurement = reset_pressure.get_measurement(resource_type);
 
@@ -413,7 +361,7 @@ fn mr6_reset_equivalence() {
 #[test]
 fn mr7_ordering_invariance() {
     proptest!(|(
-        measurements: Vec<(ResourceType, u64, u64)>
+        measurements in generators::degradation_scenario()
     )| {
         prop_assume!(measurements.len() >= 2 && measurements.len() <= 4);
         prop_assume!(measurements.iter().all(|(_, _, threshold)| *threshold > 0));
@@ -430,12 +378,7 @@ fn mr7_ordering_invariance() {
         for (resource_type, usage, threshold) in &measurements {
             monitor_original.pressure().update_measurement(
                 resource_type.clone(),
-                ResourceMeasurement {
-                    current: *usage,
-                    peak: *usage,
-                    threshold: *threshold,
-                    last_updated: Instant::now(),
-                },
+                measurement(*usage, *threshold),
             );
         }
         let _ = monitor_original.engine().process_measurements();
@@ -445,12 +388,7 @@ fn mr7_ordering_invariance() {
         for (resource_type, usage, threshold) in measurements.iter().rev() {
             monitor_reversed.pressure().update_measurement(
                 resource_type.clone(),
-                ResourceMeasurement {
-                    current: *usage,
-                    peak: *usage,
-                    threshold: *threshold,
-                    last_updated: Instant::now(),
-                },
+                measurement(*usage, *threshold),
             );
         }
         let _ = monitor_reversed.engine().process_measurements();
@@ -477,7 +415,7 @@ fn mr7_ordering_invariance() {
 #[test]
 fn mr8_subset_consistency() {
     proptest!(|(
-        all_measurements: Vec<(ResourceType, u64, u64)>
+        all_measurements in generators::degradation_scenario()
     )| {
         prop_assume!(all_measurements.len() >= 3 && all_measurements.len() <= 6);
         prop_assume!(all_measurements.iter().all(|(_, _, threshold)| *threshold > 0));
@@ -493,12 +431,7 @@ fn mr8_subset_consistency() {
         for (resource_type, usage, threshold) in &all_measurements {
             monitor_full.pressure().update_measurement(
                 resource_type.clone(),
-                ResourceMeasurement {
-                    current: *usage,
-                    peak: *usage,
-                    threshold: *threshold,
-                    last_updated: Instant::now(),
-                },
+                measurement(*usage, *threshold),
             );
         }
         let _ = monitor_full.engine().process_measurements();
@@ -508,12 +441,7 @@ fn mr8_subset_consistency() {
         for (resource_type, usage, threshold) in subset_measurements {
             monitor_subset.pressure().update_measurement(
                 resource_type.clone(),
-                ResourceMeasurement {
-                    current: *usage,
-                    peak: *usage,
-                    threshold: *threshold,
-                    last_updated: Instant::now(),
-                },
+                measurement(*usage, *threshold),
             );
         }
         let _ = monitor_subset.engine().process_measurements();
@@ -546,16 +474,12 @@ mod generators {
     }
 
     pub fn valid_measurement() -> impl Strategy<Value = (u64, u64)> {
-        (1u64..10000, 1u64..20000).prop_filter("threshold > usage", |(usage, threshold)| {
-            threshold >= usage
-        })
+        (1u64..10000, 1u64..20000)
+            .prop_filter("threshold > usage", |(usage, threshold)| threshold >= usage)
     }
 
     pub fn degradation_scenario() -> impl Strategy<Value = Vec<(ResourceType, u64, u64)>> {
-        prop::collection::vec(
-            (resource_type(), valid_measurement()),
-            1..8
-        ).prop_map(|vec| {
+        prop::collection::vec((resource_type(), valid_measurement()), 1..8).prop_map(|vec| {
             vec.into_iter()
                 .map(|(rt, (usage, threshold))| (rt, usage, threshold))
                 .collect()
@@ -582,15 +506,9 @@ mod integration_tests {
         let mut current = base_usage;
         for inc in &increments {
             current += inc;
-            monitor_base.pressure().update_measurement(
-                ResourceType::Memory,
-                ResourceMeasurement {
-                    current,
-                    peak: current,
-                    threshold: current * 3,
-                    last_updated: Instant::now(),
-                },
-            );
+            monitor_base
+                .pressure()
+                .update_measurement(ResourceType::Memory, measurement(current, current * 3));
         }
         let _ = monitor_base.engine().process_measurements();
 
@@ -603,22 +521,23 @@ mod integration_tests {
             scaled_current += scaled_inc;
             monitor_scaled.pressure().update_measurement(
                 ResourceType::Memory,
-                ResourceMeasurement {
-                    current: scaled_current,
-                    peak: scaled_current,
-                    threshold: scaled_current * 3,
-                    last_updated: Instant::now(),
-                },
+                measurement(scaled_current, scaled_current * 3),
             );
         }
         let _ = monitor_scaled.engine().process_measurements();
 
-        let base_degradation = monitor_base.pressure().get_degradation_level(&ResourceType::Memory);
-        let scaled_degradation = monitor_scaled.pressure().get_degradation_level(&ResourceType::Memory);
+        let base_degradation = monitor_base
+            .pressure()
+            .get_degradation_level(&ResourceType::Memory);
+        let scaled_degradation = monitor_scaled
+            .pressure()
+            .get_degradation_level(&ResourceType::Memory);
 
         // Composite property: scaled version should have ≥ degradation
-        assert!(scaled_degradation >= base_degradation,
-            "Composite MR violation: scaled additive measurements should preserve monotonicity");
+        assert!(
+            scaled_degradation >= base_degradation,
+            "Composite MR violation: scaled additive measurements should preserve monotonicity"
+        );
     }
 
     #[test]
@@ -637,7 +556,11 @@ mod integration_tests {
             }
 
             // Bug: ignores subsequent measurements (violates MR1)
-            fn update_measurement_ignore_subsequent(&self, resource_type: ResourceType, measurement: ResourceMeasurement) {
+            fn update_measurement_ignore_subsequent(
+                &self,
+                resource_type: ResourceType,
+                measurement: ResourceMeasurement,
+            ) {
                 let mut measurements = self.measurements.borrow_mut();
                 if !measurements.contains_key(&resource_type) {
                     measurements.insert(resource_type, measurement);
@@ -646,18 +569,39 @@ mod integration_tests {
             }
 
             // Bug: non-monotonic degradation (violates MR2)
-            fn get_degradation_level_nonmonotonic(&self, _resource_type: &ResourceType) -> DegradationLevel {
-                // BUG: returns random degradation regardless of usage
-                if rand::random::<bool>() {
-                    DegradationLevel::Low
+            fn get_degradation_level_nonmonotonic(
+                &self,
+                _resource_type: &ResourceType,
+            ) -> DegradationLevel {
+                // BUG: returns degradation unrelated to the measured resource.
+                if self.measurements.borrow().len().is_multiple_of(2) {
+                    DegradationLevel::Light
                 } else {
                     DegradationLevel::None
                 }
             }
         }
 
-        // These bugs should be caught by our MRs in real testing
-        // (We can't easily test this without refactoring the actual code,
-        // but this demonstrates the validation principle)
+        let buggy = BuggyResourcePressure::new();
+        buggy.update_measurement_ignore_subsequent(ResourceType::Memory, measurement(10, 100));
+        buggy.update_measurement_ignore_subsequent(ResourceType::Memory, measurement(90, 100));
+
+        let stored_current = buggy
+            .measurements
+            .borrow()
+            .get(&ResourceType::Memory)
+            .unwrap()
+            .current;
+        assert_eq!(
+            stored_current, 10,
+            "planted additivity bug should ignore the second measurement"
+        );
+
+        buggy.update_measurement_ignore_subsequent(ResourceType::CpuLoad, measurement(1, 100));
+        assert_eq!(
+            buggy.get_degradation_level_nonmonotonic(&ResourceType::CpuLoad),
+            DegradationLevel::Light,
+            "planted monotonicity bug should report degradation unrelated to usage"
+        );
     }
 }
