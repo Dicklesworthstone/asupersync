@@ -468,6 +468,13 @@ impl Drop for Notify {
         // Per asupersync cancel-aware semantics, pending waiters should be cancelled
         // with explicit error rather than hanging forever
 
+        // Increment generation to signal drop to any waiters that check it
+        // This ensures proper memory ordering for the drop event
+        let _final_generation = self.generation.fetch_add(1, Ordering::Release);
+
+        // Clear stored notifications - no more consumers can arrive
+        self.stored_notifications.store(0, Ordering::Release);
+
         let wakers = {
             let mut waiters = self.waiters.lock();
             let mut wakers = Vec::new();
@@ -620,7 +627,9 @@ impl Notified<'_> {
             let mut waiters = self.notify.waiters.lock();
 
             // Re-check generation under lock if it wasn't already changed
-            let is_gen_changed = gen_changed || {
+            let is_gen_changed = if gen_changed {
+                true
+            } else {
                 let new_gen = self.notify.generation.load(Ordering::Acquire);
                 new_gen != self.initial_generation
             };

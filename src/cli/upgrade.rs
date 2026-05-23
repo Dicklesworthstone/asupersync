@@ -5,9 +5,9 @@
 
 use crate::atp::config::{AtpConfig, ConfigVersion};
 use crate::types::outcome::Outcome;
+use semver::Version;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use semver::Version;
 
 /// ATP upgrade manager
 #[derive(Debug)]
@@ -51,17 +51,23 @@ impl UpgradeManager {
             current_version: installed_version.clone(),
             latest_version: self.current_version.clone(),
             update_available: self.current_version > installed_version,
-            download_url: Some("https://github.com/asupersync/asupersync/releases/latest".to_string()),
+            download_url: Some(
+                "https://github.com/asupersync/asupersync/releases/latest".to_string(),
+            ),
             changelog_url: Some("https://github.com/asupersync/asupersync/releases".to_string()),
             breaking_changes: self.has_breaking_changes(&installed_version, &self.current_version),
-            schema_migration_required: self.requires_schema_migration(&installed_version, &self.current_version),
+            schema_migration_required: self
+                .requires_schema_migration(&installed_version, &self.current_version),
         };
 
         Ok(update_info)
     }
 
     /// Perform ATP upgrade with state preservation
-    pub fn upgrade(&mut self, target_version: Option<Version>) -> Result<UpgradeResult, UpgradeError> {
+    pub fn upgrade(
+        &mut self,
+        target_version: Option<Version>,
+    ) -> Result<UpgradeResult, UpgradeError> {
         let target = target_version.unwrap_or_else(|| self.current_version.clone());
 
         println!("Upgrading ATP to version {}...", target);
@@ -123,7 +129,10 @@ impl UpgradeManager {
             self.start_daemon()?;
         }
 
-        println!("✅ ATP rolled back successfully to version {}", backup_metadata.version);
+        println!(
+            "✅ ATP rolled back successfully to version {}",
+            backup_metadata.version
+        );
 
         Ok(RollbackResult {
             restored_version: backup_metadata.version,
@@ -240,7 +249,10 @@ impl UpgradeManager {
         Ok(())
     }
 
-    fn migrate_state(&self, target_version: &Version) -> Result<Option<MigrationResult>, UpgradeError> {
+    fn migrate_state(
+        &self,
+        target_version: &Version,
+    ) -> Result<Option<MigrationResult>, UpgradeError> {
         if !self.requires_schema_migration(&self.current_version, target_version) {
             return Ok(None);
         }
@@ -332,7 +344,12 @@ impl UpgradeManager {
         Ok(())
     }
 
-    fn copy_directory_selective(&self, src: &Path, dst: &Path, excludes: &[&str]) -> Result<(), UpgradeError> {
+    fn copy_directory_selective(
+        &self,
+        src: &Path,
+        dst: &Path,
+        excludes: &[&str],
+    ) -> Result<(), UpgradeError> {
         std::fs::create_dir_all(dst)?;
 
         for entry in std::fs::read_dir(src)? {
@@ -342,7 +359,10 @@ impl UpgradeManager {
             // Check if file matches exclude patterns
             let should_exclude = excludes.iter().any(|pattern| {
                 // Simple glob matching - in real implementation would use a proper glob library
-                pattern.trim_start_matches('*').chars().all(|c| file_name.contains(c))
+                pattern
+                    .trim_start_matches('*')
+                    .chars()
+                    .all(|c| file_name.contains(c))
             });
 
             if should_exclude {
@@ -502,16 +522,10 @@ pub enum UpgradeError {
     BackupNotFound(String),
 
     #[error("Unsupported downgrade from {current} to {target}")]
-    UnsupportedDowngrade {
-        current: Version,
-        target: Version,
-    },
+    UnsupportedDowngrade { current: Version, target: Version },
 
     #[error("Unsupported major version skip from {current} to {target}")]
-    UnsupportedMajorSkip {
-        current: Version,
-        target: Version,
-    },
+    UnsupportedMajorSkip { current: Version, target: Version },
 
     #[error("Migration failed: {0}")]
     MigrationFailed(String),

@@ -1347,9 +1347,11 @@ impl<S: CancelSink> CancelBroadcaster<S> {
 
         // Process retry queue until empty or we hit a failure
         loop {
-            let msg = {
+            let (msg, original_queue_len) = {
                 let mut retries = self.pending_retries.write();
-                retries.pop_front()
+                let msg = retries.pop_front();
+                let queue_len = retries.len();
+                (msg, queue_len)
             };
 
             let Some(msg) = msg else {
@@ -1362,8 +1364,21 @@ impl<S: CancelSink> CancelBroadcaster<S> {
                     // Successfully retried, continue with next message
                 }
                 Err(err) => {
-                    // Failed again, put message back at the front for next retry
-                    self.pending_retries.write().push_front(msg);
+                    // Failed again, put message back preserving FIFO order.
+                    // Insert at the position it would have been if we hadn't removed it,
+                    // accounting for any messages added during the async broadcast.
+                    {
+                        let mut retries = self.pending_retries.write();
+                        let current_len = retries.len();
+                        if current_len > original_queue_len {
+                            // New messages were added during broadcast, insert after original messages
+                            // but before the newly added ones to preserve temporal ordering
+                            retries.insert(original_queue_len, msg);
+                        } else {
+                            // No new messages added, safe to put back at front
+                            retries.push_front(msg);
+                        }
+                    }
                     last_error = Some(err);
                     break; // Stop retrying on first failure to preserve order
                 }

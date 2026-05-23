@@ -3,8 +3,8 @@
 //! Handles initial ATP installation, identity creation, configuration setup,
 //! and capability/privacy choices for new users.
 
+use crate::atp::config::{AtpConfig, ProofRetentionPolicy, ReceiveSafetyPolicy};
 use crate::atp::identity::{AtpIdentity, IdentityKeyStore};
-use crate::atp::config::{AtpConfig, ReceiveSafetyPolicy, ProofRetentionPolicy};
 use crate::types::outcome::Outcome;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -81,7 +81,10 @@ impl FirstRunSetup {
         self.create_directories()?;
         let setup_result = self.initialize_configuration()?;
 
-        println!("✅ ATP configured automatically at: {}", self.config_dir.display());
+        println!(
+            "✅ ATP configured automatically at: {}",
+            self.config_dir.display()
+        );
         Ok(setup_result)
     }
 
@@ -100,7 +103,10 @@ impl FirstRunSetup {
         }
 
         // Inbox directory
-        println!("Inbox directory for received files [{}]:", self.inbox_dir.display());
+        println!(
+            "Inbox directory for received files [{}]:",
+            self.inbox_dir.display()
+        );
         if let Some(input) = self.read_user_input()? {
             self.inbox_dir = PathBuf::from(input);
         }
@@ -138,7 +144,9 @@ impl FirstRunSetup {
 
         // Logging level
         println!("\nLogging level [info/debug/trace, default info]:");
-        let log_level = self.read_user_input()?.unwrap_or_else(|| "info".to_string());
+        let log_level = self
+            .read_user_input()?
+            .unwrap_or_else(|| "info".to_string());
         self.privacy_choices.logging_level = log_level;
 
         // Proof retention
@@ -188,7 +196,10 @@ impl FirstRunSetup {
         let mut key_store = IdentityKeyStore::new(&self.identity_path)?;
         let identity = key_store.generate_identity()?;
 
-        println!("🔑 Generated ATP identity: {}", identity.public_key_fingerprint());
+        println!(
+            "🔑 Generated ATP identity: {}",
+            identity.public_key_fingerprint()
+        );
 
         // Create ATP configuration
         let config = AtpConfig {
@@ -225,7 +236,12 @@ impl FirstRunSetup {
     }
 
     fn create_directories(&self) -> Result<(), FirstRunError> {
-        for dir in &[&self.config_dir, &self.inbox_dir, &self.peer_dir, &self.daemon_state_dir] {
+        for dir in &[
+            &self.config_dir,
+            &self.inbox_dir,
+            &self.peer_dir,
+            &self.daemon_state_dir,
+        ] {
             std::fs::create_dir_all(dir)
                 .map_err(|e| FirstRunError::DirectoryCreation(dir.clone(), e))?;
         }
@@ -248,7 +264,10 @@ impl FirstRunSetup {
         let fish_completion = include_str!("completion/atp.fish");
         std::fs::write(completions_dir.join("atp.fish"), fish_completion)?;
 
-        println!("📝 Generated shell completions in: {}", completions_dir.display());
+        println!(
+            "📝 Generated shell completions in: {}",
+            completions_dir.display()
+        );
         println!("Add to your shell profile:");
 
         match std::env::var("SHELL").as_deref() {
@@ -256,7 +275,10 @@ impl FirstRunSetup {
                 println!("  source {}", completions_dir.join("atp.bash").display());
             }
             Ok(shell) if shell.contains("zsh") => {
-                println!("  fpath+=({}) && autoload -U compinit && compinit", completions_dir.display());
+                println!(
+                    "  fpath+=({}) && autoload -U compinit && compinit",
+                    completions_dir.display()
+                );
             }
             Ok(shell) if shell.contains("fish") => {
                 println!("  source {}", completions_dir.join("atp.fish").display());
@@ -285,7 +307,8 @@ impl FirstRunSetup {
 
         std::fs::create_dir_all(&service_dir)?;
 
-        let service_content = format!(include_str!("../packaging/linux/atp.service"),
+        let service_content = format!(
+            include_str!("../packaging/linux/atp.service"),
             binary_path = std::env::current_exe()?.display(),
             config_dir = self.config_dir.display()
         );
@@ -311,7 +334,8 @@ impl FirstRunSetup {
 
         std::fs::create_dir_all(&agents_dir)?;
 
-        let plist_content = format!(include_str!("../packaging/macos/com.asupersync.atp.plist"),
+        let plist_content = format!(
+            include_str!("../packaging/macos/com.asupersync.atp.plist"),
             binary_path = std::env::current_exe()?.display(),
             config_dir = self.config_dir.display()
         );
@@ -331,7 +355,8 @@ impl FirstRunSetup {
         let scripts_dir = self.config_dir.join("scripts");
         std::fs::create_dir_all(&scripts_dir)?;
 
-        let install_script = format!(include_str!("../packaging/windows/install-service.ps1"),
+        let install_script = format!(
+            include_str!("../packaging/windows/install-service.ps1"),
             binary_path = std::env::current_exe()?.display(),
             config_dir = self.config_dir.display()
         );
@@ -339,8 +364,14 @@ impl FirstRunSetup {
         let script_path = scripts_dir.join("install-service.ps1");
         std::fs::write(&script_path, install_script)?;
 
-        println!("📋 Windows service script generated: {}", script_path.display());
-        println!("Run as Administrator: PowerShell -ExecutionPolicy Bypass -File \"{}\"", script_path.display());
+        println!(
+            "📋 Windows service script generated: {}",
+            script_path.display()
+        );
+        println!(
+            "Run as Administrator: PowerShell -ExecutionPolicy Bypass -File \"{}\"",
+            script_path.display()
+        );
 
         Ok(())
     }
@@ -349,7 +380,10 @@ impl FirstRunSetup {
         use std::io::{self, BufRead};
 
         let stdin = io::stdin();
-        let line = stdin.lock().lines().next()
+        let line = stdin
+            .lock()
+            .lines()
+            .next()
             .ok_or(FirstRunError::InputError)?
             .map_err(FirstRunError::InputError)?;
 
@@ -436,7 +470,9 @@ impl ServiceIntegration {
     pub fn start_command(&self) -> &'static str {
         match self.platform {
             ServicePlatform::Linux => "systemctl --user start atp.service",
-            ServicePlatform::MacOS => "launchctl load ~/Library/LaunchAgents/com.asupersync.atp.plist",
+            ServicePlatform::MacOS => {
+                "launchctl load ~/Library/LaunchAgents/com.asupersync.atp.plist"
+            }
             ServicePlatform::Windows => "sc start ATP",
             ServicePlatform::Other => "atp daemon",
         }
@@ -445,7 +481,9 @@ impl ServiceIntegration {
     pub fn stop_command(&self) -> &'static str {
         match self.platform {
             ServicePlatform::Linux => "systemctl --user stop atp.service",
-            ServicePlatform::MacOS => "launchctl unload ~/Library/LaunchAgents/com.asupersync.atp.plist",
+            ServicePlatform::MacOS => {
+                "launchctl unload ~/Library/LaunchAgents/com.asupersync.atp.plist"
+            }
             ServicePlatform::Windows => "sc stop ATP",
             ServicePlatform::Other => "atp daemon stop",
         }
@@ -567,9 +605,8 @@ mod tests {
             );
 
             // Also verify the file is not empty
-            let content = std::fs::read_to_string(&full_path).unwrap_or_else(|_| {
-                panic!("Failed to read completion asset {}", file_path)
-            });
+            let content = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|_| panic!("Failed to read completion asset {}", file_path));
 
             assert!(
                 !content.trim().is_empty(),

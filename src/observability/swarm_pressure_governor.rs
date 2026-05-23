@@ -829,12 +829,24 @@ pub struct SwarmWorkloadLeaseReceipt {
     pub lease_id: SwarmWorkloadLeaseId,
     /// Workload id affected by the operation.
     pub workload_id: String,
+    /// Owner metadata bound to the lease.
+    pub owner: SwarmAdmissionOwner,
+    /// Proof or validation lane bound to the lease.
+    pub proof_lane: SwarmProofLaneKind,
     /// Region bound to the lease.
     pub region_id: RegionId,
     /// Priority bound to the lease.
     pub priority: RegionPriority,
+    /// Memory reservation carried by the lease.
+    pub reserved_memory_bytes: Option<u64>,
+    /// CPU reservation carried by the lease.
+    pub reserved_cpu_ns_per_sec: Option<u64>,
+    /// IO reservation carried by the lease.
+    pub reserved_io_ops_per_sec: Option<u64>,
     /// Lease state after the operation.
     pub state: SwarmWorkloadLeaseState,
+    /// Time at which the lease was granted.
+    pub issued_at: Instant,
     /// Lease expiry after the operation.
     pub expires_at: Instant,
     /// Terminal transition time, when the operation completed the lease.
@@ -1416,7 +1428,7 @@ impl SwarmPressureGovernor {
         let lease = SwarmWorkloadLease {
             lease_id,
             workload_id: request.workload_id.trim().to_string(),
-            owner: request.owner.clone(),
+            owner: normalized_owner_metadata(&request.owner),
             proof_lane: request.proof_lane,
             priority: request.priority,
             region_id,
@@ -1696,6 +1708,7 @@ impl SwarmPressureGovernor {
         }
 
         feedback.workload_id = feedback.workload_id.trim().to_string();
+        feedback.owner = normalized_owner_metadata(&feedback.owner);
         let now = Instant::now();
         let mut reports = self.workload_pressure_feedback.lock().unwrap();
         prune_stale_workload_pressure_feedback_locked(
@@ -1983,9 +1996,15 @@ impl SwarmPressureGovernor {
         SwarmWorkloadLeaseReceipt {
             lease_id: lease.lease_id,
             workload_id: lease.workload_id.clone(),
+            owner: lease.owner.clone(),
+            proof_lane: lease.proof_lane,
             region_id: lease.region_id,
             priority: lease.priority,
+            reserved_memory_bytes: lease.reserved_memory_bytes,
+            reserved_cpu_ns_per_sec: lease.reserved_cpu_ns_per_sec,
+            reserved_io_ops_per_sec: lease.reserved_io_ops_per_sec,
             state: lease.state,
+            issued_at: lease.issued_at,
             expires_at: lease.expires_at,
             terminal_at: lease.terminal_at,
             reason: lease.context_reason(reason.as_ref()),
@@ -3513,6 +3532,20 @@ mod tests {
             .acquire_workload_lease(RegionId::new_for_test(50, 1), &request, &decision)
             .expect("matching workload receipt should acquire");
         assert_eq!(acquired.workload_id, "receipt-owner-a");
+        assert_eq!(acquired.owner.agent_name, "DustyGorge");
+        assert_eq!(
+            acquired.owner.bead_id.as_deref(),
+            Some("asupersync-oxqrae.2")
+        );
+        assert_eq!(
+            acquired.owner.reservation_scope.as_deref(),
+            Some("src/observability/swarm_pressure_governor.rs")
+        );
+        assert_eq!(acquired.proof_lane, SwarmProofLaneKind::CargoCheckLib);
+        assert_eq!(acquired.reserved_memory_bytes, Some(1024));
+        assert_eq!(acquired.reserved_cpu_ns_per_sec, Some(50));
+        assert_eq!(acquired.reserved_io_ops_per_sec, Some(5));
+        assert!(acquired.issued_at <= acquired.expires_at);
         assert_eq!(governor.metrics().workload_leases_acquired, 1);
     }
 
@@ -4162,12 +4195,29 @@ mod tests {
             .record_workload_pressure_feedback(
                 SwarmWorkloadPressureFeedback::new(
                     "hot-proof",
-                    SwarmAdmissionOwner::new("DustyGorge"),
+                    SwarmAdmissionOwner::new(" DustyGorge ")
+                        .with_bead_id(" asupersync-oxqrae.2 ")
+                        .with_reservation_scope(" src/observability/swarm_pressure_governor.rs "),
                     SwarmProofLaneKind::CargoCheckLib,
                 )
                 .with_pressures(0.20, 0.30, 0.85, 0.40, 0.10),
             )
             .expect("workload feedback should be accepted");
+        {
+            let reports = governor.workload_pressure_feedback.lock().unwrap();
+            let feedback = reports
+                .get("hot-proof")
+                .expect("feedback should be stored by normalized workload id");
+            assert_eq!(feedback.owner.agent_name, "DustyGorge");
+            assert_eq!(
+                feedback.owner.bead_id.as_deref(),
+                Some("asupersync-oxqrae.2")
+            );
+            assert_eq!(
+                feedback.owner.reservation_scope.as_deref(),
+                Some("src/observability/swarm_pressure_governor.rs")
+            );
+        }
 
         let runtime = std::sync::Arc::new(
             RuntimeBuilder::new()
