@@ -627,7 +627,7 @@ mod tests {
         if initial_len < min_serialized_size {
             snapshot
                 .metadata
-                .resize(min_serialized_size - initial_len, 0xAB);
+                .resize(min_serialized_size.saturating_sub(initial_len), 0xAB);
             while snapshot.to_bytes().len() < min_serialized_size {
                 snapshot.metadata.push(0xAB);
             }

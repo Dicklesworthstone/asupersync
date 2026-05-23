@@ -110,7 +110,7 @@ impl RegionMode {
     const fn min_quorum(replication_factor: u32, consistency: ConsistencyLevel) -> u32 {
         match consistency {
             ConsistencyLevel::One | ConsistencyLevel::Local => 1,
-            ConsistencyLevel::Quorum => replication_factor / 2 + 1,
+            ConsistencyLevel::Quorum => (replication_factor / 2).saturating_add(1),
             ConsistencyLevel::All => replication_factor,
         }
     }
@@ -1836,7 +1836,7 @@ mod tests {
             // Interleave task add/remove with snapshots.
             let tid = TaskId::new_for_test(i, 0);
             bridge.add_task(tid).unwrap();
-            let snap = bridge.create_snapshot(Time::from_secs(u64::from(i) + 1));
+            let snap = bridge.create_snapshot(Time::from_secs(u64::from(i).saturating_add(1)));
             assert!(
                 snap.sequence > prev_seq,
                 "sequence must be monotonically increasing"
@@ -2573,7 +2573,7 @@ mod tests {
             "outbound sync must have advanced last_synced_sequence"
         );
 
-        let inbound_seq = bridge.sync_state.last_synced_sequence - 1;
+        let inbound_seq = bridge.sync_state.last_synced_sequence.saturating_sub(1);
         // Edge case: if outbound sync only emitted seq=1, fall back
         // to seq=1 since 0 is not > last_applied_inbound_sequence=0.
         let inbound_seq = inbound_seq.max(1);

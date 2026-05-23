@@ -1053,7 +1053,7 @@ fn decode_dns_name_inner(
             .ok_or_else(|| DnsError::Protocol("truncated DNS name".to_string()))?;
         if len & 0xC0 == 0xC0 {
             let next = *packet
-                .get(offset + 1)
+                .get(offset.saturating_add(1))
                 .ok_or_else(|| DnsError::Protocol("truncated DNS name pointer".to_string()))?;
             let pointer = ((u16::from(len & 0x3F) << 8) | u16::from(next)) as usize;
             if pointer >= start {
@@ -1061,11 +1061,11 @@ fn decode_dns_name_inner(
                     "forward DNS compression pointer".to_string(),
                 ));
             }
-            let (suffix, _) = decode_dns_name_inner(packet, pointer, depth + 1)?;
+            let (suffix, _) = decode_dns_name_inner(packet, pointer, depth.saturating_add(1))?;
             if !suffix.is_empty() {
                 labels.push(suffix);
             }
-            return Ok((labels.join("."), offset + 2));
+            return Ok((labels.join("."), offset.saturating_add(2)));
         }
         if len & 0xC0 != 0 {
             return Err(DnsError::Protocol("invalid DNS label encoding".to_string()));
@@ -1076,7 +1076,7 @@ fn decode_dns_name_inner(
             return Ok((labels.join("."), offset));
         }
 
-        let end = offset + usize::from(len);
+        let end = offset.saturating_add(usize::from(len));
         let label_bytes = packet
             .get(offset..end)
             .ok_or_else(|| DnsError::Protocol("truncated DNS label".to_string()))?;
@@ -1094,7 +1094,7 @@ fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswe
     let ttl = read_u32(packet, offset)?;
     let rdlen = usize::from(read_u16(packet, offset)?);
     let rdata_offset = *offset;
-    let rdata_end = rdata_offset + rdlen;
+    let rdata_end = rdata_offset.saturating_add(rdlen);
     if rdata_end > packet.len() {
         return Err(DnsError::Protocol("truncated DNS RDATA".to_string()));
     }
@@ -1165,7 +1165,7 @@ fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswe
             while txt_offset < rdata_end {
                 let len = usize::from(packet[txt_offset]);
                 txt_offset += 1;
-                let end = txt_offset + len;
+                let end = txt_offset.saturating_add(len);
                 let chunk = packet
                     .get(txt_offset..end)
                     .ok_or_else(|| DnsError::Protocol("truncated TXT record".to_string()))?;
@@ -1985,8 +1985,8 @@ mod tests {
     fn parse_test_dns_question(request: &[u8]) -> (String, usize, u16) {
         let mut offset = 12usize;
         let query_name = decode_dns_name(request, &mut offset).expect("decode question name");
-        let qtype = u16::from_be_bytes([request[offset], request[offset + 1]]);
-        (query_name, offset + 4, qtype)
+        let qtype = u16::from_be_bytes([request[offset], request[offset.saturating_add(1)]]);
+        (query_name, offset.saturating_add(4), qtype)
     }
 
     #[derive(Debug, Clone, Copy)]

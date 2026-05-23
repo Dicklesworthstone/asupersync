@@ -41,7 +41,7 @@ const DEFAULT_ENTRIES: u32 = 64;
 
 /// High bits reserved for operation kind tags in io_uring `user_data`.
 const USER_DATA_KIND_SHIFT: u32 = 56;
-const USER_DATA_SEQUENCE_MASK: u64 = (1u64 << USER_DATA_KIND_SHIFT) - 1;
+const USER_DATA_SEQUENCE_MASK: u64 = (1u64 << USER_DATA_KIND_SHIFT).saturating_sub(1);
 
 /// Logical operation kind for io_uring requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

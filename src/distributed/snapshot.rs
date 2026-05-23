@@ -387,8 +387,8 @@ impl RegionSnapshot {
         let timestamp = 8;
         let sequence = 8;
         let provenance = 16;
-        let tasks = 4 + self.tasks.len() * 10; // count + per-task (8+1+1)
-        let children = 4 + self.children.len() * 8;
+        let tasks = 4_usize.saturating_add(self.tasks.len().saturating_mul(10)); // count + per-task (8+1+1)
+        let children = 4_usize.saturating_add(self.children.len().saturating_mul(8));
         let finalizer = 4;
         let budget = 1
             + self.budget.deadline_nanos.map_or(0, |_| 8)
@@ -396,23 +396,23 @@ impl RegionSnapshot {
             + self.budget.polls_remaining.map_or(0, |_| 4)
             + 1
             + self.budget.cost_remaining.map_or(0, |_| 8);
-        let cancel = 1 + self.cancel_reason.as_ref().map_or(0, |s| 4 + s.len());
+        let cancel = 1_usize.saturating_add(self.cancel_reason.as_ref().map_or(0, |s| 4_usize.saturating_add(s.len())));
         let parent = 1 + self.parent.map_or(0, |_| 8);
-        let metadata = 4 + self.metadata.len();
+        let metadata = 4_usize.saturating_add(self.metadata.len());
 
         header
-            + region_id
-            + state
-            + timestamp
-            + sequence
-            + provenance
-            + tasks
-            + children
-            + finalizer
-            + budget
-            + cancel
-            + parent
-            + metadata
+            .saturating_add(region_id)
+            .saturating_add(state)
+            .saturating_add(timestamp)
+            .saturating_add(sequence)
+            .saturating_add(provenance)
+            .saturating_add(tasks)
+            .saturating_add(children)
+            .saturating_add(finalizer)
+            .saturating_add(budget)
+            .saturating_add(cancel)
+            .saturating_add(parent)
+            .saturating_add(metadata)
     }
 
     /// Computes a deterministic hash for deduplication.
