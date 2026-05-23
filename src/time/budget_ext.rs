@@ -26,7 +26,8 @@ impl BudgetTimeExt for Budget {
             if now >= d {
                 Duration::ZERO
             } else {
-                Duration::from_nanos(d.as_nanos() - now.as_nanos())
+                let diff_nanos = d.as_nanos().saturating_sub(now.as_nanos());
+                Duration::from_nanos(diff_nanos)
             }
         })
     }
