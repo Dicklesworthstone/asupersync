@@ -10,8 +10,8 @@ use asupersync::atp::path::{
 };
 use asupersync::net::atp::relay::{
     OpaqueRelayPacket, ProofTag, RelayError, RelayEventKind, RelayQuota, RelayReservationGrant,
-    RelayReservationId, RelayService, RelayServiceConfig, RelayTransport, RelayWireFrame,
-    RelayWireRecordDecode,
+    RelayReservationId, RelayService, RelayServiceConfig, RelayTcpTlsStreamBuffer, RelayTransport,
+    RelayWireFrame,
 };
 use asupersync::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 
@@ -425,17 +425,22 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
         .expect("encode follow-up tcp wire record");
     let mut tcp_stream = tcp_record.clone();
     tcp_stream.extend_from_slice(&followup_record);
-    let RelayWireRecordDecode::Complete {
-        frame: tcp_decoded,
-        consumed: first_record_len,
-    } = RelayWireFrame::decode_tcp_tls_record(&tcp_stream, RelayQuota::default().max_packet_bytes)
-        .expect("decode first tcp wire record")
-    else {
-        panic!("first TCP/TLS stream record should be complete");
-    };
-    let tcp_forwarded = tcp_decoded
-        .forward_into(&mut tcp_service, 240)
-        .expect("forward decoded tcp frame");
+    let mut tcp_stream_buffer = RelayTcpTlsStreamBuffer::new(
+        RelayQuota::default().max_packet_bytes,
+        tcp_record.len().max(followup_record.len()),
+    )
+    .expect("bounded TCP/TLS stream buffer");
+    let partial_forwarded = tcp_service
+        .forward_tcp_tls_stream_bytes(300, &mut tcp_stream_buffer, &tcp_stream[..2])
+        .expect("partial tcp stream prefix is buffered");
+    assert!(partial_forwarded.is_empty());
+    assert_eq!(tcp_stream_buffer.pending_len(), 2);
+    let forwarded_batch = tcp_service
+        .forward_tcp_tls_stream_bytes(300, &mut tcp_stream_buffer, &tcp_stream[2..])
+        .expect("coalesced tcp stream records are forwarded");
+    assert_eq!(forwarded_batch.len(), 2);
+    assert_eq!(tcp_stream_buffer.pending_len(), 0);
+    let tcp_forwarded = &forwarded_batch[0];
     assert_eq!(
         tcp_forwarded.packet().transport(),
         RelayTransport::TcpTls443
@@ -444,21 +449,7 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
         tcp_forwarded.packet().opaque_bytes(),
         b"encrypted-wire-tcp-fallback"
     );
-    let RelayWireRecordDecode::Complete {
-        frame: followup_decoded,
-        consumed: second_record_len,
-    } = RelayWireFrame::decode_tcp_tls_record(
-        &tcp_stream[first_record_len..],
-        RelayQuota::default().max_packet_bytes,
-    )
-    .expect("decode follow-up tcp wire record")
-    else {
-        panic!("second TCP/TLS stream record should be complete");
-    };
-    assert_eq!(first_record_len + second_record_len, tcp_stream.len());
-    let followup_forwarded = followup_decoded
-        .forward_into(&mut tcp_service, 300)
-        .expect("forward decoded follow-up tcp frame");
+    let followup_forwarded = &forwarded_batch[1];
     assert_eq!(followup_forwarded.to_peer_id(), peer(1));
     assert_eq!(
         followup_forwarded.packet().opaque_bytes(),

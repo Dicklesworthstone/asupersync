@@ -246,6 +246,112 @@ pub enum RelayWireRecordDecode {
     },
 }
 
+/// Bounded TCP/TLS 443 relay stream adapter.
+///
+/// TCP/TLS fallback is a byte stream, not a datagram channel. This adapter owns
+/// the byte buffer between socket reads and canonical relay frames, enforces a
+/// deterministic upper bound, and drains length-prefixed relay records without
+/// trusting plaintext or application message boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayTcpTlsStreamBuffer {
+    buffered: Vec<u8>,
+    max_payload_bytes: usize,
+    max_buffered_bytes: usize,
+}
+
+impl RelayTcpTlsStreamBuffer {
+    /// Construct an empty bounded stream buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidQuota`] when either bound is zero or the
+    /// buffer cannot hold the smallest possible TCP/TLS relay record.
+    pub fn new(max_payload_bytes: usize, max_buffered_bytes: usize) -> Result<Self, RelayError> {
+        if max_payload_bytes == 0
+            || max_buffered_bytes < RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN + RELAY_WIRE_HEADER_LEN
+        {
+            return Err(RelayError::InvalidQuota);
+        }
+        Ok(Self {
+            buffered: Vec::new(),
+            max_payload_bytes,
+            max_buffered_bytes,
+        })
+    }
+
+    /// Number of buffered stream bytes that have not formed complete records.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.buffered.len()
+    }
+
+    /// Maximum pending stream bytes this adapter will retain.
+    #[must_use]
+    pub const fn max_buffered_bytes(&self) -> usize {
+        self.max_buffered_bytes
+    }
+
+    /// Remaining bytes that can be accepted before the buffer bound is hit.
+    #[must_use]
+    pub fn remaining_capacity(&self) -> usize {
+        self.max_buffered_bytes.saturating_sub(self.buffered.len())
+    }
+
+    /// Discard buffered bytes after a caller closes a malformed stream.
+    pub fn clear(&mut self) {
+        self.buffered.clear();
+    }
+
+    /// Append bytes read from a TCP/TLS stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::PacketTooLarge`] when retaining `bytes` would
+    /// exceed the configured stream-buffer bound.
+    pub fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), RelayError> {
+        let next_len = self
+            .buffered
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(RelayError::PacketTooLarge)?;
+        if next_len > self.max_buffered_bytes {
+            return Err(RelayError::PacketTooLarge);
+        }
+        self.buffered.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Decode and remove the next complete record, if available.
+    ///
+    /// # Errors
+    ///
+    /// Returns relay frame validation errors for malformed records. On error,
+    /// the buffered bytes are left intact so the caller can close the stream and
+    /// preserve the offending bytes for deterministic diagnostics.
+    pub fn pop_next_frame(&mut self) -> Result<Option<RelayWireFrame>, RelayError> {
+        match RelayWireFrame::decode_tcp_tls_record(&self.buffered, self.max_payload_bytes)? {
+            RelayWireRecordDecode::NeedMore { .. } => Ok(None),
+            RelayWireRecordDecode::Complete { frame, consumed } => {
+                self.buffered.drain(..consumed);
+                Ok(Some(frame))
+            }
+        }
+    }
+
+    /// Decode and remove every currently complete record.
+    ///
+    /// # Errors
+    ///
+    /// Returns relay frame validation errors for malformed records.
+    pub fn drain_available_frames(&mut self) -> Result<Vec<RelayWireFrame>, RelayError> {
+        let mut frames = Vec::new();
+        while let Some(frame) = self.pop_next_frame()? {
+            frames.push(frame);
+        }
+        Ok(frames)
+    }
+}
+
 impl RelayWireFrame {
     /// Construct a relay tunnel frame for one opaque ATP packet.
     #[must_use]
@@ -1407,6 +1513,48 @@ impl RelayService {
         )
     }
 
+    /// Append TCP/TLS stream bytes, decode complete relay records, and forward
+    /// them in stream order.
+    ///
+    /// Partial records remain in `stream` for the next socket read. The stream
+    /// bound applies to bytes retained between decodes, so a single socket read
+    /// may contain multiple valid records as long as each record can be drained
+    /// under the configured pending-byte limit. Malformed records or forwarding
+    /// failures stop processing immediately; any already forwarded earlier
+    /// records have gone through the normal quota, auth, and proof/log path.
+    ///
+    /// # Errors
+    ///
+    /// Returns stream-buffer, relay frame, or forwarding validation errors.
+    pub fn forward_tcp_tls_stream_bytes(
+        &mut self,
+        now_micros: u64,
+        stream: &mut RelayTcpTlsStreamBuffer,
+        bytes: &[u8],
+    ) -> Result<Vec<ForwardedPacket>, RelayError> {
+        let mut forwarded = Vec::new();
+
+        let mut remaining = bytes;
+        loop {
+            while let Some(frame) = stream.pop_next_frame()? {
+                forwarded.push(self.forward_wire_frame(now_micros, frame)?);
+            }
+
+            if remaining.is_empty() {
+                break;
+            }
+
+            let accepted = remaining.len().min(stream.remaining_capacity());
+            if accepted == 0 {
+                return Err(RelayError::PacketTooLarge);
+            }
+            stream.push_bytes(&remaining[..accepted])?;
+            remaining = &remaining[accepted..];
+        }
+
+        Ok(forwarded)
+    }
+
     /// Dequeue the next forwarded packet for a peer.
     #[must_use]
     pub fn dequeue_for_peer(&mut self, peer_id: PeerId) -> Option<ForwardedPacket> {
@@ -2531,6 +2679,112 @@ mod tests {
             RelayWireFrame::decode_tcp_tls_record(&oversize_record, 4)
                 .expect_err("oversize record"),
             RelayError::PacketTooLarge
+        );
+    }
+
+    #[test]
+    fn relay_tcp_tls_stream_buffer_drains_partial_coalesced_records_with_bounds() {
+        assert_eq!(
+            RelayTcpTlsStreamBuffer::new(1024, RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN)
+                .expect_err("buffer smaller than the minimum record is invalid"),
+            RelayError::InvalidQuota
+        );
+
+        let first = RelayWireFrame::new(
+            reservation_id(39),
+            transfer_nonce(9),
+            peer(1),
+            packet(RelayTransport::TcpTls443, b"buffered-first", 1),
+        );
+        let second = RelayWireFrame::new(
+            reservation_id(39),
+            transfer_nonce(9),
+            peer(2),
+            packet(RelayTransport::TcpTls443, b"buffered-second", 2),
+        );
+        let first_record = first
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect("encode first buffered record");
+        let second_record = second
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect("encode second buffered record");
+        let mut stream = RelayTcpTlsStreamBuffer::new(
+            RelayQuota::default().max_packet_bytes,
+            first_record.len() + second_record.len(),
+        )
+        .expect("stream buffer");
+
+        stream
+            .push_bytes(&first_record[..3])
+            .expect("buffer partial prefix");
+        assert_eq!(stream.pending_len(), 3);
+        assert_eq!(stream.pop_next_frame().expect("partial decode"), None);
+        stream
+            .push_bytes(&first_record[3..])
+            .expect("finish first record");
+        let decoded_first = stream
+            .pop_next_frame()
+            .expect("decode first")
+            .expect("first complete");
+        assert_eq!(decoded_first.packet().opaque_bytes(), b"buffered-first");
+        assert_eq!(stream.pending_len(), 0);
+
+        let mut coalesced = second_record.clone();
+        coalesced.extend_from_slice(&first_record);
+        stream
+            .push_bytes(&coalesced)
+            .expect("buffer coalesced records");
+        let drained = stream
+            .drain_available_frames()
+            .expect("drain coalesced records");
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].from_peer_id(), peer(2));
+        assert_eq!(drained[1].from_peer_id(), peer(1));
+        assert_eq!(stream.pending_len(), 0);
+
+        let mut tight_stream = RelayTcpTlsStreamBuffer::new(
+            RelayQuota::default().max_packet_bytes,
+            first_record.len(),
+        )
+        .expect("tight stream buffer");
+        tight_stream
+            .push_bytes(&first_record)
+            .expect("fill buffer exactly with one record");
+        assert_eq!(
+            tight_stream
+                .push_bytes(&[0])
+                .expect_err("bounded buffer rejects unbounded stream growth"),
+            RelayError::PacketTooLarge
+        );
+        assert_eq!(tight_stream.pending_len(), first_record.len());
+        tight_stream.clear();
+        assert_eq!(tight_stream.pending_len(), 0);
+
+        let udp_frame = RelayWireFrame::new(
+            reservation_id(39),
+            transfer_nonce(9),
+            peer(1),
+            packet(RelayTransport::Udp, b"udp-in-stream-buffer", 3),
+        );
+        let udp_encoded = udp_frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode raw udp relay frame");
+        let udp_len = u32::try_from(udp_encoded.len()).expect("udp frame len fits in u32");
+        let mut udp_record =
+            Vec::with_capacity(RELAY_WIRE_TCP_TLS_RECORD_PREFIX_LEN + udp_encoded.len());
+        udp_record.extend_from_slice(&udp_len.to_be_bytes());
+        udp_record.extend_from_slice(&udp_encoded);
+        stream.push_bytes(&udp_record).expect("buffer bad record");
+        assert_eq!(
+            stream
+                .pop_next_frame()
+                .expect_err("stream buffer rejects udp record on tcp path"),
+            RelayError::InvalidRelayWireFrame
+        );
+        assert_eq!(
+            stream.pending_len(),
+            udp_record.len(),
+            "malformed bytes are retained for caller diagnostics before close"
         );
     }
 
