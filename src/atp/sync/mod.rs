@@ -14,6 +14,9 @@ pub const DIRECTORY_SYNC_PROOF_SCHEMA: &str = "asupersync.atp.directory-sync.pro
 /// Stable schema for one directory sync log entry.
 pub const DIRECTORY_SYNC_LOG_SCHEMA: &str = "asupersync.atp.directory-sync.log.v1";
 
+/// Stable schema for directory early-usability reports.
+pub const DIRECTORY_EARLY_USABILITY_SCHEMA: &str = "asupersync.atp.directory-early-usability.v1";
+
 const TREE_ROOT_DOMAIN: &[u8] = b"asupersync.atp.directory-sync.tree-root.v1\0";
 
 /// Platform path normalization rules used while building a manifest.
@@ -367,6 +370,87 @@ impl DirectoryManifest {
         }
         hasher.finalize().into()
     }
+
+    /// Build an early-usability report for verified directory metadata and small files.
+    #[must_use]
+    pub fn early_usability_report(
+        &self,
+        verified_content_ids: &BTreeSet<String>,
+        policy: DirectoryEarlyUsabilityPolicy,
+        final_commit_state: DirectoryFinalCommitState,
+        replay_pointer: impl Into<String>,
+    ) -> DirectoryEarlyUsabilityReport {
+        let mut metadata_paths = Vec::new();
+        let mut small_file_paths = Vec::new();
+        let mut withheld_content_paths = Vec::new();
+        let metadata_visible = policy.expose_metadata_before_final
+            || final_commit_state == DirectoryFinalCommitState::Committed;
+
+        let entries = self
+            .entries
+            .values()
+            .map(|entry| {
+                let exposure = early_entry_exposure(
+                    entry,
+                    verified_content_ids,
+                    policy,
+                    final_commit_state,
+                    metadata_visible,
+                );
+
+                if exposure.metadata_visible {
+                    metadata_paths.push(exposure.path.clone());
+                }
+                if exposure.content_visible {
+                    small_file_paths.push(exposure.path.clone());
+                } else if entry.content_id.is_some() {
+                    withheld_content_paths.push(exposure.path.clone());
+                }
+
+                exposure
+            })
+            .collect::<Vec<_>>();
+
+        let mut safety_caveats = Vec::new();
+        if final_commit_state == DirectoryFinalCommitState::Pending {
+            safety_caveats.push(
+                "final directory commit not complete; expose early entries separately".into(),
+            );
+        }
+        if !metadata_visible && !self.entries.is_empty() {
+            safety_caveats
+                .push("metadata exposure is disabled until final directory commit".into());
+        }
+        if !withheld_content_paths.is_empty() {
+            safety_caveats.push(
+                "some file content is withheld until verification or final commit policy allows it"
+                    .into(),
+            );
+        }
+
+        let usability_state = if final_commit_state == DirectoryFinalCommitState::Committed {
+            DirectoryEarlyUsabilityState::FinalCommitted
+        } else if !small_file_paths.is_empty() {
+            DirectoryEarlyUsabilityState::SmallFilesAvailable
+        } else if !metadata_paths.is_empty() {
+            DirectoryEarlyUsabilityState::MetadataAvailable
+        } else {
+            DirectoryEarlyUsabilityState::NoEntries
+        };
+
+        DirectoryEarlyUsabilityReport {
+            schema_version: DIRECTORY_EARLY_USABILITY_SCHEMA.to_string(),
+            usability_state,
+            final_commit_state,
+            manifest_tree_root: hex::encode(self.tree_root()),
+            replay_pointer: replay_pointer.into(),
+            metadata_paths,
+            small_file_paths,
+            withheld_content_paths,
+            entries,
+            safety_caveats,
+        }
+    }
 }
 
 /// High-level directory operation mode.
@@ -705,6 +789,187 @@ pub struct DirectorySyncPlan {
     pub logs: Vec<DirectorySyncLogEntry>,
     /// Proof summary for replay and audit bundles.
     pub proof: DirectorySyncProofSummary,
+}
+
+/// Final commit state reported separately from directory early usability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DirectoryFinalCommitState {
+    /// The directory manifest is still being assembled or verified.
+    Pending,
+    /// The final directory manifest has committed.
+    Committed,
+}
+
+/// Usable-early state for a directory transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DirectoryEarlyUsabilityState {
+    /// No entries are visible under the current policy.
+    NoEntries,
+    /// Verified metadata can be surfaced, but no file content is visible yet.
+    MetadataAvailable,
+    /// One or more verified small files can be surfaced before final commit.
+    SmallFilesAvailable,
+    /// The directory has reached final committed state.
+    FinalCommitted,
+}
+
+/// Policy for surfacing directory entries before final commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirectoryEarlyUsabilityPolicy {
+    /// Largest regular file that may be exposed early when its content is verified.
+    pub max_small_file_bytes: u64,
+    /// Whether metadata may be exposed before final commit.
+    pub expose_metadata_before_final: bool,
+}
+
+impl Default for DirectoryEarlyUsabilityPolicy {
+    fn default() -> Self {
+        Self {
+            max_small_file_bytes: 1024 * 1024,
+            expose_metadata_before_final: true,
+        }
+    }
+}
+
+impl DirectoryEarlyUsabilityPolicy {
+    /// Build a policy that exposes verified files up to `max_small_file_bytes`.
+    #[must_use]
+    pub const fn small_files_up_to(max_small_file_bytes: u64) -> Self {
+        Self {
+            max_small_file_bytes,
+            expose_metadata_before_final: true,
+        }
+    }
+}
+
+/// Per-entry early exposure state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DirectoryEarlyEntryState {
+    /// Only metadata is visible.
+    MetadataOnly,
+    /// Verified small-file content is visible.
+    SmallFileContent,
+    /// Metadata and content are withheld under the current policy.
+    Withheld,
+}
+
+/// Early exposure decision for one directory entry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirectoryEarlyEntryExposure {
+    /// Canonical manifest path.
+    pub path: String,
+    /// Entry kind.
+    pub kind: DirectoryEntryKind,
+    /// Whether metadata can be surfaced.
+    pub metadata_visible: bool,
+    /// Whether file content can be surfaced.
+    pub content_visible: bool,
+    /// Entry content identifier, if any.
+    pub content_id: Option<String>,
+    /// Entry size in bytes, if known.
+    pub size_bytes: Option<u64>,
+    /// Early exposure state.
+    pub state: DirectoryEarlyEntryState,
+    /// Stable reason for the decision.
+    pub reason: String,
+    /// Caveat codes callers must surface with this entry.
+    pub caveats: Vec<String>,
+}
+
+/// Directory early-usability report for SDK/CLI/proof artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirectoryEarlyUsabilityReport {
+    /// Stable report schema.
+    pub schema_version: String,
+    /// Current usable-early state.
+    pub usability_state: DirectoryEarlyUsabilityState,
+    /// Final commit state reported independently from early usability.
+    pub final_commit_state: DirectoryFinalCommitState,
+    /// Manifest tree root for replay and proof artifacts.
+    pub manifest_tree_root: String,
+    /// Deterministic replay pointer.
+    pub replay_pointer: String,
+    /// Paths whose metadata is visible.
+    pub metadata_paths: Vec<String>,
+    /// Paths whose verified small-file content is visible.
+    pub small_file_paths: Vec<String>,
+    /// Content-bearing paths withheld under the current policy.
+    pub withheld_content_paths: Vec<String>,
+    /// Per-entry exposure decisions.
+    pub entries: Vec<DirectoryEarlyEntryExposure>,
+    /// Safety caveats callers must show before early consumption.
+    pub safety_caveats: Vec<String>,
+}
+
+fn early_entry_exposure(
+    entry: &DirectoryManifestEntry,
+    verified_content_ids: &BTreeSet<String>,
+    policy: DirectoryEarlyUsabilityPolicy,
+    final_commit_state: DirectoryFinalCommitState,
+    metadata_visible: bool,
+) -> DirectoryEarlyEntryExposure {
+    let content_verified = entry
+        .content_id
+        .as_ref()
+        .is_some_and(|content_id| verified_content_ids.contains(content_id))
+        || final_commit_state == DirectoryFinalCommitState::Committed;
+    let size = entry.metadata.size_bytes;
+    let is_regular_file = entry.kind == DirectoryEntryKind::File;
+    let is_small_file = size.is_some_and(|size| size <= policy.max_small_file_bytes);
+    let content_visible = metadata_visible && is_regular_file && content_verified && is_small_file;
+
+    let (state, reason) = if content_visible {
+        (
+            DirectoryEarlyEntryState::SmallFileContent,
+            "verified_small_file",
+        )
+    } else if !metadata_visible {
+        (
+            DirectoryEarlyEntryState::Withheld,
+            "metadata_withheld_until_final_commit",
+        )
+    } else if entry.content_id.is_none() {
+        (
+            DirectoryEarlyEntryState::MetadataOnly,
+            "metadata_only_no_content_id",
+        )
+    } else if !is_regular_file {
+        (
+            DirectoryEarlyEntryState::MetadataOnly,
+            "metadata_only_unsupported_content_kind",
+        )
+    } else if size.is_none() {
+        (
+            DirectoryEarlyEntryState::MetadataOnly,
+            "metadata_only_unknown_size",
+        )
+    } else if !content_verified {
+        (
+            DirectoryEarlyEntryState::MetadataOnly,
+            "metadata_only_content_not_verified",
+        )
+    } else {
+        (
+            DirectoryEarlyEntryState::MetadataOnly,
+            "metadata_only_file_exceeds_small_file_policy",
+        )
+    };
+
+    DirectoryEarlyEntryExposure {
+        path: entry.path.to_string(),
+        kind: entry.kind,
+        metadata_visible,
+        content_visible,
+        content_id: entry.content_id.clone(),
+        size_bytes: entry.metadata.size_bytes,
+        state,
+        reason: reason.to_string(),
+        caveats: entry
+            .caveats
+            .iter()
+            .map(|caveat| caveat.code().to_string())
+            .collect(),
+    }
 }
 
 /// Directory sync model errors.
@@ -1279,6 +1544,17 @@ mod tests {
         )
     }
 
+    fn sized_file(raw: &str, content_id: &str, size_bytes: u64) -> DirectoryManifestEntry {
+        let mut metadata = DirectoryEntryMetadata::with_identity(content_id);
+        metadata.size_bytes = Some(size_bytes);
+        DirectoryManifestEntry::new(
+            path(raw),
+            DirectoryEntryKind::File,
+            Some(content_id.to_string()),
+            metadata,
+        )
+    }
+
     fn manifest(entries: Vec<DirectoryManifestEntry>) -> DirectoryManifest {
         let mut manifest = DirectoryManifest::new(PathNormalizationRules::default());
         for entry in entries {
@@ -1480,6 +1756,132 @@ mod tests {
             plan.proof.conflict_decisions,
             vec!["same.txt:destination_differs"]
         );
+    }
+
+    #[test]
+    fn directory_early_report_surfaces_metadata_and_verified_small_files() {
+        let directory = DirectoryManifestEntry::new(
+            path("docs"),
+            DirectoryEntryKind::Directory,
+            None,
+            DirectoryEntryMetadata::default(),
+        );
+        let source = manifest(vec![
+            directory,
+            sized_file("docs/README.md", "small-cid", 512),
+            sized_file("model.bin", "large-cid", 2 * 1024 * 1024),
+        ]);
+        let verified_content_ids =
+            BTreeSet::from(["small-cid".to_string(), "large-cid".to_string()]);
+
+        let report = source.early_usability_report(
+            &verified_content_ids,
+            DirectoryEarlyUsabilityPolicy::small_files_up_to(1024),
+            DirectoryFinalCommitState::Pending,
+            "directory-replay:small-files",
+        );
+
+        assert_eq!(
+            report.usability_state,
+            DirectoryEarlyUsabilityState::SmallFilesAvailable
+        );
+        assert_eq!(
+            report.final_commit_state,
+            DirectoryFinalCommitState::Pending
+        );
+        assert_eq!(report.replay_pointer, "directory-replay:small-files");
+        assert_eq!(
+            report.metadata_paths,
+            vec!["docs", "docs/README.md", "model.bin"]
+        );
+        assert_eq!(report.small_file_paths, vec!["docs/README.md"]);
+        assert_eq!(report.withheld_content_paths, vec!["model.bin"]);
+        assert_eq!(report.manifest_tree_root, hex::encode(source.tree_root()));
+        assert!(report.safety_caveats.contains(
+            &"final directory commit not complete; expose early entries separately".to_string()
+        ));
+
+        let large = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == "model.bin")
+            .expect("large entry");
+        assert_eq!(
+            large.state,
+            DirectoryEarlyEntryState::MetadataOnly,
+            "large verified files must not become small-file early content"
+        );
+        assert_eq!(large.reason, "metadata_only_file_exceeds_small_file_policy");
+    }
+
+    #[test]
+    fn directory_early_report_withholds_unverified_small_file_content() {
+        let source = manifest(vec![sized_file("config.json", "config-cid", 128)]);
+        let report = source.early_usability_report(
+            &BTreeSet::new(),
+            DirectoryEarlyUsabilityPolicy::small_files_up_to(1024),
+            DirectoryFinalCommitState::Pending,
+            "directory-replay:unverified",
+        );
+
+        assert_eq!(
+            report.usability_state,
+            DirectoryEarlyUsabilityState::MetadataAvailable
+        );
+        assert_eq!(report.metadata_paths, vec!["config.json"]);
+        assert!(report.small_file_paths.is_empty());
+        assert_eq!(report.withheld_content_paths, vec!["config.json"]);
+        assert_eq!(
+            report.entries[0].reason,
+            "metadata_only_content_not_verified"
+        );
+        assert!(!report.entries[0].content_visible);
+    }
+
+    #[test]
+    fn directory_early_report_keeps_final_commit_state_separate() {
+        let source = manifest(vec![sized_file("done.txt", "done-cid", 32)]);
+        let policy = DirectoryEarlyUsabilityPolicy {
+            expose_metadata_before_final: false,
+            ..DirectoryEarlyUsabilityPolicy::small_files_up_to(1024)
+        };
+
+        let pending = source.early_usability_report(
+            &BTreeSet::from(["done-cid".to_string()]),
+            policy,
+            DirectoryFinalCommitState::Pending,
+            "directory-replay:pending",
+        );
+        assert_eq!(
+            pending.usability_state,
+            DirectoryEarlyUsabilityState::NoEntries
+        );
+        assert!(pending.metadata_paths.is_empty());
+        assert!(pending.small_file_paths.is_empty());
+        assert_eq!(
+            pending.entries[0].reason,
+            "metadata_withheld_until_final_commit"
+        );
+
+        let committed = source.early_usability_report(
+            &BTreeSet::from(["done-cid".to_string()]),
+            policy,
+            DirectoryFinalCommitState::Committed,
+            "directory-replay:committed",
+        );
+        assert_eq!(
+            committed.usability_state,
+            DirectoryEarlyUsabilityState::FinalCommitted
+        );
+        assert_eq!(
+            committed.final_commit_state,
+            DirectoryFinalCommitState::Committed
+        );
+        assert_eq!(committed.metadata_paths, vec!["done.txt"]);
+        assert_eq!(committed.small_file_paths, vec!["done.txt"]);
+        assert!(!committed.safety_caveats.contains(
+            &"final directory commit not complete; expose early entries separately".to_string()
+        ));
     }
 
     #[test]
