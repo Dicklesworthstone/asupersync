@@ -728,7 +728,8 @@ struct SqliteRowStreamCounters {
 
 impl SqliteRowStreamCounters {
     fn record_buffered_row(&self) {
-        let buffered = self.buffered_rows.fetch_add(1, Ordering::AcqRel) + 1;
+        // Use saturating arithmetic to prevent overflow in row buffering metrics
+        let buffered = self.buffered_rows.fetch_add(1, Ordering::AcqRel).saturating_add(1);
         let observed = buffered.min(SQLITE_ROW_STREAM_CHANNEL_CAPACITY);
         let mut peak = self.peak_buffered_rows.load(Ordering::Acquire);
         while observed > peak {
@@ -2446,7 +2447,7 @@ mod tests {
                 ids.push(row.get_i64("id").unwrap());
                 assert_eq!(
                     row.get_str("payload").unwrap().len(),
-                    "payload-000-".len() + 1024
+                    "payload-000-".len().saturating_add(1024)
                 );
             }
 
@@ -4361,7 +4362,7 @@ mod tests {
                     Some(&format!(
                         "{} users, {} transactions",
                         users.len(),
-                        users.len() * 3
+                        users.len().saturating_mul(3)
                     )),
                 );
 
