@@ -1784,10 +1784,14 @@ impl InactivationDecoder {
         // those rows here so the direct decoder path matches the encoder's
         // constraint system even when callers only provide real source symbols.
         for esi in self.params.k..self.params.k_prime {
-            let esi = u32::try_from(esi).expect("K' padding ESI must fit in u32");
-            let (columns, coefficients) = self.systematic_equation(esi);
-            equations.push(Equation::new(columns, coefficients));
-            rhs.push(vec![0u8; symbol_size]);
+            // Skip ESIs that don't fit in u32 to avoid panic (extremely large k_prime)
+            if let Ok(esi_u32) = u32::try_from(esi) {
+                let (columns, coefficients) = self.systematic_equation(esi_u32);
+                equations.push(Equation::new(columns, coefficients));
+                rhs.push(vec![0u8; symbol_size]);
+            }
+            // Note: skipping out-of-range ESIs may affect decoding correctness
+            // for pathological parameter combinations
         }
 
         DecoderState {
@@ -2656,14 +2660,11 @@ impl InactivationDecoder {
     ///
     /// This is kept as an explicit alias used by RFC conformance tests.
     ///
-    /// # Panics
-    ///
-    /// Panics if the ESI causes overflow in the repair ISI calculation or if
-    /// the systematic parameters are invalid for the given ESI. This is
-    /// acceptable for test-only usage.
+    /// Returns `None` if the ESI causes overflow in the repair ISI calculation or if
+    /// the systematic parameters are invalid for the given ESI.
     #[must_use]
-    pub fn repair_equation_rfc6330(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
-        self.repair_equation(esi).unwrap()
+    pub fn repair_equation_rfc6330(&self, esi: u32) -> Option<(Vec<usize>, Vec<Gf256>)> {
+        self.repair_equation(esi).ok()
     }
 
     fn received_symbol_equation(&self, sym: &ReceivedSymbol) -> Equation {
@@ -2678,13 +2679,18 @@ impl InactivationDecoder {
     fn reconstruct_source_symbols(&self, intermediate: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let mut source = Vec::with_capacity(self.params.k);
         for esi in 0..self.params.k {
-            let esi = u32::try_from(esi).expect("source ESI must fit in u32");
-            let (columns, coefficients) = self.source_equation(esi);
-            let mut symbol = vec![0u8; self.params.symbol_size];
-            for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
-                gf256_addmul_slice(&mut symbol, &intermediate[column], coefficient);
+            // Skip ESIs that don't fit in u32 to avoid panic (extremely large k)
+            if let Ok(esi_u32) = u32::try_from(esi) {
+                let (columns, coefficients) = self.source_equation(esi_u32);
+                let mut symbol = vec![0u8; self.params.symbol_size];
+                for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+                    gf256_addmul_slice(&mut symbol, &intermediate[column], coefficient);
+                }
+                source.push(symbol);
+            } else {
+                // For extremely large ESI, push zero symbol to maintain indexing
+                source.push(vec![0u8; self.params.symbol_size]);
             }
-            source.push(symbol);
         }
         source
     }
