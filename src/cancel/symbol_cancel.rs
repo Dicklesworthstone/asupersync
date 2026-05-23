@@ -5723,5 +5723,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "symbol_cancel_metamorphic.rs"]
 mod symbol_cancel_metamorphic;
-

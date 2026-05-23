@@ -15872,4 +15872,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "three_lane_metamorphic.rs"]
 mod three_lane_metamorphic;

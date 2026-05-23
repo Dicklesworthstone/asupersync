@@ -42,18 +42,33 @@ fn arb_deadline() -> impl Strategy<Value = Option<Time>> {
 /// Operation types for metamorphic testing.
 #[derive(Debug, Clone)]
 enum TableOperation {
-    Insert { owner: RegionId, deadline: Option<Time> },
-    Remove { task_index: usize },
-    RecycledRemove { task_index: usize },
-    UpdatePhase { task_index: usize, new_phase: TaskPhase },
-    StoreFuture { task_index: usize },
-    RemoveFuture { task_index: usize },
+    Insert {
+        owner: RegionId,
+        deadline: Option<Time>,
+    },
+    Remove {
+        task_index: usize,
+    },
+    RecycledRemove {
+        task_index: usize,
+    },
+    UpdatePhase {
+        task_index: usize,
+        new_phase: TaskPhase,
+    },
+    StoreFuture {
+        task_index: usize,
+    },
+    RemoveFuture {
+        task_index: usize,
+    },
 }
 
 /// Generate arbitrary table operations for property-based testing.
 fn arb_table_operation() -> impl Strategy<Value = TableOperation> {
     prop_oneof![
-        (arb_region_id(), arb_deadline()).prop_map(|(owner, deadline)| TableOperation::Insert { owner, deadline }),
+        (arb_region_id(), arb_deadline())
+            .prop_map(|(owner, deadline)| TableOperation::Insert { owner, deadline }),
         any::<usize>().prop_map(|idx| TableOperation::Remove { task_index: idx }),
         any::<usize>().prop_map(|idx| TableOperation::RecycledRemove { task_index: idx }),
         (any::<usize>(), any::<u8>()).prop_map(|(idx, phase)| TableOperation::UpdatePhase {
@@ -86,7 +101,8 @@ fn apply_operation(
             task_indices.push((task_id, idx));
         }
         TableOperation::Remove { task_index } => {
-            if let Some((task_id, idx)) = task_indices.get(*task_index % task_indices.len().max(1)) {
+            if let Some((task_id, idx)) = task_indices.get(*task_index % task_indices.len().max(1))
+            {
                 table.remove_task(*task_id);
                 // Note: Not removing from task_indices to allow some operations on non-existent tasks
             }
@@ -96,7 +112,10 @@ fn apply_operation(
                 table.remove_and_recycle_task(*task_id);
             }
         }
-        TableOperation::UpdatePhase { task_index, new_phase } => {
+        TableOperation::UpdatePhase {
+            task_index,
+            new_phase,
+        } => {
             if let Some((task_id, _)) = task_indices.get(*task_index % task_indices.len().max(1)) {
                 table.update_task(*task_id, |record| {
                     record.phase.store(*new_phase);

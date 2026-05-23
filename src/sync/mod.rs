@@ -52,10 +52,10 @@ mod rwlock;
 mod rwlock_lost_wakeup_test;
 #[cfg(test)]
 mod scope_cancellation_metamorphic;
-mod waiter;
 pub mod semaphore;
 #[cfg(test)]
 mod semaphore_metamorphic_tests;
+mod waiter;
 
 pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
 pub use contended_mutex::{ContendedMutex, ContendedMutexGuard, LockMetricsSnapshot};

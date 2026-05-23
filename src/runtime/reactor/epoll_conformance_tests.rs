@@ -16,8 +16,8 @@ use super::{EpollReactor, Event, Events, Interest, Reactor, Source, Token};
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Requirement levels for conformance testing.
@@ -228,10 +228,16 @@ impl ConformanceReport {
         }
 
         let total_tests = self.results.len();
-        let total_passed = self.results.iter()
+        let total_passed = self
+            .results
+            .iter()
             .filter(|r| matches!(r.status, TestStatus::Pass))
             .count();
-        let overall_rate = if total_tests > 0 { (total_passed * 100) / total_tests } else { 0 };
+        let overall_rate = if total_tests > 0 {
+            (total_passed * 100) / total_tests
+        } else {
+            0
+        };
 
         summary.push_str(&format!(
             "\n**Overall: {}/{} tests passed ({}%)**\n",
@@ -244,7 +250,8 @@ impl ConformanceReport {
 
     /// Returns true if all MUST requirements pass.
     pub fn is_conformant(&self) -> bool {
-        self.results.iter()
+        self.results
+            .iter()
             .filter(|r| r.level == RequirementLevel::Must)
             .all(|r| matches!(r.status, TestStatus::Pass | TestStatus::ExpectedFailure(_)))
     }
@@ -263,7 +270,10 @@ impl AsRawFd for TestSource {
 }
 
 /// Creates a connected pair of Unix domain sockets for testing.
-fn create_test_socket_pair() -> io::Result<(std::os::unix::net::UnixStream, std::os::unix::net::UnixStream)> {
+fn create_test_socket_pair() -> io::Result<(
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::UnixStream,
+)> {
     std::os::unix::net::UnixStream::pair()
 }
 
@@ -279,9 +289,15 @@ fn create_invalid_test_source() -> TestSource {
 struct EpollCreateConformanceTest;
 
 impl ConformanceTest for EpollCreateConformanceTest {
-    fn name(&self) -> &str { "epoll_create_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "epoll_create_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -297,14 +313,19 @@ impl ConformanceTest for EpollCreateConformanceTest {
                         level: self.level(),
                         status: TestStatus::Pass,
                         duration: start.elapsed(),
-                        details: Some("Successfully created epoll reactor with empty initial state".to_string()),
+                        details: Some(
+                            "Successfully created epoll reactor with empty initial state"
+                                .to_string(),
+                        ),
                     }
                 } else {
                     TestResult {
                         name: self.name().to_string(),
                         category: self.category(),
                         level: self.level(),
-                        status: TestStatus::Fail("Reactor not in expected initial state".to_string()),
+                        status: TestStatus::Fail(
+                            "Reactor not in expected initial state".to_string(),
+                        ),
                         duration: start.elapsed(),
                         details: None,
                     }
@@ -317,7 +338,7 @@ impl ConformanceTest for EpollCreateConformanceTest {
                 status: TestStatus::Fail(format!("Failed to create epoll reactor: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -325,9 +346,15 @@ impl ConformanceTest for EpollCreateConformanceTest {
 struct RegisterConformanceTest;
 
 impl ConformanceTest for RegisterConformanceTest {
-    fn name(&self) -> &str { "register_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "register_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -360,7 +387,7 @@ impl ConformanceTest for RegisterConformanceTest {
                 status: TestStatus::Fail(format!("Registration failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -368,9 +395,15 @@ impl ConformanceTest for RegisterConformanceTest {
 struct ModifyConformanceTest;
 
 impl ConformanceTest for ModifyConformanceTest {
-    fn name(&self) -> &str { "modify_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "modify_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -407,7 +440,7 @@ impl ConformanceTest for ModifyConformanceTest {
                 status: TestStatus::Fail(format!("Modify failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -415,9 +448,15 @@ impl ConformanceTest for ModifyConformanceTest {
 struct DeregisterConformanceTest;
 
 impl ConformanceTest for DeregisterConformanceTest {
-    fn name(&self) -> &str { "deregister_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "deregister_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -455,7 +494,7 @@ impl ConformanceTest for DeregisterConformanceTest {
                 status: TestStatus::Fail(format!("Deregister failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -463,9 +502,15 @@ impl ConformanceTest for DeregisterConformanceTest {
 struct PollConformanceTest;
 
 impl ConformanceTest for PollConformanceTest {
-    fn name(&self) -> &str { "poll_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "poll_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -516,7 +561,7 @@ impl ConformanceTest for PollConformanceTest {
                 status: TestStatus::Fail(format!("Poll failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -524,9 +569,15 @@ impl ConformanceTest for PollConformanceTest {
 struct WakeConformanceTest;
 
 impl ConformanceTest for WakeConformanceTest {
-    fn name(&self) -> &str { "wake_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "wake_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -548,8 +599,11 @@ impl ConformanceTest for WakeConformanceTest {
                 let poll_duration = poll_start.elapsed();
 
                 // Should return quickly due to wake, not wait 5 seconds
-                assert!(poll_duration < Duration::from_secs(1),
-                       "Poll should wake quickly, took {:?}", poll_duration);
+                assert!(
+                    poll_duration < Duration::from_secs(1),
+                    "Poll should wake quickly, took {:?}",
+                    poll_duration
+                );
 
                 Ok(())
             })
@@ -569,7 +623,7 @@ impl ConformanceTest for WakeConformanceTest {
                 status: TestStatus::Fail(format!("Wake failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -577,9 +631,15 @@ impl ConformanceTest for WakeConformanceTest {
 struct OneshotModeConformanceTest;
 
 impl ConformanceTest for OneshotModeConformanceTest {
-    fn name(&self) -> &str { "oneshot_mode_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "oneshot_mode_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -628,7 +688,9 @@ impl ConformanceTest for OneshotModeConformanceTest {
                 level: self.level(),
                 status: TestStatus::Pass,
                 duration: start.elapsed(),
-                details: Some("Oneshot mode behavior verified: fire once, silence until re-arm".to_string()),
+                details: Some(
+                    "Oneshot mode behavior verified: fire once, silence until re-arm".to_string(),
+                ),
             },
             Err(e) => TestResult {
                 name: self.name().to_string(),
@@ -637,7 +699,7 @@ impl ConformanceTest for OneshotModeConformanceTest {
                 status: TestStatus::Fail(format!("Oneshot mode failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -645,9 +707,15 @@ impl ConformanceTest for OneshotModeConformanceTest {
 struct EdgeTriggeredConformanceTest;
 
 impl ConformanceTest for EdgeTriggeredConformanceTest {
-    fn name(&self) -> &str { "edge_triggered_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "edge_triggered_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -678,7 +746,10 @@ impl ConformanceTest for EdgeTriggeredConformanceTest {
             // Second poll should NOT return event (edge not retriggered)
             events.clear();
             let count = reactor.poll(&mut events, Some(Duration::ZERO))?;
-            assert_eq!(count, 0, "Second poll should not return events (edge not retriggered)");
+            assert_eq!(
+                count, 0,
+                "Second poll should not return events (edge not retriggered)"
+            );
 
             // Drain remaining data
             let mut drain_buf = [0u8; 16];
@@ -702,7 +773,9 @@ impl ConformanceTest for EdgeTriggeredConformanceTest {
                 let count = reactor.poll(&mut events, Some(Duration::from_millis(100)))?;
                 if count > 0 {
                     found = events.iter().any(|e| e.token == token && e.is_readable());
-                    if found { break; }
+                    if found {
+                        break;
+                    }
                 }
             }
 
@@ -716,7 +789,9 @@ impl ConformanceTest for EdgeTriggeredConformanceTest {
                 level: self.level(),
                 status: TestStatus::Pass,
                 duration: start.elapsed(),
-                details: Some("Edge-triggered mode verified: events only on state transitions".to_string()),
+                details: Some(
+                    "Edge-triggered mode verified: events only on state transitions".to_string(),
+                ),
             },
             Err(e) => TestResult {
                 name: self.name().to_string(),
@@ -725,7 +800,7 @@ impl ConformanceTest for EdgeTriggeredConformanceTest {
                 status: TestStatus::Fail(format!("Edge-triggered mode failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -733,9 +808,15 @@ impl ConformanceTest for EdgeTriggeredConformanceTest {
 struct LevelTriggeredConformanceTest;
 
 impl ConformanceTest for LevelTriggeredConformanceTest {
-    fn name(&self) -> &str { "level_triggered_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "level_triggered_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -786,7 +867,7 @@ impl ConformanceTest for LevelTriggeredConformanceTest {
                 status: TestStatus::Fail(format!("Level-triggered failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -794,9 +875,15 @@ impl ConformanceTest for LevelTriggeredConformanceTest {
 struct ErrorHandlingConformanceTest;
 
 impl ConformanceTest for ErrorHandlingConformanceTest {
-    fn name(&self) -> &str { "error_handling_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "error_handling_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -805,18 +892,21 @@ impl ConformanceTest for ErrorHandlingConformanceTest {
             let reactor = EpollReactor::new()?;
 
             // Test: modify() on non-existent token should return NotFound
-            let modify_err = reactor.modify(Token::new(999), Interest::READABLE)
+            let modify_err = reactor
+                .modify(Token::new(999), Interest::READABLE)
                 .expect_err("Modify on non-existent token should fail");
             assert_eq!(modify_err.kind(), io::ErrorKind::NotFound);
 
             // Test: deregister() on non-existent token should return NotFound
-            let deregister_err = reactor.deregister(Token::new(888))
+            let deregister_err = reactor
+                .deregister(Token::new(888))
                 .expect_err("Deregister on non-existent token should fail");
             assert_eq!(deregister_err.kind(), io::ErrorKind::NotFound);
 
             // Test: register() with unsupported interest should fail
             let (sock1, _) = create_test_socket_pair()?;
-            let dispatch_err = reactor.register(&sock1, Token::new(1), Interest::dispatch())
+            let dispatch_err = reactor
+                .register(&sock1, Token::new(1), Interest::dispatch())
                 .expect_err("Dispatch interest should be rejected");
             assert_eq!(dispatch_err.kind(), io::ErrorKind::InvalidInput);
 
@@ -828,7 +918,9 @@ impl ConformanceTest for ErrorHandlingConformanceTest {
                 level: self.level(),
                 status: TestStatus::Pass,
                 duration: start.elapsed(),
-                details: Some("Error conditions handled correctly with appropriate error codes".to_string()),
+                details: Some(
+                    "Error conditions handled correctly with appropriate error codes".to_string(),
+                ),
             },
             Err(e) => TestResult {
                 name: self.name().to_string(),
@@ -837,7 +929,7 @@ impl ConformanceTest for ErrorHandlingConformanceTest {
                 status: TestStatus::Fail(format!("Error handling failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -845,9 +937,15 @@ impl ConformanceTest for ErrorHandlingConformanceTest {
 struct InvalidFdConformanceTest;
 
 impl ConformanceTest for InvalidFdConformanceTest {
-    fn name(&self) -> &str { "invalid_fd_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "invalid_fd_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -857,7 +955,8 @@ impl ConformanceTest for InvalidFdConformanceTest {
 
             // Test: register() with invalid fd should fail with EBADF
             let invalid_source = create_invalid_test_source();
-            let register_err = reactor.register(&invalid_source, Token::new(1), Interest::READABLE)
+            let register_err = reactor
+                .register(&invalid_source, Token::new(1), Interest::READABLE)
                 .expect_err("Register with invalid fd should fail");
 
             // Should get EBADF (bad file descriptor)
@@ -883,7 +982,7 @@ impl ConformanceTest for InvalidFdConformanceTest {
                 status: TestStatus::Fail(format!("Invalid fd handling failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -891,9 +990,15 @@ impl ConformanceTest for InvalidFdConformanceTest {
 struct DuplicateRegistrationConformanceTest;
 
 impl ConformanceTest for DuplicateRegistrationConformanceTest {
-    fn name(&self) -> &str { "duplicate_registration_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "duplicate_registration_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -907,12 +1012,14 @@ impl ConformanceTest for DuplicateRegistrationConformanceTest {
             reactor.register(&sock1, token, Interest::READABLE)?;
 
             // Second registration with same token should fail
-            let duplicate_token_err = reactor.register(&sock1, token, Interest::WRITABLE)
+            let duplicate_token_err = reactor
+                .register(&sock1, token, Interest::WRITABLE)
                 .expect_err("Duplicate token registration should fail");
             assert_eq!(duplicate_token_err.kind(), io::ErrorKind::AlreadyExists);
 
             // Registration with different token but same fd should also fail
-            let duplicate_fd_err = reactor.register(&sock1, Token::new(2), Interest::WRITABLE)
+            let duplicate_fd_err = reactor
+                .register(&sock1, Token::new(2), Interest::WRITABLE)
                 .expect_err("Duplicate fd registration should fail");
             assert_eq!(duplicate_fd_err.kind(), io::ErrorKind::AlreadyExists);
 
@@ -936,7 +1043,7 @@ impl ConformanceTest for DuplicateRegistrationConformanceTest {
                 status: TestStatus::Fail(format!("Duplicate registration handling failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -944,9 +1051,15 @@ impl ConformanceTest for DuplicateRegistrationConformanceTest {
 struct FdReuseConformanceTest;
 
 impl ConformanceTest for FdReuseConformanceTest {
-    fn name(&self) -> &str { "fd_reuse_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "fd_reuse_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -977,7 +1090,9 @@ impl ConformanceTest for FdReuseConformanceTest {
                 level: self.level(),
                 status: TestStatus::Pass,
                 duration: start.elapsed(),
-                details: Some("File descriptor reuse after deregistration works correctly".to_string()),
+                details: Some(
+                    "File descriptor reuse after deregistration works correctly".to_string(),
+                ),
             },
             Err(e) => TestResult {
                 name: self.name().to_string(),
@@ -986,7 +1101,7 @@ impl ConformanceTest for FdReuseConformanceTest {
                 status: TestStatus::Fail(format!("Fd reuse failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -994,9 +1109,15 @@ impl ConformanceTest for FdReuseConformanceTest {
 struct FdCleanupConformanceTest;
 
 impl ConformanceTest for FdCleanupConformanceTest {
-    fn name(&self) -> &str { "fd_cleanup_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "fd_cleanup_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -1015,7 +1136,10 @@ impl ConformanceTest for FdCleanupConformanceTest {
 
             // Deregister should handle closed fd gracefully
             let deregister_result = reactor.deregister(token);
-            assert!(deregister_result.is_ok(), "Deregister after close should succeed");
+            assert!(
+                deregister_result.is_ok(),
+                "Deregister after close should succeed"
+            );
             assert_eq!(reactor.registration_count(), 0);
 
             Ok(())
@@ -1035,7 +1159,7 @@ impl ConformanceTest for FdCleanupConformanceTest {
                 status: TestStatus::Fail(format!("Fd cleanup failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -1043,9 +1167,15 @@ impl ConformanceTest for FdCleanupConformanceTest {
 struct ConcurrentOperationsConformanceTest;
 
 impl ConformanceTest for ConcurrentOperationsConformanceTest {
-    fn name(&self) -> &str { "concurrent_operations_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "concurrent_operations_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -1060,13 +1190,19 @@ impl ConformanceTest for ConcurrentOperationsConformanceTest {
             let reactor_clone = reactor.clone();
             std::thread::scope(|s| {
                 // Concurrent modify operations
-                let handles: Vec<_> = (0..5).map(|i| {
-                    let reactor = reactor_clone.clone();
-                    s.spawn(move || {
-                        let interest = if i % 2 == 0 { Interest::READABLE } else { Interest::WRITABLE };
-                        reactor.modify(token, interest)
+                let handles: Vec<_> = (0..5)
+                    .map(|i| {
+                        let reactor = reactor_clone.clone();
+                        s.spawn(move || {
+                            let interest = if i % 2 == 0 {
+                                Interest::READABLE
+                            } else {
+                                Interest::WRITABLE
+                            };
+                            reactor.modify(token, interest)
+                        })
                     })
-                }).collect();
+                    .collect();
 
                 // Wait for all operations
                 for handle in handles {
@@ -1096,7 +1232,7 @@ impl ConformanceTest for ConcurrentOperationsConformanceTest {
                 status: TestStatus::Fail(format!("Concurrent operations failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -1104,9 +1240,15 @@ impl ConformanceTest for ConcurrentOperationsConformanceTest {
 struct WakeFromThreadConformanceTest;
 
 impl ConformanceTest for WakeFromThreadConformanceTest {
-    fn name(&self) -> &str { "wake_from_thread_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "wake_from_thread_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -1127,8 +1269,10 @@ impl ConformanceTest for WakeFromThreadConformanceTest {
                 let poll_duration = poll_start.elapsed();
 
                 // Should wake within reasonable time
-                assert!(poll_duration < Duration::from_secs(1),
-                       "Cross-thread wake should interrupt poll quickly");
+                assert!(
+                    poll_duration < Duration::from_secs(1),
+                    "Cross-thread wake should interrupt poll quickly"
+                );
 
                 Ok(())
             })
@@ -1148,7 +1292,7 @@ impl ConformanceTest for WakeFromThreadConformanceTest {
                 status: TestStatus::Fail(format!("Cross-thread wake failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -1156,9 +1300,15 @@ impl ConformanceTest for WakeFromThreadConformanceTest {
 struct ScalabilityConformanceTest;
 
 impl ConformanceTest for ScalabilityConformanceTest {
-    fn name(&self) -> &str { "scalability_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Performance }
-    fn level(&self) -> RequirementLevel { RequirementLevel::May }
+    fn name(&self) -> &str {
+        "scalability_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Performance
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::May
+    }
 
     fn run(&self, ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -1192,7 +1342,10 @@ impl ConformanceTest for ScalabilityConformanceTest {
                 level: self.level(),
                 status: TestStatus::Pass,
                 duration: start.elapsed(),
-                details: Some(format!("Successfully handled {} registrations", std::cmp::min(100, ctx.max_fds / 2))),
+                details: Some(format!(
+                    "Successfully handled {} registrations",
+                    std::cmp::min(100, ctx.max_fds / 2)
+                )),
             },
             Err(e) => TestResult {
                 name: self.name().to_string(),
@@ -1201,7 +1354,7 @@ impl ConformanceTest for ScalabilityConformanceTest {
                 status: TestStatus::Fail(format!("Scalability test failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -1209,9 +1362,15 @@ impl ConformanceTest for ScalabilityConformanceTest {
 struct MemoryLeakConformanceTest;
 
 impl ConformanceTest for MemoryLeakConformanceTest {
-    fn name(&self) -> &str { "memory_leak_conformance" }
-    fn category(&self) -> TestCategory { TestCategory::Performance }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "memory_leak_conformance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Performance
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let start = Instant::now();
@@ -1244,7 +1403,9 @@ impl ConformanceTest for MemoryLeakConformanceTest {
                 level: self.level(),
                 status: TestStatus::Pass,
                 duration: start.elapsed(),
-                details: Some("Memory leak checks completed - no obvious leaks detected".to_string()),
+                details: Some(
+                    "Memory leak checks completed - no obvious leaks detected".to_string(),
+                ),
             },
             Err(e) => TestResult {
                 name: self.name().to_string(),
@@ -1253,7 +1414,7 @@ impl ConformanceTest for MemoryLeakConformanceTest {
                 status: TestStatus::Fail(format!("Memory leak test failed: {}", e)),
                 duration: start.elapsed(),
                 details: None,
-            }
+            },
         }
     }
 }
@@ -1273,15 +1434,23 @@ mod tests {
         println!("{}", report.generate_matrix());
 
         // Verify conformance
-        let failed_must_tests: Vec<_> = report.results.iter()
-            .filter(|r| r.level == RequirementLevel::Must && !matches!(r.status, TestStatus::Pass | TestStatus::ExpectedFailure(_)))
+        let failed_must_tests: Vec<_> = report
+            .results
+            .iter()
+            .filter(|r| {
+                r.level == RequirementLevel::Must
+                    && !matches!(r.status, TestStatus::Pass | TestStatus::ExpectedFailure(_))
+            })
             .collect();
 
         if !failed_must_tests.is_empty() {
             for test in &failed_must_tests {
                 eprintln!("MUST requirement failed: {} - {:?}", test.name, test.status);
             }
-            panic!("EpollReactor fails conformance: {} MUST requirements failed", failed_must_tests.len());
+            panic!(
+                "EpollReactor fails conformance: {} MUST requirements failed",
+                failed_must_tests.len()
+            );
         }
 
         println!("✅ EpollReactor conformance: All MUST requirements pass");

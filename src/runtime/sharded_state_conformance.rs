@@ -20,10 +20,13 @@
 //!
 //! This follows **Pattern 4: Spec-Derived Test Matrix** - one test per documented requirement.
 
-use crate::runtime::sharded_state::{ShardedState, ShardGuard, ShardedConfig, ShardedObservability, lock_order::{held_count, held_labels}};
-use crate::observability::metrics::{NoOpMetrics, MetricsProvider};
 use crate::observability::ObservabilityConfig;
-use crate::runtime::config::{ObligationLeakResponse, CancelAttributionConfig};
+use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
+use crate::runtime::config::{CancelAttributionConfig, ObligationLeakResponse};
+use crate::runtime::sharded_state::{
+    ShardGuard, ShardedConfig, ShardedObservability, ShardedState,
+    lock_order::{held_count, held_labels},
+};
 use crate::trace::TraceBufferHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::{RegionId, TaskId, Time};
@@ -43,9 +46,9 @@ pub enum ConformanceResult {
 /// Requirement levels for coverage tracking.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RequirementLevel {
-    Must,    // MUST requirements from specification
-    Should,  // SHOULD requirements
-    May,     // MAY requirements or edge cases
+    Must,   // MUST requirements from specification
+    Should, // SHOULD requirements
+    May,    // MAY requirements or edge cases
 }
 
 /// Conformance test case for structured execution.
@@ -64,7 +67,12 @@ impl ConformanceTestCase {
         level: RequirementLevel,
         description: &'static str,
     ) -> Self {
-        Self { id, section, level, description }
+        Self {
+            id,
+            section,
+            level,
+            description,
+        }
     }
 }
 
@@ -156,7 +164,6 @@ impl ShardedStateConformanceSuite {
                 RequirementLevel::Must,
                 "all guard must acquire B→A→C in correct order",
             ),
-
             // ─── Shard Access Compliance Tests ───
             ConformanceTestCase::new(
                 "SHARD-ACC-001",
@@ -188,7 +195,6 @@ impl ShardedStateConformanceSuite {
                 RequirementLevel::Must,
                 "for_obligation guard provides regions+obligations access, no tasks",
             ),
-
             // ─── State Consistency Tests ───
             ConformanceTestCase::new(
                 "STATE-CON-001",
@@ -208,7 +214,6 @@ impl ShardedStateConformanceSuite {
                 RequirementLevel::Must,
                 "current_time atomic operations are consistent",
             ),
-
             // ─── Deadlock Prevention Tests ───
             ConformanceTestCase::new(
                 "DEADLOCK-001",
@@ -279,7 +284,7 @@ impl ShardedStateConformanceSuite {
             "DEADLOCK-002" => Self::test_stress_concurrency(),
 
             _ => ConformanceResult::Skip {
-                reason: format!("Test case {} not implemented", case.id)
+                reason: format!("Test case {} not implemented", case.id),
             },
         }
     }
@@ -413,7 +418,10 @@ impl ShardedStateConformanceSuite {
             // Must be B→A→C order
             if held != vec!["B:Regions", "A:Tasks", "C:Obligations"] {
                 return ConformanceResult::Fail {
-                    reason: format!("Expected ['B:Regions', 'A:Tasks', 'C:Obligations'], got {:?}", held),
+                    reason: format!(
+                        "Expected ['B:Regions', 'A:Tasks', 'C:Obligations'], got {:?}",
+                        held
+                    ),
                 };
             }
         }
@@ -437,7 +445,10 @@ impl ShardedStateConformanceSuite {
             // Must be B→A→C order
             if held != vec!["B:Regions", "A:Tasks", "C:Obligations"] {
                 return ConformanceResult::Fail {
-                    reason: format!("Expected ['B:Regions', 'A:Tasks', 'C:Obligations'], got {:?}", held),
+                    reason: format!(
+                        "Expected ['B:Regions', 'A:Tasks', 'C:Obligations'], got {:?}",
+                        held
+                    ),
                 };
             }
         }
@@ -461,7 +472,10 @@ impl ShardedStateConformanceSuite {
             // Must be B→A→C order
             if held != vec!["B:Regions", "A:Tasks", "C:Obligations"] {
                 return ConformanceResult::Fail {
-                    reason: format!("Expected ['B:Regions', 'A:Tasks', 'C:Obligations'], got {:?}", held),
+                    reason: format!(
+                        "Expected ['B:Regions', 'A:Tasks', 'C:Obligations'], got {:?}",
+                        held
+                    ),
                 };
             }
         }
@@ -485,7 +499,10 @@ impl ShardedStateConformanceSuite {
             // Must be B→A→C order
             if held != vec!["B:Regions", "A:Tasks", "C:Obligations"] {
                 return ConformanceResult::Fail {
-                    reason: format!("Expected ['B:Regions', 'A:Tasks', 'C:Obligations'], got {:?}", held),
+                    reason: format!(
+                        "Expected ['B:Regions', 'A:Tasks', 'C:Obligations'], got {:?}",
+                        held
+                    ),
                 };
             }
         }
@@ -785,7 +802,8 @@ impl ShardedStateConformanceSuite {
         for handle in handles {
             if start.elapsed() > timeout {
                 return ConformanceResult::Fail {
-                    reason: "Concurrent guard acquisition timed out - possible deadlock".to_string(),
+                    reason: "Concurrent guard acquisition timed out - possible deadlock"
+                        .to_string(),
                 };
             }
             if let Err(e) = handle.join() {
@@ -813,16 +831,26 @@ impl ShardedStateConformanceSuite {
 
                 for _ in 0..200 {
                     match i % 4 {
-                        0 => { let _guard = ShardGuard::tasks_only(&fixture_clone.state); },
-                        1 => { let _guard = ShardGuard::regions_only(&fixture_clone.state); },
-                        2 => { let _guard = ShardGuard::for_spawn(&fixture_clone.state); },
-                        3 => { let _guard = ShardGuard::for_task_completed(&fixture_clone.state); },
+                        0 => {
+                            let _guard = ShardGuard::tasks_only(&fixture_clone.state);
+                        }
+                        1 => {
+                            let _guard = ShardGuard::regions_only(&fixture_clone.state);
+                        }
+                        2 => {
+                            let _guard = ShardGuard::for_spawn(&fixture_clone.state);
+                        }
+                        3 => {
+                            let _guard = ShardGuard::for_task_completed(&fixture_clone.state);
+                        }
                         _ => unreachable!(),
                     }
 
                     // Interleave atomic operations
                     fixture_clone.state.increment_leak_count();
-                    fixture_clone.state.set_time(Time::from_nanos(42 + i as u64));
+                    fixture_clone
+                        .state
+                        .set_time(Time::from_nanos(42 + i as u64));
                 }
             }));
         }

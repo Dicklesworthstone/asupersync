@@ -3209,7 +3209,5 @@ mod tests {
 mod metamorphic;
 
 #[cfg(test)]
-mod comprehensive_metamorphic_tests {
-    #![allow(dead_code, unused_imports)]
-    include!("blocking_pool/comprehensive_metamorphic_tests.rs");
-}
+#[path = "blocking_pool/comprehensive_metamorphic_tests.rs"]
+mod comprehensive_metamorphic_tests;

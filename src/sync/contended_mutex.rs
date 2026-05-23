@@ -98,7 +98,8 @@ mod inner {
             Self::update_max(&self.max_wait_ns, wait_ns);
 
             // Bound sample collection to prevent memory leak
-            let mut samples = self.wait_samples
+            let mut samples = self
+                .wait_samples
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if samples.len() >= MAX_SAMPLES {
@@ -117,7 +118,8 @@ mod inner {
             Self::update_max(&self.max_hold_ns, hold_ns);
 
             // Bound sample collection to prevent memory leak
-            let mut samples = self.hold_samples
+            let mut samples = self
+                .hold_samples
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if samples.len() >= MAX_SAMPLES {
@@ -219,7 +221,8 @@ mod inner {
 
             // Use consistent timing: capture acquisition time once
             let acquired_at = Instant::now();
-            let wait_ns = u64::try_from(acquired_at.duration_since(start).as_nanos()).unwrap_or(u64::MAX);
+            let wait_ns =
+                u64::try_from(acquired_at.duration_since(start).as_nanos()).unwrap_or(u64::MAX);
 
             self.metrics.record_acquire(wait_ns, contended);
 

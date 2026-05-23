@@ -13440,4 +13440,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "state_metamorphic.rs"]
 mod state_metamorphic;

@@ -23,12 +23,12 @@
 //! - **MR7: Waker Determinism** - Equivalent waking patterns produce equivalent outcomes
 //! - **MR8: Batch Processing Invariance** - Batched vs individual operations equivalent
 
-use crate::runtime::scheduler::three_lane::ThreeLaneScheduler;
-use crate::runtime::scheduler::priority::{PriorityClass, PriorityTask};
-use crate::runtime::scheduler::WorkerId;
-use crate::runtime::state::RuntimeState;
 use crate::runtime::TaskTable;
-use crate::types::{TaskId, RegionId, Time};
+use crate::runtime::scheduler::WorkerId;
+use crate::runtime::scheduler::priority::{PriorityClass, PriorityTask};
+use crate::runtime::scheduler::three_lane::ThreeLaneScheduler;
+use crate::runtime::state::RuntimeState;
+use crate::types::{RegionId, TaskId, Time};
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -60,12 +60,7 @@ impl TestTask {
     }
 
     fn to_priority_task(&self) -> PriorityTask {
-        PriorityTask::new(
-            self.id,
-            self.priority,
-            self.region,
-            self.spawn_time,
-        )
+        PriorityTask::new(self.id, self.priority, self.region, self.spawn_time)
     }
 }
 
@@ -547,11 +542,11 @@ mod integration_tests {
         let dispatch_sequence = [
             PriorityClass::Cancel,
             PriorityClass::Cancel,
-            PriorityClass::Ready,     // Available but preempted
+            PriorityClass::Ready, // Available but preempted
             PriorityClass::Cancel,
             PriorityClass::Cancel,
-            PriorityClass::Cancel,    // Hit limit (5)
-            PriorityClass::Ready,     // Must be dispatched now (fairness)
+            PriorityClass::Cancel, // Hit limit (5)
+            PriorityClass::Ready,  // Must be dispatched now (fairness)
         ];
 
         let mut dispatched_ready_after_limit = false;
@@ -574,7 +569,10 @@ mod integration_tests {
             }
         }
 
-        assert!(dispatched_ready_after_limit, "Ready work should be dispatched after cancel limit");
+        assert!(
+            dispatched_ready_after_limit,
+            "Ready work should be dispatched after cancel limit"
+        );
     }
 
     #[test]
@@ -584,8 +582,10 @@ mod integration_tests {
         // Bug 1: Priority inversion
         let high_priority = PriorityClass::Cancel;
         let low_priority = PriorityClass::Ready;
-        assert!(priority_to_order(high_priority) < priority_to_order(low_priority),
-            "Priority ordering should prevent inversion");
+        assert!(
+            priority_to_order(high_priority) < priority_to_order(low_priority),
+            "Priority ordering should prevent inversion"
+        );
 
         // Bug 2: Work duplication in queues
         let mut queue = VecDeque::new();
@@ -599,7 +599,10 @@ mod integration_tests {
         // This test demonstrates the detection capability
         if first == second {
             // Our MRs would catch this as a conservation violation
-            println!("Detected potential work duplication: {} == {}", first, second);
+            println!(
+                "Detected potential work duplication: {} == {}",
+                first, second
+            );
         }
     }
 }

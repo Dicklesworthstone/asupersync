@@ -479,7 +479,7 @@ impl<R> PooledResource<R> {
     pub fn get(&self) -> &R {
         self.resource.as_ref().expect(
             "PooledResource accessed after drop or return - resource has been taken. \
-            This indicates a use-after-drop bug or concurrent access violation."
+            This indicates a use-after-drop bug or concurrent access violation.",
         )
     }
 
@@ -488,7 +488,7 @@ impl<R> PooledResource<R> {
     pub fn get_mut(&mut self) -> &mut R {
         self.resource.as_mut().expect(
             "PooledResource accessed after drop or return - resource has been taken. \
-            This indicates a use-after-drop bug or concurrent access violation."
+            This indicates a use-after-drop bug or concurrent access violation.",
         )
     }
 

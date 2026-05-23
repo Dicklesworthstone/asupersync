@@ -124,7 +124,8 @@ impl SchedulerAutotuner {
         if let Some(last_adj) = self.last_adjustment_time {
             let current_time = last_obs.timestamp?;
             // Protect against clock skew/inconsistent timestamps
-            let elapsed = current_time.checked_duration_since(last_adj)
+            let elapsed = current_time
+                .checked_duration_since(last_adj)
                 .unwrap_or_else(|| Duration::from_secs(0));
             if elapsed < Duration::from_millis(self.config.observation_window_ms) {
                 return None;

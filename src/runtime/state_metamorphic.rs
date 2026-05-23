@@ -616,30 +616,43 @@ mod integration_tests {
         // Composite MR: Region hierarchy + leak tracking
         let mut state = RuntimeState::new();
 
-        let root = state.regions.create_region(
-            None,
-            "root".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create root");
+        let root = state
+            .regions
+            .create_region(
+                None,
+                "root".to_string(),
+                test_region_limits(),
+                test_source_location(),
+            )
+            .expect("Failed to create root");
 
-        let child = state.regions.create_region(
-            Some(root),
-            "child".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create child");
+        let child = state
+            .regions
+            .create_region(
+                Some(root),
+                "child".to_string(),
+                test_region_limits(),
+                test_source_location(),
+            )
+            .expect("Failed to create child");
 
         // Create obligation in child
-        let obligation = state.obligations.create_obligation(
-            child,
-            ObligationKind::Generic { description: "test".to_string() },
-            test_source_location(),
-        ).expect("Failed to create obligation");
+        let obligation = state
+            .obligations
+            .create_obligation(
+                child,
+                ObligationKind::Generic {
+                    description: "test".to_string(),
+                },
+                test_source_location(),
+            )
+            .expect("Failed to create obligation");
 
         // Leak obligation
         let initial_leaks = state.leak_count;
-        state.mark_obligation_leaked(obligation).expect("Failed to leak obligation");
+        state
+            .mark_obligation_leaked(obligation)
+            .expect("Failed to leak obligation");
 
         // Verify both hierarchy and leak count
         assert_eq!(state.leak_count, initial_leaks + 1);
@@ -657,12 +670,15 @@ mod integration_tests {
         let initial_time = state.now;
 
         // These operations should preserve invariants
-        let region = state.regions.create_region(
-            None,
-            "test".to_string(),
-            test_region_limits(),
-            test_source_location(),
-        ).expect("Failed to create region");
+        let region = state
+            .regions
+            .create_region(
+                None,
+                "test".to_string(),
+                test_region_limits(),
+                test_source_location(),
+            )
+            .expect("Failed to create region");
 
         state.advance_region_state(region);
 

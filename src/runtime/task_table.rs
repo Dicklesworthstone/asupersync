@@ -1600,7 +1600,5 @@ mod tests {
 }
 
 #[cfg(test)]
-mod metamorphic_tests {
-    #![allow(dead_code, unused_imports)]
-    include!("task_table_metamorphic_tests.rs");
-}
+#[path = "task_table_metamorphic_tests.rs"]
+mod metamorphic_tests;

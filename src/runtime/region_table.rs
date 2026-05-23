@@ -1621,7 +1621,9 @@ mod tests {
         {
             let mut table = RegionTable::new();
             let parent = table.create_root(Budget::default(), Time::ZERO);
-            let child = table.create_child(parent, Budget::default(), Time::ZERO).unwrap();
+            let child = table
+                .create_child(parent, Budget::default(), Time::ZERO)
+                .unwrap();
 
             let children = table.child_ids(parent).unwrap();
             assert_eq!(children.len(), 1);
@@ -1632,7 +1634,9 @@ mod tests {
         {
             let mut table = RegionTable::new();
             let parent = table.create_root(Budget::default(), Time::ZERO);
-            let child = table.create_child(parent, Budget::default(), Time::ZERO).unwrap();
+            let child = table
+                .create_child(parent, Budget::default(), Time::ZERO)
+                .unwrap();
 
             assert_eq!(table.parent(&child), Some(Some(parent)));
         }

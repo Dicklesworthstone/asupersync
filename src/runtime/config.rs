@@ -10683,4 +10683,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "config_metamorphic.rs"]
 mod config_metamorphic;

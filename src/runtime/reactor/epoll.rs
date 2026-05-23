@@ -2263,6 +2263,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "epoll_conformance_tests.rs"]
 pub mod epoll_conformance_tests;
 
 #[cfg(test)]
@@ -2279,7 +2280,9 @@ mod epoll_conformance_integration {
         println!("\nEpoll Conformance Report:\n{}", compliance_matrix);
 
         // Verify critical requirements pass
-        let must_failures: Vec<_> = report.results.iter()
+        let must_failures: Vec<_> = report
+            .results
+            .iter()
             .filter(|r| r.level == RequirementLevel::Must && !r.passed)
             .collect();
 
@@ -2289,6 +2292,10 @@ mod epoll_conformance_integration {
 
         let pass_rate = report.pass_rate();
         println!("Overall pass rate: {:.1}%", pass_rate * 100.0);
-        assert!(pass_rate >= 0.95, "Conformance pass rate below 95%: {:.1}%", pass_rate * 100.0);
+        assert!(
+            pass_rate >= 0.95,
+            "Conformance pass rate below 95%: {:.1}%",
+            pass_rate * 100.0
+        );
     }
 }

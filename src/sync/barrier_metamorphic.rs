@@ -19,7 +19,6 @@
 //! spurious wakeup injection, and concurrent execution patterns.
 
 #![allow(dead_code)]
-
 #![allow(unsafe_code)]
 
 use crate::cx::Cx;
@@ -253,8 +252,6 @@ async fn execute_barrier_work_unit(
         crate::time::sleep(cx.now(), Duration::from_millis(work_unit.start_delay_ms)).await;
     }
 
-
-
     // Wrapper to inject spurious wakeups during the wait
     struct SpuriousWait<'a> {
         inner: crate::sync::barrier::BarrierWaitFuture<'a>,
@@ -264,13 +261,19 @@ async fn execute_barrier_work_unit(
         global_state: std::sync::Arc<GlobalBarrierState>,
     }
     impl<'a> std::future::Future for SpuriousWait<'a> {
-        type Output = Result<crate::sync::barrier::BarrierWaitResult, crate::sync::barrier::BarrierWaitError>;
-        fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        type Output =
+            Result<crate::sync::barrier::BarrierWaitResult, crate::sync::barrier::BarrierWaitError>;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
             let this = unsafe { self.get_unchecked_mut() };
             if this.inject && !this.injected {
                 if this.rng.next_u64() % 2 == 0 {
                     this.injected = true;
-                    this.global_state.spurious_wakeups_injected.store(true, std::sync::atomic::Ordering::SeqCst);
+                    this.global_state
+                        .spurious_wakeups_injected
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     cx.waker().wake_by_ref();
                     // Fall through to poll inner, but we know it will be re-polled because we just woke it
                 }

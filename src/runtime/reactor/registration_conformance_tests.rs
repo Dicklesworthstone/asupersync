@@ -12,11 +12,11 @@
 //! - **Error Handling**: Graceful degradation when reactor disappears
 //! - **Panic Safety**: Registration cleanup survives reactor panics
 
-use super::{Registration, ReactorHandle, Interest, Token};
+use super::{Interest, ReactorHandle, Registration, Token};
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// Requirement levels for conformance testing.
@@ -117,15 +117,18 @@ impl MockReactor {
     }
 
     pub fn set_panic_on_deregister(&self, should_panic: bool) {
-        self.should_panic_on_deregister.store(should_panic, Ordering::Relaxed);
+        self.should_panic_on_deregister
+            .store(should_panic, Ordering::Relaxed);
     }
 
     pub fn set_fail_deregister(&self, should_fail: bool) {
-        self.should_fail_deregister.store(should_fail, Ordering::Relaxed);
+        self.should_fail_deregister
+            .store(should_fail, Ordering::Relaxed);
     }
 
     pub fn set_fail_modify(&self, should_fail: bool) {
-        self.should_fail_modify.store(should_fail, Ordering::Relaxed);
+        self.should_fail_modify
+            .store(should_fail, Ordering::Relaxed);
     }
 }
 
@@ -240,7 +243,9 @@ impl ConformanceReport {
     }
 
     pub fn must_pass_rate(&self) -> f64 {
-        let must_tests: Vec<_> = self.results.iter()
+        let must_tests: Vec<_> = self
+            .results
+            .iter()
             .filter(|r| r.level == RequirementLevel::Must)
             .collect();
         if must_tests.is_empty() {
@@ -257,7 +262,11 @@ impl ConformanceReport {
         matrix.push_str("|------|----------|-------|--------|------|\n");
 
         for result in &self.results {
-            let status = if result.passed { "✅ PASS" } else { "❌ FAIL" };
+            let status = if result.passed {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
             let level = match result.level {
                 RequirementLevel::Must => "MUST",
                 RequirementLevel::Should => "SHOULD",
@@ -281,8 +290,14 @@ impl ConformanceReport {
         }
 
         matrix.push_str(&format!("\n## Summary\n"));
-        matrix.push_str(&format!("- **Overall Pass Rate**: {:.1}%\n", self.pass_rate() * 100.0));
-        matrix.push_str(&format!("- **MUST Requirements**: {:.1}%\n", self.must_pass_rate() * 100.0));
+        matrix.push_str(&format!(
+            "- **Overall Pass Rate**: {:.1}%\n",
+            self.pass_rate() * 100.0
+        ));
+        matrix.push_str(&format!(
+            "- **MUST Requirements**: {:.1}%\n",
+            self.must_pass_rate() * 100.0
+        ));
         matrix.push_str(&format!("- **Total Tests**: {}\n", self.results.len()));
 
         matrix
@@ -295,9 +310,15 @@ impl ConformanceReport {
 struct AutoDeregisterOnDropTest;
 
 impl ConformanceTest for AutoDeregisterOnDropTest {
-    fn name(&self) -> &str { "auto_deregister_on_drop" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "auto_deregister_on_drop"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -315,8 +336,11 @@ impl ConformanceTest for AutoDeregisterOnDropTest {
 
         let passed = reactor.deregister_calls() == 1 && !reactor.is_registered(token);
         let error_message = if !passed {
-            Some(format!("Expected 1 deregister call, got {}. Registered: {}",
-                        reactor.deregister_calls(), reactor.is_registered(token)))
+            Some(format!(
+                "Expected 1 deregister call, got {}. Registered: {}",
+                reactor.deregister_calls(),
+                reactor.is_registered(token)
+            ))
         } else {
             None
         };
@@ -336,9 +360,15 @@ impl ConformanceTest for AutoDeregisterOnDropTest {
 struct NoDoubleDeregistrationTest;
 
 impl ConformanceTest for NoDoubleDeregistrationTest {
-    fn name(&self) -> &str { "no_double_deregistration" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "no_double_deregistration"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -361,8 +391,10 @@ impl ConformanceTest for NoDoubleDeregistrationTest {
 
         let passed = deregister_result.is_ok() && calls_after_explicit == 1;
         let error_message = if !passed {
-            Some(format!("Deregister failed: {:?}, calls: {}",
-                        deregister_result, calls_after_explicit))
+            Some(format!(
+                "Deregister failed: {:?}, calls: {}",
+                deregister_result, calls_after_explicit
+            ))
         } else {
             None
         };
@@ -382,9 +414,15 @@ impl ConformanceTest for NoDoubleDeregistrationTest {
 struct DropWithDeadReactorTest;
 
 impl ConformanceTest for DropWithDeadReactorTest {
-    fn name(&self) -> &str { "drop_with_dead_reactor" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "drop_with_dead_reactor"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let token = Token::new(44);
@@ -419,9 +457,15 @@ impl ConformanceTest for DropWithDeadReactorTest {
 struct InterestModificationTest;
 
 impl ConformanceTest for InterestModificationTest {
-    fn name(&self) -> &str { "interest_modification" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "interest_modification"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -444,8 +488,12 @@ impl ConformanceTest for InterestModificationTest {
             && reactor.modify_calls() == 1;
 
         let error_message = if !passed {
-            Some(format!("Modify failed: {:?}, final interest: {:?}, calls: {}",
-                        modify_result, registration.interest(), reactor.modify_calls()))
+            Some(format!(
+                "Modify failed: {:?}, final interest: {:?}, calls: {}",
+                modify_result,
+                registration.interest(),
+                reactor.modify_calls()
+            ))
         } else {
             None
         };
@@ -465,9 +513,15 @@ impl ConformanceTest for InterestModificationTest {
 struct ModifyWithDeadReactorTest;
 
 impl ConformanceTest for ModifyWithDeadReactorTest {
-    fn name(&self) -> &str { "modify_with_dead_reactor" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "modify_with_dead_reactor"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let token = Token::new(46);
@@ -483,11 +537,14 @@ impl ConformanceTest for ModifyWithDeadReactorTest {
         }; // reactor dropped
 
         let modify_result = registration.set_interest(Interest::WRITABLE);
-        let passed = modify_result.is_err()
-            && modify_result.unwrap_err().kind() == ErrorKind::NotConnected;
+        let passed =
+            modify_result.is_err() && modify_result.unwrap_err().kind() == ErrorKind::NotConnected;
 
         let error_message = if !passed {
-            Some(format!("Expected NotConnected error, got: {:?}", modify_result))
+            Some(format!(
+                "Expected NotConnected error, got: {:?}",
+                modify_result
+            ))
         } else {
             None
         };
@@ -507,9 +564,15 @@ impl ConformanceTest for ModifyWithDeadReactorTest {
 struct InterestQueryTest;
 
 impl ConformanceTest for InterestQueryTest {
-    fn name(&self) -> &str { "interest_query" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "interest_query"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -524,7 +587,11 @@ impl ConformanceTest for InterestQueryTest {
 
         let passed = registration.interest() == initial_interest;
         let error_message = if !passed {
-            Some(format!("Expected {:?}, got {:?}", initial_interest, registration.interest()))
+            Some(format!(
+                "Expected {:?}, got {:?}",
+                initial_interest,
+                registration.interest()
+            ))
         } else {
             None
         };
@@ -544,9 +611,15 @@ impl ConformanceTest for InterestQueryTest {
 struct ExplicitDeregisterSuccessTest;
 
 impl ConformanceTest for ExplicitDeregisterSuccessTest {
-    fn name(&self) -> &str { "explicit_deregister_success" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "explicit_deregister_success"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -563,7 +636,11 @@ impl ConformanceTest for ExplicitDeregisterSuccessTest {
         let passed = result.is_ok() && reactor.deregister_calls() == 1;
 
         let error_message = if !passed {
-            Some(format!("Deregister failed: {:?}, calls: {}", result, reactor.deregister_calls()))
+            Some(format!(
+                "Deregister failed: {:?}, calls: {}",
+                result,
+                reactor.deregister_calls()
+            ))
         } else {
             None
         };
@@ -583,9 +660,15 @@ impl ConformanceTest for ExplicitDeregisterSuccessTest {
 struct ExplicitDeregisterFailureTest;
 
 impl ConformanceTest for ExplicitDeregisterFailureTest {
-    fn name(&self) -> &str { "explicit_deregister_failure" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "explicit_deregister_failure"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -604,8 +687,11 @@ impl ConformanceTest for ExplicitDeregisterFailureTest {
         let passed = result.is_err() && reactor.deregister_calls() == 2;
 
         let error_message = if !passed {
-            Some(format!("Expected failure with 2 retries, got: {:?}, calls: {}",
-                        result, reactor.deregister_calls()))
+            Some(format!(
+                "Expected failure with 2 retries, got: {:?}, calls: {}",
+                result,
+                reactor.deregister_calls()
+            ))
         } else {
             None
         };
@@ -625,9 +711,15 @@ impl ConformanceTest for ExplicitDeregisterFailureTest {
 struct DeregisterRetryLogicTest;
 
 impl ConformanceTest for DeregisterRetryLogicTest {
-    fn name(&self) -> &str { "deregister_retry_logic" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "deregister_retry_logic"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -645,8 +737,11 @@ impl ConformanceTest for DeregisterRetryLogicTest {
         let passed = result.is_ok() && reactor.deregister_calls() == 1;
 
         let error_message = if !passed {
-            Some(format!("Expected success with 1 call for NotFound, got: {:?}, calls: {}",
-                        result, reactor.deregister_calls()))
+            Some(format!(
+                "Expected success with 1 call for NotFound, got: {:?}, calls: {}",
+                result,
+                reactor.deregister_calls()
+            ))
         } else {
             None
         };
@@ -666,9 +761,15 @@ impl ConformanceTest for DeregisterRetryLogicTest {
 struct PanicDuringDeregisterTest;
 
 impl ConformanceTest for PanicDuringDeregisterTest {
-    fn name(&self) -> &str { "panic_during_deregister" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "panic_during_deregister"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -706,9 +807,15 @@ impl ConformanceTest for PanicDuringDeregisterTest {
 struct PanicSafetyDropTest;
 
 impl ConformanceTest for PanicSafetyDropTest {
-    fn name(&self) -> &str { "panic_safety_drop" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "panic_safety_drop"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -739,9 +846,15 @@ impl ConformanceTest for PanicSafetyDropTest {
 struct SendSemanticTest;
 
 impl ConformanceTest for SendSemanticTest {
-    fn name(&self) -> &str { "send_semantic" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "send_semantic"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Compile-time test - if this compiles, Send is implemented
@@ -763,9 +876,15 @@ impl ConformanceTest for SendSemanticTest {
 struct NotSyncSemanticTest;
 
 impl ConformanceTest for NotSyncSemanticTest {
-    fn name(&self) -> &str { "not_sync_semantic" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "not_sync_semantic"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Compile-time test - this should NOT compile if uncommented
@@ -804,9 +923,15 @@ impl ConformanceTest for NotSyncSemanticTest {
 struct ActiveStateQueryTest;
 
 impl ConformanceTest for ActiveStateQueryTest {
-    fn name(&self) -> &str { "active_state_query" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "active_state_query"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -824,8 +949,10 @@ impl ConformanceTest for ActiveStateQueryTest {
 
         let passed = active_when_alive && !active_when_dead;
         let error_message = if !passed {
-            Some(format!("Expected active=true then false, got {} then {}",
-                        active_when_alive, active_when_dead))
+            Some(format!(
+                "Expected active=true then false, got {} then {}",
+                active_when_alive, active_when_dead
+            ))
         } else {
             None
         };
@@ -845,9 +972,15 @@ impl ConformanceTest for ActiveStateQueryTest {
 struct TokenQueryTest;
 
 impl ConformanceTest for TokenQueryTest {
-    fn name(&self) -> &str { "token_query" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "token_query"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -863,7 +996,10 @@ impl ConformanceTest for TokenQueryTest {
         let passed = actual_token == expected_token;
 
         let error_message = if !passed {
-            Some(format!("Expected token {:?}, got {:?}", expected_token, actual_token))
+            Some(format!(
+                "Expected token {:?}, got {:?}",
+                expected_token, actual_token
+            ))
         } else {
             None
         };
@@ -883,9 +1019,15 @@ impl ConformanceTest for TokenQueryTest {
 struct DropPerformanceTest;
 
 impl ConformanceTest for DropPerformanceTest {
-    fn name(&self) -> &str { "drop_performance" }
-    fn category(&self) -> TestCategory { TestCategory::Performance }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::May }
+    fn name(&self) -> &str {
+        "drop_performance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Performance
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::May
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();

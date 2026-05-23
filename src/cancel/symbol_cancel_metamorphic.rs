@@ -22,13 +22,13 @@
 //! - **MR7: Child Independence** - Sibling tokens don't affect each other
 //! - **MR8: Budget Preservation** - Cleanup budgets are preserved across operations
 
-use crate::cancel::symbol_cancel::{SymbolCancelToken, CancelListener};
+use crate::cancel::symbol_cancel::{CancelListener, SymbolCancelToken};
 use crate::types::{Budget, CancelKind, CancelReason, ObjectId, Time};
 use crate::util::DetRng;
 use proptest::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const EPSILON_NANOS: u64 = 1000; // 1µs tolerance for timing
 
@@ -68,7 +68,10 @@ impl CancelListener for TestListener {
         if self.panic_on_notify {
             panic!("Test listener panic");
         }
-        self.notifications.lock().unwrap().push((reason.clone(), at));
+        self.notifications
+            .lock()
+            .unwrap()
+            .push((reason.clone(), at));
     }
 }
 
@@ -559,7 +562,9 @@ mod integration_tests {
         token.cancel(&reason, now);
 
         // Panic count should increase
-        assert!(token.listener_panic_count() > initial_panic_count,
-            "Panic count should increase when listener panics");
+        assert!(
+            token.listener_panic_count() > initial_panic_count,
+            "Panic count should increase when listener panics"
+        );
     }
 }

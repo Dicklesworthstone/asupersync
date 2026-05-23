@@ -18,11 +18,11 @@ use super::IoDriver;
 use crate::runtime::reactor::{Event, Events, Interest, Reactor, Source, Token};
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
+use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
-use std::os::unix::io::RawFd;
 
 /// Requirement levels for conformance testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +112,10 @@ impl MockReactor {
     }
 
     pub fn push_event(&self, token: Token, interest: Interest) {
-        self.events.lock().unwrap().push(Event::new(token, interest));
+        self.events
+            .lock()
+            .unwrap()
+            .push(Event::new(token, interest));
     }
 
     pub fn poll_calls(&self) -> usize {
@@ -132,15 +135,18 @@ impl MockReactor {
     }
 
     pub fn set_fail_register(&self, should_fail: bool) {
-        self.should_fail_register.store(should_fail, Ordering::Relaxed);
+        self.should_fail_register
+            .store(should_fail, Ordering::Relaxed);
     }
 
     pub fn set_fail_deregister(&self, should_fail: bool) {
-        self.should_fail_deregister.store(should_fail, Ordering::Relaxed);
+        self.should_fail_deregister
+            .store(should_fail, Ordering::Relaxed);
     }
 
     pub fn set_fail_modify(&self, should_fail: bool) {
-        self.should_fail_modify.store(should_fail, Ordering::Relaxed);
+        self.should_fail_modify
+            .store(should_fail, Ordering::Relaxed);
     }
 
     pub fn set_fail_poll(&self, should_fail: bool) {
@@ -292,10 +298,7 @@ impl TestWaker {
         }
 
         let vtable = &RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn);
-        let raw_waker = RawWaker::new(
-            Arc::into_raw(wake_count) as *const (),
-            vtable,
-        );
+        let raw_waker = RawWaker::new(Arc::into_raw(wake_count) as *const (), vtable);
 
         unsafe { Waker::from_raw(raw_waker) }
     }
@@ -386,7 +389,9 @@ impl ConformanceReport {
     }
 
     pub fn must_pass_rate(&self) -> f64 {
-        let must_tests: Vec<_> = self.results.iter()
+        let must_tests: Vec<_> = self
+            .results
+            .iter()
             .filter(|r| r.level == RequirementLevel::Must)
             .collect();
         if must_tests.is_empty() {
@@ -403,7 +408,11 @@ impl ConformanceReport {
         matrix.push_str("|------|----------|-------|--------|------|\n");
 
         for result in &self.results {
-            let status = if result.passed { "✅ PASS" } else { "❌ FAIL" };
+            let status = if result.passed {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
             let level = match result.level {
                 RequirementLevel::Must => "MUST",
                 RequirementLevel::Should => "SHOULD",
@@ -427,8 +436,14 @@ impl ConformanceReport {
         }
 
         matrix.push_str(&format!("\n## Summary\n"));
-        matrix.push_str(&format!("- **Overall Pass Rate**: {:.1}%\n", self.pass_rate() * 100.0));
-        matrix.push_str(&format!("- **MUST Requirements**: {:.1}%\n", self.must_pass_rate() * 100.0));
+        matrix.push_str(&format!(
+            "- **Overall Pass Rate**: {:.1}%\n",
+            self.pass_rate() * 100.0
+        ));
+        matrix.push_str(&format!(
+            "- **MUST Requirements**: {:.1}%\n",
+            self.must_pass_rate() * 100.0
+        ));
         matrix.push_str(&format!("- **Total Tests**: {}\n", self.results.len()));
 
         matrix
@@ -441,9 +456,15 @@ impl ConformanceReport {
 struct BasicEventLoopTest;
 
 impl ConformanceTest for BasicEventLoopTest {
-    fn name(&self) -> &str { "basic_event_loop" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "basic_event_loop"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -453,7 +474,9 @@ impl ConformanceTest for BasicEventLoopTest {
         let source = MockSource::new(42);
 
         // Register source
-        let token = driver.register(&source, Interest::READABLE, test_waker.clone().into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, test_waker.clone().into_waker())
+            .unwrap();
 
         // Push event
         reactor.push_event(token, Interest::READABLE);
@@ -461,13 +484,15 @@ impl ConformanceTest for BasicEventLoopTest {
         // Process events
         let event_count = driver.turn(Some(Duration::ZERO)).unwrap();
 
-        let passed = event_count == 1
-            && test_waker.wake_count() == 1
-            && reactor.poll_calls() == 1;
+        let passed = event_count == 1 && test_waker.wake_count() == 1 && reactor.poll_calls() == 1;
 
         let error_message = if !passed {
-            Some(format!("Expected 1 event, 1 wake, 1 poll call. Got: events={}, wakes={}, polls={}",
-                        event_count, test_waker.wake_count(), reactor.poll_calls()))
+            Some(format!(
+                "Expected 1 event, 1 wake, 1 poll call. Got: events={}, wakes={}, polls={}",
+                event_count,
+                test_waker.wake_count(),
+                reactor.poll_calls()
+            ))
         } else {
             None
         };
@@ -487,9 +512,15 @@ impl ConformanceTest for BasicEventLoopTest {
 struct EventDeduplicationTest;
 
 impl ConformanceTest for EventDeduplicationTest {
-    fn name(&self) -> &str { "event_deduplication" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "event_deduplication"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -498,7 +529,9 @@ impl ConformanceTest for EventDeduplicationTest {
         let test_waker = TestWaker::new();
         let source = MockSource::new(43);
 
-        let token = driver.register(&source, Interest::READABLE, test_waker.clone().into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, test_waker.clone().into_waker())
+            .unwrap();
 
         // Push multiple events with same token
         reactor.push_event(token, Interest::READABLE);
@@ -511,8 +544,11 @@ impl ConformanceTest for EventDeduplicationTest {
         let passed = event_count == 3 && test_waker.wake_count() == 1;
 
         let error_message = if !passed {
-            Some(format!("Expected 3 events, 1 wake. Got: events={}, wakes={}",
-                        event_count, test_waker.wake_count()))
+            Some(format!(
+                "Expected 3 events, 1 wake. Got: events={}, wakes={}",
+                event_count,
+                test_waker.wake_count()
+            ))
         } else {
             None
         };
@@ -532,9 +568,15 @@ impl ConformanceTest for EventDeduplicationTest {
 struct MultipleEventsTest;
 
 impl ConformanceTest for MultipleEventsTest {
-    fn name(&self) -> &str { "multiple_events" }
-    fn category(&self) -> TestCategory { TestCategory::Integration }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "multiple_events"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Integration
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -545,8 +587,12 @@ impl ConformanceTest for MultipleEventsTest {
         let source1 = MockSource::new(44);
         let source2 = MockSource::new(45);
 
-        let token1 = driver.register(&source1, Interest::READABLE, waker1.clone().into_waker()).unwrap();
-        let token2 = driver.register(&source2, Interest::WRITABLE, waker2.clone().into_waker()).unwrap();
+        let token1 = driver
+            .register(&source1, Interest::READABLE, waker1.clone().into_waker())
+            .unwrap();
+        let token2 = driver
+            .register(&source2, Interest::WRITABLE, waker2.clone().into_waker())
+            .unwrap();
 
         // Push events for both tokens
         reactor.push_event(token1, Interest::READABLE);
@@ -554,13 +600,15 @@ impl ConformanceTest for MultipleEventsTest {
 
         let event_count = driver.turn(Some(Duration::ZERO)).unwrap();
 
-        let passed = event_count == 2
-            && waker1.wake_count() == 1
-            && waker2.wake_count() == 1;
+        let passed = event_count == 2 && waker1.wake_count() == 1 && waker2.wake_count() == 1;
 
         let error_message = if !passed {
-            Some(format!("Expected 2 events, 1 wake each. Got: events={}, waker1={}, waker2={}",
-                        event_count, waker1.wake_count(), waker2.wake_count()))
+            Some(format!(
+                "Expected 2 events, 1 wake each. Got: events={}, waker1={}, waker2={}",
+                event_count,
+                waker1.wake_count(),
+                waker2.wake_count()
+            ))
         } else {
             None
         };
@@ -580,9 +628,15 @@ impl ConformanceTest for MultipleEventsTest {
 struct TimeoutHandlingTest;
 
 impl ConformanceTest for TimeoutHandlingTest {
-    fn name(&self) -> &str { "timeout_handling" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "timeout_handling"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -596,8 +650,10 @@ impl ConformanceTest for TimeoutHandlingTest {
         let passed = event_count == 0 && elapsed < Duration::from_millis(50);
 
         let error_message = if !passed {
-            Some(format!("Expected 0 events, quick return. Got: events={}, elapsed={:?}",
-                        event_count, elapsed))
+            Some(format!(
+                "Expected 0 events, quick return. Got: events={}, elapsed={:?}",
+                event_count, elapsed
+            ))
         } else {
             None
         };
@@ -617,9 +673,15 @@ impl ConformanceTest for TimeoutHandlingTest {
 struct BasicRegistrationTest;
 
 impl ConformanceTest for BasicRegistrationTest {
-    fn name(&self) -> &str { "basic_registration" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "basic_registration"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -636,8 +698,11 @@ impl ConformanceTest for BasicRegistrationTest {
             && !driver.is_empty();
 
         let error_message = if !passed {
-            Some(format!("Registration failed or state inconsistent. Result: {:?}, registrations: {}",
-                        result, driver.stats().registrations))
+            Some(format!(
+                "Registration failed or state inconsistent. Result: {:?}, registrations: {}",
+                result,
+                driver.stats().registrations
+            ))
         } else {
             None
         };
@@ -657,9 +722,15 @@ impl ConformanceTest for BasicRegistrationTest {
 struct RegistrationFailureTest;
 
 impl ConformanceTest for RegistrationFailureTest {
-    fn name(&self) -> &str { "registration_failure" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "registration_failure"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -676,8 +747,12 @@ impl ConformanceTest for RegistrationFailureTest {
             && driver.stats().registrations == 0;
 
         let error_message = if !passed {
-            Some(format!("Expected failure with clean state. Got: {:?}, empty={}, registrations={}",
-                        result, driver.is_empty(), driver.stats().registrations))
+            Some(format!(
+                "Expected failure with clean state. Got: {:?}, empty={}, registrations={}",
+                result,
+                driver.is_empty(),
+                driver.stats().registrations
+            ))
         } else {
             None
         };
@@ -697,9 +772,15 @@ impl ConformanceTest for RegistrationFailureTest {
 struct WakerRegistrationTest;
 
 impl ConformanceTest for WakerRegistrationTest {
-    fn name(&self) -> &str { "waker_registration" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "waker_registration"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -708,13 +789,15 @@ impl ConformanceTest for WakerRegistrationTest {
         let test_waker = TestWaker::new();
         let token = driver.register_waker(test_waker.into_waker());
 
-        let passed = driver.waker_count() == 1
-            && driver.stats().registrations == 1
-            && !driver.is_empty();
+        let passed =
+            driver.waker_count() == 1 && driver.stats().registrations == 1 && !driver.is_empty();
 
         let error_message = if !passed {
-            Some(format!("Waker registration failed. Count: {}, registrations: {}",
-                        driver.waker_count(), driver.stats().registrations))
+            Some(format!(
+                "Waker registration failed. Count: {}, registrations: {}",
+                driver.waker_count(),
+                driver.stats().registrations
+            ))
         } else {
             None
         };
@@ -734,9 +817,15 @@ impl ConformanceTest for WakerRegistrationTest {
 struct BasicDeregistrationTest;
 
 impl ConformanceTest for BasicDeregistrationTest {
-    fn name(&self) -> &str { "basic_deregistration" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "basic_deregistration"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -745,7 +834,9 @@ impl ConformanceTest for BasicDeregistrationTest {
         let test_waker = TestWaker::new();
         let source = MockSource::new(48);
 
-        let token = driver.register(&source, Interest::READABLE, test_waker.into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, test_waker.into_waker())
+            .unwrap();
         let result = driver.deregister(token);
 
         let passed = result.is_ok()
@@ -754,8 +845,12 @@ impl ConformanceTest for BasicDeregistrationTest {
             && driver.stats().deregistrations == 1;
 
         let error_message = if !passed {
-            Some(format!("Deregistration failed or incomplete. Result: {:?}, registered: {}, empty: {}",
-                        result, reactor.is_registered(token), driver.is_empty()))
+            Some(format!(
+                "Deregistration failed or incomplete. Result: {:?}, registered: {}, empty: {}",
+                result,
+                reactor.is_registered(token),
+                driver.is_empty()
+            ))
         } else {
             None
         };
@@ -775,9 +870,15 @@ impl ConformanceTest for BasicDeregistrationTest {
 struct DeregistrationCleanupTest;
 
 impl ConformanceTest for DeregistrationCleanupTest {
-    fn name(&self) -> &str { "deregistration_cleanup" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "deregistration_cleanup"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -786,7 +887,9 @@ impl ConformanceTest for DeregistrationCleanupTest {
         let test_waker = TestWaker::new();
         let source = MockSource::new(49);
 
-        let token = driver.register(&source, Interest::READABLE, test_waker.into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, test_waker.into_waker())
+            .unwrap();
 
         // Make reactor fail
         reactor.set_fail_deregister(true);
@@ -798,8 +901,11 @@ impl ConformanceTest for DeregistrationCleanupTest {
             && driver.stats().deregistrations == 1;
 
         let error_message = if !passed {
-            Some(format!("Expected reactor failure but driver cleanup. Result: {:?}, empty: {}",
-                        result, driver.is_empty()))
+            Some(format!(
+                "Expected reactor failure but driver cleanup. Result: {:?}, empty: {}",
+                result,
+                driver.is_empty()
+            ))
         } else {
             None
         };
@@ -819,9 +925,15 @@ impl ConformanceTest for DeregistrationCleanupTest {
 struct DeregisterUnknownTokenTest;
 
 impl ConformanceTest for DeregisterUnknownTokenTest {
-    fn name(&self) -> &str { "deregister_unknown_token" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "deregister_unknown_token"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -834,7 +946,10 @@ impl ConformanceTest for DeregisterUnknownTokenTest {
         let passed = result.is_ok();
 
         let error_message = if !passed {
-            Some(format!("Expected success for unknown token. Got: {:?}", result))
+            Some(format!(
+                "Expected success for unknown token. Got: {:?}",
+                result
+            ))
         } else {
             None
         };
@@ -854,9 +969,15 @@ impl ConformanceTest for DeregisterUnknownTokenTest {
 struct WakerUpdateTest;
 
 impl ConformanceTest for WakerUpdateTest {
-    fn name(&self) -> &str { "waker_update" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "waker_update"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -866,20 +987,24 @@ impl ConformanceTest for WakerUpdateTest {
         let new_waker = TestWaker::new();
         let source = MockSource::new(50);
 
-        let token = driver.register(&source, Interest::READABLE, old_waker.clone().into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, old_waker.clone().into_waker())
+            .unwrap();
         let update_result = driver.update_waker(token, new_waker.clone().into_waker());
 
         // Test that new waker is used
         reactor.push_event(token, Interest::READABLE);
         let _event_count = driver.turn(Some(Duration::ZERO)).unwrap();
 
-        let passed = update_result
-            && old_waker.wake_count() == 0
-            && new_waker.wake_count() == 1;
+        let passed = update_result && old_waker.wake_count() == 0 && new_waker.wake_count() == 1;
 
         let error_message = if !passed {
-            Some(format!("Waker update failed. Update: {}, old_wakes: {}, new_wakes: {}",
-                        update_result, old_waker.wake_count(), new_waker.wake_count()))
+            Some(format!(
+                "Waker update failed. Update: {}, old_wakes: {}, new_wakes: {}",
+                update_result,
+                old_waker.wake_count(),
+                new_waker.wake_count()
+            ))
         } else {
             None
         };
@@ -899,9 +1024,15 @@ impl ConformanceTest for WakerUpdateTest {
 struct WakerDispatchTest;
 
 impl ConformanceTest for WakerDispatchTest {
-    fn name(&self) -> &str { "waker_dispatch" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "waker_dispatch"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -910,7 +1041,9 @@ impl ConformanceTest for WakerDispatchTest {
         let test_waker = TestWaker::new();
         let source = MockSource::new(51);
 
-        let token = driver.register(&source, Interest::READABLE, test_waker.clone().into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, test_waker.clone().into_waker())
+            .unwrap();
         reactor.push_event(token, Interest::READABLE);
 
         let event_count = driver.turn(Some(Duration::ZERO)).unwrap();
@@ -920,8 +1053,12 @@ impl ConformanceTest for WakerDispatchTest {
             && driver.stats().wakers_dispatched == 1;
 
         let error_message = if !passed {
-            Some(format!("Dispatch failed. Events: {}, wakes: {}, dispatched: {}",
-                        event_count, test_waker.wake_count(), driver.stats().wakers_dispatched))
+            Some(format!(
+                "Dispatch failed. Events: {}, wakes: {}, dispatched: {}",
+                event_count,
+                test_waker.wake_count(),
+                driver.stats().wakers_dispatched
+            ))
         } else {
             None
         };
@@ -941,9 +1078,15 @@ impl ConformanceTest for WakerDispatchTest {
 struct UnknownTokenHandlingTest;
 
 impl ConformanceTest for UnknownTokenHandlingTest {
-    fn name(&self) -> &str { "unknown_token_handling" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "unknown_token_handling"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -960,8 +1103,12 @@ impl ConformanceTest for UnknownTokenHandlingTest {
             && driver.stats().wakers_dispatched == 0;
 
         let error_message = if !passed {
-            Some(format!("Unknown token handling failed. Events: {}, unknown: {}, dispatched: {}",
-                        event_count, driver.stats().unknown_tokens, driver.stats().wakers_dispatched))
+            Some(format!(
+                "Unknown token handling failed. Events: {}, unknown: {}, dispatched: {}",
+                event_count,
+                driver.stats().unknown_tokens,
+                driver.stats().wakers_dispatched
+            ))
         } else {
             None
         };
@@ -981,9 +1128,15 @@ impl ConformanceTest for UnknownTokenHandlingTest {
 struct InterestModificationTest;
 
 impl ConformanceTest for InterestModificationTest {
-    fn name(&self) -> &str { "interest_modification" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "interest_modification"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -992,7 +1145,9 @@ impl ConformanceTest for InterestModificationTest {
         let test_waker = TestWaker::new();
         let source = MockSource::new(52);
 
-        let token = driver.register(&source, Interest::READABLE, test_waker.into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, test_waker.into_waker())
+            .unwrap();
         let modify_result = driver.modify_interest(token, Interest::WRITABLE);
 
         let passed = modify_result.is_ok();
@@ -1018,9 +1173,15 @@ impl ConformanceTest for InterestModificationTest {
 struct ModifyUnknownTokenTest;
 
 impl ConformanceTest for ModifyUnknownTokenTest {
-    fn name(&self) -> &str { "modify_unknown_token" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "modify_unknown_token"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1052,9 +1213,15 @@ impl ConformanceTest for ModifyUnknownTokenTest {
 struct WakeTest;
 
 impl ConformanceTest for WakeTest {
-    fn name(&self) -> &str { "wake" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "wake"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1065,7 +1232,11 @@ impl ConformanceTest for WakeTest {
         let passed = result.is_ok() && reactor.wake_calls() == 1;
 
         let error_message = if !passed {
-            Some(format!("Wake failed. Result: {:?}, calls: {}", result, reactor.wake_calls()))
+            Some(format!(
+                "Wake failed. Result: {:?}, calls: {}",
+                result,
+                reactor.wake_calls()
+            ))
         } else {
             None
         };
@@ -1085,9 +1256,15 @@ impl ConformanceTest for WakeTest {
 struct WakeFailureTest;
 
 impl ConformanceTest for WakeFailureTest {
-    fn name(&self) -> &str { "wake_failure" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "wake_failure"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1119,9 +1296,15 @@ impl ConformanceTest for WakeFailureTest {
 struct StatisticsAccuracyTest;
 
 impl ConformanceTest for StatisticsAccuracyTest {
-    fn name(&self) -> &str { "statistics_accuracy" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "statistics_accuracy"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1131,7 +1314,9 @@ impl ConformanceTest for StatisticsAccuracyTest {
         let source = MockSource::new(53);
 
         // Register
-        let token = driver.register(&source, Interest::READABLE, test_waker.into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, test_waker.into_waker())
+            .unwrap();
 
         // Push event and turn
         reactor.push_event(token, Interest::READABLE);
@@ -1169,9 +1354,15 @@ impl ConformanceTest for StatisticsAccuracyTest {
 struct WakerCountTest;
 
 impl ConformanceTest for WakerCountTest {
-    fn name(&self) -> &str { "waker_count" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "waker_count"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1194,8 +1385,10 @@ impl ConformanceTest for WakerCountTest {
         let passed = mid_count == 1 && !mid_empty && final_count == 0 && final_empty;
 
         let error_message = if !passed {
-            Some(format!("Waker count tracking failed. Mid: {}/{}, Final: {}/{}",
-                        mid_count, mid_empty, final_count, final_empty))
+            Some(format!(
+                "Waker count tracking failed. Mid: {}/{}, Final: {}/{}",
+                mid_count, mid_empty, final_count, final_empty
+            ))
         } else {
             None
         };
@@ -1215,9 +1408,15 @@ impl ConformanceTest for WakerCountTest {
 struct PollFailureHandlingTest;
 
 impl ConformanceTest for PollFailureHandlingTest {
-    fn name(&self) -> &str { "poll_failure_handling" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "poll_failure_handling"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1226,20 +1425,23 @@ impl ConformanceTest for PollFailureHandlingTest {
         let test_waker = TestWaker::new();
         let source = MockSource::new(54);
 
-        let _token = driver.register(&source, Interest::READABLE, test_waker.into_waker()).unwrap();
+        let _token = driver
+            .register(&source, Interest::READABLE, test_waker.into_waker())
+            .unwrap();
 
         // Make poll fail
         reactor.set_fail_poll(true);
         let result = driver.turn(Some(Duration::ZERO));
 
         // Driver state should be preserved
-        let passed = result.is_err()
-            && driver.waker_count() == 1
-            && !driver.is_empty();
+        let passed = result.is_err() && driver.waker_count() == 1 && !driver.is_empty();
 
         let error_message = if !passed {
-            Some(format!("Poll failure corrupted state. Result: {:?}, count: {}",
-                        result, driver.waker_count()))
+            Some(format!(
+                "Poll failure corrupted state. Result: {:?}, count: {}",
+                result,
+                driver.waker_count()
+            ))
         } else {
             None
         };
@@ -1259,9 +1461,15 @@ impl ConformanceTest for PollFailureHandlingTest {
 struct ReactorFailureRecoveryTest;
 
 impl ConformanceTest for ReactorFailureRecoveryTest {
-    fn name(&self) -> &str { "reactor_failure_recovery" }
-    fn category(&self) -> TestCategory { TestCategory::EdgeCase }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "reactor_failure_recovery"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EdgeCase
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1270,7 +1478,9 @@ impl ConformanceTest for ReactorFailureRecoveryTest {
         // Register successfully
         let test_waker = TestWaker::new();
         let source = MockSource::new(55);
-        let token = driver.register(&source, Interest::READABLE, test_waker.into_waker()).unwrap();
+        let token = driver
+            .register(&source, Interest::READABLE, test_waker.into_waker())
+            .unwrap();
 
         // Make modifications fail
         reactor.set_fail_modify(true);
@@ -1284,8 +1494,10 @@ impl ConformanceTest for ReactorFailureRecoveryTest {
         let passed = modify_result.is_err() && event_count == 1;
 
         let error_message = if !passed {
-            Some(format!("Recovery failed. Modify: {:?}, events: {}",
-                        modify_result, event_count))
+            Some(format!(
+                "Recovery failed. Modify: {:?}, events: {}",
+                modify_result, event_count
+            ))
         } else {
             None
         };
@@ -1305,9 +1517,15 @@ impl ConformanceTest for ReactorFailureRecoveryTest {
 struct TurnPerformanceTest;
 
 impl ConformanceTest for TurnPerformanceTest {
-    fn name(&self) -> &str { "turn_performance" }
-    fn category(&self) -> TestCategory { TestCategory::Performance }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::May }
+    fn name(&self) -> &str {
+        "turn_performance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Performance
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::May
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1318,7 +1536,8 @@ impl ConformanceTest for TurnPerformanceTest {
         for i in 0..1000 {
             let test_waker = TestWaker::new();
             let source = MockSource::new(i);
-            if let Ok(token) = driver.register(&source, Interest::READABLE, test_waker.into_waker()) {
+            if let Ok(token) = driver.register(&source, Interest::READABLE, test_waker.into_waker())
+            {
                 tokens.push(token);
             }
         }
@@ -1336,7 +1555,10 @@ impl ConformanceTest for TurnPerformanceTest {
         let passed = event_count == 1000 && elapsed < Duration::from_millis(100);
 
         let error_message = if !passed {
-            Some(format!("Performance inadequate. Events: {}, time: {:?}", event_count, elapsed))
+            Some(format!(
+                "Performance inadequate. Events: {}, time: {:?}",
+                event_count, elapsed
+            ))
         } else {
             None
         };
@@ -1356,9 +1578,15 @@ impl ConformanceTest for TurnPerformanceTest {
 struct RegistrationPerformanceTest;
 
 impl ConformanceTest for RegistrationPerformanceTest {
-    fn name(&self) -> &str { "registration_performance" }
-    fn category(&self) -> TestCategory { TestCategory::Performance }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::May }
+    fn name(&self) -> &str {
+        "registration_performance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Performance
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::May
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let reactor = MockReactor::new();
@@ -1379,8 +1607,11 @@ impl ConformanceTest for RegistrationPerformanceTest {
         let passed = driver.waker_count() == 1000 && elapsed < Duration::from_millis(100);
 
         let error_message = if !passed {
-            Some(format!("Registration performance poor. Count: {}, time: {:?}",
-                        driver.waker_count(), elapsed))
+            Some(format!(
+                "Registration performance poor. Count: {}, time: {:?}",
+                driver.waker_count(),
+                elapsed
+            ))
         } else {
             None
         };

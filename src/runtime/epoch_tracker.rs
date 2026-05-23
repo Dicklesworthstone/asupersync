@@ -1246,7 +1246,9 @@ mod tests {
                 if event.metadata().name() != "epoch_consistency_violation" {
                     return;
                 }
-                let mut v = VisitField { violation_type: None };
+                let mut v = VisitField {
+                    violation_type: None,
+                };
                 event.record(&mut v);
                 self.events.lock().push(Captured {
                     level: *event.metadata().level(),
@@ -1268,8 +1270,18 @@ mod tests {
             // Reproduce the #42 repro shape: TaskTable advances past
             // RegionTable@Genesis (skew > max_epoch_skew).
             let now = Time::from_nanos(1000);
-            tracker.notify_epoch_transition(ModuleId::Scheduler, EpochId::GENESIS, EpochId::new(1), now);
-            tracker.notify_epoch_transition(ModuleId::TaskTable, EpochId::GENESIS, EpochId::new(1), now);
+            tracker.notify_epoch_transition(
+                ModuleId::Scheduler,
+                EpochId::GENESIS,
+                EpochId::new(1),
+                now,
+            );
+            tracker.notify_epoch_transition(
+                ModuleId::TaskTable,
+                EpochId::GENESIS,
+                EpochId::new(1),
+                now,
+            );
             for to in 2u64..=5 {
                 tracker.notify_epoch_transition(
                     ModuleId::TaskTable,
@@ -1278,7 +1290,12 @@ mod tests {
                     Time::from_nanos(1000 + (to as u64) * 100),
                 );
             }
-            tracker.notify_epoch_transition(ModuleId::RegionTable, EpochId::GENESIS, EpochId::new(1), now);
+            tracker.notify_epoch_transition(
+                ModuleId::RegionTable,
+                EpochId::GENESIS,
+                EpochId::new(1),
+                now,
+            );
         });
 
         let captured = events.lock();

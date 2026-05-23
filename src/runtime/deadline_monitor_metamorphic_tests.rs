@@ -38,7 +38,8 @@ impl MockTimeSource {
     }
 
     fn advance(&self, duration: Duration) {
-        self.current.fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
+        self.current
+            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
     }
 
     fn set(&self, nanos: u64) {
@@ -129,9 +130,9 @@ fn time_scaling_invariance() {
     let region_id = RegionId::from_arena(ArenaIndex::new(1, 0));
 
     // Base timeline (nanoseconds)
-    let base_created = Time::from_nanos(1_000_000_000);  // 1 second
+    let base_created = Time::from_nanos(1_000_000_000); // 1 second
     let base_deadline = Time::from_nanos(5_000_000_000); // 5 seconds
-    let base_now = Time::from_nanos(4_500_000_000);     // 4.5 seconds (approaching deadline)
+    let base_now = Time::from_nanos(4_500_000_000); // 4.5 seconds (approaching deadline)
     let base_checkpoint = Time::from_nanos(3_000_000_000); // 3 seconds
 
     // Scaled timeline (2x scaling factor)
@@ -162,16 +163,25 @@ fn time_scaling_invariance() {
         Some(scaled_checkpoint),
         1,
     );
-    scaled_fixture.monitor.check_snapshots(scaled_now, [scaled_task]);
+    scaled_fixture
+        .monitor
+        .check_snapshots(scaled_now, [scaled_task]);
     let scaled_warnings = scaled_fixture.get_warnings();
 
     // Metamorphic relation: Both should produce the same warning behavior
-    assert_eq!(base_warnings.len(), scaled_warnings.len(),
-        "Time scaling should preserve warning count");
+    assert_eq!(
+        base_warnings.len(),
+        scaled_warnings.len(),
+        "Time scaling should preserve warning count"
+    );
 
-    if let (Some(base_warning), Some(scaled_warning)) = (base_warnings.first(), scaled_warnings.first()) {
-        assert_eq!(base_warning.reason, scaled_warning.reason,
-            "Time scaling should preserve warning reason");
+    if let (Some(base_warning), Some(scaled_warning)) =
+        (base_warnings.first(), scaled_warnings.first())
+    {
+        assert_eq!(
+            base_warning.reason, scaled_warning.reason,
+            "Time scaling should preserve warning reason"
+        );
 
         // Remaining time should scale proportionally
         let base_remaining_nanos = base_warning.remaining.as_nanos() as u64;
@@ -246,7 +256,10 @@ fn threshold_proportionality() {
     // Metamorphic relation: Both should warn (proportional thresholds)
     assert_eq!(warnings1.len(), 1, "Task 1 should warn at 80% elapsed");
     assert_eq!(warnings2.len(), 1, "Task 2 should warn at 80% elapsed");
-    assert_eq!(warnings1[0].reason, warnings2[0].reason, "Warning reasons should match");
+    assert_eq!(
+        warnings1[0].reason, warnings2[0].reason,
+        "Warning reasons should match"
+    );
 
     // Remaining time should be proportional
     let remaining1 = warnings1[0].remaining.as_nanos() as u64;
@@ -292,7 +305,9 @@ fn progress_monotonicity() {
         1,
     );
 
-    fixture.monitor.check_snapshots(check_time, [task_no_progress]);
+    fixture
+        .monitor
+        .check_snapshots(check_time, [task_no_progress]);
     let warnings_no_progress = fixture.get_warnings();
 
     fixture.clear_warnings();
@@ -307,7 +322,9 @@ fn progress_monotonicity() {
         2,
     );
 
-    fixture.monitor.check_snapshots(check_time, [task_with_progress]);
+    fixture
+        .monitor
+        .check_snapshots(check_time, [task_with_progress]);
     let warnings_with_progress = fixture.get_warnings();
 
     // Metamorphic relation: Progress should reduce warning severity
@@ -523,7 +540,9 @@ fn adaptive_fallback_consistency() {
     );
 
     fixture_fixed.monitor.check_snapshots(now, [task_fixed]);
-    fixture_adaptive.monitor.check_snapshots(now, [task_adaptive]);
+    fixture_adaptive
+        .monitor
+        .check_snapshots(now, [task_adaptive]);
 
     let warnings_fixed = fixture_fixed.get_warnings();
     let warnings_adaptive = fixture_adaptive.get_warnings();
@@ -596,27 +615,28 @@ fn combined_metamorphic_properties() {
         (
             Time::from_nanos(0),
             Time::from_nanos(10_000_000_000),
-            Time::from_nanos(9_000_000_000), // 90% elapsed
+            Time::from_nanos(9_000_000_000),       // 90% elapsed
             Some(Time::from_nanos(8_000_000_000)), // Recent checkpoint
-            true, // Should warn (approaching deadline)
+            true,                                  // Should warn (approaching deadline)
         ),
         (
             Time::from_nanos(0),
-            Time::from_nanos(20_000_000_000), // 2x longer task
-            Time::from_nanos(18_000_000_000), // 90% elapsed
+            Time::from_nanos(20_000_000_000),       // 2x longer task
+            Time::from_nanos(18_000_000_000),       // 90% elapsed
             Some(Time::from_nanos(16_000_000_000)), // Recent checkpoint
-            true, // Should warn (proportional behavior)
+            true,                                   // Should warn (proportional behavior)
         ),
         (
             Time::from_nanos(0),
             Time::from_nanos(10_000_000_000),
-            Time::from_nanos(5_000_000_000), // 50% elapsed
+            Time::from_nanos(5_000_000_000),       // 50% elapsed
             Some(Time::from_nanos(4_500_000_000)), // Very recent checkpoint
             false, // Should not warn (not close to deadline, recent progress)
         ),
     ];
 
-    for (i, (created, deadline, now, checkpoint, expected_warning)) in scenarios.iter().enumerate() {
+    for (i, (created, deadline, now, checkpoint, expected_warning)) in scenarios.iter().enumerate()
+    {
         fixture.clear_warnings();
 
         let task = DeadlineMonitorFixture::create_task_snapshot(

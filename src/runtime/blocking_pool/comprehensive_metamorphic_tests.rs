@@ -14,8 +14,8 @@
 use proptest::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 use super::super::*;
 
@@ -55,7 +55,13 @@ impl TestPoolConfig {
 
 /// Generate arbitrary valid pool configurations for testing.
 fn arb_pool_config() -> impl Strategy<Value = TestPoolConfig> {
-    (1usize..=4, 4usize..=8, 50u64..500, any::<bool>(), prop::option::of(1usize..4))
+    (
+        1usize..=4,
+        4usize..=8,
+        50u64..500,
+        any::<bool>(),
+        prop::option::of(1usize..4),
+    )
         .prop_map(|(min, max, timeout_ms, affinity, cohorts)| {
             let max = max.max(min); // Ensure max >= min
             TestPoolConfig {
@@ -79,7 +85,12 @@ struct TestTask {
 
 /// Generate arbitrary test tasks.
 fn arb_test_task() -> impl Strategy<Value = TestTask> {
-    (any::<u32>(), 1u64..100, any::<bool>(), prop::option::of(0usize..4))
+    (
+        any::<u32>(),
+        1u64..100,
+        any::<bool>(),
+        prop::option::of(0usize..4),
+    )
         .prop_map(|(id, duration_ms, should_fail, cohort)| TestTask {
             id,
             work_duration_ms: duration_ms,
@@ -103,9 +114,11 @@ fn arb_pool_operation() -> impl Strategy<Value = PoolOperation> {
     prop_oneof![
         arb_test_task().prop_map(|task| PoolOperation::SpawnTask { task }),
         any::<usize>().prop_map(|idx| PoolOperation::CancelTask { task_index: idx }),
-        (any::<usize>(), 100u64..1000).prop_map(|(idx, timeout)| PoolOperation::WaitForCompletion {
-            task_index: idx,
-            timeout_ms: timeout
+        (any::<usize>(), 100u64..1000).prop_map(|(idx, timeout)| {
+            PoolOperation::WaitForCompletion {
+                task_index: idx,
+                timeout_ms: timeout,
+            }
         }),
         Just(PoolOperation::DrainAndShutdown),
         Just(PoolOperation::CheckMetrics),
@@ -139,10 +152,7 @@ struct PoolSnapshot {
 }
 
 impl PoolSnapshot {
-    fn capture(
-        pool: &BlockingPool,
-        tracked_tasks: &[TrackedTask],
-    ) -> Self {
+    fn capture(pool: &BlockingPool, tracked_tasks: &[TrackedTask]) -> Self {
         let metrics = pool.metrics();
         let total_spawned = tracked_tasks.len();
         let total_completed = tracked_tasks.iter().filter(|t| t.completed).count();
@@ -212,7 +222,10 @@ fn apply_operation(
                 }
             }
         }
-        PoolOperation::WaitForCompletion { task_index, timeout_ms } => {
+        PoolOperation::WaitForCompletion {
+            task_index,
+            timeout_ms,
+        } => {
             if let Some(task) = tracked_tasks.get_mut(*task_index % tracked_tasks.len().max(1)) {
                 if !task.completed {
                     let timeout = Duration::from_millis(*timeout_ms);
@@ -245,7 +258,7 @@ fn apply_operation(
 /// Active thread count must always respect min/max bounds: min ≤ active ≤ max.
 #[test]
 fn mr_thread_count_bounds() {
-    proptest!(|(config: TestPoolConfig, operations: Vec<PoolOperation>)| {
+    proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
         let pool_options = config.to_options();
         let pool = BlockingPool::new(pool_options);
         let mut tracked_tasks = Vec::new();
@@ -274,7 +287,7 @@ fn mr_thread_count_bounds() {
 /// Total spawned tasks = completed + cancelled + pending (accounting identity).
 #[test]
 fn mr_task_conservation() {
-    proptest!(|(config: TestPoolConfig, operations: Vec<PoolOperation>)| {
+    proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
         let pool_options = config.to_options();
         let pool = BlockingPool::new(pool_options);
         let mut tracked_tasks = Vec::new();
@@ -299,7 +312,7 @@ fn mr_task_conservation() {
 /// Number of busy threads cannot exceed active threads: busy ≤ active.
 #[test]
 fn mr_busy_threads_constraint() {
-    proptest!(|(config: TestPoolConfig, operations: Vec<PoolOperation>)| {
+    proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
         let pool_options = config.to_options();
         let pool = BlockingPool::new(pool_options);
         let mut tracked_tasks = Vec::new();
@@ -324,7 +337,7 @@ fn mr_busy_threads_constraint() {
 /// (under saturation conditions).
 #[test]
 fn mr_scaling_linearity() {
-    proptest!(|(base_task_count: usize)| {
+    proptest!(|(base_task_count in 1usize..=50)| {
         let base_task_count = (base_task_count % 8) + 2; // 2-9 tasks
         let config = TestPoolConfig {
             min_threads: 1,
@@ -377,7 +390,7 @@ fn mr_scaling_linearity() {
 /// for independent tasks.
 #[test]
 fn mr_cancellation_commutativity() {
-    proptest!(|(task_duration_ms: u64)| {
+    proptest!(|(task_duration_ms in 1u64..=100)| {
         let task_duration_ms = (task_duration_ms % 300) + 100; // 100-399ms
         let config = TestPoolConfig {
             min_threads: 1,
@@ -424,7 +437,7 @@ fn mr_cancellation_commutativity() {
 /// spawn_tasks(N) → drain_and_shutdown() should restore initial state.
 #[test]
 fn mr_spawn_shutdown_round_trip() {
-    proptest!(|(task_count: usize)| {
+    proptest!(|(task_count in 1usize..=50)| {
         let task_count = (task_count % 6) + 1; // 1-6 tasks
         let config = TestPoolConfig {
             min_threads: 1,
@@ -473,7 +486,7 @@ fn mr_spawn_shutdown_round_trip() {
 /// Pool behavior should be deterministic given the same configuration parameters.
 #[test]
 fn mr_configuration_invariance() {
-    proptest!(|(config: TestPoolConfig, task_count: usize)| {
+    proptest!(|(config in arb_pool_config(), task_count in 1usize..=50)| {
         let task_count = (task_count % 4) + 1; // 1-4 tasks
 
         // Create two identical pools
@@ -514,7 +527,7 @@ fn mr_configuration_invariance() {
 /// Total tasks across all cohorts should equal global task count when affinity is enabled.
 #[test]
 fn mr_affinity_conservation() {
-    proptest!(|(task_count: usize, cohort_preferences: Vec<usize>)| {
+    proptest!(|(task_count in 1usize..=50, cohort_preferences in prop::collection::vec(0usize..4, 0..=50))| {
         let task_count = (task_count % 6) + 2; // 2-7 tasks
         let config = TestPoolConfig {
             min_threads: 1,
@@ -555,7 +568,7 @@ fn mr_affinity_conservation() {
 /// For same-priority tasks, execution order should respect submission order (FIFO property).
 #[test]
 fn mr_task_ordering_fifo() {
-    proptest!(|(task_count: usize)| {
+    proptest!(|(task_count in 1usize..=50)| {
         let task_count = (task_count % 4) + 2; // 2-5 tasks
         let config = TestPoolConfig {
             min_threads: 1,
@@ -598,7 +611,7 @@ fn mr_task_ordering_fifo() {
 /// A task marked as completed should remain completed (monotonic property).
 #[test]
 fn mr_completion_consistency() {
-    proptest!(|(task_duration_ms: u64)| {
+    proptest!(|(task_duration_ms in 1u64..=100)| {
         let task_duration_ms = (task_duration_ms % 100) + 50; // 50-149ms
         let config = TestPoolConfig {
             min_threads: 1,
@@ -641,7 +654,7 @@ mod composition_tests {
     /// Tests that all three properties hold simultaneously under complex operations.
     #[test]
     fn mr_composite_pool_invariants() {
-        proptest!(|(config: TestPoolConfig, operations: Vec<PoolOperation>)| {
+        proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
             let pool_options = config.to_options();
             let pool = BlockingPool::new(pool_options);
             let mut tracked_tasks = Vec::new();

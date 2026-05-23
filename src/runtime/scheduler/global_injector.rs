@@ -325,7 +325,11 @@ impl GlobalInjector {
                 }
                 // Race detected: combiner became inactive, remove OUR entry from pending and fallback
                 // Only pop if the last entry is the one we just pushed (FIFO ordering protection)
-                if pending.last().map(|last| last.task == entry.task && last.priority == entry.priority).unwrap_or(false) {
+                if pending
+                    .last()
+                    .map(|last| last.task == entry.task && last.priority == entry.priority)
+                    .unwrap_or(false)
+                {
                     pending.pop();
                 }
             }

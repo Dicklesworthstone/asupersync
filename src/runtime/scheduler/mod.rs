@@ -71,6 +71,9 @@ pub use priority_inversion_oracle::{
     InversionId, InversionImpact, InversionOracleConfig, InversionSeverity, InversionStats,
     InversionType, Priority, PriorityInversion, PriorityInversionOracle, ResourceId,
 };
+pub use stream_priority::{
+    SchedulerIntegration, SchedulerStats, StreamAssignment, StreamPriority, StreamPriorityScheduler,
+};
 pub use swarm_evidence::{
     CoordinationPressureFamily, SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION,
     SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION,
@@ -84,10 +87,6 @@ pub use swarm_evidence::{
     SwarmDiskPressureLevel, SwarmLaneAdmission, SwarmMemoryBudgetPlan, SwarmMemoryCapacity,
     SwarmMemoryHostTier, SwarmMemoryPressureTier, SwarmRchAdmissibility, SwarmRchCapacity,
     SwarmValidationClass,
-};
-pub use stream_priority::{
-    SchedulerIntegration, SchedulerStats, StreamAssignment, StreamPriority,
-    StreamPriorityScheduler,
 };
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use work_stealing_checker::{

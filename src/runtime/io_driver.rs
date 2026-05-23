@@ -2897,6 +2897,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "io_driver_conformance_tests.rs"]
 pub mod io_driver_conformance_tests;
 
 #[cfg(test)]
@@ -2913,12 +2914,17 @@ mod io_driver_conformance_integration {
         // IoDriver Event Loop Conformance Report generated
 
         // Verify critical requirements pass
-        let must_failures: Vec<_> = report.results.iter()
+        let must_failures: Vec<_> = report
+            .results
+            .iter()
             .filter(|r| r.level == RequirementLevel::Must && !r.passed)
             .collect();
 
         if !must_failures.is_empty() {
-            panic!("Critical event loop conformance failures: {:#?}", must_failures);
+            panic!(
+                "Critical event loop conformance failures: {:#?}",
+                must_failures
+            );
         }
 
         let must_pass_rate = report.must_pass_rate();
@@ -2927,7 +2933,15 @@ mod io_driver_conformance_integration {
         // MUST requirements and overall pass rate calculated
 
         // Event loop conformance requires 100% MUST pass rate
-        assert!(must_pass_rate >= 1.0, "Event loop MUST requirements below 100%: {:.1}%", must_pass_rate * 100.0);
-        assert!(overall_pass_rate >= 0.85, "Overall pass rate below 85%: {:.1}%", overall_pass_rate * 100.0);
+        assert!(
+            must_pass_rate >= 1.0,
+            "Event loop MUST requirements below 100%: {:.1}%",
+            must_pass_rate * 100.0
+        );
+        assert!(
+            overall_pass_rate >= 0.85,
+            "Overall pass rate below 85%: {:.1}%",
+            overall_pass_rate * 100.0
+        );
     }
 }

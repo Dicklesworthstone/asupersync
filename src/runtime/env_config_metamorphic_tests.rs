@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::env;
 
 use super::*;
-use crate::runtime::config::{RuntimeConfig, BlockingPoolOptions};
+use crate::runtime::config::{BlockingPoolOptions, RuntimeConfig};
 use crate::types::builder::BuildError;
 
 /// Test environment variable setting for controlled testing.
@@ -67,8 +67,8 @@ fn arb_env_var() -> impl Strategy<Value = TestEnvVar> {
 /// Boolean value representations for testing equivalence.
 #[derive(Debug, Clone)]
 enum BoolRepr {
-    True(String),   // "true", "1", "yes", "on"
-    False(String),  // "false", "0", "no", "off"
+    True(String),  // "true", "1", "yes", "on"
+    False(String), // "false", "0", "no", "off"
 }
 
 impl BoolRepr {
@@ -112,7 +112,10 @@ fn arb_config_operation() -> impl Strategy<Value = ConfigOperation> {
             ENV_TASK_QUEUE_DEPTH,
             ENV_ENABLE_PARKING,
             ENV_POLL_BUDGET
-        ].prop_map(|name| ConfigOperation::UnsetEnvVar { name: name.to_string() }),
+        ]
+        .prop_map(|name| ConfigOperation::UnsetEnvVar {
+            name: name.to_string()
+        }),
         Just(ConfigOperation::ApplyDefaults),
         ("[a-z_]+", "[0-9]+").prop_map(|(name, value)| ConfigOperation::ParseField {
             field_name: name,
@@ -214,10 +217,18 @@ fn mr_default_consistency() {
 
         // Clear all asupersync env vars for clean test
         for var_name in &[
-            ENV_WORKER_THREADS, ENV_TASK_QUEUE_DEPTH, ENV_THREAD_STACK_SIZE,
-            ENV_THREAD_NAME_PREFIX, ENV_STEAL_BATCH_SIZE, ENV_BLOCKING_MIN_THREADS,
-            ENV_BLOCKING_MAX_THREADS, ENV_ENABLE_PARKING, ENV_POLL_BUDGET,
-            ENV_CANCEL_LANE_MAX_STREAK, ENV_ENABLE_GOVERNOR, ENV_GOVERNOR_INTERVAL,
+            ENV_WORKER_THREADS,
+            ENV_TASK_QUEUE_DEPTH,
+            ENV_THREAD_STACK_SIZE,
+            ENV_THREAD_NAME_PREFIX,
+            ENV_STEAL_BATCH_SIZE,
+            ENV_BLOCKING_MIN_THREADS,
+            ENV_BLOCKING_MAX_THREADS,
+            ENV_ENABLE_PARKING,
+            ENV_POLL_BUDGET,
+            ENV_CANCEL_LANE_MAX_STREAK,
+            ENV_ENABLE_GOVERNOR,
+            ENV_GOVERNOR_INTERVAL,
         ] {
             env_guard.unset(var_name);
         }
@@ -228,14 +239,20 @@ fn mr_default_consistency() {
         // Create config via env application to defaults
         let mut config2 = RuntimeConfig::default();
         let result = apply_env_overrides(&mut config2);
-        prop_assert!(result.is_ok(), "Apply env overrides should succeed with no env vars");
+        prop_assert!(
+            result.is_ok(),
+            "Apply env overrides should succeed with no env vars"
+        );
 
         // Both should be identical
         let snapshot1 = ConfigSnapshot::capture(&config1);
         let snapshot2 = ConfigSnapshot::capture(&config2);
 
-        prop_assert_eq!(snapshot1, snapshot2,
-            "Default configs should be identical: direct vs env_applied");
+        prop_assert_eq!(
+            snapshot1,
+            snapshot2,
+            "Default configs should be identical: direct vs env_applied"
+        );
     });
 }
 
@@ -243,7 +260,7 @@ fn mr_default_consistency() {
 /// Different representations of the same boolean value should parse identically.
 #[test]
 fn mr_boolean_parsing_equivalence() {
-    proptest!(|(repr1: BoolRepr, repr2: BoolRepr)| {
+    proptest!(|(repr1 in arb_bool_repr(), repr2 in arb_bool_repr())| {
         // Skip if different expected values
         if repr1.expected_bool() != repr2.expected_bool() {
             return Ok(());
@@ -277,7 +294,7 @@ fn mr_boolean_parsing_equivalence() {
 /// Values with different whitespace should parse identically.
 #[test]
 fn mr_whitespace_invariance() {
-    proptest!(|(base_value: usize, whitespace_prefix: String, whitespace_suffix: String)| {
+    proptest!(|(base_value in 1usize..=1000, whitespace_prefix in ".{0,5}", whitespace_suffix in ".{0,5}")| {
         let base_value = base_value % 1000 + 1; // 1-1000
         let prefix = whitespace_prefix.chars().filter(|c| c.is_whitespace()).take(5).collect::<String>();
         let suffix = whitespace_suffix.chars().filter(|c| c.is_whitespace()).take(5).collect::<String>();
@@ -308,10 +325,7 @@ fn mr_whitespace_invariance() {
 /// Boolean values should be case-insensitive.
 #[test]
 fn mr_case_insensitive_boolean_parsing() {
-    proptest!(|(base_bool: String)| {
-        let valid_bools = ["true", "false", "yes", "no", "on", "off", "1", "0"];
-        let base_bool = prop::sample::select(valid_bools).prop_map(|s| s.to_string()).new_tree(&mut proptest::test_runner::TestRunner::default())?.current();
-
+    proptest!(|(base_bool in prop::sample::select(["true", "false", "yes", "no", "on", "off", "1", "0"]).prop_map(|s| s.to_string()))| {
         let mut env_guard = EnvGuard::new();
 
         // Test original case
@@ -350,9 +364,7 @@ fn mr_case_insensitive_boolean_parsing() {
 /// Setting one configuration field should not affect others.
 #[test]
 fn mr_field_independence() {
-    proptest!(|(worker_threads: usize, poll_budget: u32)| {
-        let worker_threads = (worker_threads % 100) + 1; // 1-100
-        let poll_budget = (poll_budget % 1000) + 1; // 1-1000
+    proptest!(|(worker_threads in 1usize..=100, poll_budget in 1u32..=1000)| {
 
         let mut env_guard = EnvGuard::new();
 
@@ -387,7 +399,7 @@ fn mr_field_independence() {
 /// Invalid values should produce consistent error types.
 #[test]
 fn mr_error_type_consistency() {
-    proptest!(|(invalid_values: Vec<String>)| {
+    proptest!(|(invalid_values in prop::collection::vec("[a-z]{1,8}", 1..=5))| {
         let invalid_values: Vec<String> = invalid_values.into_iter()
             .filter(|s| !s.trim().is_empty() && s.chars().any(|c| !c.is_ascii_digit()))
             .take(5)
@@ -427,9 +439,7 @@ fn mr_error_type_consistency() {
 /// Environment variables should always override defaults.
 #[test]
 fn mr_precedence_override_consistency() {
-    proptest!(|(override_value: usize)| {
-        let override_value = (override_value % 100) + 1; // 1-100
-
+    proptest!(|(override_value in 1usize..=100)| {
         let mut env_guard = EnvGuard::new();
 
         // Get default value
@@ -475,18 +485,28 @@ fn mr_boundary_value_consistency() {
         let mut config_zero = RuntimeConfig::default();
         let result_zero = apply_env_overrides(&mut config_zero);
 
-        prop_assert!(result_min.is_ok(),
-            "Minimum valid values should parse successfully");
+        prop_assert!(
+            result_min.is_ok(),
+            "Minimum valid values should parse successfully"
+        );
 
         // Zero worker threads should be valid (runtime decides actual count)
         // Zero blocking threads should be valid (pool handles minimum)
-        prop_assert!(result_zero.is_ok(),
-            "Zero values should be handled gracefully");
+        prop_assert!(
+            result_zero.is_ok(),
+            "Zero values should be handled gracefully"
+        );
 
-        prop_assert_eq!(config_min.worker_threads, 1,
-            "Minimum worker threads should be 1");
-        prop_assert_eq!(config_min.blocking.min_threads, 1,
-            "Minimum blocking threads should be 1");
+        prop_assert_eq!(
+            config_min.worker_threads,
+            1,
+            "Minimum worker threads should be 1"
+        );
+        prop_assert_eq!(
+            config_min.blocking.min_threads,
+            1,
+            "Minimum blocking threads should be 1"
+        );
     });
 }
 
@@ -494,9 +514,7 @@ fn mr_boundary_value_consistency() {
 /// Setting a value then unsetting should restore default behavior.
 #[test]
 fn mr_set_unset_round_trip() {
-    proptest!(|(test_value: usize)| {
-        let test_value = (test_value % 500) + 50; // 50-549
-
+    proptest!(|(test_value in 50usize..=549)| {
         let mut env_guard = EnvGuard::new();
 
         // Get baseline (no env var set)
@@ -537,10 +555,8 @@ fn mr_set_unset_round_trip() {
 /// Min threads should always be ≤ max threads after applying overrides.
 #[test]
 fn mr_blocking_pool_min_max_relationship() {
-    proptest!(|(min_threads: usize, max_threads: usize)| {
-        let min_threads = (min_threads % 20) + 1; // 1-20
-        let max_threads = (max_threads % 100) + min_threads; // Ensure max >= min
-
+    proptest!(|(min_threads in 1usize..=20, extra_threads in 0usize..=100)| {
+        let max_threads = min_threads + extra_threads;
         let mut env_guard = EnvGuard::new();
 
         env_guard.set(ENV_BLOCKING_MIN_THREADS, &min_threads.to_string());
@@ -572,7 +588,7 @@ mod composition_tests {
     /// all hold simultaneously under complex configuration scenarios.
     #[test]
     fn mr_composite_config_invariants() {
-        proptest!(|(operations: Vec<ConfigOperation>)| {
+        proptest!(|(operations in prop::collection::vec(arb_config_operation(), 0..=20))| {
             let mut env_guard = EnvGuard::new();
 
             // Start with clean environment
