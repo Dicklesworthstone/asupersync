@@ -607,6 +607,40 @@ impl RelayTcpTlsStreamWrite {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelayTcpTlsPendingWrite {
+    peer_id: PeerId,
+    bytes: Vec<u8>,
+    written: usize,
+}
+
+impl RelayTcpTlsPendingWrite {
+    fn from_record(record: RelayTcpTlsRecord) -> Self {
+        let peer_id = record.to_peer_id();
+        Self {
+            peer_id,
+            bytes: record.into_bytes(),
+            written: 0,
+        }
+    }
+
+    fn remaining(&self) -> &[u8] {
+        &self.bytes[self.written..]
+    }
+
+    fn remaining_len(&self) -> usize {
+        self.bytes.len().saturating_sub(self.written)
+    }
+
+    fn advance(&mut self, written: usize) {
+        self.written = self.written.saturating_add(written).min(self.bytes.len());
+    }
+
+    fn is_complete(&self) -> bool {
+        self.written >= self.bytes.len()
+    }
+}
+
 /// Errors from the concrete relay socket I/O boundary.
 ///
 /// Relay protocol failures stay in [`RelayError`]. This type adds the OS-facing
@@ -643,6 +677,25 @@ pub enum RelaySocketIoError {
         sent: usize,
         /// Encoded datagram bytes expected.
         expected: usize,
+    },
+    /// Caller supplied no scratch space for a TCP/TLS stream read.
+    #[error("relay TCP/TLS read buffer is empty")]
+    TcpTlsReadBufferEmpty,
+    /// TCP/TLS stream reached EOF and was closed by the socket loop.
+    #[error("relay TCP/TLS stream closed: {stream_id:?}")]
+    TcpTlsStreamClosed {
+        /// Relay-local stream id that closed.
+        stream_id: RelayTcpTlsStreamId,
+    },
+    /// A TCP/TLS stream writer accepted zero bytes while a record was pending.
+    #[error(
+        "relay TCP/TLS stream write made no progress: stream {stream_id:?}, remaining {remaining} bytes"
+    )]
+    TcpTlsWriteZero {
+        /// Relay-local stream id being written.
+        stream_id: RelayTcpTlsStreamId,
+        /// Remaining bytes in the staged TCP/TLS record.
+        remaining: usize,
     },
     /// Relay-level validation or state transition failed.
     #[error(transparent)]
@@ -681,6 +734,7 @@ impl From<io::Error> for RelaySocketIoError {
 pub struct RelaySocketLoop {
     endpoints: RelayEndpointDirectory,
     tcp_tls_streams: BTreeMap<RelayTcpTlsStreamId, RelayTcpTlsStreamBuffer>,
+    tcp_tls_pending_writes: BTreeMap<RelayTcpTlsStreamId, RelayTcpTlsPendingWrite>,
     max_payload_bytes: usize,
     max_tcp_tls_buffered_bytes: usize,
 }
@@ -702,6 +756,7 @@ impl RelaySocketLoop {
         Ok(Self {
             endpoints,
             tcp_tls_streams: BTreeMap::new(),
+            tcp_tls_pending_writes: BTreeMap::new(),
             max_payload_bytes,
             max_tcp_tls_buffered_bytes,
         })
@@ -717,6 +772,12 @@ impl RelaySocketLoop {
     #[must_use]
     pub fn tcp_tls_stream_buffer_count(&self) -> usize {
         self.tcp_tls_streams.len()
+    }
+
+    /// Number of staged TCP/TLS stream records that still have bytes to write.
+    #[must_use]
+    pub fn tcp_tls_pending_write_count(&self) -> usize {
+        self.tcp_tls_pending_writes.len()
     }
 
     /// Minimum scratch-buffer capacity for [`Self::recv_udp_socket_once`].
@@ -782,6 +843,7 @@ impl RelaySocketLoop {
     /// Close a TCP/TLS stream and discard retained partial record bytes.
     pub fn close_tcp_tls_stream(&mut self, stream_id: RelayTcpTlsStreamId) -> Option<PeerId> {
         self.tcp_tls_streams.remove(&stream_id);
+        self.tcp_tls_pending_writes.remove(&stream_id);
         self.endpoints.unbind_tcp_tls_stream(stream_id)
     }
 
@@ -796,6 +858,17 @@ impl RelaySocketLoop {
             .get(&stream_id)
             .map(RelayTcpTlsStreamBuffer::pending_len)
             .ok_or(RelayError::UnknownRelayEndpoint)
+    }
+
+    /// Return pending outbound bytes for an admitted TCP/TLS stream.
+    ///
+    /// This covers records already moved out of the relay queue into the socket
+    /// loop's write buffer because a prior `write` accepted only a prefix.
+    #[must_use]
+    pub fn tcp_tls_pending_write_len(&self, stream_id: RelayTcpTlsStreamId) -> usize {
+        self.tcp_tls_pending_writes
+            .get(&stream_id)
+            .map_or(0, RelayTcpTlsPendingWrite::remaining_len)
     }
 
     /// Ingest one UDP datagram read from a relay socket.
@@ -864,6 +937,45 @@ impl RelaySocketLoop {
         }
 
         self.ingest_udp_datagram(service, now_micros, src_addr, &scratch[..received])
+            .map(Some)
+            .map_err(Into::into)
+    }
+
+    /// Read and forward at most one chunk from a concrete TCP/TLS stream.
+    ///
+    /// The stream must already be admitted to an authenticated peer. A
+    /// nonblocking `WouldBlock` returns `Ok(None)` without mutating relay state.
+    /// EOF closes the stream binding and discards retained partial input/output
+    /// bytes for that stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelaySocketIoError::TcpTlsReadBufferEmpty`] when `scratch` is
+    /// empty, [`RelaySocketIoError::TcpTlsStreamClosed`] on EOF, OS socket errors,
+    /// or relay validation errors from decoded records.
+    pub fn recv_tcp_tls_stream_once<R: io::Read>(
+        &mut self,
+        service: &mut RelayService,
+        now_micros: u64,
+        stream_id: RelayTcpTlsStreamId,
+        stream: &mut R,
+        scratch: &mut [u8],
+    ) -> Result<Option<Vec<ForwardedPacket>>, RelaySocketIoError> {
+        if scratch.is_empty() {
+            return Err(RelaySocketIoError::TcpTlsReadBufferEmpty);
+        }
+
+        let received = match stream.read(scratch) {
+            Ok(0) => {
+                let _ = self.close_tcp_tls_stream(stream_id);
+                return Err(RelaySocketIoError::TcpTlsStreamClosed { stream_id });
+            }
+            Ok(received) => received,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+
+        self.ingest_tcp_tls_stream_bytes(service, now_micros, stream_id, &scratch[..received])
             .map(Some)
             .map_err(Into::into)
     }
@@ -980,6 +1092,70 @@ impl RelaySocketLoop {
             return Ok(None);
         };
         Ok(Some(RelayTcpTlsStreamWrite { stream_id, record }))
+    }
+
+    /// Write queued TCP/TLS relay bytes to an admitted concrete stream.
+    ///
+    /// TCP is a byte stream, so a successful write may accept only a prefix of
+    /// the record. The socket loop therefore stages a full relay record in an
+    /// internal pending-write buffer before removing it from the service queue,
+    /// and later calls continue writing the retained suffix before another
+    /// record can be dequeued for that stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the peer has no admitted
+    /// TCP/TLS stream, [`RelaySocketIoError::WouldBlock`] when a nonblocking
+    /// stream cannot accept bytes, [`RelaySocketIoError::TcpTlsWriteZero`] when
+    /// the writer makes no progress, or relay encoding/state errors.
+    pub fn send_tcp_tls_stream_once<W: io::Write>(
+        &mut self,
+        service: &mut RelayService,
+        stream: &mut W,
+        peer_id: PeerId,
+    ) -> Result<Option<usize>, RelaySocketIoError> {
+        let stream_id = self.endpoints.first_tcp_tls_stream_for_peer(peer_id)?;
+        if !self.tcp_tls_pending_writes.contains_key(&stream_id) {
+            let Some(record) =
+                service.peek_tcp_tls_record_for_peer(peer_id, self.max_payload_bytes)?
+            else {
+                return Ok(None);
+            };
+            let reservation_id = record.reservation_id();
+            let pending = RelayTcpTlsPendingWrite::from_record(record);
+            service.commit_tcp_tls_record_for_peer(peer_id, reservation_id)?;
+            self.tcp_tls_pending_writes.insert(stream_id, pending);
+        }
+
+        let pending = self
+            .tcp_tls_pending_writes
+            .get_mut(&stream_id)
+            .ok_or(RelayError::UnknownRelayEndpoint)?;
+        debug_assert_eq!(pending.peer_id, peer_id);
+        let remaining_len = pending.remaining_len();
+        let written = match stream.write(pending.remaining()) {
+            Ok(0) => {
+                return Err(RelaySocketIoError::TcpTlsWriteZero {
+                    stream_id,
+                    remaining: remaining_len,
+                });
+            }
+            Ok(written) => written,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(RelaySocketIoError::WouldBlock);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        pending.advance(written);
+        if pending.is_complete() {
+            let removed = self
+                .tcp_tls_pending_writes
+                .remove(&stream_id)
+                .expect("pending write exists after completed write");
+            debug_assert_eq!(removed.peer_id, peer_id);
+        }
+
+        Ok(Some(written))
     }
 }
 
@@ -2598,7 +2774,30 @@ impl RelayService {
         peer_id: PeerId,
         max_payload_bytes: usize,
     ) -> Result<Option<RelayTcpTlsRecord>, RelayError> {
-        let Some((forwarded, transfer_nonce, encoded)) = self.encode_front_for_peer_transport(
+        let Some(record) = self.peek_tcp_tls_record_for_peer(peer_id, max_payload_bytes)? else {
+            return Ok(None);
+        };
+        self.commit_tcp_tls_record_for_peer(peer_id, record.reservation_id())?;
+        Ok(Some(record))
+    }
+
+    /// Encode the next TCP/TLS 443 packet queued for `peer_id` without consuming it.
+    ///
+    /// This is the first phase of TCP/TLS socket egress. The socket loop can move
+    /// the bytes into its pending-write buffer and only call
+    /// [`Self::commit_tcp_tls_record_for_peer`] once the complete record is owned
+    /// by that buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns relay frame encoding errors or [`RelayError::UnknownReservation`]
+    /// if the queued packet references state that no longer exists.
+    pub fn peek_tcp_tls_record_for_peer(
+        &self,
+        peer_id: PeerId,
+        max_payload_bytes: usize,
+    ) -> Result<Option<RelayTcpTlsRecord>, RelayError> {
+        let Some((forwarded, _transfer_nonce, encoded)) = self.encode_front_for_peer_transport(
             peer_id,
             RelayTransport::TcpTls443,
             max_payload_bytes,
@@ -2606,20 +2805,48 @@ impl RelayService {
         else {
             return Ok(None);
         };
-        let popped = self
-            .dequeue_for_peer(peer_id)
-            .ok_or(RelayError::UnknownReservation)?;
-        debug_assert_eq!(popped.reservation_id, forwarded.reservation_id);
-        debug_assert_eq!(popped.packet.transport(), RelayTransport::TcpTls443);
-        let popped_transfer_nonce = self.transfer_nonce_for(&popped)?;
-        debug_assert_eq!(transfer_nonce, popped_transfer_nonce);
 
         Ok(Some(RelayTcpTlsRecord {
             to_peer_id: peer_id,
-            reservation_id: popped.reservation_id,
+            reservation_id: forwarded.reservation_id,
             bytes: encoded,
-            opaque_bytes: popped.packet.opaque_len() as u64,
+            opaque_bytes: forwarded.packet.opaque_len() as u64,
         }))
+    }
+
+    /// Commit the TCP/TLS record previously returned by [`Self::peek_tcp_tls_record_for_peer`].
+    ///
+    /// The queue front must still be the same reservation and transport. This
+    /// prevents a stream writer from consuming a newer or different packet if
+    /// relay state advanced between peek and commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownReservation`] when the peer queue is empty
+    /// or the queue front no longer matches `reservation_id`, and
+    /// [`RelayError::InvalidRelayWireFrame`] if the queue front is not a TCP/TLS
+    /// relay packet.
+    pub fn commit_tcp_tls_record_for_peer(
+        &mut self,
+        peer_id: PeerId,
+        reservation_id: RelayReservationId,
+    ) -> Result<(), RelayError> {
+        let Some(forwarded) = self.queues.get(&peer_id).and_then(VecDeque::front) else {
+            return Err(RelayError::UnknownReservation);
+        };
+        if forwarded.reservation_id != reservation_id {
+            return Err(RelayError::UnknownReservation);
+        }
+        if forwarded.packet.transport() != RelayTransport::TcpTls443 {
+            return Err(RelayError::InvalidRelayWireFrame);
+        }
+
+        let popped = self
+            .dequeue_for_peer(peer_id)
+            .ok_or(RelayError::UnknownReservation)?;
+        debug_assert_eq!(popped.reservation_id, reservation_id);
+        debug_assert_eq!(popped.packet.transport(), RelayTransport::TcpTls443);
+        Ok(())
     }
 
     /// Dequeue the next forwarded packet for a peer.

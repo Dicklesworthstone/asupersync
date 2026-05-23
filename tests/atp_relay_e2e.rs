@@ -15,7 +15,8 @@ use asupersync::net::atp::relay::{
     RelayTcpTlsStreamId, RelayTransport, RelayWireFrame,
 };
 use asupersync::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
-use std::net::{SocketAddr, UdpSocket};
+use std::io::{Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::time::Duration;
 
 fn log_stage(test: &str, stage: &str, detail: impl AsRef<str>) {
@@ -1373,6 +1374,260 @@ fn relay_socket_loop_round_trips_real_udp_socket_with_detailed_logs() {
             .expect("queue drained after successful socket send")
             .is_none()
     );
+}
+
+#[test]
+fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
+    let test = "relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs";
+    let mut service = RelayService::new(
+        RelayServiceConfig::new("relay-real-tcp-socket-e2e", 4)
+            .expect("config")
+            .with_udp_enabled(false)
+            .with_log_peer_ids(true),
+    );
+    log_stage(
+        test,
+        "reserve",
+        "accept a relay reservation that must use tcp/tls 443 fallback",
+    );
+    service
+        .reserve(
+            700,
+            reservation_id(705),
+            "real-tcp-socket-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve real tcp stream relay");
+
+    log_stage(
+        test,
+        "connect",
+        "create real loopback tcp streams for source ingress and destination egress",
+    );
+    let source_listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("source listener");
+    let source_addr = source_listener.local_addr().expect("source listener addr");
+    let mut source_client = TcpStream::connect(source_addr).expect("source client connects");
+    let (mut relay_source_stream, _) = source_listener.accept().expect("accept source stream");
+    relay_source_stream
+        .set_nonblocking(true)
+        .expect("relay source stream nonblocking");
+
+    let destination_listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("destination listener");
+    let destination_addr = destination_listener
+        .local_addr()
+        .expect("destination listener addr");
+    let mut destination_client =
+        TcpStream::connect(destination_addr).expect("destination client connects");
+    let (mut relay_destination_stream, _) = destination_listener
+        .accept()
+        .expect("accept destination stream");
+    destination_client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("destination read timeout");
+
+    let mut socket_loop = RelaySocketLoop::new(
+        RelayEndpointDirectoryQuota {
+            max_udp_endpoints: 1,
+            max_tcp_tls_streams: 2,
+        },
+        RelayQuota::default().max_packet_bytes,
+        1024,
+    )
+    .expect("socket loop");
+    let source_stream_id = RelayTcpTlsStreamId::new(801).expect("source stream id");
+    let destination_stream_id = RelayTcpTlsStreamId::new(802).expect("destination stream id");
+    socket_loop
+        .admit_tcp_tls_stream(peer(1), source_stream_id)
+        .expect("admit source tcp stream");
+    socket_loop
+        .admit_tcp_tls_stream(peer(2), destination_stream_id)
+        .expect("admit destination tcp stream");
+
+    log_stage(
+        test,
+        "empty-nonblocking-read",
+        "tcp stream read helper reports would-block without mutating proof state",
+    );
+    let mut scratch = vec![0; 1024];
+    assert_eq!(
+        socket_loop
+            .recv_tcp_tls_stream_once(
+                &mut service,
+                701,
+                source_stream_id,
+                &mut relay_source_stream,
+                &mut scratch,
+            )
+            .expect("empty nonblocking tcp stream read"),
+        None
+    );
+    assert_eq!(
+        service
+            .proof_artifact(reservation_id(705))
+            .expect("proof after empty tcp read")
+            .packets_forwarded,
+        0
+    );
+    relay_source_stream
+        .set_nonblocking(false)
+        .expect("relay source stream blocking for deterministic read");
+    relay_source_stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("relay source read timeout");
+
+    log_stage(
+        test,
+        "socket-ingress",
+        "real tcp stream bytes are admitted by stream id before relay decode",
+    );
+    let tcp_frame = RelayWireFrame::new(
+        reservation_id(705),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(
+            RelayTransport::TcpTls443,
+            b"real-tcp-socket-ciphertext",
+            1,
+            720,
+        ),
+    );
+    let tcp_record = tcp_frame
+        .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+        .expect("encode tcp record");
+    source_client
+        .write_all(&tcp_record)
+        .expect("source writes tcp relay record");
+    let forwarded = socket_loop
+        .recv_tcp_tls_stream_once(
+            &mut service,
+            740,
+            source_stream_id,
+            &mut relay_source_stream,
+            &mut scratch,
+        )
+        .expect("read relay tcp stream")
+        .expect("forwarded tcp packets");
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].from_peer_id(), peer(1));
+    assert_eq!(forwarded[0].to_peer_id(), peer(2));
+    assert_eq!(
+        forwarded[0].packet().opaque_bytes(),
+        b"real-tcp-socket-ciphertext"
+    );
+    assert_eq!(
+        service
+            .proof_artifact(reservation_id(705))
+            .expect("proof after real tcp ingress")
+            .packets_forwarded,
+        1
+    );
+
+    log_stage(
+        test,
+        "empty-egress",
+        "tcp stream write helper distinguishes empty source queues from sends",
+    );
+    assert_eq!(
+        socket_loop
+            .send_tcp_tls_stream_once(&mut service, &mut relay_destination_stream, peer(1))
+            .expect("no queued source tcp write"),
+        None
+    );
+
+    log_stage(
+        test,
+        "socket-egress",
+        "queued tcp relay record is staged and written to the concrete destination stream",
+    );
+    let mut total_written = 0usize;
+    for _ in 0..8 {
+        let Some(written) = socket_loop
+            .send_tcp_tls_stream_once(&mut service, &mut relay_destination_stream, peer(2))
+            .expect("relay tcp stream write")
+        else {
+            break;
+        };
+        total_written = total_written.saturating_add(written);
+        if socket_loop.tcp_tls_pending_write_len(destination_stream_id) == 0 {
+            break;
+        }
+    }
+    assert!(total_written > 0);
+    assert_eq!(
+        socket_loop.tcp_tls_pending_write_len(destination_stream_id),
+        0
+    );
+    assert_eq!(socket_loop.tcp_tls_pending_write_count(), 0);
+
+    let mut received = vec![0; 2048];
+    let mut received_len = 0usize;
+    while received_len < 4 {
+        let read = destination_client
+            .read(&mut received[received_len..])
+            .expect("destination reads tcp record prefix");
+        assert!(read > 0, "destination stream closed before record prefix");
+        received_len += read;
+    }
+    let frame_len =
+        u32::from_be_bytes(received[..4].try_into().expect("record prefix bytes")) as usize;
+    let record_len = frame_len + 4;
+    assert!(
+        record_len <= received.len(),
+        "destination tcp record length exceeds receive buffer"
+    );
+    while received_len < record_len {
+        let read = destination_client
+            .read(&mut received[received_len..record_len])
+            .expect("destination reads complete tcp record");
+        assert!(read > 0, "destination stream closed before complete record");
+        received_len += read;
+    }
+    let decoded = RelayWireFrame::decode_complete_tcp_tls_record(
+        &received[..record_len],
+        RelayQuota::default().max_packet_bytes,
+    )
+    .expect("decode destination tcp relay record");
+    assert_eq!(decoded.reservation_id(), reservation_id(705));
+    assert_eq!(decoded.from_peer_id(), peer(1));
+    assert_eq!(decoded.packet().transport(), RelayTransport::TcpTls443);
+    assert_eq!(
+        decoded.packet().opaque_bytes(),
+        b"real-tcp-socket-ciphertext"
+    );
+    assert!(
+        socket_loop
+            .drain_tcp_tls_record_for_peer(&mut service, peer(2))
+            .expect("queue drained after successful tcp stream write")
+            .is_none()
+    );
+
+    log_stage(
+        test,
+        "eof",
+        "tcp stream eof closes endpoint binding and retained stream buffers",
+    );
+    source_client
+        .shutdown(Shutdown::Write)
+        .expect("source half closes write side");
+    let err = socket_loop
+        .recv_tcp_tls_stream_once(
+            &mut service,
+            780,
+            source_stream_id,
+            &mut relay_source_stream,
+            &mut scratch,
+        )
+        .expect_err("tcp stream eof closes the admitted stream");
+    match err {
+        RelaySocketIoError::TcpTlsStreamClosed { stream_id } => {
+            assert_eq!(stream_id, source_stream_id);
+        }
+        other => panic!("unexpected tcp stream EOF error: {other:?}"),
+    }
+    assert_eq!(socket_loop.tcp_tls_stream_buffer_count(), 1);
 }
 
 #[test]
