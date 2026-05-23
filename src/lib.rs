@@ -245,6 +245,8 @@ pub mod cancel_cx_runtime_channel_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod channel_ordering_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod combinator_family_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod bytes_io_time_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cx_obligation_trace_metamorphic_tests;
@@ -304,6 +306,8 @@ pub mod server_session_evidence_epoch_spork_metamorphic_tests;
 pub mod sync_primitives_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod sync_scheduler_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod timer_wheel_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_logging;
 #[cfg(any(test, feature = "test-internals"))]
