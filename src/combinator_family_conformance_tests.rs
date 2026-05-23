@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(any(test, feature = "test-internals"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MockResult<T> {
     Ok(T),
     RetryableError(String),
