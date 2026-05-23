@@ -476,12 +476,22 @@ impl SwarmWorkloadPressureFeedback {
 #[derive(Debug, Clone, Copy)]
 struct SwarmWorkloadPressureSummary {
     live_report_count: u64,
+    max_queue_pressure: f64,
+    max_disk_io_pressure: f64,
+    max_rch_queue_pressure: f64,
+    max_validation_frontier_pressure: f64,
+    max_cancellation_tail_pressure: f64,
     max_overall_pressure: f64,
 }
 
 impl SwarmWorkloadPressureSummary {
     const EMPTY: Self = Self {
         live_report_count: 0,
+        max_queue_pressure: 0.0,
+        max_disk_io_pressure: 0.0,
+        max_rch_queue_pressure: 0.0,
+        max_validation_frontier_pressure: 0.0,
+        max_cancellation_tail_pressure: 0.0,
         max_overall_pressure: 0.0,
     };
 
@@ -1040,6 +1050,20 @@ pub struct SwarmAdmissionDecisionReceipt {
     pub cleanup_debt_pressure_scaled: i64,
     /// Memory budget pressure ratio scaled by 10_000.
     pub memory_budget_pressure_scaled: i64,
+    /// Live workload feedback reports considered by this decision.
+    pub workload_feedback_report_count: u64,
+    /// Maximum workload feedback pressure ratio scaled by 10_000.
+    pub workload_feedback_max_pressure_scaled: i64,
+    /// Workload queue feedback pressure ratio scaled by 10_000.
+    pub workload_queue_pressure_scaled: i64,
+    /// Workload disk or artifact-cache IO feedback pressure ratio scaled by 10_000.
+    pub workload_disk_io_pressure_scaled: i64,
+    /// Workload RCH or remote-worker queue feedback pressure ratio scaled by 10_000.
+    pub workload_rch_queue_pressure_scaled: i64,
+    /// Workload validation-frontier feedback pressure ratio scaled by 10_000.
+    pub workload_validation_frontier_pressure_scaled: i64,
+    /// Workload cancellation/drain tail feedback pressure ratio scaled by 10_000.
+    pub workload_cancellation_tail_pressure_scaled: i64,
 }
 
 /// Enhanced admission decision with resource envelope information.
@@ -1260,6 +1284,7 @@ impl SwarmPressureGovernor {
                 DegradationLevel::None,
                 &pressure_snapshot,
                 &reason,
+                workload_pressure,
                 workload_request,
             );
             self.regions_admitted.fetch_add(1, Ordering::Relaxed);
@@ -1314,6 +1339,7 @@ impl SwarmPressureGovernor {
                 degradation_level,
                 &pressure_snapshot,
                 &reason,
+                workload_pressure,
                 workload_request,
             );
             return Ok(SwarmAdmissionDecision {
@@ -1342,6 +1368,7 @@ impl SwarmPressureGovernor {
                 degradation_level,
                 &pressure_snapshot,
                 &reason,
+                workload_pressure,
                 workload_request,
             );
             return Ok(SwarmAdmissionDecision {
@@ -1401,6 +1428,7 @@ impl SwarmPressureGovernor {
             degradation_level,
             &pressure_snapshot,
             &reason,
+            workload_pressure,
             workload_request,
         );
 
@@ -2465,6 +2493,7 @@ impl SwarmPressureGovernor {
         degradation_level: DegradationLevel,
         pressure_snapshot: &PressureSnapshot,
         reason: &str,
+        workload_pressure: SwarmWorkloadPressureSummary,
         workload_request: Option<&SwarmWorkloadAdmissionRequest>,
     ) -> SwarmAdmissionDecisionReceipt {
         let decision_id = self
@@ -2531,6 +2560,25 @@ impl SwarmPressureGovernor {
             memory_budget_pressure_scaled: scale_pressure_for_metrics(
                 pressure_snapshot.memory_budget_pressure,
             ),
+            workload_feedback_report_count: workload_pressure.live_report_count,
+            workload_feedback_max_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_overall_pressure,
+            ),
+            workload_queue_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_queue_pressure,
+            ),
+            workload_disk_io_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_disk_io_pressure,
+            ),
+            workload_rch_queue_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_rch_queue_pressure,
+            ),
+            workload_validation_frontier_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_validation_frontier_pressure,
+            ),
+            workload_cancellation_tail_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_cancellation_tail_pressure,
+            ),
         }
     }
 
@@ -2576,6 +2624,18 @@ impl SwarmPressureGovernor {
             }
 
             summary.live_report_count += 1;
+            summary.max_queue_pressure = summary.max_queue_pressure.max(report.queue_pressure);
+            summary.max_disk_io_pressure =
+                summary.max_disk_io_pressure.max(report.disk_io_pressure);
+            summary.max_rch_queue_pressure = summary
+                .max_rch_queue_pressure
+                .max(report.rch_queue_pressure);
+            summary.max_validation_frontier_pressure = summary
+                .max_validation_frontier_pressure
+                .max(report.validation_frontier_pressure);
+            summary.max_cancellation_tail_pressure = summary
+                .max_cancellation_tail_pressure
+                .max(report.cancellation_tail_pressure);
             summary.max_overall_pressure = summary.max_overall_pressure.max(report.max_pressure());
         }
 
@@ -2609,12 +2669,17 @@ impl SwarmPressureGovernor {
     ) -> String {
         if peer_pressure.has_live_pressure() || workload_pressure.has_live_pressure() {
             format!(
-                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, max peer degradation {:?}, {} live workload feedback reports, max workload pressure {:.3}",
+                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, max peer degradation {:?}, {} live workload feedback reports, max workload pressure {:.3} (queue {:.3}, disk_io {:.3}, rch_queue {:.3}, validation_frontier {:.3}, cancellation_tail {:.3})",
                 peer_pressure.live_report_count,
                 peer_pressure.max_overall_pressure,
                 peer_pressure.max_degradation_level,
                 workload_pressure.live_report_count,
-                workload_pressure.max_overall_pressure
+                workload_pressure.max_overall_pressure,
+                workload_pressure.max_queue_pressure,
+                workload_pressure.max_disk_io_pressure,
+                workload_pressure.max_rch_queue_pressure,
+                workload_pressure.max_validation_frontier_pressure,
+                workload_pressure.max_cancellation_tail_pressure
             )
         } else if base == "Admission approved" {
             base.to_string()
@@ -2670,6 +2735,7 @@ impl SwarmPressureGovernor {
             degradation_level,
             &pressure_snapshot,
             &reason,
+            SwarmWorkloadPressureSummary::EMPTY,
             Some(request),
         );
         SwarmAdmissionDecision {
@@ -3651,6 +3717,34 @@ mod tests {
         assert!(decision.decision_receipt.deadline_set);
         assert_eq!(decision.decision_receipt.cancellation_budget_ms, Some(5000));
         assert_eq!(decision.decision_receipt.overall_pressure_scaled, 0);
+        assert_eq!(decision.decision_receipt.workload_feedback_report_count, 0);
+        assert_eq!(
+            decision
+                .decision_receipt
+                .workload_feedback_max_pressure_scaled,
+            0
+        );
+        assert_eq!(decision.decision_receipt.workload_queue_pressure_scaled, 0);
+        assert_eq!(
+            decision.decision_receipt.workload_disk_io_pressure_scaled,
+            0
+        );
+        assert_eq!(
+            decision.decision_receipt.workload_rch_queue_pressure_scaled,
+            0
+        );
+        assert_eq!(
+            decision
+                .decision_receipt
+                .workload_validation_frontier_pressure_scaled,
+            0
+        );
+        assert_eq!(
+            decision
+                .decision_receipt
+                .workload_cancellation_tail_pressure_scaled,
+            0
+        );
 
         let mismatched_request = SwarmWorkloadAdmissionRequest::new(
             "receipt-owner-b",
@@ -4564,6 +4658,44 @@ mod tests {
                 .contains("live workload feedback reports")
         );
         assert!(hot_decision.reason.contains("max workload pressure 0.850"));
+        assert_eq!(
+            hot_decision.decision_receipt.workload_feedback_report_count,
+            1
+        );
+        assert_eq!(
+            hot_decision
+                .decision_receipt
+                .workload_feedback_max_pressure_scaled,
+            8500
+        );
+        assert_eq!(
+            hot_decision.decision_receipt.workload_queue_pressure_scaled,
+            2000
+        );
+        assert_eq!(
+            hot_decision
+                .decision_receipt
+                .workload_disk_io_pressure_scaled,
+            3000
+        );
+        assert_eq!(
+            hot_decision
+                .decision_receipt
+                .workload_rch_queue_pressure_scaled,
+            8500
+        );
+        assert_eq!(
+            hot_decision
+                .decision_receipt
+                .workload_validation_frontier_pressure_scaled,
+            4000
+        );
+        assert_eq!(
+            hot_decision
+                .decision_receipt
+                .workload_cancellation_tail_pressure_scaled,
+            1000
+        );
 
         let cold_request = SwarmWorkloadAdmissionRequest::new(
             "cold-proof",
@@ -4573,6 +4705,18 @@ mod tests {
             .check_workload_admission(&cx, &cold_request)
             .expect("cold workload admission should classify");
         assert!(matches!(cold_decision.decision, AdmissionDecision::Admit));
+        assert_eq!(
+            cold_decision
+                .decision_receipt
+                .workload_feedback_report_count,
+            0
+        );
+        assert_eq!(
+            cold_decision
+                .decision_receipt
+                .workload_feedback_max_pressure_scaled,
+            0
+        );
 
         let metrics = governor.metrics();
         assert_eq!(metrics.workload_feedback_reports_recorded, 1);
