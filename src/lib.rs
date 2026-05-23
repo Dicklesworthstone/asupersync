@@ -263,6 +263,8 @@ pub mod database_primitives_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod deterministic_state_golden_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod distributed_security_codec_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_obligation_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_primitives_conformance_tests;
