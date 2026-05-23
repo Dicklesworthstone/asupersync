@@ -459,12 +459,21 @@ impl std::fmt::Debug for AppHandle {
 impl Drop for AppHandle {
     fn drop(&mut self) {
         if !self.resolved {
-            if std::thread::panicking() {
-                return;
-            }
-            panic!(
-                "APP HANDLE LEAKED: app `{}` (region {:?}) was dropped without stop() or join(). \
-                 Call stop(), join(), or into_raw() to resolve.",
+            // br-supervision-fix.2 — Log resource leak instead of panicking
+            // to preserve supervision tree stability. Panicking in Drop
+            // during normal operation violates process isolation invariants.
+            #[cfg(feature = "tracing-integration")]
+            tracing::error!(
+                app_name = %self.name,
+                region_id = ?self.root_region,
+                "APP HANDLE LEAKED: app was dropped without stop() or join(). \
+                 Call stop(), join(), or into_raw() to resolve."
+            );
+
+            // Always emit a trace event for deterministic debugging
+            // even without tracing feature enabled
+            eprintln!(
+                "[SUPERVISION LEAK] App '{}' (region {:?}) dropped without proper cleanup",
                 self.name, self.root_region
             );
         }

@@ -823,7 +823,8 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // stop() sets Stopping before scheduling; we must honour that signal so the
     // poll_fn guard in the message loop can detect the pre-stop and break.
     // Use compare_and_swap to avoid TOCTOU race between load() and store().
-    cell.state.compare_and_swap(ActorState::Created, ActorState::Running);
+    cell.state
+        .compare_and_swap(ActorState::Created, ActorState::Running);
 
     // Phase 1: Initialization
     // We always run on_start, even if cancelled or pre-stopped, because
@@ -964,7 +965,10 @@ fn join_result_to_task_outcome<A>(result: &Result<A, JoinError>) -> Outcome<(), 
         Err(JoinError::Cancelled(reason)) => Outcome::Cancelled(reason.clone()),
         Err(JoinError::Panicked(payload)) => Outcome::Panicked(payload.clone()),
         Err(JoinError::PolledAfterCompletion) => {
-            panic!("actor task produced JoinError::PolledAfterCompletion")
+            // br-supervision-fix.1 — Return error instead of panicking to preserve
+            // process isolation. PolledAfterCompletion indicates a runtime bug but
+            // should not crash the supervision tree.
+            Outcome::Err(())
         }
     }
 }
@@ -3302,16 +3306,16 @@ mod tests {
 // ============================================================================
 
 #[cfg(test)]
+#[path = "actor_conformance_tests.rs"]
 mod actor_conformance_tests;
 
 #[cfg(test)]
 mod conformance_integration {
-    use super::actor_conformance_tests::ActorConformanceHarness;
-    use crate::test_utils::init_test;
+    use super::actor_conformance_tests::{ActorConformanceHarness, TestVerdict};
 
     #[test]
     fn actor_conformance_suite() {
-        init_test("actor_conformance_suite");
+        crate::test_utils::init_test_logging();
 
         let mut harness = ActorConformanceHarness::new();
 
@@ -3323,10 +3327,10 @@ mod conformance_integration {
 
         for result in results {
             match result.verdict {
-                crate::actor_conformance_tests::TestVerdict::Pass => {
+                TestVerdict::Pass => {
                     passes += 1;
                 }
-                crate::actor_conformance_tests::TestVerdict::Fail(reason) => {
+                TestVerdict::Fail(reason) => {
                     failures.push(format!("{}: {}", result.test_name, reason));
                 }
             }
@@ -3336,7 +3340,10 @@ mod conformance_integration {
             panic!("Actor conformance failures:\n{}", failures.join("\n"));
         }
 
-        assert!(passes > 0, "No conformance tests passed - harness may be broken");
+        assert!(
+            passes > 0,
+            "No conformance tests passed - harness may be broken"
+        );
 
         crate::test_complete!("actor_conformance_suite");
     }
