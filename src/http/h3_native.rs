@@ -1038,7 +1038,10 @@ fn qpack_decode_required_insert_count(
             "required insert count exceeds addressable range",
         ))?;
     let max_wrapped = (max_value / full_range) * full_range;
-    let mut required_insert_count = max_wrapped + encoded_insert_count - 1;
+    // Calculate required insert count with overflow protection
+    let mut required_insert_count = max_wrapped
+        .saturating_add(encoded_insert_count)
+        .saturating_sub(1);
 
     if required_insert_count > max_value {
         if required_insert_count <= full_range {
@@ -1174,7 +1177,8 @@ pub fn qpack_decode_encoder_instruction(
         };
         return Ok((
             QpackEncoderInstruction::InsertWithNameReference { name, value },
-            pos + 1 + value_extra,
+            // Calculate position with overflow protection
+            pos.saturating_add(1).saturating_add(value_extra),
         ));
     }
 
@@ -1185,7 +1189,8 @@ pub fn qpack_decode_encoder_instruction(
         let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
         return Ok((
             QpackEncoderInstruction::InsertWithoutNameReference { name, value },
-            pos + 1 + value_extra,
+            // Calculate position with overflow protection
+            pos.saturating_add(1).saturating_add(value_extra),
         ));
     }
 
@@ -4424,7 +4429,8 @@ pub struct QpackDynamicEntry {
 
 impl QpackDynamicEntry {
     fn new(name: String, value: String, insertion_order: u64) -> Self {
-        let size = 32 + name.len() + value.len(); // RFC 9204 size calculation
+        // RFC 9204 size calculation with overflow protection
+        let size = name.len().saturating_add(value.len()).saturating_add(32);
         Self {
             name,
             value,
@@ -4498,7 +4504,8 @@ impl QpackDynamicTable {
         }
 
         // Evict entries to make space (LRU with reference checking)
-        while self.current_size + entry_size > self.max_capacity {
+        // Use saturating arithmetic to prevent overflow in capacity check
+        while self.current_size.saturating_add(entry_size) > self.max_capacity {
             if !self.evict_lru_unreferenced() {
                 return Err("cannot evict enough space (all entries referenced)");
             }
@@ -4506,7 +4513,8 @@ impl QpackDynamicTable {
 
         let insertion_id = self.insertion_counter;
         self.entries.push(entry);
-        self.current_size += entry_size;
+        // Use saturating arithmetic to prevent overflow in size tracking
+        self.current_size = self.current_size.saturating_add(entry_size);
         self.insertion_counter += 1;
 
         Ok(insertion_id)
@@ -5987,7 +5995,8 @@ mod tests {
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
         // Truncate: remove the last 2 payload bytes.
-        let truncated = &buf[..buf.len() - 2];
+        // Use saturating arithmetic to prevent underflow in test
+        let truncated = &buf[..buf.len().saturating_sub(2)];
         let err =
             H3Frame::decode(truncated, &test_config()).expect_err("must fail on truncated payload");
         assert_eq!(err, H3NativeError::UnexpectedEof);

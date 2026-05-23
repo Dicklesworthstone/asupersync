@@ -2058,7 +2058,7 @@ mod tests {
         // …but the connection window MUST still be decremented by 100 bytes.
         assert_eq!(
             conn.recv_window(),
-            window_before - 100,
+            window_before.saturating_sub(100),
             "connection recv_window must be decremented even on stream-level errors"
         );
     }
@@ -2296,7 +2296,8 @@ mod tests {
 
         let initial_window = settings::DEFAULT_INITIAL_WINDOW_SIZE;
         // Send data that crosses the 25% threshold for the *stream*.
-        let payload_len = initial_window * 3 / 4 + 2;
+        // Calculate payload length with overflow protection
+        let payload_len = initial_window.saturating_mul(3).saturating_div(4).saturating_add(2);
         let data = Bytes::from(vec![0_u8; payload_len as usize]);
         let frame = Frame::Data(DataFrame::new(1, data, false));
         conn.process_frame(frame).expect("process data");
@@ -3149,7 +3150,8 @@ mod tests {
 
         // Try to push 100 streams
         for i in 0..100 {
-            let promised_id = (i + 1) * 2; // Even IDs: 2, 4, 6, ...
+            // Generate even IDs with overflow protection: 2, 4, 6, ...
+            let promised_id = i.saturating_add(1).saturating_mul(2);
             let push = Frame::PushPromise(PushPromiseFrame {
                 stream_id,
                 promised_stream_id: promised_id,
@@ -5079,7 +5081,7 @@ mod tests {
         /// Property: f(updates_A) = f(updates_B) where updates_B is permutation of updates_A
         #[test]
         fn mr_window_update_commutativity() {
-            proptest!(|(increments: Vec<u32>)| {
+            proptest!(|(increments in prop::collection::vec(1u32..=MAX_INCREMENT, 1..=MAX_WINDOW_UPDATES))| {
                 let increments: Vec<u32> = increments.into_iter()
                     .filter(|&i| i > 0 && i <= MAX_INCREMENT)
                     .take(MAX_WINDOW_UPDATES)
@@ -5128,7 +5130,7 @@ mod tests {
         /// Property: window_final = window_initial + sum(deltas)
         #[test]
         fn mr_window_update_additive_connection_level() {
-            proptest!(|(increments: Vec<u32>)| {
+            proptest!(|(increments in prop::collection::vec(1u32..=MAX_INCREMENT, 1..=MAX_WINDOW_UPDATES))| {
                 let increments: Vec<u32> = increments.into_iter()
                     .filter(|&i| i > 0 && i <= MAX_INCREMENT)
                     .take(MAX_WINDOW_UPDATES)
@@ -5164,7 +5166,7 @@ mod tests {
         /// Property: f(a1, a2, ..., an) = f(sum(a1..an))
         #[test]
         fn mr_window_update_batch_equivalence() {
-            proptest!(|(increments: Vec<u32>)| {
+            proptest!(|(increments in prop::collection::vec(1u32..=MAX_INCREMENT, 1..=MAX_WINDOW_UPDATES))| {
                 let increments: Vec<u32> = increments.into_iter()
                     .filter(|&i| i > 0 && i <= MAX_INCREMENT)
                     .take(MAX_WINDOW_UPDATES)
@@ -5219,7 +5221,7 @@ mod tests {
         /// Property: ∀ operations, recv_window ≥ reasonable_bound
         #[test]
         fn mr_window_no_underflow_invariant() {
-            proptest!(|(window_updates: Vec<u32>)| {
+            proptest!(|(window_updates in prop::collection::vec(1u32..=MAX_INCREMENT, 1..=MAX_WINDOW_UPDATES))| {
                 let updates: Vec<u32> = window_updates.into_iter()
                     .filter(|&val| val > 0 && val <= MAX_INCREMENT)
                     .take(MAX_WINDOW_UPDATES)
@@ -5252,7 +5254,7 @@ mod tests {
         /// MR5: STREAM-LEVEL additive property
         #[test]
         fn mr_stream_window_additive() {
-            proptest!(|(increments: Vec<u32>)| {
+            proptest!(|(increments in prop::collection::vec(1u32..=MAX_INCREMENT, 1..=MAX_WINDOW_UPDATES))| {
                 let increments: Vec<u32> = increments.into_iter()
                     .filter(|&i| i > 0 && i <= MAX_INCREMENT)
                     .take(MAX_WINDOW_UPDATES)
