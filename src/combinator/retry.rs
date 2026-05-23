@@ -204,20 +204,62 @@ pub fn calculate_delay(policy: &RetryPolicy, attempt: u32, rng: Option<&mut DetR
     }
 
     // Calculate base delay with exponential backoff
-    let exponent = attempt.saturating_sub(1).min(i32::MAX as u32);
-    let multiplier_factor = policy.multiplier.powi(exponent as i32);
-    let base_nanos = policy.initial_delay.as_nanos() as f64 * multiplier_factor;
+    let exponent = attempt.saturating_sub(1);
+
+    // Safely compute multiplier^exponent, avoiding overflow and non-finite results
+    let multiplier_factor = if exponent == 0 {
+        1.0
+    } else if exponent > 60 || policy.multiplier <= 0.0 || !policy.multiplier.is_finite() {
+        // Avoid extremely large exponents or invalid multipliers
+        f64::INFINITY
+    } else {
+        // Limit exponent to reasonable range for powi()
+        let safe_exponent = exponent.min(60) as i32;
+        let factor = policy.multiplier.powi(safe_exponent);
+        if !factor.is_finite() {
+            f64::INFINITY
+        } else {
+            factor
+        }
+    };
+
+    // Safely convert initial_delay to f64, preserving precision for reasonable values
+    let initial_nanos_f64 = if policy.initial_delay.as_nanos() <= (1u64 << 53) as u128 {
+        policy.initial_delay.as_nanos() as f64
+    } else {
+        // Use seconds conversion for very large durations to preserve precision
+        policy.initial_delay.as_secs_f64() * 1_000_000_000.0
+    };
+
+    let base_nanos = if multiplier_factor.is_infinite() {
+        f64::INFINITY
+    } else {
+        initial_nanos_f64 * multiplier_factor
+    };
 
     // Cap at max_delay
     let max_nanos = policy.max_delay.as_nanos() as f64;
     let capped_nanos = base_nanos.min(max_nanos);
 
     // Apply jitter if enabled and RNG provided
-    let final_nanos = if policy.jitter > 0.0 {
+    let final_nanos = if policy.jitter > 0.0 && capped_nanos.is_finite() {
         rng.map_or(capped_nanos, |rng| {
-            // Generate deterministic jitter factor in [0, jitter]
-            let jitter_factor = (rng.next_u64() as f64 / u64::MAX as f64) * policy.jitter;
-            capped_nanos * (1.0 + jitter_factor)
+            // Generate deterministic jitter factor in [0, jitter] with precision-safe division
+            let rand_val = rng.next_u64();
+            // Use high-precision division avoiding direct u64::MAX cast
+            let normalized = if rand_val == u64::MAX {
+                1.0
+            } else {
+                rand_val as f64 / (u64::MAX as f64)
+            };
+            let jitter_factor = normalized * policy.jitter;
+
+            let result = capped_nanos * (1.0 + jitter_factor);
+            if result.is_finite() {
+                result
+            } else {
+                capped_nanos
+            }
         })
     } else {
         capped_nanos
@@ -252,12 +294,12 @@ pub fn calculate_deadline(
 ) -> Time {
     let delay = calculate_delay(policy, attempt, rng);
     let nanos = delay.as_nanos();
-    let nanos = if nanos > u128::from(u64::MAX) {
-        u64::MAX
-    } else {
+    let safe_nanos = if nanos <= u128::from(u64::MAX) {
         nanos as u64
+    } else {
+        u64::MAX
     };
-    now.saturating_add_nanos(nanos)
+    now.saturating_add_nanos(safe_nanos)
 }
 
 /// Calculates the total worst-case budget needed for all retries.

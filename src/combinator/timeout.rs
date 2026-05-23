@@ -26,7 +26,12 @@ use std::time::Duration;
 
 #[inline]
 fn duration_to_nanos(duration: Duration) -> u64 {
-    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+    let nanos = duration.as_nanos();
+    if nanos <= u128::from(u64::MAX) {
+        nanos as u64
+    } else {
+        u64::MAX
+    }
 }
 
 /// A timeout combinator.
