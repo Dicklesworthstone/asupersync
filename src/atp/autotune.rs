@@ -6,6 +6,7 @@
 //! capability-checked control paths.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 
 /// Stable metric names emitted by ATP pressure/autotune telemetry.
 ///
@@ -144,6 +145,115 @@ impl<'de> Deserialize<'de> for AtpAutotuneMetric {
         })
     }
 }
+
+/// One collected ATP autotune metric sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneMetricSample {
+    /// Stable metric key.
+    pub metric: AtpAutotuneMetric,
+    /// Observed metric value.
+    pub value: u64,
+}
+
+impl AtpAutotuneMetricSample {
+    /// Construct a metric sample with a stable metric key.
+    #[must_use]
+    pub const fn new(metric: AtpAutotuneMetric, value: u64) -> Self {
+        Self { metric, value }
+    }
+}
+
+/// Stable trace-scoped ATP autotune metric report.
+///
+/// This format is useful for runtime and lab collection paths that naturally
+/// emit metric rows rather than a fully aggregated telemetry window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneTelemetryReport {
+    /// Stable trace id linking every sample to path/proof logs.
+    pub trace_id: String,
+    /// Stable workload or transfer id.
+    pub workload_id: String,
+    /// Samples represented by this report. If zero, the sample vector length is used.
+    pub sample_count: u32,
+    /// Stable-name metric samples.
+    pub samples: Vec<AtpAutotuneMetricSample>,
+}
+
+impl AtpAutotuneTelemetryReport {
+    /// Create an empty trace-scoped telemetry report.
+    #[must_use]
+    pub fn new(trace_id: impl Into<String>, workload_id: impl Into<String>) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+            workload_id: workload_id.into(),
+            sample_count: 0,
+            samples: Vec::new(),
+        }
+    }
+
+    /// Set the represented sample count.
+    #[must_use]
+    pub const fn with_sample_count(mut self, sample_count: u32) -> Self {
+        self.sample_count = sample_count;
+        self
+    }
+
+    /// Add one metric sample.
+    #[must_use]
+    pub fn with_sample(mut self, metric: AtpAutotuneMetric, value: u64) -> Self {
+        self.samples
+            .push(AtpAutotuneMetricSample::new(metric, value));
+        self
+    }
+
+    /// Aggregate this report into one decision window.
+    ///
+    /// Repeated metrics use the latest sample in report order. Out-of-range
+    /// values for narrow fields fail before producing a telemetry window.
+    pub fn into_telemetry(self) -> Result<AtpAutotuneTelemetry, AtpAutotuneTelemetryError> {
+        let sample_count = if self.sample_count == 0 {
+            u32::try_from(self.samples.len()).unwrap_or(u32::MAX)
+        } else {
+            self.sample_count
+        };
+        let mut telemetry = AtpAutotuneTelemetry::new(self.trace_id, self.workload_id)
+            .with_sample_count(sample_count);
+        for sample in self.samples {
+            telemetry.record_metric(sample.metric, sample.value)?;
+        }
+        Ok(telemetry)
+    }
+}
+
+/// Error returned while aggregating ATP autotune metric samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtpAutotuneTelemetryError {
+    /// Metric value does not fit the telemetry field type.
+    MetricValueOutOfRange {
+        /// Metric being collected.
+        metric: AtpAutotuneMetric,
+        /// Observed value.
+        value: u64,
+        /// Maximum accepted value.
+        max: u64,
+    },
+}
+
+impl fmt::Display for AtpAutotuneTelemetryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MetricValueOutOfRange { metric, value, max } => write!(
+                f,
+                "ATP autotune metric {} value {} exceeds maximum {}",
+                metric.as_str(),
+                value,
+                max
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AtpAutotuneTelemetryError {}
 
 /// Current transfer knobs that the autotuner may adjust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +425,71 @@ impl AtpAutotuneTelemetry {
         self.sample_count = sample_count;
         self
     }
+
+    /// Record one stable-name metric sample into this telemetry window.
+    pub fn record_metric(
+        &mut self,
+        metric: AtpAutotuneMetric,
+        value: u64,
+    ) -> Result<(), AtpAutotuneTelemetryError> {
+        match metric {
+            AtpAutotuneMetric::RttMicros => self.rtt_micros = Some(value),
+            AtpAutotuneMetric::LossPermille => {
+                self.loss_permille = Some(narrow_u16_metric(metric, value)?);
+            }
+            AtpAutotuneMetric::PtoMicros => self.pto_micros = Some(value),
+            AtpAutotuneMetric::CongestionWindowBytes => {
+                self.congestion_window_bytes = Some(value);
+            }
+            AtpAutotuneMetric::InFlightBytes => self.in_flight_bytes = Some(value),
+            AtpAutotuneMetric::SendBufferQueuedBytes => {
+                self.send_buffer_queued_bytes = Some(value);
+            }
+            AtpAutotuneMetric::ReceiveBufferQueuedBytes => {
+                self.receive_buffer_queued_bytes = Some(value);
+            }
+            AtpAutotuneMetric::DiskReadLagMicros => self.disk_read_lag_micros = Some(value),
+            AtpAutotuneMetric::DiskWriteLagMicros => self.disk_write_lag_micros = Some(value),
+            AtpAutotuneMetric::EncodeBacklogSymbols => {
+                self.encode_backlog_symbols = Some(narrow_u32_metric(metric, value)?);
+            }
+            AtpAutotuneMetric::DecodeBacklogSymbols => {
+                self.decode_backlog_symbols = Some(narrow_u32_metric(metric, value)?);
+            }
+            AtpAutotuneMetric::RepairRoiPermille => {
+                self.repair_roi_permille = Some(narrow_u16_metric(metric, value)?);
+            }
+            AtpAutotuneMetric::RelayCostMicrosPerMiB => {
+                self.relay_cost_micros_per_mib = Some(value);
+            }
+            AtpAutotuneMetric::MigrationEvents => {
+                self.migration_events = Some(narrow_u32_metric(metric, value)?);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn narrow_u16_metric(
+    metric: AtpAutotuneMetric,
+    value: u64,
+) -> Result<u16, AtpAutotuneTelemetryError> {
+    u16::try_from(value).map_err(|_| AtpAutotuneTelemetryError::MetricValueOutOfRange {
+        metric,
+        value,
+        max: u64::from(u16::MAX),
+    })
+}
+
+fn narrow_u32_metric(
+    metric: AtpAutotuneMetric,
+    value: u64,
+) -> Result<u32, AtpAutotuneTelemetryError> {
+    u32::try_from(value).map_err(|_| AtpAutotuneTelemetryError::MetricValueOutOfRange {
+        metric,
+        value,
+        max: u64::from(u32::MAX),
+    })
 }
 
 /// Bottleneck class selected by the autotune policy.
@@ -764,6 +939,48 @@ mod tests {
         let decoded: AtpAutotuneMetric = serde_json::from_str(&encoded)?;
         assert_eq!(decoded, AtpAutotuneMetric::LossPermille);
         Ok(())
+    }
+
+    #[test]
+    fn telemetry_report_collects_stable_metric_samples() -> Result<(), Box<dyn std::error::Error>> {
+        let report = AtpAutotuneTelemetryReport::new("trace-report", "workload-report")
+            .with_sample_count(16)
+            .with_sample(AtpAutotuneMetric::RttMicros, 42_000)
+            .with_sample(AtpAutotuneMetric::LossPermille, 7)
+            .with_sample(AtpAutotuneMetric::EncodeBacklogSymbols, 128)
+            .with_sample(AtpAutotuneMetric::RelayCostMicrosPerMiB, 250_000);
+
+        let encoded = serde_json::to_string(&report)?;
+        assert!(encoded.contains("atp.autotune.rtt_micros"));
+
+        let decoded: AtpAutotuneTelemetryReport = serde_json::from_str(&encoded)?;
+        let telemetry = decoded.into_telemetry()?;
+
+        assert_eq!(telemetry.trace_id, "trace-report");
+        assert_eq!(telemetry.workload_id, "workload-report");
+        assert_eq!(telemetry.sample_count, 16);
+        assert_eq!(telemetry.rtt_micros, Some(42_000));
+        assert_eq!(telemetry.loss_permille, Some(7));
+        assert_eq!(telemetry.encode_backlog_symbols, Some(128));
+        assert_eq!(telemetry.relay_cost_micros_per_mib, Some(250_000));
+        Ok(())
+    }
+
+    #[test]
+    fn telemetry_report_rejects_out_of_range_metric_samples() {
+        let report = AtpAutotuneTelemetryReport::new("trace-report", "workload-report")
+            .with_sample(AtpAutotuneMetric::LossPermille, u64::from(u16::MAX) + 1);
+
+        let error = report.into_telemetry();
+
+        assert_eq!(
+            error,
+            Err(AtpAutotuneTelemetryError::MetricValueOutOfRange {
+                metric: AtpAutotuneMetric::LossPermille,
+                value: u64::from(u16::MAX) + 1,
+                max: u64::from(u16::MAX),
+            })
+        );
     }
 
     #[test]

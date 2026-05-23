@@ -673,8 +673,10 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             Some(id) if is_valid_session_id(&id) => (id, false),
             _ => {
                 let Some(id) = generate_session_id() else {
-                    return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
-                        .with_body("Session initialization failed: OS entropy unavailable".to_string());
+                    return Response::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Session initialization failed: OS entropy unavailable".to_string(),
+                    );
                 };
                 (id, true)
             }
@@ -691,8 +693,10 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             if self.is_idle_expired(&data) {
                 self.store.delete(&session_id);
                 let Some(new_id) = generate_session_id() else {
-                    return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
-                        .with_body("Session renewal failed: OS entropy unavailable".to_string());
+                    return Response::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Session renewal failed: OS entropy unavailable".to_string(),
+                    );
                 };
                 session_id = new_id;
                 is_new = true;
@@ -702,8 +706,10 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             }
         } else {
             let Some(new_id) = generate_session_id() else {
-                return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_body("Session creation failed: OS entropy unavailable".to_string());
+                return Response::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Session creation failed: OS entropy unavailable".to_string(),
+                );
             };
             session_id = new_id;
             is_new = true;
@@ -720,8 +726,10 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         //     lazily on first access. (br-asupersync-7udumi)
         if self.config.csrf_protection && session_data.get(CSRF_TOKEN_KEY).is_none() {
             let Some(csrf_token) = generate_session_id() else {
-                return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_body("CSRF token generation failed: OS entropy unavailable".to_string());
+                return Response::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "CSRF token generation failed: OS entropy unavailable".to_string(),
+                );
             };
             session_data.insert(CSRF_TOKEN_KEY, csrf_token);
         }
@@ -838,8 +846,10 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                 self.store.delete(&session_id);
             }
             let Some(new_id) = generate_session_id() else {
-                return Response::new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_body("Session regeneration failed: OS entropy unavailable".to_string());
+                return Response::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Session regeneration failed: OS entropy unavailable".to_string(),
+                );
             };
             session_id = new_id;
             // Treat as a freshly-issued cookie (must be Set-Cookie'd to
@@ -1201,15 +1211,15 @@ mod tests {
 
     #[test]
     fn generate_id_is_valid() {
-        let id = generate_session_id();
+        let id = generate_session_id().expect("OS entropy must be available in session-id test");
         assert!(is_valid_session_id(&id));
         assert_eq!(id.len(), SESSION_ID_HEX_LEN);
     }
 
     #[test]
     fn generate_id_uniqueness() {
-        let id1 = generate_session_id();
-        let id2 = generate_session_id();
+        let id1 = generate_session_id().expect("OS entropy must be available in session-id test");
+        let id2 = generate_session_id().expect("OS entropy must be available in session-id test");
         assert_ne!(id1, id2);
     }
 
@@ -1555,7 +1565,11 @@ mod tests {
     #[test]
     fn generate_id_uses_crypto_randomness() {
         // Verify 16 bytes of entropy → 32 hex chars, all unique.
-        let ids: Vec<String> = (0..100).map(|_| generate_session_id()).collect();
+        let ids: Vec<String> = (0..100)
+            .map(|_| {
+                generate_session_id().expect("OS entropy must be available in session-id test")
+            })
+            .collect();
         for id in &ids {
             assert!(is_valid_session_id(id));
         }
@@ -1653,7 +1667,9 @@ mod tests {
         let session = Session(Arc::new(Mutex::new(SessionData::new())));
         // Seed an initial token.
         session.insert(CSRF_TOKEN_KEY, "old-token");
-        let new = session.rotate_csrf_token();
+        let new = session
+            .rotate_csrf_token()
+            .expect("OS entropy must be available in CSRF rotation test");
         assert_ne!(new, "old-token");
         assert_eq!(session.csrf_token().as_deref(), Some(new.as_str()));
     }

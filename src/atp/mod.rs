@@ -35,8 +35,8 @@ pub mod writer;
 
 pub use autotune::{
     ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotuneLimits, AtpAutotuneMetric,
-    AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry, AtpBottleneckKind,
-    AtpBottleneckSignal,
+    AtpAutotuneMetricSample, AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry,
+    AtpAutotuneTelemetryError, AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
 };
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};

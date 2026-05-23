@@ -23,7 +23,7 @@ use asupersync::atp::stream_object::ByteRange;
 use asupersync::atp::sync::DirectoryEarlyUsabilityReport;
 use asupersync::atp::{
     ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotunePolicy, AtpAutotuneSettings,
-    AtpAutotuneTelemetry,
+    AtpAutotuneTelemetry, AtpAutotuneTelemetryReport,
 };
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
@@ -198,7 +198,7 @@ struct AtpEarlyUsabilityArgs {
 
 #[derive(Args, Debug)]
 struct AtpStatusArgs {
-    /// ATP autotune telemetry JSON window.
+    /// ATP autotune telemetry JSON window or trace-scoped metric sample report.
     #[arg(long, value_name = "PATH")]
     telemetry: PathBuf,
 
@@ -221,6 +221,29 @@ struct AtpStatusArgs {
     /// Current repair-symbol rate before the next autotune decision.
     #[arg(long = "current-repair-symbols-per-second", default_value_t = 256)]
     repair_symbols_per_second: u32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum AtpStatusTelemetryInput {
+    Report(AtpAutotuneTelemetryReport),
+    Window(AtpAutotuneTelemetry),
+}
+
+impl AtpStatusTelemetryInput {
+    fn into_telemetry(self) -> Result<AtpAutotuneTelemetry, CliError> {
+        match self {
+            Self::Report(report) => report.into_telemetry().map_err(|err| {
+                CliError::new(
+                    "atp_status_telemetry_metric_error",
+                    "Failed to aggregate ATP status telemetry samples",
+                )
+                .detail(err.to_string())
+                .exit_code(ExitCode::USER_ERROR)
+            }),
+            Self::Window(telemetry) => Ok(telemetry),
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -1087,8 +1110,11 @@ fn atp_status(args: &AtpStatusArgs, output: &mut Output) -> Result<(), CliError>
     let raw_telemetry = fs::read_to_string(&args.telemetry)
         .map_err(atp_status_io_error)
         .map_err(|err| err.context("telemetry", args.telemetry.display().to_string()))?;
-    let telemetry: AtpAutotuneTelemetry = serde_json::from_str(&raw_telemetry)
+    let telemetry_input: AtpStatusTelemetryInput = serde_json::from_str(&raw_telemetry)
         .map_err(atp_status_parse_error)
+        .map_err(|err| err.context("telemetry", args.telemetry.display().to_string()))?;
+    let telemetry = telemetry_input
+        .into_telemetry()
         .map_err(|err| err.context("telemetry", args.telemetry.display().to_string()))?;
 
     let current = AtpAutotuneSettings::new(
@@ -9101,6 +9127,44 @@ mod tests {
         assert!(rendered.contains("SendBufferPressure"));
         assert!(rendered.contains("atp.autotune.loss_permille"));
         assert!(rendered.contains("Next settings:"));
+        Ok(())
+    }
+
+    #[test]
+    fn atp_status_accepts_trace_scoped_metric_sample_report()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+        let report = AtpAutotuneTelemetryReport::new("trace-samples", "workload-samples")
+            .with_sample_count(16)
+            .with_sample(asupersync::atp::AtpAutotuneMetric::LossPermille, 100)
+            .with_sample(
+                asupersync::atp::AtpAutotuneMetric::SendBufferQueuedBytes,
+                32 * 1_048_576,
+            );
+        fs::write(file.path(), serde_json::to_vec(&report)?)?;
+
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        let defaults = AtpAutotuneSettings::default();
+        atp_status(
+            &AtpStatusArgs {
+                telemetry: file.path().to_path_buf(),
+                explain: true,
+                in_flight_bytes: defaults.in_flight_bytes,
+                stream_count: defaults.stream_count,
+                chunk_size_bytes: defaults.chunk_size_bytes,
+                repair_symbols_per_second: defaults.repair_symbols_per_second,
+            },
+            &mut output,
+        )?;
+
+        let rendered = capture.contents();
+        assert!(rendered.contains("Trace ID: trace-samples"));
+        assert!(rendered.contains("Workload ID: workload-samples"));
+        assert!(rendered.contains("Samples: 16"));
+        assert!(rendered.contains("NetworkLoss"));
+        assert!(rendered.contains("SendBufferPressure"));
+        assert!(rendered.contains("atp.autotune.send_buffer_queued_bytes"));
         Ok(())
     }
 
