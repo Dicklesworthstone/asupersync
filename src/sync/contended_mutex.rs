@@ -85,6 +85,8 @@ mod inner {
         hold_samples: Mutex<Vec<u64>>,
     }
 
+    const MAX_SAMPLES: usize = 10000; // Prevent unbounded growth
+
     impl Metrics {
         fn update_max(current: &AtomicU64, value: u64) {
             current.fetch_max(value, Ordering::Relaxed);
@@ -94,10 +96,16 @@ mod inner {
             self.acquisitions.fetch_add(1, Ordering::Relaxed);
             self.wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
             Self::update_max(&self.max_wait_ns, wait_ns);
-            self.wait_samples
+
+            // Bound sample collection to prevent memory leak
+            let mut samples = self.wait_samples
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(wait_ns);
+                .unwrap_or_else(PoisonError::into_inner);
+            if samples.len() >= MAX_SAMPLES {
+                // Remove oldest samples to maintain bound (FIFO eviction)
+                samples.drain(0..MAX_SAMPLES / 4);
+            }
+            samples.push(wait_ns);
 
             if contended {
                 self.contentions.fetch_add(1, Ordering::Relaxed);
@@ -107,10 +115,16 @@ mod inner {
         fn record_hold(&self, hold_ns: u64) {
             self.hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
             Self::update_max(&self.max_hold_ns, hold_ns);
-            self.hold_samples
+
+            // Bound sample collection to prevent memory leak
+            let mut samples = self.hold_samples
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(hold_ns);
+                .unwrap_or_else(PoisonError::into_inner);
+            if samples.len() >= MAX_SAMPLES {
+                // Remove oldest samples to maintain bound (FIFO eviction)
+                samples.drain(0..MAX_SAMPLES / 4);
+            }
+            samples.push(hold_ns);
         }
 
         fn quantile(samples: &Mutex<Vec<u64>>, numerator: usize, denominator: usize) -> u64 {
@@ -149,12 +163,13 @@ mod inner {
         }
 
         fn reset(&self) {
-            self.acquisitions.store(0, Ordering::Relaxed);
-            self.contentions.store(0, Ordering::Relaxed);
-            self.wait_ns.store(0, Ordering::Relaxed);
-            self.hold_ns.store(0, Ordering::Relaxed);
-            self.max_wait_ns.store(0, Ordering::Relaxed);
-            self.max_hold_ns.store(0, Ordering::Relaxed);
+            // Use sequential consistency to ensure atomic reset from reader perspective
+            self.acquisitions.store(0, Ordering::SeqCst);
+            self.contentions.store(0, Ordering::SeqCst);
+            self.wait_ns.store(0, Ordering::SeqCst);
+            self.hold_ns.store(0, Ordering::SeqCst);
+            self.max_wait_ns.store(0, Ordering::SeqCst);
+            self.max_hold_ns.store(0, Ordering::SeqCst);
             self.wait_samples
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -202,7 +217,9 @@ mod inner {
                 Err(std::sync::TryLockError::WouldBlock) => (self.inner.lock(), true),
             };
 
-            let wait_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            // Use consistent timing: capture acquisition time once
+            let acquired_at = Instant::now();
+            let wait_ns = u64::try_from(acquired_at.duration_since(start).as_nanos()).unwrap_or(u64::MAX);
 
             self.metrics.record_acquire(wait_ns, contended);
 
@@ -214,14 +231,14 @@ mod inner {
             match result {
                 Ok(guard) => Ok(ContendedMutexGuard {
                     guard: Some(guard),
-                    acquired_at: Instant::now(),
+                    acquired_at,
                     metrics: &self.metrics,
                     name: self.name,
                     rank: self.rank,
                 }),
                 Err(poison) => Err(PoisonError::new(ContendedMutexGuard {
                     guard: Some(poison.into_inner()),
-                    acquired_at: Instant::now(),
+                    acquired_at,
                     metrics: &self.metrics,
                     name: self.name,
                     rank: self.rank,
@@ -242,10 +259,11 @@ mod inner {
                         lock_ordering::record_acquire(self.name, rank);
                     }
 
+                    let acquired_at = Instant::now();
                     self.metrics.record_acquire(0, false);
                     Ok(ContendedMutexGuard {
                         guard: Some(guard),
-                        acquired_at: Instant::now(),
+                        acquired_at,
                         metrics: &self.metrics,
                         name: self.name,
                         rank: self.rank,
@@ -259,11 +277,12 @@ mod inner {
                         lock_ordering::check_acquire(self.name, rank);
                         lock_ordering::record_acquire(self.name, rank);
                     }
+                    let acquired_at = Instant::now();
                     self.metrics.record_acquire(0, false);
                     Err(std::sync::TryLockError::Poisoned(PoisonError::new(
                         ContendedMutexGuard {
                             guard: Some(poison.into_inner()),
-                            acquired_at: Instant::now(),
+                            acquired_at,
                             metrics: &self.metrics,
                             name: self.name,
                             rank: self.rank,
