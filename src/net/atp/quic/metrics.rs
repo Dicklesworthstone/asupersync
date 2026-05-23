@@ -147,7 +147,16 @@ impl PathPerformanceClass {
 
         let stability_score = metrics.path_stability;
 
-        let overall_score = (rtt_score + loss_score + congestion_score + stability_score) / 4.0;
+        let timeout_score = match metrics.pto_count {
+            0 => 1.0,
+            1 => 0.75,
+            2 => 0.5,
+            3 => 0.25,
+            _ => 0.0,
+        };
+
+        let overall_score =
+            (rtt_score + loss_score + congestion_score + stability_score + timeout_score) / 5.0;
 
         match overall_score {
             s if s >= 0.9 => Self::Excellent,
@@ -291,6 +300,7 @@ impl AtpTransportMetricsCollector {
     fn assess_path_health(&self, metrics: &AtpTransportMetrics) -> PathDoctorAssessment {
         let mut issues = Vec::new();
         let mut recommendations = Vec::new();
+        let mut recommended_rate_reduction = false;
 
         // Check RTT variance
         if let (Some(rtt), Some(rttvar)) = (metrics.smoothed_rtt_micros, metrics.rttvar_micros) {
@@ -313,8 +323,28 @@ impl AtpTransportMetricsCollector {
             }
         }
 
+        // Check PTO backoff. A rising transport PTO count is actionable even
+        // when the collector has not yet accumulated enough RTT samples.
+        let pto_pressure = self.pto_pressure(metrics.pto_count);
+        if metrics.pto_count >= 2 || pto_pressure >= 0.25 {
+            issues.push(PathIssue::FrequentTimeouts {
+                pto_rate: pto_pressure,
+            });
+            let factor = if metrics.pto_count >= 4 || pto_pressure >= 0.75 {
+                0.5
+            } else {
+                0.7
+            };
+            recommendations.push(PathRecommendation::ReduceSendingRate { factor });
+            recommended_rate_reduction = true;
+            recommendations.push(PathRecommendation::EnablePathValidation);
+            if metrics.pto_count >= 3 || pto_pressure >= 0.75 {
+                recommendations.push(PathRecommendation::ConsiderRelay);
+            }
+        }
+
         // Check congestion
-        if metrics.congestion_limited {
+        if metrics.congestion_limited && !recommended_rate_reduction {
             recommendations.push(PathRecommendation::ReduceSendingRate { factor: 0.8 });
         }
 
@@ -339,6 +369,18 @@ impl AtpTransportMetricsCollector {
             recommendations,
             performance_class,
         }
+    }
+
+    fn pto_pressure(&self, pto_count: u32) -> f64 {
+        let event_pressure = self.stability_tracker.pto_rate();
+        let backoff_pressure = match pto_count {
+            0 => 0.0,
+            1 => 0.25,
+            2 => 0.5,
+            3 => 0.75,
+            _ => 1.0,
+        };
+        event_pressure.max(backoff_pressure)
     }
 }
 
@@ -383,6 +425,11 @@ impl PathStabilityTracker {
         self.last_update = Instant::now();
     }
 
+    fn pto_rate(&self) -> f64 {
+        let denominator = self.sample_count.max(self.pto_events).max(1);
+        (self.pto_events as f64 / denominator as f64).min(1.0)
+    }
+
     fn stability_score(&self) -> f64 {
         if self.sample_count == 0 {
             return 0.5; // Neutral score with no data
@@ -415,12 +462,7 @@ impl PathStabilityTracker {
         };
 
         // Calculate timeout stability (fewer PTOs = higher stability)
-        let pto_stability = if self.sample_count > 0 {
-            let pto_rate = self.pto_events as f64 / self.sample_count as f64;
-            (1.0 - pto_rate.min(1.0)).max(0.0)
-        } else {
-            1.0
-        };
+        let pto_stability = (1.0 - self.pto_rate()).max(0.0);
 
         // Weighted average
         (rtt_stability * 0.5 + loss_stability * 0.3 + pto_stability * 0.2)

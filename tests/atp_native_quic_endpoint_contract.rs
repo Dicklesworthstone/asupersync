@@ -5,7 +5,7 @@
 
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use asupersync::net::atp::quic::AtpTransportMetricsCollector;
+use asupersync::net::atp::quic::{AtpTransportMetricsCollector, PathIssue, PathRecommendation};
 use asupersync::net::quic_native::QuicTransportMachine;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -452,5 +452,52 @@ fn native_transport_metrics_report_pto_backoff_from_transport() {
     assert_eq!(
         metrics.pto_count, 2,
         "ATP transfer metrics must expose the native transport PTO backoff count"
+    );
+}
+
+#[test]
+fn native_transport_metrics_diagnose_repeated_pto_backoff() {
+    let mut transport = QuicTransportMachine::new();
+    let collector =
+        AtpTransportMetricsCollector::new("native-quic-pto-doctor".into(), "path-b".into());
+
+    transport.on_pto_expired();
+    transport.on_pto_expired();
+    transport.on_pto_expired();
+
+    let metrics = collector.current_metrics(&transport);
+    let assessment = metrics
+        .path_doctor_assessment
+        .as_ref()
+        .expect("ATP metrics must include a path doctor assessment");
+
+    assert!(
+        assessment.detected_issues.iter().any(
+            |issue| matches!(issue, PathIssue::FrequentTimeouts { pto_rate } if *pto_rate >= 0.75)
+        ),
+        "repeated native QUIC PTO backoff must be surfaced as path timeout pressure"
+    );
+    assert!(
+        assessment
+            .recommendations
+            .iter()
+            .any(|recommendation| matches!(
+                recommendation,
+                PathRecommendation::ReduceSendingRate { factor } if *factor <= 0.7
+            )),
+        "repeated PTO backoff should conservatively reduce send pressure"
+    );
+    assert!(
+        assessment.recommendations.iter().any(|recommendation| {
+            matches!(recommendation, PathRecommendation::EnablePathValidation)
+        }),
+        "repeated PTO backoff should trigger path validation advice"
+    );
+    assert!(
+        assessment
+            .recommendations
+            .iter()
+            .any(|recommendation| matches!(recommendation, PathRecommendation::ConsiderRelay)),
+        "severe PTO backoff should recommend relay consideration"
     );
 }

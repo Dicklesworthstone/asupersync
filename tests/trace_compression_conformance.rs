@@ -213,7 +213,11 @@ fn structural_output_carries_no_noise_kinds() {
         let mut rng = Rng::new(0x7501 ^ len as u64);
         let trace = gen_trace(&mut rng, len, 0);
         for e in &compress(&trace, Level::Structural).events {
-            assert!(!is_noise(e.kind), "Structural kept a noise event: {:?}", e.kind);
+            assert!(
+                !is_noise(e.kind),
+                "Structural kept a noise event: {:?}",
+                e.kind
+            );
         }
     }
 }
@@ -381,7 +385,10 @@ fn counts_and_ratio_stay_mutually_consistent() {
                 let ratio = c.ratio();
                 assert!((0.0..=1.0).contains(&ratio), "ratio {ratio} out of [0,1]");
                 if len == 0 {
-                    assert!((ratio - 1.0).abs() < f64::EPSILON, "empty ratio must be 1.0");
+                    assert!(
+                        (ratio - 1.0).abs() < f64::EPSILON,
+                        "empty ratio must be 1.0"
+                    );
                 } else {
                     let expected = c.events.len() as f64 / len as f64;
                     assert!(
@@ -472,5 +479,254 @@ fn level_has_value_semantics() {
     assert_ne!(Level::Structural, Level::Skeleton);
     for level in LEVELS {
         assert!(!format!("{level:?}").is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Performance and Observability Conformance Enhancements
+// ---------------------------------------------------------------------------
+
+use std::time::Instant;
+use std::collections::HashMap;
+
+/// Performance metrics for compression operations.
+#[derive(Debug, Clone)]
+struct CompressionMetrics {
+    compression_time: std::time::Duration,
+    original_size: usize,
+    compressed_size: usize,
+    compression_ratio: f64,
+    events_removed: usize,
+    level: Level,
+    memory_peak_estimate: usize,
+}
+
+impl CompressionMetrics {
+    fn new(
+        compression_time: std::time::Duration,
+        compressed: &CompressedTrace,
+    ) -> Self {
+        Self {
+            compression_time,
+            original_size: compressed.original_count,
+            compressed_size: compressed.events.len(),
+            compression_ratio: compressed.ratio(),
+            events_removed: compressed.events_removed(),
+            level: compressed.level,
+            memory_peak_estimate: compressed.events.len() * std::mem::size_of::<TraceEvent>(),
+        }
+    }
+
+    fn throughput_events_per_ms(&self) -> f64 {
+        if self.compression_time.as_millis() == 0 {
+            return f64::INFINITY;
+        }
+        self.original_size as f64 / self.compression_time.as_millis() as f64
+    }
+
+    fn memory_efficiency_ratio(&self) -> f64 {
+        if self.memory_peak_estimate == 0 {
+            return 1.0;
+        }
+        (self.original_size * std::mem::size_of::<TraceEvent>()) as f64 / self.memory_peak_estimate as f64
+    }
+}
+
+/// Comprehensive performance and correctness test for trace compression.
+///
+/// This test validates compression performance characteristics, memory efficiency,
+/// and correctness properties under various load patterns and trace sizes.
+#[test]
+fn comprehensive_compression_performance_conformance() {
+    let test_cases = vec![
+        (10, "small"),
+        (100, "medium"),
+        (1000, "large"),
+        (5000, "extra_large"),
+    ];
+
+    let mut all_metrics = HashMap::new();
+
+    for &(trace_len, size_label) in &test_cases {
+        for &level in LEVELS {
+            let mut level_metrics = Vec::new();
+
+            // Test multiple random traces for statistical validity
+            for seed in 0..10u64 {
+                let mut rng = Rng::new(seed ^ 0xCE27 ^ (trace_len as u64) << 16);
+                let trace = gen_trace(&mut rng, trace_len, seed * 1000);
+
+                // Measure compression time and validate correctness
+                let start_time = Instant::now();
+                let compressed = compress(&trace, level);
+                let compression_time = start_time.elapsed();
+
+                let metrics = CompressionMetrics::new(compression_time, &compressed);
+                level_metrics.push(metrics);
+
+                // Validate correctness properties
+                assert_eq!(compressed.original_count, trace.len(),
+                    "Original count mismatch for {size_label} trace at {level:?}");
+
+                assert!(validate_compressed(&compressed),
+                    "Validation failed for {size_label} trace at {level:?}");
+
+                // Validate compression is a subsequence
+                let mut compressed_idx = 0;
+                for (orig_idx, original_event) in trace.iter().enumerate() {
+                    if compressed_idx < compressed.events.len()
+                        && compressed.events[compressed_idx].sequence_number() == original_event.sequence_number() {
+                        assert_eq!(
+                            compressed.events[compressed_idx], *original_event,
+                            "Event mismatch at original index {} for {size_label} trace at {level:?}",
+                            orig_idx
+                        );
+                        compressed_idx += 1;
+                    }
+                }
+
+                // Performance expectations based on level
+                match level {
+                    Level::Lossless => {
+                        assert_eq!(compressed.events.len(), trace.len(),
+                            "Lossless should keep all events");
+                        assert_eq!(compressed.ratio(), 1.0,
+                            "Lossless should have 1.0 compression ratio");
+                    }
+                    Level::Structural | Level::Skeleton => {
+                        assert!(compressed.events.len() <= trace.len(),
+                            "Compressed trace should not be larger than original");
+                        assert!(compressed.ratio() <= 1.0,
+                            "Compression ratio should not exceed 1.0");
+                    }
+                }
+
+                // Compression time should be reasonable (< 1ms per 100 events)
+                let expected_max_time = std::time::Duration::from_millis((trace_len / 100).max(1) as u64);
+                assert!(compression_time <= expected_max_time,
+                    "Compression too slow: {:?} for {} events at {level:?} (expected <= {:?})",
+                    compression_time, trace_len, expected_max_time);
+            }
+
+            // Calculate aggregate statistics
+            let avg_compression_time = level_metrics.iter()
+                .map(|m| m.compression_time.as_nanos())
+                .sum::<u128>() / level_metrics.len() as u128;
+
+            let avg_compression_ratio = level_metrics.iter()
+                .map(|m| m.compression_ratio)
+                .sum::<f64>() / level_metrics.len() as f64;
+
+            let avg_throughput = level_metrics.iter()
+                .map(|m| m.throughput_events_per_ms())
+                .sum::<f64>() / level_metrics.len() as f64;
+
+            let avg_memory_efficiency = level_metrics.iter()
+                .map(|m| m.memory_efficiency_ratio())
+                .sum::<f64>() / level_metrics.len() as f64;
+
+            all_metrics.insert((size_label, level), (
+                avg_compression_time,
+                avg_compression_ratio,
+                avg_throughput,
+                avg_memory_efficiency
+            ));
+
+            // Print performance report
+            println!(
+                "Compression Performance [{size_label}@{level:?}]: \
+                 avg_time={:.2}μs, ratio={:.3}, throughput={:.1}evt/ms, memory_eff={:.2}x",
+                avg_compression_time as f64 / 1000.0,
+                avg_compression_ratio,
+                avg_throughput,
+                avg_memory_efficiency
+            );
+        }
+    }
+
+    // Cross-level validation: stronger levels should never keep more events than weaker ones
+    for &(size_label, _) in &test_cases {
+        let lossless_stats = all_metrics.get(&(size_label, Level::Lossless));
+        let structural_stats = all_metrics.get(&(size_label, Level::Structural));
+        let skeleton_stats = all_metrics.get(&(size_label, Level::Skeleton));
+
+        if let (Some(lossless), Some(structural), Some(skeleton)) = (lossless_stats, structural_stats, skeleton_stats) {
+            // Compression ratios should follow: Skeleton <= Structural <= Lossless
+            assert!(skeleton.1 <= structural.1,
+                "Skeleton compression ratio should be <= Structural for {size_label}");
+            assert!(structural.1 <= lossless.1,
+                "Structural compression ratio should be <= Lossless for {size_label}");
+
+            // Throughput should be reasonable across levels (within 10x of each other)
+            assert!(skeleton.2 / lossless.2 <= 10.0 && lossless.2 / skeleton.2 <= 10.0,
+                "Throughput variance too high across compression levels for {size_label}");
+        }
+    }
+
+    // Memory efficiency should improve with trace size (economies of scale)
+    let small_memory_eff = all_metrics.get(&("small", Level::Structural)).map(|x| x.3);
+    let large_memory_eff = all_metrics.get(&("large", Level::Structural)).map(|x| x.3);
+
+    if let (Some(small), Some(large)) = (small_memory_eff, large_memory_eff) {
+        // Memory efficiency should not degrade significantly with size
+        assert!(large >= small * 0.5,
+            "Memory efficiency degraded too much with trace size: {small:.2} -> {large:.2}");
+    }
+}
+
+/// Test compression idempotence with performance tracking.
+///
+/// Validates that re-compressing a compressed trace is a no-op operation
+/// and measures the performance characteristics of this property.
+#[test]
+fn compression_idempotence_with_performance_tracking() {
+    for &len in &[10, 100, 1000] {
+        for seed in 0..5u64 {
+            let mut rng = Rng::new(seed ^ 0xABCD ^ (len as u64) << 12);
+            let original_trace = gen_trace(&mut rng, len, seed * 100);
+
+            for &level in LEVELS {
+                // First compression with timing
+                let first_start = Instant::now();
+                let first_compressed = compress(&original_trace, level);
+                let first_duration = first_start.elapsed();
+
+                // Second compression (should be idempotent) with timing
+                let second_start = Instant::now();
+                let second_compressed = compress(&first_compressed.events, level);
+                let second_duration = second_start.elapsed();
+
+                // Validate idempotence
+                assert_eq!(first_compressed.events, second_compressed.events,
+                    "Compression not idempotent at {level:?} for len={len}, seed={seed}");
+
+                assert_eq!(first_compressed.ratio(), second_compressed.ratio(),
+                    "Compression ratio not idempotent at {level:?} for len={len}, seed={seed}");
+
+                // Performance expectations: second compression should be fast (already filtered)
+                if !first_compressed.events.is_empty() {
+                    // For non-empty results, second compression should not be slower than 2x first
+                    assert!(second_duration <= first_duration * 2,
+                        "Second compression unexpectedly slow: {:?} vs {:?} at {level:?} for len={len}",
+                        second_duration, first_duration);
+                }
+
+                // Validate both compressed traces pass validation
+                assert!(validate_compressed(&first_compressed),
+                    "First compressed trace validation failed");
+                assert!(validate_compressed(&second_compressed),
+                    "Second compressed trace validation failed");
+
+                println!(
+                    "Idempotence [{level:?}, len={len}]: first={:.1}μs, second={:.1}μs, \
+                     events: {} -> {} (ratio={:.3})",
+                    first_duration.as_nanos() as f64 / 1000.0,
+                    second_duration.as_nanos() as f64 / 1000.0,
+                    original_trace.len(),
+                    first_compressed.events.len(),
+                    first_compressed.ratio()
+                );
+            }
+        }
     }
 }
