@@ -1213,11 +1213,12 @@ impl RelaySocketLoop {
     /// Write queued TCP/TLS relay bytes to an admitted concrete stream.
     ///
     /// TCP is a byte stream, so a successful write may accept only a prefix of
-    /// the record. The socket loop therefore stages a full relay record in an
-    /// internal pending-write buffer before removing it from the service queue,
-    /// and later calls continue writing the retained suffix before another
-    /// record can be dequeued for that stream. The explicit stream id resolves
-    /// the authenticated peer before the queue is inspected, so a caller cannot
+    /// the record. The socket loop therefore peeks a full relay record, writes
+    /// it, commits the service queue only after the writer accepts at least one
+    /// byte, and retains any suffix in an internal pending-write buffer. Later
+    /// calls continue writing the retained suffix before another record can be
+    /// dequeued for that stream. The explicit stream id resolves the
+    /// authenticated peer before the queue is inspected, so a caller cannot
     /// drain another peer's queued record by passing an unrelated writer.
     ///
     /// # Errors
@@ -1240,9 +1241,27 @@ impl RelaySocketLoop {
                 return Ok(None);
             };
             let reservation_id = record.reservation_id();
-            let pending = RelayTcpTlsPendingWrite::from_record(record);
+            let mut pending = RelayTcpTlsPendingWrite::from_record(record);
+            let remaining_len = pending.remaining_len();
+            let written = match stream.write(pending.remaining()) {
+                Ok(0) => {
+                    return Err(RelaySocketIoError::TcpTlsWriteZero {
+                        stream_id,
+                        remaining: remaining_len,
+                    });
+                }
+                Ok(written) => written,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return Err(RelaySocketIoError::WouldBlock);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            pending.advance(written);
             service.commit_tcp_tls_record_for_peer(peer_id, reservation_id)?;
-            self.tcp_tls_pending_writes.insert(stream_id, pending);
+            if !pending.is_complete() {
+                self.tcp_tls_pending_writes.insert(stream_id, pending);
+            }
+            return Ok(Some(written));
         }
 
         let pending = self
@@ -4776,6 +4795,159 @@ mod tests {
                 .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
                 .expect("queue drained only after destination stream write")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn tcp_tls_socket_write_commits_queue_only_after_positive_write() {
+        struct WouldBlockWriter;
+
+        impl io::Write for WouldBlockWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct ZeroWriter;
+
+        impl io::Write for ZeroWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Ok(0)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct PrefixWriter {
+            max_write: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl io::Write for PrefixWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let accepted = self.max_write.min(buf.len());
+                self.bytes.extend_from_slice(&buf[..accepted]);
+                Ok(accepted)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(45),
+                "path-relay-45",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        service
+            .forward(
+                125,
+                reservation_id(45),
+                peer(1),
+                packet_sent_at(
+                    RelayTransport::TcpTls443,
+                    b"commit-after-positive-write",
+                    1,
+                    90,
+                ),
+            )
+            .expect("tcp fallback packet forwards");
+
+        let mut socket_loop = RelaySocketLoop::new(
+            RelayEndpointDirectoryQuota {
+                max_udp_endpoints: 1,
+                max_tcp_tls_streams: 1,
+            },
+            RelayQuota::default().max_packet_bytes,
+            1024,
+        )
+        .expect("socket loop");
+        let destination_stream = RelayTcpTlsStreamId::new(45).expect("destination stream");
+        socket_loop
+            .admit_tcp_tls_stream(peer(2), destination_stream)
+            .expect("admit destination stream");
+
+        let err = socket_loop
+            .send_tcp_tls_stream_once(&mut service, destination_stream, &mut WouldBlockWriter)
+            .expect_err("would-block must not commit queued tcp record");
+        assert!(matches!(err, RelaySocketIoError::WouldBlock));
+        assert_eq!(socket_loop.tcp_tls_pending_write_count(), 0);
+        assert!(
+            service
+                .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+                .expect("peek after would-block")
+                .is_some()
+        );
+
+        let err = socket_loop
+            .send_tcp_tls_stream_once(&mut service, destination_stream, &mut ZeroWriter)
+            .expect_err("zero write must not commit queued tcp record");
+        match err {
+            RelaySocketIoError::TcpTlsWriteZero {
+                stream_id,
+                remaining,
+            } => {
+                assert_eq!(stream_id, destination_stream);
+                assert!(remaining > 0);
+            }
+            other => panic!("unexpected zero-write error: {other:?}"),
+        }
+        assert_eq!(socket_loop.tcp_tls_pending_write_count(), 0);
+        assert!(
+            service
+                .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+                .expect("peek after zero write")
+                .is_some()
+        );
+
+        let mut partial_writer = PrefixWriter {
+            max_write: 7,
+            bytes: Vec::new(),
+        };
+        let first_write = socket_loop
+            .send_tcp_tls_stream_once(&mut service, destination_stream, &mut partial_writer)
+            .expect("positive prefix write")
+            .expect("bytes written");
+        assert_eq!(first_write, 7);
+        assert!(socket_loop.tcp_tls_pending_write_len(destination_stream) > 0);
+        assert!(
+            service
+                .peek_tcp_tls_record_for_peer(peer(2), RelayQuota::default().max_packet_bytes)
+                .expect("peek after positive write")
+                .is_none()
+        );
+
+        partial_writer.max_write = usize::MAX;
+        while socket_loop.tcp_tls_pending_write_len(destination_stream) > 0 {
+            let written = socket_loop
+                .send_tcp_tls_stream_once(&mut service, destination_stream, &mut partial_writer)
+                .expect("flush retained tcp suffix")
+                .expect("suffix bytes written");
+            assert!(written > 0);
+        }
+        assert_eq!(socket_loop.tcp_tls_pending_write_count(), 0);
+
+        let decoded = RelayWireFrame::decode_complete_tcp_tls_record(
+            &partial_writer.bytes,
+            RelayQuota::default().max_packet_bytes,
+        )
+        .expect("decode fully written record");
+        assert_eq!(decoded.from_peer_id(), peer(1));
+        assert_eq!(
+            decoded.packet().opaque_bytes(),
+            b"commit-after-positive-write"
         );
     }
 

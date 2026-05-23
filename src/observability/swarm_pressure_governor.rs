@@ -1170,12 +1170,20 @@ pub struct SwarmAdmissionDecisionReceipt {
     pub peer_pressure_report_count: u64,
     /// Maximum peer-reported pressure ratio scaled by 10_000.
     pub peer_pressure_max_pressure_scaled: i64,
+    /// Peer pressure backpressure threshold scaled by 10_000.
+    pub peer_pressure_backpressure_threshold_scaled: i64,
+    /// Whether peer pressure crossed the configured backpressure threshold.
+    pub peer_pressure_backpressure_triggered: bool,
     /// Maximum peer-reported degradation level represented as its stable enum rank.
     pub peer_pressure_max_degradation_level: u8,
     /// Live workload feedback reports considered by this decision.
     pub workload_feedback_report_count: u64,
     /// Maximum workload feedback pressure ratio scaled by 10_000.
     pub workload_feedback_max_pressure_scaled: i64,
+    /// Workload feedback backpressure threshold scaled by 10_000.
+    pub workload_feedback_backpressure_threshold_scaled: i64,
+    /// Whether workload feedback crossed the configured backpressure threshold.
+    pub workload_feedback_backpressure_triggered: bool,
     /// Dominant workload feedback axis used by this admission decision.
     pub workload_feedback_dominant_pressure_source: SwarmWorkloadPressureSource,
     /// Workload queue feedback pressure ratio scaled by 10_000.
@@ -2822,10 +2830,13 @@ impl SwarmPressureGovernor {
         }
 
         let effective_degradation = degradation_level.max(peer_pressure.max_degradation_level);
+        let peer_pressure_backpressure_threshold = self.peer_pressure_backpressure_threshold();
+        let workload_feedback_backpressure_threshold =
+            self.workload_feedback_backpressure_threshold();
         let peer_pressure_high =
-            peer_pressure.max_overall_pressure >= self.peer_pressure_backpressure_threshold();
-        let workload_pressure_high = workload_pressure.max_overall_pressure
-            >= self.workload_feedback_backpressure_threshold();
+            peer_pressure.max_overall_pressure >= peer_pressure_backpressure_threshold;
+        let workload_pressure_high =
+            workload_pressure.max_overall_pressure >= workload_feedback_backpressure_threshold;
 
         // Combine pressure governor decision with system degradation
         let decision = match (pressure_decision, effective_degradation, priority) {
@@ -2884,6 +2895,8 @@ impl SwarmPressureGovernor {
                 priority,
                 peer_pressure,
                 workload_pressure,
+                peer_pressure_backpressure_threshold,
+                workload_feedback_backpressure_threshold,
             ),
             AdmissionDecision::Reject => Self::format_swarm_admission_reason(
                 "Rejected due to pressure",
@@ -2891,6 +2904,8 @@ impl SwarmPressureGovernor {
                 priority,
                 peer_pressure,
                 workload_pressure,
+                peer_pressure_backpressure_threshold,
+                workload_feedback_backpressure_threshold,
             ),
             AdmissionDecision::AdmitWithBackpressure => Self::format_swarm_admission_reason(
                 "Admitted with backpressure",
@@ -2898,6 +2913,8 @@ impl SwarmPressureGovernor {
                 priority,
                 peer_pressure,
                 workload_pressure,
+                peer_pressure_backpressure_threshold,
+                workload_feedback_backpressure_threshold,
             ),
         };
 
@@ -2967,6 +2984,10 @@ impl SwarmPressureGovernor {
             (None, None, None, None, None, None, None, None, false, None)
         };
 
+        let peer_pressure_backpressure_threshold = self.peer_pressure_backpressure_threshold();
+        let workload_feedback_backpressure_threshold =
+            self.workload_feedback_backpressure_threshold();
+
         SwarmAdmissionDecisionReceipt {
             decision_id,
             replay_pointer: format!("swarm-admission://decision/{decision_id}"),
@@ -3003,11 +3024,21 @@ impl SwarmPressureGovernor {
             peer_pressure_max_pressure_scaled: scale_pressure_for_metrics(
                 peer_pressure.max_overall_pressure,
             ),
+            peer_pressure_backpressure_threshold_scaled: scale_pressure_for_metrics(
+                peer_pressure_backpressure_threshold,
+            ),
+            peer_pressure_backpressure_triggered: peer_pressure.max_overall_pressure
+                >= peer_pressure_backpressure_threshold,
             peer_pressure_max_degradation_level: peer_pressure.max_degradation_level as u8,
             workload_feedback_report_count: workload_pressure.live_report_count,
             workload_feedback_max_pressure_scaled: scale_pressure_for_metrics(
                 workload_pressure.max_overall_pressure,
             ),
+            workload_feedback_backpressure_threshold_scaled: scale_pressure_for_metrics(
+                workload_feedback_backpressure_threshold,
+            ),
+            workload_feedback_backpressure_triggered: workload_pressure.max_overall_pressure
+                >= workload_feedback_backpressure_threshold,
             workload_feedback_dominant_pressure_source: workload_pressure.dominant_pressure_source,
             workload_queue_pressure_scaled: scale_pressure_for_metrics(
                 workload_pressure.max_queue_pressure,
@@ -3119,15 +3150,21 @@ impl SwarmPressureGovernor {
         priority: RegionPriority,
         peer_pressure: SwarmPeerPressureSummary,
         workload_pressure: SwarmWorkloadPressureSummary,
+        peer_pressure_backpressure_threshold: f64,
+        workload_feedback_backpressure_threshold: f64,
     ) -> String {
         if peer_pressure.has_live_pressure() || workload_pressure.has_live_pressure() {
             format!(
-                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, max peer degradation {:?}, {} live workload feedback reports, max workload pressure {:.3}, dominant workload pressure source {} (queue {:.3}, disk_io {:.3}, rch_queue {:.3}, validation_frontier {:.3}, cancellation_tail {:.3})",
+                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, peer pressure threshold {:.3}, peer pressure backpressure triggered {}, max peer degradation {:?}, {} live workload feedback reports, max workload pressure {:.3}, workload feedback threshold {:.3}, workload feedback backpressure triggered {}, dominant workload pressure source {} (queue {:.3}, disk_io {:.3}, rch_queue {:.3}, validation_frontier {:.3}, cancellation_tail {:.3})",
                 peer_pressure.live_report_count,
                 peer_pressure.max_overall_pressure,
+                peer_pressure_backpressure_threshold,
+                peer_pressure.max_overall_pressure >= peer_pressure_backpressure_threshold,
                 peer_pressure.max_degradation_level,
                 workload_pressure.live_report_count,
                 workload_pressure.max_overall_pressure,
+                workload_feedback_backpressure_threshold,
+                workload_pressure.max_overall_pressure >= workload_feedback_backpressure_threshold,
                 workload_pressure.dominant_pressure_source.as_str(),
                 workload_pressure.max_queue_pressure,
                 workload_pressure.max_disk_io_pressure,
@@ -5549,8 +5586,25 @@ mod tests {
         assert_eq!(
             decision
                 .decision_receipt
+                .peer_pressure_backpressure_threshold_scaled,
+            8000
+        );
+        assert!(
+            decision
+                .decision_receipt
+                .peer_pressure_backpressure_triggered
+        );
+        assert_eq!(
+            decision
+                .decision_receipt
                 .peer_pressure_max_degradation_level,
             DegradationLevel::Moderate as u8
+        );
+        assert!(decision.reason.contains("peer pressure threshold 0.800"));
+        assert!(
+            decision
+                .reason
+                .contains("peer pressure backpressure triggered true")
         );
 
         let metrics = governor.metrics();
@@ -5763,8 +5817,29 @@ mod tests {
         assert_eq!(
             hot_decision
                 .decision_receipt
+                .workload_feedback_backpressure_threshold_scaled,
+            8000
+        );
+        assert!(
+            hot_decision
+                .decision_receipt
+                .workload_feedback_backpressure_triggered
+        );
+        assert_eq!(
+            hot_decision
+                .decision_receipt
                 .workload_feedback_dominant_pressure_source,
             SwarmWorkloadPressureSource::RchQueue
+        );
+        assert!(
+            hot_decision
+                .reason
+                .contains("workload feedback threshold 0.800")
+        );
+        assert!(
+            hot_decision
+                .reason
+                .contains("workload feedback backpressure triggered true")
         );
         assert_eq!(
             hot_decision.decision_receipt.workload_queue_pressure_scaled,
@@ -5814,6 +5889,17 @@ mod tests {
                 .decision_receipt
                 .workload_feedback_max_pressure_scaled,
             0
+        );
+        assert_eq!(
+            cold_decision
+                .decision_receipt
+                .workload_feedback_backpressure_threshold_scaled,
+            8000
+        );
+        assert!(
+            !cold_decision
+                .decision_receipt
+                .workload_feedback_backpressure_triggered
         );
         assert_eq!(
             cold_decision

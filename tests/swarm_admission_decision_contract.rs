@@ -294,6 +294,28 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
                 .replay_pointer
                 .starts_with("swarm-admission://decision/")
         );
+        assert_eq!(
+            decision
+                .decision_receipt
+                .peer_pressure_backpressure_threshold_scaled,
+            8000
+        );
+        assert!(
+            !decision
+                .decision_receipt
+                .peer_pressure_backpressure_triggered
+        );
+        assert_eq!(
+            decision
+                .decision_receipt
+                .workload_feedback_backpressure_threshold_scaled,
+            8000
+        );
+        assert!(
+            !decision
+                .decision_receipt
+                .workload_feedback_backpressure_triggered
+        );
 
         let region_id = RegionId::new_for_test(
             70 + u32::try_from(workload_count).expect("fixture count fits u32"),
