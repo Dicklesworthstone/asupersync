@@ -324,7 +324,10 @@ def command_routes_cargo_through_rch(command: str) -> bool:
     try:
         argv = shlex.split(command, posix=True)
     except ValueError:
-        return "cargo" not in command.split()
+        return False
+
+    if any(any(marker in token for marker in SHELL_CONTROL_TOKENS) for token in argv):
+        return False
 
     if "cargo" not in argv:
         return True

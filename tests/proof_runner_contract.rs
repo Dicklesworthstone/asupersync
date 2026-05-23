@@ -1255,6 +1255,8 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
          "validation_command": "rch exec -- cargo test -p asupersync --test proof_runner_contract"},
         {"id": "missing-remote-required", "title": "rch cargo validation without remote-required guard", "priority": 1,
          "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"},
+        {"id": "shell-control-rch-cargo", "title": "rch cargo validation with shell control", "priority": 1,
+         "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract; touch /tmp/asupersync-proof-runner-pwn"},
         {"id": "rch-cargo", "title": "rch cargo validation", "priority": 1,
          "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"}
     ]}));
@@ -1280,12 +1282,13 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
             "rch-cargo",
             "bare-cargo",
             "bare-rch-cargo",
-            "missing-remote-required"
+            "missing-remote-required",
+            "shell-control-rch-cargo"
         ]
     );
     assert_eq!(
         result["summary"]["unsafe_validation_block_count"].as_i64(),
-        Some(3)
+        Some(4)
     );
 
     let safe = &result["ranked_fallback_beads"][0];
@@ -1325,6 +1328,17 @@ fn proof_runner_rank_fallback_beads_blocks_bare_cargo_validation() {
         blocked["unsafe_validation_commands"][0].as_str(),
         Some(
             "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract"
+        )
+    );
+
+    let blocked = &result["ranked_fallback_beads"][4];
+    assert_eq!(blocked["id"].as_str(), Some("shell-control-rch-cargo"));
+    assert_eq!(blocked["eligible"].as_bool(), Some(false));
+    assert_eq!(blocked["unsafe_validation_blocked"].as_bool(), Some(true));
+    assert_eq!(
+        blocked["unsafe_validation_commands"][0].as_str(),
+        Some(
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner cargo test -p asupersync --test proof_runner_contract; touch /tmp/asupersync-proof-runner-pwn"
         )
     );
 
