@@ -165,6 +165,7 @@ impl JournalCrashPoint {
 pub struct JournalTestArtifact {
     pub test_name: String,
     pub crash_point: Option<JournalCrashPoint>,
+    pub failure_message: Option<String>,
     pub journal_entries: Vec<JournalEntry>,
     pub journal_size: u64,
     pub bitmap_updates: Vec<BitmapUpdate>,
@@ -181,6 +182,7 @@ impl JournalTestArtifact {
         Self {
             test_name,
             crash_point: None,
+            failure_message: None,
             journal_entries: Vec::new(),
             journal_size: 0,
             bitmap_updates: Vec::new(),
@@ -208,6 +210,10 @@ impl JournalTestArtifact {
 
     pub fn record_recovery_state(&mut self, state: RecoveryState) {
         self.recovery_state = Some(state);
+    }
+
+    pub fn record_failure(&mut self, failure_message: String) {
+        self.failure_message = Some(failure_message);
     }
 
     pub fn record_compaction(&mut self, stats: CompactionStats) {
@@ -247,6 +253,10 @@ impl JournalTestArtifact {
 
         if let Some(crash_point) = self.crash_point {
             artifact.insert("crash_point".to_string(), crash_point.name().to_string());
+        }
+
+        if let Some(failure_message) = &self.failure_message {
+            artifact.insert("failure_message".to_string(), failure_message.clone());
         }
 
         if let Some(recovery) = &self.recovery_state {
@@ -313,28 +323,49 @@ impl JournalTestHarness {
             Option<JournalCrashPoint>,
         ) -> Result<JournalTestArtifact, Box<dyn std::error::Error>>,
     {
+        test_utils::clear_crash_injection();
+
         // Clean run first
         let clean_artifact = test_fn(&self.config, None)?;
         self.artifacts.push(clean_artifact);
 
         // Test each crash point
         for &crash_point in &self.config.crash_points {
-            println!(
-                "Testing {} with crash point: {}",
-                test_name,
-                crash_point.name()
-            );
+            let (result, crash_point_was_hit) = {
+                let _guard = test_utils::setup_crash_injection(crash_point);
+                let result = test_fn(&self.config, Some(crash_point));
+                let crash_point_was_hit = test_utils::active_crash_injection_was_hit();
+                (result, crash_point_was_hit)
+            };
 
-            match test_fn(&self.config, Some(crash_point)) {
-                Ok(artifact) => {
-                    self.artifacts.push(artifact);
+            match (result, crash_point_was_hit) {
+                (Ok(artifact), true) => self.artifacts.push(artifact),
+                (Ok(_), false) => {
+                    return Err(format!(
+                        "journal test {test_name} configured crash point {} but never exercised it",
+                        crash_point.name()
+                    )
+                    .into());
                 }
-                Err(e) => {
-                    // Record crash failure artifact
+                (Err(e), true) => {
                     let mut artifact = JournalTestArtifact::new(test_name.to_string());
                     artifact.crash_point = Some(crash_point);
+                    artifact.record_failure(e.to_string());
                     artifact.record_recovery_state(RecoveryState::CrashDetected);
+                    artifact.journal_size = self
+                        .config
+                        .journal_path
+                        .metadata()
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0);
                     self.artifacts.push(artifact);
+                }
+                (Err(e), false) => {
+                    return Err(format!(
+                        "journal test {test_name} failed before exercising configured crash point {}: {e}",
+                        crash_point.name()
+                    )
+                    .into());
                 }
             }
         }
@@ -343,10 +374,15 @@ impl JournalTestHarness {
     }
 
     pub fn verify_journal_integrity(&self) -> Result<(), String> {
-        println!("Verifying journal integrity across all test runs...");
-
         // Check that recovery is consistent
         for artifact in &self.artifacts {
+            if artifact.crash_point.is_some() && artifact.recovery_state.is_none() {
+                return Err(format!(
+                    "crash artifact {} has no recovery state",
+                    artifact.test_name
+                ));
+            }
+
             if let Some(recovery) = &artifact.recovery_state {
                 match recovery {
                     RecoveryState::Completed => {
@@ -356,10 +392,25 @@ impl JournalTestHarness {
                                 "Recovery completed but no journal entries found".to_string()
                             );
                         }
+                        if let Some(failure_message) = &artifact.failure_message {
+                            return Err(format!(
+                                "recovery completed despite recorded failure: {failure_message}"
+                            ));
+                        }
                     }
                     RecoveryState::CrashDetected => {
-                        // Verify crash was handled properly
-                        println!("Crash detected and handled: {:?}", artifact.crash_point);
+                        if artifact.crash_point.is_none() {
+                            return Err(format!(
+                                "crash detected without a crash point in {}",
+                                artifact.test_name
+                            ));
+                        }
+                        if artifact.failure_message.is_none() {
+                            return Err(format!(
+                                "crash detected without failure message in {}",
+                                artifact.test_name
+                            ));
+                        }
                     }
                     _ => {
                         // Other states should be valid
@@ -372,8 +423,6 @@ impl JournalTestHarness {
     }
 
     pub fn verify_bitmap_consistency(&self) -> Result<(), String> {
-        println!("Verifying bitmap consistency...");
-
         for artifact in &self.artifacts {
             // Check bitmap updates are properly sequenced
             let mut expected_sequence = 0;
@@ -402,12 +451,6 @@ impl JournalTestHarness {
             std::fs::write(artifact_file, artifact_data)?;
         }
 
-        println!(
-            "Generated {} journal lab artifacts in: {}",
-            self.artifacts.len(),
-            artifacts_dir.display()
-        );
-
         Ok(())
     }
 }
@@ -423,6 +466,50 @@ impl Drop for JournalTestHarness {
 /// Common journal test utilities
 pub mod test_utils {
     use super::*;
+    use std::cell::RefCell;
+    use std::fmt;
+    use std::io::Write;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ActiveJournalCrashInjection {
+        crash_point: JournalCrashPoint,
+        was_hit: bool,
+    }
+
+    thread_local! {
+        static ACTIVE_CRASH_INJECTION: RefCell<Option<ActiveJournalCrashInjection>> =
+            const { RefCell::new(None) };
+    }
+
+    #[derive(Debug)]
+    pub struct JournalCrashInjectionGuard {
+        previous: Option<ActiveJournalCrashInjection>,
+    }
+
+    impl Drop for JournalCrashInjectionGuard {
+        fn drop(&mut self) {
+            ACTIVE_CRASH_INJECTION.with(|slot| {
+                *slot.borrow_mut() = self.previous;
+            });
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct JournalCrashInjection {
+        pub crash_point: JournalCrashPoint,
+    }
+
+    impl fmt::Display for JournalCrashInjection {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "injected journal crash at {}",
+                self.crash_point.name()
+            )
+        }
+    }
+
+    impl std::error::Error for JournalCrashInjection {}
 
     pub fn create_test_journal_entry(id: ObjectId, kind: ObjectKind) -> JournalEntry {
         JournalEntry::ObjectCreated {
@@ -436,9 +523,68 @@ pub mod test_utils {
         BitmapUpdate::new(chunk_id, is_available, SystemTime::now())
     }
 
-    pub fn setup_crash_injection(crash_point: JournalCrashPoint) {
-        println!("Setting up crash injection for: {}", crash_point.name());
-        // TODO: Implement actual crash injection mechanism
+    pub fn setup_crash_injection(crash_point: JournalCrashPoint) -> JournalCrashInjectionGuard {
+        let previous = ACTIVE_CRASH_INJECTION.with(|slot| {
+            slot.borrow_mut().replace(ActiveJournalCrashInjection {
+                crash_point,
+                was_hit: false,
+            })
+        });
+        JournalCrashInjectionGuard { previous }
+    }
+
+    pub fn active_crash_injection() -> Option<JournalCrashPoint> {
+        ACTIVE_CRASH_INJECTION.with(|slot| slot.borrow().map(|active| active.crash_point))
+    }
+
+    pub fn active_crash_injection_was_hit() -> bool {
+        ACTIVE_CRASH_INJECTION.with(|slot| slot.borrow().is_some_and(|active| active.was_hit))
+    }
+
+    pub fn clear_crash_injection() {
+        ACTIVE_CRASH_INJECTION.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+
+    pub fn inject_if_active(crash_point: JournalCrashPoint) -> Result<(), JournalCrashInjection> {
+        ACTIVE_CRASH_INJECTION.with(|slot| {
+            let mut active = slot.borrow_mut();
+            match active.as_mut() {
+                Some(active) if active.crash_point == crash_point => {
+                    active.was_hit = true;
+                    Err(JournalCrashInjection { crash_point })
+                }
+                _ => Ok(()),
+            }
+        })
+    }
+
+    pub fn reset_test_files(config: &JournalTestConfig) -> std::io::Result<()> {
+        std::fs::create_dir_all(&config.temp_dir)?;
+        std::fs::write(&config.journal_path, b"")?;
+        std::fs::write(&config.bitmap_path, b"")?;
+        Ok(())
+    }
+
+    pub fn persist_journal_entry(
+        config: &JournalTestConfig,
+        sequence: u64,
+        entry: &JournalEntry,
+    ) -> std::io::Result<()> {
+        let mut journal = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&config.journal_path)?;
+        writeln!(journal, "{sequence}:{entry:?}")?;
+        Ok(())
+    }
+
+    pub fn fsync_journal(config: &JournalTestConfig) -> std::io::Result<()> {
+        let journal = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&config.journal_path)?;
+        journal.sync_data()
     }
 
     pub fn verify_journal_checksum(journal_path: &PathBuf) -> Result<[u8; 32], std::io::Error> {
@@ -456,5 +602,38 @@ pub mod test_utils {
         } else {
             1.0 - (live_size as f64 / total_size as f64)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn journal_crash_injection_records_only_matching_fault() {
+        test_utils::clear_crash_injection();
+
+        {
+            let _guard = test_utils::setup_crash_injection(JournalCrashPoint::JournalAppend);
+
+            assert_eq!(
+                test_utils::active_crash_injection(),
+                Some(JournalCrashPoint::JournalAppend)
+            );
+            assert!(!test_utils::active_crash_injection_was_hit());
+            assert!(test_utils::inject_if_active(JournalCrashPoint::BitmapUpdate).is_ok());
+            assert!(!test_utils::active_crash_injection_was_hit());
+
+            let error = test_utils::inject_if_active(JournalCrashPoint::JournalAppend)
+                .expect_err("matching crash point should inject a fault");
+            assert_eq!(error.crash_point, JournalCrashPoint::JournalAppend);
+            assert!(test_utils::active_crash_injection_was_hit());
+        }
+
+        assert_eq!(test_utils::active_crash_injection(), None);
+
+        let update = test_utils::create_test_bitmap_update(7, true);
+        assert_eq!(update.sequence_number(), 7);
+        assert_eq!(test_utils::compute_fragmentation_ratio(100, 25), 0.75);
     }
 }
