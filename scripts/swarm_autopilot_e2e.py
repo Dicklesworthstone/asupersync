@@ -295,7 +295,7 @@ def observed_values(kind: str, report: dict[str, Any]) -> dict[str, Any]:
             if isinstance(proposed_action, dict)
             else None,
         }
-    return {}
+    raise ValueError(f"unsupported observation kind: {kind}")
 
 
 def add_kind_specific_checks(
@@ -409,8 +409,19 @@ def run_stage(
         )
         report = {}
     check_value(checks, "helper_exit_code", exit_code, 0)
-    observed = observed_values(kind, report)
     expectations = stage.get("expect", {}) if isinstance(stage.get("expect"), dict) else {}
+    try:
+        observed = observed_values(kind, report)
+    except ValueError as error:
+        checks.append(
+            {
+                "check": "observed_values_kind",
+                "status": "fail",
+                "expected": "supported-stage-observer",
+                "observed": str(error),
+            }
+        )
+        observed = {}
     for key, expected in expectations.items():
         if key in {"candidate_statuses", "candidate_blockers", "row_statuses"}:
             continue
