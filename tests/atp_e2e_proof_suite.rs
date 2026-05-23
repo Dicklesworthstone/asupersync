@@ -600,6 +600,41 @@ fn test_atp_replay_artifacts_reject_ledger_that_masks_journal_failure()
 }
 
 #[test]
+fn test_atp_replay_artifacts_reject_ledger_entry_detached_from_trace_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let mut trace = TraceBuffer::new(4);
+    trace.push(TraceEvent::user_trace(
+        1,
+        Time::from_nanos(1),
+        "ATP violation: manifest_integrity failure",
+    ));
+    let crashpack = CrashpackBuilder::new()
+        .with_oracle_result(violation_result("manifest_integrity"))
+        .with_trace(trace)
+        .with_seed("lab-seed", 102)
+        .build()
+        .expect("crashpack builds");
+
+    crashpack.emit_atp_trace(temp_dir.path())?;
+
+    let ledger_path = temp_dir.path().join("evidence-ledger.json");
+    let ledger_json = std::fs::read_to_string(&ledger_path)?;
+    let mut ledger: serde_json::Value = serde_json::from_str(&ledger_json)?;
+    ledger["entries"][0]["artifact_path"] = serde_json::Value::String("pathlog".to_string());
+    std::fs::write(&ledger_path, serde_json::to_string_pretty(&ledger)?)?;
+
+    let err = AtpReplayCoordinator::validate_replay_artifacts(temp_dir.path())
+        .expect_err("ledger entry evidence must remain attached to trace artifact");
+    assert!(
+        err.to_string().contains("artifact path mismatch"),
+        "unexpected replay artifact validation error: {err}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_atp_crashpack_quotes_oracle_replay_args() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let crashpack = CrashpackBuilder::new()

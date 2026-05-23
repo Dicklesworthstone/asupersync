@@ -1057,6 +1057,20 @@ fn validate_ledger_entry_matches_journal(
         )));
     }
 
+    let Some(artifact_path) = entry.artifact_path.as_deref() else {
+        return Err(replay_validation_failed(format!(
+            "evidence ledger entry {} is missing artifact path",
+            entry.oracle_name
+        )));
+    };
+    if artifact_path != Path::new("transfer.atp-trace") {
+        return Err(replay_validation_failed(format!(
+            "evidence ledger entry {} artifact path mismatch: recorded {}, expected transfer.atp-trace",
+            entry.oracle_name,
+            artifact_path.display()
+        )));
+    }
+
     if entry.evidence.passed != result.passed {
         return Err(replay_validation_failed(format!(
             "evidence ledger oracle {} passed status mismatch: ledger {}, journal {}",
