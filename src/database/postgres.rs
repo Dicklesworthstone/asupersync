@@ -44,7 +44,7 @@ use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
 use crate::security::SecretString;
 #[cfg(feature = "tls")]
-use crate::tls::{TlsConnectorBuilder, TlsStream};
+use crate::tls::{Certificate, TlsConnector, TlsConnectorBuilder, TlsStream};
 use crate::types::{CancelReason, Outcome};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -3540,10 +3540,7 @@ impl PgConnection {
         match response[0] {
             b'S' => {
                 // Server accepts TLS — perform handshake.
-                let connector = TlsConnectorBuilder::new()
-                    .with_webpki_roots()
-                    .build()
-                    .map_err(|e| PgError::Tls(e.to_string()))?;
+                let connector = Self::build_postgres_tls_connector()?;
                 let tls_stream = connector
                     .connect(&options.host, tcp)
                     .await
@@ -3649,12 +3646,10 @@ impl PgConnection {
                             //     posture and binds auth to the TLS channel.
                             //   * If TLS is in use but the server did NOT
                             //     advertise -PLUS, use SCRAM-SHA-256 with
-                            //     `y,,` GS2 to signal "I support CB but you
-                            //     didn't offer it". A real server that
-                            //     supports CB would have advertised -PLUS;
-                            //     if a MITM stripped -PLUS, the server's
-                            //     verification of `y` will fail. This is the
-                            //     RFC 5802 §6 downgrade-detection contract.
+                            //     `n,,` GS2. Several Postgres poolers reject
+                            //     the `y,,` supported-but-not-used signal;
+                            //     libpq/common drivers use the plain SCRAM
+                            //     path for this case.
                             //   * Otherwise (plain TCP), use SCRAM-SHA-256
                             //     with `n,,` GS2 (no CB).
                             let cb = Self::pick_scram_channel_binding(
@@ -3716,6 +3711,26 @@ impl PgConnection {
         }
     }
 
+    #[cfg(feature = "tls")]
+    fn build_postgres_tls_connector() -> Result<TlsConnector, PgError> {
+        let mut tls_builder = TlsConnectorBuilder::new()
+            .with_webpki_roots()
+            .with_strict_ca_validation();
+
+        // Match libpq-style deployments that provide an extra private
+        // CA bundle through SSL_CERT_FILE, while keeping certificate
+        // verification enabled.
+        if let Ok(ca_path) = std::env::var("SSL_CERT_FILE") {
+            let certs = Certificate::from_pem_file(&ca_path)
+                .map_err(|err| PgError::Tls(format!("loading SSL_CERT_FILE {ca_path}: {err}")))?;
+            tls_builder = tls_builder.add_root_certificates(certs);
+        }
+
+        tls_builder
+            .build()
+            .map_err(|err| PgError::Tls(err.to_string()))
+    }
+
     /// Choose a `ScramChannelBinding` based on advertised mechanisms, whether
     /// the connection is already TLS, and the presence of a TLS leaf
     /// certificate. See the call site in the SASL handler for the policy tree.
@@ -3742,9 +3757,10 @@ impl PgConnection {
                     cbind_data: tls_server_end_point_cbind(&cert),
                 }
             } else {
-                // TLS is in use but server didn't advertise -PLUS. The `y` GS2
-                // signal still defends against the downgrade attack.
-                ScramChannelBinding::SupportedNotUsed
+                // TLS is in use but the server did not advertise -PLUS.
+                // Some Postgres poolers reject the `y,,` GS2 signal, so
+                // use plain SCRAM like libpq/common drivers.
+                ScramChannelBinding::None
             });
         }
 
@@ -8191,6 +8207,9 @@ mod tests {
     use crate::types::CancelKind;
     use crate::{Budget, Cx, RegionId, TaskId};
 
+    #[cfg(feature = "tls")]
+    static POSTGRES_SSL_CERT_FILE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         tracing::info!(test = %name, "starting postgres test");
@@ -8824,13 +8843,46 @@ mod tests {
         }
     }
 
-    /// RFC 7677 SCRAM channel binding preference audit test.
-    ///
-    /// Verifies that when server offers both SCRAM-SHA-256 and SCRAM-SHA-256-PLUS,
-    /// client correctly chooses SHA-256-PLUS (with channel binding) to prevent
-    /// downgrade attacks as required by RFC 7677.
+    #[cfg(feature = "tls")]
     #[test]
-    fn audit_scram_channel_binding_preference_rfc7677_compliance() {
+    #[allow(unsafe_code)]
+    fn postgres_tls_connector_reports_invalid_ssl_cert_file() {
+        let _guard = POSTGRES_SSL_CERT_FILE_ENV_LOCK
+            .lock()
+            .expect("env lock poisoned");
+        let previous = std::env::var_os("SSL_CERT_FILE");
+        // SAFETY: this test holds a process-wide mutex for SSL_CERT_FILE.
+        unsafe { std::env::set_var("SSL_CERT_FILE", "/definitely/not/a/postgres-ca.pem") };
+
+        let result = PgConnection::build_postgres_tls_connector();
+
+        match previous {
+            Some(value) => {
+                // SAFETY: this test holds a process-wide mutex for SSL_CERT_FILE.
+                unsafe { std::env::set_var("SSL_CERT_FILE", value) };
+            }
+            None => {
+                // SAFETY: this test holds a process-wide mutex for SSL_CERT_FILE.
+                unsafe { std::env::remove_var("SSL_CERT_FILE") };
+            }
+        }
+
+        match result {
+            Err(PgError::Tls(msg)) => {
+                assert!(msg.contains("SSL_CERT_FILE"), "got: {msg}");
+            }
+            other => panic!("expected SSL_CERT_FILE TLS error, got {other:?}"),
+        }
+    }
+
+    /// SCRAM channel-binding preference audit test.
+    ///
+    /// Verifies that when the server offers SCRAM-SHA-256-PLUS, the client
+    /// chooses PLUS with channel binding. When a TLS server offers only plain
+    /// SCRAM-SHA-256, the client follows libpq/common-driver behavior and uses
+    /// the plain `n,,` GS2 header for pooler compatibility.
+    #[test]
+    fn audit_scram_channel_binding_preference_and_pooler_compatibility() {
         // Test 1: TLS active + server offers both → should choose PLUS
         #[cfg(feature = "tls")]
         {
@@ -8854,7 +8906,7 @@ mod tests {
             );
         }
 
-        // Test 2: TLS active + server offers only SHA-256 → should use SHA-256 with downgrade protection
+        // Test 2: TLS active + server offers only SHA-256 → use plain SCRAM for pooler compatibility.
         #[cfg(feature = "tls")]
         {
             let mechanisms_no_plus = vec!["SCRAM-SHA-256".to_string()];
@@ -8865,18 +8917,18 @@ mod tests {
                 true, // TLS active
                 Some(der_prefix_cert),
             )
-            .expect("should use downgrade protection");
+            .expect("should use plain SCRAM");
 
             assert_eq!(
                 result.mechanism(),
                 "SCRAM-SHA-256",
                 "RFC 7677: When TLS active but server doesn't offer PLUS, use SHA-256"
             );
-            match result {
-                ScramChannelBinding::SupportedNotUsed => {
-                    // Correct: This sets GS2 'y' flag for downgrade attack detection
+            match &result {
+                ScramChannelBinding::None => {
+                    assert_eq!(result.gs2_header(), "n,,");
                 }
-                _ => panic!("Expected SupportedNotUsed for downgrade protection"),
+                _ => panic!("Expected None for pooler-compatible plain SCRAM"),
             }
         }
 
