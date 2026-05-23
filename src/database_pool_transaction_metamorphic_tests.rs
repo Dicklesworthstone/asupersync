@@ -58,13 +58,15 @@ mod tests {
             let client_first_message = format!("n,,n={},r={}", username, client_nonce);
 
             let server_nonce = format!("{}DEADBEEF", client_nonce);
-            let server_first_message = format!("r={},s={},i={}",
+            let server_first_message = format!(
+                "r={},s={},i={}",
                 server_nonce,
                 base64::encode(&salt),
                 iterations
             );
 
-            let client_final_message = format!("c=biws,r={},p=dHVyZiBhbmQgdHVyZiBhZ2Fpbg==", server_nonce);
+            let client_final_message =
+                format!("c=biws,r={},p=dHVyZiBhbmQgdHVyZiBhZ2Fpbg==", server_nonce);
             let server_final_message = "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=".to_string();
 
             Self {
@@ -88,10 +90,10 @@ mod tests {
         }
 
         pub fn is_valid_transcript(&self) -> bool {
-            !self.client_first_message.is_empty() &&
-            !self.server_first_message.is_empty() &&
-            self.client_final_message.contains("r=") &&
-            self.server_final_message.contains("v=")
+            !self.client_first_message.is_empty()
+                && !self.server_first_message.is_empty()
+                && self.client_final_message.contains("r=")
+                && self.server_final_message.contains("v=")
         }
     }
 
@@ -140,7 +142,9 @@ mod tests {
         pub fn parse_and_serialize(&self) -> String {
             // Mock implementation: parse SQL and serialize back
             let parsed = self.normalize_sql(&self.sql);
-            parsed.replace(" WHERE ", " WHERE ").replace(" AND ", " AND ")
+            parsed
+                .replace(" WHERE ", " WHERE ")
+                .replace(" AND ", " AND ")
         }
 
         pub fn bind_parameters(&self, params: &[MockValue]) -> Result<String, String> {
@@ -152,7 +156,11 @@ mod tests {
                     return Err("Not enough parameters".to_string());
                 }
 
-                let end_pos = result[pos+1..].find(|c: char| !c.is_ascii_digit()).unwrap_or(result.len() - pos - 1) + pos + 1;
+                let end_pos = result[pos + 1..]
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(result.len() - pos - 1)
+                    + pos
+                    + 1;
                 let param_placeholder = &result[pos..end_pos];
                 let param_value = match &params[param_index] {
                     MockValue::Integer(i) => i.to_string(),
@@ -201,9 +209,9 @@ mod tests {
         }
 
         pub fn is_healthy(&self) -> bool {
-            self.is_valid &&
-            !self.in_transaction &&
-            self.last_activity.elapsed().unwrap_or(Duration::MAX) < Duration::from_secs(300)
+            self.is_valid
+                && !self.in_transaction
+                && self.last_activity.elapsed().unwrap_or(Duration::MAX) < Duration::from_secs(300)
         }
 
         pub fn execute_query(&mut self) {
@@ -382,15 +390,20 @@ mod tests {
         }
 
         pub fn can_read_uncommitted(&self, other: &MockTransaction) -> bool {
-            matches!(self.isolation_level, IsolationLevel::ReadUncommitted) ||
-            other.committed
+            matches!(self.isolation_level, IsolationLevel::ReadUncommitted) || other.committed
         }
 
-        pub fn can_see_changes(&self, other: &MockTransaction, operation_timestamp: SystemTime) -> bool {
+        pub fn can_see_changes(
+            &self,
+            other: &MockTransaction,
+            operation_timestamp: SystemTime,
+        ) -> bool {
             match self.isolation_level {
                 IsolationLevel::ReadUncommitted => true,
                 IsolationLevel::ReadCommitted => other.committed,
-                IsolationLevel::RepeatableRead => other.committed && operation_timestamp < SystemTime::now(),
+                IsolationLevel::RepeatableRead => {
+                    other.committed && operation_timestamp < SystemTime::now()
+                }
                 IsolationLevel::Serializable => other.committed && self.id < other.id,
             }
         }
@@ -985,7 +998,8 @@ mod tests {
 
     #[test]
     fn test_transaction_savepoint_stack() {
-        let mut tx = MockTransaction::new("test_tx".to_string(), IsolationLevel::ReadCommitted, false);
+        let mut tx =
+            MockTransaction::new("test_tx".to_string(), IsolationLevel::ReadCommitted, false);
 
         tx.create_savepoint("sp1".to_string());
         tx.create_savepoint("sp2".to_string());

@@ -172,7 +172,10 @@ mod tests {
                 source_symbols_count,
                 symbol_size,
                 received_symbols: HashMap::new(),
-                reconstruction_matrix: vec![vec![GF256(0); source_symbols_count as usize]; source_symbols_count as usize],
+                reconstruction_matrix: vec![
+                    vec![GF256(0); source_symbols_count as usize];
+                    source_symbols_count as usize
+                ],
                 decoding_progress: 0.0,
                 partial_blocks: HashMap::new(),
             }
@@ -200,14 +203,15 @@ mod tests {
         fn update_partial_blocks(&mut self, symbol_id: u32) {
             let block_id = symbol_id / 256; // Simple block partitioning
 
-            let partial_block = self.partial_blocks.entry(block_id).or_insert_with(|| {
-                PartialBlock {
-                    block_id,
-                    available_symbols: HashSet::new(),
-                    missing_symbols: (0..self.source_symbols_count).collect(),
-                    recovery_possible: false,
-                }
-            });
+            let partial_block =
+                self.partial_blocks
+                    .entry(block_id)
+                    .or_insert_with(|| PartialBlock {
+                        block_id,
+                        available_symbols: HashSet::new(),
+                        missing_symbols: (0..self.source_symbols_count).collect(),
+                        recovery_possible: false,
+                    });
 
             partial_block.available_symbols.insert(symbol_id);
             partial_block.missing_symbols.remove(&symbol_id);
@@ -328,13 +332,17 @@ mod tests {
 
         fn get_coefficient(&self, repair_symbol_id: u32, source_index: u32) -> GF256 {
             // RFC 6330-style coefficient generation (simplified)
-            let seed = (repair_symbol_id.wrapping_mul(257).wrapping_add(source_index)) % 256;
+            let seed = (repair_symbol_id
+                .wrapping_mul(257)
+                .wrapping_add(source_index))
+                % 256;
             GF256(if seed == 0 { 1 } else { seed as u8 })
         }
 
         pub fn verify_rfc6330_compliance(&self) -> bool {
             // Check systematic property
-            if self.systematic_indices != (0..self.source_symbols.len() as u32).collect::<Vec<_>>() {
+            if self.systematic_indices != (0..self.source_symbols.len() as u32).collect::<Vec<_>>()
+            {
                 return false;
             }
 
@@ -462,7 +470,8 @@ mod tests {
                 let end_offset = start_offset + self.symbol_size;
 
                 if start_offset < source_data.len() {
-                    let mut symbol = source_data.get(start_offset..end_offset)
+                    let mut symbol = source_data
+                        .get(start_offset..end_offset)
                         .unwrap_or(&source_data[start_offset..])
                         .to_vec();
 
@@ -509,9 +518,19 @@ mod tests {
 
     #[derive(Debug, Clone)]
     pub enum RowOperation {
-        Swap { row1: usize, row2: usize },
-        Scale { row: usize, factor: GF256 },
-        AddScaled { target_row: usize, source_row: usize, factor: GF256 },
+        Swap {
+            row1: usize,
+            row2: usize,
+        },
+        Scale {
+            row: usize,
+            factor: GF256,
+        },
+        AddScaled {
+            target_row: usize,
+            source_row: usize,
+            factor: GF256,
+        },
     }
 
     impl MockGaussianElimination {
@@ -588,19 +607,26 @@ mod tests {
                 self.matrix[row][col] = gf256_multiply_gf256(self.matrix[row][col], factor);
             }
             self.augmented_column[row] = gf256_multiply_gf256(self.augmented_column[row], factor);
-            self.row_operations.push(RowOperation::Scale { row, factor });
+            self.row_operations
+                .push(RowOperation::Scale { row, factor });
         }
 
         fn add_scaled_row(&mut self, target_row: usize, source_row: usize, factor: GF256) {
             for col in 0..self.matrix[target_row].len() {
                 let scaled_value = gf256_multiply_gf256(self.matrix[source_row][col], factor);
-                self.matrix[target_row][col] = GF256(self.matrix[target_row][col].0 ^ scaled_value.0);
+                self.matrix[target_row][col] =
+                    GF256(self.matrix[target_row][col].0 ^ scaled_value.0);
             }
 
             let scaled_augmented = gf256_multiply_gf256(self.augmented_column[source_row], factor);
-            self.augmented_column[target_row] = GF256(self.augmented_column[target_row].0 ^ scaled_augmented.0);
+            self.augmented_column[target_row] =
+                GF256(self.augmented_column[target_row].0 ^ scaled_augmented.0);
 
-            self.row_operations.push(RowOperation::AddScaled { target_row, source_row, factor });
+            self.row_operations.push(RowOperation::AddScaled {
+                target_row,
+                source_row,
+                factor,
+            });
         }
 
         pub fn calculate_rank(&self) -> usize {

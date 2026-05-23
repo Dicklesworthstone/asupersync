@@ -152,7 +152,8 @@ mod tests {
         }
 
         pub fn get_header(&self, name: &str) -> Option<&String> {
-            self.headers.iter()
+            self.headers
+                .iter()
                 .find(|(h_name, _)| h_name.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value)
         }
@@ -329,7 +330,8 @@ mod tests {
 
                     // Read value (simplified - until end or next header)
                     let value_start = i;
-                    while i < encoded.len() && (encoded[i] & 0x80) == 0 && (encoded[i] & 0x40) == 0 {
+                    while i < encoded.len() && (encoded[i] & 0x80) == 0 && (encoded[i] & 0x40) == 0
+                    {
                         i += 1;
                     }
                     let value = String::from_utf8_lossy(&encoded[value_start..i]).to_string();
@@ -362,7 +364,8 @@ mod tests {
         }
 
         pub fn create_stream(&mut self, stream_id: u32) {
-            self.stream_windows.insert(stream_id, self.initial_window_size);
+            self.stream_windows
+                .insert(stream_id, self.initial_window_size);
         }
 
         pub fn send_data(&mut self, stream_id: u32, length: u32) -> Result<(), String> {
@@ -374,7 +377,9 @@ mod tests {
             }
 
             // Check stream window
-            let stream_window = self.stream_windows.get_mut(&stream_id)
+            let stream_window = self
+                .stream_windows
+                .get_mut(&stream_id)
                 .ok_or("Stream not found")?;
 
             if *stream_window < length {
@@ -388,7 +393,11 @@ mod tests {
             Ok(())
         }
 
-        pub fn receive_window_update(&mut self, stream_id: Option<u32>, increment: u32) -> Result<(), String> {
+        pub fn receive_window_update(
+            &mut self,
+            stream_id: Option<u32>,
+            increment: u32,
+        ) -> Result<(), String> {
             let increment = increment as i32;
 
             if increment <= 0 {
@@ -397,8 +406,8 @@ mod tests {
 
             match stream_id {
                 Some(id) => {
-                    let stream_window = self.stream_windows.get_mut(&id)
-                        .ok_or("Stream not found")?;
+                    let stream_window =
+                        self.stream_windows.get_mut(&id).ok_or("Stream not found")?;
 
                     if *stream_window > i32::MAX - increment {
                         return Err("Stream window overflow".to_string());
@@ -426,13 +435,33 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum MockH3Frame {
-        Data { stream_id: u64, data: Vec<u8> },
-        Headers { stream_id: u64, headers: Vec<(String, String)> },
-        Settings { max_table_capacity: Option<u32>, blocked_streams: Option<u32> },
-        PushPromise { stream_id: u64, promised_stream_id: u64, headers: Vec<(String, String)> },
-        CancelPush { push_id: u64 },
-        MaxPushId { push_id: u64 },
-        Unknown { frame_type: u64, payload: Vec<u8> },
+        Data {
+            stream_id: u64,
+            data: Vec<u8>,
+        },
+        Headers {
+            stream_id: u64,
+            headers: Vec<(String, String)>,
+        },
+        Settings {
+            max_table_capacity: Option<u32>,
+            blocked_streams: Option<u32>,
+        },
+        PushPromise {
+            stream_id: u64,
+            promised_stream_id: u64,
+            headers: Vec<(String, String)>,
+        },
+        CancelPush {
+            push_id: u64,
+        },
+        MaxPushId {
+            push_id: u64,
+        },
+        Unknown {
+            frame_type: u64,
+            payload: Vec<u8>,
+        },
     }
 
     impl MockH3Frame {
@@ -463,7 +492,10 @@ mod tests {
                     encoded.extend_from_slice(&headers_data);
                     encoded
                 }
-                MockH3Frame::Settings { max_table_capacity, blocked_streams } => {
+                MockH3Frame::Settings {
+                    max_table_capacity,
+                    blocked_streams,
+                } => {
                     let mut encoded = Vec::new();
                     encoded.push(0x04); // SETTINGS frame type
 
@@ -500,12 +532,12 @@ mod tests {
                         return Err("Invalid DATA frame".to_string());
                     }
                     let stream_id = u64::from_be_bytes([
-                        bytes[1], bytes[2], bytes[3], bytes[4],
-                        bytes[5], bytes[6], bytes[7], bytes[8]
+                        bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[8],
                     ]);
                     let length = u64::from_be_bytes([
-                        bytes[9], bytes[10], bytes[11], bytes[12],
-                        bytes[13], bytes[14], bytes[15], bytes[16]
+                        bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+                        bytes[16],
                     ]) as usize;
 
                     if bytes.len() < 17 + length {
@@ -520,12 +552,12 @@ mod tests {
                         return Err("Invalid HEADERS frame".to_string());
                     }
                     let stream_id = u64::from_be_bytes([
-                        bytes[1], bytes[2], bytes[3], bytes[4],
-                        bytes[5], bytes[6], bytes[7], bytes[8]
+                        bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[8],
                     ]);
                     let length = u64::from_be_bytes([
-                        bytes[9], bytes[10], bytes[11], bytes[12],
-                        bytes[13], bytes[14], bytes[15], bytes[16]
+                        bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+                        bytes[16],
                     ]) as usize;
 
                     if bytes.len() < 17 + length {
@@ -544,14 +576,16 @@ mod tests {
                         if i >= headers_data.len() {
                             break;
                         }
-                        let name = String::from_utf8_lossy(&headers_data[name_start..i]).to_string();
+                        let name =
+                            String::from_utf8_lossy(&headers_data[name_start..i]).to_string();
                         i += 1; // Skip null
 
                         let value_start = i;
                         while i < headers_data.len() && headers_data[i] != 0 {
                             i += 1;
                         }
-                        let value = String::from_utf8_lossy(&headers_data[value_start..i]).to_string();
+                        let value =
+                            String::from_utf8_lossy(&headers_data[value_start..i]).to_string();
                         i += 1; // Skip null
 
                         headers.push((name, value));
@@ -566,12 +600,10 @@ mod tests {
                         blocked_streams: Some(100),
                     })
                 }
-                _ => {
-                    Ok(MockH3Frame::Unknown {
-                        frame_type: frame_type as u64,
-                        payload: bytes[1..].to_vec(),
-                    })
-                }
+                _ => Ok(MockH3Frame::Unknown {
+                    frame_type: frame_type as u64,
+                    payload: bytes[1..].to_vec(),
+                }),
             }
         }
 
@@ -1508,9 +1540,18 @@ mod tests {
         assert_eq!(MockGrpcStatus::NotFound.to_http_status(), 404);
         assert_eq!(MockGrpcStatus::Internal.to_http_status(), 500);
 
-        assert_eq!(MockGrpcStatus::from_http_status(200), Some(MockGrpcStatus::Ok));
-        assert_eq!(MockGrpcStatus::from_http_status(404), Some(MockGrpcStatus::NotFound));
-        assert_eq!(MockGrpcStatus::from_http_status(500), Some(MockGrpcStatus::Internal));
+        assert_eq!(
+            MockGrpcStatus::from_http_status(200),
+            Some(MockGrpcStatus::Ok)
+        );
+        assert_eq!(
+            MockGrpcStatus::from_http_status(404),
+            Some(MockGrpcStatus::NotFound)
+        );
+        assert_eq!(
+            MockGrpcStatus::from_http_status(500),
+            Some(MockGrpcStatus::Internal)
+        );
     }
 
     #[test]
@@ -1520,7 +1561,10 @@ mod tests {
 
         assert_eq!(frame.len(), 5 + 4); // 5-byte header + 4-byte payload
         assert_eq!(frame[0], 0); // No compression
-        assert_eq!(u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]), 4); // Length
+        assert_eq!(
+            u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]),
+            4
+        ); // Length
 
         let decoded = MockGrpcMessage::decode_frame(&frame).unwrap();
         assert_eq!(decoded, vec![1, 2, 3, 4]);
