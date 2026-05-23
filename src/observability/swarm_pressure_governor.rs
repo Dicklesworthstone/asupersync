@@ -47,6 +47,7 @@ use thiserror::Error;
 
 const DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD: f64 = 0.80;
 const DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD: f64 = 0.80;
+const DEFAULT_WORKLOAD_LEASE_STARVATION_AGING_STEP: Duration = Duration::from_secs(5 * 60);
 
 /// Errors specific to swarm pressure governance.
 #[derive(Debug, Error)]
@@ -305,6 +306,8 @@ pub struct SwarmPressureGovernorConfig {
     pub workload_feedback_max_age: Duration,
     /// Workload pressure ratio that triggers admission backpressure rules.
     pub workload_feedback_backpressure_threshold: f64,
+    /// Wait time per priority-rank aging step for live workload leases.
+    pub workload_lease_starvation_aging_step: Duration,
 }
 
 impl Default for SwarmPressureGovernorConfig {
@@ -325,6 +328,7 @@ impl Default for SwarmPressureGovernorConfig {
             workload_feedback_max_age: Duration::from_secs(5),
             workload_feedback_backpressure_threshold:
                 DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD,
+            workload_lease_starvation_aging_step: DEFAULT_WORKLOAD_LEASE_STARVATION_AGING_STEP,
         }
     }
 }
@@ -911,6 +915,10 @@ pub struct SwarmWorkloadLeaseScheduleEntry {
     pub proof_lane: SwarmProofLaneKind,
     /// Pressure priority used by the scheduler.
     pub priority: RegionPriority,
+    /// Priority rank after bounded starvation aging is applied.
+    pub effective_priority_rank: u8,
+    /// Number of priority-rank steps discounted because the lease has waited.
+    pub starvation_aging_discount: u8,
     /// Region currently bound to this lease.
     pub region_id: RegionId,
     /// Live lifecycle state used by the scheduler.
@@ -1686,10 +1694,13 @@ impl SwarmPressureGovernor {
         };
         self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
         let feedback_by_workload = self.live_workload_feedback_by_id(now);
+        let aging_step = self.workload_lease_starvation_aging_step();
         live_leases.sort_by_key(|lease| {
             Self::workload_lease_schedule_key(
                 lease,
                 feedback_by_workload.get(lease.workload_id.as_str()),
+                now,
+                aging_step,
             )
         });
         live_leases
@@ -1700,6 +1711,8 @@ impl SwarmPressureGovernor {
                     lease,
                     rank as u64,
                     feedback_by_workload.get(lease.workload_id.as_str()),
+                    now,
+                    aging_step,
                 )
             })
             .collect()
@@ -2082,9 +2095,11 @@ impl SwarmPressureGovernor {
     fn workload_lease_schedule_key(
         lease: &SwarmWorkloadLease,
         feedback: Option<&SwarmWorkloadPressureFeedback>,
+        now: Instant,
+        aging_step: Duration,
     ) -> (u8, i64, Instant, u8, u8, Instant, u64) {
         (
-            Self::priority_schedule_rank(lease.priority),
+            Self::effective_priority_schedule_rank(lease, now, aging_step),
             Self::feedback_max_pressure_scaled(feedback),
             lease.expires_at,
             Self::proof_lane_schedule_rank(lease.proof_lane),
@@ -2098,11 +2113,16 @@ impl SwarmPressureGovernor {
         lease: &SwarmWorkloadLease,
         scheduling_rank: u64,
         feedback: Option<&SwarmWorkloadPressureFeedback>,
+        now: Instant,
+        aging_step: Duration,
     ) -> SwarmWorkloadLeaseScheduleEntry {
         let replay_pointer = format!(
             "swarm-workload-lease://lease/{}/schedule/{scheduling_rank}",
             lease.lease_id.as_u64()
         );
+        let effective_priority_rank =
+            Self::effective_priority_schedule_rank(lease, now, aging_step);
+        let starvation_aging_discount = Self::starvation_aging_discount(lease, now, aging_step);
         let (
             queue_pressure_scaled,
             disk_io_pressure_scaled,
@@ -2119,6 +2139,8 @@ impl SwarmPressureGovernor {
             owner: lease.owner.clone(),
             proof_lane: lease.proof_lane,
             priority: lease.priority,
+            effective_priority_rank,
+            starvation_aging_discount,
             region_id: lease.region_id,
             state: lease.state,
             reserved_memory_bytes: lease.reserved_memory_bytes,
@@ -2135,7 +2157,7 @@ impl SwarmPressureGovernor {
             validation_frontier_pressure_scaled,
             cancellation_tail_pressure_scaled,
             max_pressure_scaled,
-            reason: Self::workload_lease_schedule_reason(lease, feedback),
+            reason: Self::workload_lease_schedule_reason(lease, feedback, now, aging_step),
         }
     }
 
@@ -2205,11 +2227,43 @@ impl SwarmPressureGovernor {
             .unwrap_or(0)
     }
 
+    fn effective_priority_schedule_rank(
+        lease: &SwarmWorkloadLease,
+        now: Instant,
+        aging_step: Duration,
+    ) -> u8 {
+        Self::priority_schedule_rank(lease.priority)
+            .saturating_sub(Self::starvation_aging_discount(lease, now, aging_step))
+    }
+
+    fn starvation_aging_discount(
+        lease: &SwarmWorkloadLease,
+        now: Instant,
+        aging_step: Duration,
+    ) -> u8 {
+        let base_rank = Self::priority_schedule_rank(lease.priority);
+        if base_rank <= 1 {
+            return 0;
+        }
+
+        let max_discount = base_rank - 1;
+        let wait_age = now.saturating_duration_since(lease.issued_at);
+        let aging_step = if aging_step.is_zero() {
+            DEFAULT_WORKLOAD_LEASE_STARVATION_AGING_STEP
+        } else {
+            aging_step
+        };
+        let discount = wait_age.as_nanos() / aging_step.as_nanos();
+        discount.min(u128::from(max_discount)) as u8
+    }
+
     fn workload_lease_schedule_reason(
         lease: &SwarmWorkloadLease,
         feedback: Option<&SwarmWorkloadPressureFeedback>,
+        now: Instant,
+        aging_step: Duration,
     ) -> String {
-        let base = if let Some(feedback) = feedback {
+        let mut base = if let Some(feedback) = feedback {
             format!(
                 "live workload lease scheduled with pressure feedback queue={} disk_io={} rch_queue={} validation_frontier={} cancellation_tail={} max={}",
                 scale_pressure_for_metrics(feedback.queue_pressure),
@@ -2222,7 +2276,24 @@ impl SwarmPressureGovernor {
         } else {
             "live workload lease scheduled without pressure feedback".to_string()
         };
+        let starvation_aging_discount = Self::starvation_aging_discount(lease, now, aging_step);
+        if starvation_aging_discount > 0 {
+            let effective_priority_rank =
+                Self::effective_priority_schedule_rank(lease, now, aging_step);
+            let wait_age_ms = now.saturating_duration_since(lease.issued_at).as_millis();
+            base.push_str(&format!(
+                " starvation_aging_discount={starvation_aging_discount} effective_priority_rank={effective_priority_rank} wait_age_ms={wait_age_ms}"
+            ));
+        }
         lease.context_reason(&base)
+    }
+
+    fn workload_lease_starvation_aging_step(&self) -> Duration {
+        if self.config.workload_lease_starvation_aging_step.is_zero() {
+            DEFAULT_WORKLOAD_LEASE_STARVATION_AGING_STEP
+        } else {
+            self.config.workload_lease_starvation_aging_step
+        }
     }
 
     const fn priority_schedule_rank(priority: RegionPriority) -> u8 {
@@ -4064,6 +4135,129 @@ mod tests {
         assert_eq!(metrics.workload_leases_expired, 1);
         assert_eq!(metrics.active_workload_lease_count, 4);
         assert_eq!(metrics.terminal_workload_lease_count, 1);
+    }
+
+    #[test]
+    fn test_workload_lease_schedule_applies_starvation_aging_without_overtaking_critical() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let mut config = SwarmPressureGovernorConfig::default();
+        config.workload_lease_starvation_aging_step = Duration::from_secs(10);
+        let pressure_governor = PressureGovernor::new(
+            config.pressure_config.clone(),
+            std::sync::Arc::clone(&runtime),
+            Metrics::new(),
+        )
+        .expect("Failed to create pressure governor");
+        let governor =
+            SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let deadline = Instant::now() + Duration::from_secs(300);
+
+        let critical_request = SwarmWorkloadAdmissionRequest::new(
+            "critical-admission",
+            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope("critical-lane"),
+        )
+        .with_priority(RegionPriority::Critical)
+        .with_proof_lane(SwarmProofLaneKind::SourceOnly)
+        .with_deadline(deadline);
+        let fresh_normal_request = SwarmWorkloadAdmissionRequest::new(
+            "fresh-normal",
+            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope("normal-lane"),
+        )
+        .with_priority(RegionPriority::Normal)
+        .with_proof_lane(SwarmProofLaneKind::SourceOnly)
+        .with_deadline(deadline);
+        let aged_low_request = SwarmWorkloadAdmissionRequest::new(
+            "aged-low",
+            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope("low-lane"),
+        )
+        .with_priority(RegionPriority::Low)
+        .with_proof_lane(SwarmProofLaneKind::SourceOnly)
+        .with_deadline(deadline);
+
+        let critical_decision = governor
+            .check_workload_admission(&cx, &critical_request)
+            .expect("critical workload admission should classify");
+        let fresh_normal_decision = governor
+            .check_workload_admission(&cx, &fresh_normal_request)
+            .expect("fresh normal workload admission should classify");
+        let aged_low_decision = governor
+            .check_workload_admission(&cx, &aged_low_request)
+            .expect("aged low workload admission should classify");
+
+        let critical = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(59, 1),
+                &critical_request,
+                &critical_decision,
+            )
+            .expect("critical workload should acquire lease");
+        let fresh_normal = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(59, 2),
+                &fresh_normal_request,
+                &fresh_normal_decision,
+            )
+            .expect("fresh normal workload should acquire lease");
+        let aged_low = governor
+            .acquire_workload_lease(
+                RegionId::new_for_test(59, 3),
+                &aged_low_request,
+                &aged_low_decision,
+            )
+            .expect("aged low workload should acquire lease");
+
+        let now = Instant::now();
+        let old_issued_at = now
+            .checked_sub(Duration::from_secs(25))
+            .expect("test time should support subtracting wait age");
+        {
+            let mut leases = governor.workload_leases.lock().unwrap();
+            leases
+                .get_mut(&critical.lease_id)
+                .expect("critical lease should exist")
+                .expires_at = deadline;
+            leases
+                .get_mut(&fresh_normal.lease_id)
+                .expect("fresh normal lease should exist")
+                .expires_at = deadline;
+            let aged = leases
+                .get_mut(&aged_low.lease_id)
+                .expect("aged low lease should exist");
+            aged.issued_at = old_issued_at;
+            aged.expires_at = deadline;
+        }
+
+        let schedule = governor.workload_lease_schedule();
+        let ordered_ids: Vec<_> = schedule.iter().map(|entry| entry.lease_id).collect();
+        assert_eq!(
+            ordered_ids,
+            vec![critical.lease_id, aged_low.lease_id, fresh_normal.lease_id],
+            "aged low-priority work should catch up to fresh normal work but not critical work"
+        );
+        assert_eq!(schedule[0].effective_priority_rank, 0);
+        assert_eq!(schedule[0].starvation_aging_discount, 0);
+        assert_eq!(schedule[1].workload_id, "aged-low");
+        assert_eq!(schedule[1].effective_priority_rank, 1);
+        assert_eq!(schedule[1].starvation_aging_discount, 2);
+        assert!(
+            schedule[1].reason.contains("starvation_aging_discount=2"),
+            "{}",
+            schedule[1].reason
+        );
+        assert!(
+            schedule[1].reason.contains("effective_priority_rank=1"),
+            "{}",
+            schedule[1].reason
+        );
+        assert_eq!(schedule[2].workload_id, "fresh-normal");
+        assert_eq!(schedule[2].effective_priority_rank, 2);
+        assert_eq!(schedule[2].starvation_aging_discount, 0);
     }
 
     #[test]
