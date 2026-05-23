@@ -566,7 +566,7 @@ mod bytes_io_time_tests {
             let original_len = data.len();
 
             if split_pos <= original_len {
-                let mut buffer = MockBytesBuffer::new(data.clone());
+                let buffer = MockBytesBuffer::new(data.clone());
                 let original_slice = buffer.as_slice().to_vec();
 
                 // split_off: splits at position, returns tail
@@ -688,9 +688,9 @@ mod bytes_io_time_tests {
                 "Right associative chain doesn't match expected concatenation");
 
             // Remaining should be consistent
-            let mut left_check = MockBufChain::chain(a.clone(), b.clone())
+            let left_check = MockBufChain::chain(a.clone(), b.clone())
                 .chain_with(MockBufChain::new(vec![c.clone()]));
-            let mut right_check = MockBufChain::new(vec![a])
+            let right_check = MockBufChain::new(vec![a])
                 .chain_with(MockBufChain::chain(b, c));
 
             prop_assert_eq!(left_check.remaining(), right_check.remaining(),
@@ -758,7 +758,7 @@ mod bytes_io_time_tests {
             let original_read_data = original_stream.read_data().to_vec();
 
             // Split into halves
-            let (mut read_half, write_half) = original_stream.split();
+            let (read_half, write_half) = original_stream.split();
 
             // Capture current state
             let read_data_after_split = read_half.remaining_data();
@@ -862,7 +862,7 @@ mod bytes_io_time_tests {
                 lines_individually.len(), lines_batch.len());
 
             // Reconstruction test: join lines should approximate original
-            let reconstructed = lines_individually.join("");
+            let _reconstructed = lines_individually.join("");
 
             // Handle case where original didn't end with newline
             if !text_data.is_empty() {
@@ -992,8 +992,6 @@ mod bytes_io_time_tests {
 
             for (i, &woken_id) in woken_sleeps.iter().enumerate() {
                 if i < sleep_deadlines.len() {
-                    let (expected_deadline, expected_id) = sleep_deadlines[i];
-
                     // Find the actual deadline for this woken sleep
                     if let Some(sleep) = sleeps.iter().find(|s| s.sleep_id() == woken_id) {
                         let actual_deadline = sleep.deadline();
@@ -1105,8 +1103,8 @@ mod bytes_io_time_tests {
                 let split_part = buffer1.mock_split_to(split_pos);
                 let remaining_part = buffer1.as_slice().to_vec();
 
-                let mut chain1 = MockBufChain::chain(split_part.as_slice().to_vec(), data2.clone());
-                let mut chain2 = MockBufChain::chain(remaining_part, Vec::new());
+                let chain1 = MockBufChain::chain(split_part.as_slice().to_vec(), data2.clone());
+                let chain2 = MockBufChain::chain(remaining_part, Vec::new());
 
                 // MR3: Chain the results with associativity check
                 let mut combined_chain = chain1.chain_with(chain2);
@@ -1117,7 +1115,7 @@ mod bytes_io_time_tests {
                 let full_result = full_chain.to_vec();
 
                 // Extract the split position from the full result
-                let split_result = if split_pos < full_result.len() {
+                let _split_result = if split_pos < full_result.len() {
                     full_result[..split_pos + data2.len()].to_vec()
                 } else {
                     full_result.clone()
