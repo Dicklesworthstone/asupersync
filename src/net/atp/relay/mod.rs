@@ -744,9 +744,6 @@ impl RelayService {
         if path_id.trim().is_empty() {
             return Err(RelayError::EmptyPathId);
         }
-        if grant.expires_at_micros <= now_micros {
-            return Err(RelayError::ExpiredReservation);
-        }
         if !verifier.verify(&grant) {
             self.push_event(RelayEventDraft {
                 kind: RelayEventKind::AuthorizationRejected,
@@ -762,6 +759,10 @@ impl RelayService {
             });
             return Err(RelayError::InvalidAuthorization);
         }
+        if grant.expires_at_micros <= now_micros {
+            return Err(RelayError::ExpiredReservation);
+        }
+        let _expired_reservations = self.expire_reservations(now_micros);
         if self.reservations.contains_key(&reservation_id) {
             return Err(RelayError::DuplicateReservation);
         }
@@ -1788,6 +1789,36 @@ mod tests {
     }
 
     #[test]
+    fn invalid_grant_authorization_precedes_expiry_check() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+
+        assert_eq!(
+            service
+                .reserve(
+                    20,
+                    reservation_id(32),
+                    "path-relay-32",
+                    grant(20, RelayQuota::default()),
+                    &|_: &RelayReservationGrant| false,
+                )
+                .expect_err("invalid expired grant"),
+            RelayError::InvalidAuthorization
+        );
+
+        let event = service.events().last().expect("auth rejection event");
+        assert_eq!(event.kind, RelayEventKind::AuthorizationRejected);
+        assert_eq!(event.reservation_id, Some(reservation_id(32)));
+        assert_eq!(event.quota_decision, "grant_authorization_rejected");
+        assert_eq!(event.path_id.as_deref(), Some("path-relay-32"));
+        assert_eq!(
+            service
+                .proof_artifact(reservation_id(32))
+                .expect_err("invalid grant must not install expired reservation"),
+            RelayError::UnknownReservation
+        );
+    }
+
+    #[test]
     fn unauthorized_peer_rejection_is_logged_before_transport_policy() {
         let config = RelayServiceConfig::default().with_tcp_tls_443_enabled(false);
         let mut service = RelayService::new(config);
@@ -2085,6 +2116,21 @@ mod tests {
             .expect("expired reservation should not occupy the only active slot");
 
         assert_eq!(candidate.reservation_id(), reservation_id(14));
+        assert_eq!(service.snapshot().reservation_count(), 1);
+        assert!(
+            service
+                .snapshot()
+                .reservations
+                .iter()
+                .all(|(id, _)| *id != reservation_id(13))
+        );
+        assert!(
+            service
+                .events()
+                .iter()
+                .any(|event| event.reservation_id == Some(reservation_id(13))
+                    && event.kind == RelayEventKind::ReservationExpired)
+        );
     }
 
     #[test]
