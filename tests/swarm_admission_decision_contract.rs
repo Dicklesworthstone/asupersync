@@ -355,6 +355,10 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
             entry.reason.contains("dominant_pressure_source="),
             "live workload lease should expose the dominant pressure source in its schedule reason"
         );
+        assert!(
+            entry.reason.contains("workload_pressure_deferral="),
+            "live workload lease should expose workload pressure deferral in its schedule reason"
+        );
         let workload_index = entry
             .workload_id
             .rsplit('-')
@@ -416,13 +420,14 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
         .iter()
         .map(|entry| {
             format!(
-                "{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                 entry.scheduling_rank,
                 entry.workload_id,
                 entry.proof_lane.as_str(),
                 entry.priority,
                 entry.effective_priority_rank,
                 entry.dominant_pressure_source.as_str(),
+                entry.workload_pressure_deferral,
                 entry.cancellation_budget_ms.unwrap_or(0),
                 entry.queue_pressure_scaled,
                 entry.disk_io_pressure_scaled,
