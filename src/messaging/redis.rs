@@ -250,7 +250,10 @@ fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
             )));
         }
         let digit = i128::from(b - b'0');
-        acc = acc * 10 + digit;
+        // Check for overflow before performing arithmetic to prevent TOCTOU vulnerability
+        acc = acc.checked_mul(10).and_then(|a| a.checked_add(digit)).ok_or_else(|| {
+            RedisError::Protocol("integer overflow during parsing".to_string())
+        })?;
         if acc > limit {
             return Err(RedisError::Protocol("integer overflow".to_string()));
         }
@@ -2601,7 +2604,7 @@ impl RedisClient {
             ));
         }
 
-        let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
+        let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len().saturating_add(1));
         args.push(b"DEL");
         for key in keys {
             args.push(key.as_bytes());
@@ -2680,7 +2683,7 @@ impl RedisClient {
             ));
         }
 
-        let mut args: Vec<&[u8]> = Vec::with_capacity(fields.len() + 2);
+        let mut args: Vec<&[u8]> = Vec::with_capacity(fields.len().saturating_add(2));
         args.push(b"HDEL");
         args.push(key.as_bytes());
         for field in fields {
@@ -3437,7 +3440,7 @@ impl RedisPubSub {
         }
 
         let mut guard = PubSubControlGuard::new(self)?;
-        let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len() + 1);
+        let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len().saturating_add(1));
         args.push(b"SUBSCRIBE");
         for channel in channels {
             args.push(channel.as_bytes());
@@ -3482,7 +3485,7 @@ impl RedisPubSub {
         }
 
         let mut guard = PubSubControlGuard::new(self)?;
-        let mut args: Vec<&[u8]> = Vec::with_capacity(patterns.len() + 1);
+        let mut args: Vec<&[u8]> = Vec::with_capacity(patterns.len().saturating_add(1));
         args.push(b"PSUBSCRIBE");
         for pattern in patterns {
             args.push(pattern.as_bytes());
@@ -3526,7 +3529,7 @@ impl RedisPubSub {
         }
 
         let mut guard = PubSubControlGuard::new(self)?;
-        let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len() + 1);
+        let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len().saturating_add(1));
         args.push(b"UNSUBSCRIBE");
         for channel in channels {
             args.push(channel.as_bytes());
@@ -3573,7 +3576,7 @@ impl RedisPubSub {
         }
 
         let mut guard = PubSubControlGuard::new(self)?;
-        let mut args: Vec<&[u8]> = Vec::with_capacity(patterns.len() + 1);
+        let mut args: Vec<&[u8]> = Vec::with_capacity(patterns.len().saturating_add(1));
         args.push(b"PUNSUBSCRIBE");
         for pattern in patterns {
             args.push(pattern.as_bytes());
