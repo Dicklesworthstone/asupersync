@@ -295,9 +295,13 @@ pub mod raptorq_rfc6330_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod scheduler_priority_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod supervision_genserver_actor_io_fs_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod server_session_evidence_epoch_spork_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod sync_primitives_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod sync_scheduler_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
