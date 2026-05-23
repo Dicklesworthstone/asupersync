@@ -861,7 +861,7 @@ mod tests {
                         Ok::<(), TryStreamError<&'static str>>(()),
                         Ok::<(), TryStreamError<&'static str>>(())
                     ),
-                    (left_result, right_result)
+                    (&left_result, &right_result)
                 );
                 crate::assert_with_log!(
                     segmented == combined_recorded,

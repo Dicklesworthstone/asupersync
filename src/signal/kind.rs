@@ -298,12 +298,12 @@ mod tests {
                 name
             );
 
-            let display = kind.to_string();
+            let display_name = kind.to_string();
             crate::assert_with_log!(
-                display == expected_name,
+                display_name == expected_name,
                 "display delegates to name",
                 expected_name,
-                display
+                display_name
             );
         }
 
