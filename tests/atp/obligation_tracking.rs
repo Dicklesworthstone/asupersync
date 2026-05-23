@@ -255,6 +255,14 @@ impl AtpObligationTracker {
 
     /// Validate region quiescence
     pub fn validate_region_quiescence(&self) -> Result<(), ObligationLeakError> {
+        let worker_count = self.count_active_workers();
+        if worker_count > 0 {
+            return Err(ObligationLeakError {
+                leaked_count: worker_count,
+                leak_details: vec![format!("{} active workers remaining", worker_count)],
+            });
+        }
+
         let active = self.active_obligations();
 
         if !active.is_empty() {
@@ -269,22 +277,23 @@ impl AtpObligationTracker {
             });
         }
 
-        // Check for any workers that should have been cleaned up
-        let worker_count = self.count_active_workers();
-        if worker_count > 0 {
-            return Err(ObligationLeakError {
-                leaked_count: worker_count,
-                leak_details: vec![format!("{} active workers remaining", worker_count)],
-            });
-        }
-
         Ok(())
     }
 
-    /// Count active workers (placeholder implementation)
+    /// Count worker obligations that still represent live workers.
     fn count_active_workers(&self) -> usize {
-        // In a real implementation, this would query the runtime for active workers
-        0
+        self.obligations
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|info| {
+                matches!(&info.obligation_type, ObligationType::Worker(_))
+                    && matches!(
+                        &info.state,
+                        ObligationState::Active | ObligationState::Fulfilling
+                    )
+            })
+            .count()
     }
 
     /// Notify all watchers
@@ -475,7 +484,6 @@ macro_rules! obligation_guard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
     use std::time::Duration;
 
     #[test]
@@ -564,5 +572,30 @@ mod tests {
 
         // Should fail with active obligation
         assert!(tracker.validate_region_quiescence().is_err());
+    }
+
+    #[test]
+    fn test_region_quiescence_reports_live_worker_obligations() {
+        let tracker = Arc::new(AtpObligationTracker::new());
+
+        let worker_id = tracker.create_obligation(
+            ObligationType::Worker("repair-worker-0".to_string()),
+            "worker_pool".to_string(),
+            HashMap::new(),
+        );
+
+        assert_eq!(tracker.count_active_workers(), 1);
+        let err = tracker
+            .validate_region_quiescence()
+            .expect_err("live worker obligation should block quiescence");
+        assert_eq!(err.leaked_count, 1);
+        assert_eq!(
+            err.leak_details,
+            vec!["1 active workers remaining".to_string()]
+        );
+
+        assert!(tracker.fulfill_obligation(&worker_id));
+        assert_eq!(tracker.count_active_workers(), 0);
+        assert!(tracker.validate_region_quiescence().is_ok());
     }
 }
