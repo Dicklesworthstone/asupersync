@@ -5,10 +5,13 @@
 mod atp;
 
 use asupersync::lab::crashpack::{
-    AtpReplayCoordinator, CrashpackBuilder, TraceMinimizer, TraceMinimizerConfig,
-    TransferOracleResult, TransferViolation, ViolationSeverity,
+    AtpEvidenceLedger, AtpReplayCoordinator, CrashpackBuilder, TraceMinimizer,
+    TraceMinimizerConfig, TransferOracleResult, TransferViolation, ViolationSeverity,
 };
 use asupersync::lab::oracle::OracleStats;
+use asupersync::lab::oracle::evidence::{
+    BayesFactor, EvidenceEntry, EvidenceLine, EvidenceStrength, LogLikelihoodContributions,
+};
 use asupersync::trace::{TraceBuffer, TraceEvent};
 use asupersync::types::Time;
 use atp::{
@@ -17,6 +20,7 @@ use atp::{
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
@@ -227,6 +231,47 @@ fn test_atp_replay_accepts_violation_crashpack_with_trace_witness() {
 }
 
 #[test]
+fn test_atp_evidence_ledger_records_deterministic_artifact_metadata() {
+    let mut ledger = AtpEvidenceLedger::new();
+    let artifact_path = PathBuf::from("artifacts/transfer.atp-trace");
+
+    ledger.record_seed("lab", 0xA7);
+    ledger.add_metadata("transfer_id", "tx-ledger");
+    ledger.record_oracle_result(
+        "manifest_integrity",
+        ledger_evidence("manifest_integrity", true, -2.0),
+        Some(artifact_path.clone()),
+    );
+    ledger.record_oracle_result_at(
+        "proof_bundle_validity",
+        ledger_evidence("proof_bundle_validity", false, 2.5),
+        Some(artifact_path.clone()),
+        99,
+    );
+
+    let summary = ledger.evidence_summary();
+    assert_eq!(ledger.entries[0].timestamp, 0);
+    assert_eq!(ledger.entries[1].timestamp, 99);
+    assert_eq!(ledger.artifact_paths, vec![artifact_path]);
+    assert_eq!(ledger.seeds.get("lab"), Some(&0xA7));
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.against, 1);
+    assert_eq!(summary.very_strong, 1);
+    assert_eq!(summary.violation_count(), 1);
+    assert!(summary.has_strong_violations());
+
+    let json = ledger.export_json().expect("ledger exports as JSON");
+    let roundtrip = AtpEvidenceLedger::import_json(&json).expect("ledger imports from JSON");
+    assert_eq!(roundtrip.entries.len(), 2);
+    assert_eq!(roundtrip.entries[0].timestamp, 0);
+    assert_eq!(roundtrip.entries[1].timestamp, 99);
+    assert_eq!(
+        roundtrip.metadata.get("transfer_id"),
+        Some(&"tx-ledger".to_string())
+    );
+}
+
+#[test]
 fn test_atp_obligation_tracking_basic() -> Result<(), Box<dyn std::error::Error>> {
     let tracker = std::sync::Arc::new(AtpObligationTracker::new());
 
@@ -254,6 +299,28 @@ fn test_atp_obligation_tracking_basic() -> Result<(), Box<dyn std::error::Error>
 
     println!("ATP obligation tracking basic test completed successfully");
     Ok(())
+}
+
+fn ledger_evidence(invariant: &str, passed: bool, log10_bf: f64) -> EvidenceEntry {
+    EvidenceEntry {
+        invariant: invariant.to_string(),
+        passed,
+        bayes_factor: BayesFactor {
+            log10_bf,
+            hypothesis: format!("{invariant} violation"),
+            strength: EvidenceStrength::from_log10_bf(log10_bf),
+        },
+        log_likelihoods: LogLikelihoodContributions {
+            structural: log10_bf / 2.0,
+            detection: log10_bf / 2.0,
+            total: log10_bf,
+        },
+        evidence_lines: vec![EvidenceLine {
+            equation: "BF = P(data | violation) / P(data | clean)".to_string(),
+            substitution: format!("log10_bf={log10_bf}"),
+            intuition: format!("{invariant} deterministic evidence"),
+        }],
+    }
 }
 
 fn violation_result(oracle_name: &str) -> TransferOracleResult {
