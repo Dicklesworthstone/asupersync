@@ -37,11 +37,12 @@
 
 #[allow(dead_code)]
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 #[cfg(test)]
 use proptest::prelude::*;
@@ -228,7 +229,7 @@ impl MockPgProtocol {
     }
 
     pub fn process_scram_final_message(&mut self, client_final_message: &str) -> Result<Vec<PgMessage>, String> {
-        let scram_state = self.scram_state.as_mut()
+        let _scram_state = self.scram_state.as_mut()
             .ok_or("SCRAM state not initialized")?;
 
         // Validate client-final-message format
@@ -613,8 +614,8 @@ impl MockSqlParser {
 
         // Simplified WHERE/ORDER BY/LIMIT parsing
         let mut where_clause = None;
-        let mut order_by = None;
-        let mut limit = None;
+        let order_by = None;
+        let limit = None;
 
         let sql_lower = sql.to_lowercase();
         if let Some(where_pos) = sql_lower.find(" where ") {
@@ -785,7 +786,7 @@ impl ConnectionManager<MockConnection> for MockConnectionManager {
 }
 
 impl<T: Clone> MockConnectionPool<T> {
-    pub fn new(max_size: usize, manager: Arc<dyn ConnectionManager<T, Error = String> + Send + Sync>) -> Self {
+    pub fn new(max_size: usize, _manager: Arc<dyn ConnectionManager<T, Error = String> + Send + Sync>) -> Self {
         Self {
             connections: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             active_count: Arc::new(AtomicUsize::new(0)),
