@@ -398,6 +398,14 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
     assert_eq!(live_audit.terminal_lease_count, 0);
     assert_eq!(live_audit.live_unregistered_region_count, 0);
     assert_eq!(live_audit.live_expired_count, 0);
+    assert_eq!(
+        live_audit.duplicate_live_owner_agent_count,
+        workload_count.saturating_sub(1) as u64
+    );
+    assert_eq!(
+        live_audit.duplicate_live_bead_id_count,
+        workload_count.saturating_sub(1) as u64
+    );
     assert!(
         !live_audit.leak_detected,
         "deterministic live workload fixture should be leak-free: {}",
@@ -446,6 +454,8 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
     assert_eq!(terminal_audit.live_lease_count, 0);
     assert_eq!(terminal_audit.terminal_lease_count, workload_count as u64);
     assert_eq!(terminal_audit.terminal_missing_terminal_at_count, 0);
+    assert_eq!(terminal_audit.duplicate_live_owner_agent_count, 0);
+    assert_eq!(terminal_audit.duplicate_live_bead_id_count, 0);
     assert!(
         !terminal_audit.leak_detected,
         "deterministic terminal workload fixture should be leak-free: {}",

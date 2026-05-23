@@ -1065,6 +1065,10 @@ pub struct SwarmWorkloadLeaseAuditSnapshot {
     pub terminal_missing_terminal_at_count: u64,
     /// Extra live leases sharing a workload id with another live lease.
     pub duplicate_live_workload_id_count: u64,
+    /// Extra live leases sharing an owner agent with another live lease.
+    pub duplicate_live_owner_agent_count: u64,
+    /// Extra live leases sharing a bead id with another live lease.
+    pub duplicate_live_bead_id_count: u64,
     /// Extra live leases sharing a reservation scope with another live lease.
     pub duplicate_live_reservation_scope_count: u64,
     /// True when any linear-obligation invariant violation is present.
@@ -1903,6 +1907,8 @@ impl SwarmPressureGovernor {
         let mut live_expired_count = 0u64;
         let mut terminal_missing_terminal_at_count = 0u64;
         let mut live_workload_ids: HashMap<String, u64> = HashMap::new();
+        let mut live_owner_agents: HashMap<String, u64> = HashMap::new();
+        let mut live_bead_ids: HashMap<String, u64> = HashMap::new();
         let mut live_reservation_scopes: HashMap<String, u64> = HashMap::new();
 
         {
@@ -1927,6 +1933,16 @@ impl SwarmPressureGovernor {
                     *live_workload_ids
                         .entry(lease.workload_id.trim().to_string())
                         .or_insert(0) += 1;
+                    if let Some(agent_name) =
+                        normalized_optional_string(Some(&lease.owner.agent_name))
+                    {
+                        *live_owner_agents.entry(agent_name).or_insert(0) += 1;
+                    }
+                    if let Some(bead_id) =
+                        normalized_optional_string(lease.owner.bead_id.as_deref())
+                    {
+                        *live_bead_ids.entry(bead_id).or_insert(0) += 1;
+                    }
                     if let Some(scope) = lease
                         .owner
                         .reservation_scope
@@ -1946,6 +1962,10 @@ impl SwarmPressureGovernor {
 
         let duplicate_live_workload_id_count =
             duplicate_count_from_group_counts(live_workload_ids.values());
+        let duplicate_live_owner_agent_count =
+            duplicate_count_from_group_counts(live_owner_agents.values());
+        let duplicate_live_bead_id_count =
+            duplicate_count_from_group_counts(live_bead_ids.values());
         let duplicate_live_reservation_scope_count =
             duplicate_count_from_group_counts(live_reservation_scopes.values());
         let live_lease_count = active_lease_count + committed_lease_count;
@@ -1956,7 +1976,7 @@ impl SwarmPressureGovernor {
             || duplicate_live_workload_id_count > 0
             || duplicate_live_reservation_scope_count > 0;
         let reason = format!(
-            "workload_lease_audit live_lease_count={live_lease_count} active_lease_count={active_lease_count} committed_lease_count={committed_lease_count} terminal_lease_count={terminal_lease_count} released_lease_count={released_lease_count} aborted_lease_count={aborted_lease_count} expired_lease_count={expired_lease_count} live_unregistered_region_count={live_unregistered_region_count} live_expired_count={live_expired_count} terminal_missing_terminal_at_count={terminal_missing_terminal_at_count} duplicate_live_workload_id_count={duplicate_live_workload_id_count} duplicate_live_reservation_scope_count={duplicate_live_reservation_scope_count} leak_detected={leak_detected}"
+            "workload_lease_audit live_lease_count={live_lease_count} active_lease_count={active_lease_count} committed_lease_count={committed_lease_count} terminal_lease_count={terminal_lease_count} released_lease_count={released_lease_count} aborted_lease_count={aborted_lease_count} expired_lease_count={expired_lease_count} live_unregistered_region_count={live_unregistered_region_count} live_expired_count={live_expired_count} terminal_missing_terminal_at_count={terminal_missing_terminal_at_count} duplicate_live_workload_id_count={duplicate_live_workload_id_count} duplicate_live_owner_agent_count={duplicate_live_owner_agent_count} duplicate_live_bead_id_count={duplicate_live_bead_id_count} duplicate_live_reservation_scope_count={duplicate_live_reservation_scope_count} leak_detected={leak_detected}"
         );
 
         SwarmWorkloadLeaseAuditSnapshot {
@@ -1971,6 +1991,8 @@ impl SwarmPressureGovernor {
             live_expired_count,
             terminal_missing_terminal_at_count,
             duplicate_live_workload_id_count,
+            duplicate_live_owner_agent_count,
+            duplicate_live_bead_id_count,
             duplicate_live_reservation_scope_count,
             leak_detected,
             reason,
@@ -4834,6 +4856,7 @@ mod tests {
         let request = SwarmWorkloadAdmissionRequest::new(
             "lease-audit",
             SwarmAdmissionOwner::new("DustyGorge")
+                .with_bead_id("asupersync-oxqrae.2")
                 .with_reservation_scope("src/observability/swarm_pressure_governor.rs"),
         );
         let decision = governor
@@ -4884,7 +4907,19 @@ mod tests {
         let duplicate_audit = governor.workload_lease_audit_snapshot();
         assert_eq!(duplicate_audit.live_lease_count, 2);
         assert_eq!(duplicate_audit.duplicate_live_workload_id_count, 1);
+        assert_eq!(duplicate_audit.duplicate_live_owner_agent_count, 1);
+        assert_eq!(duplicate_audit.duplicate_live_bead_id_count, 1);
         assert_eq!(duplicate_audit.duplicate_live_reservation_scope_count, 1);
+        assert!(
+            duplicate_audit
+                .reason
+                .contains("duplicate_live_owner_agent_count=1")
+        );
+        assert!(
+            duplicate_audit
+                .reason
+                .contains("duplicate_live_bead_id_count=1")
+        );
         assert!(duplicate_audit.leak_detected, "{}", duplicate_audit.reason);
 
         {
