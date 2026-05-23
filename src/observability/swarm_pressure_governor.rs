@@ -1030,6 +1030,8 @@ pub struct SwarmWorkloadLeaseScheduleEntry {
     pub cancellation_tail_pressure_scaled: i64,
     /// Maximum live workload pressure ratio scaled by 10_000.
     pub max_pressure_scaled: i64,
+    /// Whether workload feedback pressure is deferring this lease behind cooler peer work.
+    pub workload_pressure_deferral: bool,
     /// Dominant live workload pressure axis used by schedule ordering.
     pub dominant_pressure_source: SwarmWorkloadPressureSource,
     /// Runtime resource-monitor degradation level observed for this schedule pass.
@@ -1877,6 +1879,7 @@ impl SwarmPressureGovernor {
         let resource_pressure_scaled =
             resource_pressure_scaled_from_degradation(resource_degradation_level);
         let aging_step = self.workload_lease_starvation_aging_step();
+        let workload_pressure_threshold = self.workload_feedback_backpressure_threshold();
         live_leases.sort_by_key(|lease| {
             Self::workload_lease_schedule_key(
                 lease,
@@ -1896,6 +1899,7 @@ impl SwarmPressureGovernor {
                     feedback_by_workload.get(lease.workload_id.as_str()),
                     resource_degradation_level,
                     resource_pressure_scaled,
+                    workload_pressure_threshold,
                     now,
                     aging_step,
                 )
@@ -2506,6 +2510,7 @@ impl SwarmPressureGovernor {
         feedback: Option<&SwarmWorkloadPressureFeedback>,
         resource_degradation_level: DegradationLevel,
         resource_pressure_scaled: i64,
+        workload_pressure_threshold: f64,
         now: Instant,
         aging_step: Duration,
     ) -> SwarmWorkloadLeaseScheduleEntry {
@@ -2528,6 +2533,8 @@ impl SwarmPressureGovernor {
             SwarmWorkloadPressureSource::None,
             SwarmWorkloadPressureFeedback::dominant_pressure_source,
         );
+        let workload_pressure_deferral =
+            Self::workload_pressure_schedule_deferral(feedback, workload_pressure_threshold);
         let resource_pressure_deferral =
             Self::resource_pressure_schedule_penalty(lease.priority, resource_degradation_level)
                 > 0;
@@ -2562,6 +2569,7 @@ impl SwarmPressureGovernor {
             validation_frontier_pressure_scaled,
             cancellation_tail_pressure_scaled,
             max_pressure_scaled,
+            workload_pressure_deferral,
             dominant_pressure_source,
             resource_degradation_level,
             resource_pressure_scaled,
@@ -2571,6 +2579,7 @@ impl SwarmPressureGovernor {
                 feedback,
                 resource_degradation_level,
                 resource_pressure_scaled,
+                workload_pressure_threshold,
                 now,
                 aging_step,
             ),
@@ -2642,6 +2651,21 @@ impl SwarmPressureGovernor {
         })
     }
 
+    fn workload_pressure_schedule_deferral(
+        feedback: Option<&SwarmWorkloadPressureFeedback>,
+        threshold: f64,
+    ) -> bool {
+        let Some(feedback) = feedback else {
+            return false;
+        };
+        let threshold = if threshold.is_finite() && threshold >= 0.0 {
+            threshold
+        } else {
+            DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD
+        };
+        feedback.max_pressure() >= threshold
+    }
+
     fn effective_priority_schedule_rank(
         lease: &SwarmWorkloadLease,
         now: Instant,
@@ -2677,6 +2701,7 @@ impl SwarmPressureGovernor {
         feedback: Option<&SwarmWorkloadPressureFeedback>,
         resource_degradation_level: DegradationLevel,
         resource_pressure_scaled: i64,
+        workload_pressure_threshold: f64,
         now: Instant,
         aging_step: Duration,
     ) -> String {
@@ -2699,7 +2724,8 @@ impl SwarmPressureGovernor {
         let cancellation_budget_ms =
             optional_u64_reason_field(lease.cancellation_budget.map(duration_as_u64_ms));
         base.push_str(&format!(
-            " wait_age_ms={wait_age_ms} time_to_expiry_ms={time_to_expiry_ms} cancellation_budget_ms={cancellation_budget_ms} resource_degradation_level={} resource_pressure_scaled={resource_pressure_scaled} resource_pressure_deferral={}",
+            " wait_age_ms={wait_age_ms} time_to_expiry_ms={time_to_expiry_ms} cancellation_budget_ms={cancellation_budget_ms} workload_pressure_deferral={} resource_degradation_level={} resource_pressure_scaled={resource_pressure_scaled} resource_pressure_deferral={}",
+            Self::workload_pressure_schedule_deferral(feedback, workload_pressure_threshold),
             degradation_level_as_str(resource_degradation_level),
             Self::resource_pressure_schedule_penalty(lease.priority, resource_degradation_level) > 0
         ));
@@ -5444,6 +5470,11 @@ mod tests {
         );
         assert_eq!(schedule[0].workload_id, "cool-rch-lane");
         assert!(schedule[0].pressure_feedback_present);
+        assert!(
+            !schedule[0].workload_pressure_deferral,
+            "{}",
+            schedule[0].reason
+        );
         assert_eq!(
             schedule[0].dominant_pressure_source,
             SwarmWorkloadPressureSource::RchQueue
@@ -5452,6 +5483,11 @@ mod tests {
         assert_eq!(schedule[0].rch_queue_pressure_scaled, 2000);
         assert_eq!(schedule[1].workload_id, "hot-rch-lane");
         assert!(schedule[1].pressure_feedback_present);
+        assert!(
+            schedule[1].workload_pressure_deferral,
+            "{}",
+            schedule[1].reason
+        );
         assert_eq!(
             schedule[1].dominant_pressure_source,
             SwarmWorkloadPressureSource::RchQueue
@@ -5471,6 +5507,11 @@ mod tests {
             schedule[1]
                 .reason
                 .contains("dominant_pressure_source=rch_queue")
+        );
+        assert!(
+            schedule[1]
+                .reason
+                .contains("workload_pressure_deferral=true")
         );
     }
 
