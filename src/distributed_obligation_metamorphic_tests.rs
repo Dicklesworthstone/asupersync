@@ -22,10 +22,10 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::distributed::consistent_hash::HashRing;
+    use crate::obligation::eprocess::{AlertState, LeakMonitor, MonitorConfig};
     use proptest::prelude::*;
     use std::collections::{HashMap, HashSet};
-    use crate::distributed::consistent_hash::HashRing;
-    use crate::obligation::eprocess::{LeakMonitor, MonitorConfig, AlertState};
 
     // ────────────────────────────────────────────────────────────────────
     // Property Generators for Metamorphic Relations
@@ -54,14 +54,13 @@ mod tests {
 
     /// Generate valid monitor configurations.
     fn monitor_config() -> impl Strategy<Value = MonitorConfig> {
-        (0.001f64..0.1f64, 1_000u64..10_000_000u64, 1u64..10u64)
-            .prop_map(|(alpha, expected_lifetime_ns, min_observations)| {
-                MonitorConfig {
-                    alpha,
-                    expected_lifetime_ns,
-                    min_observations,
-                }
-            })
+        (0.001f64..0.1f64, 1_000u64..10_000_000u64, 1u64..10u64).prop_map(
+            |(alpha, expected_lifetime_ns, min_observations)| MonitorConfig {
+                alpha,
+                expected_lifetime_ns,
+                min_observations,
+            },
+        )
     }
 
     // ────────────────────────────────────────────────────────────────────

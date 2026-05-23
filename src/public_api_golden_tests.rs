@@ -20,9 +20,9 @@
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::collections::BTreeMap;
 
     /// Public API golden artifact testing infrastructure
     struct ApiGoldenTester {
@@ -187,9 +187,18 @@ mod tests {
 
         // Test consistent error message formatting
         let error_examples = [
-            ("missing_argument", "error: The following required arguments were not provided:\n  <INPUT>\n\nUsage: asupersync run <INPUT>\n\nFor more information try --help"),
-            ("invalid_config", "error: Invalid configuration file\n  --> config.toml:15:8\n   |\n15 |   timeout = \"invalid\"\n   |            ^^^^^^^^^ expected duration, found string\n   |\n   = help: Use format like \"30s\", \"5m\", or \"1h\""),
-            ("file_not_found", "error: Configuration file not found\n  --> /path/to/config.toml\n   |\n   = help: Create a config file or specify an existing one with --config"),
+            (
+                "missing_argument",
+                "error: The following required arguments were not provided:\n  <INPUT>\n\nUsage: asupersync run <INPUT>\n\nFor more information try --help",
+            ),
+            (
+                "invalid_config",
+                "error: Invalid configuration file\n  --> config.toml:15:8\n   |\n15 |   timeout = \"invalid\"\n   |            ^^^^^^^^^ expected duration, found string\n   |\n   = help: Use format like \"30s\", \"5m\", or \"1h\"",
+            ),
+            (
+                "file_not_found",
+                "error: Configuration file not found\n  --> /path/to/config.toml\n   |\n   = help: Create a config file or specify an existing one with --config",
+            ),
         ];
 
         let mut output = String::new();
@@ -232,11 +241,23 @@ mod tests {
 
         // Individual health check formatting
         let health_checks = [
-            ("Runtime Dependencies", "✓ PASS", "All required dependencies available"),
+            (
+                "Runtime Dependencies",
+                "✓ PASS",
+                "All required dependencies available",
+            ),
             ("Configuration", "✓ PASS", "Configuration file is valid"),
-            ("Network Connectivity", "✓ PASS", "Network interfaces operational"),
+            (
+                "Network Connectivity",
+                "✓ PASS",
+                "Network interfaces operational",
+            ),
             ("File Permissions", "⚠ WARN", "Some temp files not writable"),
-            ("System Resources", "✗ FAIL", "Insufficient memory available"),
+            (
+                "System Resources",
+                "✗ FAIL",
+                "Insufficient memory available",
+            ),
         ];
 
         let mut output = String::new();
@@ -548,8 +569,16 @@ mod tests {
 
     /// Format CLI option consistently
     fn format_cli_option(long: &str, short: &str, value: &str, description: &str) -> String {
-        let short_part = if short.is_empty() { "    ".to_string() } else { format!("{}, ", short) };
-        let value_part = if value.is_empty() { "".to_string() } else { format!(" <{}>", value) };
+        let short_part = if short.is_empty() {
+            "    ".to_string()
+        } else {
+            format!("{}, ", short)
+        };
+        let value_part = if value.is_empty() {
+            "".to_string()
+        } else {
+            format!(" <{}>", value)
+        };
         format!("  {}{}{:<20} {}", short_part, long, value_part, description)
     }
 
@@ -585,7 +614,8 @@ mod tests {
         • Increase available memory or reduce worker thread count\n\
         • Fix file permission issues in /tmp directory\n\
         • Consider enabling compression to reduce bandwidth usage\n\n\
-        Summary: 3 checks passed, 1 warning, 1 failure".to_string()
+        Summary: 3 checks passed, 1 warning, 1 failure"
+            .to_string()
     }
 
     /// Format individual health check
@@ -672,7 +702,8 @@ mod tests {
                     ;;\n\
             esac\n\
         }\n\n\
-        complete -F _asupersync_completion asupersync".to_string()
+        complete -F _asupersync_completion asupersync"
+            .to_string()
     }
 
     /// Generate zsh completion script
@@ -721,7 +752,8 @@ mod tests {
                     ;;\n\
             esac\n\
         }\n\n\
-        _asupersync".to_string()
+        _asupersync"
+            .to_string()
     }
 
     /// Generate fish completion script
@@ -753,15 +785,36 @@ mod tests {
 
     /// Extract commands from completion scripts for consistency checking
     fn extract_commands_from_bash_completion() -> Vec<String> {
-        vec!["run".to_string(), "test".to_string(), "doctor".to_string(), "config".to_string(), "trace".to_string(), "help".to_string()]
+        vec![
+            "run".to_string(),
+            "test".to_string(),
+            "doctor".to_string(),
+            "config".to_string(),
+            "trace".to_string(),
+            "help".to_string(),
+        ]
     }
 
     fn extract_commands_from_zsh_completion() -> Vec<String> {
-        vec!["run".to_string(), "test".to_string(), "doctor".to_string(), "config".to_string(), "trace".to_string(), "help".to_string()]
+        vec![
+            "run".to_string(),
+            "test".to_string(),
+            "doctor".to_string(),
+            "config".to_string(),
+            "trace".to_string(),
+            "help".to_string(),
+        ]
     }
 
     fn extract_commands_from_fish_completion() -> Vec<String> {
-        vec!["run".to_string(), "test".to_string(), "doctor".to_string(), "config".to_string(), "trace".to_string(), "help".to_string()]
+        vec![
+            "run".to_string(),
+            "test".to_string(),
+            "doctor".to_string(),
+            "config".to_string(),
+            "trace".to_string(),
+            "help".to_string(),
+        ]
     }
 
     /// Compute SHA256 hash for byte sequence verification
@@ -860,9 +913,15 @@ mod tests {
 
     fn get_error_help_text(error: &str) -> String {
         match error {
-            e if e.contains("timeout_seconds") => "Use a positive number for timeout duration".to_string(),
-            e if e.contains("log level") => "Valid log levels are: ERROR, WARN, INFO, DEBUG, TRACE".to_string(),
-            e if e.contains("missing required") => "Check the configuration documentation for required fields".to_string(),
+            e if e.contains("timeout_seconds") => {
+                "Use a positive number for timeout duration".to_string()
+            }
+            e if e.contains("log level") => {
+                "Valid log levels are: ERROR, WARN, INFO, DEBUG, TRACE".to_string()
+            }
+            e if e.contains("missing required") => {
+                "Check the configuration documentation for required fields".to_string()
+            }
             _ => "See documentation for configuration format".to_string(),
         }
     }

@@ -79,9 +79,9 @@ mod tests {
         /// Canonicalize output for cross-platform stability
         fn canonicalize(&self, output: &str) -> String {
             output
-                .replace("\r\n", "\n")                    // Windows line endings
+                .replace("\r\n", "\n") // Windows line endings
                 .lines()
-                .map(|l| l.trim_end())                    // Trailing whitespace
+                .map(|l| l.trim_end()) // Trailing whitespace
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -204,9 +204,7 @@ mod tests {
             let h = (s + 1) / 2;
             let w = s;
 
-            output.push_str(&format!(
-                "K={}: S={}, H={}, W={}\n", k, s, h, w
-            ));
+            output.push_str(&format!("K={}: S={}, H={}, W={}\n", k, s, h, w));
         }
 
         tester.assert_golden(&tester.canonicalize(&output));
@@ -393,7 +391,8 @@ mod tests {
         }
 
         output.push_str(&format!("\nTotal entries: {}\n", static_table.len()));
-        output.push_str("# Note: Full table has 61 entries (truncated here for golden stability)\n");
+        output
+            .push_str("# Note: Full table has 61 entries (truncated here for golden stability)\n");
 
         tester.assert_golden(&tester.canonicalize(&output));
     }
@@ -418,18 +417,21 @@ mod tests {
 
         output.push_str("\n# Example symbol codes (first 8 for stability):\n");
         let example_codes = [
-            (0x00, "256", "0"),      // '0'
-            (0x01, "257", "1"),      // '1'
-            (0x02, "258", "2"),      // '2'
-            (0x03, "259", "3"),      // '3'
-            (0x04, "260", "4"),      // '4'
-            (0x05, "261", "5"),      // '5'
-            (0x06, "262", "6"),      // '6'
-            (0x07, "263", "7"),      // '7'
+            (0x00, "256", "0"), // '0'
+            (0x01, "257", "1"), // '1'
+            (0x02, "258", "2"), // '2'
+            (0x03, "259", "3"), // '3'
+            (0x04, "260", "4"), // '4'
+            (0x05, "261", "5"), // '5'
+            (0x06, "262", "6"), // '6'
+            (0x07, "263", "7"), // '7'
         ];
 
         for (symbol, code, ascii) in &example_codes {
-            output.push_str(&format!("symbol_{:02x}: code={}, ascii='{}'\n", symbol, code, ascii));
+            output.push_str(&format!(
+                "symbol_{:02x}: code={}, ascii='{}'\n",
+                symbol, code, ascii
+            ));
         }
 
         tester.assert_golden(&tester.canonicalize(&output));

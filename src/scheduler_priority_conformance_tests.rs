@@ -25,8 +25,8 @@
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use std::collections::{HashMap, BTreeMap, VecDeque};
     use std::cmp::{Ordering, Reverse};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
 
     /// Scheduler priority conformance test infrastructure
     struct SchedulerConformanceTester {
@@ -182,7 +182,10 @@ mod tests {
         }
 
         fn cancel_task(&mut self, task_id: TaskId) -> Result<(), String> {
-            let index = self.task_to_index.get(&task_id).copied()
+            let index = self
+                .task_to_index
+                .get(&task_id)
+                .copied()
                 .ok_or_else(|| format!("Task {:?} not found in heap", task_id))?;
 
             self.nodes[index].task.cancelled = true;
@@ -239,13 +242,12 @@ mod tests {
                 let left = 2 * index + 1;
                 let right = 2 * index + 2;
 
-                if left < self.nodes.len() &&
-                   self.compare_nodes(left, smallest) == Ordering::Less {
+                if left < self.nodes.len() && self.compare_nodes(left, smallest) == Ordering::Less {
                     smallest = left;
                 }
 
-                if right < self.nodes.len() &&
-                   self.compare_nodes(right, smallest) == Ordering::Less {
+                if right < self.nodes.len() && self.compare_nodes(right, smallest) == Ordering::Less
+                {
                     smallest = right;
                 }
 
@@ -279,7 +281,10 @@ mod tests {
             match node_i.task.priority.cmp(&node_j.task.priority) {
                 Ordering::Equal => {
                     // Secondary: compare by insertion order (FIFO for equal priorities)
-                    node_i.task.insertion_order.cmp(&node_j.task.insertion_order)
+                    node_i
+                        .task
+                        .insertion_order
+                        .cmp(&node_j.task.insertion_order)
                 }
                 other => other,
             }

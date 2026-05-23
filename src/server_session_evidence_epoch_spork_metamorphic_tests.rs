@@ -46,7 +46,7 @@
 mod tests {
     #[cfg(test)]
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, VecDeque, HashMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -188,7 +188,9 @@ mod tests {
                 let shutdown_elapsed = self.current_time - signal.triggered_at;
 
                 // Check for drain timeout
-                if shutdown_elapsed >= signal.drain_timeout_ms && self.state == MockServerState::Draining {
+                if shutdown_elapsed >= signal.drain_timeout_ms
+                    && self.state == MockServerState::Draining
+                {
                     self.state = MockServerState::ForceClosing;
                     signal.phase = MockShutdownPhase::ForceClosing;
 
@@ -200,7 +202,10 @@ mod tests {
 
                     // Force close remaining connections
                     for connection in self.connections.values_mut() {
-                        if matches!(connection.state, MockConnectionState::Draining | MockConnectionState::Active) {
+                        if matches!(
+                            connection.state,
+                            MockConnectionState::Draining | MockConnectionState::Active
+                        ) {
                             connection.state = MockConnectionState::ForceClosed;
                             connection.closed_at = Some(self.current_time);
                         }
@@ -211,7 +216,9 @@ mod tests {
             // Simulate natural connection completion
             let mut completed_connections = Vec::new();
             for (id, connection) in &mut self.connections {
-                if connection.state == MockConnectionState::Draining && connection.in_flight_requests == 0 {
+                if connection.state == MockConnectionState::Draining
+                    && connection.in_flight_requests == 0
+                {
                     connection.state = MockConnectionState::Closed;
                     connection.closed_at = Some(self.current_time);
                     completed_connections.push(*id);
@@ -227,9 +234,16 @@ mod tests {
             }
 
             // Check if server is fully stopped
-            if matches!(self.state, MockServerState::Draining | MockServerState::ForceClosing) {
-                let all_closed = self.connections.values()
-                    .all(|c| matches!(c.state, MockConnectionState::Closed | MockConnectionState::ForceClosed));
+            if matches!(
+                self.state,
+                MockServerState::Draining | MockServerState::ForceClosing
+            ) {
+                let all_closed = self.connections.values().all(|c| {
+                    matches!(
+                        c.state,
+                        MockConnectionState::Closed | MockConnectionState::ForceClosed
+                    )
+                });
 
                 if all_closed && self.state != MockServerState::Stopped {
                     self.state = MockServerState::Stopped;
@@ -355,7 +369,7 @@ mod tests {
                     // Transition to next state (simplified)
                     let old_state = format!("{:?}", self.protocol_state);
                     self.protocol_state = MockProtocolState::RecvState {
-                        expected_recv: b"ack".to_vec()
+                        expected_recv: b"ack".to_vec(),
                     };
                     let new_state = format!("{:?}", self.protocol_state);
 
@@ -387,18 +401,18 @@ mod tests {
 
         pub fn create_dual(&self) -> MockSession {
             let dual_state = match &self.protocol_state {
-                MockProtocolState::SendState { next_send } => {
-                    MockProtocolState::RecvState { expected_recv: next_send.clone() }
-                }
-                MockProtocolState::RecvState { expected_recv } => {
-                    MockProtocolState::SendState { next_send: expected_recv.clone() }
-                }
-                MockProtocolState::ChooseState { options } => {
-                    MockProtocolState::OfferState { alternatives: options.clone() }
-                }
-                MockProtocolState::OfferState { alternatives } => {
-                    MockProtocolState::ChooseState { options: alternatives.clone() }
-                }
+                MockProtocolState::SendState { next_send } => MockProtocolState::RecvState {
+                    expected_recv: next_send.clone(),
+                },
+                MockProtocolState::RecvState { expected_recv } => MockProtocolState::SendState {
+                    next_send: expected_recv.clone(),
+                },
+                MockProtocolState::ChooseState { options } => MockProtocolState::OfferState {
+                    alternatives: options.clone(),
+                },
+                MockProtocolState::OfferState { alternatives } => MockProtocolState::ChooseState {
+                    options: alternatives.clone(),
+                },
                 MockProtocolState::EndState => MockProtocolState::EndState,
             };
 
@@ -472,7 +486,13 @@ mod tests {
             Ok(())
         }
 
-        pub fn emit_concurrent(&mut self, thread_id: u64, entry_id: u64, data: Vec<u8>, emission_time: u64) -> Result<(), &'static str> {
+        pub fn emit_concurrent(
+            &mut self,
+            thread_id: u64,
+            entry_id: u64,
+            data: Vec<u8>,
+            emission_time: u64,
+        ) -> Result<(), &'static str> {
             // Record concurrent emission for ordering analysis
             self.concurrent_emissions.push(MockConcurrentEmission {
                 thread_id,
@@ -561,9 +581,7 @@ mod tests {
                     self.setup_teardown_cycles += 1;
                     Ok(())
                 }
-                MockFixtureState::SetUp => {
-                    Err("Fixture already set up")
-                }
+                MockFixtureState::SetUp => Err("Fixture already set up"),
             }
         }
 
@@ -573,9 +591,7 @@ mod tests {
                     self.fixture_state = MockFixtureState::TornDown;
                     Ok(())
                 }
-                _ => {
-                    Err("Fixture not set up")
-                }
+                _ => Err("Fixture not set up"),
             }
         }
 
@@ -651,7 +667,11 @@ mod tests {
             }
         }
 
-        pub fn advance_epoch(&mut self, trigger: MockEpochTrigger, timestamp: u64) -> Result<u64, &'static str> {
+        pub fn advance_epoch(
+            &mut self,
+            trigger: MockEpochTrigger,
+            timestamp: u64,
+        ) -> Result<u64, &'static str> {
             let new_epoch = self.current_epoch + 1;
 
             self.epoch_history.push(MockEpochTransition {
@@ -679,7 +699,11 @@ mod tests {
             self.barriers.insert(barrier_id, barrier);
         }
 
-        pub fn wait_barrier(&mut self, barrier_id: u64, thread_id: u64) -> Result<(), &'static str> {
+        pub fn wait_barrier(
+            &mut self,
+            barrier_id: u64,
+            thread_id: u64,
+        ) -> Result<(), &'static str> {
             if let Some(barrier) = self.barriers.get_mut(&barrier_id) {
                 if self.current_epoch >= barrier.target_epoch {
                     barrier.completed = true;
@@ -716,9 +740,14 @@ mod tests {
             }
         }
 
-        pub fn check_consistency_with_remote(&mut self, check_id: u64, remote_epoch: u64, timestamp: u64) {
-            let consistent = self.current_epoch >= remote_epoch ||
-                           (remote_epoch - self.current_epoch) <= 1; // Allow small skew
+        pub fn check_consistency_with_remote(
+            &mut self,
+            check_id: u64,
+            remote_epoch: u64,
+            timestamp: u64,
+        ) {
+            let consistent =
+                self.current_epoch >= remote_epoch || (remote_epoch - self.current_epoch) <= 1; // Allow small skew
 
             self.clock_consistency_checks.push(MockClockCheck {
                 check_id,
@@ -879,7 +908,11 @@ mod tests {
             Ok(())
         }
 
-        pub fn child_failed(&mut self, child_id: u64, timestamp: u64) -> Result<bool, &'static str> {
+        pub fn child_failed(
+            &mut self,
+            child_id: u64,
+            timestamp: u64,
+        ) -> Result<bool, &'static str> {
             if let Some(child) = self.children.get_mut(&child_id) {
                 child.state = MockChildState::Failed;
 
@@ -922,11 +955,14 @@ mod tests {
                     let time_since_restart = current_time - last_restart;
                     if time_since_restart < self.restart_policy.time_window_ms {
                         // Check if we're within rate limits
-                        let recent_restarts = self.lifecycle_events.iter()
+                        let recent_restarts = self
+                            .lifecycle_events
+                            .iter()
                             .filter(|e| {
-                                matches!(e.event_type, MockLifecycleEventType::ChildRestarted) &&
-                                e.child_id == Some(child_id) &&
-                                current_time - e.timestamp < self.restart_policy.time_window_ms
+                                matches!(e.event_type, MockLifecycleEventType::ChildRestarted)
+                                    && e.child_id == Some(child_id)
+                                    && current_time - e.timestamp
+                                        < self.restart_policy.time_window_ms
                             })
                             .count();
 
@@ -940,7 +976,12 @@ mod tests {
             }
         }
 
-        pub fn register_name(&mut self, name: String, child_id: u64, timestamp: u64) -> Result<(), &'static str> {
+        pub fn register_name(
+            &mut self,
+            name: String,
+            child_id: u64,
+            timestamp: u64,
+        ) -> Result<(), &'static str> {
             if self.name_registry.contains_key(&name) {
                 return Err("Name already registered");
             }
@@ -962,7 +1003,9 @@ mod tests {
             self.supervision_tree_state = MockSupervisionTreeState::Quiescing;
 
             // Check if already quiescent (no active children)
-            let active_children = self.children.values()
+            let active_children = self
+                .children
+                .values()
                 .any(|c| matches!(c.state, MockChildState::Running | MockChildState::Starting));
 
             if !active_children {

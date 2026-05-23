@@ -36,16 +36,16 @@
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
-    use std::collections::{HashMap, HashSet, BTreeSet};
-    use crate::types::{TaskId, RegionId, Time};
-    use crate::cx::macaroon::{CaveatPredicate, MacaroonToken, Caveat};
-    use crate::security::key::AuthKey;
-    use crate::obligation::leak_check::{VarState, ObligationVar};
-    use crate::obligation::lyapunov::{StateSnapshot, LyapunovGovernor, PotentialWeights};
-    use crate::trace::dpor::{Race, RaceAnalysis, DetectedRace, RaceKind};
-    use crate::trace::independence::Resource;
+    use crate::cx::macaroon::{Caveat, CaveatPredicate, MacaroonToken};
+    use crate::obligation::leak_check::{ObligationVar, VarState};
+    use crate::obligation::lyapunov::{LyapunovGovernor, PotentialWeights, StateSnapshot};
     use crate::record::ObligationKind;
+    use crate::security::key::AuthKey;
+    use crate::trace::dpor::{DetectedRace, Race, RaceAnalysis, RaceKind};
+    use crate::trace::independence::Resource;
+    use crate::types::{RegionId, TaskId, Time};
+    use proptest::prelude::*;
+    use std::collections::{BTreeSet, HashMap, HashSet};
 
     // ────────────────────────────────────────────────────────────────────
     // Property Generators for Metamorphic Relations
@@ -110,28 +110,42 @@ mod tests {
             0u32..20u32,
             0u32..20u32,
             0u32..100u32,
-        ).prop_map(|(time, live_tasks, pending_obligations, obligation_age_sum_ns,
-                    draining_regions, deadline_pressure, pending_send_permits,
-                    pending_acks, pending_leases, pending_io_ops,
-                    cancel_requested_tasks, cancelling_tasks, finalizing_tasks,
-                    ready_queue_depth)| {
-            StateSnapshot {
-                time,
-                live_tasks,
-                pending_obligations,
-                obligation_age_sum_ns,
-                draining_regions,
-                deadline_pressure,
-                pending_send_permits,
-                pending_acks,
-                pending_leases,
-                pending_io_ops,
-                cancel_requested_tasks,
-                cancelling_tasks,
-                finalizing_tasks,
-                ready_queue_depth,
-            }
-        })
+        )
+            .prop_map(
+                |(
+                    time,
+                    live_tasks,
+                    pending_obligations,
+                    obligation_age_sum_ns,
+                    draining_regions,
+                    deadline_pressure,
+                    pending_send_permits,
+                    pending_acks,
+                    pending_leases,
+                    pending_io_ops,
+                    cancel_requested_tasks,
+                    cancelling_tasks,
+                    finalizing_tasks,
+                    ready_queue_depth,
+                )| {
+                    StateSnapshot {
+                        time,
+                        live_tasks,
+                        pending_obligations,
+                        obligation_age_sum_ns,
+                        draining_regions,
+                        deadline_pressure,
+                        pending_send_permits,
+                        pending_acks,
+                        pending_leases,
+                        pending_io_ops,
+                        cancel_requested_tasks,
+                        cancelling_tasks,
+                        finalizing_tasks,
+                        ready_queue_depth,
+                    }
+                },
+            )
     }
 
     /// Generate Race structures for DPOR testing.
@@ -758,7 +772,10 @@ mod tests {
         let weights = PotentialWeights::default();
         let _governor = LyapunovGovernor::new(weights);
 
-        let race = Race { earlier: 0, later: 1 };
+        let race = Race {
+            earlier: 0,
+            later: 1,
+        };
         assert!(race.later > race.earlier);
     }
 }

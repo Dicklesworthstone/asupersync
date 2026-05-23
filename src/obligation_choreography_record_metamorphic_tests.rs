@@ -26,15 +26,15 @@
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
-    use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
-    use crate::types::{TaskId, RegionId, ObligationId, Time, Budget, CancelReason};
-    use crate::record::{ObligationKind, ObligationState};
-    use crate::record::task::{TaskState, TaskPhase, TaskOutcome};
-    use crate::record::region::RegionState;
     use crate::obligation::marking::{MarkingEvent, MarkingEventKind};
     use crate::obligation::recovery::{RecoveryConfig, RecoveryPhase};
     use crate::obligation::saga::Lattice;
+    use crate::record::region::RegionState;
+    use crate::record::task::{TaskOutcome, TaskPhase, TaskState};
+    use crate::record::{ObligationKind, ObligationState};
+    use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
+    use proptest::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     // ────────────────────────────────────────────────────────────────────
     // Property Generators for Metamorphic Relations
@@ -73,14 +73,18 @@ mod tests {
             any::<ObligationKind>(),
             task_id(),
             region_id(),
-        ).prop_map(|(time, obligation, kind, task, region)| {
-            MarkingEvent::new(time, MarkingEventKind::Reserve {
-                obligation,
-                kind,
-                task,
-                region,
+        )
+            .prop_map(|(time, obligation, kind, task, region)| {
+                MarkingEvent::new(
+                    time,
+                    MarkingEventKind::Reserve {
+                        obligation,
+                        kind,
+                        task,
+                        region,
+                    },
+                )
             })
-        })
     }
 
     /// Generate lattice values for saga testing.
@@ -95,14 +99,15 @@ mod tests {
             prop::collection::vec(region_id(), 0..5),
             any::<RegionState>(),
             0u32..10u32,
-        ).prop_map(|(root_id, child_ids, state, pending_tasks)| {
-            MockRegionHierarchy {
-                root_id,
-                child_ids,
-                state,
-                pending_tasks,
-            }
-        })
+        )
+            .prop_map(
+                |(root_id, child_ids, state, pending_tasks)| MockRegionHierarchy {
+                    root_id,
+                    child_ids,
+                    state,
+                    pending_tasks,
+                },
+            )
     }
 
     /// Generate task event logs for replay testing.
@@ -112,11 +117,7 @@ mod tests {
 
     /// Generate individual task events.
     fn task_event() -> impl Strategy<Value = MockTaskEvent> {
-        (
-            time(),
-            task_id(),
-            any::<TaskPhase>(),
-        ).prop_map(|(timestamp, task_id, phase)| {
+        (time(), task_id(), any::<TaskPhase>()).prop_map(|(timestamp, task_id, phase)| {
             MockTaskEvent {
                 timestamp,
                 task_id,
@@ -150,20 +151,24 @@ mod tests {
 
             for event in events {
                 match &event.kind {
-                    MarkingEventKind::Reserve { obligation, task, .. } => {
+                    MarkingEventKind::Reserve {
+                        obligation, task, ..
+                    } => {
                         if self.ghost_state.contains_key(obligation) {
                             is_valid = false; // Double allocation
                         }
                         self.ghost_state.insert(*obligation, *task);
-                        self.verification_trace.push(format!("Reserve({:?}, {:?})", obligation, task));
+                        self.verification_trace
+                            .push(format!("Reserve({:?}, {:?})", obligation, task));
                     }
-                    MarkingEventKind::Commit { obligation, .. } |
-                    MarkingEventKind::Abort { obligation, .. } => {
+                    MarkingEventKind::Commit { obligation, .. }
+                    | MarkingEventKind::Abort { obligation, .. } => {
                         if !self.ghost_state.contains_key(obligation) {
                             is_valid = false; // Use after free
                         }
                         self.ghost_state.remove(obligation);
-                        self.verification_trace.push(format!("Release({:?})", obligation));
+                        self.verification_trace
+                            .push(format!("Release({:?})", obligation));
                     }
                     _ => {}
                 }
@@ -212,8 +217,8 @@ mod tests {
                     MarkingEventKind::Reserve { obligation, .. } => {
                         self.ghost_counter += 1;
                     }
-                    MarkingEventKind::Commit { obligation, .. } |
-                    MarkingEventKind::Abort { obligation, .. } => {
+                    MarkingEventKind::Commit { obligation, .. }
+                    | MarkingEventKind::Abort { obligation, .. } => {
                         if self.ghost_counter > 0 {
                             self.ghost_counter -= 1;
                         }
@@ -264,7 +269,8 @@ mod tests {
                 if conflict.age_ns > self.config.stale_timeout_ns {
                     // Resolve stale obligation deterministically
                     resolved_conflicts += 1;
-                    self.resolution_log.push(format!("Abort-stale({})", conflict.obligation_id.as_u64()));
+                    self.resolution_log
+                        .push(format!("Abort-stale({})", conflict.obligation_id.as_u64()));
                 }
             }
 

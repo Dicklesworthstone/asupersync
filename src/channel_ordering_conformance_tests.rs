@@ -25,9 +25,9 @@
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use std::collections::{HashMap, VecDeque, BTreeMap};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Channel ordering conformance test infrastructure
     struct ChannelConformanceTester {
@@ -254,7 +254,9 @@ mod tests {
         }
 
         fn try_recv(&mut self, receiver_id: u64) -> Result<Message, String> {
-            let receiver = self.receivers.get_mut(&receiver_id)
+            let receiver = self
+                .receivers
+                .get_mut(&receiver_id)
                 .ok_or_else(|| "Receiver not found".to_string())?;
 
             if receiver.next_index >= self.history.len() {
@@ -267,7 +269,8 @@ mod tests {
         }
 
         fn receiver_lag(&self, receiver_id: u64) -> Option<usize> {
-            self.receivers.get(&receiver_id)
+            self.receivers
+                .get(&receiver_id)
                 .map(|r| (self.history.len() - r.next_index) + r.lag_count)
         }
 
@@ -337,7 +340,9 @@ mod tests {
         }
 
         fn recv(&mut self, subscriber_id: u64) -> Result<T, String> {
-            let subscriber = self.subscribers.get_mut(&subscriber_id)
+            let subscriber = self
+                .subscribers
+                .get_mut(&subscriber_id)
                 .ok_or_else(|| "Subscriber not found".to_string())?;
 
             // Always return current value (watch semantics)

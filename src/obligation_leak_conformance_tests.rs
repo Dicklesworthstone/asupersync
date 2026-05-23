@@ -25,7 +25,7 @@
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use std::collections::{HashMap, HashSet, BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Obligation leak conformance test infrastructure
@@ -136,12 +136,19 @@ mod tests {
                 (VarState::Resolved, _) | (_, VarState::Resolved) => VarState::Resolved,
                 (VarState::Held(k1), VarState::Held(k2)) if k1 == k2 => VarState::Held(k1),
                 (VarState::Held(_), VarState::Held(_)) => VarState::MayHoldAmbiguous,
-                (VarState::Held(k), VarState::MayHold(mk)) | (VarState::MayHold(mk), VarState::Held(k)) => {
-                    if k == mk { VarState::Held(k) } else { VarState::MayHoldAmbiguous }
+                (VarState::Held(k), VarState::MayHold(mk))
+                | (VarState::MayHold(mk), VarState::Held(k)) => {
+                    if k == mk {
+                        VarState::Held(k)
+                    } else {
+                        VarState::MayHoldAmbiguous
+                    }
                 }
                 (VarState::MayHold(k1), VarState::MayHold(k2)) if k1 == k2 => VarState::MayHold(k1),
                 (VarState::MayHold(_), VarState::MayHold(_)) => VarState::MayHoldAmbiguous,
-                (VarState::MayHoldAmbiguous, _) | (_, VarState::MayHoldAmbiguous) => VarState::MayHoldAmbiguous,
+                (VarState::MayHoldAmbiguous, _) | (_, VarState::MayHoldAmbiguous) => {
+                    VarState::MayHoldAmbiguous
+                }
             }
         }
     }
@@ -234,10 +241,10 @@ mod tests {
         }
 
         fn compute_potential(&self, state: &SystemState) -> f64 {
-            self.task_weight * (state.live_tasks as f64) +
-            self.obligation_weight * (state.pending_obligations as f64) +
-            self.region_weight * (state.draining_regions as f64) +
-            self.deadline_weight * state.deadline_pressure
+            self.task_weight * (state.live_tasks as f64)
+                + self.obligation_weight * (state.pending_obligations as f64)
+                + self.region_weight * (state.draining_regions as f64)
+                + self.deadline_weight * state.deadline_pressure
         }
     }
 

@@ -151,11 +151,11 @@ mod tests {
 
         // RFC 7541 Appendix B - Static Table Indexed Headers
         let indexed_headers = [
-            (2, ":method", "GET"),     // Index 2
-            (4, ":path", "/"),         // Index 4
-            (6, ":scheme", "http"),    // Index 6
-            (8, ":status", "200"),     // Index 8
-            (14, ":status", "303"),    // Index 14
+            (2, ":method", "GET"),  // Index 2
+            (4, ":path", "/"),      // Index 4
+            (6, ":scheme", "http"), // Index 6
+            (8, ":status", "200"),  // Index 8
+            (14, ":status", "303"), // Index 14
         ];
 
         let mut output = String::new();
@@ -179,10 +179,10 @@ mod tests {
 
         // RFC 7541 Appendix B - Huffman encoding examples
         let huffman_examples = [
-            ("302", "302"),                    // Status code
-            ("private", "private"),            // Cache directive
+            ("302", "302"),                            // Status code
+            ("private", "private"),                    // Cache directive
             ("Mon, 21 Oct 2013 20:13:21 GMT", "date"), // Date header
-            ("https://www.example.com", "url"), // URL
+            ("https://www.example.com", "url"),        // URL
         ];
 
         let mut output = String::new();
@@ -194,10 +194,15 @@ mod tests {
 
             output.push_str(&format!("Category: {}\n", category));
             output.push_str(&format!("Plaintext: {}\n", plaintext));
-            output.push_str(&format!("Plain bytes: {}\n", hex::encode(plaintext.as_bytes())));
+            output.push_str(&format!(
+                "Plain bytes: {}\n",
+                hex::encode(plaintext.as_bytes())
+            ));
             output.push_str(&format!("Huffman encoded: {}\n", hex::encode(&encoded)));
-            output.push_str(&format!("Compression ratio: {:.1}%\n\n",
-                (encoded.len() as f64 / plaintext.len() as f64) * 100.0));
+            output.push_str(&format!(
+                "Compression ratio: {:.1}%\n\n",
+                (encoded.len() as f64 / plaintext.len() as f64) * 100.0
+            ));
         }
 
         tester.assert_golden(&tester.canonicalize(&output));
@@ -214,7 +219,13 @@ mod tests {
         // RFC 7540 Section 6 - Frame Format
         let frame_examples = [
             // SETTINGS frame (type 0x4)
-            ("SETTINGS", 0x4, 0x0, 0, vec![0x00, 0x01, 0x00, 0x00, 0x10, 0x00]),
+            (
+                "SETTINGS",
+                0x4,
+                0x0,
+                0,
+                vec![0x00, 0x01, 0x00, 0x00, 0x10, 0x00],
+            ),
             // WINDOW_UPDATE frame (type 0x8)
             ("WINDOW_UPDATE", 0x8, 0x0, 1, vec![0x00, 0x00, 0x40, 0x00]),
             // HEADERS frame (type 0x1)
@@ -225,7 +236,9 @@ mod tests {
 
         let mut output = String::new();
         output.push_str("# HTTP/2 Frame Headers (RFC 7540 §4.1)\n\n");
-        output.push_str("# Frame format: [Length:24][Type:8][Flags:8][R:1][Stream ID:31][Payload]\n\n");
+        output.push_str(
+            "# Frame format: [Length:24][Type:8][Flags:8][R:1][Stream ID:31][Payload]\n\n",
+        );
 
         for (name, frame_type, flags, stream_id, payload) in &frame_examples {
             // Construct frame header (9 bytes)
@@ -253,20 +266,26 @@ mod tests {
             frame.extend_from_slice(payload);
 
             output.push_str(&format!("Frame: {}\n", name));
-            output.push_str(&format!("Type: 0x{:02x}, Flags: 0x{:02x}, Stream: {}\n",
-                frame_type, flags, stream_id));
+            output.push_str(&format!(
+                "Type: 0x{:02x}, Flags: 0x{:02x}, Stream: {}\n",
+                frame_type, flags, stream_id
+            ));
             output.push_str(&format!("Length: {} bytes\n", payload.len()));
             output.push_str(&format!("Wire format: {}\n", hex::encode(&frame)));
 
             // Break down header bytes
             let header = &frame[0..9];
             output.push_str(&format!("Header breakdown:\n"));
-            output.push_str(&format!("  Length: {:02x}{:02x}{:02x} ({} bytes)\n",
-                header[0], header[1], header[2], length));
+            output.push_str(&format!(
+                "  Length: {:02x}{:02x}{:02x} ({} bytes)\n",
+                header[0], header[1], header[2], length
+            ));
             output.push_str(&format!("  Type: {:02x} ({})\n", header[3], name));
             output.push_str(&format!("  Flags: {:02x}\n", header[4]));
-            output.push_str(&format!("  Stream: {:02x}{:02x}{:02x}{:02x} ({})\n",
-                header[5], header[6], header[7], header[8], stream_id));
+            output.push_str(&format!(
+                "  Stream: {:02x}{:02x}{:02x}{:02x} ({})\n",
+                header[5], header[6], header[7], header[8], stream_id
+            ));
             output.push_str("\n");
         }
 
@@ -279,12 +298,12 @@ mod tests {
 
         // RFC 7540 Section 6.5 - SETTINGS Frame
         let settings_parameters = [
-            (0x1, 4096),    // SETTINGS_HEADER_TABLE_SIZE
-            (0x2, 1),       // SETTINGS_ENABLE_PUSH
-            (0x3, 100),     // SETTINGS_MAX_CONCURRENT_STREAMS
-            (0x4, 65535),   // SETTINGS_INITIAL_WINDOW_SIZE
-            (0x5, 16384),   // SETTINGS_MAX_FRAME_SIZE
-            (0x6, 100),     // SETTINGS_MAX_HEADER_LIST_SIZE
+            (0x1, 4096),  // SETTINGS_HEADER_TABLE_SIZE
+            (0x2, 1),     // SETTINGS_ENABLE_PUSH
+            (0x3, 100),   // SETTINGS_MAX_CONCURRENT_STREAMS
+            (0x4, 65535), // SETTINGS_INITIAL_WINDOW_SIZE
+            (0x5, 16384), // SETTINGS_MAX_FRAME_SIZE
+            (0x6, 100),   // SETTINGS_MAX_HEADER_LIST_SIZE
         ];
 
         let mut payload = Vec::new();
@@ -304,15 +323,18 @@ mod tests {
 
         // Frame header
         frame.extend_from_slice(&length.to_be_bytes()[1..4]); // 24-bit length
-        frame.push(0x4);  // SETTINGS type
-        frame.push(0x0);  // No flags
+        frame.push(0x4); // SETTINGS type
+        frame.push(0x0); // No flags
         frame.extend_from_slice(&0u32.to_be_bytes()); // Stream ID 0
         frame.extend_from_slice(&payload);
 
         let mut output = String::new();
         output.push_str("# HTTP/2 SETTINGS Frame Canonical Format (RFC 7540 §6.5)\n\n");
         output.push_str(&format!("Frame length: {} bytes\n", length));
-        output.push_str(&format!("Parameters count: {}\n\n", settings_parameters.len()));
+        output.push_str(&format!(
+            "Parameters count: {}\n\n",
+            settings_parameters.len()
+        ));
 
         for (i, (identifier, value)) in settings_parameters.iter().enumerate() {
             let setting_name = match identifier {
@@ -326,9 +348,14 @@ mod tests {
             };
 
             let offset = 9 + i * 6; // Frame header (9) + previous settings
-            let setting_bytes = &frame[offset..offset+6];
+            let setting_bytes = &frame[offset..offset + 6];
 
-            output.push_str(&format!("Setting {}: {} = {}\n", i+1, setting_name, value));
+            output.push_str(&format!(
+                "Setting {}: {} = {}\n",
+                i + 1,
+                setting_name,
+                value
+            ));
             output.push_str(&format!("  ID: 0x{:04x}, Value: {}\n", identifier, value));
             output.push_str(&format!("  Bytes: {}\n\n", hex::encode(setting_bytes)));
         }
@@ -399,14 +426,23 @@ mod tests {
 
         output.push_str("Frame components:\n");
         output.push_str(&format!("Type: {} (SETTINGS)\n", hex::encode(&frame_type)));
-        output.push_str(&format!("Length: {} ({} bytes payload)\n",
-            hex::encode(&frame_length), frame_payload.len()));
+        output.push_str(&format!(
+            "Length: {} ({} bytes payload)\n",
+            hex::encode(&frame_length),
+            frame_payload.len()
+        ));
 
         output.push_str("\nSettings parameters:\n");
         for (identifier, value, name) in &h3_settings {
             output.push_str(&format!("  {} (0x{:x}): {}\n", name, identifier, value));
-            output.push_str(&format!("    ID varint: {}\n", hex::encode(&encode_varint(*identifier))));
-            output.push_str(&format!("    Value varint: {}\n", hex::encode(&encode_varint(*value))));
+            output.push_str(&format!(
+                "    ID varint: {}\n",
+                hex::encode(&encode_varint(*identifier))
+            ));
+            output.push_str(&format!(
+                "    Value varint: {}\n",
+                hex::encode(&encode_varint(*value))
+            ));
         }
 
         let mut complete_frame = Vec::new();
@@ -414,7 +450,10 @@ mod tests {
         complete_frame.extend_from_slice(&frame_length);
         complete_frame.extend_from_slice(&frame_payload);
 
-        output.push_str(&format!("\nComplete frame: {}\n", hex::encode(&complete_frame)));
+        output.push_str(&format!(
+            "\nComplete frame: {}\n",
+            hex::encode(&complete_frame)
+        ));
 
         tester.assert_golden(&tester.canonicalize(&output));
     }
@@ -456,10 +495,15 @@ mod tests {
             }
 
             output.push_str(&format!("Test case {}:\n", payload_idx + 1));
-            output.push_str(&format!("Original: {} ({})\n",
-                String::from_utf8_lossy(payload), hex::encode(payload)));
-            output.push_str(&format!("Masking key: {:02x}{:02x}{:02x}{:02x}\n",
-                masking_key[0], masking_key[1], masking_key[2], masking_key[3]));
+            output.push_str(&format!(
+                "Original: {} ({})\n",
+                String::from_utf8_lossy(payload),
+                hex::encode(payload)
+            ));
+            output.push_str(&format!(
+                "Masking key: {:02x}{:02x}{:02x}{:02x}\n",
+                masking_key[0], masking_key[1], masking_key[2], masking_key[3]
+            ));
             output.push_str(&format!("Masked: {}\n", hex::encode(&masked_payload)));
 
             // Verify round-trip
@@ -484,7 +528,13 @@ mod tests {
             // Text frame, masked (client)
             (true, 0x1, true, b"Hello", [0x12, 0x34, 0x56, 0x78]),
             // Binary frame, unmasked (server)
-            (false, 0x2, false, b"\x01\x02\x03\x04", [0x00, 0x00, 0x00, 0x00]),
+            (
+                false,
+                0x2,
+                false,
+                b"\x01\x02\x03\x04",
+                [0x00, 0x00, 0x00, 0x00],
+            ),
             // Ping frame, masked (client)
             (true, 0x9, true, b"ping", [0xab, 0xcd, 0xef, 0x01]),
             // Close frame, unmasked (server)
@@ -536,13 +586,17 @@ mod tests {
                 _ => "UNKNOWN",
             };
 
-            output.push_str(&format!("Frame: {} (0x{:x}), FIN={}, MASK={}\n",
-                opcode_name, opcode, fin, masked));
+            output.push_str(&format!(
+                "Frame: {} (0x{:x}), FIN={}, MASK={}\n",
+                opcode_name, opcode, fin, masked
+            ));
             output.push_str(&format!("Payload length: {} bytes\n", payload.len()));
             output.push_str(&format!("Original payload: {}\n", hex::encode(payload)));
             if *masked {
-                output.push_str(&format!("Masking key: {:02x}{:02x}{:02x}{:02x}\n",
-                    mask_key[0], mask_key[1], mask_key[2], mask_key[3]));
+                output.push_str(&format!(
+                    "Masking key: {:02x}{:02x}{:02x}{:02x}\n",
+                    mask_key[0], mask_key[1], mask_key[2], mask_key[3]
+                ));
             }
             output.push_str(&format!("Wire format: {}\n", hex::encode(&frame)));
             output.push_str(&format!("Frame length: {} bytes\n\n", frame.len()));
@@ -562,13 +616,16 @@ mod tests {
         // These would normally come from crate::raptorq::rfc6330
         // Using simplified constants for testing
         let v0_sample = &[
-            251291136, 3952231631, 3370958628, 4070167936, 123631495, 3351110283, 3218676425, 2011642291,
+            251291136, 3952231631, 3370958628, 4070167936, 123631495, 3351110283, 3218676425,
+            2011642291,
         ];
         let v1_sample = &[
-            807385413, 2043073223, 3336749796, 1302105833, 2278607931, 541015020, 1684564270, 372709334,
+            807385413, 2043073223, 3336749796, 1302105833, 2278607931, 541015020, 1684564270,
+            372709334,
         ];
         let v2_sample = &[
-            1629829892, 282540176, 2794583710, 496504798, 2990494426, 3070701851, 2575963183, 4094823972,
+            1629829892, 282540176, 2794583710, 496504798, 2990494426, 3070701851, 2575963183,
+            4094823972,
         ];
 
         let mut output = String::new();
@@ -630,7 +687,7 @@ mod tests {
 
             // Show first few repair symbol indices
             output.push_str("  First repair indices: ");
-            let repair: Vec<u32> = (k..k+4).collect();
+            let repair: Vec<u32> = (k..k + 4).collect();
             output.push_str(&format!("{:?}\n\n", repair));
         }
 
@@ -652,7 +709,7 @@ mod tests {
                 b' ' => encoded.push(0x80), // Space gets special encoding
                 b'e' => encoded.push(0x81), // Common letter 'e'
                 b't' => encoded.push(0x82), // Common letter 't'
-                _ => encoded.push(*byte),    // Others unchanged
+                _ => encoded.push(*byte),   // Others unchanged
             }
         }
 

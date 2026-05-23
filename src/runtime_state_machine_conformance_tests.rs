@@ -25,7 +25,7 @@
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use std::collections::{HashMap, HashSet, BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Runtime state machine conformance test infrastructure
@@ -184,7 +184,10 @@ mod tests {
                 if let Some(parent_region) = self.regions.get_mut(&parent_id) {
                     parent_region.child_regions.insert(id);
                 }
-                self.parent_child_map.entry(parent_id).or_insert_with(HashSet::new).insert(id);
+                self.parent_child_map
+                    .entry(parent_id)
+                    .or_insert_with(HashSet::new)
+                    .insert(id);
             }
 
             self.regions.insert(id, region);
@@ -220,7 +223,9 @@ mod tests {
         }
 
         fn complete_task(&mut self, task_id: TaskId) -> Result<(), String> {
-            let task = self.tasks.get_mut(&task_id)
+            let task = self
+                .tasks
+                .get_mut(&task_id)
                 .ok_or_else(|| format!("Task {:?} does not exist", task_id))?;
 
             match task.state {
@@ -233,7 +238,9 @@ mod tests {
         }
 
         fn cancel_task(&mut self, task_id: TaskId) -> Result<(), String> {
-            let task = self.tasks.get_mut(&task_id)
+            let task = self
+                .tasks
+                .get_mut(&task_id)
                 .ok_or_else(|| format!("Task {:?} does not exist", task_id))?;
 
             match task.state {
@@ -257,22 +264,24 @@ mod tests {
             // 1. It has no active tasks
             // 2. It has no child regions
             // 3. It has no pending obligations
-            let has_active_tasks = region.tasks.iter()
-                .any(|&task_id| {
-                    if let Some(task) = self.tasks.get(&task_id) {
-                        matches!(task.state, TaskState::Created | TaskState::Running | TaskState::Cancelling)
-                    } else {
-                        false
-                    }
-                });
+            let has_active_tasks = region.tasks.iter().any(|&task_id| {
+                if let Some(task) = self.tasks.get(&task_id) {
+                    matches!(
+                        task.state,
+                        TaskState::Created | TaskState::Running | TaskState::Cancelling
+                    )
+                } else {
+                    false
+                }
+            });
 
-            !has_active_tasks &&
-            region.child_regions.is_empty() &&
-            region.pending_obligations == 0
+            !has_active_tasks && region.child_regions.is_empty() && region.pending_obligations == 0
         }
 
         fn attempt_region_close(&mut self, region_id: RegionId) -> Result<bool, String> {
-            let region = self.regions.get(&region_id)
+            let region = self
+                .regions
+                .get(&region_id)
                 .ok_or_else(|| format!("Region {:?} does not exist", region_id))?;
 
             if region.state == RegionState::Closed {
@@ -343,7 +352,15 @@ mod tests {
 
             for &region_id in self.regions.keys() {
                 if !visited.contains(&region_id) {
-                    if visit(region_id, &self.regions, &mut result, &mut visited, &mut temp_marks).is_err() {
+                    if visit(
+                        region_id,
+                        &self.regions,
+                        &mut result,
+                        &mut visited,
+                        &mut temp_marks,
+                    )
+                    .is_err()
+                    {
                         return Vec::new(); // Cycle detected
                     }
                 }

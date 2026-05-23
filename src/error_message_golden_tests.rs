@@ -7,10 +7,10 @@
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
     use std::sync::Arc;
-    use std::collections::HashMap;
 
     /// Error message golden test infrastructure
     struct ErrorGoldenTester {
@@ -28,8 +28,8 @@ mod tests {
 
         /// Assert error message bytes match golden with UPDATE_GOLDENS support
         fn assert_error_golden(&self, test_name: &str, error_bytes: &[u8]) {
-            let golden_path = Path::new(&self.golden_dir)
-                .join(format!("{}.{}.golden", self.name, test_name));
+            let golden_path =
+                Path::new(&self.golden_dir).join(format!("{}.{}.golden", self.name, test_name));
 
             if std::env::var("UPDATE_GOLDENS").is_ok() {
                 fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
@@ -38,11 +38,12 @@ mod tests {
                 return;
             }
 
-            let expected = fs::read(&golden_path)
-                .unwrap_or_else(|_| panic!(
+            let expected = fs::read(&golden_path).unwrap_or_else(|_| {
+                panic!(
                     "Error golden missing: {}\nRun with UPDATE_GOLDENS=1 to create",
                     golden_path.display()
-                ));
+                )
+            });
 
             if error_bytes != expected {
                 let actual_path = golden_path.with_extension("actual");
@@ -53,9 +54,12 @@ mod tests {
                      Expected {} bytes, got {} bytes\n\
                      To update: UPDATE_GOLDENS=1 cargo test\n\
                      To diff: diff {} {}",
-                    self.name, test_name,
-                    expected.len(), error_bytes.len(),
-                    golden_path.display(), actual_path.display()
+                    self.name,
+                    test_name,
+                    expected.len(),
+                    error_bytes.len(),
+                    golden_path.display(),
+                    actual_path.display()
                 );
             }
         }
@@ -94,7 +98,8 @@ mod tests {
              Stack trace suppressed for deterministic testing.\n\
              Recovery: isolate panic, drain region, finalize obligations.",
             panic.thread_name, panic.message, panic.location
-        ).into_bytes()
+        )
+        .into_bytes()
     }
 
     fn format_supervision_restart(event: &MockSupervisionEvent) -> Vec<u8> {
@@ -102,17 +107,19 @@ mod tests {
             "SUPERVISION_RESTART[{}]: restart #{} due to '{}'\n\
              Strategy: {}\n\
              Action: spawn replacement, transfer state, resume supervision.",
-            event.actor_id, event.restart_count,
-            event.failure_reason, event.restart_strategy
-        ).into_bytes()
+            event.actor_id, event.restart_count, event.failure_reason, event.restart_strategy
+        )
+        .into_bytes()
     }
 
     fn format_region_close_cause_chain(event: &MockRegionCloseEvent) -> Vec<u8> {
         let mut output = format!(
             "REGION_CLOSE[{}]: {} obligations leaked, {} cleanup budget used\n\
              Cause chain ({} entries):\n",
-            event.region_id, event.obligations_leaked,
-            event.cleanup_budget_used, event.cause_chain.len()
+            event.region_id,
+            event.obligations_leaked,
+            event.cleanup_budget_used,
+            event.cause_chain.len()
         );
 
         for (i, cause) in event.cause_chain.iter().enumerate() {
@@ -204,7 +211,8 @@ mod tests {
         let event = MockSupervisionEvent {
             actor_id: "obligation_tracker_region_allocator".to_string(),
             restart_count: 0,
-            failure_reason: "deadlock detected: circular dependency in token resolution".to_string(),
+            failure_reason: "deadlock detected: circular dependency in token resolution"
+                .to_string(),
             restart_strategy: "kill_and_restart_with_fresh_state".to_string(),
         };
 
@@ -324,8 +332,14 @@ mod tests {
             cleanup_budget_used: 3000,
         });
 
-        let combined_bytes = [panic_bytes, b"\n---\n".to_vec(), supervision_bytes,
-                              b"\n---\n".to_vec(), region_bytes].concat();
+        let combined_bytes = [
+            panic_bytes,
+            b"\n---\n".to_vec(),
+            supervision_bytes,
+            b"\n---\n".to_vec(),
+            region_bytes,
+        ]
+        .concat();
 
         tester.assert_error_golden("panic_supervision_cascade", &combined_bytes);
     }
@@ -341,7 +355,10 @@ mod tests {
             let event = MockRegionCloseEvent {
                 region_id: format!("consensus_node_{}", node_id),
                 cause_chain: vec![
-                    format!("network partition detected: lost contact with {} peers", 4 - node_id),
+                    format!(
+                        "network partition detected: lost contact with {} peers",
+                        4 - node_id
+                    ),
                     "split-brain prevention: minority partition shutdown".to_string(),
                     "state preserved for partition healing".to_string(),
                 ],

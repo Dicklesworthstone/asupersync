@@ -141,7 +141,9 @@ mod tests {
             output.push_str("]\n\n");
 
             // Binary serialization for compact replay
-            let binary_event = serialize_trace_event_binary(*timestamp, event_type, *task_id, *region_id, metadata);
+            let binary_event = serialize_trace_event_binary(
+                *timestamp, event_type, *task_id, *region_id, metadata,
+            );
             output.push_str(&format!("Binary: {}\n", hex::encode(&binary_event)));
             output.push_str(&format!("Length: {} bytes\n\n", binary_event.len()));
         }
@@ -156,11 +158,26 @@ mod tests {
         // TLA+ behavior (sequence of states) for model checking
         let states = [
             ("Initial", "tasks = {}, regions = {}, obligations = {}"),
-            ("TaskSpawned", "tasks = {1 |-> \"Spawned\"}, regions = {1 |-> \"Open\"}, obligations = {}"),
-            ("TaskScheduled", "tasks = {1 |-> \"Scheduled\"}, regions = {1 |-> \"Open\"}, obligations = {}"),
-            ("ObligationReserved", "tasks = {1 |-> \"Polling\"}, regions = {1 |-> \"Open\"}, obligations = {1 |-> \"Reserved\"}"),
-            ("ObligationCommitted", "tasks = {1 |-> \"Completed\"}, regions = {1 |-> \"Open\"}, obligations = {1 |-> \"Committed\"}"),
-            ("RegionClosed", "tasks = {}, regions = {1 |-> \"Closed\"}, obligations = {}"),
+            (
+                "TaskSpawned",
+                "tasks = {1 |-> \"Spawned\"}, regions = {1 |-> \"Open\"}, obligations = {}",
+            ),
+            (
+                "TaskScheduled",
+                "tasks = {1 |-> \"Scheduled\"}, regions = {1 |-> \"Open\"}, obligations = {}",
+            ),
+            (
+                "ObligationReserved",
+                "tasks = {1 |-> \"Polling\"}, regions = {1 |-> \"Open\"}, obligations = {1 |-> \"Reserved\"}",
+            ),
+            (
+                "ObligationCommitted",
+                "tasks = {1 |-> \"Completed\"}, regions = {1 |-> \"Open\"}, obligations = {1 |-> \"Committed\"}",
+            ),
+            (
+                "RegionClosed",
+                "tasks = {}, regions = {1 |-> \"Closed\"}, obligations = {}",
+            ),
         ];
 
         let mut output = String::new();
@@ -209,13 +226,20 @@ mod tests {
 
         output.push_str("Compressed Events:\n");
         for (timestamp, event_type, id, metadata) in &events {
-            let event_id = dictionary.iter().position(|e| e == event_type).unwrap_or(255);
+            let event_id = dictionary
+                .iter()
+                .position(|e| e == event_type)
+                .unwrap_or(255);
             let compressed = compress_trace_event(*timestamp, event_id as u8, *id, metadata);
 
             output.push_str(&format!("Event: {} (id={})\n", event_type, event_id));
-            output.push_str(&format!("  Raw: timestamp={}, id={}, metadata=\"{}\"\n", timestamp, id, metadata));
+            output.push_str(&format!(
+                "  Raw: timestamp={}, id={}, metadata=\"{}\"\n",
+                timestamp, id, metadata
+            ));
             output.push_str(&format!("  Compressed: {}\n", hex::encode(&compressed)));
-            output.push_str(&format!("  Size: {} bytes (vs {} raw)\n\n",
+            output.push_str(&format!(
+                "  Size: {} bytes (vs {} raw)\n\n",
                 compressed.len(),
                 8 + event_type.len() + metadata.len() + 4
             ));
@@ -242,9 +266,18 @@ mod tests {
 
         output.push_str("Ledger Metadata:\n");
         output.push_str(&format!("  next_obligation_id: {}\n", ledger_state.next_id));
-        output.push_str(&format!("  active_regions: {}\n", ledger_state.active_regions.len()));
-        output.push_str(&format!("  pending_obligations: {}\n", ledger_state.obligations.len()));
-        output.push_str(&format!("  finalized_regions: {}\n", ledger_state.finalized_regions.len()));
+        output.push_str(&format!(
+            "  active_regions: {}\n",
+            ledger_state.active_regions.len()
+        ));
+        output.push_str(&format!(
+            "  pending_obligations: {}\n",
+            ledger_state.obligations.len()
+        ));
+        output.push_str(&format!(
+            "  finalized_regions: {}\n",
+            ledger_state.finalized_regions.len()
+        ));
         output.push_str("\n");
 
         output.push_str("Active Obligations:\n");
@@ -260,18 +293,34 @@ mod tests {
 
         // Serialize to canonical binary format
         let snapshot_bytes = serialize_ledger_snapshot(&ledger_state);
-        output.push_str(&format!("Binary snapshot ({} bytes):\n", snapshot_bytes.len()));
+        output.push_str(&format!(
+            "Binary snapshot ({} bytes):\n",
+            snapshot_bytes.len()
+        ));
 
         // Show header breakdown
         output.push_str("Header breakdown:\n");
         if snapshot_bytes.len() >= 16 {
-            let magic = u32::from_le_bytes([snapshot_bytes[0], snapshot_bytes[1], snapshot_bytes[2], snapshot_bytes[3]]);
+            let magic = u32::from_le_bytes([
+                snapshot_bytes[0],
+                snapshot_bytes[1],
+                snapshot_bytes[2],
+                snapshot_bytes[3],
+            ]);
             let version = u16::from_le_bytes([snapshot_bytes[4], snapshot_bytes[5]]);
             let flags = u16::from_le_bytes([snapshot_bytes[6], snapshot_bytes[7]]);
-            let count = u32::from_le_bytes([snapshot_bytes[8], snapshot_bytes[9], snapshot_bytes[10], snapshot_bytes[11]]);
+            let count = u32::from_le_bytes([
+                snapshot_bytes[8],
+                snapshot_bytes[9],
+                snapshot_bytes[10],
+                snapshot_bytes[11],
+            ]);
 
-            output.push_str(&format!("  Magic: 0x{:08x} ({})\n", magic,
-                String::from_utf8_lossy(&snapshot_bytes[0..4])));
+            output.push_str(&format!(
+                "  Magic: 0x{:08x} ({})\n",
+                magic,
+                String::from_utf8_lossy(&snapshot_bytes[0..4])
+            ));
             output.push_str(&format!("  Version: {}\n", version));
             output.push_str(&format!("  Flags: 0x{:04x}\n", flags));
             output.push_str(&format!("  Record count: {}\n", count));
@@ -289,10 +338,10 @@ mod tests {
             ("Reserved", "Committed", true),
             ("Reserved", "Aborted", true),
             ("Reserved", "Leaked", true),
-            ("Committed", "Reserved", false),    // Invalid
-            ("Committed", "Aborted", false),     // Invalid
-            ("Aborted", "Committed", false),     // Invalid
-            ("Aborted", "Reserved", false),      // Invalid
+            ("Committed", "Reserved", false), // Invalid
+            ("Committed", "Aborted", false),  // Invalid
+            ("Aborted", "Committed", false),  // Invalid
+            ("Aborted", "Reserved", false),   // Invalid
         ];
 
         let mut output = String::new();
@@ -330,10 +379,34 @@ mod tests {
 
         // Create deterministic progress certificate
         let certificates = [
-            ("TaskProgress", 1000, 2000, "Task 1 completed successfully", true),
-            ("RegionProgress", 2000, 3000, "Region 1 reached quiescence", true),
-            ("CancelProgress", 3000, 4000, "Cancellation drain completed", true),
-            ("TimeoutProgress", 4000, 5000, "Operation timed out cleanly", false),
+            (
+                "TaskProgress",
+                1000,
+                2000,
+                "Task 1 completed successfully",
+                true,
+            ),
+            (
+                "RegionProgress",
+                2000,
+                3000,
+                "Region 1 reached quiescence",
+                true,
+            ),
+            (
+                "CancelProgress",
+                3000,
+                4000,
+                "Cancellation drain completed",
+                true,
+            ),
+            (
+                "TimeoutProgress",
+                4000,
+                5000,
+                "Operation timed out cleanly",
+                false,
+            ),
         ];
 
         let mut output = String::new();
@@ -343,8 +416,12 @@ mod tests {
 
         for (cert_type, start_time, end_time, description, valid) in &certificates {
             output.push_str(&format!("Certificate: {}\n", cert_type));
-            output.push_str(&format!("  Time range: {} → {} ({} μs)\n",
-                start_time, end_time, end_time - start_time));
+            output.push_str(&format!(
+                "  Time range: {} → {} ({} μs)\n",
+                start_time,
+                end_time,
+                end_time - start_time
+            ));
             output.push_str(&format!("  Description: {}\n", description));
             output.push_str(&format!("  Valid: {}\n", valid));
 
@@ -357,7 +434,10 @@ mod tests {
                 output.push_str("  Proof structure:\n");
                 output.push_str(&format!("    Header: {}\n", hex::encode(&bundle[0..8])));
                 output.push_str(&format!("    Signature: {}\n", hex::encode(&bundle[8..24])));
-                output.push_str(&format!("    Timestamp: {}\n", hex::encode(&bundle[24..32])));
+                output.push_str(&format!(
+                    "    Timestamp: {}\n",
+                    hex::encode(&bundle[24..32])
+                ));
             }
 
             output.push_str(&format!("  Complete bundle: {}\n\n", hex::encode(&bundle)));
@@ -372,8 +452,14 @@ mod tests {
 
         // Proof chain for formal verification
         let proof_chain = [
-            ("NoLeakProof", "All obligations resolved before region close"),
-            ("NoOrphanProof", "All tasks drained before region finalization"),
+            (
+                "NoLeakProof",
+                "All obligations resolved before region close",
+            ),
+            (
+                "NoOrphanProof",
+                "All tasks drained before region finalization",
+            ),
             ("QuiescenceProof", "Region reached quiescent state"),
             ("BudgetProof", "Cleanup completed within bounded time"),
             ("LinearityProof", "Obligation lifecycle preserved linearity"),
@@ -447,10 +533,16 @@ mod tests {
 
         // Test key properties
         output.push_str("Property Verification:\n");
-        output.push_str(&format!("  Zero product: 0×42 = {} ✓\n", gf256_multiply(0, 42)));
+        output.push_str(&format!(
+            "  Zero product: 0×42 = {} ✓\n",
+            gf256_multiply(0, 42)
+        ));
         output.push_str(&format!("  Identity: 1×42 = {} ✓\n", gf256_multiply(1, 42)));
-        output.push_str(&format!("  Commutativity: 5×7 = {}, 7×5 = {} ✓\n",
-            gf256_multiply(5, 7), gf256_multiply(7, 5)));
+        output.push_str(&format!(
+            "  Commutativity: 5×7 = {}, 7×5 = {} ✓\n",
+            gf256_multiply(5, 7),
+            gf256_multiply(7, 5)
+        ));
 
         // Sample table entries for verification
         output.push_str("\nSample Table Entries:\n");
@@ -483,8 +575,10 @@ mod tests {
         for i in [1, 2, 3, 5, 7, 11, 13, 17] {
             let inv = gf256_inverse(i);
             let product = gf256_multiply(i, inv);
-            output.push_str(&format!("  inv({}) = {}, verification: {}×{} = {}\n",
-                i, inv, i, inv, product));
+            output.push_str(&format!(
+                "  inv({}) = {}, verification: {}×{} = {}\n",
+                i, inv, i, inv, product
+            ));
         }
 
         output.push_str("\nSelf-Inverse Elements:\n");
@@ -529,7 +623,10 @@ mod tests {
 
         output.push_str("\nTable Properties:\n");
         output.push_str(&format!("  LOG table size: {} entries\n", log_table.len()));
-        output.push_str(&format!("  EXP table size: {} entries (extended)\n", exp_table.len()));
+        output.push_str(&format!(
+            "  EXP table size: {} entries (extended)\n",
+            exp_table.len()
+        ));
         output.push_str(&format!("  Generator: 2\n"));
 
         // Verify table consistency
@@ -537,8 +634,10 @@ mod tests {
         for i in [1, 2, 4, 8, 16, 32] {
             let log_val = log_table[i];
             let exp_val = exp_table[log_val as usize];
-            output.push_str(&format!("  EXP[LOG[{}]] = EXP[{}] = {} ✓\n",
-                i, log_val, exp_val));
+            output.push_str(&format!(
+                "  EXP[LOG[{}]] = EXP[{}] = {} ✓\n",
+                i, log_val, exp_val
+            ));
         }
 
         // Combined binary format
@@ -573,12 +672,19 @@ mod tests {
             output.push_str(&format!("K = {} source symbols:\n", k));
 
             let schedule = generate_raptorq_schedule(k);
-            output.push_str(&format!("  Schedule length: {} operations\n", schedule.len()));
+            output.push_str(&format!(
+                "  Schedule length: {} operations\n",
+                schedule.len()
+            ));
 
             // Show first few schedule operations
             output.push_str("  Operations (first 8):\n");
             for (i, op) in schedule.iter().take(8).enumerate() {
-                output.push_str(&format!("    [{:2}]: {}\n", i, format_schedule_operation(op)));
+                output.push_str(&format!(
+                    "    [{:2}]: {}\n",
+                    i,
+                    format_schedule_operation(op)
+                ));
             }
 
             // Schedule hash for determinism verification
@@ -588,8 +694,10 @@ mod tests {
             // Binary schedule representation
             let schedule_bytes = serialize_schedule(&schedule);
             output.push_str(&format!("  Binary size: {} bytes\n", schedule_bytes.len()));
-            output.push_str(&format!("  Binary (first 32 bytes): {}\n\n",
-                hex::encode(&schedule_bytes[..std::cmp::min(32, schedule_bytes.len())])));
+            output.push_str(&format!(
+                "  Binary (first 32 bytes): {}\n\n",
+                hex::encode(&schedule_bytes[..std::cmp::min(32, schedule_bytes.len())])
+            ));
         }
 
         tester.assert_golden(&tester.canonicalize(&output));
@@ -605,11 +713,17 @@ mod tests {
 
         let mut output = String::new();
         output.push_str("# RaptorQ Systematic Generation Matrix\n\n");
-        output.push_str(&format!("# {}×{} matrix for K={} source symbols\n", matrix.rows, matrix.cols, k));
+        output.push_str(&format!(
+            "# {}×{} matrix for K={} source symbols\n",
+            matrix.rows, matrix.cols, k
+        ));
         output.push_str("# Used to generate repair symbols deterministically\n\n");
 
         output.push_str("Matrix Properties:\n");
-        output.push_str(&format!("  Rows: {} (includes LDPC and PI symbols)\n", matrix.rows));
+        output.push_str(&format!(
+            "  Rows: {} (includes LDPC and PI symbols)\n",
+            matrix.rows
+        ));
         output.push_str(&format!("  Cols: {} (source symbols)\n", matrix.cols));
         output.push_str(&format!("  Density: {:.2}%\n", matrix.density() * 100.0));
         output.push_str(&format!("  Rank: {}\n", matrix.rank()));
@@ -632,7 +746,10 @@ mod tests {
 
         // Matrix serialization
         let matrix_bytes = matrix.serialize();
-        output.push_str(&format!("\nSerialized matrix: {} bytes\n", matrix_bytes.len()));
+        output.push_str(&format!(
+            "\nSerialized matrix: {} bytes\n",
+            matrix_bytes.len()
+        ));
 
         tester.assert_binary_golden(&matrix_bytes);
     }
@@ -666,17 +783,21 @@ mod tests {
 
         output.push_str("Event Sequence:\n");
         for (i, (timestamp, event_type, task_id, region_id)) in events.iter().enumerate() {
-            output.push_str(&format!("  Event[{:2}]: @{:6}μs {} (task={}, region={})\n",
-                i, timestamp, event_type, task_id, region_id));
+            output.push_str(&format!(
+                "  Event[{:2}]: @{:6}μs {} (task={}, region={})\n",
+                i, timestamp, event_type, task_id, region_id
+            ));
         }
 
         output.push_str("\nTemporal Ordering Verification:\n");
         for i in 1..events.len() {
-            let prev_time = events[i-1].0;
+            let prev_time = events[i - 1].0;
             let curr_time = events[i].0;
             let ordered = curr_time >= prev_time;
-            output.push_str(&format!("  Event[{}] → Event[{}]: {} {}\n",
-                i-1, i,
+            output.push_str(&format!(
+                "  Event[{}] → Event[{}]: {} {}\n",
+                i - 1,
+                i,
                 if ordered { "✓" } else { "✗" },
                 if ordered { "ORDERED" } else { "OUT_OF_ORDER" }
             ));
@@ -684,7 +805,10 @@ mod tests {
 
         // Serialize event sequence
         let event_bytes = serialize_event_sequence(&events);
-        output.push_str(&format!("\nSerialized events: {} bytes\n", event_bytes.len()));
+        output.push_str(&format!(
+            "\nSerialized events: {} bytes\n",
+            event_bytes.len()
+        ));
 
         // Event sequence hash for determinism
         let sequence_hash = hash_event_sequence(&events);
@@ -707,7 +831,11 @@ mod tests {
 
         output.push_str("Scheduler Trace Events:\n");
         for (i, event) in trace_events.iter().enumerate() {
-            output.push_str(&format!("  Trace[{:2}]: {}\n", i, format_trace_event(event)));
+            output.push_str(&format!(
+                "  Trace[{:2}]: {}\n",
+                i,
+                format_trace_event(event)
+            ));
         }
 
         output.push_str("\nScheduler Invariants:\n");
@@ -718,7 +846,8 @@ mod tests {
 
         // Trace compression
         let compressed_trace = compress_scheduler_trace(&trace_events);
-        output.push_str(&format!("\nCompressed trace: {} bytes (vs {} uncompressed)\n",
+        output.push_str(&format!(
+            "\nCompressed trace: {} bytes (vs {} uncompressed)\n",
             compressed_trace.len(),
             trace_events.len() * 32 // Approximate uncompressed size
         ));
@@ -731,7 +860,13 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Serialize trace event to canonical binary format
-    fn serialize_trace_event_binary(timestamp: u64, event_type: &str, task_id: u32, region_id: u32, metadata: &str) -> Vec<u8> {
+    fn serialize_trace_event_binary(
+        timestamp: u64,
+        event_type: &str,
+        task_id: u32,
+        region_id: u32,
+        metadata: &str,
+    ) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&timestamp.to_le_bytes());
         bytes.extend_from_slice(&(task_id as u64).to_le_bytes());
@@ -746,7 +881,11 @@ mod tests {
     /// Check state invariants for TLA+ model checking
     fn check_state_invariants(state_name: &str) -> Vec<String> {
         match state_name {
-            "Initial" => vec!["NoTasks".to_string(), "NoRegions".to_string(), "NoObligations".to_string()],
+            "Initial" => vec![
+                "NoTasks".to_string(),
+                "NoRegions".to_string(),
+                "NoObligations".to_string(),
+            ],
             "TaskSpawned" => vec!["TaskExists".to_string(), "RegionOpen".to_string()],
             "TaskScheduled" => vec!["TaskScheduled".to_string(), "RegionOpen".to_string()],
             "ObligationReserved" => vec!["ObligationPending".to_string(), "TaskActive".to_string()],
@@ -768,9 +907,15 @@ mod tests {
     /// Build trace compression dictionary
     fn build_trace_compression_dictionary() -> Vec<String> {
         vec![
-            "TaskSpawn".to_string(), "TaskScheduled".to_string(), "TaskPolling".to_string(),
-            "TaskYield".to_string(), "TaskCompleted".to_string(), "RegionClose".to_string(),
-            "ObligationReserved".to_string(), "ObligationCommitted".to_string(), "ObligationAborted".to_string(),
+            "TaskSpawn".to_string(),
+            "TaskScheduled".to_string(),
+            "TaskPolling".to_string(),
+            "TaskYield".to_string(),
+            "TaskCompleted".to_string(),
+            "RegionClose".to_string(),
+            "ObligationReserved".to_string(),
+            "ObligationCommitted".to_string(),
+            "ObligationAborted".to_string(),
         ]
     }
 
@@ -805,20 +950,26 @@ mod tests {
 
     fn create_test_ledger_state() -> TestLedgerState {
         let mut obligations = BTreeMap::new();
-        obligations.insert(1, TestObligationRecord {
-            kind: "Permit".to_string(),
-            state: "Reserved".to_string(),
-            region_id: 1,
-            task_id: 1,
-            reserved_at: 1000000,
-        });
-        obligations.insert(2, TestObligationRecord {
-            kind: "Lease".to_string(),
-            state: "Committed".to_string(),
-            region_id: 1,
-            task_id: 2,
-            reserved_at: 1001000,
-        });
+        obligations.insert(
+            1,
+            TestObligationRecord {
+                kind: "Permit".to_string(),
+                state: "Reserved".to_string(),
+                region_id: 1,
+                task_id: 1,
+                reserved_at: 1000000,
+            },
+        );
+        obligations.insert(
+            2,
+            TestObligationRecord {
+                kind: "Lease".to_string(),
+                state: "Committed".to_string(),
+                region_id: 1,
+                task_id: 2,
+                reserved_at: 1001000,
+            },
+        );
 
         TestLedgerState {
             next_id: 3,
@@ -852,11 +1003,22 @@ mod tests {
         bytes.extend_from_slice(from_state.as_bytes());
         bytes.push(to_state.len() as u8);
         bytes.extend_from_slice(to_state.as_bytes());
-        bytes.extend_from_slice(&std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros().to_le_bytes()[..8]);
+        bytes.extend_from_slice(
+            &std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+                .to_le_bytes()[..8],
+        );
         bytes
     }
 
-    fn create_certificate_bundle(start_time: u64, end_time: u64, description: &str, valid: bool) -> Vec<u8> {
+    fn create_certificate_bundle(
+        start_time: u64,
+        end_time: u64,
+        description: &str,
+        valid: bool,
+    ) -> Vec<u8> {
         let mut bundle = Vec::new();
         bundle.extend_from_slice(b"CERT"); // Magic
         bundle.extend_from_slice(&1u32.to_le_bytes()); // Version
@@ -891,14 +1053,18 @@ mod tests {
 
     // GF256 arithmetic implementation
     fn gf256_multiply(a: u8, b: u8) -> u8 {
-        if a == 0 || b == 0 { return 0; }
+        if a == 0 || b == 0 {
+            return 0;
+        }
         let log_a = gf256_log(a);
         let log_b = gf256_log(b);
         gf256_exp((log_a as u16 + log_b as u16) % 255)
     }
 
     fn gf256_inverse(a: u8) -> u8 {
-        if a == 0 { return 0; }
+        if a == 0 {
+            return 0;
+        }
         gf256_exp(255 - gf256_log(a) as u16)
     }
 
@@ -962,7 +1128,7 @@ mod tests {
         }
 
         // Generate repair operations
-        for i in k..k+4 {
+        for i in k..k + 4 {
             schedule.push(ScheduleOperation {
                 op_type: "XOR".to_string(),
                 src_indices: (0..k).collect(),
@@ -974,9 +1140,16 @@ mod tests {
     }
 
     fn format_schedule_operation(op: &ScheduleOperation) -> String {
-        format!("{} {} → {}", op.op_type,
-            op.src_indices.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","),
-            op.dst_index)
+        format!(
+            "{} {} → {}",
+            op.op_type,
+            op.src_indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            op.dst_index
+        )
     }
 
     fn hash_schedule(schedule: &[ScheduleOperation]) -> u32 {
@@ -1052,7 +1225,11 @@ mod tests {
             }
         }
 
-        Matrix { rows: k, cols: k, data }
+        Matrix {
+            rows: k,
+            cols: k,
+            data,
+        }
     }
 
     // Event sequence operations
@@ -1121,8 +1298,10 @@ mod tests {
     }
 
     fn format_trace_event(event: &SchedulerTraceEvent) -> String {
-        format!("@{}μs {} task={} decision={}",
-            event.timestamp, event.event_type, event.task_id, event.decision)
+        format!(
+            "@{}μs {} task={} decision={}",
+            event.timestamp, event.event_type, event.task_id, event.decision
+        )
     }
 
     fn compress_scheduler_trace(events: &[SchedulerTraceEvent]) -> Vec<u8> {

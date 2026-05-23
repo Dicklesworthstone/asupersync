@@ -48,7 +48,7 @@
 mod tests {
     #[cfg(test)]
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, VecDeque, HashMap};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::time::Duration;
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -205,7 +205,11 @@ mod tests {
             self.cast_queue.push_back(cast);
         }
 
-        pub fn reply_to_call(&mut self, call_id: u64, response: Vec<u8>) -> Result<(), &'static str> {
+        pub fn reply_to_call(
+            &mut self,
+            call_id: u64,
+            response: Vec<u8>,
+        ) -> Result<(), &'static str> {
             if !self.pending_calls.contains_key(&call_id) {
                 return Err("Call not found");
             }
@@ -344,7 +348,8 @@ mod tests {
 
             // Cleanup monitors for the terminated task
             self.watchers.remove(&task_id);
-            self.monitors.retain(|_, monitor| monitor.monitored_id != task_id);
+            self.monitors
+                .retain(|_, monitor| monitor.monitored_id != task_id);
         }
 
         pub fn get_sorted_notifications(&self) -> Vec<MockDownNotification> {
@@ -566,8 +571,16 @@ mod tests {
 
         pub fn is_symmetric(&self) -> bool {
             for link in self.links.values() {
-                let task_a_links = self.task_links.get(&link.task_a).map(|v| v.as_slice()).unwrap_or(&[]);
-                let task_b_links = self.task_links.get(&link.task_b).map(|v| v.as_slice()).unwrap_or(&[]);
+                let task_a_links = self
+                    .task_links
+                    .get(&link.task_a)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let task_b_links = self
+                    .task_links
+                    .get(&link.task_b)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
 
                 if !task_a_links.contains(&link.link_id) || !task_b_links.contains(&link.link_id) {
                     return false;

@@ -33,7 +33,7 @@
 mod tests {
     #[cfg(test)]
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, VecDeque, HashMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -93,7 +93,12 @@ mod tests {
             }
         }
 
-        pub fn reserve_name(&mut self, name: String, task_id: u64, timestamp: u64) -> Result<u64, &'static str> {
+        pub fn reserve_name(
+            &mut self,
+            name: String,
+            task_id: u64,
+            timestamp: u64,
+        ) -> Result<u64, &'static str> {
             if self.leases.contains_key(&name) {
                 return Err("Name already leased");
             }
@@ -219,16 +224,21 @@ mod tests {
             let task_id = self.next_task_id;
             self.next_task_id += 1;
 
-            if self.budget.cpu_millis < required_budget.cpu_millis ||
-               self.budget.memory_bytes < required_budget.memory_bytes ||
-               self.budget.io_ops < required_budget.io_ops ||
-               self.budget.network_bytes < required_budget.network_bytes {
-
+            if self.budget.cpu_millis < required_budget.cpu_millis
+                || self.budget.memory_bytes < required_budget.memory_bytes
+                || self.budget.io_ops < required_budget.io_ops
+                || self.budget.network_bytes < required_budget.network_bytes
+            {
                 self.budget_exhaustion_count += 1;
                 let result = MockSpawnResult::BudgetExhausted("Insufficient budget".to_string());
                 self.spawned_tasks.push(MockSpawnedTask {
                     task_id,
-                    budget_consumed: MockBudget { cpu_millis: 0, memory_bytes: 0, io_ops: 0, network_bytes: 0 },
+                    budget_consumed: MockBudget {
+                        cpu_millis: 0,
+                        memory_bytes: 0,
+                        io_ops: 0,
+                        network_bytes: 0,
+                    },
                     spawn_result: result.clone(),
                 });
                 return Err(result);
@@ -257,7 +267,7 @@ mod tests {
     // Scheduler Module Mocks
     #[derive(Debug, Clone, PartialEq)]
     pub struct MockIntrusiveHeap {
-        pub heap: Vec<u64>,  // task_ids
+        pub heap: Vec<u64>, // task_ids
         pub task_metadata: HashMap<u64, MockTaskMetadata>,
         pub next_generation: u64,
     }
@@ -350,8 +360,14 @@ mod tests {
                     break;
                 }
                 self.heap.swap(parent_pos, pos);
-                self.task_metadata.get_mut(&self.heap[parent_pos]).unwrap().heap_index = Some(parent_pos);
-                self.task_metadata.get_mut(&self.heap[pos]).unwrap().heap_index = Some(pos);
+                self.task_metadata
+                    .get_mut(&self.heap[parent_pos])
+                    .unwrap()
+                    .heap_index = Some(parent_pos);
+                self.task_metadata
+                    .get_mut(&self.heap[pos])
+                    .unwrap()
+                    .heap_index = Some(pos);
                 pos = parent_pos;
             }
         }
@@ -375,14 +391,22 @@ mod tests {
                 }
 
                 self.heap.swap(pos, largest);
-                self.task_metadata.get_mut(&self.heap[pos]).unwrap().heap_index = Some(pos);
-                self.task_metadata.get_mut(&self.heap[largest]).unwrap().heap_index = Some(largest);
+                self.task_metadata
+                    .get_mut(&self.heap[pos])
+                    .unwrap()
+                    .heap_index = Some(pos);
+                self.task_metadata
+                    .get_mut(&self.heap[largest])
+                    .unwrap()
+                    .heap_index = Some(largest);
                 pos = largest;
             }
         }
 
         fn should_sift_up(&self, pos: usize) -> bool {
-            if pos == 0 { return false; }
+            if pos == 0 {
+                return false;
+            }
             let parent_pos = (pos - 1) / 2;
             !self.compare(parent_pos, pos)
         }
@@ -394,8 +418,8 @@ mod tests {
             let meta_j = &self.task_metadata[&task_j];
 
             // Max heap: higher priority first, then earlier generation
-            meta_i.priority > meta_j.priority ||
-            (meta_i.priority == meta_j.priority && meta_i.generation < meta_j.generation)
+            meta_i.priority > meta_j.priority
+                || (meta_i.priority == meta_j.priority && meta_i.generation < meta_j.generation)
         }
 
         pub fn verify_heap_property(&self) -> bool {
@@ -418,7 +442,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     pub struct MockThreeLaneScheduler {
         pub cancel_lane: VecDeque<u64>,
-        pub timed_lane: BTreeMap<u64, Vec<u64>>,  // deadline -> tasks
+        pub timed_lane: BTreeMap<u64, Vec<u64>>, // deadline -> tasks
         pub ready_lane: VecDeque<u64>,
         pub cancel_streak: u32,
         pub cancel_streak_limit: u32,
@@ -468,7 +492,10 @@ mod tests {
         }
 
         pub fn schedule_timed(&mut self, task_id: u64, deadline: u64) {
-            self.timed_lane.entry(deadline).or_insert_with(Vec::new).push(task_id);
+            self.timed_lane
+                .entry(deadline)
+                .or_insert_with(Vec::new)
+                .push(task_id);
         }
 
         pub fn schedule_ready(&mut self, task_id: u64) {
@@ -483,10 +510,10 @@ mod tests {
             self.current_time += 1;
 
             // Cancel lane has strict priority, but fairness limits apply
-            if !self.cancel_lane.is_empty() &&
-               (self.cancel_streak < self.cancel_streak_limit ||
-                (self.timed_lane.is_empty() && self.ready_lane.is_empty())) {
-
+            if !self.cancel_lane.is_empty()
+                && (self.cancel_streak < self.cancel_streak_limit
+                    || (self.timed_lane.is_empty() && self.ready_lane.is_empty()))
+            {
                 let task_id = self.cancel_lane.pop_front().unwrap();
                 self.cancel_streak += 1;
                 self.timed_streak = 0;
@@ -503,13 +530,15 @@ mod tests {
             }
 
             // Check timed lane for due tasks
-            let due_tasks: Vec<u64> = self.timed_lane.range(..=self.current_time)
+            let due_tasks: Vec<u64> = self
+                .timed_lane
+                .range(..=self.current_time)
                 .flat_map(|(_, tasks)| tasks.iter().cloned())
                 .collect();
 
-            if !due_tasks.is_empty() &&
-               (self.timed_streak < self.timed_streak_limit || self.ready_lane.is_empty()) {
-
+            if !due_tasks.is_empty()
+                && (self.timed_streak < self.timed_streak_limit || self.ready_lane.is_empty())
+            {
                 // Remove from timed lane and dispatch
                 for deadline in self.timed_lane.keys().cloned().collect::<Vec<_>>() {
                     if deadline <= self.current_time {
@@ -647,14 +676,14 @@ mod tests {
             // This is a simplified check - in practice, combiner batching
             // can reorder within batches while preserving global FIFO
             while let (Some(&ready_task), Some(&injected_task)) =
-                (ready_iter.next(), injection_iter.next()) {
-
+                (ready_iter.next(), injection_iter.next())
+            {
                 // Allow for combiner reordering within reasonable bounds
-                let position_in_ready = self.ready_queue.iter()
-                    .position(|&t| t == injected_task);
+                let position_in_ready = self.ready_queue.iter().position(|&t| t == injected_task);
 
                 if let Some(pos) = position_in_ready {
-                    if pos > 10 {  // Allow some reordering due to batching
+                    if pos > 10 {
+                        // Allow some reordering due to batching
                         return false;
                     }
                 }
@@ -757,9 +786,7 @@ mod tests {
                         Err("No result available")
                     }
                 }
-                MockRemoteState::LeaseExpired => {
-                    Ok(MockRemoteResult::LeaseExpired)
-                }
+                MockRemoteState::LeaseExpired => Ok(MockRemoteResult::LeaseExpired),
                 MockRemoteState::PolledAfterCompletion => {
                     self.state = MockRemoteState::PolledAfterCompletion;
                     Err("Polled after completion")
@@ -771,7 +798,9 @@ mod tests {
             self.cancel_after_completion_calls += 1;
 
             match &self.state {
-                MockRemoteState::Completed | MockRemoteState::Cancelled | MockRemoteState::LeaseExpired => {
+                MockRemoteState::Completed
+                | MockRemoteState::Cancelled
+                | MockRemoteState::LeaseExpired => {
                     // Canceling after completion should be idempotent
                     Ok(())
                 }
@@ -779,9 +808,7 @@ mod tests {
                     self.cancel("Cancel after completion".to_string());
                     Ok(())
                 }
-                MockRemoteState::PolledAfterCompletion => {
-                    Err("Already polled after completion")
-                }
+                MockRemoteState::PolledAfterCompletion => Err("Already polled after completion"),
             }
         }
     }
