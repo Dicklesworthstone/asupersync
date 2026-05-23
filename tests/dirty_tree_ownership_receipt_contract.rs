@@ -16,6 +16,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn run_receipt(fixture: &str) -> Output {
+    run_receipt_with_args(fixture, &[])
+}
+
+fn run_receipt_with_args(fixture: &str, extra_args: &[&str]) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--fixture")
@@ -28,9 +32,14 @@ fn run_receipt(fixture: &str) -> Output {
         .arg(GENERATED_AT)
         .arg("--output")
         .arg("json")
+        .args(extra_args)
         .current_dir(repo_root())
         .output()
         .expect("run dirty tree ownership receipt")
+}
+
+fn json_from_output(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
 }
 
 fn receipt_json(fixture: &str) -> Value {
@@ -42,7 +51,7 @@ fn receipt_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+    json_from_output(&output)
 }
 
 fn receipt_stdout(fixture: &str) -> String {
@@ -300,6 +309,316 @@ fn mixed_staged_index_requires_path_limited_commit_boundary() {
     assert_eq!(
         fuzz["staging_guidance"]["decision"].as_str(),
         Some("unstage-before-commit")
+    );
+}
+
+#[test]
+fn declared_commit_preflight_allows_owned_path_and_preserves_peer_index() {
+    let output = run_receipt_with_args(
+        "mixed_staged_index.json",
+        &[
+            "--declared-commit-preflight",
+            "--commit-path",
+            "scripts/dirty_tree_ownership_receipt.py",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "declared preflight should pass for owned path: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(preflight["allowed"].as_bool(), Some(true));
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("ready-path-limited-commit")
+    );
+    assert_eq!(
+        preflight["declared_paths"][0].as_str(),
+        Some("scripts/dirty_tree_ownership_receipt.py")
+    );
+    assert_eq!(
+        preflight["currently_staged_paths"]
+            .as_array()
+            .expect("staged paths")
+            .len(),
+        3
+    );
+    assert_eq!(
+        preflight["dirty_peer_paths_outside_scope"][0].as_str(),
+        Some("fuzz/Cargo.toml")
+    );
+    assert_eq!(
+        preflight["final_commit_path_set"][0].as_str(),
+        Some("scripts/dirty_tree_ownership_receipt.py")
+    );
+    assert_eq!(
+        preflight["path_limited_commit_command"].as_str(),
+        Some("git commit --only -- scripts/dirty_tree_ownership_receipt.py")
+    );
+    assert_eq!(
+        preflight["peer_index_preservation_required"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn declared_commit_preflight_refuses_empty_declared_path_set() {
+    let output = run_receipt_with_args("mixed_staged_index.json", &["--declared-commit-preflight"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "empty declaration should fail closed"
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(preflight["allowed"].as_bool(), Some(false));
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("refuse-empty-declared-paths")
+    );
+    assert_eq!(
+        preflight["final_commit_path_set"]
+            .as_array()
+            .expect("final commit paths")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn declared_commit_preflight_refuses_paths_outside_repository() {
+    let output = run_receipt_with_args(
+        "mixed_staged_index.json",
+        &[
+            "--declared-commit-preflight",
+            "--commit-path",
+            "../outside.rs",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "outside declaration should fail closed"
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("refuse-invalid-declared-paths")
+    );
+    assert_eq!(
+        preflight["declared_path_errors"][0]["reason"].as_str(),
+        Some("declared commit path resolves outside repository")
+    );
+}
+
+#[test]
+fn declared_commit_preflight_refuses_peer_declared_path() {
+    let output = run_receipt_with_args(
+        "mixed_staged_index.json",
+        &[
+            "--declared-commit-preflight",
+            "--commit-path",
+            "fuzz/Cargo.toml",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "peer-owned declaration should fail closed"
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("refuse-unowned-declared-paths")
+    );
+    assert_eq!(
+        preflight["unsafe_declared_paths"][0].as_str(),
+        Some("fuzz/Cargo.toml")
+    );
+    assert_eq!(preflight["path_limited_commit_command"].as_str(), Some(""));
+}
+
+#[test]
+fn declared_commit_preflight_allows_unattributed_declared_tracked_path_with_warning() {
+    let output = run_receipt_with_args(
+        "no_agent_mail.json",
+        &[
+            "--declared-commit-preflight",
+            "--commit-path",
+            "src/unknown.rs",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "tracked unattributed declaration should pass with warning: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(preflight["allowed"].as_bool(), Some(true));
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("ready-path-limited-commit")
+    );
+    assert_eq!(
+        preflight["unattributed_declared_paths"][0].as_str(),
+        Some("src/unknown.rs")
+    );
+    assert_eq!(
+        preflight["final_commit_path_set"][0].as_str(),
+        Some("src/unknown.rs")
+    );
+    assert_eq!(
+        preflight["path_limited_commit_command"].as_str(),
+        Some("git commit --only -- src/unknown.rs")
+    );
+}
+
+#[test]
+fn declared_commit_preflight_refuses_untracked_declared_path_until_staged() {
+    let output = run_receipt_with_args(
+        "self_reservation.json",
+        &[
+            "--declared-commit-preflight",
+            "--commit-path",
+            "scripts/dirty_tree_ownership_receipt.py",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "untracked declaration should fail until staged"
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("refuse-untracked-declared-paths")
+    );
+    assert_eq!(
+        preflight["untracked_declared_paths"][0].as_str(),
+        Some("scripts/dirty_tree_ownership_receipt.py")
+    );
+    assert_eq!(
+        preflight["final_commit_path_set"]
+            .as_array()
+            .expect("final commit paths")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn declared_commit_preflight_refuses_clean_tree_noop() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+repo_path = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("dirty_tree_ownership_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+preflight = module.build_declared_commit_preflight([], ["src/lib.rs"], repo_path)
+print(json.dumps(preflight))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run clean-tree declared preflight smoke");
+    assert!(
+        output.status.success(),
+        "clean-tree preflight smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let preflight: Value = serde_json::from_slice(&output.stdout).expect("preflight JSON");
+    assert_eq!(
+        preflight["decision"].as_str(),
+        Some("refuse-no-dirty-declared-paths")
+    );
+    assert_eq!(
+        preflight["declared_clean_or_missing_paths"][0].as_str(),
+        Some("src/lib.rs")
+    );
+    assert_eq!(
+        preflight["final_commit_path_set"]
+            .as_array()
+            .expect("final commit paths")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn declared_commit_preflight_quotes_pathspec_edges() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+repo_path = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("dirty_tree_ownership_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+rows = [
+    {
+        "path": "docs/path with space.md",
+        "classification": "self-owned",
+        "evidence": {"index_status": "A"},
+    },
+]
+preflight = module.build_declared_commit_preflight(
+    rows, ["docs/path with space.md"], repo_path
+)
+print(json.dumps(preflight))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg(repo_root())
+        .current_dir(repo_root())
+        .output()
+        .expect("run pathspec declared preflight smoke");
+    assert!(
+        output.status.success(),
+        "pathspec preflight smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let preflight: Value = serde_json::from_slice(&output.stdout).expect("preflight JSON");
+    assert_eq!(
+        preflight["path_limited_commit_command"].as_str(),
+        Some("git commit --only -- 'docs/path with space.md'")
     );
 }
 

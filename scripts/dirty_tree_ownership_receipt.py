@@ -437,6 +437,163 @@ def pathspec(paths: list[str]) -> str:
     return " ".join(shlex.quote(path) for path in paths)
 
 
+def normalize_declared_commit_paths(
+    raw_paths: list[str],
+    repo_path: Path,
+) -> tuple[list[str], list[dict[str, str]]]:
+    repo_path = repo_path.resolve()
+    normalized_paths: list[str] = []
+    errors: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for raw_path in raw_paths:
+        if raw_path == "":
+            errors.append(
+                {
+                    "path": raw_path,
+                    "reason": "declared commit path must not be empty",
+                }
+            )
+            continue
+
+        candidate = Path(raw_path)
+        resolved = candidate.resolve() if candidate.is_absolute() else (repo_path / candidate).resolve()
+        try:
+            relative = resolved.relative_to(repo_path)
+        except ValueError:
+            errors.append(
+                {
+                    "path": raw_path,
+                    "reason": "declared commit path resolves outside repository",
+                }
+            )
+            continue
+
+        normalized = normalize_path(relative.as_posix())
+        if not normalized or normalized == ".":
+            errors.append(
+                {
+                    "path": raw_path,
+                    "reason": "declared commit path must name a repository file",
+                }
+            )
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            normalized_paths.append(normalized)
+
+    return normalized_paths, errors
+
+
+def build_declared_commit_preflight(
+    rows: list[dict[str, Any]],
+    raw_paths: list[str],
+    repo_path: Path,
+) -> dict[str, Any]:
+    declared_paths, path_errors = normalize_declared_commit_paths(raw_paths, repo_path)
+    declared = set(declared_paths)
+    rows_by_path = {str(row["path"]): row for row in rows}
+    declared_rows = [rows_by_path[path] for path in declared_paths if path in rows_by_path]
+    declared_dirty_paths = [str(row["path"]) for row in declared_rows]
+    declared_missing = [path for path in declared_paths if path not in rows_by_path]
+    staged_paths = [str(row["path"]) for row in rows if is_index_staged(row)]
+    outside_rows = [row for row in rows if str(row["path"]) not in declared]
+    tracker_rows = [row for row in declared_rows if row["classification"] == "tracker-state"]
+    non_tracker_declared = [
+        str(row["path"])
+        for row in declared_rows
+        if row["classification"] != "tracker-state"
+    ]
+    unsafe_declared = [
+        str(row["path"])
+        for row in declared_rows
+        if row["classification"] in {"peer-owned", "owner-conflict"}
+    ]
+    unattributed_declared = [
+        str(row["path"])
+        for row in declared_rows
+        if row["classification"] == "unattributed"
+    ]
+    untracked_declared = [
+        str(row["path"])
+        for row in declared_rows
+        if str(row.get("status", "")).startswith("??")
+    ]
+    final_commit_paths = [
+        str(row["path"])
+        for row in declared_rows
+        if row["classification"] in {"self-owned", "tracker-state", "unattributed"}
+        and str(row.get("status", "")) != "??"
+    ]
+
+    if path_errors:
+        decision = "refuse-invalid-declared-paths"
+        reason = "one or more declared paths are empty or outside the repository"
+    elif not declared_paths:
+        decision = "refuse-empty-declared-paths"
+        reason = "declare at least one project-relative path before committing"
+    elif unsafe_declared:
+        decision = "refuse-unowned-declared-paths"
+        reason = "declared commit paths include peer-owned or conflicted paths"
+    elif untracked_declared:
+        decision = "refuse-untracked-declared-paths"
+        reason = "untracked declared paths must be staged before git commit --only can include them"
+    elif tracker_rows and non_tracker_declared:
+        decision = "refuse-mixed-tracker-commit"
+        reason = "tracker files require a tracker-only commit surface"
+    elif not final_commit_paths:
+        decision = "refuse-no-dirty-declared-paths"
+        reason = "no dirty declared paths are available for the path-limited commit"
+    elif tracker_rows:
+        decision = "ready-tracker-only-path-limited-commit"
+        reason = "declared tracker paths are the entire commit surface"
+    else:
+        decision = "ready-path-limited-commit"
+        reason = "path-limited commit excludes unrelated staged and unstaged paths"
+
+    allowed = decision in {
+        "ready-path-limited-commit",
+        "ready-tracker-only-path-limited-commit",
+    }
+    command = f"git commit --only -- {pathspec(final_commit_paths)}" if allowed else ""
+
+    return {
+        "allowed": allowed,
+        "decision": decision,
+        "reason": reason,
+        "declared_paths": declared_paths,
+        "declared_path_errors": path_errors,
+        "declared_dirty_paths": declared_dirty_paths,
+        "declared_clean_or_missing_paths": declared_missing,
+        "currently_staged_paths": staged_paths,
+        "dirty_paths_outside_scope": [str(row["path"]) for row in outside_rows],
+        "dirty_peer_paths_outside_scope": [
+            str(row["path"])
+            for row in outside_rows
+            if row["classification"] in {"peer-owned", "owner-conflict"}
+        ],
+        "dirty_unattributed_paths_outside_scope": [
+            str(row["path"])
+            for row in outside_rows
+            if row["classification"] == "unattributed"
+        ],
+        "dirty_unstaged_paths_outside_scope": [
+            str(row["path"])
+            for row in outside_rows
+            if not is_index_staged(row)
+        ],
+        "unsafe_declared_paths": unsafe_declared,
+        "unattributed_declared_paths": unattributed_declared,
+        "untracked_declared_paths": untracked_declared,
+        "final_commit_path_set": final_commit_paths if allowed else [],
+        "path_limited_commit_command": command,
+        "ordinary_index_commit_allowed": False,
+        "peer_index_preservation_required": bool(
+            final_commit_paths and any(path not in final_commit_paths for path in staged_paths)
+        ),
+    }
+
+
 def commit_boundary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     self_owned = [
         str(row["path"])
@@ -548,6 +705,7 @@ def build_receipt(
     repo_path: str,
     agent: str,
     generated_at: str,
+    declared_commit_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     rows = [
         ownership_for_entry(source, agent, generated_at, entry)
@@ -597,6 +755,12 @@ def build_receipt(
     shared_boundary = shared_main_boundary(rows, normalized_upstream(source))
     if shared_boundary is not None:
         receipt["shared_main_boundary"] = shared_boundary
+    if declared_commit_paths is not None:
+        receipt["declared_commit"] = build_declared_commit_preflight(
+            rows=rows,
+            raw_paths=declared_commit_paths,
+            repo_path=Path(repo_path),
+        )
     return receipt
 
 
@@ -609,6 +773,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent", default="unknown", help="Agent generating the receipt")
     parser.add_argument("--generated-at", default="", help="Stable timestamp for deterministic receipts")
     parser.add_argument("--timeout", type=float, default=2.0, help="Per-probe timeout in seconds")
+    parser.add_argument(
+        "--declared-commit-preflight",
+        action="store_true",
+        help="Evaluate declared commit paths and exit nonzero unless a path-limited commit is safe",
+    )
+    parser.add_argument(
+        "--commit-path",
+        action="append",
+        default=[],
+        help="Project-relative path intended for git commit --only; repeat for multi-path commits",
+    )
     parser.add_argument("--output", choices=["json"], default="json")
     return parser.parse_args()
 
@@ -623,9 +798,12 @@ def main() -> int:
         repo_path=str(repo_path),
         agent=args.agent,
         generated_at=generated_at,
+        declared_commit_paths=args.commit_path if args.declared_commit_preflight or args.commit_path else None,
     )
     json.dump(receipt, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
+    if "declared_commit" in receipt and not receipt["declared_commit"]["allowed"]:
+        return 2
     return 0
 
 

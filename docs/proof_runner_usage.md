@@ -142,6 +142,84 @@ strings are safe to paste as summaries. They use `NO_GREEN_PROOF` whenever the
 classified transcript is failed or externally blocked, even when a blocker is
 well identified, so closeouts do not accidentally overstate evidence.
 
+## Declared-Path Commit Preflight
+
+Before committing from a dirty shared-main checkout, run the dirty-tree receipt
+helper with declared commit paths. The helper is non-mutating in preflight mode:
+it prints the declared paths, currently staged paths, dirty peer paths outside
+scope, final commit path set, and the exact path-limited command. It exits with
+status 2 when the declaration is empty, escapes the repository, names a path
+with known peer/conflicting ownership, names an untracked file that still needs
+`git add --`, or would mix tracker state with implementation paths. Tracked
+declared paths without ownership evidence are allowed, but they are surfaced in
+`declared_commit.unattributed_declared_paths` so the operator can decide
+whether to proceed or coordinate first.
+
+Normal code commit:
+
+```bash
+python3 scripts/dirty_tree_ownership_receipt.py \
+  --repo-path . \
+  --agent "$AGENT_NAME" \
+  --declared-commit-preflight \
+  --commit-path src/net/atp/quic/metrics.rs \
+  --commit-path tests/atp_native_quic_endpoint_contract.rs \
+  --output json
+
+git commit --only \
+  -m "fix(atp): diagnose QUIC PTO path pressure br-asupersync-ambb2w" \
+  -- \
+  src/net/atp/quic/metrics.rs \
+  tests/atp_native_quic_endpoint_contract.rs
+```
+
+Docs-only commit:
+
+```bash
+python3 scripts/dirty_tree_ownership_receipt.py \
+  --repo-path . \
+  --agent "$AGENT_NAME" \
+  --declared-commit-preflight \
+  --commit-path docs/proof_runner_usage.md \
+  --output json
+
+git commit --only \
+  -m "docs: document declared-path commit preflight br-asupersync-oxqrae.7.1" \
+  -- docs/proof_runner_usage.md
+```
+
+Tracker-only commit:
+
+```bash
+python3 scripts/dirty_tree_ownership_receipt.py \
+  --repo-path . \
+  --agent "$AGENT_NAME" \
+  --declared-commit-preflight \
+  --commit-path .beads/issues.jsonl \
+  --output json
+
+git commit --only \
+  -m "chore(beads): sync ASW-7A tracker state br-asupersync-oxqrae.7.1" \
+  -- .beads/issues.jsonl
+```
+
+Abort after a race is detected:
+
+```bash
+python3 scripts/dirty_tree_ownership_receipt.py \
+  --repo-path . \
+  --agent "$AGENT_NAME" \
+  --declared-commit-preflight \
+  --commit-path scripts/dirty_tree_ownership_receipt.py \
+  --output json
+```
+
+If the command exits with status 2 or `declared_commit.allowed=false`, do not
+commit. Use `declared_commit.dirty_peer_paths_outside_scope`,
+`declared_commit.currently_staged_paths`, and
+`declared_commit.unsafe_declared_paths` to route the race through Agent Mail or
+rerun with a narrower declared path set.
+
 If no explicit bead id is supplied, the classifier best-effort maps the first
 blocker path to `git log -20 -- <path>`. The resulting
 `validation_frontier_record.blocker_origin` and
