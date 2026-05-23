@@ -15870,3 +15870,6 @@ mod tests {
         println!("  - Verified README fairness claims: bounded preemption + telemetry");
     }
 }
+
+#[cfg(test)]
+mod three_lane_metamorphic;
