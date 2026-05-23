@@ -247,6 +247,8 @@ pub mod bytes_io_time_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cx_obligation_trace_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod cx_scheduler_remote_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod cli_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod database_grpc_metamorphic_tests;
