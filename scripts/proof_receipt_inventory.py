@@ -38,6 +38,36 @@ RCH_LOCAL_FALLBACK_RE = re.compile(
     r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
 )
+FORBIDDEN_VALIDATION_PATTERNS = (
+    (
+        "rm -rf",
+        re.compile(r"(?i)(?<![A-Za-z0-9_.-])rm\s+-(?=[A-Za-z]*r)(?=[A-Za-z]*f)[A-Za-z]*\b"),
+    ),
+    (
+        "git reset --hard",
+        re.compile(r"(?i)(?<![A-Za-z0-9_.-])git\s+reset\s+--hard\b"),
+    ),
+    (
+        "git clean -fd",
+        re.compile(r"(?i)(?<![A-Za-z0-9_.-])git\s+clean\s+-(?=[A-Za-z]*f)(?=[A-Za-z]*d)[A-Za-z]*\b"),
+    ),
+    (
+        "git worktree add",
+        re.compile(r"(?i)(?<![A-Za-z0-9_.-])git\s+worktree\s+add\b"),
+    ),
+    (
+        "git checkout -b",
+        re.compile(r"(?i)(?<![A-Za-z0-9_.-])git\s+checkout\s+-b\b"),
+    ),
+    (
+        "git switch -c",
+        re.compile(r"(?i)(?<![A-Za-z0-9_.-])git\s+switch\s+-c\b"),
+    ),
+    (
+        "git branch non-main",
+        re.compile(r"(?i)(?<![A-Za-z0-9_.-])git\s+branch\s+(?!-)(?!main(?:\s|$))\S+"),
+    ),
+)
 
 
 def utc_now() -> str:
@@ -300,6 +330,16 @@ def local_fallback_validation_commands(row: dict[str, Any]) -> list[str]:
     ]
 
 
+def forbidden_validation_commands(row: dict[str, Any]) -> list[tuple[str, str]]:
+    violations = []
+    for command in row["validation"]:
+        for label, pattern in FORBIDDEN_VALIDATION_PATTERNS:
+            if pattern.search(command):
+                violations.append((command, label))
+                break
+    return violations
+
+
 def canonical_key(row: dict[str, Any]) -> tuple[int, int, int, str]:
     if is_superseded(row):
         tier = 3
@@ -367,7 +407,8 @@ def capability_summaries(
                 or any(unsafe_validation_commands(row) for row in rows)
                 or any(missing_target_dir_validation_commands(row) for row in rows)
                 or any(missing_remote_required_validation_commands(row) for row in rows)
-                or any(local_fallback_validation_commands(row) for row in rows),
+                or any(local_fallback_validation_commands(row) for row in rows)
+                or any(forbidden_validation_commands(row) for row in rows),
             }
         )
     return summaries, canonical_by_capability
@@ -484,6 +525,18 @@ def review_cues(rows: list[dict[str, Any]], capabilities: list[dict[str, Any]]) 
                     "helper_id": row["helper_id"],
                     "command": command,
                     "recommendation": "rerun validation remotely; local rch fallback is not acceptable proof",
+                }
+            )
+        for command, violation in forbidden_validation_commands(row):
+            cues.append(
+                {
+                    "kind": "forbidden-validation-command",
+                    "severity": "high",
+                    "capability_id": row["capability_id"],
+                    "helper_id": row["helper_id"],
+                    "command": command,
+                    "violation": violation,
+                    "recommendation": "remove forbidden destructive operations from validation commands and record a proof blocker instead",
                 }
             )
     return sorted(cues, key=lambda cue: (cue["severity"], cue["kind"], cue["capability_id"], cue.get("helper_id", "")))

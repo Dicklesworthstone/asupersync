@@ -295,6 +295,28 @@ fn unsafe_validation_command_is_actionable() {
 }
 
 #[test]
+fn forbidden_validation_command_is_actionable() {
+    let receipt = receipt_json("unsafe_validation_command.json");
+    let cues = receipt["review_cues"].as_array().expect("review cues");
+
+    for (command, violation) in [
+        ("rm -rf /tmp/asupersync-proof-cache", "rm -rf"),
+        ("git reset --hard", "git reset --hard"),
+        (
+            "git worktree add ../asupersync-proof-scratch",
+            "git worktree add",
+        ),
+    ] {
+        assert!(cues.iter().any(|cue| {
+            cue["kind"].as_str() == Some("forbidden-validation-command")
+                && cue["helper_id"].as_str() == Some("local-cargo-proof-receipt")
+                && cue["command"].as_str() == Some(command)
+                && cue["violation"].as_str() == Some(violation)
+        }));
+    }
+}
+
+#[test]
 fn unsafe_validation_command_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "unsafe_validation_command.json",
