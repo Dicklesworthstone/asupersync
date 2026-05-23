@@ -951,7 +951,9 @@ fn pg_value_to_wire_bytes(val: &PgValue, oid: u32, format: Format) -> Result<Vec
     Ok(match format {
         Format::Text => match val {
             PgValue::Bytes(bytes) if oid == oid::BYTEA => {
-                let mut out = Vec::with_capacity(2 + bytes.len() * 2);
+                // Calculate capacity with overflow protection for hex encoding (2 chars per byte + "\\x" prefix)
+                let capacity = bytes.len().saturating_mul(2).saturating_add(2);
+                let mut out = Vec::with_capacity(capacity);
                 out.extend_from_slice(b"\\x");
                 out.extend_from_slice(hex::encode(bytes).as_bytes());
                 out
@@ -968,7 +970,8 @@ fn pg_value_to_wire_bytes(val: &PgValue, oid: u32, format: Format) -> Result<Vec
             PgValue::Float8(v) => v.to_be_bytes().to_vec(),
             PgValue::Text(text) => {
                 if oid == oid::JSONB {
-                    let mut out = Vec::with_capacity(text.len() + 1);
+                    // Calculate capacity with overflow protection for JSONB prefix (1 byte + text)
+                    let mut out = Vec::with_capacity(text.len().saturating_add(1));
                     out.push(1);
                     out.extend_from_slice(text.as_bytes());
                     out
@@ -1367,7 +1370,11 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        let total = parse_msg.len() + bind_msg.len() + execute_msg.len() + sync_msg.len();
+        // Calculate total length with overflow protection for message concatenation
+        let total = parse_msg.len()
+            .saturating_add(bind_msg.len())
+            .saturating_add(execute_msg.len())
+            .saturating_add(sync_msg.len());
         let mut combined = Vec::with_capacity(total);
         combined.extend_from_slice(&parse_msg);
         combined.extend_from_slice(&bind_msg);
@@ -3120,7 +3127,8 @@ fn validate_notification_payload(payload: &str) -> Result<(), PgError> {
 }
 
 fn quote_postgres_identifier(identifier: &str) -> String {
-    let mut quoted = String::with_capacity(identifier.len() + 2);
+    // Calculate capacity with overflow protection for quoted identifier
+    let mut quoted = String::with_capacity(identifier.len().saturating_add(2));
     quoted.push('"');
     for ch in identifier.chars() {
         if ch == '"' {
@@ -4758,7 +4766,12 @@ impl PgConnection {
         };
 
         // Combine into single write for reduced syscalls.
-        let total = parse.len() + bind.len() + describe.len() + execute.len() + sync.len();
+        // Calculate total length with overflow protection for message concatenation
+        let total = parse.len()
+            .saturating_add(bind.len())
+            .saturating_add(describe.len())
+            .saturating_add(execute.len())
+            .saturating_add(sync.len());
         let mut combined = Vec::with_capacity(total);
         combined.extend_from_slice(&parse);
         combined.extend_from_slice(&bind);
@@ -4855,7 +4868,11 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        let total = parse.len() + bind.len() + execute.len() + sync.len();
+        // Calculate total length with overflow protection for message concatenation
+        let total = parse.len()
+            .saturating_add(bind.len())
+            .saturating_add(execute.len())
+            .saturating_add(sync.len());
         let mut combined = Vec::with_capacity(total);
         combined.extend_from_slice(&parse);
         combined.extend_from_slice(&bind);
@@ -4952,7 +4969,10 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        let total = parse.len() + describe.len() + sync.len();
+        // Calculate total length with overflow protection for message concatenation
+        let total = parse.len()
+            .saturating_add(describe.len())
+            .saturating_add(sync.len());
         let mut combined = Vec::with_capacity(total);
         combined.extend_from_slice(&parse);
         combined.extend_from_slice(&describe);
@@ -5354,7 +5374,11 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        let total = bind.len() + describe.len() + execute.len() + sync.len();
+        // Calculate total length with overflow protection for message concatenation
+        let total = bind.len()
+            .saturating_add(describe.len())
+            .saturating_add(execute.len())
+            .saturating_add(sync.len());
         let mut combined = Vec::with_capacity(total);
         combined.extend_from_slice(&bind);
         combined.extend_from_slice(&describe);
@@ -5417,7 +5441,10 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        let total = bind.len() + execute.len() + sync.len();
+        // Calculate total length with overflow protection for message concatenation
+        let total = bind.len()
+            .saturating_add(execute.len())
+            .saturating_add(sync.len());
         let mut combined = Vec::with_capacity(total);
         combined.extend_from_slice(&bind);
         combined.extend_from_slice(&execute);
@@ -5475,7 +5502,8 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        let mut combined = Vec::with_capacity(close.len() + sync.len());
+        // Calculate capacity with overflow protection for message concatenation
+        let mut combined = Vec::with_capacity(close.len().saturating_add(sync.len()));
         combined.extend_from_slice(&close);
         combined.extend_from_slice(&sync);
 
@@ -7005,7 +7033,8 @@ fn build_parse_msg(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Result<Vec
             i16::MAX
         )));
     }
-    let mut buf = MessageBuffer::with_capacity(sql.len() + 64);
+    // Calculate capacity with overflow protection (SQL + estimated overhead)
+    let mut buf = MessageBuffer::with_capacity(sql.len().saturating_add(64));
     buf.write_cstring(stmt_name);
     buf.write_cstring(sql);
     buf.write_i16(param_oids.len() as i16);
