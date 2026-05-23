@@ -2937,3 +2937,9 @@ mod tests {
         crate::test_complete!("conformance_coalescing_group_behavior");
     }
 }
+
+#[cfg(test)]
+mod metamorphic_tests {
+    #![allow(dead_code, unused_imports)]
+    include!("../time/wheel_metamorphic_tests.rs");
+}
