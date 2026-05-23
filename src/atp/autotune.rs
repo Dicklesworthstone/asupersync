@@ -206,6 +206,12 @@ impl AtpAutotuneTelemetryReport {
         self
     }
 
+    /// Export an aggregated telemetry window as stable metric samples.
+    #[must_use]
+    pub fn from_telemetry(telemetry: &AtpAutotuneTelemetry) -> Self {
+        telemetry.to_report()
+    }
+
     /// Aggregate this report into one decision window.
     ///
     /// Repeated metrics use the latest sample in report order. Out-of-range
@@ -424,6 +430,64 @@ impl AtpAutotuneTelemetry {
     pub const fn with_sample_count(mut self, sample_count: u32) -> Self {
         self.sample_count = sample_count;
         self
+    }
+
+    /// Export this telemetry window as a trace-scoped metric sample report.
+    ///
+    /// Samples are emitted in [`ATP_AUTOTUNE_METRIC_NAMES`] order and omitted
+    /// when the corresponding telemetry field is absent. If this window has a
+    /// zero `sample_count`, the report keeps zero so aggregation can infer the
+    /// represented count from the exported samples.
+    #[must_use]
+    pub fn to_report(&self) -> AtpAutotuneTelemetryReport {
+        let mut report =
+            AtpAutotuneTelemetryReport::new(self.trace_id.clone(), self.workload_id.clone())
+                .with_sample_count(self.sample_count);
+
+        if let Some(value) = self.rtt_micros {
+            report = report.with_sample(AtpAutotuneMetric::RttMicros, value);
+        }
+        if let Some(value) = self.loss_permille {
+            report = report.with_sample(AtpAutotuneMetric::LossPermille, u64::from(value));
+        }
+        if let Some(value) = self.pto_micros {
+            report = report.with_sample(AtpAutotuneMetric::PtoMicros, value);
+        }
+        if let Some(value) = self.congestion_window_bytes {
+            report = report.with_sample(AtpAutotuneMetric::CongestionWindowBytes, value);
+        }
+        if let Some(value) = self.in_flight_bytes {
+            report = report.with_sample(AtpAutotuneMetric::InFlightBytes, value);
+        }
+        if let Some(value) = self.send_buffer_queued_bytes {
+            report = report.with_sample(AtpAutotuneMetric::SendBufferQueuedBytes, value);
+        }
+        if let Some(value) = self.receive_buffer_queued_bytes {
+            report = report.with_sample(AtpAutotuneMetric::ReceiveBufferQueuedBytes, value);
+        }
+        if let Some(value) = self.disk_read_lag_micros {
+            report = report.with_sample(AtpAutotuneMetric::DiskReadLagMicros, value);
+        }
+        if let Some(value) = self.disk_write_lag_micros {
+            report = report.with_sample(AtpAutotuneMetric::DiskWriteLagMicros, value);
+        }
+        if let Some(value) = self.encode_backlog_symbols {
+            report = report.with_sample(AtpAutotuneMetric::EncodeBacklogSymbols, u64::from(value));
+        }
+        if let Some(value) = self.decode_backlog_symbols {
+            report = report.with_sample(AtpAutotuneMetric::DecodeBacklogSymbols, u64::from(value));
+        }
+        if let Some(value) = self.repair_roi_permille {
+            report = report.with_sample(AtpAutotuneMetric::RepairRoiPermille, u64::from(value));
+        }
+        if let Some(value) = self.relay_cost_micros_per_mib {
+            report = report.with_sample(AtpAutotuneMetric::RelayCostMicrosPerMiB, value);
+        }
+        if let Some(value) = self.migration_events {
+            report = report.with_sample(AtpAutotuneMetric::MigrationEvents, u64::from(value));
+        }
+
+        report
     }
 
     /// Record one stable-name metric sample into this telemetry window.
@@ -981,6 +1045,89 @@ mod tests {
                 max: u64::from(u16::MAX),
             })
         );
+    }
+
+    #[test]
+    fn telemetry_window_exports_stable_sample_report_order() {
+        let mut telemetry =
+            AtpAutotuneTelemetry::new("trace-window", "workload-window").with_sample_count(32);
+        telemetry.loss_permille = Some(5);
+        telemetry.rtt_micros = Some(40_000);
+        telemetry.congestion_window_bytes = Some(64 * 1_048_576);
+        telemetry.migration_events = Some(2);
+
+        let report = telemetry.to_report();
+
+        assert_eq!(report.trace_id, "trace-window");
+        assert_eq!(report.workload_id, "workload-window");
+        assert_eq!(report.sample_count, 32);
+        assert_eq!(
+            report.samples,
+            vec![
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::RttMicros, 40_000),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::LossPermille, 5),
+                AtpAutotuneMetricSample::new(
+                    AtpAutotuneMetric::CongestionWindowBytes,
+                    64 * 1_048_576,
+                ),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::MigrationEvents, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn telemetry_window_roundtrips_through_sample_report() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let telemetry = AtpAutotuneTelemetry {
+            trace_id: String::from("trace-roundtrip"),
+            workload_id: String::from("workload-roundtrip"),
+            sample_count: 16,
+            rtt_micros: Some(41_000),
+            loss_permille: Some(3),
+            pto_micros: Some(125_000),
+            congestion_window_bytes: Some(96 * 1_048_576),
+            in_flight_bytes: Some(32 * 1_048_576),
+            send_buffer_queued_bytes: Some(2 * 1_048_576),
+            receive_buffer_queued_bytes: Some(1_048_576),
+            disk_read_lag_micros: Some(10_000),
+            disk_write_lag_micros: Some(12_000),
+            encode_backlog_symbols: Some(128),
+            decode_backlog_symbols: Some(64),
+            repair_roi_permille: Some(800),
+            relay_cost_micros_per_mib: Some(250_000),
+            migration_events: Some(1),
+        };
+
+        let report = AtpAutotuneTelemetryReport::from_telemetry(&telemetry);
+
+        assert_eq!(report.samples.len(), ATP_AUTOTUNE_METRIC_NAMES.len());
+        assert_eq!(
+            report.samples[0],
+            AtpAutotuneMetricSample::new(AtpAutotuneMetric::RttMicros, 41_000)
+        );
+        assert_eq!(
+            report.samples[13],
+            AtpAutotuneMetricSample::new(AtpAutotuneMetric::MigrationEvents, 1)
+        );
+        assert_eq!(report.into_telemetry()?, telemetry);
+        Ok(())
+    }
+
+    #[test]
+    fn telemetry_window_zero_sample_count_roundtrip_uses_exported_sample_count()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut telemetry = AtpAutotuneTelemetry::new("trace-inferred", "workload-inferred");
+        telemetry.rtt_micros = Some(25_000);
+        telemetry.loss_permille = Some(1);
+
+        let roundtrip = telemetry.to_report().into_telemetry()?;
+
+        assert_eq!(roundtrip.trace_id, telemetry.trace_id);
+        assert_eq!(roundtrip.workload_id, telemetry.workload_id);
+        assert_eq!(roundtrip.sample_count, 2);
+        assert_eq!(roundtrip.rtt_micros, Some(25_000));
+        assert_eq!(roundtrip.loss_permille, Some(1));
+        Ok(())
     }
 
     #[test]
