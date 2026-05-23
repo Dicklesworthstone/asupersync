@@ -108,7 +108,9 @@ impl SchedulerAutotuner {
         self.observation_history.push(observation.clone());
         // Keep only recent observations to bound memory
         if self.observation_history.len() > 100 {
-            self.observation_history.drain(0..50);
+            // Remove oldest observations to maintain constant bound
+            let excess = self.observation_history.len() - 100;
+            self.observation_history.drain(0..excess);
         }
         self.last_observation = Some(observation);
     }
@@ -120,7 +122,10 @@ impl SchedulerAutotuner {
 
         // Require minimum observation window
         if let Some(last_adj) = self.last_adjustment_time {
-            let elapsed = last_obs.timestamp?.duration_since(last_adj);
+            let current_time = last_obs.timestamp?;
+            // Protect against clock skew/inconsistent timestamps
+            let elapsed = current_time.checked_duration_since(last_adj)
+                .unwrap_or_else(|| Duration::from_secs(0));
             if elapsed < Duration::from_millis(self.config.observation_window_ms) {
                 return None;
             }
@@ -332,7 +337,7 @@ fn average_confidence(confidence_factors: &[u8]) -> u8 {
         .iter()
         .map(|confidence| u16::from(*confidence))
         .sum();
-    let count = u16::try_from(confidence_factors.len()).unwrap_or(1).max(1);
+    let count = u16::try_from(confidence_factors.len()).unwrap_or(1);
     u8::try_from((sum / count).min(100)).unwrap_or(100)
 }
 
