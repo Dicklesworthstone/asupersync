@@ -4,7 +4,7 @@
 //! trace minimization and failure reproduction capabilities.
 
 use crate::lab::crashpack::{ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, TransferViolation};
-use crate::lab::oracle::OracleReport;
+use crate::lab::oracle::{OracleEntryReport, OracleReport};
 use crate::trace::{TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,7 +45,7 @@ impl AtpReplayCoordinator {
             minimized_trace_length: self.crashpack.trace_events.len(),
             replay_successful: original_violations == 0
                 || !failure_witness_counts(&self.crashpack.trace_events).is_empty(),
-            oracle_results: Vec::new(),
+            oracle_results: vec![self.replay_oracle_report()],
             minimization_stats: MinimizationStats::default(),
         };
 
@@ -155,6 +155,30 @@ impl AtpReplayCoordinator {
         }
 
         missing
+    }
+
+    fn replay_oracle_report(&self) -> OracleReport {
+        let entries = self
+            .crashpack
+            .oracle_results
+            .iter()
+            .map(|result| OracleEntryReport {
+                invariant: result.oracle_name.clone(),
+                passed: result.passed,
+                violation: summarize_transfer_violations(&result.violations),
+                stats: result.stats.clone(),
+            })
+            .collect::<Vec<_>>();
+        let passed = entries.iter().filter(|entry| entry.passed).count();
+        let total = entries.len();
+
+        OracleReport {
+            entries,
+            total,
+            passed,
+            failed: total.saturating_sub(passed),
+            check_time_nanos: 0,
+        }
     }
 }
 
@@ -529,6 +553,25 @@ fn violation_label(oracle_name: &str, violation: &TransferViolation) -> String {
     } else {
         format!("{}/{}", oracle_name, violation.violation_type)
     }
+}
+
+fn summarize_transfer_violations(violations: &[TransferViolation]) -> Option<String> {
+    if violations.is_empty() {
+        return None;
+    }
+
+    Some(
+        violations
+            .iter()
+            .map(|violation| {
+                format!(
+                    "{} [{:?}]: {}",
+                    violation.violation_type, violation.severity, violation.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 fn env_suffix(name: &str) -> String {

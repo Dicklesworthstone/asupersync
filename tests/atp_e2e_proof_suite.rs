@@ -229,6 +229,26 @@ fn test_atp_replay_accepts_violation_crashpack_with_trace_witness() {
     assert_eq!(result.original_violations, 1);
     assert!(result.replay_successful);
     assert_eq!(result.minimized_trace_length, 1);
+    assert_eq!(result.oracle_results.len(), 1);
+
+    let replay_report = &result.oracle_results[0];
+    assert_eq!(replay_report.total, 1);
+    assert_eq!(replay_report.passed, 0);
+    assert_eq!(replay_report.failed, 1);
+    assert_eq!(replay_report.check_time_nanos, 0);
+    let replay_entry = replay_report
+        .entry("proof_bundle_validity")
+        .expect("replay report preserves proof oracle entry");
+    assert!(!replay_entry.passed);
+    assert_eq!(replay_entry.stats.entities_tracked, 1);
+    assert_eq!(replay_entry.stats.events_recorded, 1);
+    assert!(
+        replay_entry
+            .violation
+            .as_deref()
+            .is_some_and(|text| text.contains("proof_bundle_validity failed")),
+        "replay report should preserve violation summary"
+    );
 }
 
 #[test]
