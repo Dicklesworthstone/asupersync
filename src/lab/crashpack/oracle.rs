@@ -100,6 +100,40 @@ impl AtpTransferOracle {
             }
         }
 
+        // Final exposure check
+        if self.enabled_checks.final_exposure {
+            let evidence = self.check_final_exposure(state);
+            let oracle_passed = matches!(
+                evidence.bayes_factor.strength,
+                EvidenceStrength::Against | EvidenceStrength::Negligible
+            );
+
+            evidence_ledger.record_oracle_result("final_exposure", evidence, None);
+            stats.events_recorded += 1;
+
+            if !oracle_passed {
+                stats.entities_tracked += 1;
+                passed = false;
+            }
+        }
+
+        // Cancellation drain check
+        if self.enabled_checks.cancellation_drain {
+            let evidence = self.check_cancellation_drain(state);
+            let oracle_passed = matches!(
+                evidence.bayes_factor.strength,
+                EvidenceStrength::Against | EvidenceStrength::Negligible
+            );
+
+            evidence_ledger.record_oracle_result("cancellation_drain", evidence, None);
+            stats.events_recorded += 1;
+
+            if !oracle_passed {
+                stats.entities_tracked += 1;
+                passed = false;
+            }
+        }
+
         // Obligation leak check
         if self.enabled_checks.obligation_leak {
             let evidence = self.check_obligation_leak(state);
@@ -315,6 +349,113 @@ impl AtpTransferOracle {
         }
     }
 
+    fn check_final_exposure(&self, state: &AtpTransferState) -> EvidenceEntry {
+        let exposures = state.unverified_final_exposures;
+
+        if exposures == 0 {
+            EvidenceEntry {
+                invariant: "final_exposure".to_string(),
+                passed: true,
+                bayes_factor: BayesFactor {
+                    log10_bf: -1.4,
+                    hypothesis: "unverified final exposure".to_string(),
+                    strength: EvidenceStrength::from_log10_bf(-1.4),
+                },
+                log_likelihoods: LogLikelihoodContributions {
+                    structural: -0.7,
+                    detection: -0.7,
+                    total: -1.4,
+                },
+                evidence_lines: vec![EvidenceLine {
+                    equation:
+                        "P(no_exposure | verified_publish) / P(no_exposure | premature_publish)"
+                            .to_string(),
+                    substitution: "0.97 / 0.03 = 32.3".to_string(),
+                    intuition: "Strong evidence that final exposure waited for verification"
+                        .to_string(),
+                }],
+            }
+        } else {
+            let log_bf = (exposures as f64).log10() + 1.7;
+            EvidenceEntry {
+                invariant: "final_exposure".to_string(),
+                passed: false,
+                bayes_factor: BayesFactor {
+                    log10_bf: log_bf,
+                    hypothesis: "unverified final exposure".to_string(),
+                    strength: EvidenceStrength::from_log10_bf(log_bf),
+                },
+                log_likelihoods: LogLikelihoodContributions {
+                    structural: log_bf / 2.0,
+                    detection: log_bf / 2.0,
+                    total: log_bf,
+                },
+                evidence_lines: vec![EvidenceLine {
+                    equation: "P(exposure | verified_publish) / P(exposure | premature_publish)"
+                        .to_string(),
+                    substitution: format!("0.005 / 0.9 = {:.3}", 10.0_f64.powf(log_bf)),
+                    intuition: format!(
+                        "Strong evidence of unverified final exposure: {exposures} exposure(s)"
+                    ),
+                }],
+            }
+        }
+    }
+
+    fn check_cancellation_drain(&self, state: &AtpTransferState) -> EvidenceEntry {
+        let pending_drains = state.pending_cancellation_drains;
+
+        if pending_drains == 0 {
+            EvidenceEntry {
+                invariant: "cancellation_drain".to_string(),
+                passed: true,
+                bayes_factor: BayesFactor {
+                    log10_bf: -1.3,
+                    hypothesis: "undrained cancellation".to_string(),
+                    strength: EvidenceStrength::from_log10_bf(-1.3),
+                },
+                log_likelihoods: LogLikelihoodContributions {
+                    structural: -0.6,
+                    detection: -0.7,
+                    total: -1.3,
+                },
+                evidence_lines: vec![EvidenceLine {
+                    equation:
+                        "P(no_pending_drains | cancel_correct) / P(no_pending_drains | cancel_leak)"
+                            .to_string(),
+                    substitution: "0.96 / 0.04 = 24".to_string(),
+                    intuition: "Strong evidence that cancellation drained before replay close"
+                        .to_string(),
+                }],
+            }
+        } else {
+            let log_bf = (pending_drains as f64).log10() + 1.5;
+            EvidenceEntry {
+                invariant: "cancellation_drain".to_string(),
+                passed: false,
+                bayes_factor: BayesFactor {
+                    log10_bf: log_bf,
+                    hypothesis: "undrained cancellation".to_string(),
+                    strength: EvidenceStrength::from_log10_bf(log_bf),
+                },
+                log_likelihoods: LogLikelihoodContributions {
+                    structural: log_bf / 2.0,
+                    detection: log_bf / 2.0,
+                    total: log_bf,
+                },
+                evidence_lines: vec![EvidenceLine {
+                    equation:
+                        "P(pending_drains | cancel_correct) / P(pending_drains | cancel_leak)"
+                            .to_string(),
+                    substitution: format!("0.02 / 0.85 = {:.3}", 10.0_f64.powf(log_bf)),
+                    intuition: format!(
+                        "Strong evidence of undrained cancellation: {pending_drains} pending drain(s)"
+                    ),
+                }],
+            }
+        }
+    }
+
     fn check_obligation_leak(&self, state: &AtpTransferState) -> EvidenceEntry {
         let has_leaks = state.leaked_obligations > 0;
 
@@ -467,6 +608,8 @@ pub struct AtpOracleChecks {
     pub manifest_integrity: bool,
     pub journal_consistency: bool,
     pub quiescence: bool,
+    pub final_exposure: bool,
+    pub cancellation_drain: bool,
     pub obligation_leak: bool,
     pub path_consistency: bool,
     pub proof_bundle_validity: bool,
@@ -479,6 +622,8 @@ impl AtpOracleChecks {
             manifest_integrity: true,
             journal_consistency: true,
             quiescence: true,
+            final_exposure: true,
+            cancellation_drain: true,
             obligation_leak: true,
             path_consistency: true,
             proof_bundle_validity: true,
@@ -491,6 +636,8 @@ impl AtpOracleChecks {
             manifest_integrity: true,
             journal_consistency: true,
             quiescence: true,
+            final_exposure: false,
+            cancellation_drain: false,
             obligation_leak: false,
             path_consistency: false,
             proof_bundle_validity: false,
@@ -510,6 +657,12 @@ pub struct AtpTransferState {
 
     // Quiescence
     pub pending_operations: u32,
+
+    // Final exposure
+    pub unverified_final_exposures: u32,
+
+    // Cancellation drain
+    pub pending_cancellation_drains: u32,
 
     // Obligation tracking
     pub leaked_obligations: u32,
@@ -531,6 +684,8 @@ impl AtpTransferState {
             expected_manifest_hash: String::new(),
             journal_gaps: 0,
             pending_operations: 0,
+            unverified_final_exposures: 0,
+            pending_cancellation_drains: 0,
             leaked_obligations: 0,
             path_outcomes_consistent: true,
             proof_bundle_valid: true,
@@ -545,6 +700,8 @@ impl AtpTransferState {
             expected_manifest_hash: "clean_hash_123".to_string(),
             journal_gaps: 0,
             pending_operations: 0,
+            unverified_final_exposures: 0,
+            pending_cancellation_drains: 0,
             leaked_obligations: 0,
             path_outcomes_consistent: true,
             proof_bundle_valid: true,
@@ -597,10 +754,10 @@ mod tests {
             result.passed,
             "clean transfer should not be classified as a violation"
         );
-        assert_eq!(result.stats.events_recorded, 6);
+        assert_eq!(result.stats.events_recorded, 8);
         assert_eq!(result.stats.entities_tracked, 0);
-        assert_eq!(summary.total, 6);
-        assert_eq!(summary.against, 6);
+        assert_eq!(summary.total, 8);
+        assert_eq!(summary.against, 8);
         assert_eq!(summary.violation_count(), 0);
         assert!(!result.has_strong_violations());
     }
@@ -622,6 +779,8 @@ mod tests {
         let mut state = AtpTransferState::clean();
         state.manifest_hash = "tampered".to_string();
         state.journal_gaps = 2;
+        state.unverified_final_exposures = 1;
+        state.pending_cancellation_drains = 2;
         state.leaked_obligations = 1;
         state.proof_bundle_valid = false;
 
@@ -629,11 +788,52 @@ mod tests {
         let summary = result.evidence_ledger.evidence_summary();
 
         assert!(!result.passed);
-        assert_eq!(result.stats.events_recorded, 6);
-        assert_eq!(result.stats.entities_tracked, 4);
+        assert_eq!(result.stats.events_recorded, 8);
+        assert_eq!(result.stats.entities_tracked, 6);
         assert_eq!(summary.against, 2);
-        assert_eq!(summary.violation_count(), 4);
+        assert_eq!(summary.violation_count(), 6);
         assert!(result.has_strong_violations());
+    }
+
+    #[test]
+    fn final_exposure_and_cancellation_drain_have_dedicated_evidence_entries() {
+        let mut state = AtpTransferState::clean();
+        state.unverified_final_exposures = 2;
+        state.pending_cancellation_drains = 3;
+
+        let result = AtpTransferOracle::new("publish_and_cancel").validate(&state);
+
+        assert!(!result.passed);
+        assert_eq!(result.stats.events_recorded, 8);
+        assert_eq!(result.stats.entities_tracked, 2);
+
+        let final_exposure = result
+            .evidence_ledger
+            .entries
+            .iter()
+            .find(|entry| entry.oracle_name == "final_exposure")
+            .expect("final exposure entry is recorded");
+        assert!(!final_exposure.evidence.passed);
+        assert_eq!(final_exposure.evidence.invariant, "final_exposure");
+        assert!(
+            final_exposure.evidence.evidence_lines[0]
+                .intuition
+                .contains("2 exposure(s)")
+        );
+
+        let cancellation_drain = result
+            .evidence_ledger
+            .entries
+            .iter()
+            .find(|entry| entry.oracle_name == "cancellation_drain")
+            .expect("cancellation drain entry is recorded");
+        assert!(!cancellation_drain.evidence.passed);
+        assert_eq!(cancellation_drain.evidence.invariant, "cancellation_drain");
+        assert!(
+            cancellation_drain.evidence.evidence_lines[0]
+                .intuition
+                .contains("3 pending drain(s)")
+        );
     }
 
     #[test]

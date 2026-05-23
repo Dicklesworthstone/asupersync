@@ -5,8 +5,9 @@
 mod atp;
 
 use asupersync::lab::crashpack::{
-    AtpEvidenceLedger, AtpReplayCoordinator, CrashpackBuilder, TraceMinimizer,
-    TraceMinimizerConfig, TransferOracleResult, TransferViolation, ViolationSeverity,
+    AtpEvidenceLedger, AtpReplayCoordinator, AtpTransferOracle, AtpTransferState, CrashpackBuilder,
+    TraceMinimizer, TraceMinimizerConfig, TransferOracleResult, TransferViolation,
+    ViolationSeverity,
 };
 use asupersync::lab::oracle::OracleStats;
 use asupersync::lab::oracle::evidence::{
@@ -717,6 +718,37 @@ fn test_atp_evidence_ledger_records_deterministic_artifact_metadata() {
         roundtrip.metadata.get("transfer_id"),
         Some(&"tx-ledger".to_string())
     );
+}
+
+#[test]
+fn test_atp_transfer_oracle_records_final_exposure_and_cancellation_drain_violations() {
+    let mut state = AtpTransferState::clean();
+    state.unverified_final_exposures = 1;
+    state.pending_cancellation_drains = 2;
+
+    let result = AtpTransferOracle::new("atp_l2_oracle_surface").validate(&state);
+
+    assert!(!result.passed);
+    assert_eq!(result.stats.events_recorded, 8);
+    assert_eq!(result.stats.entities_tracked, 2);
+
+    let final_exposure = result
+        .evidence_ledger
+        .entries
+        .iter()
+        .find(|entry| entry.oracle_name == "final_exposure")
+        .expect("final exposure oracle is recorded");
+    assert!(!final_exposure.evidence.passed);
+    assert_eq!(final_exposure.evidence.invariant, "final_exposure");
+
+    let cancellation_drain = result
+        .evidence_ledger
+        .entries
+        .iter()
+        .find(|entry| entry.oracle_name == "cancellation_drain")
+        .expect("cancellation drain oracle is recorded");
+    assert!(!cancellation_drain.evidence.passed);
+    assert_eq!(cancellation_drain.evidence.invariant, "cancellation_drain");
 }
 
 #[test]
