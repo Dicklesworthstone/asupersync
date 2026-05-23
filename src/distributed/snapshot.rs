@@ -381,23 +381,27 @@ impl RegionSnapshot {
     /// Returns an estimated serialized size.
     #[must_use]
     pub fn size_estimate(&self) -> usize {
-        let header = 5; // magic + version
-        let region_id = 8;
-        let state = 1;
-        let timestamp = 8;
-        let sequence = 8;
-        let provenance = 16;
+        let header = 5_usize; // magic + version
+        let region_id = 8_usize;
+        let state = 1_usize;
+        let timestamp = 8_usize;
+        let sequence = 8_usize;
+        let provenance = 16_usize;
         let tasks = 4_usize.saturating_add(self.tasks.len().saturating_mul(10)); // count + per-task (8+1+1)
         let children = 4_usize.saturating_add(self.children.len().saturating_mul(8));
-        let finalizer = 4;
-        let budget = 1
+        let finalizer = 4_usize;
+        let budget = 1_usize
             + self.budget.deadline_nanos.map_or(0, |_| 8)
             + 1
             + self.budget.polls_remaining.map_or(0, |_| 4)
             + 1
             + self.budget.cost_remaining.map_or(0, |_| 8);
-        let cancel = 1_usize.saturating_add(self.cancel_reason.as_ref().map_or(0, |s| 4_usize.saturating_add(s.len())));
-        let parent = 1 + self.parent.map_or(0, |_| 8);
+        let cancel = 1_usize.saturating_add(
+            self.cancel_reason
+                .as_ref()
+                .map_or(0, |s| 4_usize.saturating_add(s.len())),
+        );
+        let parent = 1_usize + self.parent.map_or(0, |_| 8);
         let metadata = 4_usize.saturating_add(self.metadata.len());
 
         header
