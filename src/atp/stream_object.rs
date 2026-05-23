@@ -368,6 +368,43 @@ impl StreamManifest {
             .unwrap_or(0)
     }
 
+    /// Get the contiguous verified prefix end offset.
+    #[must_use]
+    pub fn verified_prefix_end(&self) -> u64 {
+        self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly)
+    }
+
+    /// Get the contiguous prefix end offset exposed under a consumption policy.
+    #[must_use]
+    pub fn consumable_prefix_end(&self, policy: ConsumptionPolicy) -> u64 {
+        let mut expected_start = 0;
+
+        for epoch in &self.epochs {
+            if epoch.byte_range.start != expected_start {
+                break;
+            }
+
+            let consumable = matches!(
+                (policy, epoch.state),
+                (
+                    ConsumptionPolicy::VerifiedOnly,
+                    EpochState::Verified | EpochState::Final
+                ) | (
+                    ConsumptionPolicy::AllowProvisional,
+                    EpochState::Verified | EpochState::Final | EpochState::Provisional,
+                )
+            );
+
+            if !consumable {
+                break;
+            }
+
+            expected_start = epoch.byte_range.end;
+        }
+
+        expected_start
+    }
+
     /// Check if the stream is complete.
     #[must_use]
     pub const fn is_complete(&self) -> bool {
@@ -458,63 +495,44 @@ impl PrefixConsumer {
         }
     }
 
+    fn available_prefix_end(&self) -> u64 {
+        self.manifest.consumable_prefix_end(self.safety_policy)
+    }
+
     /// Check if data is available for consumption at the current offset.
     #[must_use]
     pub fn data_available(&self) -> bool {
-        match self.safety_policy {
-            ConsumptionPolicy::VerifiedOnly => {
-                self.consumption_offset < self.manifest.latest_verified_offset()
-            }
-            ConsumptionPolicy::AllowProvisional => {
-                self.consumption_offset
-                    < (self.manifest.total_verified_bytes + self.manifest.total_provisional_bytes)
-            }
-        }
+        self.consumption_offset < self.available_prefix_end()
     }
 
     /// Get the next safe range for consumption.
     #[must_use]
     pub fn next_safe_range(&self) -> Option<ByteRange> {
-        match self.safety_policy {
-            ConsumptionPolicy::VerifiedOnly => {
-                let max_offset = self.manifest.latest_verified_offset();
-                if self.consumption_offset < max_offset {
-                    Some(ByteRange::new(self.consumption_offset, max_offset))
-                } else {
-                    None
-                }
-            }
-            ConsumptionPolicy::AllowProvisional => {
-                let max_offset =
-                    self.manifest.total_verified_bytes + self.manifest.total_provisional_bytes;
-                if self.consumption_offset < max_offset {
-                    Some(ByteRange::new(self.consumption_offset, max_offset))
-                } else {
-                    None
-                }
-            }
+        let max_offset = self.available_prefix_end();
+        if self.consumption_offset < max_offset {
+            Some(ByteRange::new(self.consumption_offset, max_offset))
+        } else {
+            None
         }
     }
 
     /// Advance consumption offset after processing data.
     pub fn advance_consumption(&mut self, bytes_consumed: u64) {
-        self.consumption_offset += bytes_consumed;
+        self.consumption_offset = self
+            .consumption_offset
+            .saturating_add(bytes_consumed)
+            .min(self.available_prefix_end());
     }
 
     /// Get consumption progress as a percentage.
     #[must_use]
     pub fn consumption_progress(&self) -> f64 {
-        let total_available = match self.safety_policy {
-            ConsumptionPolicy::VerifiedOnly => self.manifest.total_verified_bytes,
-            ConsumptionPolicy::AllowProvisional => {
-                self.manifest.total_verified_bytes + self.manifest.total_provisional_bytes
-            }
-        };
+        let total_available = self.available_prefix_end();
 
         if total_available == 0 {
             0.0
         } else {
-            (self.consumption_offset as f64 / total_available as f64) * 100.0
+            (self.consumption_offset.min(total_available) as f64 / total_available as f64) * 100.0
         }
     }
 }
@@ -760,6 +778,109 @@ mod tests {
         let consumer_prov = PrefixConsumer::new(manifest, ConsumptionPolicy::AllowProvisional);
         let safe_range_prov = consumer_prov.next_safe_range().unwrap();
         assert_eq!(safe_range_prov, ByteRange::new(0, 2048));
+    }
+
+    #[test]
+    fn verified_only_prefix_stops_before_provisional_gap() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Provisional,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                3,
+                object_id,
+                ByteRange::new(200, 300),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+
+        assert_eq!(manifest.latest_verified_offset(), 300);
+        assert_eq!(manifest.verified_prefix_end(), 100);
+
+        let mut consumer = PrefixConsumer::new(manifest, ConsumptionPolicy::VerifiedOnly);
+        assert_eq!(consumer.next_safe_range(), Some(ByteRange::new(0, 100)));
+
+        consumer.advance_consumption(100);
+        assert!(!consumer.data_available());
+        assert_eq!(consumer.next_safe_range(), None);
+    }
+
+    #[test]
+    fn provisional_policy_prefix_stops_before_invalidated_gap() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id.clone(),
+                ByteRange::new(0, 100),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                2,
+                object_id.clone(),
+                ByteRange::new(100, 200),
+                EpochState::Invalidated,
+                vec![],
+            ))
+            .unwrap();
+        manifest
+            .add_epoch(StreamEpoch::new(
+                3,
+                object_id,
+                ByteRange::new(200, 300),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+
+        let consumer = PrefixConsumer::new(manifest, ConsumptionPolicy::AllowProvisional);
+        assert_eq!(consumer.next_safe_range(), Some(ByteRange::new(0, 100)));
+    }
+
+    #[test]
+    fn prefix_consumer_advance_caps_at_available_prefix() {
+        let object_id = test_object_id();
+        let mut manifest = StreamManifest::new(object_id.clone());
+
+        manifest
+            .add_epoch(StreamEpoch::new(
+                1,
+                object_id,
+                ByteRange::new(0, 1024),
+                EpochState::Verified,
+                vec![],
+            ))
+            .unwrap();
+
+        let mut consumer = PrefixConsumer::new(manifest, ConsumptionPolicy::VerifiedOnly);
+        consumer.advance_consumption(2048);
+
+        assert_eq!(consumer.consumption_progress(), 100.0);
+        assert_eq!(consumer.next_safe_range(), None);
     }
 
     #[test]
