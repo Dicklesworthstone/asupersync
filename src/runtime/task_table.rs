@@ -1598,3 +1598,9 @@ mod tests {
         assert_eq!(table.live_task_count(), 1);
     }
 }
+
+#[cfg(test)]
+mod metamorphic_tests {
+    #![allow(dead_code, unused_imports)]
+    include!("task_table_metamorphic_tests.rs");
+}
