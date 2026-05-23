@@ -21,6 +21,10 @@ use asupersync::atp::identity::directory::{
 use asupersync::atp::sdk::StreamEarlyUsabilityReport;
 use asupersync::atp::stream_object::ByteRange;
 use asupersync::atp::sync::DirectoryEarlyUsabilityReport;
+use asupersync::atp::{
+    ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotunePolicy, AtpAutotuneSettings,
+    AtpAutotuneTelemetry,
+};
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
     AdvancedRemediationDelta, AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
@@ -162,6 +166,8 @@ struct AtpArgs {
 enum AtpCommand {
     /// ATP diagnostics
     Doctor(AtpDoctorArgs),
+    /// Explain current ATP autotune status from a telemetry window
+    Status(AtpStatusArgs),
     /// Peer directory operations
     Directory(AtpDirectoryArgs),
     /// Render ATP usable-early report artifacts
@@ -188,6 +194,33 @@ struct AtpEarlyUsabilityArgs {
     /// JSON report emitted by SDK, proof, or transfer artifact code.
     #[arg(long, value_name = "PATH")]
     report: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct AtpStatusArgs {
+    /// ATP autotune telemetry JSON window.
+    #[arg(long, value_name = "PATH")]
+    telemetry: PathBuf,
+
+    /// Include bottleneck explanations in human output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    explain: bool,
+
+    /// Current in-flight byte limit before the next autotune decision.
+    #[arg(long = "current-in-flight-bytes", default_value_t = 8_388_608)]
+    in_flight_bytes: u64,
+
+    /// Current concurrent stream count before the next autotune decision.
+    #[arg(long = "current-stream-count", default_value_t = 4)]
+    stream_count: u16,
+
+    /// Current target chunk size before the next autotune decision.
+    #[arg(long = "current-chunk-size-bytes", default_value_t = 262_144)]
+    chunk_size_bytes: u32,
+
+    /// Current repair-symbol rate before the next autotune decision.
+    #[arg(long = "current-repair-symbols-per-second", default_value_t = 256)]
+    repair_symbols_per_second: u32,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1024,6 +1057,7 @@ fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
 fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         AtpCommand::Doctor(args) => atp_doctor(&args, output),
+        AtpCommand::Status(args) => atp_status(&args, output),
         AtpCommand::Directory(args) => atp_directory(&args, output),
         AtpCommand::EarlyUsability(args) => atp_early_usability(&args, output),
         AtpCommand::Verify(args) => atp_verify(&args, output),
@@ -1047,6 +1081,58 @@ fn atp_doctor(args: &AtpDoctorArgs, output: &mut Output) -> Result<(), CliError>
         .write(&payload)
         .map_err(output_write_error("ATP platform capability report"))?;
     Ok(())
+}
+
+fn atp_status(args: &AtpStatusArgs, output: &mut Output) -> Result<(), CliError> {
+    let raw_telemetry = fs::read_to_string(&args.telemetry)
+        .map_err(atp_status_io_error)
+        .map_err(|err| err.context("telemetry", args.telemetry.display().to_string()))?;
+    let telemetry: AtpAutotuneTelemetry = serde_json::from_str(&raw_telemetry)
+        .map_err(atp_status_parse_error)
+        .map_err(|err| err.context("telemetry", args.telemetry.display().to_string()))?;
+
+    let current = AtpAutotuneSettings::new(
+        args.in_flight_bytes,
+        args.stream_count,
+        args.chunk_size_bytes,
+        args.repair_symbols_per_second,
+    );
+    let decision = AtpAutotunePolicy::default().decide(current, &telemetry);
+    let payload = AtpStatusOutput {
+        telemetry_path: args.telemetry.display().to_string(),
+        trace_id: telemetry.trace_id,
+        workload_id: telemetry.workload_id,
+        sample_count: telemetry.sample_count,
+        explain: args.explain,
+        metric_names: ATP_AUTOTUNE_METRIC_NAMES
+            .iter()
+            .map(|metric| metric.as_str())
+            .collect(),
+        decision,
+    };
+
+    output
+        .write(&payload)
+        .map_err(output_write_error("ATP autotune status"))?;
+    Ok(())
+}
+
+fn atp_status_io_error(err: impl std::error::Error) -> CliError {
+    CliError::new(
+        "atp_status_telemetry_read_error",
+        "Failed to read ATP status telemetry",
+    )
+    .detail(err.to_string())
+    .exit_code(ExitCode::RUNTIME_ERROR)
+}
+
+fn atp_status_parse_error(err: impl std::error::Error) -> CliError {
+    CliError::new(
+        "atp_status_telemetry_parse_error",
+        "Failed to parse ATP status telemetry",
+    )
+    .detail(err.to_string())
+    .exit_code(ExitCode::USER_ERROR)
 }
 
 fn atp_directory(args: &AtpDirectoryArgs, output: &mut Output) -> Result<(), CliError> {
@@ -1593,6 +1679,53 @@ impl<T: serde::Serialize> Outputtable for JsonOutputValue<T> {
 enum AtpEarlyUsabilityReportInput {
     Stream(StreamEarlyUsabilityReport),
     Directory(DirectoryEarlyUsabilityReport),
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct AtpStatusOutput {
+    telemetry_path: String,
+    trace_id: String,
+    workload_id: String,
+    sample_count: u32,
+    explain: bool,
+    metric_names: Vec<&'static str>,
+    decision: AtpAutotuneDecision,
+}
+
+impl Outputtable for AtpStatusOutput {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            "ATP Status".to_string(),
+            format!("Telemetry: {}", self.telemetry_path),
+            format!("Trace ID: {}", self.trace_id),
+            format!("Workload ID: {}", self.workload_id),
+            format!("Samples: {}", self.sample_count),
+            format!("Reason: {}", self.decision.reason_code),
+            format!("Fail closed: {}", self.decision.fail_closed),
+            format!(
+                "Next settings: in_flight_bytes={}, stream_count={}, chunk_size_bytes={}, repair_symbols_per_second={}",
+                self.decision.settings.in_flight_bytes,
+                self.decision.settings.stream_count,
+                self.decision.settings.chunk_size_bytes,
+                self.decision.settings.repair_symbols_per_second
+            ),
+            format!("Bottlenecks: {}", self.decision.bottlenecks.len()),
+        ];
+
+        if self.explain {
+            for signal in &self.decision.bottlenecks {
+                let metric = signal
+                    .metric
+                    .map_or("none", asupersync::atp::AtpAutotuneMetric::as_str);
+                lines.push(format!(
+                    "- {:?}: metric={}, observed={}, threshold={}",
+                    signal.kind, metric, signal.observed, signal.threshold
+                ));
+            }
+        }
+
+        lines.join("\n")
+    }
 }
 
 #[derive(Debug, serde::Serialize, PartialEq, Eq)]
@@ -8886,6 +9019,89 @@ mod tests {
             args.report.as_path(),
             Path::new("artifacts/early-usability.json")
         );
+    }
+
+    #[test]
+    fn atp_status_args_parse_explain_telemetry_and_current_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "atp",
+            "status",
+            "--telemetry",
+            "artifacts/atp-telemetry.json",
+            "--explain",
+            "--current-in-flight-bytes",
+            "4096",
+            "--current-stream-count",
+            "2",
+            "--current-chunk-size-bytes",
+            "1024",
+            "--current-repair-symbols-per-second",
+            "8",
+        ])?;
+
+        let args = match cli.command {
+            Command::Atp(AtpArgs {
+                command: AtpCommand::Status(args),
+            }) => args,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "expected atp status command",
+                )
+                .into());
+            }
+        };
+
+        assert_eq!(
+            args.telemetry.as_path(),
+            Path::new("artifacts/atp-telemetry.json")
+        );
+        assert!(args.explain);
+        assert_eq!(args.in_flight_bytes, 4096);
+        assert_eq!(args.stream_count, 2);
+        assert_eq!(args.chunk_size_bytes, 1024);
+        assert_eq!(args.repair_symbols_per_second, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn atp_status_explain_reports_bottlenecks_and_next_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+        let mut telemetry =
+            AtpAutotuneTelemetry::new("trace-status", "workload-status").with_sample_count(16);
+        telemetry.loss_permille = Some(100);
+        telemetry.send_buffer_queued_bytes = Some(32 * 1_048_576);
+        fs::write(file.path(), serde_json::to_vec(&telemetry)?)?;
+
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        let defaults = AtpAutotuneSettings::default();
+        atp_status(
+            &AtpStatusArgs {
+                telemetry: file.path().to_path_buf(),
+                explain: true,
+                in_flight_bytes: defaults.in_flight_bytes,
+                stream_count: defaults.stream_count,
+                chunk_size_bytes: defaults.chunk_size_bytes,
+                repair_symbols_per_second: defaults.repair_symbols_per_second,
+            },
+            &mut output,
+        )?;
+
+        let rendered = capture.contents();
+        assert!(rendered.contains("ATP Status"));
+        assert!(rendered.contains("Trace ID: trace-status"));
+        assert!(rendered.contains("Workload ID: workload-status"));
+        assert!(rendered.contains("Reason: hold_or_backoff_on_pressure"));
+        assert!(rendered.contains("Fail closed: true"));
+        assert!(rendered.contains("NetworkLoss"));
+        assert!(rendered.contains("SendBufferPressure"));
+        assert!(rendered.contains("atp.autotune.loss_permille"));
+        assert!(rendered.contains("Next settings:"));
+        Ok(())
     }
 
     #[test]

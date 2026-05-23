@@ -7,6 +7,7 @@
 //! before endpoint, CLI, daemon, or relay code depends on it.
 
 pub mod actor;
+pub mod autotune;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
 pub mod grant;
@@ -32,6 +33,11 @@ pub mod verifier;
 pub mod verify;
 pub mod writer;
 
+pub use autotune::{
+    ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotuneLimits, AtpAutotuneMetric,
+    AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry, AtpBottleneckKind,
+    AtpBottleneckSignal,
+};
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};
 pub use inbox::{

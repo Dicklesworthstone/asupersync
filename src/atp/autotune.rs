@@ -1,0 +1,910 @@
+//! Conservative ATP transfer autotuning model.
+//!
+//! The policy in this module is intentionally deterministic and side-effect
+//! free. Runtime, CLI, and lab harnesses can feed it observed path, disk, CPU,
+//! and repair telemetry, then apply the returned settings through their own
+//! capability-checked control paths.
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Stable metric names emitted by ATP pressure/autotune telemetry.
+///
+/// Keep these names stable; downstream proof bundles and operator diagnostics
+/// use them as durable keys.
+pub const ATP_AUTOTUNE_METRIC_NAMES: [AtpAutotuneMetric; 14] = [
+    AtpAutotuneMetric::RttMicros,
+    AtpAutotuneMetric::LossPermille,
+    AtpAutotuneMetric::PtoMicros,
+    AtpAutotuneMetric::CongestionWindowBytes,
+    AtpAutotuneMetric::InFlightBytes,
+    AtpAutotuneMetric::SendBufferQueuedBytes,
+    AtpAutotuneMetric::ReceiveBufferQueuedBytes,
+    AtpAutotuneMetric::DiskReadLagMicros,
+    AtpAutotuneMetric::DiskWriteLagMicros,
+    AtpAutotuneMetric::EncodeBacklogSymbols,
+    AtpAutotuneMetric::DecodeBacklogSymbols,
+    AtpAutotuneMetric::RepairRoiPermille,
+    AtpAutotuneMetric::RelayCostMicrosPerMiB,
+    AtpAutotuneMetric::MigrationEvents,
+];
+
+/// Metric keys accepted by [`AtpAutotuneTelemetry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AtpAutotuneMetric {
+    /// Smoothed round-trip time in microseconds.
+    RttMicros,
+    /// Observed loss rate in packets per thousand.
+    LossPermille,
+    /// Probe timeout in microseconds.
+    PtoMicros,
+    /// Congestion window in bytes.
+    CongestionWindowBytes,
+    /// Bytes currently in flight.
+    InFlightBytes,
+    /// Bytes queued in the send buffer.
+    SendBufferQueuedBytes,
+    /// Bytes queued in the receive buffer.
+    ReceiveBufferQueuedBytes,
+    /// Disk read lag in microseconds.
+    DiskReadLagMicros,
+    /// Disk write lag in microseconds.
+    DiskWriteLagMicros,
+    /// Pending encoder work in symbols.
+    EncodeBacklogSymbols,
+    /// Pending decoder work in symbols.
+    DecodeBacklogSymbols,
+    /// Repair benefit in useful repair symbols per thousand sent repair symbols.
+    RepairRoiPermille,
+    /// Relay cost in microseconds per MiB transferred.
+    RelayCostMicrosPerMiB,
+    /// Number of path migration events in the current decision window.
+    MigrationEvents,
+}
+
+impl AtpAutotuneMetric {
+    /// Return the stable metric name used in logs and proof artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RttMicros => "atp.autotune.rtt_micros",
+            Self::LossPermille => "atp.autotune.loss_permille",
+            Self::PtoMicros => "atp.autotune.pto_micros",
+            Self::CongestionWindowBytes => "atp.autotune.congestion_window_bytes",
+            Self::InFlightBytes => "atp.autotune.in_flight_bytes",
+            Self::SendBufferQueuedBytes => "atp.autotune.send_buffer_queued_bytes",
+            Self::ReceiveBufferQueuedBytes => "atp.autotune.receive_buffer_queued_bytes",
+            Self::DiskReadLagMicros => "atp.autotune.disk_read_lag_micros",
+            Self::DiskWriteLagMicros => "atp.autotune.disk_write_lag_micros",
+            Self::EncodeBacklogSymbols => "atp.autotune.encode_backlog_symbols",
+            Self::DecodeBacklogSymbols => "atp.autotune.decode_backlog_symbols",
+            Self::RepairRoiPermille => "atp.autotune.repair_roi_permille",
+            Self::RelayCostMicrosPerMiB => "atp.autotune.relay_cost_micros_per_mib",
+            Self::MigrationEvents => "atp.autotune.migration_events",
+        }
+    }
+
+    /// Parse a stable metric name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "atp.autotune.rtt_micros" => Some(Self::RttMicros),
+            "atp.autotune.loss_permille" => Some(Self::LossPermille),
+            "atp.autotune.pto_micros" => Some(Self::PtoMicros),
+            "atp.autotune.congestion_window_bytes" => Some(Self::CongestionWindowBytes),
+            "atp.autotune.in_flight_bytes" => Some(Self::InFlightBytes),
+            "atp.autotune.send_buffer_queued_bytes" => Some(Self::SendBufferQueuedBytes),
+            "atp.autotune.receive_buffer_queued_bytes" => Some(Self::ReceiveBufferQueuedBytes),
+            "atp.autotune.disk_read_lag_micros" => Some(Self::DiskReadLagMicros),
+            "atp.autotune.disk_write_lag_micros" => Some(Self::DiskWriteLagMicros),
+            "atp.autotune.encode_backlog_symbols" => Some(Self::EncodeBacklogSymbols),
+            "atp.autotune.decode_backlog_symbols" => Some(Self::DecodeBacklogSymbols),
+            "atp.autotune.repair_roi_permille" => Some(Self::RepairRoiPermille),
+            "atp.autotune.relay_cost_micros_per_mib" => Some(Self::RelayCostMicrosPerMiB),
+            "atp.autotune.migration_events" => Some(Self::MigrationEvents),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for AtpAutotuneMetric {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AtpAutotuneMetric {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Self::from_name(&name).ok_or_else(|| {
+            serde::de::Error::unknown_variant(
+                &name,
+                &[
+                    "atp.autotune.rtt_micros",
+                    "atp.autotune.loss_permille",
+                    "atp.autotune.pto_micros",
+                    "atp.autotune.congestion_window_bytes",
+                    "atp.autotune.in_flight_bytes",
+                    "atp.autotune.send_buffer_queued_bytes",
+                    "atp.autotune.receive_buffer_queued_bytes",
+                    "atp.autotune.disk_read_lag_micros",
+                    "atp.autotune.disk_write_lag_micros",
+                    "atp.autotune.encode_backlog_symbols",
+                    "atp.autotune.decode_backlog_symbols",
+                    "atp.autotune.repair_roi_permille",
+                    "atp.autotune.relay_cost_micros_per_mib",
+                    "atp.autotune.migration_events",
+                ],
+            )
+        })
+    }
+}
+
+/// Current transfer knobs that the autotuner may adjust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneSettings {
+    /// Maximum bytes allowed in flight for this transfer.
+    pub in_flight_bytes: u64,
+    /// Maximum concurrent streams for this transfer.
+    pub stream_count: u16,
+    /// Target chunk size in bytes.
+    pub chunk_size_bytes: u32,
+    /// Repair symbols allowed per second.
+    pub repair_symbols_per_second: u32,
+}
+
+impl AtpAutotuneSettings {
+    /// Construct settings with explicit nonzero values.
+    #[must_use]
+    pub const fn new(
+        in_flight_bytes: u64,
+        stream_count: u16,
+        chunk_size_bytes: u32,
+        repair_symbols_per_second: u32,
+    ) -> Self {
+        Self {
+            in_flight_bytes,
+            stream_count,
+            chunk_size_bytes,
+            repair_symbols_per_second,
+        }
+    }
+}
+
+impl Default for AtpAutotuneSettings {
+    fn default() -> Self {
+        Self {
+            in_flight_bytes: 8 * 1_048_576,
+            stream_count: 4,
+            chunk_size_bytes: 256 * 1_024,
+            repair_symbols_per_second: 256,
+        }
+    }
+}
+
+/// Hard bounds for autotune decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneLimits {
+    /// Minimum in-flight byte limit.
+    pub min_in_flight_bytes: u64,
+    /// Maximum in-flight byte limit.
+    pub max_in_flight_bytes: u64,
+    /// Minimum stream count.
+    pub min_stream_count: u16,
+    /// Maximum stream count.
+    pub max_stream_count: u16,
+    /// Minimum chunk size in bytes.
+    pub min_chunk_size_bytes: u32,
+    /// Maximum chunk size in bytes.
+    pub max_chunk_size_bytes: u32,
+    /// Minimum repair-symbol rate.
+    pub min_repair_symbols_per_second: u32,
+    /// Maximum repair-symbol rate.
+    pub max_repair_symbols_per_second: u32,
+}
+
+impl Default for AtpAutotuneLimits {
+    fn default() -> Self {
+        Self {
+            min_in_flight_bytes: 1_048_576,
+            max_in_flight_bytes: 512 * 1_048_576,
+            min_stream_count: 1,
+            max_stream_count: 64,
+            min_chunk_size_bytes: 64 * 1_024,
+            max_chunk_size_bytes: 8 * 1_048_576,
+            min_repair_symbols_per_second: 0,
+            max_repair_symbols_per_second: 16_384,
+        }
+    }
+}
+
+impl AtpAutotuneLimits {
+    /// Clamp settings into this bounds envelope.
+    #[must_use]
+    pub fn clamp(self, settings: AtpAutotuneSettings) -> AtpAutotuneSettings {
+        AtpAutotuneSettings {
+            in_flight_bytes: settings
+                .in_flight_bytes
+                .clamp(self.min_in_flight_bytes, self.max_in_flight_bytes),
+            stream_count: settings
+                .stream_count
+                .clamp(self.min_stream_count, self.max_stream_count),
+            chunk_size_bytes: settings
+                .chunk_size_bytes
+                .clamp(self.min_chunk_size_bytes, self.max_chunk_size_bytes),
+            repair_symbols_per_second: settings.repair_symbols_per_second.clamp(
+                self.min_repair_symbols_per_second,
+                self.max_repair_symbols_per_second,
+            ),
+        }
+    }
+}
+
+/// Telemetry window used for one autotune decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneTelemetry {
+    /// Stable trace id linking this decision to path/proof logs.
+    pub trace_id: String,
+    /// Stable workload or transfer id.
+    pub workload_id: String,
+    /// Samples represented by this telemetry window.
+    pub sample_count: u32,
+    /// Smoothed RTT in microseconds.
+    pub rtt_micros: Option<u64>,
+    /// Loss rate in packets per thousand.
+    pub loss_permille: Option<u16>,
+    /// Probe timeout in microseconds.
+    pub pto_micros: Option<u64>,
+    /// Congestion window in bytes.
+    pub congestion_window_bytes: Option<u64>,
+    /// Current in-flight bytes.
+    pub in_flight_bytes: Option<u64>,
+    /// Queued send-buffer bytes.
+    pub send_buffer_queued_bytes: Option<u64>,
+    /// Queued receive-buffer bytes.
+    pub receive_buffer_queued_bytes: Option<u64>,
+    /// Disk read lag in microseconds.
+    pub disk_read_lag_micros: Option<u64>,
+    /// Disk write lag in microseconds.
+    pub disk_write_lag_micros: Option<u64>,
+    /// Encoder backlog in symbols.
+    pub encode_backlog_symbols: Option<u32>,
+    /// Decoder backlog in symbols.
+    pub decode_backlog_symbols: Option<u32>,
+    /// Repair ROI in useful symbols per thousand repair symbols.
+    pub repair_roi_permille: Option<u16>,
+    /// Relay cost in microseconds per MiB.
+    pub relay_cost_micros_per_mib: Option<u64>,
+    /// Migration events during the window.
+    pub migration_events: Option<u32>,
+}
+
+impl AtpAutotuneTelemetry {
+    /// Create a telemetry window with only stable identifiers populated.
+    #[must_use]
+    pub fn new(trace_id: impl Into<String>, workload_id: impl Into<String>) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+            workload_id: workload_id.into(),
+            sample_count: 0,
+            rtt_micros: None,
+            loss_permille: None,
+            pto_micros: None,
+            congestion_window_bytes: None,
+            in_flight_bytes: None,
+            send_buffer_queued_bytes: None,
+            receive_buffer_queued_bytes: None,
+            disk_read_lag_micros: None,
+            disk_write_lag_micros: None,
+            encode_backlog_symbols: None,
+            decode_backlog_symbols: None,
+            repair_roi_permille: None,
+            relay_cost_micros_per_mib: None,
+            migration_events: None,
+        }
+    }
+
+    /// Set the sample count.
+    #[must_use]
+    pub const fn with_sample_count(mut self, sample_count: u32) -> Self {
+        self.sample_count = sample_count;
+        self
+    }
+}
+
+/// Bottleneck class selected by the autotune policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpBottleneckKind {
+    /// Not enough telemetry to safely increase throughput.
+    InsufficientTelemetry,
+    /// Telemetry contains contradictory values.
+    ContradictoryTelemetry,
+    /// Loss or PTO signals imply network pressure.
+    NetworkLoss,
+    /// RTT is high enough to avoid aggressive growth.
+    NetworkLatency,
+    /// Current in-flight bytes exceed the observed congestion window.
+    CongestionWindow,
+    /// Sender buffering is backing up.
+    SendBufferPressure,
+    /// Receiver buffering is backing up.
+    ReceiveBufferPressure,
+    /// Disk reads are lagging.
+    DiskReadLag,
+    /// Disk writes are lagging.
+    DiskWriteLag,
+    /// Encoding work is backing up.
+    EncodeBacklog,
+    /// Decoding work is backing up.
+    DecodeBacklog,
+    /// Repair traffic is not paying for itself.
+    RepairLowRoi,
+    /// Relay path is materially expensive.
+    RelayCost,
+    /// Frequent migration means the path is unstable.
+    MigrationInstability,
+}
+
+/// One human-readable bottleneck signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpBottleneckSignal {
+    /// Bottleneck class.
+    pub kind: AtpBottleneckKind,
+    /// Stable metric that produced this signal.
+    pub metric: Option<AtpAutotuneMetric>,
+    /// Observed value.
+    pub observed: u64,
+    /// Threshold used by the policy.
+    pub threshold: u64,
+}
+
+impl AtpBottleneckSignal {
+    fn new(
+        kind: AtpBottleneckKind,
+        metric: Option<AtpAutotuneMetric>,
+        observed: u64,
+        threshold: u64,
+    ) -> Self {
+        Self {
+            kind,
+            metric,
+            observed,
+            threshold,
+        }
+    }
+}
+
+/// Decision returned by [`AtpAutotunePolicy`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneDecision {
+    /// Settings to apply for the next window.
+    pub settings: AtpAutotuneSettings,
+    /// Signals explaining why the decision was made.
+    pub bottlenecks: Vec<AtpBottleneckSignal>,
+    /// Whether the decision held or reduced throughput because confidence was low.
+    pub fail_closed: bool,
+    /// Short stable reason suitable for logs and proof artifacts.
+    pub reason_code: String,
+}
+
+/// Deterministic conservative autotune policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotunePolicy {
+    /// Hard decision limits.
+    pub limits: AtpAutotuneLimits,
+    /// Minimum samples before the policy may grow throughput.
+    pub min_growth_samples: u32,
+    /// Loss threshold that starts backing off in-flight bytes.
+    pub loss_backoff_permille: u16,
+    /// RTT threshold that blocks growth.
+    pub latency_hold_micros: u64,
+    /// Buffer pressure threshold in bytes.
+    pub buffer_pressure_bytes: u64,
+    /// Disk lag threshold in microseconds.
+    pub disk_lag_micros: u64,
+    /// CPU backlog threshold in symbols.
+    pub cpu_backlog_symbols: u32,
+    /// Repair ROI floor for keeping repair rate elevated.
+    pub repair_roi_floor_permille: u16,
+    /// Relay cost threshold in microseconds per MiB.
+    pub relay_cost_micros_per_mib: u64,
+}
+
+impl Default for AtpAutotunePolicy {
+    fn default() -> Self {
+        Self {
+            limits: AtpAutotuneLimits::default(),
+            min_growth_samples: 8,
+            loss_backoff_permille: 25,
+            latency_hold_micros: 250_000,
+            buffer_pressure_bytes: 8 * 1_048_576,
+            disk_lag_micros: 100_000,
+            cpu_backlog_symbols: 4_096,
+            repair_roi_floor_permille: 350,
+            relay_cost_micros_per_mib: 500_000,
+        }
+    }
+}
+
+impl AtpAutotunePolicy {
+    /// Produce a conservative decision for the next transfer window.
+    #[must_use]
+    pub fn decide(
+        self,
+        current: AtpAutotuneSettings,
+        telemetry: &AtpAutotuneTelemetry,
+    ) -> AtpAutotuneDecision {
+        let mut settings = self.limits.clamp(current);
+        let mut bottlenecks = Vec::new();
+
+        self.detect_bottlenecks(telemetry, &mut bottlenecks);
+
+        if telemetry.sample_count < self.min_growth_samples {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::InsufficientTelemetry,
+                None,
+                u64::from(telemetry.sample_count),
+                u64::from(self.min_growth_samples),
+            ));
+        }
+
+        let fail_closed = !bottlenecks.is_empty();
+        if fail_closed {
+            settings = self.backoff(settings, telemetry, &bottlenecks);
+            return AtpAutotuneDecision {
+                settings: self.limits.clamp(settings),
+                bottlenecks,
+                fail_closed,
+                reason_code: String::from("hold_or_backoff_on_pressure"),
+            };
+        }
+
+        AtpAutotuneDecision {
+            settings: self.limits.clamp(self.grow(settings)),
+            bottlenecks,
+            fail_closed,
+            reason_code: String::from("conservative_growth"),
+        }
+    }
+
+    fn detect_bottlenecks(
+        self,
+        telemetry: &AtpAutotuneTelemetry,
+        bottlenecks: &mut Vec<AtpBottleneckSignal>,
+    ) {
+        if telemetry.trace_id.trim().is_empty() || telemetry.workload_id.trim().is_empty() {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::ContradictoryTelemetry,
+                None,
+                0,
+                1,
+            ));
+        }
+
+        if let Some(loss) = telemetry.loss_permille
+            && loss > self.loss_backoff_permille
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::NetworkLoss,
+                Some(AtpAutotuneMetric::LossPermille),
+                u64::from(loss),
+                u64::from(self.loss_backoff_permille),
+            ));
+        }
+
+        if let Some(rtt) = telemetry.rtt_micros
+            && rtt > self.latency_hold_micros
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::NetworkLatency,
+                Some(AtpAutotuneMetric::RttMicros),
+                rtt,
+                self.latency_hold_micros,
+            ));
+        }
+
+        if let (Some(in_flight), Some(cwnd)) =
+            (telemetry.in_flight_bytes, telemetry.congestion_window_bytes)
+            && in_flight > cwnd
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::CongestionWindow,
+                Some(AtpAutotuneMetric::InFlightBytes),
+                in_flight,
+                cwnd,
+            ));
+        }
+
+        self.detect_queue_bottleneck(
+            telemetry.send_buffer_queued_bytes,
+            AtpBottleneckKind::SendBufferPressure,
+            AtpAutotuneMetric::SendBufferQueuedBytes,
+            bottlenecks,
+        );
+        self.detect_queue_bottleneck(
+            telemetry.receive_buffer_queued_bytes,
+            AtpBottleneckKind::ReceiveBufferPressure,
+            AtpAutotuneMetric::ReceiveBufferQueuedBytes,
+            bottlenecks,
+        );
+        self.detect_lag_bottleneck(
+            telemetry.disk_read_lag_micros,
+            AtpBottleneckKind::DiskReadLag,
+            AtpAutotuneMetric::DiskReadLagMicros,
+            bottlenecks,
+        );
+        self.detect_lag_bottleneck(
+            telemetry.disk_write_lag_micros,
+            AtpBottleneckKind::DiskWriteLag,
+            AtpAutotuneMetric::DiskWriteLagMicros,
+            bottlenecks,
+        );
+        self.detect_cpu_bottleneck(
+            telemetry.encode_backlog_symbols,
+            AtpBottleneckKind::EncodeBacklog,
+            AtpAutotuneMetric::EncodeBacklogSymbols,
+            bottlenecks,
+        );
+        self.detect_cpu_bottleneck(
+            telemetry.decode_backlog_symbols,
+            AtpBottleneckKind::DecodeBacklog,
+            AtpAutotuneMetric::DecodeBacklogSymbols,
+            bottlenecks,
+        );
+
+        if let Some(roi) = telemetry.repair_roi_permille
+            && roi < self.repair_roi_floor_permille
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::RepairLowRoi,
+                Some(AtpAutotuneMetric::RepairRoiPermille),
+                u64::from(roi),
+                u64::from(self.repair_roi_floor_permille),
+            ));
+        }
+
+        if let Some(cost) = telemetry.relay_cost_micros_per_mib
+            && cost > self.relay_cost_micros_per_mib
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::RelayCost,
+                Some(AtpAutotuneMetric::RelayCostMicrosPerMiB),
+                cost,
+                self.relay_cost_micros_per_mib,
+            ));
+        }
+
+        if let Some(events) = telemetry.migration_events
+            && events > 0
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::MigrationInstability,
+                Some(AtpAutotuneMetric::MigrationEvents),
+                u64::from(events),
+                0,
+            ));
+        }
+    }
+
+    fn detect_queue_bottleneck(
+        self,
+        observed: Option<u64>,
+        kind: AtpBottleneckKind,
+        metric: AtpAutotuneMetric,
+        bottlenecks: &mut Vec<AtpBottleneckSignal>,
+    ) {
+        if let Some(bytes) = observed
+            && bytes > self.buffer_pressure_bytes
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                kind,
+                Some(metric),
+                bytes,
+                self.buffer_pressure_bytes,
+            ));
+        }
+    }
+
+    fn detect_lag_bottleneck(
+        self,
+        observed: Option<u64>,
+        kind: AtpBottleneckKind,
+        metric: AtpAutotuneMetric,
+        bottlenecks: &mut Vec<AtpBottleneckSignal>,
+    ) {
+        if let Some(micros) = observed
+            && micros > self.disk_lag_micros
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                kind,
+                Some(metric),
+                micros,
+                self.disk_lag_micros,
+            ));
+        }
+    }
+
+    fn detect_cpu_bottleneck(
+        self,
+        observed: Option<u32>,
+        kind: AtpBottleneckKind,
+        metric: AtpAutotuneMetric,
+        bottlenecks: &mut Vec<AtpBottleneckSignal>,
+    ) {
+        if let Some(symbols) = observed
+            && symbols > self.cpu_backlog_symbols
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                kind,
+                Some(metric),
+                u64::from(symbols),
+                u64::from(self.cpu_backlog_symbols),
+            ));
+        }
+    }
+
+    fn backoff(
+        self,
+        mut settings: AtpAutotuneSettings,
+        telemetry: &AtpAutotuneTelemetry,
+        bottlenecks: &[AtpBottleneckSignal],
+    ) -> AtpAutotuneSettings {
+        let reduce_transport = bottlenecks.iter().any(|signal| {
+            matches!(
+                signal.kind,
+                AtpBottleneckKind::NetworkLoss
+                    | AtpBottleneckKind::NetworkLatency
+                    | AtpBottleneckKind::CongestionWindow
+                    | AtpBottleneckKind::SendBufferPressure
+                    | AtpBottleneckKind::ReceiveBufferPressure
+                    | AtpBottleneckKind::MigrationInstability
+            )
+        });
+        if reduce_transport {
+            settings.in_flight_bytes = decrease_by_quarter(settings.in_flight_bytes);
+            settings.stream_count = settings.stream_count.saturating_sub(1).max(1);
+        }
+
+        let reduce_chunk = bottlenecks.iter().any(|signal| {
+            matches!(
+                signal.kind,
+                AtpBottleneckKind::DiskReadLag
+                    | AtpBottleneckKind::DiskWriteLag
+                    | AtpBottleneckKind::EncodeBacklog
+                    | AtpBottleneckKind::DecodeBacklog
+            )
+        });
+        if reduce_chunk {
+            settings.chunk_size_bytes = decrease_by_quarter_u32(settings.chunk_size_bytes);
+        }
+
+        if bottlenecks
+            .iter()
+            .any(|signal| signal.kind == AtpBottleneckKind::RepairLowRoi)
+        {
+            settings.repair_symbols_per_second =
+                decrease_by_quarter_u32(settings.repair_symbols_per_second);
+        } else if telemetry
+            .loss_permille
+            .is_some_and(|loss| loss > self.loss_backoff_permille)
+        {
+            settings.repair_symbols_per_second = increase_by_quarter_u32(
+                settings.repair_symbols_per_second.max(1),
+                self.limits.max_repair_symbols_per_second,
+            );
+        }
+
+        settings
+    }
+
+    fn grow(self, mut settings: AtpAutotuneSettings) -> AtpAutotuneSettings {
+        settings.in_flight_bytes =
+            increase_by_eighth(settings.in_flight_bytes, self.limits.max_in_flight_bytes);
+        settings.stream_count = settings
+            .stream_count
+            .saturating_add(1)
+            .min(self.limits.max_stream_count);
+        settings.chunk_size_bytes =
+            increase_by_eighth_u32(settings.chunk_size_bytes, self.limits.max_chunk_size_bytes);
+        settings
+    }
+}
+
+fn decrease_by_quarter(value: u64) -> u64 {
+    value.saturating_sub(value / 4).max(1)
+}
+
+fn decrease_by_quarter_u32(value: u32) -> u32 {
+    value.saturating_sub(value / 4).max(1)
+}
+
+fn increase_by_eighth(value: u64, max: u64) -> u64 {
+    value.saturating_add(value / 8).min(max)
+}
+
+fn increase_by_eighth_u32(value: u32, max: u32) -> u32 {
+    value.saturating_add(value / 8).min(max)
+}
+
+fn increase_by_quarter_u32(value: u32, max: u32) -> u32 {
+    value.saturating_add(value / 4).min(max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn healthy_telemetry() -> AtpAutotuneTelemetry {
+        AtpAutotuneTelemetry::new("trace-a", "workload-a").with_sample_count(16)
+    }
+
+    #[test]
+    fn metric_names_are_stable_and_namespaced() {
+        let names: Vec<_> = ATP_AUTOTUNE_METRIC_NAMES
+            .iter()
+            .map(|metric| metric.as_str())
+            .collect();
+
+        assert_eq!(names.len(), 14);
+        assert!(names.iter().all(|name| name.starts_with("atp.autotune.")));
+        assert_eq!(names[0], "atp.autotune.rtt_micros");
+        assert_eq!(names[13], "atp.autotune.migration_events");
+    }
+
+    #[test]
+    fn metric_json_uses_stable_names() -> serde_json::Result<()> {
+        let encoded = serde_json::to_string(&AtpAutotuneMetric::LossPermille)?;
+        assert_eq!(encoded, r#""atp.autotune.loss_permille""#);
+
+        let decoded: AtpAutotuneMetric = serde_json::from_str(&encoded)?;
+        assert_eq!(decoded, AtpAutotuneMetric::LossPermille);
+        Ok(())
+    }
+
+    #[test]
+    fn healthy_window_grows_conservatively() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let decision = policy.decide(current, &healthy_telemetry());
+
+        assert!(!decision.fail_closed);
+        assert_eq!(decision.reason_code, "conservative_growth");
+        assert_eq!(
+            decision.settings.in_flight_bytes,
+            current.in_flight_bytes + current.in_flight_bytes / 8
+        );
+        assert_eq!(decision.settings.stream_count, current.stream_count + 1);
+        assert_eq!(
+            decision.settings.chunk_size_bytes,
+            current.chunk_size_bytes + current.chunk_size_bytes / 8
+        );
+        assert_eq!(
+            decision.settings.repair_symbols_per_second,
+            current.repair_symbols_per_second
+        );
+    }
+
+    #[test]
+    fn insufficient_samples_hold_existing_settings() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let telemetry = AtpAutotuneTelemetry::new("trace-a", "workload-a").with_sample_count(2);
+        let decision = policy.decide(current, &telemetry);
+
+        assert!(decision.fail_closed);
+        assert_eq!(decision.settings, current);
+        assert_eq!(
+            decision.bottlenecks[0].kind,
+            AtpBottleneckKind::InsufficientTelemetry
+        );
+    }
+
+    #[test]
+    fn loss_backs_off_transport_and_raises_repair_rate() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let mut telemetry = healthy_telemetry();
+        telemetry.loss_permille = Some(100);
+
+        let decision = policy.decide(current, &telemetry);
+
+        assert!(decision.fail_closed);
+        assert!(
+            decision
+                .bottlenecks
+                .iter()
+                .any(|signal| signal.kind == AtpBottleneckKind::NetworkLoss)
+        );
+        assert!(decision.settings.in_flight_bytes < current.in_flight_bytes);
+        assert_eq!(decision.settings.stream_count, current.stream_count - 1);
+        assert!(decision.settings.repair_symbols_per_second > current.repair_symbols_per_second);
+    }
+
+    #[test]
+    fn low_repair_roi_reduces_repair_rate_without_transport_backoff() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let mut telemetry = healthy_telemetry();
+        telemetry.repair_roi_permille = Some(100);
+
+        let decision = policy.decide(current, &telemetry);
+
+        assert!(decision.fail_closed);
+        assert_eq!(decision.settings.in_flight_bytes, current.in_flight_bytes);
+        assert_eq!(decision.settings.stream_count, current.stream_count);
+        assert!(decision.settings.repair_symbols_per_second < current.repair_symbols_per_second);
+    }
+
+    #[test]
+    fn buffer_and_disk_pressure_reduce_different_knobs() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let mut telemetry = healthy_telemetry();
+        telemetry.send_buffer_queued_bytes = Some(policy.buffer_pressure_bytes + 1);
+        telemetry.disk_write_lag_micros = Some(policy.disk_lag_micros + 1);
+
+        let decision = policy.decide(current, &telemetry);
+
+        assert!(decision.fail_closed);
+        assert!(decision.settings.in_flight_bytes < current.in_flight_bytes);
+        assert!(decision.settings.chunk_size_bytes < current.chunk_size_bytes);
+        assert!(
+            decision
+                .bottlenecks
+                .iter()
+                .any(|signal| signal.kind == AtpBottleneckKind::SendBufferPressure)
+        );
+        assert!(
+            decision
+                .bottlenecks
+                .iter()
+                .any(|signal| signal.kind == AtpBottleneckKind::DiskWriteLag)
+        );
+    }
+
+    #[test]
+    fn empty_ids_fail_closed() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let telemetry = AtpAutotuneTelemetry::new("", " ").with_sample_count(16);
+
+        let decision = policy.decide(current, &telemetry);
+
+        assert!(decision.fail_closed);
+        assert!(
+            decision
+                .bottlenecks
+                .iter()
+                .any(|signal| signal.kind == AtpBottleneckKind::ContradictoryTelemetry)
+        );
+    }
+
+    #[test]
+    fn limits_are_enforced_on_growth_and_backoff() {
+        let policy = AtpAutotunePolicy {
+            limits: AtpAutotuneLimits {
+                min_in_flight_bytes: 4,
+                max_in_flight_bytes: 10,
+                min_stream_count: 2,
+                max_stream_count: 3,
+                min_chunk_size_bytes: 8,
+                max_chunk_size_bytes: 12,
+                min_repair_symbols_per_second: 2,
+                max_repair_symbols_per_second: 4,
+            },
+            ..AtpAutotunePolicy::default()
+        };
+        let current = AtpAutotuneSettings::new(100, 99, 100, 99);
+        let decision = policy.decide(current, &healthy_telemetry());
+
+        assert_eq!(decision.settings.in_flight_bytes, 10);
+        assert_eq!(decision.settings.stream_count, 3);
+        assert_eq!(decision.settings.chunk_size_bytes, 12);
+        assert_eq!(decision.settings.repair_symbols_per_second, 4);
+    }
+}
