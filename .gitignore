@@ -48,6 +48,9 @@ criterion/
 **/.beads/last-touched
 **/.beads/.local_version
 
+# Golden artifact test temporaries (should not be committed)
+tests/golden/**/*.actual
+
 # Agent artifact reports (keep local, don't commit)
 /exploration_report.md
 /final_summary.txt
