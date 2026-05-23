@@ -122,6 +122,8 @@ pub mod blocking_pool;
 pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
+#[cfg(test)]
+mod deadline_monitor_metamorphic_tests;
 pub mod effects;
 pub mod env_config;
 pub mod epoch_gc;
