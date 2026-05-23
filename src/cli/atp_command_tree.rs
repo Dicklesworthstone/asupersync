@@ -57,6 +57,9 @@ pub enum AtpCommand {
     /// Verify ATP proof bundles offline
     Verify(AtpVerifyArgs),
 
+    /// Replay emitted ATP crashpack artifacts
+    Replay(AtpReplayArgs),
+
     /// Display ATP proof bundle information
     Proof(AtpProofArgs),
 
@@ -466,7 +469,7 @@ pub struct AtpConfigArgs {
 }
 
 /// Re-export ATP command args from the args module
-pub use super::args::{AtpDoctorArgs, AtpProofArgs, AtpVerifyArgs};
+pub use super::args::{AtpDoctorArgs, AtpProofArgs, AtpReplayArgs, AtpVerifyArgs};
 
 /// JSON output schema for ATP status command.
 #[derive(Debug, Serialize, Deserialize)]

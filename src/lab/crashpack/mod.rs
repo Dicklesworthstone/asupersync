@@ -599,7 +599,7 @@ impl AtpCrashpack {
 
         cmd.push_str("\n# Replay command\n");
         cmd.push_str(
-            "atp replay --trace-file transfer.atp-trace --manifest manifest \
+            "asupersync atp replay --trace-file transfer.atp-trace --manifest manifest \
              --journal-digest journal.digest --evidence-ledger evidence-ledger.json \
              --pathlog pathlog --quiclog quiclog --repairlog repairlog --validate-oracles",
         );

@@ -96,7 +96,7 @@ impl AtpReplayCoordinator {
         let repairlog = shell_path_arg(&output_dir.join("repairlog"));
         cmd.push_str("\n# Replay execution\n");
         cmd.push_str(&format!(
-            "atp replay --trace-file {trace_file} --manifest {manifest} --journal-digest {journal_digest} --evidence-ledger {evidence_ledger} --pathlog {pathlog} --quiclog {quiclog} --repairlog {repairlog} --validate-oracles"
+            "asupersync atp replay --trace-file {trace_file} --manifest {manifest} --journal-digest {journal_digest} --evidence-ledger {evidence_ledger} --pathlog {pathlog} --quiclog {quiclog} --repairlog {repairlog} --validate-oracles"
         ));
 
         // Add minimization if configured
@@ -203,7 +203,7 @@ impl AtpReplayCoordinator {
 
         let replay_command = read_replay_artifact(&output_dir.join("replay_command.sh"))?;
         for token in [
-            "atp replay",
+            "asupersync atp replay",
             "--trace-file",
             "transfer.atp-trace",
             "--manifest",

@@ -73,8 +73,8 @@ pub mod upgrade;
 
 // Re-export commonly used types
 pub use args::{
-    AtpDoctorArgs, AtpProofArgs, AtpVerifyArgs, COMMON_ARGS_HELP, CommonArgs, parse_color_choice,
-    parse_output_format,
+    AtpDoctorArgs, AtpProofArgs, AtpReplayArgs, AtpVerifyArgs, COMMON_ARGS_HELP, CommonArgs,
+    parse_color_choice, parse_output_format,
 };
 pub use atp_user_journey::{
     ATP_USER_JOURNEY_CONTRACT_VERSION, ATP_USER_JOURNEY_REQUIRED_LOG_FIELDS,

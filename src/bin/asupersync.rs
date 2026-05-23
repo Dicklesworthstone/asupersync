@@ -31,7 +31,7 @@ use asupersync::cli::doctor::{
     validate_advanced_diagnostics_report_extension_contract,
 };
 use asupersync::cli::{
-    AtpDoctorArgs, AtpProofArgs, AtpVerifyArgs, CliError, ColorChoice, CommonArgs,
+    AtpDoctorArgs, AtpProofArgs, AtpReplayArgs, AtpVerifyArgs, CliError, ColorChoice, CommonArgs,
     CoreDiagnosticsReport, CoreDiagnosticsReportBundle, CoreDiagnosticsSummary, ExitCode,
     InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
     OutputFormat, Outputtable, RemediationRecipeBundle, ScreenEngineContract,
@@ -163,6 +163,8 @@ enum AtpCommand {
     Directory(AtpDirectoryArgs),
     /// Verify ATP proof bundle offline
     Verify(AtpVerifyArgs),
+    /// Replay emitted ATP crashpack artifacts
+    Replay(AtpReplayArgs),
     /// Display ATP proof bundle information
     Proof(AtpProofArgs),
 }
@@ -1012,6 +1014,7 @@ fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
         AtpCommand::Doctor(args) => atp_doctor(&args, output),
         AtpCommand::Directory(args) => atp_directory(&args, output),
         AtpCommand::Verify(args) => atp_verify(&args, output),
+        AtpCommand::Replay(args) => atp_replay(&args, output),
         AtpCommand::Proof(args) => atp_proof(&args, output),
     }
 }
@@ -1169,6 +1172,171 @@ fn directory_io_error(err: impl std::error::Error) -> CliError {
     CliError::new("atp_directory_io_error", "ATP peer directory I/O failed")
         .detail(err.to_string())
         .exit_code(ExitCode::RUNTIME_ERROR)
+}
+
+fn atp_replay(args: &AtpReplayArgs, output: &mut Output) -> Result<(), CliError> {
+    use asupersync::lab::crashpack::{AtpReplayCoordinator, TraceMinimizerConfig};
+
+    if !(0.0..=1.0).contains(&args.reduction_target) {
+        return Err(CliError::new(
+            "invalid_argument",
+            "ATP replay reduction target must be between 0.0 and 1.0",
+        )
+        .context("reduction_target", args.reduction_target)
+        .exit_code(ExitCode::USER_ERROR));
+    }
+
+    let artifact_dir = atp_replay_artifact_dir(args)?;
+    let minimizer_config = TraceMinimizerConfig {
+        enabled: args.minimize,
+        reduction_target: args.reduction_target,
+        max_attempts: TraceMinimizerConfig::default().max_attempts,
+        preserve_oracle_events: true,
+        preserve_timing: false,
+    };
+
+    let result =
+        AtpReplayCoordinator::replay_from_artifacts_with_config(&artifact_dir, minimizer_config)
+            .map_err(atp_replay_error)?;
+
+    if args.validate_oracles || !args.oracles.is_empty() {
+        validate_requested_atp_replay_oracles(&result, &args.oracles)?;
+    }
+
+    let payload = AtpReplayOutput {
+        artifact_dir: artifact_dir.display().to_string(),
+        trace_file: args.trace_file.display().to_string(),
+        replay_successful: result.replay_successful,
+        original_violations: result.original_violations,
+        minimized_trace_length: result.minimized_trace_length,
+        requested_oracles: args.oracles.clone(),
+        result,
+    };
+
+    output
+        .write(&payload)
+        .map_err(output_write_error("ATP replay result"))?;
+
+    if !payload.replay_successful {
+        return Err(
+            CliError::new("atp_replay_failed", "ATP replay did not reproduce cleanly")
+                .context("artifact_dir", payload.artifact_dir)
+                .exit_code(ExitCode::USER_ERROR),
+        );
+    }
+
+    Ok(())
+}
+
+fn atp_replay_artifact_dir(args: &AtpReplayArgs) -> Result<PathBuf, CliError> {
+    let trace_file = canonical_existing_atp_replay_path(&args.trace_file, "--trace-file")?;
+    require_atp_replay_artifact_name(&trace_file, "transfer.atp-trace", "--trace-file")?;
+    let artifact_dir = trace_file
+        .parent()
+        .ok_or_else(|| {
+            CliError::new(
+                "invalid_argument",
+                "ATP replay trace file has no parent directory",
+            )
+            .context("trace_file", trace_file.display().to_string())
+            .exit_code(ExitCode::USER_ERROR)
+        })?
+        .to_path_buf();
+
+    for (flag, expected_name, actual_path) in [
+        ("--manifest", "manifest", &args.manifest),
+        ("--journal-digest", "journal.digest", &args.journal_digest),
+        (
+            "--evidence-ledger",
+            "evidence-ledger.json",
+            &args.evidence_ledger,
+        ),
+        ("--pathlog", "pathlog", &args.pathlog),
+        ("--quiclog", "quiclog", &args.quiclog),
+        ("--repairlog", "repairlog", &args.repairlog),
+    ] {
+        let actual = canonical_existing_atp_replay_path(actual_path, flag)?;
+        require_atp_replay_artifact_name(&actual, expected_name, flag)?;
+        let expected = canonical_existing_atp_replay_path(&artifact_dir.join(expected_name), flag)?;
+        if actual != expected {
+            return Err(CliError::new(
+                "invalid_argument",
+                "ATP replay artifacts must come from the same crashpack directory",
+            )
+            .context("flag", flag)
+            .context("expected", expected.display().to_string())
+            .context("actual", actual.display().to_string())
+            .exit_code(ExitCode::USER_ERROR));
+        }
+    }
+
+    Ok(artifact_dir)
+}
+
+fn canonical_existing_atp_replay_path(path: &Path, flag: &str) -> Result<PathBuf, CliError> {
+    std::fs::canonicalize(path).map_err(|err| {
+        CliError::new("file_read_error", "ATP replay artifact is not readable")
+            .detail(err.to_string())
+            .context("flag", flag)
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::USER_ERROR)
+    })
+}
+
+fn require_atp_replay_artifact_name(
+    path: &Path,
+    expected_name: &str,
+    flag: &str,
+) -> Result<(), CliError> {
+    if path.file_name().and_then(|name| name.to_str()) == Some(expected_name) {
+        return Ok(());
+    }
+
+    Err(CliError::new(
+        "invalid_argument",
+        "ATP replay artifact has an unexpected file name",
+    )
+    .context("flag", flag)
+    .context("expected", expected_name)
+    .context("path", path.display().to_string())
+    .exit_code(ExitCode::USER_ERROR))
+}
+
+fn validate_requested_atp_replay_oracles(
+    result: &asupersync::lab::crashpack::AtpReplayResult,
+    requested_oracles: &[String],
+) -> Result<(), CliError> {
+    let available = result
+        .oracle_results
+        .iter()
+        .flat_map(|report| report.entries.iter().map(|entry| entry.invariant.as_str()))
+        .collect::<BTreeSet<_>>();
+    let missing = requested_oracles
+        .iter()
+        .filter(|oracle| !available.contains(oracle.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::new(
+            "atp_replay_oracle_missing",
+            "ATP replay output did not include every requested oracle",
+        )
+        .context("missing_oracles", missing)
+        .context(
+            "available_oracles",
+            available.into_iter().collect::<Vec<_>>(),
+        )
+        .exit_code(ExitCode::USER_ERROR))
+    }
+}
+
+fn atp_replay_error(err: asupersync::lab::crashpack::ReplayError) -> CliError {
+    CliError::new("atp_replay_failed", "ATP replay failed")
+        .detail(err.to_string())
+        .exit_code(ExitCode::USER_ERROR)
 }
 
 fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError> {
@@ -2389,6 +2557,51 @@ Journal complete: {journal_complete}",
                 lines.join("\n")
             }
         }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpReplayOutput {
+    artifact_dir: String,
+    trace_file: String,
+    replay_successful: bool,
+    original_violations: usize,
+    minimized_trace_length: usize,
+    requested_oracles: Vec<String>,
+    result: asupersync::lab::crashpack::AtpReplayResult,
+}
+
+impl Outputtable for AtpReplayOutput {
+    fn human_format(&self) -> String {
+        let status = if self.replay_successful {
+            "reproduced"
+        } else {
+            "not reproduced"
+        };
+        let mut lines = vec![
+            format!("ATP Replay: {status}"),
+            format!("Artifact directory: {}", self.artifact_dir),
+            format!("Trace file: {}", self.trace_file),
+            format!("Original violations: {}", self.original_violations),
+            format!("Minimized trace length: {}", self.minimized_trace_length),
+            format!("Oracle reports: {}", self.result.oracle_results.len()),
+        ];
+
+        if !self.requested_oracles.is_empty() {
+            lines.push(format!(
+                "Requested oracles: {}",
+                self.requested_oracles.join(", ")
+            ));
+        }
+
+        for report in &self.result.oracle_results {
+            for entry in &report.entries {
+                let entry_status = if entry.passed { "passed" } else { "failed" };
+                lines.push(format!("  {}: {}", entry.invariant, entry_status));
+            }
+        }
+
+        lines.join("\n")
     }
 }
 
@@ -8406,6 +8619,132 @@ mod tests {
         assert_eq!(args.window_start, 8);
         assert_eq!(args.window_events, Some(12));
         assert!(args.json);
+    }
+
+    #[test]
+    fn atp_replay_args_parse_artifact_flags() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "atp",
+            "replay",
+            "--trace-file",
+            "artifacts/transfer.atp-trace",
+            "--manifest",
+            "artifacts/manifest",
+            "--journal-digest",
+            "artifacts/journal.digest",
+            "--evidence-ledger",
+            "artifacts/evidence-ledger.json",
+            "--pathlog",
+            "artifacts/pathlog",
+            "--quiclog",
+            "artifacts/quiclog",
+            "--repairlog",
+            "artifacts/repairlog",
+            "--validate-oracles",
+            "--oracle",
+            "manifest_integrity",
+            "--oracle",
+            "journal_consistency",
+            "--minimize",
+            "--reduction-target",
+            "0.8",
+        ])
+        .expect("parse atp replay args");
+
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Replay(args),
+        }) = cli.command
+        else {
+            panic!("expected atp replay command");
+        };
+
+        assert_eq!(
+            args.trace_file.as_path(),
+            Path::new("artifacts/transfer.atp-trace")
+        );
+        assert_eq!(args.manifest.as_path(), Path::new("artifacts/manifest"));
+        assert_eq!(
+            args.journal_digest.as_path(),
+            Path::new("artifacts/journal.digest")
+        );
+        assert_eq!(
+            args.evidence_ledger.as_path(),
+            Path::new("artifacts/evidence-ledger.json")
+        );
+        assert_eq!(args.pathlog.as_path(), Path::new("artifacts/pathlog"));
+        assert_eq!(args.quiclog.as_path(), Path::new("artifacts/quiclog"));
+        assert_eq!(args.repairlog.as_path(), Path::new("artifacts/repairlog"));
+        assert!(args.validate_oracles);
+        assert_eq!(
+            args.oracles,
+            vec![
+                "manifest_integrity".to_string(),
+                "journal_consistency".to_string()
+            ]
+        );
+        assert!(args.minimize);
+        assert_eq!(args.reduction_target, 0.8);
+    }
+
+    #[test]
+    fn atp_replay_replays_emitted_crashpack_artifacts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut trace = asupersync::trace::TraceBuffer::new(4);
+        trace.push(asupersync::trace::TraceEvent::user_trace(
+            1,
+            Time::from_nanos(1),
+            "ATP violation: manifest_integrity",
+        ));
+        let crashpack = asupersync::lab::crashpack::CrashpackBuilder::new()
+            .with_oracle_result(asupersync::lab::crashpack::TransferOracleResult {
+                oracle_name: "manifest_integrity".to_string(),
+                violations: vec![asupersync::lab::crashpack::TransferViolation {
+                    violation_type: "manifest_integrity".to_string(),
+                    description: "manifest integrity failed".to_string(),
+                    severity: asupersync::lab::crashpack::ViolationSeverity::High,
+                    evidence: std::collections::BTreeMap::new(),
+                }],
+                stats: asupersync::lab::oracle::OracleStats {
+                    entities_tracked: 1,
+                    events_recorded: 1,
+                },
+                passed: false,
+            })
+            .with_trace(trace)
+            .with_seed("lab-seed", 7)
+            .build()
+            .expect("crashpack builds");
+        crashpack
+            .emit_atp_trace(temp.path())
+            .expect("crashpack emits replay artifacts");
+
+        let args = AtpReplayArgs {
+            trace_file: temp.path().join("transfer.atp-trace"),
+            manifest: temp.path().join("manifest"),
+            journal_digest: temp.path().join("journal.digest"),
+            evidence_ledger: temp.path().join("evidence-ledger.json"),
+            pathlog: temp.path().join("pathlog"),
+            quiclog: temp.path().join("quiclog"),
+            repairlog: temp.path().join("repairlog"),
+            validate_oracles: true,
+            oracles: vec!["manifest_integrity".to_string()],
+            minimize: true,
+            reduction_target: 0.8,
+        };
+        let writer = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Json, writer.clone());
+
+        atp_replay(&args, &mut output).expect("atp replay succeeds");
+
+        let values = parse_jsonl_values(&writer.contents());
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0]["replay_successful"], true);
+        assert_eq!(values[0]["original_violations"], 1);
+        assert_eq!(
+            values[0]["requested_oracles"],
+            serde_json::json!(["manifest_integrity"])
+        );
     }
 
     #[test]

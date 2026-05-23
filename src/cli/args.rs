@@ -198,6 +198,44 @@ pub struct AtpVerifyArgs {
     pub verbose: bool,
 }
 
+/// ATP replay command arguments.
+#[derive(Args, Debug)]
+pub struct AtpReplayArgs {
+    /// Path to the emitted ATP trace file.
+    #[arg(long = "trace-file", value_name = "PATH")]
+    pub trace_file: PathBuf,
+    /// Path to the emitted crashpack manifest.
+    #[arg(long = "manifest", value_name = "PATH")]
+    pub manifest: PathBuf,
+    /// Path to the emitted journal digest file.
+    #[arg(long = "journal-digest", value_name = "PATH")]
+    pub journal_digest: PathBuf,
+    /// Path to the emitted evidence ledger JSON file.
+    #[arg(long = "evidence-ledger", value_name = "PATH")]
+    pub evidence_ledger: PathBuf,
+    /// Path to the emitted ATP path log.
+    #[arg(long = "pathlog", value_name = "PATH")]
+    pub pathlog: PathBuf,
+    /// Path to the emitted QUIC log.
+    #[arg(long = "quiclog", value_name = "PATH")]
+    pub quiclog: PathBuf,
+    /// Path to the emitted repair log.
+    #[arg(long = "repairlog", value_name = "PATH")]
+    pub repairlog: PathBuf,
+    /// Validate requested oracle names against the replayed artifact reports.
+    #[arg(long = "validate-oracles", action = ArgAction::SetTrue)]
+    pub validate_oracles: bool,
+    /// Oracle name expected in the replayed artifact reports.
+    #[arg(long = "oracle", value_name = "NAME")]
+    pub oracles: Vec<String>,
+    /// Minimize the replay trace while preserving oracle witnesses.
+    #[arg(long = "minimize", action = ArgAction::SetTrue)]
+    pub minimize: bool,
+    /// Target trace reduction ratio for minimization.
+    #[arg(long = "reduction-target", default_value_t = 0.3)]
+    pub reduction_target: f64,
+}
+
 /// ATP proof command arguments.
 #[derive(Args, Debug)]
 pub struct AtpProofArgs {
