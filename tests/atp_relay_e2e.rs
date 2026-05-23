@@ -980,6 +980,7 @@ fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
     let destination_udp = SocketAddr::from(([203, 0, 113, 32], 47_032));
     let source_stream = RelayTcpTlsStreamId::new(731).expect("source stream");
     let destination_stream = RelayTcpTlsStreamId::new(732).expect("destination stream");
+    let unknown_stream = RelayTcpTlsStreamId::new(733).expect("unknown stream");
 
     log_stage(
         test,
@@ -998,6 +999,37 @@ fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
     socket_loop
         .admit_tcp_tls_stream(peer(2), destination_stream)
         .expect("admit destination tcp");
+
+    log_stage(
+        test,
+        "unknown-ingress",
+        "unadmitted UDP addresses and TCP/TLS streams fail before malformed bytes are decoded",
+    );
+    assert_eq!(
+        socket_loop
+            .ingest_udp_datagram(
+                &mut service,
+                505,
+                SocketAddr::from(([203, 0, 113, 99], 47_099)),
+                b"not-a-relay-frame",
+            )
+            .expect_err("unknown udp source is rejected before decode"),
+        RelayError::UnknownRelayEndpoint
+    );
+    assert_eq!(
+        socket_loop
+            .ingest_tcp_tls_stream_bytes(&mut service, 506, unknown_stream, b"not-a-record")
+            .expect_err("unknown tcp stream is rejected before buffering"),
+        RelayError::UnknownRelayEndpoint
+    );
+    assert_eq!(socket_loop.tcp_tls_stream_buffer_count(), 2);
+    assert_eq!(
+        service
+            .proof_artifact(reservation_id(703))
+            .expect("proof after unknown ingress")
+            .packets_forwarded,
+        0
+    );
 
     let udp_frame = RelayWireFrame::new(
         reservation_id(703),

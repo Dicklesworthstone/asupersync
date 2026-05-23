@@ -708,12 +708,11 @@ impl RelaySocketLoop {
         bytes: &[u8],
     ) -> Result<Vec<ForwardedPacket>, RelayError> {
         let from_peer_id = self.endpoints.peer_for_tcp_tls_stream(stream_id)?;
-        let result = {
-            let stream = self
-                .tcp_tls_streams
-                .get_mut(&stream_id)
-                .ok_or(RelayError::UnknownRelayEndpoint)?;
-            service.forward_tcp_tls_stream_bytes(now_micros, from_peer_id, stream, bytes)
+        let result = match self.tcp_tls_streams.get_mut(&stream_id) {
+            Some(stream) => {
+                service.forward_tcp_tls_stream_bytes(now_micros, from_peer_id, stream, bytes)
+            }
+            None => Err(RelayError::UnknownRelayEndpoint),
         };
         if result.is_err() {
             let _ = self.close_tcp_tls_stream(stream_id);
@@ -4062,6 +4061,7 @@ mod tests {
         let destination_udp = SocketAddr::from(([203, 0, 113, 41], 47_041));
         let source_stream = RelayTcpTlsStreamId::new(48).expect("source stream");
         let destination_stream = RelayTcpTlsStreamId::new(49).expect("destination stream");
+        let orphaned_stream = RelayTcpTlsStreamId::new(50).expect("orphaned stream");
 
         socket_loop
             .admit_udp_endpoint(peer(1), source_udp)
@@ -4075,6 +4075,23 @@ mod tests {
         socket_loop
             .admit_tcp_tls_stream(peer(2), destination_stream)
             .expect("admit destination tcp");
+        socket_loop
+            .admit_tcp_tls_stream(peer(1), orphaned_stream)
+            .expect("admit stream for orphan-buffer regression");
+        socket_loop.tcp_tls_streams.remove(&orphaned_stream);
+        assert_eq!(
+            socket_loop
+                .ingest_tcp_tls_stream_bytes(&mut service, 80, orphaned_stream, b"")
+                .expect_err("admitted stream without buffer fails closed"),
+            RelayError::UnknownRelayEndpoint
+        );
+        assert_eq!(
+            socket_loop
+                .endpoints()
+                .peer_for_tcp_tls_stream(orphaned_stream)
+                .expect_err("orphaned stream binding is removed"),
+            RelayError::UnknownRelayEndpoint
+        );
         assert_eq!(socket_loop.endpoints().udp_endpoint_count(), 2);
         assert_eq!(socket_loop.tcp_tls_stream_buffer_count(), 2);
 
