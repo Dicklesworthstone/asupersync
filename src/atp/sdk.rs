@@ -9,6 +9,10 @@ use crate::atp::object::{ContentId, ObjectId};
 use crate::atp::stream_object::{
     ByteRange, ConsumptionPolicy, EpochState, PrefixConsumer, StreamEpoch, StreamManifest,
 };
+use crate::atp::sync::{
+    DirectoryEarlyUsabilityPolicy, DirectoryEarlyUsabilityReport, DirectoryFinalCommitState,
+    DirectoryManifest,
+};
 use crate::atp::transfer::{
     IdempotencyKey, PeerCapabilities, TransferActor, TransferCommand, TransferCommandKind,
     TransferId, TransferManifestRef, TransferState,
@@ -20,6 +24,7 @@ use crate::net::atp::protocol::outcome::{
 };
 use crate::sync::ContendedMutex;
 use crate::types::outcome::Outcome;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, PoisonError};
@@ -880,6 +885,74 @@ pub struct TreeSyncResult {
     pub bytes_transferred: u64,
 }
 
+/// SDK handle for directory transfers with usable-early reporting.
+#[derive(Debug, Clone)]
+pub struct DirectoryHandle {
+    /// Stable directory transfer identifier.
+    pub directory_id: String,
+    /// Current verified directory manifest.
+    pub manifest: DirectoryManifest,
+    /// Content ids that have passed verification.
+    pub verified_content_ids: BTreeSet<String>,
+    /// Final directory commit state, kept separate from early usability.
+    pub final_commit_state: DirectoryFinalCommitState,
+}
+
+impl DirectoryHandle {
+    /// Build a directory handle from a manifest snapshot.
+    #[must_use]
+    pub fn new(directory_id: impl Into<String>, manifest: DirectoryManifest) -> Self {
+        Self {
+            directory_id: directory_id.into(),
+            manifest,
+            verified_content_ids: BTreeSet::new(),
+            final_commit_state: DirectoryFinalCommitState::Pending,
+        }
+    }
+
+    /// Record one verified content id.
+    pub fn mark_content_verified(&mut self, content_id: impl Into<String>) -> bool {
+        self.verified_content_ids.insert(content_id.into())
+    }
+
+    /// Mark the directory manifest as finally committed.
+    pub fn mark_final_committed(&mut self) {
+        self.final_commit_state = DirectoryFinalCommitState::Committed;
+    }
+
+    /// Return true once the directory has reached final committed state.
+    #[must_use]
+    pub fn is_final_committed(&self) -> bool {
+        self.final_commit_state == DirectoryFinalCommitState::Committed
+    }
+
+    /// Count verified content ids available for early-usability decisions.
+    #[must_use]
+    pub fn verified_content_count(&self) -> usize {
+        self.verified_content_ids.len()
+    }
+
+    /// Build the SDK-facing directory early-usability report.
+    ///
+    /// The returned report keeps usable-early state, final commit state,
+    /// metadata paths, small-file paths, withheld paths, safety caveats, and
+    /// replay pointer as separate fields so callers do not infer finality from
+    /// early availability.
+    #[must_use]
+    pub fn early_usability_report(
+        &self,
+        policy: DirectoryEarlyUsabilityPolicy,
+        replay_pointer: impl Into<String>,
+    ) -> DirectoryEarlyUsabilityReport {
+        self.manifest.early_usability_report(
+            &self.verified_content_ids,
+            policy,
+            self.final_commit_state,
+            replay_pointer,
+        )
+    }
+}
+
 /// Handle for streaming operations.
 #[derive(Debug, Clone)]
 pub struct StreamHandle {
@@ -1149,6 +1222,10 @@ pub enum PathType {
 mod tests {
     use super::*;
     use crate::atp::actor::{TransferActorId, TransferActorTopology, TransferRegionId};
+    use crate::atp::sync::{
+        DirectoryEarlyUsabilityState, DirectoryEntryKind, DirectoryEntryMetadata,
+        DirectoryManifestEntry, DirectoryPath, PathNormalizationRules,
+    };
     use crate::atp::transfer::{PeerCapabilities, TransferManifestRef};
     use crate::cx::Cx;
     use crate::types::{Budget, RegionId, TaskId};
@@ -1178,6 +1255,26 @@ mod tests {
             )
             .unwrap(),
         ))
+    }
+
+    fn directory_file(path: &str, content_id: &str, size_bytes: u64) -> DirectoryManifestEntry {
+        DirectoryManifestEntry::new(
+            DirectoryPath::normalize(path, PathNormalizationRules::default()).unwrap(),
+            DirectoryEntryKind::File,
+            Some(content_id.to_string()),
+            DirectoryEntryMetadata {
+                size_bytes: Some(size_bytes),
+                ..DirectoryEntryMetadata::default()
+            },
+        )
+    }
+
+    fn directory_manifest(entries: Vec<DirectoryManifestEntry>) -> DirectoryManifest {
+        let mut manifest = DirectoryManifest::new(PathNormalizationRules::default());
+        for entry in entries {
+            manifest.insert(entry).unwrap();
+        }
+        manifest
     }
 
     #[test]
@@ -1297,6 +1394,83 @@ mod tests {
 
         assert!(handle.is_complete());
         assert_eq!(handle.progress_percent(), 100.0);
+    }
+
+    #[test]
+    fn directory_handle_report_surfaces_sdk_metadata_and_small_files() {
+        let manifest = directory_manifest(vec![
+            directory_file("docs/README.md", "readme-cid", 512),
+            directory_file("model.bin", "model-cid", 4 * 1024 * 1024),
+        ]);
+        let mut handle = DirectoryHandle::new("sdk-directory", manifest);
+
+        assert!(handle.mark_content_verified("readme-cid"));
+        assert!(handle.mark_content_verified("model-cid"));
+        assert_eq!(handle.verified_content_count(), 2);
+
+        let report = handle.early_usability_report(
+            DirectoryEarlyUsabilityPolicy::small_files_up_to(1024),
+            "sdk-directory-replay:small-files",
+        );
+
+        assert_eq!(
+            report.usability_state,
+            DirectoryEarlyUsabilityState::SmallFilesAvailable
+        );
+        assert_eq!(
+            report.final_commit_state,
+            DirectoryFinalCommitState::Pending
+        );
+        assert_eq!(report.replay_pointer, "sdk-directory-replay:small-files");
+        assert_eq!(report.metadata_paths, vec!["docs/README.md", "model.bin"]);
+        assert_eq!(report.small_file_paths, vec!["docs/README.md"]);
+        assert_eq!(report.withheld_content_paths, vec!["model.bin"]);
+        assert!(report.safety_caveats.contains(
+            &"final directory commit not complete; expose early entries separately".to_string()
+        ));
+    }
+
+    #[test]
+    fn directory_handle_report_keeps_final_commit_state_separate() {
+        let manifest = directory_manifest(vec![directory_file("done.txt", "done-cid", 32)]);
+        let mut handle = DirectoryHandle::new("sdk-directory-final", manifest);
+        let policy = DirectoryEarlyUsabilityPolicy {
+            expose_metadata_before_final: false,
+            ..DirectoryEarlyUsabilityPolicy::small_files_up_to(1024)
+        };
+
+        let pending = handle.early_usability_report(policy, "sdk-directory-replay:pending");
+        assert_eq!(
+            pending.usability_state,
+            DirectoryEarlyUsabilityState::NoEntries
+        );
+        assert_eq!(
+            pending.final_commit_state,
+            DirectoryFinalCommitState::Pending
+        );
+        assert!(pending.metadata_paths.is_empty());
+        assert!(pending.small_file_paths.is_empty());
+        assert!(
+            pending.safety_caveats.contains(
+                &"metadata exposure is disabled until final directory commit".to_string()
+            )
+        );
+
+        handle.mark_final_committed();
+        assert!(handle.is_final_committed());
+
+        let committed = handle.early_usability_report(policy, "sdk-directory-replay:committed");
+        assert_eq!(
+            committed.usability_state,
+            DirectoryEarlyUsabilityState::FinalCommitted
+        );
+        assert_eq!(
+            committed.final_commit_state,
+            DirectoryFinalCommitState::Committed
+        );
+        assert_eq!(committed.metadata_paths, vec!["done.txt"]);
+        assert_eq!(committed.small_file_paths, vec!["done.txt"]);
+        assert!(committed.safety_caveats.is_empty());
     }
 
     #[test]
