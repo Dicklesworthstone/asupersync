@@ -9,7 +9,11 @@ use super::actor::{
     TransferActorId, TransferActorTopology, TransferChildRegion, TransferObligationId,
     TransferRegionId, TransferTopologyError,
 };
-use super::autotune::AtpTransferPressureSnapshot;
+use super::autotune::{
+    AtpAutotuneApplicationReceipt, AtpAutotuneApplicationState, AtpAutotuneDecisionReceipt,
+    AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryError,
+    AtpTransferPressureSnapshot,
+};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use std::fmt;
@@ -484,6 +488,60 @@ impl TransferState {
     }
 }
 
+/// Fail-closed reason for refusing to apply autotune settings to a transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferAutotuneApplicationError {
+    /// Complete pressure collection failed before policy evaluation.
+    PressureCollection(TransferPressureCollectionError),
+    /// Pressure samples could not be aggregated into a policy window.
+    Telemetry(AtpAutotuneTelemetryError),
+    /// The actor is terminal or draining and must not mutate transfer knobs.
+    ActorNotTunable {
+        /// Current transfer state.
+        state: TransferState,
+    },
+}
+
+impl TransferAutotuneApplicationError {
+    /// Stable reason code suitable for status and replay artifacts.
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::PressureCollection(err) => err.reason_code(),
+            Self::Telemetry(_) => "invalid_autotune_telemetry",
+            Self::ActorNotTunable { .. } => "transfer_not_tunable",
+        }
+    }
+}
+
+impl fmt::Display for TransferAutotuneApplicationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PressureCollection(err) => {
+                write!(f, "transfer pressure collection failed: {err}")
+            }
+            Self::Telemetry(err) => write!(f, "transfer autotune telemetry failed: {err}"),
+            Self::ActorNotTunable { state } => {
+                write!(f, "transfer state {state:?} cannot apply autotune settings")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TransferAutotuneApplicationError {}
+
+impl From<TransferPressureCollectionError> for TransferAutotuneApplicationError {
+    fn from(err: TransferPressureCollectionError) -> Self {
+        Self::PressureCollection(err)
+    }
+}
+
+impl From<AtpAutotuneTelemetryError> for TransferAutotuneApplicationError {
+    fn from(err: AtpAutotuneTelemetryError) -> Self {
+        Self::Telemetry(err)
+    }
+}
+
 /// Cancellation phase preserved in logs and replay artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferCancelPhase {
@@ -700,6 +758,8 @@ pub struct TransferActor {
     pub topology: TransferActorTopology,
     /// Transfer progress.
     pub progress: TransferProgress,
+    /// Transfer-owned autotune settings and hysteresis state.
+    autotune: AtpAutotuneApplicationState,
     state: TransferState,
     next_journal_seq: u64,
     applied_keys: SmallVec<[IdempotencyKey; 8]>,
@@ -728,6 +788,7 @@ impl TransferActor {
             peer_capabilities,
             topology,
             progress: TransferProgress::default(),
+            autotune: AtpAutotuneApplicationState::default(),
             state: TransferState::Offered,
             next_journal_seq: 0,
             applied_keys: SmallVec::new(),
@@ -759,6 +820,18 @@ impl TransferActor {
     #[must_use]
     pub fn open_obligation_count(&self) -> usize {
         self.open_obligations.len()
+    }
+
+    /// Current bounded autotune settings owned by this transfer.
+    #[must_use]
+    pub const fn autotune_settings(&self) -> AtpAutotuneSettings {
+        self.autotune.settings
+    }
+
+    /// Current autotune application state, including hysteresis counters.
+    #[must_use]
+    pub const fn autotune_application_state(&self) -> &AtpAutotuneApplicationState {
+        &self.autotune
     }
 
     /// Collect actor-owned transfer pressure for an autotune decision window.
@@ -847,6 +920,49 @@ impl TransferActor {
         Ok(snapshot)
     }
 
+    /// Apply one policy window to this transfer's owned autotune state.
+    ///
+    /// The method mutates only the transfer-owned autotune settings. Terminal
+    /// or draining states reject before mutation so cancellation cannot leave a
+    /// partially-applied tuning step behind.
+    pub fn apply_autotune_telemetry(
+        &mut self,
+        policy: AtpAutotunePolicy,
+        telemetry: &AtpAutotuneTelemetry,
+    ) -> Result<AtpAutotuneApplicationReceipt, TransferAutotuneApplicationError> {
+        self.ensure_autotune_mutable()?;
+        Ok(self.autotune.apply_policy_window(policy, telemetry))
+    }
+
+    /// Apply one already-built transfer pressure snapshot to the actor's knobs.
+    pub fn apply_autotune_snapshot(
+        &mut self,
+        policy: AtpAutotunePolicy,
+        snapshot: AtpTransferPressureSnapshot,
+    ) -> Result<AtpAutotuneApplicationReceipt, TransferAutotuneApplicationError> {
+        let telemetry = snapshot.into_telemetry()?;
+        self.apply_autotune_telemetry(policy, &telemetry)
+    }
+
+    /// Collect complete pressure sources and apply the resulting policy window.
+    pub fn apply_complete_pressure_autotune(
+        &mut self,
+        policy: AtpAutotunePolicy,
+        sources: TransferPressureSources,
+    ) -> Result<AtpAutotuneApplicationReceipt, TransferAutotuneApplicationError> {
+        let snapshot = self.collect_complete_pressure_snapshot(sources)?;
+        self.apply_autotune_snapshot(policy, snapshot)
+    }
+
+    /// Apply a precomputed decision receipt if it still matches actor-owned state.
+    pub fn apply_autotune_decision_receipt(
+        &mut self,
+        receipt: AtpAutotuneDecisionReceipt,
+    ) -> Result<AtpAutotuneApplicationReceipt, TransferAutotuneApplicationError> {
+        self.ensure_autotune_mutable()?;
+        Ok(self.autotune.apply_decision_receipt(receipt))
+    }
+
     /// Apply a command to the actor.
     pub fn apply(&mut self, command: TransferCommand) -> Result<TransferReply, TransferActorError> {
         if self.applied_keys.contains(&command.key) {
@@ -907,6 +1023,14 @@ impl TransferActor {
             Err(TransferActorError::ObligationLeak {
                 open: self.open_obligations.len(),
             })
+        }
+    }
+
+    fn ensure_autotune_mutable(&self) -> Result<(), TransferAutotuneApplicationError> {
+        if self.state.is_terminal() {
+            Err(TransferAutotuneApplicationError::ActorNotTunable { state: self.state })
+        } else {
+            Ok(())
         }
     }
 
@@ -1534,6 +1658,216 @@ mod tests {
             .collect_complete_pressure_snapshot(relay_sources)
             .expect_err("relay cost without payload must fail closed");
         assert_eq!(relay_err.reason_code(), "contradictory_relay_counters");
+    }
+
+    #[test]
+    fn transfer_actor_applies_autotune_growth_after_hysteresis() {
+        let policy = AtpAutotunePolicy::default();
+        let mut actor = actor();
+        let initial = actor.autotune_settings();
+        let mut first_sources = complete_sources("trace-growth-1");
+        first_sources.sample_count = 16;
+
+        let first = actor
+            .apply_complete_pressure_autotune(policy, first_sources)
+            .expect("first healthy pressure window");
+
+        assert_eq!(
+            first.outcome,
+            AtpAutotuneApplicationOutcome::DeferredGrowthHysteresis
+        );
+        assert!(!first.applied);
+        assert_eq!(actor.autotune_settings(), initial);
+        assert_eq!(
+            actor
+                .autotune_application_state()
+                .consecutive_growth_windows,
+            1
+        );
+
+        let mut second_sources = complete_sources("trace-growth-2");
+        second_sources.sample_count = 16;
+        let second = actor
+            .apply_complete_pressure_autotune(policy, second_sources)
+            .expect("second healthy pressure window");
+
+        assert_eq!(
+            second.outcome,
+            AtpAutotuneApplicationOutcome::AppliedConfirmedGrowth
+        );
+        assert!(second.applied);
+        assert!(actor.autotune_settings().in_flight_bytes > initial.in_flight_bytes);
+        assert!(actor.autotune_settings().stream_count > initial.stream_count);
+        assert!(actor.autotune_settings().chunk_size_bytes > initial.chunk_size_bytes);
+        assert_eq!(
+            actor
+                .autotune_application_state()
+                .consecutive_growth_windows,
+            0
+        );
+    }
+
+    #[test]
+    fn transfer_actor_applies_autotune_pressure_to_independent_knobs() {
+        let policy = AtpAutotunePolicy::default();
+
+        let mut network_actor = actor();
+        let network_initial = network_actor.autotune_settings();
+        let mut network_sources = complete_sources("trace-network");
+        network_sources.sample_count = 16;
+        network_sources
+            .transport
+            .as_mut()
+            .expect("transport source")
+            .loss_permille = policy.loss_backoff_permille + 1;
+
+        let network_receipt = network_actor
+            .apply_complete_pressure_autotune(policy, network_sources)
+            .expect("network pressure window");
+
+        assert_eq!(
+            network_receipt.outcome,
+            AtpAutotuneApplicationOutcome::AppliedPressureBackoff
+        );
+        assert!(
+            network_actor.autotune_settings().in_flight_bytes < network_initial.in_flight_bytes
+        );
+        assert!(network_actor.autotune_settings().stream_count < network_initial.stream_count);
+        assert!(
+            network_actor.autotune_settings().repair_symbols_per_second
+                > network_initial.repair_symbols_per_second
+        );
+
+        let mut disk_cpu_actor = actor();
+        let disk_cpu_initial = disk_cpu_actor.autotune_settings();
+        let mut disk_cpu_sources = complete_sources("trace-disk-cpu");
+        disk_cpu_sources.sample_count = 16;
+        disk_cpu_sources
+            .disk
+            .as_mut()
+            .expect("disk source")
+            .write_lag_micros = policy.disk_lag_micros + 1;
+        disk_cpu_sources
+            .coding
+            .as_mut()
+            .expect("coding source")
+            .encode_backlog_symbols = policy.cpu_backlog_symbols + 1;
+
+        let disk_cpu_receipt = disk_cpu_actor
+            .apply_complete_pressure_autotune(policy, disk_cpu_sources)
+            .expect("disk/cpu pressure window");
+
+        assert_eq!(
+            disk_cpu_receipt.outcome,
+            AtpAutotuneApplicationOutcome::AppliedPressureBackoff
+        );
+        assert_eq!(
+            disk_cpu_actor.autotune_settings().in_flight_bytes,
+            disk_cpu_initial.in_flight_bytes
+        );
+        assert!(
+            disk_cpu_actor.autotune_settings().chunk_size_bytes < disk_cpu_initial.chunk_size_bytes
+        );
+
+        let mut relay_actor = actor();
+        let relay_initial = relay_actor.autotune_settings();
+        let mut relay_sources = complete_sources("trace-relay-cost");
+        relay_sources.sample_count = 16;
+        let relay = relay_sources.relay.as_mut().expect("relay source");
+        relay.bytes = 1_048_576;
+        relay.cost_micros = policy.relay_cost_micros_per_mib + 1;
+
+        let relay_receipt = relay_actor
+            .apply_complete_pressure_autotune(policy, relay_sources)
+            .expect("relay pressure window");
+
+        assert_eq!(
+            relay_receipt.outcome,
+            AtpAutotuneApplicationOutcome::AppliedPressureBackoff
+        );
+        assert!(relay_actor.autotune_settings().in_flight_bytes < relay_initial.in_flight_bytes);
+        assert!(relay_actor.autotune_settings().stream_count < relay_initial.stream_count);
+        assert_eq!(
+            relay_actor.autotune_settings().repair_symbols_per_second,
+            relay_initial.repair_symbols_per_second
+        );
+    }
+
+    #[test]
+    fn transfer_actor_rejects_contradictory_autotune_sources_without_mutation() {
+        let policy = AtpAutotunePolicy::default();
+        let mut actor = actor();
+        actor.progress.offered_bytes = 10;
+        actor.progress.verified_bytes = 20;
+        actor.progress.committed_bytes = 5;
+        let before = actor.autotune_settings();
+        let mut sources = complete_sources("trace-contradictory");
+        sources.sample_count = 16;
+
+        let err = actor
+            .apply_complete_pressure_autotune(policy, sources)
+            .expect_err("contradictory progress must reject before mutation");
+
+        assert_eq!(err.reason_code(), "contradictory_progress_counters");
+        assert!(matches!(
+            err,
+            TransferAutotuneApplicationError::PressureCollection(
+                TransferPressureCollectionError::ContradictoryProgress { .. }
+            )
+        ));
+        assert_eq!(actor.autotune_settings(), before);
+    }
+
+    #[test]
+    fn transfer_actor_rejects_autotune_while_cancelling_without_obligation_or_settings_mutation() {
+        let policy = AtpAutotunePolicy::default();
+        let mut actor = actor();
+        actor
+            .apply(cmd(
+                1,
+                TransferCommandKind::Accept {
+                    obligation: TransferObligationId::new(1),
+                },
+            ))
+            .expect("accept");
+        actor
+            .apply(cmd(
+                2,
+                TransferCommandKind::Start {
+                    path_id: 7,
+                    obligation: TransferObligationId::new(2),
+                },
+            ))
+            .expect("start");
+        actor
+            .apply(cmd(
+                3,
+                TransferCommandKind::Cancel {
+                    phase: TransferCancelPhase::Requested,
+                },
+            ))
+            .expect("cancel");
+
+        let before_settings = actor.autotune_settings();
+        let before_open = actor.open_obligation_count();
+        let before_journal_len = actor.journal().len();
+        let mut sources = complete_sources("trace-cancelled");
+        sources.sample_count = 16;
+
+        let err = actor
+            .apply_complete_pressure_autotune(policy, sources)
+            .expect_err("cancelled actor must not apply autotune");
+
+        assert_eq!(err.reason_code(), "transfer_not_tunable");
+        assert!(matches!(
+            err,
+            TransferAutotuneApplicationError::ActorNotTunable {
+                state: TransferState::Cancelling
+            }
+        ));
+        assert_eq!(actor.autotune_settings(), before_settings);
+        assert_eq!(actor.open_obligation_count(), before_open);
+        assert_eq!(actor.journal().len(), before_journal_len);
     }
 
     fn cmd(key: u128, kind: TransferCommandKind) -> TransferCommand {
