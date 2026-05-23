@@ -2620,12 +2620,17 @@ fn json_value_after_key<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn scan_json_string_literal(json: &str, quote_start: usize, key: &str) -> Option<(bool, usize)> {
+    // Ensure quote_start + 1 doesn't overflow or go out of bounds
+    if quote_start.saturating_add(1) >= json.len() {
+        return None;
+    }
+
     let mut key_chars = key.chars();
     let mut matches_key = true;
     let mut escaped = false;
 
     for (offset, ch) in json[quote_start + 1..].char_indices() {
-        let idx = quote_start + 1 + offset;
+        let idx = quote_start.saturating_add(1).saturating_add(offset);
 
         if escaped {
             matches_key = false;
@@ -2819,7 +2824,7 @@ fn validate_stream_subject_pattern(subject: &str) -> Result<(), &'static str> {
     for (index, token) in tokens.into_iter().enumerate() {
         match token {
             "*" => {}
-            ">" if index + 1 == token_count => {}
+            ">" if index.saturating_add(1) == token_count => {}
             ">" => return Err("contains an invalid NATS wildcard placement"),
             _ if token.contains('*') || token.contains('>') => {
                 return Err("contains an invalid NATS wildcard placement");
