@@ -1,4 +1,6 @@
 //! Service Layer Conformance Tests
+
+#![allow(dead_code)]
 //!
 //! Property-based conformance harness for service layer components: rate limiting fairness,
 //! load balancing convergence, hedge cancel-on-first-success, retry idempotency under
@@ -35,13 +37,13 @@
 //! - SL-RT05: Side effects occur exactly once despite retries
 
 #[cfg(any(test, feature = "test-internals"))]
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 #[cfg(any(test, feature = "test-internals"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(any(test, feature = "test-internals"))]
 use std::sync::{Arc, Mutex};
 #[cfg(any(test, feature = "test-internals"))]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -118,12 +120,10 @@ impl MockRateLimiter {
 
         // Refill tokens based on elapsed time
         let elapsed = now.duration_since(bucket.last_refill);
-        let refill_amount = (elapsed.as_millis() as f64
-            / self.config.refill_interval_ms as f64)
+        let refill_amount = (elapsed.as_millis() as f64 / self.config.refill_interval_ms as f64)
             * self.config.requests_per_second as f64;
 
-        bucket.tokens = (bucket.tokens + refill_amount)
-            .min(self.config.burst_capacity as f64);
+        bucket.tokens = (bucket.tokens + refill_amount).min(self.config.burst_capacity as f64);
         bucket.last_refill = now;
 
         bucket.request_count += 1;
@@ -146,7 +146,7 @@ impl MockRateLimiter {
     fn get_global_stats(&self) -> (u64, u64) {
         (
             self.total_requests.load(Ordering::SeqCst),
-            self.total_limited.load(Ordering::SeqCst)
+            self.total_limited.load(Ordering::SeqCst),
         )
     }
 }
@@ -156,7 +156,7 @@ impl MockRateLimiter {
 pub struct BackendId(String);
 
 #[cfg(any(test, feature = "test-internals"))]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Backend {
     id: BackendId,
     weight: u32,
@@ -309,7 +309,7 @@ pub struct MockHedge<T> {
 }
 
 #[cfg(any(test, feature = "test-internals"))]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct MockHedgeOperation<T> {
     id: usize,
     response: MockResponse<T>,
@@ -320,7 +320,9 @@ struct MockHedgeOperation<T> {
 #[cfg(any(test, feature = "test-internals"))]
 impl<T: Clone> MockHedge<T> {
     fn new(operations: Vec<(MockResponse<T>, u64)>, timeout_ms: u64) -> Self {
-        let hedge_ops = operations.into_iter().enumerate()
+        let hedge_ops = operations
+            .into_iter()
+            .enumerate()
             .map(|(id, (response, delay_ms))| MockHedgeOperation {
                 id,
                 response,
@@ -357,7 +359,11 @@ impl<T: Clone> MockHedge<T> {
 
             for op in &self.operations {
                 if op.id != success_id {
-                    if op.is_cancelled.compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                    if op
+                        .is_cancelled
+                        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed)
+                        .is_ok()
+                    {
                         self.cancelled_count.fetch_add(1, Ordering::SeqCst);
                     }
                 }
@@ -429,9 +435,13 @@ impl<T: Clone> MockRetryHandler<T> {
         for attempt in 0..self.config.max_attempts {
             let attempt_idx = self.attempt_count.fetch_add(1, Ordering::SeqCst);
 
-            let response = self.responses.get(attempt_idx)
-                .cloned()
-                .unwrap_or(MockResponse::PermanentError("Exhausted responses".to_string()));
+            let response =
+                self.responses
+                    .get(attempt_idx)
+                    .cloned()
+                    .unwrap_or(MockResponse::PermanentError(
+                        "Exhausted responses".to_string(),
+                    ));
 
             // Side effects should only occur on success or permanent error
             if response.is_success() || !response.is_retryable() {
@@ -446,8 +456,9 @@ impl<T: Clone> MockRetryHandler<T> {
                 // Simulate backoff delay calculation
                 let delay = std::cmp::min(
                     (self.config.base_delay_ms as f64
-                        * self.config.backoff_multiplier.powi(attempt as i32)) as u64,
-                    self.config.max_delay_ms
+                        * self.config.backoff_multiplier.powi(attempt as i32))
+                        as u64,
+                    self.config.max_delay_ms,
                 );
                 // In real implementation: sleep(Duration::from_millis(delay));
                 _ = delay; // Acknowledge delay for test
@@ -488,13 +499,19 @@ mod conformance_tests {
         for _ in 0..5 {
             assert!(limiter.check_rate_limit(&key1), "Key1 should have tokens");
         }
-        assert!(!limiter.check_rate_limit(&key1), "Key1 should be rate limited");
+        assert!(
+            !limiter.check_rate_limit(&key1),
+            "Key1 should be rate limited"
+        );
 
         // Key2 should still have full bucket
         for _ in 0..5 {
             assert!(limiter.check_rate_limit(&key2), "Key2 should have tokens");
         }
-        assert!(!limiter.check_rate_limit(&key2), "Key2 should be rate limited");
+        assert!(
+            !limiter.check_rate_limit(&key2),
+            "Key2 should be rate limited"
+        );
 
         let (key1_total, key1_limited) = limiter.get_stats(&key1).unwrap();
         let (key2_total, key2_limited) = limiter.get_stats(&key2).unwrap();
@@ -515,7 +532,9 @@ mod conformance_tests {
         };
 
         let limiter = MockRateLimiter::new(config);
-        let keys: Vec<_> = (0..10).map(|i| RateLimitKey::new(format!("user{}", i))).collect();
+        let keys: Vec<_> = (0..10)
+            .map(|i| RateLimitKey::new(format!("user{}", i)))
+            .collect();
 
         // Simulate burst load across all keys
         for _ in 0..20 {
@@ -534,9 +553,11 @@ mod conformance_tests {
 
         // Calculate variance to ensure fairness
         let mean = limitation_rates.iter().sum::<f64>() / limitation_rates.len() as f64;
-        let variance = limitation_rates.iter()
+        let variance = limitation_rates
+            .iter()
             .map(|rate| (rate - mean).powi(2))
-            .sum::<f64>() / limitation_rates.len() as f64;
+            .sum::<f64>()
+            / limitation_rates.len() as f64;
 
         // Fairness condition: variance should be low (< 0.1)
         assert!(
@@ -563,7 +584,7 @@ mod conformance_tests {
             if let Some(backend) = lb.select_backend() {
                 backend.add_load();
                 // Simulate request completion
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(std::time::Duration::from_millis(1));
                 backend.remove_load();
             }
         }
@@ -572,9 +593,15 @@ mod conformance_tests {
 
         // Check distribution matches weights (30:50:20 ratio)
         let total_selections: usize = distribution.values().sum();
-        let backend1_ratio = distribution.get(&BackendId("backend1".to_string())).unwrap_or(&0);
-        let backend2_ratio = distribution.get(&BackendId("backend2".to_string())).unwrap_or(&0);
-        let backend3_ratio = distribution.get(&BackendId("backend3".to_string())).unwrap_or(&0);
+        let backend1_ratio = distribution
+            .get(&BackendId("backend1".to_string()))
+            .unwrap_or(&0);
+        let backend2_ratio = distribution
+            .get(&BackendId("backend2".to_string()))
+            .unwrap_or(&0);
+        let backend3_ratio = distribution
+            .get(&BackendId("backend3".to_string()))
+            .unwrap_or(&0);
 
         let expected_backend1_ratio = 30.0 / 100.0;
         let expected_backend2_ratio = 50.0 / 100.0;
@@ -588,19 +615,22 @@ mod conformance_tests {
         assert!(
             (actual_backend1_ratio - expected_backend1_ratio).abs() < 0.05,
             "Backend1 ratio diverged: expected {:.2}, got {:.2}",
-            expected_backend1_ratio, actual_backend1_ratio
+            expected_backend1_ratio,
+            actual_backend1_ratio
         );
 
         assert!(
             (actual_backend2_ratio - expected_backend2_ratio).abs() < 0.05,
             "Backend2 ratio diverged: expected {:.2}, got {:.2}",
-            expected_backend2_ratio, actual_backend2_ratio
+            expected_backend2_ratio,
+            actual_backend2_ratio
         );
 
         assert!(
             (actual_backend3_ratio - expected_backend3_ratio).abs() < 0.05,
             "Backend3 ratio diverged: expected {:.2}, got {:.2}",
-            expected_backend3_ratio, actual_backend3_ratio
+            expected_backend3_ratio,
+            actual_backend3_ratio
         );
     }
 
@@ -608,9 +638,9 @@ mod conformance_tests {
     #[test]
     fn sl_he01_hedge_cancel_on_first_success() {
         let operations = vec![
-            (MockResponse::TransientError("fail".to_string()), 50),  // Fails fast
-            (MockResponse::Success(42), 100),                        // Succeeds slower
-            (MockResponse::Success(43), 200),                        // Succeeds slowest
+            (MockResponse::TransientError("fail".to_string()), 50), // Fails fast
+            (MockResponse::Success(42), 100),                       // Succeeds slower
+            (MockResponse::Success(43), 200),                       // Succeeds slowest
             (MockResponse::TransientError("fail2".to_string()), 150), // Would fail
         ];
 
@@ -618,7 +648,11 @@ mod conformance_tests {
         let result = hedge.execute();
 
         assert_eq!(result, Some(42), "Should return first successful response");
-        assert_eq!(hedge.get_first_success_id(), Some(1), "Success ID should be 1");
+        assert_eq!(
+            hedge.get_first_success_id(),
+            Some(1),
+            "Success ID should be 1"
+        );
 
         // Should cancel 2 operations (operations 2 and 3 that hadn't completed)
         // Operation 0 failed before success, so it's not cancelled
@@ -632,9 +666,9 @@ mod conformance_tests {
     #[test]
     fn sl_he02_hedge_timeout_bounds() {
         let operations = vec![
-            (MockResponse::Success(42), 500),   // Would succeed within timeout
-            (MockResponse::Success(43), 1500),  // Would succeed but timeout
-            (MockResponse::Success(44), 2000),  // Would succeed but timeout
+            (MockResponse::Success(42), 500),  // Would succeed within timeout
+            (MockResponse::Success(43), 1500), // Would succeed but timeout
+            (MockResponse::Success(44), 2000), // Would succeed but timeout
         ];
 
         let hedge = MockHedge::new(operations, 1000); // 1 second timeout
@@ -651,7 +685,10 @@ mod conformance_tests {
         let slow_hedge = MockHedge::new(faster_operations, 1000);
         let slow_result = slow_hedge.execute();
 
-        assert_eq!(slow_result, None, "Should return None when all operations exceed timeout");
+        assert_eq!(
+            slow_result, None,
+            "Should return None when all operations exceed timeout"
+        );
     }
 
     /// SL-RT01: Retry operations are idempotent (same input → same output)
@@ -670,7 +707,11 @@ mod conformance_tests {
         let result2 = handler2.execute_with_retries();
 
         assert_eq!(result1, result2, "Retry results should be idempotent");
-        assert_eq!(result1, MockResponse::Success(42), "Should succeed after retries");
+        assert_eq!(
+            result1,
+            MockResponse::Success(42),
+            "Should succeed after retries"
+        );
 
         // Both should have same attempt pattern
         assert_eq!(handler1.get_attempt_count(), handler2.get_attempt_count());
@@ -690,7 +731,11 @@ mod conformance_tests {
         let transient_result = transient_handler.execute_with_retries();
 
         assert_eq!(transient_result, MockResponse::Success(42));
-        assert_eq!(transient_handler.get_attempt_count(), 3, "Should make 3 attempts for transient failures");
+        assert_eq!(
+            transient_handler.get_attempt_count(),
+            3,
+            "Should make 3 attempts for transient failures"
+        );
 
         // Test permanent failure termination
         let permanent_responses = vec![
@@ -702,8 +747,15 @@ mod conformance_tests {
         let permanent_handler = MockRetryHandler::new(permanent_responses, RetryConfig::default());
         let permanent_result = permanent_handler.execute_with_retries();
 
-        assert_eq!(permanent_result, MockResponse::PermanentError("fatal".to_string()));
-        assert_eq!(permanent_handler.get_attempt_count(), 2, "Should terminate on permanent failure");
+        assert_eq!(
+            permanent_result,
+            MockResponse::PermanentError("fatal".to_string())
+        );
+        assert_eq!(
+            permanent_handler.get_attempt_count(),
+            2,
+            "Should terminate on permanent failure"
+        );
     }
 
     /// SL-RT05: Side effects occur exactly once despite retries
@@ -716,12 +768,22 @@ mod conformance_tests {
             MockResponse::Success(42),
         ];
 
-        let handler = MockRetryHandler::new(responses, RetryConfig { max_attempts: 5, ..Default::default() });
+        let handler = MockRetryHandler::new(
+            responses,
+            RetryConfig {
+                max_attempts: 5,
+                ..Default::default()
+            },
+        );
         let result = handler.execute_with_retries();
 
         assert_eq!(result, MockResponse::Success(42));
         assert_eq!(handler.get_attempt_count(), 4, "Should make 4 attempts");
-        assert_eq!(handler.get_side_effect_count(), 1, "Side effect should occur exactly once");
+        assert_eq!(
+            handler.get_side_effect_count(),
+            1,
+            "Side effect should occur exactly once"
+        );
     }
 
     /// Property-based tests for service layer invariants
@@ -900,7 +962,10 @@ mod conformance_tests {
                     if backend.add_load() {
                         // Simulate hedge operation
                         let hedge_ops = vec![
-                            (MockResponse::Success(format!("response_from_{}", backend.id.0)), 100),
+                            (
+                                MockResponse::Success(format!("response_from_{}", backend.id.0)),
+                                100,
+                            ),
                             (MockResponse::TransientError("backup_fail".to_string()), 150),
                         ];
 
@@ -918,8 +983,14 @@ mod conformance_tests {
         }
 
         // Verify integration behavior
-        assert!(successful_requests > 0, "Should have some successful requests");
-        assert!(rate_limited_requests > 0, "Should have some rate limited requests");
+        assert!(
+            successful_requests > 0,
+            "Should have some successful requests"
+        );
+        assert!(
+            rate_limited_requests > 0,
+            "Should have some rate limited requests"
+        );
         assert_eq!(
             successful_requests + rate_limited_requests,
             50,
@@ -929,7 +1000,10 @@ mod conformance_tests {
         // Check load distribution
         let distribution = lb.get_selection_distribution();
         let total_lb_selections: usize = distribution.values().sum();
-        assert!(total_lb_selections > 0, "Load balancer should have made selections");
+        assert!(
+            total_lb_selections > 0,
+            "Load balancer should have made selections"
+        );
 
         println!(
             "Integration test results: {} successful, {} rate limited, {} load balanced",
@@ -984,7 +1058,10 @@ mod edge_case_tests {
 
         // All requests should be rate limited with zero burst
         for _ in 0..5 {
-            assert!(!limiter.check_rate_limit(&key), "Should rate limit with zero burst");
+            assert!(
+                !limiter.check_rate_limit(&key),
+                "Should rate limit with zero burst"
+            );
         }
     }
 
@@ -1004,7 +1081,10 @@ mod edge_case_tests {
         let lb = MockLoadBalancer::new(backends);
 
         // Should return None when all backends unhealthy
-        assert!(lb.select_backend().is_none(), "Should return None with no healthy backends");
+        assert!(
+            lb.select_backend().is_none(),
+            "Should return None with no healthy backends"
+        );
     }
 
     /// Edge case: hedge with all operations beyond timeout
@@ -1018,15 +1098,25 @@ mod edge_case_tests {
         let hedge = MockHedge::new(operations, 1000); // 1 second timeout
         let result = hedge.execute();
 
-        assert!(result.is_none(), "Should return None when all operations timeout");
-        assert_eq!(hedge.get_cancelled_count(), 0, "No operations to cancel if all timeout");
+        assert!(
+            result.is_none(),
+            "Should return None when all operations timeout"
+        );
+        assert_eq!(
+            hedge.get_cancelled_count(),
+            0,
+            "No operations to cancel if all timeout"
+        );
     }
 
     /// Edge case: retry with zero max attempts
     #[test]
     fn edge_case_retry_zero_attempts() {
         let responses = vec![MockResponse::Success(42)];
-        let config = RetryConfig { max_attempts: 0, ..Default::default() };
+        let config = RetryConfig {
+            max_attempts: 0,
+            ..Default::default()
+        };
 
         let handler = MockRetryHandler::new(responses, config);
         let result = handler.execute_with_retries();

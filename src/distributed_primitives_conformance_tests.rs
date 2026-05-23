@@ -1,4 +1,6 @@
 //! Distributed Primitives Conformance Tests
+
+#![allow(dead_code)]
 //!
 //! Property-based conformance harness for distributed system primitives: consistent hash
 //! ring rebalance idempotency, snapshot/restore round-trip integrity, bridge sequence
@@ -30,9 +32,9 @@
 #[cfg(any(test, feature = "test-internals"))]
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(any(test, feature = "test-internals"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 #[cfg(any(test, feature = "test-internals"))]
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -117,7 +119,9 @@ impl MockConsistentHashRing {
         let hash = self.hash_key(key);
 
         // Find first node >= hash, or wrap to first node
-        let node = self.ring.range(hash..)
+        let node = self
+            .ring
+            .range(hash..)
             .next()
             .or_else(|| self.ring.iter().next())
             .map(|(_, node)| node.clone())?;
@@ -217,7 +221,9 @@ impl SnapshotData {
 
     fn compress(&self) -> CompressedSnapshot {
         // Mock compression - in reality would use actual compression
-        let serialized_size = self.data.iter()
+        let serialized_size = self
+            .data
+            .iter()
             .map(|(k, v)| k.len() + v.len())
             .sum::<usize>();
 
@@ -251,7 +257,7 @@ impl CompressedSnapshot {
 
 #[cfg(any(test, feature = "test-internals"))]
 /// Mock state machine for snapshot/restore testing
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MockStateMachine {
     state: HashMap<String, String>,
     version: AtomicU64,
@@ -410,12 +416,14 @@ impl MockBridge {
             self.gap_count.fetch_add(1, Ordering::SeqCst);
             return Err(format!(
                 "Sequence gap detected: received {}, expected {}",
-                sequence.sequence_number, last_valid + 1
+                sequence.sequence_number,
+                last_valid + 1
             ));
         }
 
         // Valid sequence
-        self.last_valid_sequence.store(sequence.sequence_number, Ordering::SeqCst);
+        self.last_valid_sequence
+            .store(sequence.sequence_number, Ordering::SeqCst);
         Ok(())
     }
 
@@ -472,7 +480,10 @@ mod conformance_tests {
         let mappings1 = ring1.get_all_mappings(&test_keys);
         let mappings2 = ring2.get_all_mappings(&test_keys);
 
-        assert_eq!(mappings1, mappings2, "Identical operations should produce identical ring state");
+        assert_eq!(
+            mappings1, mappings2,
+            "Identical operations should produce identical ring state"
+        );
 
         // Remove and re-add node - should be idempotent
         ring1.remove_node(&NodeId::new("node2"));
@@ -484,7 +495,10 @@ mod conformance_tests {
         let remappings1 = ring1.get_all_mappings(&test_keys);
         let remappings2 = ring2.get_all_mappings(&test_keys);
 
-        assert_eq!(remappings1, remappings2, "Rebalance operations should be idempotent");
+        assert_eq!(
+            remappings1, remappings2,
+            "Rebalance operations should be idempotent"
+        );
     }
 
     /// DP-CH02: Node additions preserve existing key mappings when possible
@@ -496,9 +510,7 @@ mod conformance_tests {
         ring.add_node(NodeId::new("node1"));
         ring.add_node(NodeId::new("node2"));
 
-        let test_keys: Vec<_> = (0..50)
-            .map(|i| HashKey::new(format!("key{}", i)))
-            .collect();
+        let test_keys: Vec<_> = (0..50).map(|i| HashKey::new(format!("key{}", i))).collect();
 
         let initial_mappings = ring.get_all_mappings(&test_keys);
 
@@ -507,7 +519,8 @@ mod conformance_tests {
         let new_mappings = ring.get_all_mappings(&test_keys);
 
         // Count how many mappings changed
-        let changed_count = initial_mappings.iter()
+        let changed_count = initial_mappings
+            .iter()
             .filter(|(key, node)| new_mappings.get(key) != Some(node))
             .count();
 
@@ -544,7 +557,9 @@ mod conformance_tests {
 
         // No keys should map to removed node
         assert!(
-            !after_removal_mappings.values().any(|node| node == &NodeId::new("node2")),
+            !after_removal_mappings
+                .values()
+                .any(|node| node == &NodeId::new("node2")),
             "No keys should map to removed node"
         );
 
@@ -576,12 +591,17 @@ mod conformance_tests {
         for (op, node_id) in operations {
             match op {
                 "add" => ring.add_node(NodeId::new(node_id)),
-                "remove" => { ring.remove_node(&NodeId::new(node_id)); },
+                "remove" => {
+                    ring.remove_node(&NodeId::new(node_id));
+                }
                 _ => unreachable!(),
             }
 
             // Verify consistency after each operation
-            assert!(ring.node_count() <= 5, "Should not have more nodes than added");
+            assert!(
+                ring.node_count() <= 5,
+                "Should not have more nodes than added"
+            );
             assert_eq!(
                 ring.ring_size(),
                 ring.node_count() * 50,
@@ -617,7 +637,9 @@ mod conformance_tests {
         assert_ne!(state_machine.get_state_size(), initial_size);
 
         // Restore from snapshot
-        state_machine.restore(&snapshot).expect("Restore should succeed");
+        state_machine
+            .restore(&snapshot)
+            .expect("Restore should succeed");
 
         // Verify exact state restoration
         assert_eq!(state_machine.get_version(), initial_version);
@@ -651,7 +673,9 @@ mod conformance_tests {
         let mut reconstructed = MockStateMachine::new();
 
         // Apply latest snapshot (should contain complete state)
-        reconstructed.restore(&snapshot3).expect("Final snapshot restore should succeed");
+        reconstructed
+            .restore(&snapshot3)
+            .expect("Final snapshot restore should succeed");
 
         // Verify complete state reconstruction
         assert_eq!(reconstructed.get("a"), None); // Was deleted
@@ -676,11 +700,11 @@ mod conformance_tests {
         // Attempt restore
         let result = state_machine.restore(&corrupted_snapshot);
 
-        assert!(result.is_err(), "Restore should fail for corrupted snapshot");
-        assert_eq!(
-            result.unwrap_err(),
-            "Snapshot checksum verification failed"
+        assert!(
+            result.is_err(),
+            "Restore should fail for corrupted snapshot"
         );
+        assert_eq!(result.unwrap_err(), "Snapshot checksum verification failed");
 
         // State machine should remain unchanged
         assert_eq!(state_machine.get_version(), original_version);
@@ -690,25 +714,31 @@ mod conformance_tests {
     /// DP-SR05: Snapshot compression preserves data integrity
     #[test]
     fn dp_sr05_snapshot_compression_integrity() {
-        let data = [
-            ("key1", "value1"),
-            ("key2", "value2"),
-            ("key3", "value3"),
-        ].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let data = [("key1", "value1"), ("key2", "value2"), ("key3", "value3")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
 
         let original_snapshot = SnapshotData::new(1, data);
-        assert!(original_snapshot.verify_checksum(), "Original snapshot should be valid");
+        assert!(
+            original_snapshot.verify_checksum(),
+            "Original snapshot should be valid"
+        );
 
         // Compress snapshot
         let compressed = original_snapshot.compress();
 
         // Decompress
-        let decompressed = compressed.decompress(&original_snapshot)
+        let decompressed = compressed
+            .decompress(&original_snapshot)
             .expect("Decompression should succeed");
 
         // Verify integrity preserved
         assert_eq!(decompressed, original_snapshot);
-        assert!(decompressed.verify_checksum(), "Decompressed snapshot should be valid");
+        assert!(
+            decompressed.verify_checksum(),
+            "Decompressed snapshot should be valid"
+        );
         assert_eq!(decompressed.data.len(), 3);
         assert_eq!(decompressed.data.get("key1"), Some(&"value1".to_string()));
     }
@@ -738,14 +768,19 @@ mod conformance_tests {
             assert!(
                 window[1] > window[0],
                 "Sequence numbers should increase monotonically: {} -> {}",
-                window[0], window[1]
+                window[0],
+                window[1]
             );
         }
 
         // Verify no gaps or duplicates
         sequences.sort_unstable();
         for (i, &seq) in sequences.iter().enumerate() {
-            assert_eq!(seq, (i + 1) as u64, "Sequence should be consecutive starting from 1");
+            assert_eq!(
+                seq,
+                (i + 1) as u64,
+                "Sequence should be consecutive starting from 1"
+            );
         }
     }
 
@@ -993,15 +1028,21 @@ mod conformance_tests {
         }
 
         // Create snapshots
-        let snapshots: HashMap<_, _> = state_machines.iter()
+        let snapshots: HashMap<_, _> = state_machines
+            .iter()
             .map(|(node, sm)| (node.clone(), sm.snapshot()))
             .collect();
 
         // Simulate node failure and restore
-        state_machines.get_mut(&nodes[0]).unwrap().put("corrupted".to_string(), "bad".to_string());
+        state_machines
+            .get_mut(&nodes[0])
+            .unwrap()
+            .put("corrupted".to_string(), "bad".to_string());
 
         // Restore from snapshot
-        let result = state_machines.get_mut(&nodes[0]).unwrap()
+        let result = state_machines
+            .get_mut(&nodes[0])
+            .unwrap()
             .restore(&snapshots[&nodes[0]]);
         assert!(result.is_ok(), "Snapshot restore should succeed");
 
@@ -1025,12 +1066,22 @@ mod conformance_tests {
         for i in 0..30 {
             let key = HashKey::new(format!("data{}", i));
             let mapped_node = hash_ring.get_node(&key);
-            assert!(mapped_node.is_some(), "All keys should still be mapped after node removal");
-            assert_ne!(mapped_node.unwrap(), nodes[0], "Keys should not map to removed node");
+            assert!(
+                mapped_node.is_some(),
+                "All keys should still be mapped after node removal"
+            );
+            assert_ne!(
+                mapped_node.unwrap(),
+                nodes[0],
+                "Keys should not map to removed node"
+            );
         }
 
-        println!("Integration test completed: {} nodes, {} snapshots, hash ring rebalanced",
-                 nodes.len() - 1, snapshots.len());
+        println!(
+            "Integration test completed: {} nodes, {} snapshots, hash ring rebalanced",
+            nodes.len() - 1,
+            snapshots.len()
+        );
     }
 
     /// Conformance summary test
