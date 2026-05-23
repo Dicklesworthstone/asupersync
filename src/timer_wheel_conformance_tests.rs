@@ -27,8 +27,6 @@
 //! operation sequences verifies correctness under adversarial patterns.
 
 #[cfg(any(test, feature = "test-internals"))]
-use proptest::{prelude::*, strategy::BoxedStrategy, strategy::Strategy, arbitrary::Arbitrary};
-#[cfg(any(test, feature = "test-internals"))]
 use std::collections::{BinaryHeap, HashMap, HashSet};
 #[cfg(any(test, feature = "test-internals"))]
 use std::time::{Duration, Instant};
@@ -240,39 +238,39 @@ pub enum TimerOperation {
     Cancel(TimerId),
 }
 
-#[cfg(any(test, feature = "test-internals"))]
-impl Arbitrary for MockDeadline {
-    type Parameters = ();
-    type Strategy = BoxedStrategy<Self>;
-
-    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-        // Generate deadlines within reasonable range to test ordering
-        (0u64..1_000_000_000u64)
-            .prop_map(MockDeadline::from_nanos)
-            .boxed()
-    }
-}
-
-#[cfg(any(test, feature = "test-internals"))]
-impl Arbitrary for TimerOperation {
-    type Parameters = ();
-    type Strategy = BoxedStrategy<Self>;
-
-    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-        prop_oneof![
-            // 50% inserts
-            any::<MockDeadline>().prop_map(TimerOperation::Insert),
-            // 25% extracts
-            Just(TimerOperation::ExtractEarliest),
-            // 25% cancels (will generate timer IDs during test execution)
-            (0u64..100u64).prop_map(|id| TimerOperation::Cancel(TimerId(id))),
-        ].boxed()
-    }
-}
 
 #[cfg(test)]
 mod conformance_tests {
     use super::*;
+    use proptest::prelude::*;
+
+    impl Arbitrary for MockDeadline {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            // Generate deadlines within reasonable range to test ordering
+            (0u64..1_000_000_000u64)
+                .prop_map(MockDeadline::from_nanos)
+                .boxed()
+        }
+    }
+
+    impl Arbitrary for TimerOperation {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            prop_oneof![
+                // 50% inserts
+                any::<MockDeadline>().prop_map(TimerOperation::Insert),
+                // 25% extracts
+                Just(TimerOperation::ExtractEarliest),
+                // 25% cancels (will generate timer IDs during test execution)
+                (0u64..100u64).prop_map(|id| TimerOperation::Cancel(TimerId(id))),
+            ].boxed()
+        }
+    }
 
     /// TW-001: Insert operation maintains timer wheel ordering invariant
     #[test]

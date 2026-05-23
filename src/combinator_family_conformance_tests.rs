@@ -32,8 +32,6 @@
 //! - CB-S03: Quorum memory usage is proportional to input count
 
 #[cfg(any(test, feature = "test-internals"))]
-use proptest::{prelude::*, strategy::BoxedStrategy, strategy::Just, arbitrary::Arbitrary};
-#[cfg(any(test, feature = "test-internals"))]
 use std::collections::{HashMap, HashSet};
 #[cfg(any(test, feature = "test-internals"))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -261,45 +259,45 @@ pub fn mock_quorum<T: Clone>(
     }
 }
 
-#[cfg(any(test, feature = "test-internals"))]
-impl<T> Arbitrary for MockResult<T>
-where
-    T: Arbitrary + Clone,
-{
-    type Parameters = T::Parameters;
-    type Strategy = BoxedStrategy<Self>;
-
-    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
-        prop_oneof![
-            T::arbitrary_with(args).prop_map(MockResult::Ok),
-            "[a-z]{1,10}".prop_map(MockResult::RetryableError),
-            "[A-Z]{1,10}".prop_map(MockResult::PermanentError),
-            Just(MockResult::Timeout),
-        ].boxed()
-    }
-}
-
-#[cfg(any(test, feature = "test-internals"))]
-impl<T> Arbitrary for RaceInput<T>
-where
-    T: Arbitrary + Clone,
-{
-    type Parameters = T::Parameters;
-    type Strategy = BoxedStrategy<Self>;
-
-    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
-        (
-            any::<u32>(),
-            MockResult::<T>::arbitrary_with(args),
-            0u64..5000u64,
-        ).prop_map(|(id, result, delay_ms)| RaceInput { id, result, delay_ms })
-        .boxed()
-    }
-}
 
 #[cfg(test)]
 mod conformance_tests {
     use super::*;
+    use proptest::prelude::*;
+
+    impl<T> Arbitrary for MockResult<T>
+    where
+        T: Arbitrary + Clone,
+    {
+        type Parameters = T::Parameters;
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+            prop_oneof![
+                T::arbitrary_with(args).prop_map(MockResult::Ok),
+                "[a-z]{1,10}".prop_map(MockResult::RetryableError),
+                "[A-Z]{1,10}".prop_map(MockResult::PermanentError),
+                Just(MockResult::Timeout),
+            ].boxed()
+        }
+    }
+
+    impl<T> Arbitrary for RaceInput<T>
+    where
+        T: Arbitrary + Clone,
+    {
+        type Parameters = T::Parameters;
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+            (
+                any::<u32>(),
+                MockResult::<T>::arbitrary_with(args),
+                0u64..5000u64,
+            ).prop_map(|(id, result, delay_ms)| RaceInput { id, result, delay_ms })
+            .boxed()
+        }
+    }
 
     /// CB-R01: Same operation retried multiple times gives same final result
     #[test]
