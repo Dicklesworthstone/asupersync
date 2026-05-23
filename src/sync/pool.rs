@@ -477,13 +477,38 @@ impl<R> PooledResource<R> {
     #[inline]
     #[must_use]
     pub fn get(&self) -> &R {
-        self.resource.as_ref().expect("resource taken")
+        self.resource.as_ref().expect(
+            "PooledResource accessed after drop or return - resource has been taken. \
+            This indicates a use-after-drop bug or concurrent access violation."
+        )
     }
 
     /// Mutably access the resource.
     #[inline]
     pub fn get_mut(&mut self) -> &mut R {
-        self.resource.as_mut().expect("resource taken")
+        self.resource.as_mut().expect(
+            "PooledResource accessed after drop or return - resource has been taken. \
+            This indicates a use-after-drop bug or concurrent access violation."
+        )
+    }
+
+    /// Try to access the resource, returning None if already taken.
+    ///
+    /// This is a safer alternative to get() that doesn't panic when called
+    /// after the resource has been returned or dropped.
+    #[inline]
+    #[must_use]
+    pub fn try_get(&self) -> Option<&R> {
+        self.resource.as_ref()
+    }
+
+    /// Try to mutably access the resource, returning None if already taken.
+    ///
+    /// This is a safer alternative to get_mut() that doesn't panic when called
+    /// after the resource has been returned or dropped.
+    #[inline]
+    pub fn try_get_mut(&mut self) -> Option<&mut R> {
+        self.resource.as_mut()
     }
 
     /// Explicitly return the resource to the pool.
