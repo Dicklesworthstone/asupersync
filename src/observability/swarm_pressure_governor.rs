@@ -2157,6 +2157,22 @@ impl SwarmPressureGovernor {
             max_workload_feedback_pressure_scaled: scale_pressure_for_metrics(
                 workload_pressure.max_overall_pressure,
             ),
+            workload_feedback_dominant_pressure_source: workload_pressure.dominant_pressure_source,
+            max_workload_feedback_queue_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_queue_pressure,
+            ),
+            max_workload_feedback_disk_io_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_disk_io_pressure,
+            ),
+            max_workload_feedback_rch_queue_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_rch_queue_pressure,
+            ),
+            max_workload_feedback_validation_frontier_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_validation_frontier_pressure,
+            ),
+            max_workload_feedback_cancellation_tail_pressure_scaled: scale_pressure_for_metrics(
+                workload_pressure.max_cancellation_tail_pressure,
+            ),
             live_peer_pressure_reports: peer_pressure.live_report_count,
             max_peer_pressure_scaled: scale_pressure_for_metrics(
                 peer_pressure.max_overall_pressure,
@@ -3283,6 +3299,18 @@ pub struct SwarmPressureMetrics {
     pub live_workload_feedback_reports: u64,
     /// Maximum live workload feedback pressure ratio scaled by 10_000.
     pub max_workload_feedback_pressure_scaled: i64,
+    /// Dominant live workload feedback pressure axis.
+    pub workload_feedback_dominant_pressure_source: SwarmWorkloadPressureSource,
+    /// Maximum live workload queue feedback pressure ratio scaled by 10_000.
+    pub max_workload_feedback_queue_pressure_scaled: i64,
+    /// Maximum live workload disk or artifact-cache IO feedback pressure ratio scaled by 10_000.
+    pub max_workload_feedback_disk_io_pressure_scaled: i64,
+    /// Maximum live workload RCH or remote-worker queue feedback pressure ratio scaled by 10_000.
+    pub max_workload_feedback_rch_queue_pressure_scaled: i64,
+    /// Maximum live workload validation-frontier feedback pressure ratio scaled by 10_000.
+    pub max_workload_feedback_validation_frontier_pressure_scaled: i64,
+    /// Maximum live workload cancellation/drain tail feedback pressure ratio scaled by 10_000.
+    pub max_workload_feedback_cancellation_tail_pressure_scaled: i64,
     /// Number of live peer pressure reports considered by admission.
     pub live_peer_pressure_reports: u64,
     /// Maximum live peer pressure ratio scaled by 10_000.
@@ -5695,6 +5723,24 @@ mod tests {
             "scaled workload feedback should round near 8500, got {}",
             metrics.max_workload_feedback_pressure_scaled
         );
+        assert_eq!(
+            metrics.workload_feedback_dominant_pressure_source,
+            SwarmWorkloadPressureSource::RchQueue
+        );
+        assert_eq!(metrics.max_workload_feedback_queue_pressure_scaled, 2000);
+        assert_eq!(metrics.max_workload_feedback_disk_io_pressure_scaled, 3000);
+        assert_eq!(
+            metrics.max_workload_feedback_rch_queue_pressure_scaled,
+            8500
+        );
+        assert_eq!(
+            metrics.max_workload_feedback_validation_frontier_pressure_scaled,
+            4000
+        );
+        assert_eq!(
+            metrics.max_workload_feedback_cancellation_tail_pressure_scaled,
+            1000
+        );
     }
 
     #[test]
@@ -5754,7 +5800,17 @@ mod tests {
                     .expect("test feedback max age should double");
         }
         assert_eq!(governor.prune_stale_workload_pressure_feedback(), 1);
-        assert_eq!(governor.metrics().live_workload_feedback_reports, 0);
+        let metrics = governor.metrics();
+        assert_eq!(metrics.live_workload_feedback_reports, 0);
+        assert_eq!(
+            metrics.workload_feedback_dominant_pressure_source,
+            SwarmWorkloadPressureSource::None
+        );
+        assert_eq!(metrics.max_workload_feedback_pressure_scaled, 0);
+        assert_eq!(
+            metrics.max_workload_feedback_validation_frontier_pressure_scaled,
+            0
+        );
     }
 
     #[test]
