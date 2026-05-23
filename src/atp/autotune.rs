@@ -924,6 +924,232 @@ impl AtpAutotuneDecisionReceipt {
     }
 }
 
+/// Stable schema version for ATP autotune decision-application receipts.
+pub const ATP_AUTOTUNE_APPLICATION_RECEIPT_SCHEMA_VERSION: &str =
+    "atp-autotune-application-receipt-v1";
+
+/// Outcome for applying a policy decision to transfer-owned state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpAutotuneApplicationOutcome {
+    /// Pressure backoff was applied immediately.
+    AppliedPressureBackoff,
+    /// Conservative growth was applied after enough consecutive clean windows.
+    AppliedConfirmedGrowth,
+    /// Conservative growth was deferred until the hysteresis threshold is met.
+    DeferredGrowthHysteresis,
+    /// No safe improvement was available, so existing settings were held.
+    HeldNoWin,
+    /// Malformed or contradictory telemetry was rejected without mutation.
+    RejectedMalformedTelemetry,
+    /// A receipt for stale transfer state was rejected without mutation.
+    RejectedStaleReceipt,
+    /// A receipt with an unsupported schema was rejected without mutation.
+    RejectedSchemaVersion,
+}
+
+/// Replay-friendly evidence for applying one autotune decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneApplicationReceipt {
+    /// Application receipt schema version.
+    pub schema_version: String,
+    /// Stable trace id linked to the source decision.
+    pub trace_id: String,
+    /// Stable workload or transfer id linked to the source decision.
+    pub workload_id: String,
+    /// Samples represented by the decision window.
+    pub sample_count: u32,
+    /// Bounded settings before the application step.
+    pub previous_settings: AtpAutotuneSettings,
+    /// Bounded candidate settings selected by the policy.
+    pub candidate_settings: AtpAutotuneSettings,
+    /// Settings visible after the application step.
+    pub applied_settings: AtpAutotuneSettings,
+    /// Whether transfer-owned settings changed.
+    pub applied: bool,
+    /// Stable outcome for logs, status, and proof artifacts.
+    pub outcome: AtpAutotuneApplicationOutcome,
+    /// Consecutive clean-growth windows observed after this application step.
+    pub consecutive_growth_windows: u8,
+    /// Number of clean-growth windows required before applying growth.
+    pub growth_confirmations_required: u8,
+    /// Stable reason suitable for status and proof artifacts.
+    pub reason_code: String,
+    /// Original deterministic policy receipt.
+    pub decision_receipt: AtpAutotuneDecisionReceipt,
+}
+
+impl AtpAutotuneApplicationReceipt {
+    fn from_parts(
+        previous_settings: AtpAutotuneSettings,
+        candidate_settings: AtpAutotuneSettings,
+        applied_settings: AtpAutotuneSettings,
+        outcome: AtpAutotuneApplicationOutcome,
+        consecutive_growth_windows: u8,
+        growth_confirmations_required: u8,
+        decision_receipt: AtpAutotuneDecisionReceipt,
+    ) -> Self {
+        let reason_code = match outcome {
+            AtpAutotuneApplicationOutcome::AppliedPressureBackoff => "applied_pressure_backoff",
+            AtpAutotuneApplicationOutcome::AppliedConfirmedGrowth => "applied_confirmed_growth",
+            AtpAutotuneApplicationOutcome::DeferredGrowthHysteresis => "deferred_growth_hysteresis",
+            AtpAutotuneApplicationOutcome::HeldNoWin => "held_no_win",
+            AtpAutotuneApplicationOutcome::RejectedMalformedTelemetry => {
+                "rejected_malformed_telemetry"
+            }
+            AtpAutotuneApplicationOutcome::RejectedStaleReceipt => "rejected_stale_receipt",
+            AtpAutotuneApplicationOutcome::RejectedSchemaVersion => "rejected_schema_version",
+        };
+        let applied = previous_settings != applied_settings;
+        Self {
+            schema_version: String::from(ATP_AUTOTUNE_APPLICATION_RECEIPT_SCHEMA_VERSION),
+            trace_id: decision_receipt.trace_id.clone(),
+            workload_id: decision_receipt.workload_id.clone(),
+            sample_count: decision_receipt.sample_count,
+            previous_settings,
+            candidate_settings,
+            applied_settings,
+            applied,
+            outcome,
+            consecutive_growth_windows,
+            growth_confirmations_required,
+            reason_code: String::from(reason_code),
+            decision_receipt,
+        }
+    }
+}
+
+/// Transfer-owned state for safely applying autotune decisions.
+///
+/// The state applies backoff immediately, but requires consecutive clean
+/// windows before growth is visible to a transfer. That hysteresis keeps noisy
+/// pressure from oscillating knobs while preserving fail-closed behavior for
+/// stale or malformed decision receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneApplicationState {
+    /// Current bounded transfer settings.
+    pub settings: AtpAutotuneSettings,
+    /// Hard bounds enforced at every application step.
+    pub limits: AtpAutotuneLimits,
+    /// Consecutive clean-growth windows required before applying growth.
+    pub growth_confirmations_required: u8,
+    /// Consecutive clean-growth windows observed so far.
+    pub consecutive_growth_windows: u8,
+}
+
+impl Default for AtpAutotuneApplicationState {
+    fn default() -> Self {
+        Self::new(AtpAutotuneSettings::default(), AtpAutotuneLimits::default())
+    }
+}
+
+impl AtpAutotuneApplicationState {
+    /// Create transfer-owned application state with default two-window growth hysteresis.
+    #[must_use]
+    pub fn new(settings: AtpAutotuneSettings, limits: AtpAutotuneLimits) -> Self {
+        Self {
+            settings: limits.clamp(settings),
+            limits,
+            growth_confirmations_required: 2,
+            consecutive_growth_windows: 0,
+        }
+    }
+
+    /// Override the number of consecutive clean windows required for growth.
+    #[must_use]
+    pub fn with_growth_confirmations_required(mut self, required: u8) -> Self {
+        self.growth_confirmations_required = required.max(1);
+        self
+    }
+
+    /// Compute and apply one policy decision from a telemetry window.
+    #[must_use]
+    pub fn apply_policy_window(
+        &mut self,
+        policy: AtpAutotunePolicy,
+        telemetry: &AtpAutotuneTelemetry,
+    ) -> AtpAutotuneApplicationReceipt {
+        let bounded_policy = AtpAutotunePolicy {
+            limits: self.limits,
+            ..policy
+        };
+        let receipt = bounded_policy.decide_with_receipt(self.settings, telemetry);
+        self.apply_decision_receipt(receipt)
+    }
+
+    /// Apply a precomputed policy receipt if it still matches transfer-owned state.
+    #[must_use]
+    pub fn apply_decision_receipt(
+        &mut self,
+        receipt: AtpAutotuneDecisionReceipt,
+    ) -> AtpAutotuneApplicationReceipt {
+        let previous = self.limits.clamp(self.settings);
+        self.settings = previous;
+
+        if receipt.schema_version != ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION {
+            self.consecutive_growth_windows = 0;
+            return AtpAutotuneApplicationReceipt::from_parts(
+                previous,
+                previous,
+                previous,
+                AtpAutotuneApplicationOutcome::RejectedSchemaVersion,
+                self.consecutive_growth_windows,
+                self.growth_confirmations_required,
+                receipt,
+            );
+        }
+
+        if receipt.current_settings != previous {
+            self.consecutive_growth_windows = 0;
+            return AtpAutotuneApplicationReceipt::from_parts(
+                previous,
+                self.limits.clamp(receipt.decision.settings),
+                previous,
+                AtpAutotuneApplicationOutcome::RejectedStaleReceipt,
+                self.consecutive_growth_windows,
+                self.growth_confirmations_required,
+                receipt,
+            );
+        }
+
+        let candidate = self.limits.clamp(receipt.decision.settings);
+        let outcome = match receipt.outcome {
+            AtpAutotuneDecisionOutcome::PressureBackoff => {
+                self.consecutive_growth_windows = 0;
+                self.settings = candidate;
+                AtpAutotuneApplicationOutcome::AppliedPressureBackoff
+            }
+            AtpAutotuneDecisionOutcome::ConservativeGrowth => {
+                self.consecutive_growth_windows = self.consecutive_growth_windows.saturating_add(1);
+                if self.consecutive_growth_windows >= self.growth_confirmations_required {
+                    self.settings = candidate;
+                    self.consecutive_growth_windows = 0;
+                    AtpAutotuneApplicationOutcome::AppliedConfirmedGrowth
+                } else {
+                    AtpAutotuneApplicationOutcome::DeferredGrowthHysteresis
+                }
+            }
+            AtpAutotuneDecisionOutcome::HoldNoWin => {
+                self.consecutive_growth_windows = 0;
+                AtpAutotuneApplicationOutcome::HeldNoWin
+            }
+            AtpAutotuneDecisionOutcome::MalformedTelemetry => {
+                self.consecutive_growth_windows = 0;
+                AtpAutotuneApplicationOutcome::RejectedMalformedTelemetry
+            }
+        };
+
+        AtpAutotuneApplicationReceipt::from_parts(
+            previous,
+            candidate,
+            self.settings,
+            outcome,
+            self.consecutive_growth_windows,
+            self.growth_confirmations_required,
+            receipt,
+        )
+    }
+}
+
 /// Deterministic conservative autotune policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtpAutotunePolicy {
@@ -1780,5 +2006,119 @@ mod tests {
                 .iter()
                 .all(|change| change.direction == AtpAutotuneKnobDirection::Hold)
         );
+    }
+
+    #[test]
+    fn application_state_defers_growth_until_hysteresis_is_satisfied() {
+        let policy = AtpAutotunePolicy::default();
+        let mut state = AtpAutotuneApplicationState::default();
+        let initial = state.settings;
+
+        let first = state.apply_policy_window(policy, &healthy_telemetry());
+        assert_eq!(
+            first.outcome,
+            AtpAutotuneApplicationOutcome::DeferredGrowthHysteresis
+        );
+        assert!(!first.applied);
+        assert_eq!(state.settings, initial);
+        assert_eq!(state.consecutive_growth_windows, 1);
+
+        let second = state.apply_policy_window(policy, &healthy_telemetry());
+        assert_eq!(
+            second.outcome,
+            AtpAutotuneApplicationOutcome::AppliedConfirmedGrowth
+        );
+        assert!(second.applied);
+        assert!(state.settings.in_flight_bytes > initial.in_flight_bytes);
+        assert_eq!(state.consecutive_growth_windows, 0);
+    }
+
+    #[test]
+    fn application_state_applies_pressure_backoff_immediately() {
+        let policy = AtpAutotunePolicy::default();
+        let mut state = AtpAutotuneApplicationState::default();
+        let initial = state.settings;
+        let mut telemetry = healthy_telemetry();
+        telemetry.loss_permille = Some(100);
+
+        let receipt = state.apply_policy_window(policy, &telemetry);
+
+        assert_eq!(
+            receipt.outcome,
+            AtpAutotuneApplicationOutcome::AppliedPressureBackoff
+        );
+        assert!(receipt.applied);
+        assert!(state.settings.in_flight_bytes < initial.in_flight_bytes);
+        assert!(state.settings.repair_symbols_per_second > initial.repair_symbols_per_second);
+        assert_eq!(state.consecutive_growth_windows, 0);
+    }
+
+    #[test]
+    fn application_state_resets_pending_growth_after_noisy_pressure() {
+        let policy = AtpAutotunePolicy::default();
+        let mut state = AtpAutotuneApplicationState::default();
+        let first = state.apply_policy_window(policy, &healthy_telemetry());
+        assert_eq!(
+            first.outcome,
+            AtpAutotuneApplicationOutcome::DeferredGrowthHysteresis
+        );
+        assert_eq!(state.consecutive_growth_windows, 1);
+
+        let mut telemetry = healthy_telemetry();
+        telemetry.send_buffer_queued_bytes = Some(policy.buffer_pressure_bytes + 1);
+        let noisy = state.apply_policy_window(policy, &telemetry);
+
+        assert_eq!(
+            noisy.outcome,
+            AtpAutotuneApplicationOutcome::AppliedPressureBackoff
+        );
+        assert_eq!(state.consecutive_growth_windows, 0);
+
+        let next_clean = state.apply_policy_window(policy, &healthy_telemetry());
+        assert_eq!(
+            next_clean.outcome,
+            AtpAutotuneApplicationOutcome::DeferredGrowthHysteresis
+        );
+        assert_eq!(state.consecutive_growth_windows, 1);
+    }
+
+    #[test]
+    fn application_state_rejects_stale_receipts_without_mutation() {
+        let policy = AtpAutotunePolicy::default();
+        let mut state = AtpAutotuneApplicationState::default();
+        let stale_current = AtpAutotuneSettings::new(1, 1, 64 * 1_024, 0);
+        let stale_receipt = policy.decide_with_receipt(stale_current, &healthy_telemetry());
+        let before = state.settings;
+
+        let applied = state.apply_decision_receipt(stale_receipt);
+
+        assert_eq!(
+            applied.outcome,
+            AtpAutotuneApplicationOutcome::RejectedStaleReceipt
+        );
+        assert!(!applied.applied);
+        assert_eq!(state.settings, before);
+        assert_eq!(state.consecutive_growth_windows, 0);
+    }
+
+    #[test]
+    fn application_state_rejects_malformed_receipts_without_mutation() {
+        let policy = AtpAutotunePolicy::default();
+        let mut state = AtpAutotuneApplicationState::default();
+        let malformed = policy.decide_with_receipt(
+            state.settings,
+            &AtpAutotuneTelemetry::new("", "workload-a").with_sample_count(16),
+        );
+        let before = state.settings;
+
+        let applied = state.apply_decision_receipt(malformed);
+
+        assert_eq!(
+            applied.outcome,
+            AtpAutotuneApplicationOutcome::RejectedMalformedTelemetry
+        );
+        assert!(!applied.applied);
+        assert_eq!(state.settings, before);
+        assert_eq!(state.consecutive_growth_windows, 0);
     }
 }

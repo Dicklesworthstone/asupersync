@@ -34,10 +34,12 @@ pub mod verify;
 pub mod writer;
 
 pub use autotune::{
-    ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION, ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision,
-    AtpAutotuneDecisionOutcome, AtpAutotuneDecisionReceipt, AtpAutotuneKnob, AtpAutotuneKnobChange,
-    AtpAutotuneKnobDirection, AtpAutotuneLimits, AtpAutotuneMetric, AtpAutotuneMetricSample,
-    AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryError,
+    ATP_AUTOTUNE_APPLICATION_RECEIPT_SCHEMA_VERSION, ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION,
+    ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneApplicationOutcome, AtpAutotuneApplicationReceipt,
+    AtpAutotuneApplicationState, AtpAutotuneDecision, AtpAutotuneDecisionOutcome,
+    AtpAutotuneDecisionReceipt, AtpAutotuneKnob, AtpAutotuneKnobChange, AtpAutotuneKnobDirection,
+    AtpAutotuneLimits, AtpAutotuneMetric, AtpAutotuneMetricSample, AtpAutotunePolicy,
+    AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryError,
     AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
     AtpTransferPressureSnapshot,
 };
