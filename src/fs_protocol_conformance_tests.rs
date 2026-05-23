@@ -11,9 +11,6 @@
 #![allow(clippy::missing_errors_doc)]
 
 #[cfg(any(test, feature = "test-internals"))]
-use crate::error::Error;
-
-#[cfg(any(test, feature = "test-internals"))]
 use std::collections::HashMap;
 #[cfg(any(test, feature = "test-internals"))]
 use std::io::{IoSlice, IoSliceMut};
@@ -50,8 +47,8 @@ pub struct MockUringWrite {
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UringConsistencyMode {
-    Strict,      // Exact vectored I/O semantics
-    Permissive,  // Allow reordering within transaction
+    Strict,     // Exact vectored I/O semantics
+    Permissive, // Allow reordering within transaction
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -65,7 +62,12 @@ impl MockUringProcessor {
     }
 
     /// Process vectored read operation - must maintain consistency between buffers
-    pub fn readv(&mut self, fd: i32, bufs: &mut [IoSliceMut<'_>], offset: u64) -> Result<usize, std::io::Error> {
+    pub fn readv(
+        &mut self,
+        fd: i32,
+        bufs: &mut [IoSliceMut<'_>],
+        offset: u64,
+    ) -> Result<usize, std::io::Error> {
         let mut total_read = 0;
         let mut buffer_contents = Vec::new();
 
@@ -88,7 +90,12 @@ impl MockUringProcessor {
     }
 
     /// Process vectored write operation - must maintain ordering and atomicity
-    pub fn writev(&mut self, fd: i32, bufs: &[IoSlice<'_>], offset: u64) -> Result<usize, std::io::Error> {
+    pub fn writev(
+        &mut self,
+        fd: i32,
+        bufs: &[IoSlice<'_>],
+        offset: u64,
+    ) -> Result<usize, std::io::Error> {
         let mut total_written = 0;
         let mut buffer_contents = Vec::new();
 
@@ -159,8 +166,14 @@ impl MockVfsCanonicalizer {
 
         // Setup mock filesystem structure
         symlinks.insert(PathBuf::from("/link/to/file"), PathBuf::from("/real/file"));
-        symlinks.insert(PathBuf::from("/recursive/link"), PathBuf::from("/another/link"));
-        symlinks.insert(PathBuf::from("/another/link"), PathBuf::from("/final/target"));
+        symlinks.insert(
+            PathBuf::from("/recursive/link"),
+            PathBuf::from("/another/link"),
+        );
+        symlinks.insert(
+            PathBuf::from("/another/link"),
+            PathBuf::from("/final/target"),
+        );
 
         mount_points.insert(PathBuf::from("/mnt"), PathBuf::from("/dev/sda1"));
         mount_points.insert(PathBuf::from("/proc"), PathBuf::from("procfs"));
@@ -196,8 +209,18 @@ impl MockVfsCanonicalizer {
         }
 
         // Cache result
-        self.canonicalization_cache.insert(path.clone(), canonical.clone());
+        self.canonicalization_cache
+            .insert(path.clone(), canonical.clone());
         Ok(canonical)
+    }
+
+    /// Return the backing mount source for a canonical path, if it is under a known mount point.
+    pub fn mount_source_for_path(&self, path: &Path) -> Option<&Path> {
+        self.mount_points
+            .iter()
+            .filter(|(mount_point, _)| path.starts_with(mount_point.as_path()))
+            .max_by_key(|(mount_point, _)| mount_point.components().count())
+            .map(|(_, source)| source.as_path())
     }
 
     /// Normalize path components (remove .., ., duplicate separators)
@@ -230,17 +253,27 @@ impl MockVfsCanonicalizer {
     }
 
     /// Validate canonicalization invariants
-    pub fn validate_canonicalization(&self, _original: &Path, canonical: &Path) -> Result<(), String> {
+    pub fn validate_canonicalization(
+        &self,
+        _original: &Path,
+        canonical: &Path,
+    ) -> Result<(), String> {
         // Invariant 1: Canonical paths are absolute
         if !canonical.is_absolute() {
-            return Err(format!("Canonical path must be absolute: {}", canonical.display()));
+            return Err(format!(
+                "Canonical path must be absolute: {}",
+                canonical.display()
+            ));
         }
 
         // Invariant 2: No . or .. components in canonical path
         for component in canonical.components() {
             match component {
                 std::path::Component::CurDir | std::path::Component::ParentDir => {
-                    return Err(format!("Canonical path contains . or ..: {}", canonical.display()));
+                    return Err(format!(
+                        "Canonical path contains . or ..: {}",
+                        canonical.display()
+                    ));
                 }
                 _ => continue,
             }
@@ -248,6 +281,16 @@ impl MockVfsCanonicalizer {
 
         // Invariant 3: Idempotency - canonicalizing a canonical path returns itself
         // (This would require mutable access, so we document the requirement)
+
+        // Invariant 4: Known mount points retain nonempty backing metadata.
+        if let Some(mount_source) = self.mount_source_for_path(canonical) {
+            if mount_source.as_os_str().is_empty() {
+                return Err(format!(
+                    "Mount point for {} has empty backing source",
+                    canonical.display()
+                ));
+            }
+        }
 
         Ok(())
     }
@@ -294,9 +337,7 @@ impl MockBufProcessor {
             return Ok(0); // EOF
         }
 
-        buf[..to_read].copy_from_slice(
-            &self.read_buffer[self.read_pos..self.read_pos + to_read]
-        );
+        buf[..to_read].copy_from_slice(&self.read_buffer[self.read_pos..self.read_pos + to_read]);
         self.read_pos += to_read;
         Ok(to_read)
     }
@@ -330,7 +371,8 @@ impl MockBufProcessor {
         if self.read_pos > self.read_buffer.len() {
             return Err(format!(
                 "Read position {} exceeds buffer length {}",
-                self.read_pos, self.read_buffer.len()
+                self.read_pos,
+                self.read_buffer.len()
             ));
         }
 
@@ -338,7 +380,8 @@ impl MockBufProcessor {
         if self.write_buffer.len() > self.buffer_size && self.write_buffer.len() > 1 {
             return Err(format!(
                 "Write buffer size {} exceeds limit {}",
-                self.write_buffer.len(), self.buffer_size
+                self.write_buffer.len(),
+                self.buffer_size
             ));
         }
 
@@ -381,9 +424,9 @@ pub struct ConformanceTestResult {
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequirementLevel {
-    Must,    // POSIX/Linux mandated behavior
-    Should,  // Recommended practice
-    May,     // Optional optimization
+    Must,   // POSIX/Linux mandated behavior
+    Should, // Recommended practice
+    May,    // Optional optimization
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -420,15 +463,28 @@ impl FsProtocolConformanceHarness {
         let mut buffers = [IoSliceMut::new(&mut buf1), IoSliceMut::new(&mut buf2)];
         match self.uring_processor.readv(1, &mut buffers, 0) {
             Ok(bytes_read) => {
-                self.record_test("uring_readv_basic", RequirementLevel::Must, TestStatus::Pass, None);
+                self.record_test(
+                    "uring_readv_basic",
+                    RequirementLevel::Must,
+                    TestStatus::Pass,
+                    None,
+                );
                 if bytes_read != 3072 {
-                    self.record_test("uring_readv_byte_count", RequirementLevel::Must, TestStatus::Fail,
-                        Some(format!("Expected 3072 bytes, got {}", bytes_read)));
+                    self.record_test(
+                        "uring_readv_byte_count",
+                        RequirementLevel::Must,
+                        TestStatus::Fail,
+                        Some(format!("Expected 3072 bytes, got {}", bytes_read)),
+                    );
                 }
             }
             Err(e) => {
-                self.record_test("uring_readv_basic", RequirementLevel::Must, TestStatus::Fail,
-                    Some(e.to_string()));
+                self.record_test(
+                    "uring_readv_basic",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.to_string()),
+                );
             }
         }
 
@@ -437,25 +493,47 @@ impl FsProtocolConformanceHarness {
         match self.uring_processor.writev(2, &write_bufs, 0) {
             Ok(bytes_written) => {
                 if bytes_written == 10 {
-                    self.record_test("uring_writev_atomicity", RequirementLevel::Must, TestStatus::Pass, None);
+                    self.record_test(
+                        "uring_writev_atomicity",
+                        RequirementLevel::Must,
+                        TestStatus::Pass,
+                        None,
+                    );
                 } else {
-                    self.record_test("uring_writev_atomicity", RequirementLevel::Must, TestStatus::Fail,
-                        Some(format!("Partial write: {} of 10 bytes", bytes_written)));
+                    self.record_test(
+                        "uring_writev_atomicity",
+                        RequirementLevel::Must,
+                        TestStatus::Fail,
+                        Some(format!("Partial write: {} of 10 bytes", bytes_written)),
+                    );
                 }
             }
             Err(e) => {
-                self.record_test("uring_writev_atomicity", RequirementLevel::Must, TestStatus::Fail,
-                    Some(e.to_string()));
+                self.record_test(
+                    "uring_writev_atomicity",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.to_string()),
+                );
             }
         }
 
         // Test 3: Operation ordering
         self.uring_processor.validate_consistency().map_err(|e| {
-            self.record_test("uring_operation_ordering", RequirementLevel::Must, TestStatus::Fail,
-                Some(e.clone()));
+            self.record_test(
+                "uring_operation_ordering",
+                RequirementLevel::Must,
+                TestStatus::Fail,
+                Some(e.clone()),
+            );
             e
         })?;
-        self.record_test("uring_operation_ordering", RequirementLevel::Must, TestStatus::Pass, None);
+        self.record_test(
+            "uring_operation_ordering",
+            RequirementLevel::Must,
+            TestStatus::Pass,
+            None,
+        );
 
         Ok(())
     }
@@ -473,17 +551,32 @@ impl FsProtocolConformanceHarness {
             match self.vfs_canonicalizer.canonicalize(input) {
                 Ok(canonical) => {
                     if canonical == Path::new(expected) {
-                        self.record_test(&format!("vfs_canonicalize_{}", input.replace('/', "_")),
-                            RequirementLevel::Must, TestStatus::Pass, None);
+                        self.record_test(
+                            &format!("vfs_canonicalize_{}", input.replace('/', "_")),
+                            RequirementLevel::Must,
+                            TestStatus::Pass,
+                            None,
+                        );
                     } else {
-                        self.record_test(&format!("vfs_canonicalize_{}", input.replace('/', "_")),
-                            RequirementLevel::Must, TestStatus::Fail,
-                            Some(format!("Expected {}, got {}", expected, canonical.display())));
+                        self.record_test(
+                            &format!("vfs_canonicalize_{}", input.replace('/', "_")),
+                            RequirementLevel::Must,
+                            TestStatus::Fail,
+                            Some(format!(
+                                "Expected {}, got {}",
+                                expected,
+                                canonical.display()
+                            )),
+                        );
                     }
                 }
                 Err(e) => {
-                    self.record_test(&format!("vfs_canonicalize_{}", input.replace('/', "_")),
-                        RequirementLevel::Must, TestStatus::Fail, Some(e.to_string()));
+                    self.record_test(
+                        &format!("vfs_canonicalize_{}", input.replace('/', "_")),
+                        RequirementLevel::Must,
+                        TestStatus::Fail,
+                        Some(e.to_string()),
+                    );
                 }
             }
         }
@@ -492,15 +585,28 @@ impl FsProtocolConformanceHarness {
         match self.vfs_canonicalizer.canonicalize("/link/to/file") {
             Ok(canonical) => {
                 if canonical == Path::new("/real/file") {
-                    self.record_test("vfs_symlink_resolution", RequirementLevel::Must, TestStatus::Pass, None);
+                    self.record_test(
+                        "vfs_symlink_resolution",
+                        RequirementLevel::Must,
+                        TestStatus::Pass,
+                        None,
+                    );
                 } else {
-                    self.record_test("vfs_symlink_resolution", RequirementLevel::Must, TestStatus::Fail,
-                        Some(format!("Expected /real/file, got {}", canonical.display())));
+                    self.record_test(
+                        "vfs_symlink_resolution",
+                        RequirementLevel::Must,
+                        TestStatus::Fail,
+                        Some(format!("Expected /real/file, got {}", canonical.display())),
+                    );
                 }
             }
             Err(e) => {
-                self.record_test("vfs_symlink_resolution", RequirementLevel::Must, TestStatus::Fail,
-                    Some(e.to_string()));
+                self.record_test(
+                    "vfs_symlink_resolution",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.to_string()),
+                );
             }
         }
 
@@ -510,11 +616,20 @@ impl FsProtocolConformanceHarness {
 
         match self.vfs_canonicalizer.canonicalize("/cycle/a") {
             Ok(_) => {
-                self.record_test("vfs_cycle_detection", RequirementLevel::Must, TestStatus::Fail,
-                    Some("Cycle not detected".to_string()));
+                self.record_test(
+                    "vfs_cycle_detection",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some("Cycle not detected".to_string()),
+                );
             }
             Err(_) => {
-                self.record_test("vfs_cycle_detection", RequirementLevel::Must, TestStatus::Pass, None);
+                self.record_test(
+                    "vfs_cycle_detection",
+                    RequirementLevel::Must,
+                    TestStatus::Pass,
+                    None,
+                );
             }
         }
 
@@ -523,21 +638,35 @@ impl FsProtocolConformanceHarness {
 
     fn test_buf_reader_writer_boundaries(&mut self) -> Result<(), String> {
         // Test 1: Buffer boundary handling
-        self.buf_processor.fill_read_buffer(b"hello world test data");
+        self.buf_processor
+            .fill_read_buffer(b"hello world test data");
 
         let mut small_buf = [0u8; 5];
         match self.buf_processor.buf_read(&mut small_buf) {
             Ok(bytes_read) => {
                 if bytes_read == 5 && &small_buf == b"hello" {
-                    self.record_test("buf_reader_boundary", RequirementLevel::Must, TestStatus::Pass, None);
+                    self.record_test(
+                        "buf_reader_boundary",
+                        RequirementLevel::Must,
+                        TestStatus::Pass,
+                        None,
+                    );
                 } else {
-                    self.record_test("buf_reader_boundary", RequirementLevel::Must, TestStatus::Fail,
-                        Some(format!("Unexpected read result: {} bytes", bytes_read)));
+                    self.record_test(
+                        "buf_reader_boundary",
+                        RequirementLevel::Must,
+                        TestStatus::Fail,
+                        Some(format!("Unexpected read result: {} bytes", bytes_read)),
+                    );
                 }
             }
             Err(e) => {
-                self.record_test("buf_reader_boundary", RequirementLevel::Must, TestStatus::Fail,
-                    Some(e.to_string()));
+                self.record_test(
+                    "buf_reader_boundary",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.to_string()),
+                );
             }
         }
 
@@ -546,30 +675,60 @@ impl FsProtocolConformanceHarness {
         match self.buf_processor.buf_write(&large_data) {
             Ok(bytes_written) => {
                 if bytes_written == 10000 {
-                    self.record_test("buf_writer_large_write", RequirementLevel::Must, TestStatus::Pass, None);
+                    self.record_test(
+                        "buf_writer_large_write",
+                        RequirementLevel::Must,
+                        TestStatus::Pass,
+                        None,
+                    );
                 } else {
-                    self.record_test("buf_writer_large_write", RequirementLevel::Must, TestStatus::Fail,
-                        Some(format!("Partial write: {} of 10000 bytes", bytes_written)));
+                    self.record_test(
+                        "buf_writer_large_write",
+                        RequirementLevel::Must,
+                        TestStatus::Fail,
+                        Some(format!("Partial write: {} of 10000 bytes", bytes_written)),
+                    );
                 }
             }
             Err(e) => {
-                self.record_test("buf_writer_large_write", RequirementLevel::Must, TestStatus::Fail,
-                    Some(e.to_string()));
+                self.record_test(
+                    "buf_writer_large_write",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.to_string()),
+                );
             }
         }
 
         // Test 3: Boundary semantics validation
-        self.buf_processor.validate_boundary_semantics().map_err(|e| {
-            self.record_test("buf_boundary_semantics", RequirementLevel::Must, TestStatus::Fail,
-                Some(e.clone()));
-            e
-        })?;
-        self.record_test("buf_boundary_semantics", RequirementLevel::Must, TestStatus::Pass, None);
+        self.buf_processor
+            .validate_boundary_semantics()
+            .map_err(|e| {
+                self.record_test(
+                    "buf_boundary_semantics",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
+                e
+            })?;
+        self.record_test(
+            "buf_boundary_semantics",
+            RequirementLevel::Must,
+            TestStatus::Pass,
+            None,
+        );
 
         Ok(())
     }
 
-    fn record_test(&mut self, name: &str, level: RequirementLevel, status: TestStatus, error: Option<String>) {
+    fn record_test(
+        &mut self,
+        name: &str,
+        level: RequirementLevel,
+        status: TestStatus,
+        error: Option<String>,
+    ) {
         self.test_results.push(ConformanceTestResult {
             test_name: name.to_string(),
             requirement_level: level,
@@ -581,45 +740,26 @@ impl FsProtocolConformanceHarness {
     fn generate_compliance_report(&self) -> Result<(), String> {
         let mut must_pass = 0;
         let mut must_total = 0;
-        let mut should_pass = 0;
-        let mut should_total = 0;
-        let mut may_pass = 0;
-        let mut may_total = 0;
-
         for result in &self.test_results {
-            match result.requirement_level {
-                RequirementLevel::Must => {
-                    must_total += 1;
-                    if result.status == TestStatus::Pass {
-                        must_pass += 1;
-                    }
-                }
-                RequirementLevel::Should => {
-                    should_total += 1;
-                    if result.status == TestStatus::Pass {
-                        should_pass += 1;
-                    }
-                }
-                RequirementLevel::May => {
-                    may_total += 1;
-                    if result.status == TestStatus::Pass {
-                        may_pass += 1;
-                    }
+            if result.requirement_level == RequirementLevel::Must {
+                must_total += 1;
+                if result.status == TestStatus::Pass {
+                    must_pass += 1;
                 }
             }
         }
 
-        let must_score = if must_total > 0 { (must_pass as f64 / must_total as f64) * 100.0 } else { 100.0 };
-        let should_score = if should_total > 0 { (should_pass as f64 / should_total as f64) * 100.0 } else { 100.0 };
-        let may_score = if may_total > 0 { (may_pass as f64 / may_total as f64) * 100.0 } else { 100.0 };
-
-        println!("FS Protocol Conformance Report:");
-        println!("MUST requirements: {}/{} ({:.1}%)", must_pass, must_total, must_score);
-        println!("SHOULD requirements: {}/{} ({:.1}%)", should_pass, should_total, should_score);
-        println!("MAY requirements: {}/{} ({:.1}%)", may_pass, may_total, may_score);
+        let must_score = if must_total > 0 {
+            (must_pass as f64 / must_total as f64) * 100.0
+        } else {
+            100.0
+        };
 
         if must_score < 95.0 {
-            return Err(format!("MUST requirement compliance below 95%: {:.1}%", must_score));
+            return Err(format!(
+                "MUST requirement compliance below 95%: {:.1}% ({}/{})",
+                must_score, must_pass, must_total
+            ));
         }
 
         Ok(())
@@ -641,13 +781,19 @@ mod tests {
         });
 
         // Verify we tested all major components
-        let test_names: Vec<&str> = harness.test_results.iter()
+        let test_names: Vec<&str> = harness
+            .test_results
+            .iter()
             .map(|r| r.test_name.as_str())
             .collect();
 
         assert!(test_names.iter().any(|name| name.contains("uring_readv")));
         assert!(test_names.iter().any(|name| name.contains("uring_writev")));
-        assert!(test_names.iter().any(|name| name.contains("vfs_canonicalize")));
+        assert!(
+            test_names
+                .iter()
+                .any(|name| name.contains("vfs_canonicalize"))
+        );
         assert!(test_names.iter().any(|name| name.contains("vfs_symlink")));
         assert!(test_names.iter().any(|name| name.contains("buf_reader")));
         assert!(test_names.iter().any(|name| name.contains("buf_writer")));
@@ -664,7 +810,10 @@ mod tests {
 
         let mut read_buf1 = [0u8; 4];
         let mut read_buf2 = [0u8; 4];
-        let mut read_bufs = [IoSliceMut::new(&mut read_buf1), IoSliceMut::new(&mut read_buf2)];
+        let mut read_bufs = [
+            IoSliceMut::new(&mut read_buf1),
+            IoSliceMut::new(&mut read_buf2),
+        ];
         let bytes_read = processor.readv(1, &mut read_bufs, 0).unwrap();
         assert_eq!(bytes_read, 8);
 
@@ -690,6 +839,14 @@ mod tests {
         // Test symlink resolution
         let result = canonicalizer.canonicalize("/link/to/file").unwrap();
         assert_eq!(result, PathBuf::from("/real/file"));
+
+        // Test mount metadata lookup
+        let result = canonicalizer.canonicalize("/mnt/volume/file").unwrap();
+        assert_eq!(result, PathBuf::from("/mnt/volume/file"));
+        assert_eq!(
+            canonicalizer.mount_source_for_path(&result),
+            Some(Path::new("/dev/sda1"))
+        );
     }
 
     #[test]
@@ -734,13 +891,24 @@ mod tests {
 
         // Record some test results
         harness.record_test("test1", RequirementLevel::Must, TestStatus::Pass, None);
-        harness.record_test("test2", RequirementLevel::Should, TestStatus::Fail, Some("error".to_string()));
+        harness.record_test(
+            "test2",
+            RequirementLevel::Should,
+            TestStatus::Fail,
+            Some("error".to_string()),
+        );
 
         assert_eq!(harness.test_results.len(), 2);
         assert_eq!(harness.test_results[0].test_name, "test1");
-        assert_eq!(harness.test_results[0].requirement_level, RequirementLevel::Must);
+        assert_eq!(
+            harness.test_results[0].requirement_level,
+            RequirementLevel::Must
+        );
         assert_eq!(harness.test_results[0].status, TestStatus::Pass);
         assert_eq!(harness.test_results[1].status, TestStatus::Fail);
-        assert_eq!(harness.test_results[1].error_message, Some("error".to_string()));
+        assert_eq!(
+            harness.test_results[1].error_message,
+            Some("error".to_string())
+        );
     }
 }
