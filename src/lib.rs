@@ -250,6 +250,8 @@ pub mod plan_trace_metamorphic_tests;
 pub mod obligation_combinator_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cancel_cx_runtime_channel_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod net_http_metamorphic_tests;
 
 // Re-exports for convenient access to core types
 pub use config::{
