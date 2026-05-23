@@ -212,6 +212,16 @@ fn relay_candidate_feeds_path_race_and_preserves_proof_evidence() {
     let relay_outcome = proof.to_path_success_outcome(175, Some(25));
     race.record_outcome(relay_id, relay_outcome)
         .expect("record relay win");
+    race.record_outcome(
+        direct_id,
+        PathOutcome::failure(PathFailureKind::Timeout, 180),
+    )
+    .expect("late direct failure is idempotent");
+    race.record_outcome(
+        relay_id,
+        PathOutcome::failure(PathFailureKind::RelayUnavailable, 181),
+    )
+    .expect("late relay failure cannot overwrite selected success");
 
     let snapshot = race.diagnostic_snapshot();
     assert_eq!(race.winner(), Some(relay_id));
@@ -220,6 +230,12 @@ fn relay_candidate_feeds_path_race_and_preserves_proof_evidence() {
     assert_eq!(snapshot.relay_count, 1);
     assert_eq!(snapshot.failure_count, 1);
     assert_eq!(snapshot.success_count, 1);
+    assert_eq!(snapshot.drained_loser_count, 0);
+    assert!(matches!(
+        race.candidate(direct_id).expect("direct state").state,
+        PathAttemptState::Failed(outcome)
+            if outcome.result == PathOutcomeResult::Failure(PathFailureKind::UdpBlocked)
+    ));
     assert!(matches!(
         race.candidate(relay_id).expect("relay state").state,
         PathAttemptState::Succeeded(outcome)

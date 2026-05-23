@@ -574,11 +574,20 @@ impl PathRace {
         id: PathCandidateId,
         outcome: PathOutcome,
     ) -> Result<(), PathRaceError> {
+        let existing_state = self
+            .candidates
+            .get(&id)
+            .ok_or(PathRaceError::UnknownCandidate(id))?
+            .state;
+        if existing_state.is_terminal() {
+            return Ok(());
+        }
+
         if let Some(winner) = self.winner {
             if winner != id {
                 self.drain_loser(id, winner, outcome)?;
-                return Ok(());
             }
+            return Ok(());
         }
 
         let candidate = self
@@ -905,6 +914,75 @@ mod tests {
         );
         assert_eq!(snapshot.selected_kind, Some(PathKind::NatPunchedUdp));
         assert_eq!(snapshot.selected_family(), Some(PathFamily::Direct));
+    }
+
+    #[test]
+    fn late_winner_outcome_cannot_overwrite_selected_success() {
+        let relay = PathCandidateId::new(1);
+        let mut race = PathRace::new();
+        race.add_candidate(candidate(relay.get(), PathKind::AtpRelayTcpTls443))
+            .expect("relay candidate");
+        race.start_all().expect("start race");
+
+        race.record_outcome(
+            relay,
+            PathOutcome::success(PathSuccessKind::RelaySelected, 10, Some(4)).with_bytes(256, 128),
+        )
+        .expect("relay wins");
+        race.record_outcome(
+            relay,
+            PathOutcome::failure(PathFailureKind::RelayUnavailable, 11),
+        )
+        .expect("late duplicate outcome is idempotent");
+
+        assert_eq!(race.winner(), Some(relay));
+        assert!(matches!(
+            race.candidate(relay).expect("relay").state,
+            PathAttemptState::Succeeded(outcome)
+                if outcome.result == PathOutcomeResult::Success(PathSuccessKind::RelaySelected)
+                    && outcome.bytes_sent == 256
+                    && outcome.bytes_received == 128
+        ));
+        let snapshot = race.diagnostic_snapshot();
+        assert_eq!(snapshot.success_count, 1);
+        assert_eq!(snapshot.failure_count, 0);
+        assert_eq!(snapshot.reason, PathSelectionReason::RelayFallbackValidated);
+    }
+
+    #[test]
+    fn terminal_failures_before_winner_are_not_reclassified_as_drained_losers() {
+        let direct = PathCandidateId::new(1);
+        let relay = PathCandidateId::new(2);
+        let mut race = PathRace::new();
+        race.add_candidate(candidate(direct.get(), PathKind::NatPunchedUdp))
+            .expect("direct candidate");
+        race.add_candidate(candidate(relay.get(), PathKind::AtpRelayUdp))
+            .expect("relay candidate");
+        race.start_all().expect("start race");
+
+        race.record_outcome(
+            direct,
+            PathOutcome::failure(PathFailureKind::UdpBlocked, 10),
+        )
+        .expect("direct failed before relay won");
+        race.record_outcome(
+            relay,
+            PathOutcome::success(PathSuccessKind::RelaySelected, 20, Some(6)),
+        )
+        .expect("relay wins");
+        race.record_outcome(direct, PathOutcome::failure(PathFailureKind::Timeout, 30))
+            .expect("late duplicate direct failure is idempotent");
+
+        assert!(matches!(
+            race.candidate(direct).expect("direct").state,
+            PathAttemptState::Failed(outcome)
+                if outcome.result == PathOutcomeResult::Failure(PathFailureKind::UdpBlocked)
+        ));
+        assert!(race.cleanup_records().is_empty());
+        let snapshot = race.diagnostic_snapshot();
+        assert_eq!(snapshot.failure_count, 1);
+        assert_eq!(snapshot.drained_loser_count, 0);
+        assert_eq!(snapshot.reason, PathSelectionReason::RelayFallbackValidated);
     }
 
     #[test]
