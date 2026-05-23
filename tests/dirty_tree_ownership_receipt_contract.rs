@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCRIPT_PATH: &str = "scripts/dirty_tree_ownership_receipt.py";
 const FIXTURE_ROOT: &str = "tests/fixtures/dirty_tree_ownership_receipt";
@@ -69,6 +70,17 @@ fn receipt_stdout(fixture: &str) -> String {
 fn fixture_text(fixture: &str) -> String {
     fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
         .expect("fixture golden must be readable")
+}
+
+fn unique_temp_dir(test_name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "asupersync-dirty-tree-{test_name}-{}-{nanos}",
+        std::process::id()
+    ))
 }
 
 fn assert_receipt_output_matches_golden(fixture: &str, expected_fixture: &str) {
@@ -313,7 +325,7 @@ fn mixed_staged_index_requires_path_limited_commit_boundary() {
 }
 
 #[test]
-fn declared_commit_preflight_allows_owned_path_and_preserves_peer_index() {
+fn declared_commit_preflight_refuses_peer_staged_paths_outside_declared_scope() {
     let output = run_receipt_with_args(
         "mixed_staged_index.json",
         &[
@@ -322,20 +334,18 @@ fn declared_commit_preflight_allows_owned_path_and_preserves_peer_index() {
             "scripts/dirty_tree_ownership_receipt.py",
         ],
     );
-    assert!(
-        output.status.success(),
-        "declared preflight should pass for owned path: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "peer staged paths outside declaration should fail closed"
     );
     let receipt = json_from_output(&output);
     let preflight = &receipt["declared_commit"];
 
-    assert_eq!(preflight["allowed"].as_bool(), Some(true));
+    assert_eq!(preflight["allowed"].as_bool(), Some(false));
     assert_eq!(
         preflight["decision"].as_str(),
-        Some("ready-path-limited-commit")
+        Some("refuse-staged-paths-outside-declared-scope")
     );
     assert_eq!(
         preflight["declared_paths"][0].as_str(),
@@ -349,20 +359,203 @@ fn declared_commit_preflight_allows_owned_path_and_preserves_peer_index() {
         3
     );
     assert_eq!(
-        preflight["dirty_peer_paths_outside_scope"][0].as_str(),
+        preflight["commit_race_blockers"][0]["path"].as_str(),
         Some("fuzz/Cargo.toml")
     );
     assert_eq!(
-        preflight["final_commit_path_set"][0].as_str(),
-        Some("scripts/dirty_tree_ownership_receipt.py")
+        preflight["commit_race_blockers"][0]["scope"].as_str(),
+        Some("peer-reserved")
     );
     assert_eq!(
-        preflight["path_limited_commit_command"].as_str(),
-        Some("git commit --only -- scripts/dirty_tree_ownership_receipt.py")
+        preflight["commit_race_blockers"][0]["reservation_holder"].as_str(),
+        Some("MaroonBear")
     );
     assert_eq!(
-        preflight["peer_index_preservation_required"].as_bool(),
-        Some(true)
+        preflight["commit_race_blockers"][0]["reservation_path_pattern"].as_str(),
+        Some("fuzz/Cargo.toml")
+    );
+    assert_eq!(preflight["path_limited_commit_command"].as_str(), Some(""));
+}
+
+#[test]
+fn declared_commit_preflight_reads_offline_reservation_artifacts_for_blockers() {
+    let artifact_dir = unique_temp_dir("offline-reservations");
+    fs::create_dir_all(&artifact_dir).expect("create reservation artifact dir");
+    fs::write(
+        artifact_dir.join("id-9001.json"),
+        r#"{
+  "id": 9001,
+  "project": "/data/projects/asupersync",
+  "agent": "TopazGoose",
+  "path_pattern": "scripts/dirty_tree_ownership_receipt.py",
+  "exclusive": true,
+  "reason": "declared-path-test",
+  "created_ts": "2026-05-08T05:00:00Z",
+  "expires_ts": "2026-05-08T06:08:00Z"
+}"#,
+    )
+    .expect("write self reservation artifact");
+    fs::write(
+        artifact_dir.join("id-9002.json"),
+        r#"{
+  "id": 9002,
+  "project": "/data/projects/asupersync",
+  "agent": "MaroonBear",
+  "path_pattern": "fuzz/Cargo.toml",
+  "exclusive": true,
+  "reason": "declared-path-test-peer",
+  "created_ts": "2026-05-08T05:00:00Z",
+  "expires_ts": "2026-05-08T06:30:00Z"
+}"#,
+    )
+    .expect("write peer reservation artifact");
+    fs::write(
+        artifact_dir.join("id-9003.json"),
+        r#"{
+  "id": 9003,
+  "project": "/data/projects/asupersync",
+  "agent": "MaroonBear",
+  "path_pattern": "fuzz/fuzz_targets/*.rs",
+  "exclusive": true,
+  "reason": "declared-path-test-peer-glob",
+  "created_ts": "2026-05-08T05:00:00Z",
+  "expires_ts": "2026-05-08T06:30:00Z"
+}"#,
+    )
+    .expect("write peer glob reservation artifact");
+
+    let output = Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--fixture")
+        .arg(
+            repo_root()
+                .join(FIXTURE_ROOT)
+                .join("mixed_staged_index.json"),
+        )
+        .arg("--repo-path")
+        .arg(repo_root())
+        .arg("--agent")
+        .arg("TopazGoose")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--output")
+        .arg("json")
+        .arg("--reservation-artifact-dir")
+        .arg(&artifact_dir)
+        .arg("--declared-commit-preflight")
+        .arg("--commit-path")
+        .arg("scripts/dirty_tree_ownership_receipt.py")
+        .current_dir(repo_root())
+        .output()
+        .expect("run dirty tree ownership receipt with offline artifacts");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "offline peer reservation blocker should fail closed"
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(
+        receipt["subsystems"]["agent_mail"].as_str(),
+        Some("offline-reservation-artifacts-ok")
+    );
+    assert_eq!(
+        preflight["commit_race_blockers"][0]["path"].as_str(),
+        Some("fuzz/Cargo.toml")
+    );
+    assert_eq!(
+        preflight["commit_race_blockers"][0]["reservation_id"].as_str(),
+        Some("9002")
+    );
+    assert_eq!(
+        preflight["commit_race_blockers"][0]["reservation_artifact_path"]
+            .as_str()
+            .expect("artifact path")
+            .ends_with("id-9002.json"),
+        true
+    );
+}
+
+#[test]
+fn declared_commit_preflight_treats_expired_offline_reservation_as_unreserved_blocker() {
+    let artifact_dir = unique_temp_dir("expired-offline-reservations");
+    fs::create_dir_all(&artifact_dir).expect("create reservation artifact dir");
+    fs::write(
+        artifact_dir.join("id-9011.json"),
+        r#"{
+  "id": 9011,
+  "project": "/data/projects/asupersync",
+  "agent": "TopazGoose",
+  "path_pattern": "scripts/dirty_tree_ownership_receipt.py",
+  "exclusive": true,
+  "reason": "declared-path-test",
+  "created_ts": "2026-05-08T05:00:00Z",
+  "expires_ts": "2026-05-08T06:08:00Z"
+}"#,
+    )
+    .expect("write self reservation artifact");
+    fs::write(
+        artifact_dir.join("id-9012.json"),
+        r#"{
+  "id": 9012,
+  "project": "/data/projects/asupersync",
+  "agent": "MaroonBear",
+  "path_pattern": "fuzz/Cargo.toml",
+  "exclusive": true,
+  "reason": "expired-peer",
+  "created_ts": "2026-05-08T04:00:00Z",
+  "expires_ts": "2026-05-08T04:30:00Z"
+}"#,
+    )
+    .expect("write expired peer reservation artifact");
+
+    let output = Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--fixture")
+        .arg(
+            repo_root()
+                .join(FIXTURE_ROOT)
+                .join("mixed_staged_index.json"),
+        )
+        .arg("--repo-path")
+        .arg(repo_root())
+        .arg("--agent")
+        .arg("TopazGoose")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--output")
+        .arg("json")
+        .arg("--reservation-artifact-dir")
+        .arg(&artifact_dir)
+        .arg("--declared-commit-preflight")
+        .arg("--commit-path")
+        .arg("scripts/dirty_tree_ownership_receipt.py")
+        .current_dir(repo_root())
+        .output()
+        .expect("run dirty tree ownership receipt with expired offline artifact");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expired peer artifact should leave staged path unreserved and blocked"
+    );
+    let receipt = json_from_output(&output);
+    let preflight = &receipt["declared_commit"];
+
+    assert_eq!(
+        preflight["commit_race_blockers"][0]["path"].as_str(),
+        Some("fuzz/Cargo.toml")
+    );
+    assert_eq!(
+        preflight["commit_race_blockers"][0]["scope"].as_str(),
+        Some("unreserved")
+    );
+    assert!(
+        preflight["commit_race_blockers"][0]["reservation_id"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
+        "expired reservation id must not be cited as active ownership"
     );
 }
 

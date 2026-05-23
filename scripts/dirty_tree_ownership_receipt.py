@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import fnmatch
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -58,6 +59,68 @@ def current_date(generated_at: str) -> str:
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def project_slug(repo_path: Path) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", str(repo_path.resolve()).strip("/")).strip("-").lower()
+
+
+def default_reservation_artifact_dir(repo_path: Path) -> Path:
+    return (
+        Path.home()
+        / ".mcp_agent_mail_git_mailbox_repo"
+        / "projects"
+        / project_slug(repo_path)
+        / "file_reservations"
+    )
+
+
+def load_reservation_artifacts(reservation_dir: Path) -> tuple[str, list[dict[str, Any]], list[str]]:
+    if not reservation_dir.exists():
+        return "offline-reservation-artifacts-missing", [], []
+    if not reservation_dir.is_dir():
+        return "offline-reservation-artifacts-not-directory", [], [str(reservation_dir)]
+
+    rows = []
+    errors = []
+    for path in sorted(reservation_dir.glob("*.json")):
+        try:
+            loaded = load_json(path)
+        except (OSError, json.JSONDecodeError) as error:
+            errors.append(f"{path}: {error}")
+            continue
+        if not isinstance(loaded, dict):
+            errors.append(f"{path}: expected object")
+            continue
+        row = dict(loaded)
+        row["artifact_path"] = str(path)
+        rows.append(row)
+
+    status = "offline-reservation-artifacts-ok" if not errors else "offline-reservation-artifacts-partial"
+    return status, rows, errors
+
+
+def attach_reservation_artifacts(
+    source: dict[str, Any],
+    repo_path: Path,
+    reservation_artifact_dir: Path | None,
+) -> dict[str, Any]:
+    artifact_dir = reservation_artifact_dir or default_reservation_artifact_dir(repo_path)
+    status, reservations, errors = load_reservation_artifacts(artifact_dir)
+    merged = dict(source)
+    existing_mail = source.get("agent_mail") if isinstance(source.get("agent_mail"), dict) else {}
+    agent_mail = dict(existing_mail)
+    agent_mail.update(
+        {
+            "available": status in {"offline-reservation-artifacts-ok", "offline-reservation-artifacts-partial"},
+            "status": status,
+            "reservation_artifact_dir": str(artifact_dir),
+            "reservation_artifact_errors": errors[:20],
+            "reservations": reservations,
+        }
+    )
+    merged["agent_mail"] = agent_mail
+    return merged
 
 
 def run_text(repo_path: Path, command: list[str], timeout: float) -> tuple[str, str]:
@@ -189,7 +252,11 @@ def parse_status_lines(raw: str) -> list[dict[str, str]]:
     return entries
 
 
-def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
+def live_probe(
+    repo_path: Path,
+    timeout: float,
+    reservation_artifact_dir: Path | None,
+) -> dict[str, Any]:
     status, raw_status = run_text(repo_path, ["git", "status", "--porcelain=v1"], timeout)
     branch_status, branch = run_text(repo_path, ["git", "branch", "--show-current"], timeout)
     upstream_status, upstream_counts = run_text(
@@ -212,7 +279,7 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
             behind = parse_int(parts[1])
         else:
             upstream_status = "malformed-counts"
-    return {
+    source = {
         "git": {
             "status": status,
             "branch": branch if branch_status == "ok" else "",
@@ -235,6 +302,7 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
             "issues": extract_rows(beads, ("issues",)) if isinstance(beads, dict) else [],
         },
     }
+    return attach_reservation_artifacts(source, repo_path, reservation_artifact_dir)
 
 
 def reservation_rows(agent_mail: dict[str, Any]) -> list[dict[str, Any]]:
@@ -437,6 +505,63 @@ def pathspec(paths: list[str]) -> str:
     return " ".join(shlex.quote(path) for path in paths)
 
 
+def reservation_context_for_path(
+    source: dict[str, Any] | None,
+    path: str,
+    generated_at: str,
+) -> dict[str, str]:
+    if source is None:
+        return {}
+    agent_mail = source.get("agent_mail") if isinstance(source.get("agent_mail"), dict) else {}
+    reservations = active_reservations_for_path(reservation_rows(agent_mail), path, generated_at)
+    if not reservations:
+        return {}
+    reservation = reservations[0]
+    return {
+        "reservation_id": str(reservation.get("id", "")),
+        "reservation_holder": holder_name(reservation),
+        "reservation_path_pattern": row_pattern(reservation),
+        "reservation_expires_ts": str(reservation.get("expires_ts") or reservation.get("expires_at") or ""),
+        "reservation_artifact_path": str(reservation.get("artifact_path", "")),
+    }
+
+
+def outside_staged_scope(row: dict[str, Any], source: dict[str, Any] | None) -> str:
+    classification = str(row["classification"])
+    if classification == "self-owned":
+        return "own-reserved"
+    if classification == "peer-owned":
+        return "peer-reserved"
+    if classification == "owner-conflict":
+        return "conflicting-reservation"
+    if classification == "tracker-state":
+        return "tracker-state"
+    if classification == "unattributed":
+        agent_mail = source.get("agent_mail") if isinstance(source, dict) and isinstance(source.get("agent_mail"), dict) else {}
+        if agent_mail.get("status") in {"ok", "offline-reservation-artifacts-ok", "offline-reservation-artifacts-partial"}:
+            return "unreserved"
+        return "unknown"
+    return "unknown"
+
+
+def staged_outside_blocker(
+    row: dict[str, Any],
+    source: dict[str, Any] | None,
+    generated_at: str,
+) -> dict[str, Any]:
+    path = str(row["path"])
+    reservation = reservation_context_for_path(source, path, generated_at)
+    return {
+        "path": path,
+        "scope": outside_staged_scope(row, source),
+        "classification": row["classification"],
+        "owner": row["owner"],
+        "status": row["status"],
+        "reason": "staged path is outside the declared commit path set",
+        **reservation,
+    }
+
+
 def normalize_declared_commit_paths(
     raw_paths: list[str],
     repo_path: Path,
@@ -489,6 +614,8 @@ def build_declared_commit_preflight(
     rows: list[dict[str, Any]],
     raw_paths: list[str],
     repo_path: Path,
+    source: dict[str, Any] | None = None,
+    generated_at: str = "",
 ) -> dict[str, Any]:
     declared_paths, path_errors = normalize_declared_commit_paths(raw_paths, repo_path)
     declared = set(declared_paths)
@@ -498,6 +625,17 @@ def build_declared_commit_preflight(
     declared_missing = [path for path in declared_paths if path not in rows_by_path]
     staged_paths = [str(row["path"]) for row in rows if is_index_staged(row)]
     outside_rows = [row for row in rows if str(row["path"]) not in declared]
+    staged_outside = [row for row in outside_rows if is_index_staged(row)]
+    own_reserved_staged_outside = [
+        staged_outside_blocker(row, source, generated_at)
+        for row in staged_outside
+        if outside_staged_scope(row, source) == "own-reserved"
+    ]
+    commit_race_blockers = [
+        staged_outside_blocker(row, source, generated_at)
+        for row in staged_outside
+        if outside_staged_scope(row, source) != "own-reserved"
+    ]
     tracker_rows = [row for row in declared_rows if row["classification"] == "tracker-state"]
     non_tracker_declared = [
         str(row["path"])
@@ -538,6 +676,9 @@ def build_declared_commit_preflight(
     elif untracked_declared:
         decision = "refuse-untracked-declared-paths"
         reason = "untracked declared paths must be staged before git commit --only can include them"
+    elif commit_race_blockers:
+        decision = "refuse-staged-paths-outside-declared-scope"
+        reason = "staged paths outside the declared commit set require coordination or explicit declaration"
     elif tracker_rows and non_tracker_declared:
         decision = "refuse-mixed-tracker-commit"
         reason = "tracker files require a tracker-only commit surface"
@@ -566,6 +707,9 @@ def build_declared_commit_preflight(
         "declared_dirty_paths": declared_dirty_paths,
         "declared_clean_or_missing_paths": declared_missing,
         "currently_staged_paths": staged_paths,
+        "staged_paths_outside_scope": [str(row["path"]) for row in staged_outside],
+        "own_reserved_staged_paths_outside_scope": own_reserved_staged_outside,
+        "commit_race_blockers": commit_race_blockers,
         "dirty_paths_outside_scope": [str(row["path"]) for row in outside_rows],
         "dirty_peer_paths_outside_scope": [
             str(row["path"])
@@ -760,6 +904,8 @@ def build_receipt(
             rows=rows,
             raw_paths=declared_commit_paths,
             repo_path=Path(repo_path),
+            source=source,
+            generated_at=generated_at,
         )
     return receipt
 
@@ -784,6 +930,11 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Project-relative path intended for git commit --only; repeat for multi-path commits",
     )
+    parser.add_argument(
+        "--reservation-artifact-dir",
+        type=Path,
+        help="Read offline Agent Mail file reservation artifacts from this directory",
+    )
     parser.add_argument("--output", choices=["json"], default="json")
     return parser.parse_args()
 
@@ -792,7 +943,12 @@ def main() -> int:
     args = parse_args()
     repo_path = Path(args.repo_path).resolve()
     generated_at = args.generated_at or utc_now()
-    source = load_json(args.fixture) if args.fixture else live_probe(repo_path, args.timeout)
+    if args.fixture:
+        source = load_json(args.fixture)
+        if args.reservation_artifact_dir is not None:
+            source = attach_reservation_artifacts(source, repo_path, args.reservation_artifact_dir)
+    else:
+        source = live_probe(repo_path, args.timeout, args.reservation_artifact_dir)
     receipt = build_receipt(
         source=source,
         repo_path=str(repo_path),

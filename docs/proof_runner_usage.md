@@ -155,6 +155,18 @@ declared paths without ownership evidence are allowed, but they are surfaced in
 `declared_commit.unattributed_declared_paths` so the operator can decide
 whether to proceed or coordinate first.
 
+The helper reads offline Agent Mail file reservation artifacts from the local
+mail archive by default:
+
+```text
+~/.mcp_agent_mail_git_mailbox_repo/projects/data-projects-asupersync/file_reservations
+```
+
+Use `--reservation-artifact-dir <dir>` only for deterministic tests or
+emergency recovery from a relocated archive. The guard treats active
+peer-reserved, unreserved, unknown, or tracker staged paths outside the
+declared set as commit-race blockers and exits before Git creates a commit.
+
 Normal code commit:
 
 ```bash
@@ -219,6 +231,16 @@ commit. Use `declared_commit.dirty_peer_paths_outside_scope`,
 `declared_commit.currently_staged_paths`, and
 `declared_commit.unsafe_declared_paths` to route the race through Agent Mail or
 rerun with a narrower declared path set.
+
+Agent Mail closeout template:
+
+```text
+Commit: <sha>
+Declared paths: <declared_commit.declared_paths>
+Commit-race blockers: <declared_commit.commit_race_blockers or "none">
+Proof: <rch command and result>
+Tracker state: <committed | local-only due shared tracker dirt>
+```
 
 If no explicit bead id is supplied, the classifier best-effort maps the first
 blocker path to `git log -20 -- <path>`. The resulting
