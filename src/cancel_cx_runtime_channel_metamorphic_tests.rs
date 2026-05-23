@@ -176,8 +176,11 @@ impl MockMacaroon {
     }
 
     pub fn check_authority(&self, required: &str) -> bool {
-        self.authority.iter().any(|a| a == required) &&
-        !self.caveats.iter().any(|c| c == &format!("deny:{}", required))
+        self.authority.iter().any(|a| a == required)
+            && !self
+                .caveats
+                .iter()
+                .any(|c| c == &format!("deny:{}", required))
     }
 }
 
@@ -222,11 +225,14 @@ impl MockRegion {
 
         while !remaining.is_empty() {
             // Close leaf regions first (no children in remaining set)
-            let leaf_idx = remaining.iter().position(|r| {
-                !r.children.iter().any(|child_id| {
-                    remaining.iter().any(|rem| rem.id == *child_id)
+            let leaf_idx = remaining
+                .iter()
+                .position(|r| {
+                    !r.children
+                        .iter()
+                        .any(|child_id| remaining.iter().any(|rem| rem.id == *child_id))
                 })
-            }).unwrap_or(0);
+                .unwrap_or(0);
 
             let region = remaining.remove(leaf_idx);
             order.push(region.id);
@@ -739,19 +745,26 @@ mod tests {
     #[test]
     fn test_mock_implementations() {
         // Verify mock implementations work correctly
-        let cert = MockProgressCertificate { progress: 10, timestamp: 100 };
+        let cert = MockProgressCertificate {
+            progress: 10,
+            timestamp: 100,
+        };
         let advanced = cert.advance(5);
         assert_eq!(advanced.progress, 15);
         assert_eq!(advanced.timestamp, 101);
 
         let request = MockSymbolCancelRequest {
             symbol_id: 1,
-            reason: "timeout".to_string()
+            reason: "timeout".to_string(),
         };
         assert!(request.cancel());
         assert!(request.cancel_repeated(3));
 
-        let mut scope = MockScope { id: 1, task_count: 0, closed: false };
+        let mut scope = MockScope {
+            id: 1,
+            task_count: 0,
+            closed: false,
+        };
         assert!(scope.close());
         assert!(scope.is_quiescent());
     }

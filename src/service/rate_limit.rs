@@ -284,7 +284,8 @@ impl<S> RateLimit<S> {
                 let new_tokens = periods.saturating_mul(rate);
                 state.tokens = state.tokens.saturating_add(new_tokens).min(rate);
                 // Update last_refill to the last complete period boundary
-                let refill_time = last_refill.saturating_add_nanos(periods.saturating_mul(period_nanos));
+                let refill_time =
+                    last_refill.saturating_add_nanos(periods.saturating_mul(period_nanos));
                 state.last_refill = Some(refill_time);
             }
         } else if state.last_refill.is_none() {

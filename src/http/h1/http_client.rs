@@ -299,7 +299,9 @@ where
         if self.prefetched_pos < self.prefetched.len() && buf.remaining() > 0 {
             let remaining_prefetched = self.prefetched.len() - self.prefetched_pos;
             let to_copy = remaining_prefetched.min(buf.remaining());
-            buf.put_slice(&self.prefetched[self.prefetched_pos..self.prefetched_pos.saturating_add(to_copy)]);
+            buf.put_slice(
+                &self.prefetched[self.prefetched_pos..self.prefetched_pos.saturating_add(to_copy)],
+            );
             self.prefetched_pos = self.prefetched_pos.saturating_add(to_copy);
             return Poll::Ready(Ok(()));
         }
@@ -2014,7 +2016,11 @@ async fn socks5_authenticate_user_pass(
     let pass_len = u8::try_from(password.len())
         .map_err(|_| ClientError::ProxyError("SOCKS5 password exceeds 255 bytes".into()))?;
 
-    let mut auth = Vec::with_capacity(3_usize.saturating_add(username.len()).saturating_add(password.len()));
+    let mut auth = Vec::with_capacity(
+        3_usize
+            .saturating_add(username.len())
+            .saturating_add(password.len()),
+    );
     auth.push(0x01);
     auth.push(user_len);
     auth.extend_from_slice(username.as_bytes());

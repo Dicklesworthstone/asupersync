@@ -237,9 +237,8 @@ impl MockUdpSocket {
 
     pub fn ordering_preserved(&self) -> bool {
         // Check if received packets maintain sequence order
-        let received_sequences: Vec<u64> = self.received_packets.iter()
-            .map(|p| p.sequence)
-            .collect();
+        let received_sequences: Vec<u64> =
+            self.received_packets.iter().map(|p| p.sequence).collect();
 
         received_sequences.windows(2).all(|w| w[0] <= w[1])
     }
@@ -331,10 +330,10 @@ impl MockTlsHandshake {
 
     pub fn security_properties_maintained(&self) -> bool {
         // Mock security property check
-        self.completed &&
-        self.client_random != [0u8; 32] &&
-        self.server_random != [0u8; 32] &&
-        !self.cipher_suite.is_empty()
+        self.completed
+            && self.client_random != [0u8; 32]
+            && self.server_random != [0u8; 32]
+            && !self.cipher_suite.is_empty()
     }
 }
 
@@ -522,13 +521,13 @@ impl MockH3Frame {
         }
 
         let frame_type = u64::from_be_bytes([
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
         let length = u64::from_be_bytes([
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]) as usize;
         let stream_id = u64::from_be_bytes([
-            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23]
+            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
         ]);
 
         if data.len() < 24 + length {

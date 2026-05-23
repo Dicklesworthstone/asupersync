@@ -251,9 +251,10 @@ fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
         }
         let digit = i128::from(b - b'0');
         // Check for overflow before performing arithmetic to prevent TOCTOU vulnerability
-        acc = acc.checked_mul(10).and_then(|a| a.checked_add(digit)).ok_or_else(|| {
-            RedisError::Protocol("integer overflow during parsing".to_string())
-        })?;
+        acc = acc
+            .checked_mul(10)
+            .and_then(|a| a.checked_add(digit))
+            .ok_or_else(|| RedisError::Protocol("integer overflow during parsing".to_string()))?;
         if acc > limit {
             return Err(RedisError::Protocol("integer overflow".to_string()));
         }

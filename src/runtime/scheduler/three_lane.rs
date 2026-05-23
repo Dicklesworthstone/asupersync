@@ -12615,7 +12615,11 @@ mod tests {
         let (mut scheduler, state, task_table) = task_table_scheduler(1, 3);
         let waiter_id = TaskId::new_for_test(1, 0);
         assert!(
-            state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).task(waiter_id).is_none(),
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task(waiter_id)
+                .is_none(),
             "regression precondition: waiter exists only in the sharded task table"
         );
         assert!(
@@ -12631,7 +12635,9 @@ mod tests {
         let worker = &mut workers[0];
 
         {
-            let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             worker.wake_dependents_locked(&guard, [waiter_id]);
         }
 
@@ -12762,7 +12768,9 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         {
-            let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
         }
 
@@ -12831,7 +12839,9 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(2000)));
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         {
-            let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
         }
 
@@ -14783,7 +14793,9 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
         {
-            let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
         }
 
@@ -14836,7 +14848,9 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
         {
-            let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
         }
 
@@ -15141,7 +15155,9 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         {
-            let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
         }
 
@@ -15152,7 +15168,9 @@ mod tests {
         // Force MeetDeadlines suggestion (EDF priority mode)
         // Create deadline pressure to trigger EDF mode
         let _root = {
-            let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.now = Time::from_nanos(1000);
             guard.create_root_region(Budget::unlimited())
         };
@@ -15252,7 +15270,9 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         {
-            let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
         }
 

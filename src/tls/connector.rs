@@ -583,7 +583,8 @@ impl TlsConnectorBuilder {
                                 match &load_result {
                                     Ok(counts) => {
                                         loaded_total = loaded_total.saturating_add(counts.loaded);
-                                        rejected_total = rejected_total.saturating_add(counts.rejected_non_ca);
+                                        rejected_total =
+                                            rejected_total.saturating_add(counts.rejected_non_ca);
                                     }
                                     Err(error) => {
                                         tracing::warn!(

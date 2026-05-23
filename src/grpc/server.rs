@@ -2803,7 +2803,10 @@ mod tests {
                 // Last char is the unit; rest must be 1..=8 ASCII digits.
                 // Defensive check to prevent underflow in test
                 if formatted.is_empty() {
-                    panic!("format_grpc_timeout returned empty string for duration {:?}", d);
+                    panic!(
+                        "format_grpc_timeout returned empty string for duration {:?}",
+                        d
+                    );
                 }
                 let (digits, unit) = formatted.split_at(formatted.len() - 1);
                 assert!(

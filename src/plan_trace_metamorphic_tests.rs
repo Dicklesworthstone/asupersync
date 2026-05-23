@@ -161,8 +161,8 @@ fn mr_latency_algebra_identity() {
 ///   - State management bugs in multi-step proofs
 #[test]
 fn mr_plan_certificate_transitivity() {
-    use crate::plan::certificate::{PlanHash};
-    use crate::plan::{PlanDag};
+    use crate::plan::PlanDag;
+    use crate::plan::certificate::PlanHash;
     use std::time::Duration;
 
     proptest!(|(
@@ -264,7 +264,7 @@ fn mr_plan_hash_consistency() {
 ///   - Basic state management bugs
 #[test]
 fn mr_trace_record_replay_round_trip() {
-    use crate::trace::recorder::{TraceRecorder, RecorderConfig};
+    use crate::trace::recorder::{RecorderConfig, TraceRecorder};
     use crate::trace::replay::TraceMetadata;
     use crate::types::TaskId;
 

@@ -753,7 +753,8 @@ impl SettingsFrame {
         let mut settings = Vec::new();
         let mut cursor: usize = 0;
         while cursor.saturating_add(6) <= payload.len() {
-            let id = ((u16::from(payload[cursor])) << 8) | u16::from(payload[cursor.saturating_add(1)]);
+            let id =
+                ((u16::from(payload[cursor])) << 8) | u16::from(payload[cursor.saturating_add(1)]);
             let value = ((u32::from(payload[cursor.saturating_add(2)])) << 24)
                 | ((u32::from(payload[cursor.saturating_add(3)])) << 16)
                 | ((u32::from(payload[cursor.saturating_add(4)])) << 8)
@@ -2587,8 +2588,16 @@ mod tests {
         };
         let cases = [
             (0x04_u16, 0x8000_0000_u32, ErrorCode::FlowControlError),
-            (0x05, MIN_MAX_FRAME_SIZE.saturating_sub(1), ErrorCode::ProtocolError),
-            (0x05, MAX_FRAME_SIZE.saturating_add(1), ErrorCode::ProtocolError),
+            (
+                0x05,
+                MIN_MAX_FRAME_SIZE.saturating_sub(1),
+                ErrorCode::ProtocolError,
+            ),
+            (
+                0x05,
+                MAX_FRAME_SIZE.saturating_add(1),
+                ErrorCode::ProtocolError,
+            ),
         ];
 
         for (id, value, expected_code) in cases {

@@ -82,9 +82,19 @@ pub struct MockSqliteTransaction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqliteOperation {
-    Read { table: String, row_id: u64 },
-    Write { table: String, row_id: u64, value: String },
-    Delete { table: String, row_id: u64 },
+    Read {
+        table: String,
+        row_id: u64,
+    },
+    Write {
+        table: String,
+        row_id: u64,
+        value: String,
+    },
+    Delete {
+        table: String,
+        row_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -199,13 +209,13 @@ impl MockScramTranscript {
     }
 
     pub fn is_transcript_valid(&self) -> bool {
-        !self.username.is_empty() &&
-        !self.client_nonce.is_empty() &&
-        !self.server_nonce.is_empty() &&
-        !self.salt.is_empty() &&
-        self.iteration_count > 0 &&
-        !self.client_proof.is_empty() &&
-        !self.server_signature.is_empty()
+        !self.username.is_empty()
+            && !self.client_nonce.is_empty()
+            && !self.server_nonce.is_empty()
+            && !self.salt.is_empty()
+            && self.iteration_count > 0
+            && !self.client_proof.is_empty()
+            && !self.server_signature.is_empty()
     }
 }
 
@@ -290,12 +300,40 @@ impl MockSqliteTransaction {
         for op1 in &self.operations {
             for op2 in &other.operations {
                 match (op1, op2) {
-                    (SqliteOperation::Write { table: t1, row_id: r1, .. },
-                     SqliteOperation::Read { table: t2, row_id: r2 }) |
-                    (SqliteOperation::Read { table: t1, row_id: r1 },
-                     SqliteOperation::Write { table: t2, row_id: r2, .. }) |
-                    (SqliteOperation::Write { table: t1, row_id: r1, .. },
-                     SqliteOperation::Write { table: t2, row_id: r2, .. }) => {
+                    (
+                        SqliteOperation::Write {
+                            table: t1,
+                            row_id: r1,
+                            ..
+                        },
+                        SqliteOperation::Read {
+                            table: t2,
+                            row_id: r2,
+                        },
+                    )
+                    | (
+                        SqliteOperation::Read {
+                            table: t1,
+                            row_id: r1,
+                        },
+                        SqliteOperation::Write {
+                            table: t2,
+                            row_id: r2,
+                            ..
+                        },
+                    )
+                    | (
+                        SqliteOperation::Write {
+                            table: t1,
+                            row_id: r1,
+                            ..
+                        },
+                        SqliteOperation::Write {
+                            table: t2,
+                            row_id: r2,
+                            ..
+                        },
+                    ) => {
                         if t1 == t2 && r1 == r2 {
                             return true;
                         }
@@ -311,9 +349,10 @@ impl MockSqliteTransaction {
         // Check that transactions maintain serializable isolation
         for (i, tx1) in transactions.iter().enumerate() {
             for tx2 in transactions.iter().skip(i + 1) {
-                if tx1.isolation_level == IsolationLevel::Serializable &&
-                   tx2.isolation_level == IsolationLevel::Serializable &&
-                   tx1.conflicts_with(tx2) {
+                if tx1.isolation_level == IsolationLevel::Serializable
+                    && tx2.isolation_level == IsolationLevel::Serializable
+                    && tx1.conflicts_with(tx2)
+                {
                     // For simplicity, we require non-conflicting transactions
                     return false;
                 }
@@ -346,7 +385,11 @@ impl MockConnectionPool {
     }
 
     pub fn release(&mut self, reservation_id: ReservationId) -> bool {
-        if let Some(pos) = self.active_reservations.iter().position(|r| r == &reservation_id) {
+        if let Some(pos) = self
+            .active_reservations
+            .iter()
+            .position(|r| r == &reservation_id)
+        {
             self.active_reservations.remove(pos);
             self.available_count += 1;
 
@@ -435,7 +478,8 @@ impl MockGrpcMessage {
             return None;
         }
 
-        let field_count = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        let field_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         for _ in 0..field_count {
@@ -443,8 +487,9 @@ impl MockGrpcMessage {
                 break;
             }
 
-            let field_number = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
-            let field_type = match data[pos+4] {
+            let field_number =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            let field_type = match data[pos + 4] {
                 0 => FieldType::Varint,
                 1 => FieldType::Fixed64,
                 2 => FieldType::LengthDelimited,
@@ -455,20 +500,37 @@ impl MockGrpcMessage {
 
             let value = match field_type {
                 FieldType::Varint => {
-                    if pos + 8 > data.len() { break; }
+                    if pos + 8 > data.len() {
+                        break;
+                    }
                     let val = i64::from_le_bytes([
-                        data[pos], data[pos+1], data[pos+2], data[pos+3],
-                        data[pos+4], data[pos+5], data[pos+6], data[pos+7]
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                        data[pos + 4],
+                        data[pos + 5],
+                        data[pos + 6],
+                        data[pos + 7],
                     ]);
                     pos += 8;
                     FieldValue::Int(val)
                 }
                 FieldType::LengthDelimited => {
-                    if pos + 4 > data.len() { break; }
-                    let len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+                    if pos + 4 > data.len() {
+                        break;
+                    }
+                    let len = u32::from_le_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]) as usize;
                     pos += 4;
-                    if pos + len > data.len() { break; }
-                    let bytes = data[pos..pos+len].to_vec();
+                    if pos + len > data.len() {
+                        break;
+                    }
+                    let bytes = data[pos..pos + len].to_vec();
                     pos += len;
                     FieldValue::Bytes(bytes)
                 }
@@ -520,10 +582,9 @@ impl MockGrpcStatus {
     }
 
     pub fn is_retryable(&self) -> bool {
-        matches!(self.code,
-            StatusCode::DeadlineExceeded |
-            StatusCode::Unavailable |
-            StatusCode::ResourceExhausted
+        matches!(
+            self.code,
+            StatusCode::DeadlineExceeded | StatusCode::Unavailable | StatusCode::ResourceExhausted
         )
     }
 }

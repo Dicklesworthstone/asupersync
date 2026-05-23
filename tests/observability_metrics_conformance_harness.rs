@@ -90,7 +90,7 @@ enum ConformanceResult {
 impl ConformanceResult {
     fn expect_pass(self, test_name: &str) {
         match self {
-            ConformanceResult::Pass => {},
+            ConformanceResult::Pass => {}
             ConformanceResult::Fail(msg) => panic!("{} failed: {}", test_name, msg),
         }
     }
@@ -108,7 +108,10 @@ fn validate_prometheus_name(name: &str) -> ConformanceResult {
         return ConformanceResult::Fail(format!("Invalid first character: {}", first_char));
     }
 
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':') {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+    {
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail(format!("Invalid metric name: {}", name))
@@ -166,7 +169,10 @@ fn validate_prometheus_format(output: &str) -> ConformanceResult {
             // Validate value format
             let value_str = value_part.split_whitespace().next().unwrap_or("");
             if value_str.parse::<f64>().is_err() {
-                errors.push(format!("Line {}: Invalid value format: {}", line_num, value_str));
+                errors.push(format!(
+                    "Line {}: Invalid value format: {}",
+                    line_num, value_str
+                ));
             }
 
             // Validate labels if present
@@ -177,7 +183,9 @@ fn validate_prometheus_format(output: &str) -> ConformanceResult {
                         for label_pair in labels_str.split(',') {
                             if let Some(eq_pos) = label_pair.find('=') {
                                 let label_name = label_pair[..eq_pos].trim();
-                                if let ConformanceResult::Fail(msg) = validate_prometheus_label(label_name) {
+                                if let ConformanceResult::Fail(msg) =
+                                    validate_prometheus_label(label_name)
+                                {
                                     errors.push(format!("Line {}: {}", line_num, msg));
                                 }
                             }
@@ -202,7 +210,9 @@ fn p1_prometheus_format_conformance() {
 
     // Test various metric types with edge cases
     metrics.counter("requests_total").add(42);
-    metrics.counter("http_requests_total{method=\"GET\",status=\"200\"}").add(100);
+    metrics
+        .counter("http_requests_total{method=\"GET\",status=\"200\"}")
+        .add(100);
     metrics.gauge("memory_usage_bytes").set(1_234_567_890);
     metrics.gauge("temperature_celsius").set(-15);
 
@@ -227,7 +237,8 @@ fn p1_prometheus_format_conformance() {
     // deliberately omits them; see src/observability/DISCREPANCIES.md DISC-001.
 
     // Validate histogram bucket ordering
-    let histogram_lines: Vec<&str> = output.lines()
+    let histogram_lines: Vec<&str> = output
+        .lines()
         .filter(|line| line.contains("request_duration_seconds_bucket"))
         .collect();
 
@@ -239,7 +250,12 @@ fn p1_prometheus_format_conformance() {
                 let le_str = &le_part[..le_end];
                 if le_str != "+Inf" {
                     let le_value: f64 = le_str.parse().unwrap();
-                    assert!(le_value >= prev_le, "Histogram buckets not monotonic: {} < {}", le_value, prev_le);
+                    assert!(
+                        le_value >= prev_le,
+                        "Histogram buckets not monotonic: {} < {}",
+                        le_value,
+                        prev_le
+                    );
                     prev_le = le_value;
                 }
             }
@@ -253,7 +269,8 @@ fn p2_opentelemetry_semantic_conventions() {
     let mut metrics = Metrics::new();
 
     // Test unit suffixes
-    let duration_metric = metrics.histogram("operation_duration_seconds", vec![0.001, 0.01, 0.1, 1.0]);
+    let duration_metric =
+        metrics.histogram("operation_duration_seconds", vec![0.001, 0.01, 0.1, 1.0]);
     let size_metric = metrics.histogram("payload_size_bytes", vec![100.0, 1000.0, 10000.0]);
     let ratio_metric = metrics.gauge("cache_hit_ratio");
 
@@ -264,13 +281,19 @@ fn p2_opentelemetry_semantic_conventions() {
 
     // Verify naming conventions
     let output = metrics.export_prometheus();
-    assert!(output.contains("operation_duration_seconds"), "Duration metric missing");
+    assert!(
+        output.contains("operation_duration_seconds"),
+        "Duration metric missing"
+    );
     assert!(output.contains("payload_size_bytes"), "Size metric missing");
     assert!(output.contains("cache_hit_ratio"), "Ratio metric missing");
 
     // Verify proper help text contains units (simplified check)
-    let has_duration_context = output.contains("seconds") || output.contains("duration") || output.contains("operation_duration");
-    let has_size_context = output.contains("bytes") || output.contains("size") || output.contains("payload_size");
+    let has_duration_context = output.contains("seconds")
+        || output.contains("duration")
+        || output.contains("operation_duration");
+    let has_size_context =
+        output.contains("bytes") || output.contains("size") || output.contains("payload_size");
 
     assert!(has_duration_context, "Duration context not found in output");
     assert!(has_size_context, "Size context not found in output");
@@ -348,11 +371,17 @@ fn p3_concurrency_safety() {
     let expected_total = (config.concurrency_level * config.operations_per_thread) as u64
         + (config.concurrency_level * (config.operations_per_thread / 100) * 10) as u64; // batch adds
 
-    assert_eq!(total_counter, expected_total, "Counter operations not atomic");
+    assert_eq!(
+        total_counter, expected_total,
+        "Counter operations not atomic"
+    );
 
     // Verify metrics can be exported without panicking
     let output = metrics.lock().unwrap().export_prometheus();
-    assert!(!output.is_empty(), "Export should produce output after concurrent operations");
+    assert!(
+        !output.is_empty(),
+        "Export should produce output after concurrent operations"
+    );
 
     // Validate format is still correct after concurrent access
     validate_prometheus_format(&output).expect_pass("P3: Format after concurrency");
@@ -372,8 +401,10 @@ fn p4_memory_efficiency() {
         for status in ["200", "400", "404", "500"] {
             let endpoint_count = (config.max_label_cardinality / 100).max(1);
             for endpoint in (1..=endpoint_count).map(|i| format!("endpoint_{}", i)) {
-                let metric_name = format!("http_requests_total{{method=\"{}\",status=\"{}\",endpoint=\"{}\"}}",
-                                        method, status, endpoint);
+                let metric_name = format!(
+                    "http_requests_total{{method=\"{}\",status=\"{}\",endpoint=\"{}\"}}",
+                    method, status, endpoint
+                );
                 metrics.counter(&metric_name).increment();
             }
         }
@@ -386,25 +417,45 @@ fn p4_memory_efficiency() {
     let output = metrics.export_prometheus();
     let export_time = export_start.elapsed();
 
-    assert!(export_time < Duration::from_secs(5),
-        "Export took too long: {:?} for {} bytes", export_time, output.len());
+    assert!(
+        export_time < Duration::from_secs(5),
+        "Export took too long: {:?} for {} bytes",
+        export_time,
+        output.len()
+    );
 
     // Verify output contains expected metrics
     let line_count = output.lines().count();
-    assert!(line_count > 100, "Expected many metrics, got {} lines", line_count);
+    assert!(
+        line_count > 100,
+        "Expected many metrics, got {} lines",
+        line_count
+    );
 
     // Memory efficiency check: multiple exports shouldn't significantly increase time
     let export2_start = Instant::now();
     let output2 = metrics.export_prometheus();
     let export2_time = export2_start.elapsed();
 
-    assert_eq!(output.len(), output2.len(), "Export output should be deterministic");
-    assert!(export2_time <= export_time * 3,
+    assert_eq!(
+        output.len(),
+        output2.len(),
+        "Export output should be deterministic"
+    );
+    assert!(
+        export2_time <= export_time * 3,
         "Second export should not be significantly slower: {:?} vs {:?}",
-        export2_time, export_time);
+        export2_time,
+        export_time
+    );
 
-    println!("P4 Performance: Creation: {:?}, Export1: {:?}, Export2: {:?}, Output size: {} bytes",
-        creation_time, export_time, export2_time, output.len());
+    println!(
+        "P4 Performance: Creation: {:?}, Export1: {:?}, Export2: {:?}, Output size: {} bytes",
+        creation_time,
+        export_time,
+        export2_time,
+        output.len()
+    );
 }
 
 /// Test P5: Histogram and summary statistical properties.
@@ -419,10 +470,10 @@ fn p5_statistical_correctness() {
     // Add observations with known distribution
     let observations = [
         0.05, 0.15, 0.25, 0.35, 0.45, // 5 in [0, 0.5)
-        0.6, 0.7, 0.8, 0.9,           // 4 in [0.5, 1.0)
-        2.0, 3.0, 4.0,                // 3 in [1.0, 5.0)
-        7.5, 8.5,                     // 2 in [5.0, 10.0)
-        15.0, 20.0,                   // 2 in [10.0, +Inf)
+        0.6, 0.7, 0.8, 0.9, // 4 in [0.5, 1.0)
+        2.0, 3.0, 4.0, // 3 in [1.0, 5.0)
+        7.5, 8.5, // 2 in [5.0, 10.0)
+        15.0, 20.0, // 2 in [10.0, +Inf)
     ];
 
     for &obs in &observations {
@@ -433,7 +484,8 @@ fn p5_statistical_correctness() {
     let output = metrics.export_prometheus();
 
     // Parse bucket values (simplified validation)
-    let bucket_lines: Vec<&str> = output.lines()
+    let bucket_lines: Vec<&str> = output
+        .lines()
         .filter(|line| line.contains("test_latency_bucket"))
         .collect();
 
@@ -441,7 +493,8 @@ fn p5_statistical_correctness() {
     assert!(!bucket_lines.is_empty(), "No histogram buckets found");
 
     // Find the +Inf bucket line
-    let inf_bucket = bucket_lines.iter()
+    let inf_bucket = bucket_lines
+        .iter()
         .find(|line| line.contains("le=\"+Inf\""));
 
     if let Some(inf_line) = inf_bucket {
@@ -449,20 +502,26 @@ fn p5_statistical_correctness() {
         if let Some(space_pos) = inf_line.rfind(' ') {
             let count_str = &inf_line[space_pos + 1..];
             if let Ok(count) = count_str.trim().parse::<u64>() {
-                assert_eq!(count, observations.len() as u64,
-                    "Total count should equal number of observations");
+                assert_eq!(
+                    count,
+                    observations.len() as u64,
+                    "Total count should equal number of observations"
+                );
             }
         }
     }
 
     // Test summary quantile ordering
     let summary = metrics.summary("test_response_size");
-    for value in [100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0] {
+    for value in [
+        100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0,
+    ] {
         summary.observe(value);
     }
 
     let output = metrics.export_prometheus();
-    let quantile_lines: Vec<&str> = output.lines()
+    let quantile_lines: Vec<&str> = output
+        .lines()
         .filter(|line| line.contains("test_response_size{quantile="))
         .collect();
     assert!(
@@ -478,8 +537,12 @@ fn p5_statistical_correctness() {
             if let Some(end) = quantile_part.find('"') {
                 let quantile_str = &quantile_part[..end];
                 if let Ok(quantile) = quantile_str.parse::<f64>() {
-                    assert!(quantile >= prev_quantile,
-                        "Quantiles not in ascending order: {} < {}", quantile, prev_quantile);
+                    assert!(
+                        quantile >= prev_quantile,
+                        "Quantiles not in ascending order: {} < {}",
+                        quantile,
+                        prev_quantile
+                    );
                     prev_quantile = quantile;
                 }
             }
@@ -505,9 +568,7 @@ fn comprehensive_conformance_integration() {
             let counters = {
                 let mut metrics = metrics.lock().unwrap();
                 (0..10)
-                    .map(|i| {
-                        metrics.counter(&format!("requests_total{{endpoint=\"/api/{}\"}}", i))
-                    })
+                    .map(|i| metrics.counter(&format!("requests_total{{endpoint=\"/api/{}\"}}", i)))
                     .collect::<Vec<_>>()
             };
             barrier.wait();
@@ -579,18 +640,36 @@ fn comprehensive_conformance_integration() {
 
     // Verify content correctness
     assert!(output.contains("requests_total"), "Missing counter metrics");
-    assert!(output.contains("active_connections"), "Missing gauge metrics");
-    assert!(output.contains("request_duration_seconds"), "Missing histogram metrics");
-    assert!(output.contains("response_size_bytes"), "Missing summary metrics");
+    assert!(
+        output.contains("active_connections"),
+        "Missing gauge metrics"
+    );
+    assert!(
+        output.contains("request_duration_seconds"),
+        "Missing histogram metrics"
+    );
+    assert!(
+        output.contains("response_size_bytes"),
+        "Missing summary metrics"
+    );
 
     // Check for required metadata
-    assert!(output.contains("# TYPE"), "Missing metric type declarations");
-    assert!(output.contains("# HELP") || output.len() > 1000, "Missing help text or substantial output");
+    assert!(
+        output.contains("# TYPE"),
+        "Missing metric type declarations"
+    );
+    assert!(
+        output.contains("# HELP") || output.len() > 1000,
+        "Missing help text or substantial output"
+    );
 
     // Validate line count is reasonable
     let line_count = output.lines().count();
     assert!(line_count > 20, "Too few output lines: {}", line_count);
     assert!(line_count < 50000, "Too many output lines: {}", line_count);
 
-    println!("Comprehensive conformance test passed: {} lines of output", line_count);
+    println!(
+        "Comprehensive conformance test passed: {} lines of output",
+        line_count
+    );
 }

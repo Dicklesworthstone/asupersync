@@ -297,7 +297,10 @@ impl Header {
     /// Size = name bytes + value bytes + 32 overhead.
     #[must_use]
     pub fn size(&self) -> usize {
-        self.name.len().saturating_add(self.value.len()).saturating_add(32)
+        self.name
+            .len()
+            .saturating_add(self.value.len())
+            .saturating_add(32)
     }
 }
 
@@ -353,7 +356,10 @@ impl DynamicTableEntry {
     }
 
     fn size(&self) -> usize {
-        self.name.len().saturating_add(self.value.len()).saturating_add(32)
+        self.name
+            .len()
+            .saturating_add(self.value.len())
+            .saturating_add(32)
     }
 }
 
@@ -1127,7 +1133,11 @@ const fn build_bit_masks() -> [u64; 65] {
     let mut masks = [0u64; 65];
     let mut i = 0usize;
     while i <= 64 {
-        masks[i] = if i == 64 { u64::MAX } else { (1u64 << i).saturating_sub(1) };
+        masks[i] = if i == 64 {
+            u64::MAX
+        } else {
+            (1u64 << i).saturating_sub(1)
+        };
         i += 1;
     }
     masks

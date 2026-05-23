@@ -486,8 +486,8 @@ fn level_has_value_semantics() {
 // Performance and Observability Conformance Enhancements
 // ---------------------------------------------------------------------------
 
-use std::time::Instant;
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// Performance metrics for compression operations.
 #[derive(Debug, Clone)]
@@ -502,10 +502,7 @@ struct CompressionMetrics {
 }
 
 impl CompressionMetrics {
-    fn new(
-        compression_time: std::time::Duration,
-        compressed: &CompressedTrace,
-    ) -> Self {
+    fn new(compression_time: std::time::Duration, compressed: &CompressedTrace) -> Self {
         Self {
             compression_time,
             original_size: compressed.original_count,
@@ -528,7 +525,8 @@ impl CompressionMetrics {
         if self.memory_peak_estimate == 0 {
             return 1.0;
         }
-        (self.original_size * std::mem::size_of::<TraceEvent>()) as f64 / self.memory_peak_estimate as f64
+        (self.original_size * std::mem::size_of::<TraceEvent>()) as f64
+            / self.memory_peak_estimate as f64
     }
 }
 
@@ -565,17 +563,24 @@ fn comprehensive_compression_performance_conformance() {
                 level_metrics.push(metrics);
 
                 // Validate correctness properties
-                assert_eq!(compressed.original_count, trace.len(),
-                    "Original count mismatch for {size_label} trace at {level:?}");
+                assert_eq!(
+                    compressed.original_count,
+                    trace.len(),
+                    "Original count mismatch for {size_label} trace at {level:?}"
+                );
 
-                assert!(validate_compressed(&compressed),
-                    "Validation failed for {size_label} trace at {level:?}");
+                assert!(
+                    validate_compressed(&compressed),
+                    "Validation failed for {size_label} trace at {level:?}"
+                );
 
                 // Validate compression is a subsequence
                 let mut compressed_idx = 0;
                 for (orig_idx, original_event) in trace.iter().enumerate() {
                     if compressed_idx < compressed.events.len()
-                        && compressed.events[compressed_idx].sequence_number() == original_event.sequence_number() {
+                        && compressed.events[compressed_idx].sequence_number()
+                            == original_event.sequence_number()
+                    {
                         assert_eq!(
                             compressed.events[compressed_idx], *original_event,
                             "Event mismatch at original index {} for {size_label} trace at {level:?}",
@@ -588,49 +593,75 @@ fn comprehensive_compression_performance_conformance() {
                 // Performance expectations based on level
                 match level {
                     Level::Lossless => {
-                        assert_eq!(compressed.events.len(), trace.len(),
-                            "Lossless should keep all events");
-                        assert_eq!(compressed.ratio(), 1.0,
-                            "Lossless should have 1.0 compression ratio");
+                        assert_eq!(
+                            compressed.events.len(),
+                            trace.len(),
+                            "Lossless should keep all events"
+                        );
+                        assert_eq!(
+                            compressed.ratio(),
+                            1.0,
+                            "Lossless should have 1.0 compression ratio"
+                        );
                     }
                     Level::Structural | Level::Skeleton => {
-                        assert!(compressed.events.len() <= trace.len(),
-                            "Compressed trace should not be larger than original");
-                        assert!(compressed.ratio() <= 1.0,
-                            "Compression ratio should not exceed 1.0");
+                        assert!(
+                            compressed.events.len() <= trace.len(),
+                            "Compressed trace should not be larger than original"
+                        );
+                        assert!(
+                            compressed.ratio() <= 1.0,
+                            "Compression ratio should not exceed 1.0"
+                        );
                     }
                 }
 
                 // Compression time should be reasonable (< 1ms per 100 events)
-                let expected_max_time = std::time::Duration::from_millis((trace_len / 100).max(1) as u64);
-                assert!(compression_time <= expected_max_time,
+                let expected_max_time =
+                    std::time::Duration::from_millis((trace_len / 100).max(1) as u64);
+                assert!(
+                    compression_time <= expected_max_time,
                     "Compression too slow: {:?} for {} events at {level:?} (expected <= {:?})",
-                    compression_time, trace_len, expected_max_time);
+                    compression_time,
+                    trace_len,
+                    expected_max_time
+                );
             }
 
             // Calculate aggregate statistics
-            let avg_compression_time = level_metrics.iter()
+            let avg_compression_time = level_metrics
+                .iter()
                 .map(|m| m.compression_time.as_nanos())
-                .sum::<u128>() / level_metrics.len() as u128;
+                .sum::<u128>()
+                / level_metrics.len() as u128;
 
-            let avg_compression_ratio = level_metrics.iter()
+            let avg_compression_ratio = level_metrics
+                .iter()
                 .map(|m| m.compression_ratio)
-                .sum::<f64>() / level_metrics.len() as f64;
+                .sum::<f64>()
+                / level_metrics.len() as f64;
 
-            let avg_throughput = level_metrics.iter()
+            let avg_throughput = level_metrics
+                .iter()
                 .map(|m| m.throughput_events_per_ms())
-                .sum::<f64>() / level_metrics.len() as f64;
+                .sum::<f64>()
+                / level_metrics.len() as f64;
 
-            let avg_memory_efficiency = level_metrics.iter()
+            let avg_memory_efficiency = level_metrics
+                .iter()
                 .map(|m| m.memory_efficiency_ratio())
-                .sum::<f64>() / level_metrics.len() as f64;
+                .sum::<f64>()
+                / level_metrics.len() as f64;
 
-            all_metrics.insert((size_label, level), (
-                avg_compression_time,
-                avg_compression_ratio,
-                avg_throughput,
-                avg_memory_efficiency
-            ));
+            all_metrics.insert(
+                (size_label, level),
+                (
+                    avg_compression_time,
+                    avg_compression_ratio,
+                    avg_throughput,
+                    avg_memory_efficiency,
+                ),
+            );
 
             // Print performance report
             println!(
@@ -650,16 +681,24 @@ fn comprehensive_compression_performance_conformance() {
         let structural_stats = all_metrics.get(&(size_label, Level::Structural));
         let skeleton_stats = all_metrics.get(&(size_label, Level::Skeleton));
 
-        if let (Some(lossless), Some(structural), Some(skeleton)) = (lossless_stats, structural_stats, skeleton_stats) {
+        if let (Some(lossless), Some(structural), Some(skeleton)) =
+            (lossless_stats, structural_stats, skeleton_stats)
+        {
             // Compression ratios should follow: Skeleton <= Structural <= Lossless
-            assert!(skeleton.1 <= structural.1,
-                "Skeleton compression ratio should be <= Structural for {size_label}");
-            assert!(structural.1 <= lossless.1,
-                "Structural compression ratio should be <= Lossless for {size_label}");
+            assert!(
+                skeleton.1 <= structural.1,
+                "Skeleton compression ratio should be <= Structural for {size_label}"
+            );
+            assert!(
+                structural.1 <= lossless.1,
+                "Structural compression ratio should be <= Lossless for {size_label}"
+            );
 
             // Throughput should be reasonable across levels (within 10x of each other)
-            assert!(skeleton.2 / lossless.2 <= 10.0 && lossless.2 / skeleton.2 <= 10.0,
-                "Throughput variance too high across compression levels for {size_label}");
+            assert!(
+                skeleton.2 / lossless.2 <= 10.0 && lossless.2 / skeleton.2 <= 10.0,
+                "Throughput variance too high across compression levels for {size_label}"
+            );
         }
     }
 
@@ -669,8 +708,10 @@ fn comprehensive_compression_performance_conformance() {
 
     if let (Some(small), Some(large)) = (small_memory_eff, large_memory_eff) {
         // Memory efficiency should not degrade significantly with size
-        assert!(large >= small * 0.5,
-            "Memory efficiency degraded too much with trace size: {small:.2} -> {large:.2}");
+        assert!(
+            large >= small * 0.5,
+            "Memory efficiency degraded too much with trace size: {small:.2} -> {large:.2}"
+        );
     }
 }
 
@@ -697,25 +738,37 @@ fn compression_idempotence_with_performance_tracking() {
                 let second_duration = second_start.elapsed();
 
                 // Validate idempotence
-                assert_eq!(first_compressed.events, second_compressed.events,
-                    "Compression not idempotent at {level:?} for len={len}, seed={seed}");
+                assert_eq!(
+                    first_compressed.events, second_compressed.events,
+                    "Compression not idempotent at {level:?} for len={len}, seed={seed}"
+                );
 
-                assert_eq!(first_compressed.ratio(), second_compressed.ratio(),
-                    "Compression ratio not idempotent at {level:?} for len={len}, seed={seed}");
+                assert_eq!(
+                    first_compressed.ratio(),
+                    second_compressed.ratio(),
+                    "Compression ratio not idempotent at {level:?} for len={len}, seed={seed}"
+                );
 
                 // Performance expectations: second compression should be fast (already filtered)
                 if !first_compressed.events.is_empty() {
                     // For non-empty results, second compression should not be slower than 2x first
-                    assert!(second_duration <= first_duration * 2,
+                    assert!(
+                        second_duration <= first_duration * 2,
                         "Second compression unexpectedly slow: {:?} vs {:?} at {level:?} for len={len}",
-                        second_duration, first_duration);
+                        second_duration,
+                        first_duration
+                    );
                 }
 
                 // Validate both compressed traces pass validation
-                assert!(validate_compressed(&first_compressed),
-                    "First compressed trace validation failed");
-                assert!(validate_compressed(&second_compressed),
-                    "Second compressed trace validation failed");
+                assert!(
+                    validate_compressed(&first_compressed),
+                    "First compressed trace validation failed"
+                );
+                assert!(
+                    validate_compressed(&second_compressed),
+                    "Second compressed trace validation failed"
+                );
 
                 println!(
                     "Idempotence [{level:?}, len={len}]: first={:.1}μs, second={:.1}μs, \

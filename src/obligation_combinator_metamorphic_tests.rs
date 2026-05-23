@@ -29,7 +29,7 @@ use proptest::prelude::*;
 ///   - Double-resolve or use-after-free bugs
 #[test]
 fn mr_obligation_ledger_ordering() {
-    use crate::obligation::ledger::{ObligationLedger, LedgerError};
+    use crate::obligation::ledger::{LedgerError, ObligationLedger};
     use crate::record::{ObligationKind, ObligationRecord, ObligationState, SourceLocation};
     use crate::types::{ObligationId, RegionId, TaskId};
 
@@ -107,10 +107,10 @@ fn mr_obligation_ledger_ordering() {
 ///   - Random ordering affecting leak detection outcomes
 #[test]
 fn mr_leak_check_determinism() {
-    use crate::obligation::leak_check::{LeakChecker, LeakCheckConfig};
+    use crate::obligation::leak_check::{LeakCheckConfig, LeakChecker};
     use crate::obligation::ledger::ObligationLedger;
-    use crate::types::{ObligationId, RegionId, TaskId};
     use crate::record::{ObligationKind, SourceLocation};
+    use crate::types::{ObligationId, RegionId, TaskId};
 
     proptest!(|(
         seed in 0u64..1000u64,
@@ -385,7 +385,7 @@ fn mr_retry_idempotency() {
 #[test]
 fn mr_race_symmetry() {
     use crate::combinator::race::{Race2, RaceResult};
-    use crate::types::{Outcome};
+    use crate::types::Outcome;
 
     proptest!(|(
         outcome_a in prop::sample::select(vec!["success_a", "error_a"]),
@@ -519,7 +519,7 @@ fn mr_quorum_threshold_invariants() {
 ///   - Incorrect delay calculation or application
 #[test]
 fn mr_hedge_convergence() {
-    use crate::combinator::hedge::{HedgePolicy, HedgeConfig};
+    use crate::combinator::hedge::{HedgeConfig, HedgePolicy};
     use std::time::Duration;
 
     proptest!(|(
@@ -596,7 +596,7 @@ fn mr_hedge_convergence() {
 ///   - Frame inference bugs in proof generation
 #[test]
 fn mr_separation_logic_frame_rule() {
-    use crate::obligation::separation_logic::{HeapState, SeparationProof, FrameRule};
+    use crate::obligation::separation_logic::{FrameRule, HeapState, SeparationProof};
     use std::collections::BTreeMap;
 
     proptest!(|(

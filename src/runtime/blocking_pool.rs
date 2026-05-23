@@ -2159,7 +2159,9 @@ mod tests {
                 on_thread_stop: Some(Arc::new(move || {
                     let (lock, condvar) = &*retired_signal;
                     {
-                        let mut retired = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut retired = lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         *retired = true;
                     }
                     condvar.notify_all();
@@ -2172,7 +2174,9 @@ mod tests {
 
         let (lock, condvar) = &*retired;
         let retired = {
-            let retired = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retired = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (retired, _timeout) = condvar
                 .wait_timeout_while(retired, Duration::from_secs(1), |retired| !*retired)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2242,9 +2246,13 @@ mod tests {
         let release_clone = Arc::clone(&release);
         let join_target = thread::spawn(move || {
             let (lock, condvar) = &*release_clone;
-            let mut released = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut released = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             while !*released {
-                released = condvar.wait(released).unwrap_or_else(std::sync::PoisonError::into_inner);
+                released = condvar
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
             }
         });
 
@@ -2282,7 +2290,9 @@ mod tests {
 
         let (release_lock, release_condvar) = &*release;
         {
-            let mut released = release_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut released = release_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *released = true;
         }
         release_condvar.notify_all();
@@ -2338,15 +2348,21 @@ mod tests {
                 on_thread_stop: Some(Arc::new(move || {
                     let (lock, condvar) = &*exiting_signal;
                     {
-                        let mut exiting = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut exiting = lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         *exiting = true;
                     }
                     condvar.notify_all();
 
                     let (gate_lock, gate_condvar) = &*exit_gate_signal;
-                    let mut release = gate_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut release = gate_lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     while !*release {
-                        release = gate_condvar.wait(release).unwrap_or_else(std::sync::PoisonError::into_inner);
+                        release = gate_condvar
+                            .wait(release)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
                     drop(release);
                 })),
@@ -2362,7 +2378,9 @@ mod tests {
         let (exiting_lock, exiting_condvar) = &*exiting;
         let (exiting, _timeout) = exiting_condvar
             .wait_timeout_while(
-                exiting_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                exiting_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
                 Duration::from_secs(1),
                 |exiting| !*exiting,
             )
@@ -2405,7 +2423,9 @@ mod tests {
 
         let (gate_lock, gate_condvar) = &*exit_gate;
         {
-            let mut release = gate_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut release = gate_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *release = true;
         }
         gate_condvar.notify_all();

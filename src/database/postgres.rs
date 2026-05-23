@@ -1371,7 +1371,8 @@ impl PgConnection {
         };
 
         // Calculate total length with overflow protection for message concatenation
-        let total = parse_msg.len()
+        let total = parse_msg
+            .len()
             .saturating_add(bind_msg.len())
             .saturating_add(execute_msg.len())
             .saturating_add(sync_msg.len());
@@ -4783,7 +4784,8 @@ impl PgConnection {
 
         // Combine into single write for reduced syscalls.
         // Calculate total length with overflow protection for message concatenation
-        let total = parse.len()
+        let total = parse
+            .len()
             .saturating_add(bind.len())
             .saturating_add(describe.len())
             .saturating_add(execute.len())
@@ -4885,7 +4887,8 @@ impl PgConnection {
         };
 
         // Calculate total length with overflow protection for message concatenation
-        let total = parse.len()
+        let total = parse
+            .len()
             .saturating_add(bind.len())
             .saturating_add(execute.len())
             .saturating_add(sync.len());
@@ -4986,7 +4989,8 @@ impl PgConnection {
         };
 
         // Calculate total length with overflow protection for message concatenation
-        let total = parse.len()
+        let total = parse
+            .len()
             .saturating_add(describe.len())
             .saturating_add(sync.len());
         let mut combined = Vec::with_capacity(total);
@@ -5391,7 +5395,8 @@ impl PgConnection {
         };
 
         // Calculate total length with overflow protection for message concatenation
-        let total = bind.len()
+        let total = bind
+            .len()
             .saturating_add(describe.len())
             .saturating_add(execute.len())
             .saturating_add(sync.len());
@@ -5458,7 +5463,8 @@ impl PgConnection {
         };
 
         // Calculate total length with overflow protection for message concatenation
-        let total = bind.len()
+        let total = bind
+            .len()
             .saturating_add(execute.len())
             .saturating_add(sync.len());
         let mut combined = Vec::with_capacity(total);

@@ -88,7 +88,10 @@ fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|p| p.saturating_add(4));
-    let lf_pos = data.windows(2).position(|w| w == b"\n\n").map(|p| p.saturating_add(2));
+    let lf_pos = data
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|p| p.saturating_add(2));
 
     let split_at = match (crlf_pos, lf_pos) {
         (Some(c), Some(l)) => Some(std::cmp::min(c, l)),

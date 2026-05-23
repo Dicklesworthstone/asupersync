@@ -1181,7 +1181,9 @@ const fn rejected_profile_candidates_for_selection(
     }
 }
 
-fn profile_pack_metadata(profile_pack: Gf256ProfilePackId) -> Option<&'static Gf256ProfilePackMetadata> {
+fn profile_pack_metadata(
+    profile_pack: Gf256ProfilePackId,
+) -> Option<&'static Gf256ProfilePackMetadata> {
     GF256_PROFILE_PACK_CATALOG
         .iter()
         .find(|metadata| metadata.profile_pack == profile_pack)
@@ -1252,8 +1254,8 @@ fn detect_dual_policy() -> DualKernelPolicy {
     });
 
     let selection = select_profile_pack(dispatch().kind, requested_profile);
-    let metadata = profile_pack_metadata(selection.profile_pack)
-        .unwrap_or(&GF256_PROFILE_PACK_CATALOG[0]); // fallback to first catalog entry
+    let metadata =
+        profile_pack_metadata(selection.profile_pack).unwrap_or(&GF256_PROFILE_PACK_CATALOG[0]); // fallback to first catalog entry
     let mut override_mask = DualKernelOverrideMask::empty();
     if requested_mode_raw.is_some() {
         override_mask.set_dual_policy_env_requested();
@@ -1375,8 +1377,8 @@ fn apply_effective_selection_contract(policy: &mut DualKernelPolicy) {
 }
 
 fn effective_profile_pack_metadata(policy: &DualKernelPolicy) -> Gf256ProfilePackMetadata {
-    let mut metadata = *profile_pack_metadata(policy.profile_pack)
-        .unwrap_or(&GF256_PROFILE_PACK_CATALOG[0]); // fallback to first catalog entry
+    let mut metadata =
+        *profile_pack_metadata(policy.profile_pack).unwrap_or(&GF256_PROFILE_PACK_CATALOG[0]); // fallback to first catalog entry
     metadata.tuning_corpus_id = policy.tuning_corpus_id;
     metadata.selected_tuning_candidate_id = policy.selected_tuning_candidate_id;
     metadata.rejected_tuning_candidate_ids = policy.rejected_tuning_candidate_ids;

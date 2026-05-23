@@ -528,7 +528,10 @@ fn mr_composite_full_channel_abort_vs_drop() {
         after_drop_result1.is_ok(),
         "First send results should be equivalent after abort vs drop. \
          Performance: abort1={:?}, abort2={:?}, drop1={:?}, drop2={:?}",
-        abort_duration_1a, abort_duration_1b, drop_duration_2a, drop_duration_2b
+        abort_duration_1a,
+        abort_duration_1b,
+        drop_duration_2a,
+        drop_duration_2b
     );
     assert_eq!(
         after_abort_result2.is_ok(),
@@ -542,8 +545,7 @@ fn mr_composite_full_channel_abort_vs_drop() {
         counts_after_abort, counts_after_drop,
         "Channel counts should be equivalent after abort vs drop. \
          Abort path telemetry: waiters={}, Drop path telemetry: waiters={}",
-        telemetry_final_abort_path.send_waiter_count,
-        telemetry_final_drop_path.send_waiter_count
+        telemetry_final_abort_path.send_waiter_count, telemetry_final_drop_path.send_waiter_count
     );
 
     // Verify receivers see the same data (enhanced with timing)
@@ -566,8 +568,10 @@ fn mr_composite_full_channel_abort_vs_drop() {
         vec![1, 2, 3],
         "Should receive all successfully sent messages. Final states - \
          abort_path: queue={}, reserved={}, drop_path: queue={}, reserved={}",
-        counts_after_abort.0, counts_after_abort.1,
-        counts_after_drop.0, counts_after_drop.1
+        counts_after_abort.0,
+        counts_after_abort.1,
+        counts_after_drop.0,
+        counts_after_drop.1
     );
 }
 

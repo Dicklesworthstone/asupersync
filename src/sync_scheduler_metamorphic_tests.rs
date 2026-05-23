@@ -222,9 +222,11 @@ impl MockSemaphore {
     }
 
     pub fn release(&mut self, thread_id: ThreadId, count: usize) -> bool {
-        if let Some(pos) = self.acquired_permits.iter()
-            .position(|(t, c)| *t == thread_id && *c == count) {
-
+        if let Some(pos) = self
+            .acquired_permits
+            .iter()
+            .position(|(t, c)| *t == thread_id && *c == count)
+        {
             self.acquired_permits.remove(pos);
             self.permits += count;
 
@@ -339,7 +341,9 @@ impl<T: Clone> MockWatch<T> {
     }
 
     pub fn coalescing_idempotent(&self, original_updates: &[T]) -> bool
-    where T: PartialEq {
+    where
+        T: PartialEq,
+    {
         if let Some(last_update) = original_updates.last() {
             &self.value == last_update && self.pending_updates.is_empty()
         } else {
@@ -401,10 +405,14 @@ impl<T: Clone> MockPool<T> {
     }
 
     pub fn return_resource(&mut self, thread_id: ThreadId, resource: T) -> bool
-    where T: PartialEq {
-        if let Some(pos) = self.reserved.iter()
-            .position(|(t, r)| *t == thread_id && *r == resource) {
-
+    where
+        T: PartialEq,
+    {
+        if let Some(pos) = self
+            .reserved
+            .iter()
+            .position(|(t, r)| *t == thread_id && *r == resource)
+        {
             let (_, returned_resource) = self.reserved.remove(pos);
             self.resources.push(returned_resource);
             true
@@ -464,7 +472,11 @@ impl MockEpoch {
     }
 
     pub fn reclaim(&mut self, object_id: ObjectId) -> bool {
-        if let Some(pos) = self.protected_objects.iter().position(|&id| id == object_id) {
+        if let Some(pos) = self
+            .protected_objects
+            .iter()
+            .position(|&id| id == object_id)
+        {
             self.protected_objects.remove(pos);
             self.reclaimed_objects.push(object_id);
             true
@@ -552,7 +564,8 @@ impl MockWorkStealer {
         let total_work: u64 = stealers.iter().map(|s| s.total_work).sum();
         let average_work = total_work as f64 / stealers.len() as f64;
 
-        let variance: f64 = stealers.iter()
+        let variance: f64 = stealers
+            .iter()
             .map(|s| (s.total_work as f64 - average_work).powi(2))
             .sum();
 

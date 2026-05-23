@@ -1857,7 +1857,10 @@ fn mr_zero_byte_boundary_round_trip() {
 
             // Should either succeed with empty output or fail gracefully
             if let Ok(outcome) = result {
-                assert_eq!(outcome.source_symbols, 0, "Empty input should produce no source symbols");
+                assert_eq!(
+                    outcome.source_symbols, 0,
+                    "Empty input should produce no source symbols"
+                );
             } else {
                 // Graceful failure is acceptable for empty input
             }
@@ -1878,20 +1881,31 @@ fn mr_zero_byte_boundary_round_trip() {
                 if outcome.source_symbols > 0 && !symbols.is_empty() {
                     // Try to decode with just the source symbols
                     let received = symbols_to_received(symbols, outcome.source_symbols);
-                    let decode_result = decode_payload(symbols, outcome.source_symbols, config.encoding.symbol_size as usize, data.len());
+                    let decode_result = decode_payload(
+                        symbols,
+                        outcome.source_symbols,
+                        config.encoding.symbol_size as usize,
+                        data.len(),
+                    );
 
                     if let Ok(decoded) = decode_result {
                         assert_eq!(
-                            decoded.len(), data.len(),
+                            decoded.len(),
+                            data.len(),
                             "Boundary case length mismatch for {}: expected {}, got {}",
-                            description, data.len(), decoded.len()
+                            description,
+                            data.len(),
+                            decoded.len()
                         );
 
                         if !data.is_empty() {
                             assert_eq!(
-                                decoded[..data.len()], data[..],
+                                decoded[..data.len()],
+                                data[..],
                                 "Boundary case data mismatch for {}: input {:?} != output {:?}",
-                                description, data, &decoded[..data.len()]
+                                description,
+                                data,
+                                &decoded[..data.len()]
                             );
                         }
                     }
@@ -2220,7 +2234,7 @@ fn mr_gf256_exponentiation_properties() {
 ///   - Kernel dispatch bugs that select wrong implementation
 #[test]
 fn mr_gf256_slice_operation_consistency() {
-    use crate::raptorq::gf256::{Gf256, gf256_add_slice, gf256_mul_slice, gf256_addmul_slice};
+    use crate::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice, gf256_mul_slice};
 
     proptest!(|(
         data: Vec<u8>,
@@ -2331,8 +2345,8 @@ fn mr_row_operation_linearity_addition() {
 ///   - Edge cases with zero or one scalars
 #[test]
 fn mr_row_operation_scalar_linearity() {
-    use crate::raptorq::linalg::row_scale;
     use crate::raptorq::gf256::Gf256;
+    use crate::raptorq::linalg::row_scale;
 
     proptest!(|(
         a: Vec<u8>,
@@ -2377,7 +2391,7 @@ fn mr_row_operation_scalar_linearity() {
 ///   - Numerical instability that depends on pivot order
 #[test]
 fn mr_gaussian_solve_determinism() {
-    use crate::raptorq::linalg::{GaussianSolver, DenseRow, GaussianResult};
+    use crate::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
 
     proptest!(|(
         matrix_data: Vec<Vec<u8>>,
@@ -2454,8 +2468,8 @@ fn classify_result(result: &GaussianResult) -> &'static str {
 ///   - Implementation bugs in row swap/scale operations
 #[test]
 fn mr_matrix_operation_rank_monotonicity() {
-    use crate::raptorq::linalg::{row_xor, row_scale, row_swap};
     use crate::raptorq::gf256::Gf256;
+    use crate::raptorq::linalg::{row_scale, row_swap, row_xor};
 
     proptest!(|(
         matrix: Vec<Vec<u8>>,
@@ -2503,7 +2517,10 @@ fn mr_matrix_operation_rank_monotonicity() {
 }
 
 fn count_nonzero_rows(matrix: &[Vec<u8>]) -> usize {
-    matrix.iter().filter(|row| row.iter().any(|&x| x != 0)).count()
+    matrix
+        .iter()
+        .filter(|row| row.iter().any(|&x| x != 0))
+        .count()
 }
 
 /// MR-DenseRowOperationConsistency: Dense row operations should match slice operations.
@@ -2516,8 +2533,8 @@ fn count_nonzero_rows(matrix: &[Vec<u8>]) -> usize {
 ///   - State management bugs in row data structures
 #[test]
 fn mr_dense_row_operation_consistency() {
-    use crate::raptorq::linalg::{DenseRow, row_xor};
     use crate::raptorq::gf256::Gf256;
+    use crate::raptorq::linalg::{DenseRow, row_xor};
 
     proptest!(|(
         data1: Vec<u8>,
@@ -2583,9 +2600,9 @@ fn mr_dense_row_operation_consistency() {
 ///   - Inconsistent frame boundaries in delimited codecs
 #[test]
 fn mr_codec_roundtrip_identity() {
-    use crate::codec::{BytesCodec, LinesCodec, LengthDelimitedCodec};
-    use crate::codec::{Decoder, Encoder};
     use crate::bytes::{Bytes, BytesMut};
+    use crate::codec::{BytesCodec, LengthDelimitedCodec, LinesCodec};
+    use crate::codec::{Decoder, Encoder};
     use std::io;
 
     proptest!(|(data: Vec<u8>)| {
@@ -2651,8 +2668,8 @@ fn mr_codec_roundtrip_identity() {
 ///   - Partial buffer handling errors
 #[test]
 fn mr_codec_streaming_consistency() {
-    use crate::codec::{LengthDelimitedCodec, Decoder};
     use crate::bytes::{Bytes, BytesMut};
+    use crate::codec::{Decoder, LengthDelimitedCodec};
 
     proptest!(|(
         data: Vec<u8>,

@@ -945,8 +945,13 @@ impl GlobalProtocol {
             } => {
                 stats.comm_count = stats.comm_count.saturating_add(1);
                 match monotonicity {
-                    Some(Monotonicity::Monotone) => stats.monotone_comm_count = stats.monotone_comm_count.saturating_add(1),
-                    Some(Monotonicity::NonMonotone) => stats.non_monotone_comm_count = stats.non_monotone_comm_count.saturating_add(1),
+                    Some(Monotonicity::Monotone) => {
+                        stats.monotone_comm_count = stats.monotone_comm_count.saturating_add(1)
+                    }
+                    Some(Monotonicity::NonMonotone) => {
+                        stats.non_monotone_comm_count =
+                            stats.non_monotone_comm_count.saturating_add(1)
+                    }
                     None => {}
                 }
                 Self::count_interaction(then, depth.saturating_add(1), stats);

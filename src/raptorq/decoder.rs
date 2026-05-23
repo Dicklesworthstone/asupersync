@@ -2754,21 +2754,15 @@ fn rebuild_dense_matrix_from_equations(
         // `checked_mul` so the buffer is correctly sized for
         // legitimate inputs; this guard makes the loop fail closed
         // on malformed inputs that bypass the upstream sizing.
-        let row_off = row.checked_mul(n_cols).ok_or_else(|| {
-            DecodeError::SingularMatrix {
-                row: eq_idx,
-            }
-        })?;
+        let row_off = row
+            .checked_mul(n_cols)
+            .ok_or_else(|| DecodeError::SingularMatrix { row: eq_idx })?;
         for &(col, coef) in &equations[eq_idx].terms {
             if let Some(dense_col) = dense_col_index(col_to_dense, col) {
                 let off = row_off
                     .checked_add(dense_col)
                     .filter(|&o| o < a.len())
-                    .ok_or_else(|| {
-                        DecodeError::SingularMatrix {
-                            row: eq_idx,
-                        }
-                    })?;
+                    .ok_or_else(|| DecodeError::SingularMatrix { row: eq_idx })?;
                 a[off] = coef;
             }
         }
@@ -2785,11 +2779,10 @@ fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Result<Vec<u8>, D
     // arithmetic for `off = row_idx * symbol_size` and indexes
     // PAST the saturated buffer end. Switching to `checked_mul +
     // proper error handling makes the overflow fail gracefully.
-    let total = rows.len().checked_mul(symbol_size).ok_or_else(|| {
-        DecodeError::SingularMatrix {
-            row: rows.len(),
-        }
-    })?;
+    let total = rows
+        .len()
+        .checked_mul(symbol_size)
+        .ok_or_else(|| DecodeError::SingularMatrix { row: rows.len() })?;
     let mut snapshot = vec![0u8; total];
     for (row_idx, row) in rows.iter().enumerate() {
         debug_assert_eq!(row.len(), symbol_size);

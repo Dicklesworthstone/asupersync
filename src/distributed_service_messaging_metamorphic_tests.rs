@@ -283,9 +283,10 @@ impl MockDistributedBridge {
 
     pub fn sequence_monotonicity_holds(&self) -> bool {
         // Check that message log sequences are monotonically increasing
-        self.message_log.windows(2).all(|pair| {
-            pair[0].sequence < pair[1].sequence
-        }) && self.last_applied_sequence <= self.sequence_number
+        self.message_log
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence)
+            && self.last_applied_sequence <= self.sequence_number
     }
 }
 
@@ -316,9 +317,9 @@ impl MockSnapshot {
     }
 
     pub fn roundtrip_preserves_data(&self, restored: &Self) -> bool {
-        self.data == restored.data &&
-        self.metadata == restored.metadata &&
-        self.checksum == restored.checksum
+        self.data == restored.data
+            && self.metadata == restored.metadata
+            && self.checksum == restored.checksum
     }
 }
 
@@ -425,26 +426,34 @@ impl MockDistributedMessage {
         let mut pos = 0;
 
         let id = u64::from_le_bytes([
-            data[pos], data[pos+1], data[pos+2], data[pos+3],
-            data[pos+4], data[pos+5], data[pos+6], data[pos+7]
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
         ]);
         pos += 8;
 
-        let payload_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        let payload_len =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         if pos + payload_len > data.len() {
             return None;
         }
 
-        let payload = data[pos..pos+payload_len].to_vec();
+        let payload = data[pos..pos + payload_len].to_vec();
         pos += payload_len;
 
         if pos + 4 > data.len() {
             return None;
         }
 
-        let header_count = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        let header_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         let mut headers = Vec::new();
@@ -453,28 +462,32 @@ impl MockDistributedMessage {
                 return None;
             }
 
-            let key_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+            let key_len =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
             pos += 4;
 
             if pos + key_len > data.len() {
                 return None;
             }
 
-            let key = String::from_utf8_lossy(&data[pos..pos+key_len]).into_owned();
+            let key = String::from_utf8_lossy(&data[pos..pos + key_len]).into_owned();
             pos += key_len;
 
             if pos + 4 > data.len() {
                 return None;
             }
 
-            let value_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+            let value_len =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
             pos += 4;
 
             if pos + value_len > data.len() {
                 return None;
             }
 
-            let value = String::from_utf8_lossy(&data[pos..pos+value_len]).into_owned();
+            let value = String::from_utf8_lossy(&data[pos..pos + value_len]).into_owned();
             pos += value_len;
 
             headers.push((key, value));
@@ -484,14 +497,15 @@ impl MockDistributedMessage {
             return None;
         }
 
-        let routing_key_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        let routing_key_len =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         if pos + routing_key_len > data.len() {
             return None;
         }
 
-        let routing_key = String::from_utf8_lossy(&data[pos..pos+routing_key_len]).into_owned();
+        let routing_key = String::from_utf8_lossy(&data[pos..pos + routing_key_len]).into_owned();
 
         Some(Self {
             id,
@@ -541,7 +555,8 @@ impl MockRateLimit {
             return 1.0;
         }
 
-        let variance: f64 = counts.iter()
+        let variance: f64 = counts
+            .iter()
             .map(|&count| (count as f64 - average).powi(2))
             .sum();
 
@@ -563,9 +578,16 @@ impl MockLoadBalancer {
     }
 
     pub fn select_backend(&mut self) -> Option<usize> {
-        let healthy_backends: Vec<usize> = self.backends.iter().enumerate()
+        let healthy_backends: Vec<usize> = self
+            .backends
+            .iter()
+            .enumerate()
             .filter_map(|(i, backend)| {
-                if backend.health == HealthStatus::Healthy { Some(i) } else { None }
+                if backend.health == HealthStatus::Healthy {
+                    Some(i)
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -580,7 +602,8 @@ impl MockLoadBalancer {
             }
             LoadBalanceAlgorithm::WeightedRoundRobin => {
                 // Simplified: select based on weight
-                let total_weight: u32 = healthy_backends.iter()
+                let total_weight: u32 = healthy_backends
+                    .iter()
                     .map(|&i| self.backends[i].weight)
                     .sum();
 
@@ -594,7 +617,8 @@ impl MockLoadBalancer {
             }
             LoadBalanceAlgorithm::LeastConnections => {
                 // Find backend with fewest requests
-                healthy_backends.iter()
+                healthy_backends
+                    .iter()
                     .min_by_key(|&&i| self.request_counts[i])
                     .copied()
                     .unwrap_or(healthy_backends[0])
@@ -629,7 +653,9 @@ impl MockLoadBalancer {
         }
 
         let expected_per_backend = total_requests as f64 / self.request_counts.len() as f64;
-        let variance: f64 = self.request_counts.iter()
+        let variance: f64 = self
+            .request_counts
+            .iter()
             .map(|&count| (count as f64 - expected_per_backend).powi(2))
             .sum();
 
@@ -645,12 +671,17 @@ impl MockLoadBalancer {
 }
 
 impl MockRetryAttempt {
-    pub fn attempt_request(policy: &MockRetryPolicy, attempt_number: u32, will_succeed: bool) -> Self {
+    pub fn attempt_request(
+        policy: &MockRetryPolicy,
+        attempt_number: u32,
+        will_succeed: bool,
+    ) -> Self {
         let delay_ms = if attempt_number == 1 {
             0
         } else {
             let base_delay = policy.backoff_base_ms as f64;
-            let exponential_delay = base_delay * policy.backoff_multiplier.powi((attempt_number - 2) as i32);
+            let exponential_delay =
+                base_delay * policy.backoff_multiplier.powi((attempt_number - 2) as i32);
 
             let jitter_factor = if policy.jitter {
                 0.9 + (attempt_number as f64 * 0.1) % 0.2 // Simple jitter simulation
@@ -693,7 +724,9 @@ impl MockRetryAttempt {
 
 impl MockHedgeRequest {
     pub fn new(request_id: u64, backend_addresses: Vec<String>) -> Self {
-        let parallel_requests = backend_addresses.into_iter().enumerate()
+        let parallel_requests = backend_addresses
+            .into_iter()
+            .enumerate()
             .map(|(i, backend)| HedgedCall {
                 call_id: i as u64,
                 backend,
@@ -712,7 +745,11 @@ impl MockHedgeRequest {
     }
 
     pub fn complete_call(&mut self, call_id: u64, outcome: RetryOutcome, timestamp: u64) {
-        if let Some(call) = self.parallel_requests.iter_mut().find(|c| c.call_id == call_id) {
+        if let Some(call) = self
+            .parallel_requests
+            .iter_mut()
+            .find(|c| c.call_id == call_id)
+        {
             call.finished_at = Some(timestamp);
             call.outcome = Some(outcome.clone());
 
@@ -805,11 +842,13 @@ impl MockMessageBroker {
     }
 
     pub fn create_topic(&mut self, topic_name: String, partition_count: u32) {
-        let partitions = (0..partition_count).map(|id| Partition {
-            id,
-            messages: Vec::new(),
-            high_water_mark: 0,
-        }).collect();
+        let partitions = (0..partition_count)
+            .map(|id| Partition {
+                id,
+                messages: Vec::new(),
+                high_water_mark: 0,
+            })
+            .collect();
 
         self.topics.push(Topic {
             name: topic_name,
@@ -817,7 +856,12 @@ impl MockMessageBroker {
         });
     }
 
-    pub fn publish(&mut self, topic_name: &str, key: Option<String>, value: Vec<u8>) -> Option<(u32, u64)> {
+    pub fn publish(
+        &mut self,
+        topic_name: &str,
+        key: Option<String>,
+        value: Vec<u8>,
+    ) -> Option<(u32, u64)> {
         if let Some(topic) = self.topics.iter_mut().find(|t| t.name == topic_name) {
             // Select partition based on key or round-robin
             let partition_id = if let Some(ref key) = key {
@@ -861,10 +905,17 @@ impl MockMessageBroker {
         }
     }
 
-    pub fn consume(&mut self, topic_name: &str, partition_id: u32, start_offset: u64) -> Vec<ConsumedMessage> {
+    pub fn consume(
+        &mut self,
+        topic_name: &str,
+        partition_id: u32,
+        start_offset: u64,
+    ) -> Vec<ConsumedMessage> {
         if let Some(topic) = self.topics.iter().find(|t| t.name == topic_name) {
             if let Some(partition) = topic.partitions.iter().find(|p| p.id == partition_id) {
-                let messages: Vec<ConsumedMessage> = partition.messages.iter()
+                let messages: Vec<ConsumedMessage> = partition
+                    .messages
+                    .iter()
                     .filter(|msg| msg.offset >= start_offset)
                     .map(|msg| {
                         let consumed = ConsumedMessage {
@@ -911,7 +962,9 @@ impl MockMessageBroker {
         for published in &self.publish_order {
             if let Some(partition_id) = published.partition {
                 let key = (published.topic.clone(), partition_id);
-                partition_sequences.entry(key).or_insert_with(Vec::new)
+                partition_sequences
+                    .entry(key)
+                    .or_insert_with(Vec::new)
                     .push(published.message.offset);
             }
         }
@@ -1388,7 +1441,11 @@ mod tests {
 
         // Test snapshot round-trip
         let data = vec![("key1".to_string(), "value1".to_string())];
-        let metadata = SnapshotMetadata { version: 1, timestamp: 1000, node_count: 3 };
+        let metadata = SnapshotMetadata {
+            version: 1,
+            timestamp: 1000,
+            node_count: 3,
+        };
         let snapshot = MockSnapshot::create(data, metadata);
         let restored = MockSnapshot::restore(&snapshot);
         assert!(snapshot.roundtrip_preserves_data(&restored));
