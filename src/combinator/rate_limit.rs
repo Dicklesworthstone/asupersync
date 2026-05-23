@@ -855,9 +855,8 @@ pub struct SlidingWindowRateLimiter {
     /// Timestamps of recent operations: (timestamp_millis, cost).
     window: RwLock<VecDeque<(u64, u32)>>,
 
-    /// Running total of costs in the window. Maintained incrementally to
-    /// avoid O(n) summation on every `try_acquire`.
-    window_cost: AtomicU32,
+    // NOTE: Previously had window_cost: AtomicU32 shadow counter, but this
+    // created race conditions. Now we compute cost from window contents directly.
 
     // Atomic counters
     total_allowed: AtomicU64,
@@ -874,7 +873,6 @@ impl SlidingWindowRateLimiter {
         Self {
             policy,
             window: RwLock::new(VecDeque::with_capacity(window_capacity)),
-            window_cost: AtomicU32::new(0),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
         }
@@ -884,6 +882,12 @@ impl SlidingWindowRateLimiter {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.policy.name
+    }
+
+    /// Compute current cost from window contents.
+    /// This replaces the previous window_cost atomic to avoid race conditions.
+    fn compute_window_cost(window: &std::collections::VecDeque<(u64, u32)>) -> u32 {
+        window.iter().map(|(_, cost)| cost).sum::<u32>()
     }
 
     /// Try to acquire without waiting.
@@ -896,24 +900,21 @@ impl SlidingWindowRateLimiter {
         // Single lock acquisition: cleanup expired + check usage + add entry
         let mut window = self.window.write();
 
-        // Cleanup expired entries inline, decrementing the running cost total.
-        while let Some((t, c)) = window.front() {
+        // Cleanup expired entries inline.
+        while let Some((t, _c)) = window.front() {
             if period_millis > 0 && now_millis.saturating_sub(*t) >= period_millis {
-                let evicted_cost = *c;
                 window.pop_front();
-                self.window_cost.fetch_sub(evicted_cost, Ordering::Relaxed);
             } else {
                 break;
             }
         }
 
-        // O(1) usage from the running total (replaces O(n) summation).
-        let usage = self.window_cost.load(Ordering::Relaxed);
+        // Compute current usage directly from window contents.
+        let usage = Self::compute_window_cost(&window);
 
         if usage.saturating_add(cost) <= self.policy.rate {
             if cost > 0 {
                 window.push_back((now_millis, cost));
-                self.window_cost.fetch_add(cost, Ordering::Relaxed);
             }
             drop(window);
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
@@ -941,17 +942,15 @@ impl SlidingWindowRateLimiter {
         let mut window = self.window.write();
 
         // Inline cleanup
-        while let Some((t, c)) = window.front() {
+        while let Some((t, _c)) = window.front() {
             if period_millis > 0 && now_millis.saturating_sub(*t) >= period_millis {
-                let evicted_cost = *c;
                 window.pop_front();
-                self.window_cost.fetch_sub(evicted_cost, Ordering::Relaxed);
             } else {
                 break;
             }
         }
 
-        let usage = self.window_cost.load(Ordering::Relaxed);
+        let usage = Self::compute_window_cost(&window);
         if usage.saturating_add(cost) <= self.policy.rate {
             return Duration::ZERO;
         }
@@ -996,7 +995,6 @@ impl SlidingWindowRateLimiter {
     pub fn reset(&self) {
         let mut window = self.window.write();
         window.clear();
-        self.window_cost.store(0, Ordering::Relaxed);
         drop(window);
     }
 }

@@ -46,7 +46,7 @@ use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::types::Time;
@@ -395,7 +395,6 @@ pub struct CircuitBreaker {
     total_failure: AtomicU64,
     total_rejected: AtomicU64,
     total_ignored_errors: AtomicU64,
-    current_failure_streak: AtomicU32,
     times_opened: AtomicU64,
     times_closed: AtomicU64,
 }
@@ -432,7 +431,6 @@ impl CircuitBreaker {
             total_failure: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
             total_ignored_errors: AtomicU64::new(0),
-            current_failure_streak: AtomicU32::new(0),
             times_opened: AtomicU64::new(0),
             times_closed: AtomicU64::new(0),
         }
@@ -457,7 +455,10 @@ impl CircuitBreaker {
             total_ignored_errors: self.total_ignored_errors.load(Ordering::Relaxed),
             times_opened: self.times_opened.load(Ordering::Relaxed),
             times_closed: self.times_closed.load(Ordering::Relaxed),
-            current_failure_streak: self.current_failure_streak.load(Ordering::Relaxed),
+            current_failure_streak: match self.state() {
+                State::Closed { failures } => failures,
+                _ => 0,
+            },
             current_state: self.state(),
             sliding_window_failure_rate: self
                 .sliding_window
@@ -594,7 +595,6 @@ impl CircuitBreaker {
                                 Ordering::Acquire,
                             ) {
                                 Ok(_) => {
-                                    self.current_failure_streak.store(0, Ordering::Relaxed);
                                     break;
                                 }
                                 Err(actual) => current_bits = actual,
@@ -629,7 +629,6 @@ impl CircuitBreaker {
                                     Ordering::Acquire,
                                 ) {
                                     Ok(_) => {
-                                        self.current_failure_streak.store(0, Ordering::Relaxed);
                                         self.times_closed.fetch_add(1, Ordering::Relaxed);
                                         let mut m = self.metrics.write();
                                         m.current_state = new_state;
@@ -689,7 +688,10 @@ impl CircuitBreaker {
         m.total_failure = self.total_failure.load(Ordering::Relaxed);
         m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
         m.total_ignored_errors = self.total_ignored_errors.load(Ordering::Relaxed);
-        m.current_failure_streak = self.current_failure_streak.load(Ordering::Relaxed);
+        m.current_failure_streak = match self.state() {
+            State::Closed { failures } => failures,
+            _ => 0,
+        };
         m.times_opened = self.times_opened.load(Ordering::Relaxed);
         m.times_closed = self.times_closed.load(Ordering::Relaxed);
     }
@@ -831,8 +833,6 @@ impl CircuitBreaker {
                                     Ordering::Acquire,
                                 ) {
                                     Ok(_) => {
-                                        self.current_failure_streak
-                                            .store(new_failures, Ordering::Relaxed);
                                         self.times_opened.fetch_add(1, Ordering::Relaxed);
                                         let mut m = self.metrics.write();
                                         m.current_state = new_state;
@@ -858,8 +858,6 @@ impl CircuitBreaker {
                                     Ordering::Acquire,
                                 ) {
                                     Ok(_) => {
-                                        self.current_failure_streak
-                                            .store(new_failures, Ordering::Relaxed);
                                         break;
                                     }
                                     Err(actual) => current_bits = actual,
@@ -997,7 +995,6 @@ impl CircuitBreaker {
                 Err(actual) => current = actual,
             }
         }
-        self.current_failure_streak.store(0, Ordering::Relaxed);
 
         if let Some(ref window) = self.sliding_window {
             window.write().reset();
