@@ -161,10 +161,8 @@ pub struct WatchTelemetrySnapshot {
 struct WatchInner<T> {
     /// The current value and its version number.
     value: RwLock<(T, u64)>,
-    /// Lock-free mirror of the version in `value`. Updated under the write
-    /// lock, read without any lock. Eliminates RwLock acquisition for the
-    /// frequent version-only checks in `changed()`, `has_changed()`, etc.
-    version: AtomicU64,
+    // NOTE: Previously had version: AtomicU64 shadow counter, but this
+    // created race conditions. Now we read version from value RwLock directly.
     /// Number of active receivers (excluding sender's implicit subscription).
     receiver_count: AtomicUsize,
     /// Whether the sender has been dropped.
@@ -181,7 +179,6 @@ impl<T> WatchInner<T> {
     fn new(initial: T) -> Self {
         Self {
             value: RwLock::new((initial, 0)),
-            version: AtomicU64::new(0),
             receiver_count: AtomicUsize::new(1), // Counts the Receiver returned by channel()
             sender_dropped: AtomicBool::new(false),
             waiters: Mutex::new(SmallVec::new()),
@@ -195,7 +192,7 @@ impl<T> WatchInner<T> {
     }
 
     fn current_version(&self) -> u64 {
-        self.version.load(Ordering::Acquire)
+        self.value.read().1
     }
 
     fn insert_receiver_version(&self, version: u64) -> ArenaIndex {
@@ -434,7 +431,6 @@ impl<T> Sender<T> {
             let mut guard = self.inner.value.write();
             let old = std::mem::replace(&mut guard.0, value);
             guard.1 = guard.1.wrapping_add(1);
-            self.inner.version.store(guard.1, Ordering::Release);
             old
         };
 
@@ -484,7 +480,6 @@ impl<T> Sender<T> {
             let mut guard = self.inner.value.write();
             guard.0 = value;
             guard.1 = guard.1.wrapping_add(1);
-            self.inner.version.store(guard.1, Ordering::Release);
         }
 
         if self.inner.receiver_count.load(Ordering::Acquire) != 0 {
@@ -1242,7 +1237,6 @@ mod tests {
             let mut guard = tx.inner.value.write();
             guard.1 = u64::MAX - 1;
             drop(guard);
-            tx.inner.version.store(u64::MAX - 1, Ordering::Release);
         }
         rx.seen_version = u64::MAX - 1;
 
