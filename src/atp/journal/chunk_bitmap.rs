@@ -92,6 +92,47 @@ impl ChunkState {
             ChunkState::Invalidated => "Invalidated - chunk marked invalid, needs re-fetch",
         }
     }
+
+    /// Decode a `ChunkState` from its wire-format `u8`. Fail closed on unknown discriminants.
+    pub fn from_u8(byte: u8) -> Result<Self, ChunkBitmapDecodeError> {
+        match byte {
+            0 => Ok(ChunkState::Wanted),
+            1 => Ok(ChunkState::Received),
+            2 => Ok(ChunkState::Verified),
+            3 => Ok(ChunkState::Written),
+            4 => Ok(ChunkState::RepairDerived),
+            5 => Ok(ChunkState::Committed),
+            6 => Ok(ChunkState::Quarantined),
+            7 => Ok(ChunkState::Invalidated),
+            other => Err(ChunkBitmapDecodeError::UnknownChunkState(other)),
+        }
+    }
+}
+
+/// Errors returned when decoding a serialized `ChunkBitmap`.
+///
+/// Every variant represents a fail-closed condition: malformed input must never
+/// silently degrade to an empty or partially-populated bitmap.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ChunkBitmapDecodeError {
+    #[error("truncated chunk bitmap (need {needed} more bytes at offset {offset})")]
+    Truncated { offset: usize, needed: usize },
+    #[error("bad chunk bitmap magic: expected {expected:?}, got {actual:?}")]
+    BadMagic { expected: [u8; 4], actual: [u8; 4] },
+    #[error("unsupported chunk bitmap version {0}")]
+    UnsupportedVersion(u8),
+    #[error("checksum mismatch: expected {expected:#x}, computed {actual:#x}")]
+    ChecksumMismatch { expected: u32, actual: u32 },
+    #[error("invalid utf-8 in chunk bitmap field: {0}")]
+    InvalidUtf8(String),
+    #[error("unknown chunk state discriminant {0}")]
+    UnknownChunkState(u8),
+    #[error("invalid bool discriminant {0}")]
+    InvalidBool(u8),
+    #[error("trailing bytes after chunk bitmap payload ({0} unread)")]
+    TrailingBytes(usize),
+    #[error("field length {0} exceeds remaining input")]
+    OversizedField(u64),
 }
 
 /// A chunk entry in the bitmap
@@ -424,6 +465,203 @@ impl ChunkBitmap {
         invalidated_count
     }
 
+    /// Read-only accessor for the transfer this bitmap belongs to.
+    pub fn transfer_id(&self) -> &str {
+        &self.transfer_id
+    }
+
+    /// Total payload size tracked by this bitmap.
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// Chunk size used to partition the payload.
+    pub fn chunk_size(&self) -> u64 {
+        self.chunk_size
+    }
+
+    /// Creation timestamp captured when the bitmap was constructed.
+    pub fn created_at(&self) -> u64 {
+        self.created_at
+    }
+
+    /// Most-recent update timestamp.
+    pub fn updated_at(&self) -> u64 {
+        self.updated_at
+    }
+
+    /// Number of chunk entries currently tracked.
+    pub fn entry_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Serialize this bitmap to a deterministic, length-prefixed byte sequence
+    /// suitable for atomic on-disk persistence and crash recovery.
+    ///
+    /// Wire format (little-endian, matches the rest of the ATP journal):
+    /// ```text
+    ///   magic: b"ABMP" (4 bytes)
+    ///   version: u8 = 1
+    ///   transfer_id: u32 len + utf-8 bytes
+    ///   total_size: u64
+    ///   chunk_size: u64
+    ///   created_at: u64
+    ///   updated_at: u64
+    ///   chunk_count: u32 (sorted by offset for determinism)
+    ///   for each chunk:
+    ///     offset: u64
+    ///     state: u8
+    ///     state_timestamp: u64
+    ///     has_hash: u8 (0|1)
+    ///     hash: 32 bytes if has_hash
+    ///     metadata_count: u32 (sorted by key for determinism)
+    ///     for each metadata pair:
+    ///       key: u32 len + utf-8 bytes
+    ///       value: u32 len + utf-8 bytes
+    ///   crc32: u32 (over all preceding bytes including magic+version)
+    /// ```
+    pub fn serialize_to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 + self.chunks.len() * 64);
+        out.extend_from_slice(&Self::SERIALIZATION_MAGIC);
+        out.push(Self::SERIALIZATION_VERSION);
+
+        put_string(&mut out, &self.transfer_id);
+        put_u64(&mut out, self.total_size);
+        put_u64(&mut out, self.chunk_size);
+        put_u64(&mut out, self.created_at);
+        put_u64(&mut out, self.updated_at);
+
+        let mut offsets: Vec<u64> = self.chunks.keys().copied().collect();
+        offsets.sort_unstable();
+        put_u32(&mut out, u32::try_from(offsets.len()).unwrap_or(u32::MAX));
+
+        for offset in offsets {
+            let entry = match self.chunks.get(&offset) {
+                Some(entry) => entry,
+                None => continue,
+            };
+            put_u64(&mut out, offset);
+            out.push(entry.state as u8);
+            put_u64(&mut out, entry.state_timestamp);
+            match entry.chunk_hash {
+                Some(hash) => {
+                    out.push(1);
+                    out.extend_from_slice(&hash);
+                }
+                None => out.push(0),
+            }
+
+            let mut keys: Vec<&String> = entry.metadata.keys().collect();
+            keys.sort();
+            put_u32(&mut out, u32::try_from(keys.len()).unwrap_or(u32::MAX));
+            for key in keys {
+                let value = match entry.metadata.get(key) {
+                    Some(value) => value.as_str(),
+                    None => continue,
+                };
+                put_string(&mut out, key);
+                put_string(&mut out, value);
+            }
+        }
+
+        let checksum = crc32fast::hash(&out);
+        out.extend_from_slice(&checksum.to_le_bytes());
+        out
+    }
+
+    /// Deserialize a `ChunkBitmap` previously produced by `serialize_to_bytes`.
+    ///
+    /// Fails closed on truncation, magic/version mismatch, CRC mismatch, or any
+    /// invalid discriminant (chunk state, bool, utf-8). No partial bitmap is
+    /// returned on error.
+    pub fn deserialize_from_bytes(bytes: &[u8]) -> Result<Self, ChunkBitmapDecodeError> {
+        if bytes.len() < Self::SERIALIZATION_MAGIC.len() + 1 + 4 {
+            return Err(ChunkBitmapDecodeError::Truncated {
+                offset: 0,
+                needed: Self::SERIALIZATION_MAGIC.len() + 1 + 4,
+            });
+        }
+        let payload_len = bytes.len() - 4;
+        let payload = &bytes[..payload_len];
+        let stored_checksum = {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&bytes[payload_len..]);
+            u32::from_le_bytes(buf)
+        };
+        let computed_checksum = crc32fast::hash(payload);
+        if computed_checksum != stored_checksum {
+            return Err(ChunkBitmapDecodeError::ChecksumMismatch {
+                expected: stored_checksum,
+                actual: computed_checksum,
+            });
+        }
+
+        let mut cursor = BitmapCursor::new(payload);
+        let magic = cursor.read_array::<4>()?;
+        if magic != Self::SERIALIZATION_MAGIC {
+            return Err(ChunkBitmapDecodeError::BadMagic {
+                expected: Self::SERIALIZATION_MAGIC,
+                actual: magic,
+            });
+        }
+        let version = cursor.read_u8()?;
+        if version != Self::SERIALIZATION_VERSION {
+            return Err(ChunkBitmapDecodeError::UnsupportedVersion(version));
+        }
+
+        let transfer_id = cursor.read_string()?;
+        let total_size = cursor.read_u64()?;
+        let chunk_size = cursor.read_u64()?;
+        let created_at = cursor.read_u64()?;
+        let updated_at = cursor.read_u64()?;
+        let chunk_count = cursor.read_u32()? as usize;
+
+        let mut chunks = HashMap::with_capacity(chunk_count);
+        for _ in 0..chunk_count {
+            let offset = cursor.read_u64()?;
+            let state = ChunkState::from_u8(cursor.read_u8()?)?;
+            let state_timestamp = cursor.read_u64()?;
+            let chunk_hash = match cursor.read_u8()? {
+                0 => None,
+                1 => Some(cursor.read_array::<32>()?),
+                other => return Err(ChunkBitmapDecodeError::InvalidBool(other)),
+            };
+            let metadata_count = cursor.read_u32()? as usize;
+            let mut metadata = HashMap::with_capacity(metadata_count);
+            for _ in 0..metadata_count {
+                let key = cursor.read_string()?;
+                let value = cursor.read_string()?;
+                metadata.insert(key, value);
+            }
+            chunks.insert(
+                offset,
+                ChunkEntry {
+                    state,
+                    state_timestamp,
+                    chunk_hash,
+                    metadata,
+                },
+            );
+        }
+
+        cursor.finish()?;
+
+        Ok(Self {
+            chunks,
+            total_size,
+            chunk_size,
+            transfer_id,
+            created_at,
+            updated_at,
+        })
+    }
+
+    /// Magic header identifying the ATP chunk bitmap on-disk format.
+    pub const SERIALIZATION_MAGIC: [u8; 4] = *b"ABMP";
+
+    /// Current serialization format version. Bumped only on incompatible changes.
+    pub const SERIALIZATION_VERSION: u8 = 1;
+
     /// Export bitmap state for recovery
     pub fn export_state(&self) -> HashMap<u64, (ChunkState, u64, Option<[u8; 32]>)> {
         self.chunks
@@ -481,6 +719,89 @@ impl std::fmt::Display for ChunkBitmapStats {
             self.verification_ratio * 100.0,
             self.completion_ratio * 100.0
         )
+    }
+}
+
+fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_string(out: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    put_u32(out, len);
+    out.extend_from_slice(bytes);
+}
+
+struct BitmapCursor<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> BitmapCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, offset: 0 }
+    }
+
+    fn read_slice(&mut self, len: usize) -> Result<&'a [u8], ChunkBitmapDecodeError> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or(ChunkBitmapDecodeError::Truncated {
+                offset: self.offset,
+                needed: len,
+            })?;
+        if end > self.data.len() {
+            return Err(ChunkBitmapDecodeError::Truncated {
+                offset: self.offset,
+                needed: len,
+            });
+        }
+        let slice = &self.data[self.offset..end];
+        self.offset = end;
+        Ok(slice)
+    }
+
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], ChunkBitmapDecodeError> {
+        let slice = self.read_slice(N)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(slice);
+        Ok(out)
+    }
+
+    fn read_u8(&mut self) -> Result<u8, ChunkBitmapDecodeError> {
+        Ok(self.read_slice(1)?[0])
+    }
+
+    fn read_u32(&mut self) -> Result<u32, ChunkBitmapDecodeError> {
+        Ok(u32::from_le_bytes(self.read_array::<4>()?))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, ChunkBitmapDecodeError> {
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
+    }
+
+    fn read_string(&mut self) -> Result<String, ChunkBitmapDecodeError> {
+        let len = self.read_u32()? as usize;
+        let remaining = self.data.len().saturating_sub(self.offset);
+        if len > remaining {
+            return Err(ChunkBitmapDecodeError::OversizedField(len as u64));
+        }
+        let bytes = self.read_slice(len)?.to_vec();
+        String::from_utf8(bytes).map_err(|e| ChunkBitmapDecodeError::InvalidUtf8(e.to_string()))
+    }
+
+    fn finish(self) -> Result<(), ChunkBitmapDecodeError> {
+        let remaining = self.data.len().saturating_sub(self.offset);
+        if remaining > 0 {
+            Err(ChunkBitmapDecodeError::TrailingBytes(remaining))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -638,5 +959,122 @@ mod tests {
 
         let entry1 = bitmap2.get_chunk_entry(0).unwrap(); // ubs:ignore - test oracle
         assert_eq!(entry1.chunk_hash, Some([1u8; 32]));
+    }
+
+    fn populated_bitmap() -> ChunkBitmap {
+        let mut bitmap = ChunkBitmap::new("xfer-9".to_string(), 1024, 256, 5_000);
+        bitmap.initialize_wanted_chunks(5_001);
+        bitmap.update_chunk_state(0, ChunkState::Received, 5_010, None);
+        bitmap.update_chunk_state(256, ChunkState::Verified, 5_020, Some([7u8; 32]));
+        bitmap.update_chunk_state(512, ChunkState::Written, 5_030, Some([9u8; 32]));
+        bitmap.update_chunk_state(768, ChunkState::Quarantined, 5_040, None);
+        bitmap.set_chunk_metadata(256, "source".into(), "peer-a".into(), 5_050);
+        bitmap.set_chunk_metadata(256, "verifier".into(), "sha256".into(), 5_060);
+        bitmap
+    }
+
+    #[test]
+    fn serialization_round_trip_preserves_state() {
+        let original = populated_bitmap();
+        let bytes = original.serialize_to_bytes();
+        let decoded = ChunkBitmap::deserialize_from_bytes(&bytes).expect("decode succeeds");
+
+        assert_eq!(decoded.transfer_id(), original.transfer_id());
+        assert_eq!(decoded.total_size(), original.total_size());
+        assert_eq!(decoded.chunk_size(), original.chunk_size());
+        assert_eq!(decoded.created_at(), original.created_at());
+        assert_eq!(decoded.updated_at(), original.updated_at());
+        assert_eq!(decoded.entry_count(), original.entry_count());
+
+        for offset in [0, 256, 512, 768] {
+            let original_entry = original.get_chunk_entry(offset).expect("entry exists");
+            let decoded_entry = decoded.get_chunk_entry(offset).expect("entry exists");
+            assert_eq!(original_entry.state, decoded_entry.state);
+            assert_eq!(
+                original_entry.state_timestamp,
+                decoded_entry.state_timestamp
+            );
+            assert_eq!(original_entry.chunk_hash, decoded_entry.chunk_hash);
+            assert_eq!(original_entry.metadata, decoded_entry.metadata);
+        }
+    }
+
+    #[test]
+    fn serialization_is_deterministic() {
+        let bitmap = populated_bitmap();
+        let a = bitmap.serialize_to_bytes();
+        let b = bitmap.serialize_to_bytes();
+        assert_eq!(a, b, "two serializations of the same bitmap must be equal");
+
+        // Reconstruct from decoded form and re-serialize -- canonical form survives a round trip.
+        let decoded = ChunkBitmap::deserialize_from_bytes(&a).expect("decode succeeds");
+        let re_serialized = decoded.serialize_to_bytes();
+        assert_eq!(a, re_serialized);
+    }
+
+    #[test]
+    fn deserialize_rejects_truncated_input() {
+        let bytes = populated_bitmap().serialize_to_bytes();
+        for cut in 0..bytes.len().min(80) {
+            let result = ChunkBitmap::deserialize_from_bytes(&bytes[..cut]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ChunkBitmapDecodeError::Truncated { .. })
+                        | Err(ChunkBitmapDecodeError::ChecksumMismatch { .. })
+                        | Err(ChunkBitmapDecodeError::BadMagic { .. })
+                ),
+                "cut={cut} must fail closed, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_bad_magic() {
+        let mut bytes = populated_bitmap().serialize_to_bytes();
+        bytes[0] = b'X';
+        // Recompute checksum so the magic check is exercised, not the crc.
+        let payload_len = bytes.len() - 4;
+        let crc = crc32fast::hash(&bytes[..payload_len]);
+        bytes[payload_len..].copy_from_slice(&crc.to_le_bytes());
+        match ChunkBitmap::deserialize_from_bytes(&bytes) {
+            Err(ChunkBitmapDecodeError::BadMagic { .. }) => (),
+            other => panic!("expected BadMagic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_unsupported_version() {
+        let mut bytes = populated_bitmap().serialize_to_bytes();
+        bytes[4] = 0xFE;
+        let payload_len = bytes.len() - 4;
+        let crc = crc32fast::hash(&bytes[..payload_len]);
+        bytes[payload_len..].copy_from_slice(&crc.to_le_bytes());
+        match ChunkBitmap::deserialize_from_bytes(&bytes) {
+            Err(ChunkBitmapDecodeError::UnsupportedVersion(0xFE)) => (),
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_checksum_mismatch() {
+        let mut bytes = populated_bitmap().serialize_to_bytes();
+        // Flip a byte deep in the payload without recomputing the trailing CRC.
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0x80;
+        match ChunkBitmap::deserialize_from_bytes(&bytes) {
+            Err(ChunkBitmapDecodeError::ChecksumMismatch { .. }) => (),
+            other => panic!("expected ChecksumMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_empty_bitmap_round_trips() {
+        let original = ChunkBitmap::new("empty".to_string(), 0, 4096, 7);
+        let bytes = original.serialize_to_bytes();
+        let decoded = ChunkBitmap::deserialize_from_bytes(&bytes).expect("decode succeeds");
+        assert_eq!(decoded.transfer_id(), "empty");
+        assert_eq!(decoded.entry_count(), 0);
+        assert_eq!(decoded.chunk_size(), 4096);
     }
 }

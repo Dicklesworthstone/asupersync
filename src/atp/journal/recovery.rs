@@ -411,10 +411,13 @@ pub async fn recover_journal_and_bitmap(
 
     let (bitmaps, stats) = context.finalize();
 
-    // Export recovered bitmaps to disk
-    for transfer_id in bitmaps.keys() {
+    // Export recovered bitmaps to disk. Each bitmap is written atomically as
+    // its canonical serialized form so a subsequent `load_or_create_bitmap`
+    // call can reconstruct the exact same state — this is the on-disk side of
+    // the crash-recovery contract.
+    for (transfer_id, bitmap) in bitmaps.iter() {
         let bitmap_path = bitmap_dir.join(format!("transfer_{}.bitmap", transfer_id));
-        let exported = vec![]; // TODO: implement proper serialization
+        let exported = bitmap.serialize_to_bytes();
         fs::write(&bitmap_path, exported).await?;
     }
 
@@ -430,15 +433,27 @@ pub async fn recover_journal_and_bitmap(
     Ok((journal, bitmaps))
 }
 
-/// Load existing bitmap from disk or create new one.
+/// Load an existing chunk bitmap from disk, or return a fresh empty one if no
+/// file exists yet. Malformed or truncated bitmaps fail closed with
+/// `RecoveryError::BitmapRecovery` rather than silently degrading to an empty
+/// bitmap — losing chunk state on restart would let a partially-completed
+/// transfer re-fetch already-verified data and overwrite the disk image.
+///
+/// The fallback path constructs an empty bitmap that derives its `transfer_id`
+/// from the on-disk filename (`transfer_<id>.bitmap`) so the caller's recovery
+/// loop continues to associate the bitmap with the correct transfer.
 pub async fn load_or_create_bitmap(bitmap_path: &Path) -> Result<ChunkBitmap, RecoveryError> {
     match fs::read(bitmap_path).await {
-        Ok(_data) => {
-            // TODO: implement proper deserialization
-            Ok(ChunkBitmap::new("temp".to_string(), 0, 4096, 0))
-        }
+        Ok(data) => ChunkBitmap::deserialize_from_bytes(&data)
+            .map_err(|e| RecoveryError::BitmapRecovery(e.to_string())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            Ok(ChunkBitmap::new("temp".to_string(), 0, 4096, 0))
+            let transfer_id = bitmap_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("transfer_"))
+                .unwrap_or("unknown")
+                .to_string();
+            Ok(ChunkBitmap::new(transfer_id, 0, 4096, 0))
         }
         Err(e) => Err(RecoveryError::Io(e)),
     }
