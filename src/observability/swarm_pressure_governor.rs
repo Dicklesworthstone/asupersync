@@ -754,12 +754,13 @@ impl SwarmWorkloadAdmissionRequest {
     }
 
     fn context_reason(&self, base: &str) -> String {
+        let owner = normalized_owner_metadata(&self.owner);
         format!(
             "workload_id={} owner_agent={} bead_id={} reservation_scope={} priority={:?} proof_lane={} requested_memory_bytes={} requested_cpu_ns_per_sec={} requested_io_ops_per_sec={} deadline_set={} cancellation_budget_ms={}: {base}",
             self.workload_id.trim(),
-            self.owner.agent_name.trim(),
-            optional_reason_field(self.owner.bead_id.as_deref()),
-            optional_reason_field(self.owner.reservation_scope.as_deref()),
+            owner.agent_name.as_str(),
+            optional_reason_field(owner.bead_id.as_deref()),
+            optional_reason_field(owner.reservation_scope.as_deref()),
             self.priority,
             self.proof_lane.as_str(),
             optional_u64_reason_field(self.requested_memory_bytes),
@@ -2201,15 +2202,11 @@ impl SwarmPressureGovernor {
             .owner
             .reservation_scope
             .as_deref()
-            .map(str::trim)
-            .filter(|scope| !scope.is_empty());
-        let requested_scope = request
-            .owner
-            .reservation_scope
-            .as_deref()
-            .map(str::trim)
-            .filter(|scope| !scope.is_empty());
-        if let (Some(existing_scope), Some(requested_scope)) = (existing_scope, requested_scope)
+            .and_then(|scope| normalized_reservation_scope(Some(scope)));
+        let requested_scope =
+            normalized_reservation_scope(request.owner.reservation_scope.as_deref());
+        if let (Some(existing_scope), Some(requested_scope)) =
+            (existing_scope.as_deref(), requested_scope.as_deref())
             && existing_scope == requested_scope
         {
             return Some(format!(
@@ -3324,7 +3321,7 @@ fn normalized_owner_metadata(owner: &SwarmAdmissionOwner) -> SwarmAdmissionOwner
     SwarmAdmissionOwner {
         agent_name: owner.agent_name.trim().to_string(),
         bead_id: normalized_optional_string(owner.bead_id.as_deref()),
-        reservation_scope: normalized_optional_string(owner.reservation_scope.as_deref()),
+        reservation_scope: normalized_reservation_scope(owner.reservation_scope.as_deref()),
     }
 }
 
@@ -3333,6 +3330,27 @@ fn normalized_optional_string(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn normalized_reservation_scope(value: Option<&str>) -> Option<String> {
+    let trimmed = normalized_optional_string(value)?;
+    let mut collapsed = String::with_capacity(trimmed.len());
+    let mut previous_slash = false;
+    for ch in trimmed.chars() {
+        if ch == '/' {
+            if !previous_slash {
+                collapsed.push(ch);
+            }
+            previous_slash = true;
+        } else {
+            collapsed.push(ch);
+            previous_slash = false;
+        }
+    }
+    while collapsed.starts_with("./") {
+        collapsed.drain(..2);
+    }
+    normalized_optional_string(Some(&collapsed))
 }
 
 fn prune_stale_peer_pressure_reports_locked(
@@ -4092,7 +4110,7 @@ mod tests {
             " receipt-owner-a ",
             SwarmAdmissionOwner::new(" DustyGorge ")
                 .with_bead_id(" asupersync-oxqrae.2 ")
-                .with_reservation_scope(" src/observability/swarm_pressure_governor.rs "),
+                .with_reservation_scope(" ./src//observability/swarm_pressure_governor.rs "),
         )
         .with_declared_resources(Some(1024), Some(50), Some(5))
         .with_proof_lane(SwarmProofLaneKind::CargoCheckLib)
@@ -4354,7 +4372,7 @@ mod tests {
         let first_request = SwarmWorkloadAdmissionRequest::new(
             "scope-owner-a",
             SwarmAdmissionOwner::new("DustyGorge")
-                .with_reservation_scope(format!(" {reservation_scope} ")),
+                .with_reservation_scope(format!(" ./{reservation_scope} ")),
         )
         .with_proof_lane(SwarmProofLaneKind::CargoCheckLib);
         let first_decision = governor
@@ -4370,7 +4388,8 @@ mod tests {
 
         let second_request = SwarmWorkloadAdmissionRequest::new(
             "scope-owner-b",
-            SwarmAdmissionOwner::new("DustyGorge").with_reservation_scope(reservation_scope),
+            SwarmAdmissionOwner::new("DustyGorge")
+                .with_reservation_scope("src/observability//swarm_pressure_governor.rs"),
         )
         .with_proof_lane(SwarmProofLaneKind::ClippyAllTargets);
         let second_decision = governor
