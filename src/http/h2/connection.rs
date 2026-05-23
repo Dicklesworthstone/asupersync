@@ -2297,7 +2297,10 @@ mod tests {
         let initial_window = settings::DEFAULT_INITIAL_WINDOW_SIZE;
         // Send data that crosses the 25% threshold for the *stream*.
         // Calculate payload length with overflow protection
-        let payload_len = initial_window.saturating_mul(3).saturating_div(4).saturating_add(2);
+        let payload_len = initial_window
+            .saturating_mul(3)
+            .saturating_div(4)
+            .saturating_add(2);
         let data = Bytes::from(vec![0_u8; payload_len as usize]);
         let frame = Frame::Data(DataFrame::new(1, data, false));
         conn.process_frame(frame).expect("process data");
@@ -3149,7 +3152,7 @@ mod tests {
         let mut rejected = 0;
 
         // Try to push 100 streams
-        for i in 0..100 {
+        for i in 0_u32..100 {
             // Generate even IDs with overflow protection: 2, 4, 6, ...
             let promised_id = i.saturating_add(1).saturating_mul(2);
             let push = Frame::PushPromise(PushPromiseFrame {

@@ -10,7 +10,10 @@ use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome};
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Stable schema for stream prefix proof artifacts.
+pub const STREAM_PREFIX_PROOF_ARTIFACT_SCHEMA: &str = "asupersync.atp.stream-prefix-proof.v1";
 
 /// Rolling manifest epoch representing a verified prefix of a stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -686,6 +689,19 @@ pub enum PrefixVerifiedState {
     Invalidated,
 }
 
+impl PrefixVerifiedState {
+    /// Stable identifier for proof and log artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoConsumablePrefix => "no_consumable_prefix",
+            Self::Verified => "verified",
+            Self::Provisional => "provisional",
+            Self::Invalidated => "invalidated",
+        }
+    }
+}
+
 /// Consumer exposure decision for a stream prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefixExposureDecision {
@@ -693,6 +709,65 @@ pub enum PrefixExposureDecision {
     Expose,
     /// The prefix must be withheld from the consumer.
     Withhold,
+}
+
+impl PrefixExposureDecision {
+    /// Stable identifier for proof and log artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Expose => "expose",
+            Self::Withhold => "withhold",
+        }
+    }
+}
+
+/// Serializable proof/log artifact for a stream prefix exposure decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixExposureArtifact {
+    /// Full stream object identifier.
+    pub object_id: String,
+    /// Hex-encoded object hash for parser-friendly correlation.
+    pub object_hash: String,
+    /// Prefix range considered by the decision.
+    pub prefix_range: Option<ByteRange>,
+    /// Stable verification state string.
+    pub verified_state: String,
+    /// Stable consumer exposure decision string.
+    pub exposure_decision: String,
+    /// Reason a previously exposed prefix was invalidated, if any.
+    pub invalidation_reason: Option<String>,
+    /// Deterministic replay pointer for reproducing the decision.
+    pub replay_pointer: Option<String>,
+    /// Consumption policy used for the decision.
+    pub consumption_policy: String,
+    /// Record timestamp as Unix nanoseconds, saturated for portable JSON.
+    pub recorded_at_unix_nanos: u64,
+}
+
+/// Serializable stream proof artifact for prefix-first consumption.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamPrefixProofArtifact {
+    /// Stable schema identifier.
+    pub schema_version: String,
+    /// Full stream object identifier.
+    pub object_id: String,
+    /// Hex-encoded object hash for parser-friendly correlation.
+    pub object_hash: String,
+    /// Epochs that were consumed.
+    pub consumed_epochs: Vec<u64>,
+    /// Final consumption offset.
+    pub final_offset: u64,
+    /// Consumption policy used.
+    pub consumption_policy: String,
+    /// Whether the stream was fully consumed.
+    pub fully_consumed: bool,
+    /// Prefix exposure records that justify early consumer visibility.
+    pub prefix_exposures: Vec<PrefixExposureArtifact>,
+    /// Verification timestamp as Unix nanoseconds, saturated for portable JSON.
+    pub verified_at_unix_nanos: u64,
+    /// Hex-encoded consumer signature, if available.
+    pub consumer_signature_hex: Option<String>,
 }
 
 /// Proof/log record for a prefix exposure decision.
@@ -736,6 +811,22 @@ impl PrefixExposureRecord {
             replay_pointer,
             consumption_policy: consumption_policy.as_str().to_string(),
             recorded_at: SystemTime::now(),
+        }
+    }
+
+    /// Convert this in-memory record into a stable serializable artifact.
+    #[must_use]
+    pub fn to_artifact(&self) -> PrefixExposureArtifact {
+        PrefixExposureArtifact {
+            object_id: object_id_artifact_id(&self.object_id),
+            object_hash: self.object_id.as_hex(),
+            prefix_range: self.prefix_range,
+            verified_state: self.verified_state.as_str().to_string(),
+            exposure_decision: self.exposure_decision.as_str().to_string(),
+            invalidation_reason: self.invalidation_reason.clone(),
+            replay_pointer: self.replay_pointer.clone(),
+            consumption_policy: self.consumption_policy.clone(),
+            recorded_at_unix_nanos: system_time_unix_nanos(self.recorded_at),
         }
     }
 }
@@ -792,6 +883,44 @@ impl StreamProofRecord {
     pub fn sign(&mut self, signature: Vec<u8>) {
         self.consumer_signature = Some(signature);
     }
+
+    /// Convert this proof record into a stable serializable artifact.
+    #[must_use]
+    pub fn to_artifact(&self) -> StreamPrefixProofArtifact {
+        StreamPrefixProofArtifact {
+            schema_version: STREAM_PREFIX_PROOF_ARTIFACT_SCHEMA.to_string(),
+            object_id: object_id_artifact_id(&self.object_id),
+            object_hash: self.object_id.as_hex(),
+            consumed_epochs: self.consumed_epochs.clone(),
+            final_offset: self.final_offset,
+            consumption_policy: self.consumption_policy.clone(),
+            fully_consumed: self.fully_consumed,
+            prefix_exposures: self
+                .prefix_exposures
+                .iter()
+                .map(PrefixExposureRecord::to_artifact)
+                .collect(),
+            verified_at_unix_nanos: system_time_unix_nanos(self.verified_at),
+            consumer_signature_hex: self.consumer_signature.as_ref().map(hex::encode),
+        }
+    }
+}
+
+fn object_id_artifact_id(object_id: &ObjectId) -> String {
+    let kind = match object_id {
+        ObjectId::Content(_) => "content",
+        ObjectId::Manifest(_) => "manifest",
+    };
+    format!("{kind}:{}", object_id.as_hex())
+}
+
+fn system_time_unix_nanos(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| match u64::try_from(duration.as_nanos()) {
+            Ok(nanos) => nanos,
+            Err(_) => u64::MAX,
+        })
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1439,6 +1568,89 @@ mod tests {
             proof.prefix_exposures[0].prefix_range,
             Some(ByteRange::new(0, 1024))
         );
+    }
+
+    #[test]
+    fn prefix_exposure_artifact_serializes_required_log_fields() -> Result<(), serde_json::Error> {
+        let object_id = test_object_id();
+        let mut exposure = PrefixExposureRecord::new(
+            object_id.clone(),
+            Some(ByteRange::new(100, 200)),
+            PrefixVerifiedState::Invalidated,
+            PrefixExposureDecision::Withhold,
+            ConsumptionPolicy::AllowProvisional,
+            Some("replay:prefix-artifact".to_string()),
+        );
+        exposure.invalidation_reason = Some("epoch manifest hash mismatch".to_string());
+
+        let artifact = exposure.to_artifact();
+        let json = serde_json::to_value(&artifact)?;
+
+        assert_eq!(artifact.object_id, object_id_artifact_id(&object_id));
+        assert_eq!(artifact.object_hash, object_id.as_hex());
+        assert_eq!(artifact.prefix_range, Some(ByteRange::new(100, 200)));
+        assert_eq!(artifact.verified_state, "invalidated");
+        assert_eq!(artifact.exposure_decision, "withhold");
+        assert_eq!(
+            artifact.invalidation_reason.as_deref(),
+            Some("epoch manifest hash mismatch")
+        );
+        assert_eq!(
+            artifact.replay_pointer.as_deref(),
+            Some("replay:prefix-artifact")
+        );
+        assert_eq!(artifact.consumption_policy, "allow_provisional");
+        assert_eq!(json["prefix_range"]["start"], 100);
+        assert_eq!(json["verified_state"], "invalidated");
+        Ok(())
+    }
+
+    #[test]
+    fn stream_prefix_proof_artifact_round_trips_exposure_records() -> Result<(), serde_json::Error>
+    {
+        let object_id = test_object_id();
+        let exposure = PrefixExposureRecord::new(
+            object_id.clone(),
+            Some(ByteRange::new(0, 1024)),
+            PrefixVerifiedState::Verified,
+            PrefixExposureDecision::Expose,
+            ConsumptionPolicy::VerifiedOnly,
+            Some("replay:stream-proof".to_string()),
+        );
+        let mut proof = StreamProofRecord::new(
+            object_id.clone(),
+            vec![1, 2],
+            1024,
+            ConsumptionPolicy::VerifiedOnly,
+            false,
+        );
+        proof.record_prefix_exposure(exposure);
+        proof.sign(vec![0xAB, 0xCD]);
+
+        let artifact = proof.to_artifact();
+        let encoded = serde_json::to_string(&artifact)?;
+        let decoded: StreamPrefixProofArtifact = serde_json::from_str(&encoded)?;
+
+        assert_eq!(decoded.schema_version, STREAM_PREFIX_PROOF_ARTIFACT_SCHEMA);
+        assert_eq!(decoded.object_id, object_id_artifact_id(&object_id));
+        assert_eq!(decoded.object_hash, object_id.as_hex());
+        assert_eq!(decoded.consumed_epochs, vec![1, 2]);
+        assert_eq!(decoded.final_offset, 1024);
+        assert_eq!(decoded.consumption_policy, "verified_only");
+        assert!(!decoded.fully_consumed);
+        assert_eq!(decoded.consumer_signature_hex.as_deref(), Some("abcd"));
+        assert_eq!(decoded.prefix_exposures.len(), 1);
+        assert_eq!(
+            decoded.prefix_exposures[0].prefix_range,
+            Some(ByteRange::new(0, 1024))
+        );
+        assert_eq!(decoded.prefix_exposures[0].verified_state, "verified");
+        assert_eq!(decoded.prefix_exposures[0].exposure_decision, "expose");
+        assert_eq!(
+            decoded.prefix_exposures[0].replay_pointer.as_deref(),
+            Some("replay:stream-proof")
+        );
+        Ok(())
     }
 
     #[test]
