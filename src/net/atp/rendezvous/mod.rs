@@ -1022,6 +1022,9 @@ impl Service {
         if now_micros >= signed.candidate.expires_at_micros {
             return Err(Error::ExpiredCandidate);
         }
+        if signed.candidate.expires_at_micros > session.expires_at_micros {
+            return Err(Error::CandidateOutlivesSession);
+        }
         validate_capability_context(now_micros, &signed)?;
         if !verifier.verify(&signed) {
             return Err(Error::InvalidSignature);
@@ -1240,6 +1243,9 @@ pub enum Error {
     /// Candidate has expired.
     #[error("candidate expired")]
     ExpiredCandidate,
+    /// Candidate expiry exceeds the rendezvous session expiry.
+    #[error("candidate outlives rendezvous session")]
+    CandidateOutlivesSession,
     /// Candidate nonce was replayed by the same peer.
     #[error("candidate nonce replay")]
     NonceReplay,
@@ -1544,6 +1550,20 @@ mod tests {
                 .register_candidate(20, expired_candidate, &|_: &SignedCandidate| true)
                 .expect_err("expired candidate"),
             Error::ExpiredCandidate
+        );
+
+        let outliving_candidate = SignedCandidate::new(
+            peer(1),
+            live_nonce,
+            candidate_nonce(11),
+            Candidate::new(endpoint(50_002), CandidateTransport::Udp, 1_001),
+            CandidateSignature::new(vec![1]).expect("signature"),
+        );
+        assert_eq!(
+            service
+                .register_candidate(20, outliving_candidate, &|_: &SignedCandidate| true)
+                .expect_err("candidate outlives session"),
+            Error::CandidateOutlivesSession
         );
     }
 
