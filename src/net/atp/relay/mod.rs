@@ -468,6 +468,22 @@ impl RelayEndpointDirectory {
     pub fn unbind_tcp_tls_stream(&mut self, stream_id: RelayTcpTlsStreamId) -> Option<PeerId> {
         self.tcp_tls_streams.remove(&stream_id)
     }
+
+    /// Return the first deterministic TCP/TLS stream admitted for `peer_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the peer has no
+    /// TCP/TLS stream in the directory.
+    pub fn first_tcp_tls_stream_for_peer(
+        &self,
+        peer_id: PeerId,
+    ) -> Result<RelayTcpTlsStreamId, RelayError> {
+        self.tcp_tls_streams
+            .iter()
+            .find_map(|(stream_id, bound_peer)| (*bound_peer == peer_id).then_some(*stream_id))
+            .ok_or(RelayError::UnknownRelayEndpoint)
+    }
 }
 
 impl Default for RelayEndpointDirectory {
@@ -477,6 +493,273 @@ impl Default for RelayEndpointDirectory {
             tcp_tls_streams: BTreeMap::new(),
             quota: RelayEndpointDirectoryQuota::default(),
         }
+    }
+}
+
+/// Encoded TCP/TLS stream write selected by the socket loop.
+///
+/// [`RelayTcpTlsRecord`] carries the bytes and peer identity. The actual socket
+/// writer also needs the relay-local stream id that was admitted for that peer,
+/// so the socket loop wraps the record with the concrete stream destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayTcpTlsStreamWrite {
+    stream_id: RelayTcpTlsStreamId,
+    record: RelayTcpTlsRecord,
+}
+
+impl RelayTcpTlsStreamWrite {
+    /// Relay-local stream id to write to.
+    #[must_use]
+    pub const fn stream_id(&self) -> RelayTcpTlsStreamId {
+        self.stream_id
+    }
+
+    /// Peer id whose TCP/TLS stream should receive this record.
+    #[must_use]
+    pub const fn to_peer_id(&self) -> PeerId {
+        self.record.to_peer_id()
+    }
+
+    /// Reservation id represented by the encoded record.
+    #[must_use]
+    pub const fn reservation_id(&self) -> RelayReservationId {
+        self.record.reservation_id()
+    }
+
+    /// Length-prefixed TCP/TLS relay record bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.record.bytes()
+    }
+
+    /// Number of opaque ATP ciphertext bytes represented by this record.
+    #[must_use]
+    pub const fn opaque_bytes(&self) -> u64 {
+        self.record.opaque_bytes()
+    }
+
+    /// Borrow the underlying TCP/TLS relay record.
+    #[must_use]
+    pub const fn record(&self) -> &RelayTcpTlsRecord {
+        &self.record
+    }
+
+    /// Consume this value and return the underlying TCP/TLS relay record.
+    #[must_use]
+    pub fn into_record(self) -> RelayTcpTlsRecord {
+        self.record
+    }
+}
+
+/// Deterministic socket-facing relay loop state.
+///
+/// This is the boundary a real UDP socket loop or TCP/TLS accept/read/write loop
+/// can use without trusting self-declared peer ids inside relay frames. Endpoint
+/// admission binds physical socket identities to authenticated peers, TCP/TLS
+/// stream buffers retain only incomplete records under a fixed bound, and egress
+/// helpers resolve concrete socket destinations before dequeueing relay packets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelaySocketLoop {
+    endpoints: RelayEndpointDirectory,
+    tcp_tls_streams: BTreeMap<RelayTcpTlsStreamId, RelayTcpTlsStreamBuffer>,
+    max_payload_bytes: usize,
+    max_tcp_tls_buffered_bytes: usize,
+}
+
+impl RelaySocketLoop {
+    /// Construct an empty socket-loop state model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidQuota`] when endpoint, payload, or stream
+    /// buffer bounds are unusable.
+    pub fn new(
+        endpoint_quota: RelayEndpointDirectoryQuota,
+        max_payload_bytes: usize,
+        max_tcp_tls_buffered_bytes: usize,
+    ) -> Result<Self, RelayError> {
+        let endpoints = RelayEndpointDirectory::new(endpoint_quota)?;
+        let _ = RelayTcpTlsStreamBuffer::new(max_payload_bytes, max_tcp_tls_buffered_bytes)?;
+        Ok(Self {
+            endpoints,
+            tcp_tls_streams: BTreeMap::new(),
+            max_payload_bytes,
+            max_tcp_tls_buffered_bytes,
+        })
+    }
+
+    /// Borrow the current endpoint admission directory.
+    #[must_use]
+    pub const fn endpoints(&self) -> &RelayEndpointDirectory {
+        &self.endpoints
+    }
+
+    /// Number of retained TCP/TLS stream buffers.
+    #[must_use]
+    pub fn tcp_tls_stream_buffer_count(&self) -> usize {
+        self.tcp_tls_streams.len()
+    }
+
+    /// Admit a UDP socket endpoint for an authenticated peer.
+    ///
+    /// # Errors
+    ///
+    /// Propagates endpoint validation, duplicate-binding, and quota errors from
+    /// [`RelayEndpointDirectory::bind_udp_endpoint`].
+    pub fn admit_udp_endpoint(
+        &mut self,
+        peer_id: PeerId,
+        endpoint: SocketAddr,
+    ) -> Result<(), RelayError> {
+        self.endpoints.bind_udp_endpoint(peer_id, endpoint)
+    }
+
+    /// Close a UDP endpoint binding.
+    pub fn close_udp_endpoint(&mut self, endpoint: SocketAddr) -> Option<PeerId> {
+        self.endpoints.unbind_udp_endpoint(endpoint)
+    }
+
+    /// Admit a TCP/TLS stream for an authenticated peer and allocate its buffer.
+    ///
+    /// # Errors
+    ///
+    /// Propagates duplicate-binding and quota errors from the endpoint directory.
+    pub fn admit_tcp_tls_stream(
+        &mut self,
+        peer_id: PeerId,
+        stream_id: RelayTcpTlsStreamId,
+    ) -> Result<(), RelayError> {
+        let stream = if self.tcp_tls_streams.contains_key(&stream_id) {
+            None
+        } else {
+            Some(RelayTcpTlsStreamBuffer::new(
+                self.max_payload_bytes,
+                self.max_tcp_tls_buffered_bytes,
+            )?)
+        };
+        self.endpoints.bind_tcp_tls_stream(peer_id, stream_id)?;
+        if let Some(stream) = stream {
+            self.tcp_tls_streams.insert(stream_id, stream);
+        }
+        Ok(())
+    }
+
+    /// Close a TCP/TLS stream and discard retained partial record bytes.
+    pub fn close_tcp_tls_stream(&mut self, stream_id: RelayTcpTlsStreamId) -> Option<PeerId> {
+        self.tcp_tls_streams.remove(&stream_id);
+        self.endpoints.unbind_tcp_tls_stream(stream_id)
+    }
+
+    /// Return pending incomplete bytes for an admitted TCP/TLS stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the stream is no longer
+    /// admitted or its buffer has been closed.
+    pub fn tcp_tls_pending_len(&self, stream_id: RelayTcpTlsStreamId) -> Result<usize, RelayError> {
+        self.tcp_tls_streams
+            .get(&stream_id)
+            .map(RelayTcpTlsStreamBuffer::pending_len)
+            .ok_or(RelayError::UnknownRelayEndpoint)
+    }
+
+    /// Ingest one UDP datagram read from a relay socket.
+    ///
+    /// The source address is resolved before frame decode, so unadmitted
+    /// addresses cannot exercise reservation, nonce, quota, proof, or queue
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Returns endpoint, frame, auth, quota, lifecycle, or transport errors from
+    /// the relay service.
+    pub fn ingest_udp_datagram(
+        &self,
+        service: &mut RelayService,
+        now_micros: u64,
+        src_addr: SocketAddr,
+        datagram: &[u8],
+    ) -> Result<ForwardedPacket, RelayError> {
+        service.forward_udp_datagram_from_endpoint(
+            now_micros,
+            &self.endpoints,
+            src_addr,
+            datagram,
+            self.max_payload_bytes,
+        )
+    }
+
+    /// Ingest bytes read from an admitted TCP/TLS 443 stream.
+    ///
+    /// Unknown streams are rejected before buffering. Admitted streams fail
+    /// closed on decode or forwarding errors: the stream binding and incomplete
+    /// bytes are removed so a malformed or unauthorized record cannot poison a
+    /// later read.
+    ///
+    /// # Errors
+    ///
+    /// Returns endpoint, stream-buffer, frame, auth, quota, lifecycle, or
+    /// transport errors from the relay service.
+    pub fn ingest_tcp_tls_stream_bytes(
+        &mut self,
+        service: &mut RelayService,
+        now_micros: u64,
+        stream_id: RelayTcpTlsStreamId,
+        bytes: &[u8],
+    ) -> Result<Vec<ForwardedPacket>, RelayError> {
+        let from_peer_id = self.endpoints.peer_for_tcp_tls_stream(stream_id)?;
+        let result = {
+            let stream = self
+                .tcp_tls_streams
+                .get_mut(&stream_id)
+                .ok_or(RelayError::UnknownRelayEndpoint)?;
+            service.forward_tcp_tls_stream_bytes(now_micros, from_peer_id, stream, bytes)
+        };
+        if result.is_err() {
+            let _ = self.close_tcp_tls_stream(stream_id);
+        }
+        result
+    }
+
+    /// Drain one queued UDP relay packet to the peer's admitted socket endpoint.
+    ///
+    /// The destination endpoint is resolved before dequeueing so peer disconnects
+    /// do not silently drop queued relay traffic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the peer has no admitted
+    /// UDP endpoint, or encoding/state errors from the relay service.
+    pub fn drain_udp_datagram_for_peer(
+        &mut self,
+        service: &mut RelayService,
+        peer_id: PeerId,
+    ) -> Result<Option<RelayUdpDatagram>, RelayError> {
+        let dst_addr = self.endpoints.first_udp_endpoint_for_peer(peer_id)?;
+        service.dequeue_udp_datagram_for_peer(peer_id, dst_addr, self.max_payload_bytes)
+    }
+
+    /// Drain one queued TCP/TLS relay record to the peer's admitted stream.
+    ///
+    /// The stream id is resolved before dequeueing so peer disconnects do not
+    /// silently drop queued relay traffic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::UnknownRelayEndpoint`] when the peer has no admitted
+    /// TCP/TLS stream, or encoding/state errors from the relay service.
+    pub fn drain_tcp_tls_record_for_peer(
+        &mut self,
+        service: &mut RelayService,
+        peer_id: PeerId,
+    ) -> Result<Option<RelayTcpTlsStreamWrite>, RelayError> {
+        let stream_id = self.endpoints.first_tcp_tls_stream_for_peer(peer_id)?;
+        let Some(record) =
+            service.dequeue_tcp_tls_record_for_peer(peer_id, self.max_payload_bytes)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(RelayTcpTlsStreamWrite { stream_id, record }))
     }
 }
 
@@ -3752,6 +4035,152 @@ mod tests {
             .expect("forward admitted tcp stream");
         assert_eq!(tcp_forwarded.len(), 1);
         assert_eq!(tcp_forwarded[0].to_peer_id(), peer(2));
+    }
+
+    #[test]
+    fn relay_socket_loop_bridges_admitted_endpoints_and_closes_bad_streams() {
+        let mut service = RelayService::new(RelayServiceConfig::default());
+        service
+            .reserve(
+                10,
+                reservation_id(48),
+                "path-relay-48",
+                grant(1_000, RelayQuota::default()),
+                &|_: &RelayReservationGrant| true,
+            )
+            .expect("reservation");
+        let mut socket_loop = RelaySocketLoop::new(
+            RelayEndpointDirectoryQuota {
+                max_udp_endpoints: 4,
+                max_tcp_tls_streams: 4,
+            },
+            RelayQuota::default().max_packet_bytes,
+            1024,
+        )
+        .expect("socket loop");
+        let source_udp = SocketAddr::from(([203, 0, 113, 40], 47_040));
+        let destination_udp = SocketAddr::from(([203, 0, 113, 41], 47_041));
+        let source_stream = RelayTcpTlsStreamId::new(48).expect("source stream");
+        let destination_stream = RelayTcpTlsStreamId::new(49).expect("destination stream");
+
+        socket_loop
+            .admit_udp_endpoint(peer(1), source_udp)
+            .expect("admit source udp");
+        socket_loop
+            .admit_udp_endpoint(peer(2), destination_udp)
+            .expect("admit destination udp");
+        socket_loop
+            .admit_tcp_tls_stream(peer(1), source_stream)
+            .expect("admit source tcp");
+        socket_loop
+            .admit_tcp_tls_stream(peer(2), destination_stream)
+            .expect("admit destination tcp");
+        assert_eq!(socket_loop.endpoints().udp_endpoint_count(), 2);
+        assert_eq!(socket_loop.tcp_tls_stream_buffer_count(), 2);
+
+        let udp_frame = RelayWireFrame::new(
+            reservation_id(48),
+            transfer_nonce(9),
+            peer(1),
+            packet_sent_at(RelayTransport::Udp, b"loop-udp-ciphertext", 1, 90),
+        );
+        let udp_datagram = udp_frame
+            .encode(RelayQuota::default().max_packet_bytes)
+            .expect("encode udp datagram");
+        let udp_forwarded = socket_loop
+            .ingest_udp_datagram(&mut service, 100, source_udp, &udp_datagram)
+            .expect("ingest admitted udp datagram");
+        assert_eq!(udp_forwarded.to_peer_id(), peer(2));
+        assert_eq!(
+            socket_loop
+                .drain_udp_datagram_for_peer(&mut service, peer(3))
+                .expect_err("unknown udp destination"),
+            RelayError::UnknownRelayEndpoint
+        );
+        let drained_udp = socket_loop
+            .drain_udp_datagram_for_peer(&mut service, peer(2))
+            .expect("drain udp")
+            .expect("queued udp datagram");
+        assert_eq!(drained_udp.dst_addr(), destination_udp);
+        let decoded_udp = RelayWireFrame::decode(
+            drained_udp.payload(),
+            RelayQuota::default().max_packet_bytes,
+        )
+        .expect("decode drained udp");
+        assert_eq!(decoded_udp.from_peer_id(), peer(1));
+        assert_eq!(decoded_udp.packet().opaque_bytes(), b"loop-udp-ciphertext");
+
+        let tcp_frame = RelayWireFrame::new(
+            reservation_id(48),
+            transfer_nonce(9),
+            peer(1),
+            packet_sent_at(RelayTransport::TcpTls443, b"loop-tcp-ciphertext", 2, 110),
+        );
+        let tcp_record = tcp_frame
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect("encode tcp record");
+        assert_eq!(
+            socket_loop
+                .ingest_tcp_tls_stream_bytes(&mut service, 120, source_stream, &tcp_record[..2])
+                .expect("partial tcp prefix"),
+            Vec::new()
+        );
+        assert_eq!(
+            socket_loop
+                .tcp_tls_pending_len(source_stream)
+                .expect("source pending bytes"),
+            2
+        );
+        let tcp_forwarded = socket_loop
+            .ingest_tcp_tls_stream_bytes(&mut service, 121, source_stream, &tcp_record[2..])
+            .expect("complete tcp record");
+        assert_eq!(tcp_forwarded.len(), 1);
+        let drained_tcp = socket_loop
+            .drain_tcp_tls_record_for_peer(&mut service, peer(2))
+            .expect("drain tcp")
+            .expect("queued tcp record");
+        assert_eq!(drained_tcp.stream_id(), destination_stream);
+        assert_eq!(drained_tcp.to_peer_id(), peer(2));
+        let decoded_tcp = RelayWireFrame::decode_complete_tcp_tls_record(
+            drained_tcp.bytes(),
+            RelayQuota::default().max_packet_bytes,
+        )
+        .expect("decode drained tcp");
+        assert_eq!(decoded_tcp.packet().opaque_bytes(), b"loop-tcp-ciphertext");
+
+        let mismatch_frame = RelayWireFrame::new(
+            reservation_id(48),
+            transfer_nonce(9),
+            peer(3),
+            packet_sent_at(RelayTransport::TcpTls443, b"bad-stream-ciphertext", 3, 130),
+        );
+        let mismatch_record = mismatch_frame
+            .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+            .expect("encode mismatch record");
+        assert_eq!(
+            socket_loop
+                .ingest_tcp_tls_stream_bytes(&mut service, 140, source_stream, &mismatch_record)
+                .expect_err("mismatched stream source"),
+            RelayError::UnauthorizedPeer
+        );
+        assert_eq!(
+            socket_loop
+                .tcp_tls_pending_len(source_stream)
+                .expect_err("bad stream closed"),
+            RelayError::UnknownRelayEndpoint
+        );
+        assert_eq!(
+            socket_loop
+                .close_tcp_tls_stream(destination_stream)
+                .expect("close destination stream"),
+            peer(2)
+        );
+        assert_eq!(
+            socket_loop
+                .drain_tcp_tls_record_for_peer(&mut service, peer(2))
+                .expect_err("closed tcp destination"),
+            RelayError::UnknownRelayEndpoint
+        );
     }
 
     #[test]

@@ -9,9 +9,10 @@ use asupersync::atp::path::{
     PathOutcomeResult, PathRace, PathSelectionReason, PathSuccessKind, PathTraceId,
 };
 use asupersync::net::atp::relay::{
-    OpaqueRelayPacket, ProofTag, RelayEndpointDirectory, RelayError, RelayEventKind, RelayQuota,
-    RelayReservationGrant, RelayReservationId, RelayService, RelayServiceConfig,
-    RelayTcpTlsStreamBuffer, RelayTcpTlsStreamId, RelayTransport, RelayWireFrame,
+    OpaqueRelayPacket, ProofTag, RelayEndpointDirectory, RelayEndpointDirectoryQuota, RelayError,
+    RelayEventKind, RelayQuota, RelayReservationGrant, RelayReservationId, RelayService,
+    RelayServiceConfig, RelaySocketLoop, RelayTcpTlsStreamBuffer, RelayTcpTlsStreamId,
+    RelayTransport, RelayWireFrame,
 };
 use asupersync::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
 use std::net::SocketAddr;
@@ -941,6 +942,216 @@ fn relay_endpoint_directory_admits_socket_sources_before_forwarding() {
             .expect("second queued packet"),
         tcp_forwarded[0]
     );
+}
+
+#[test]
+fn relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs() {
+    let test = "relay_socket_loop_runs_udp_and_tcp_boundaries_with_detailed_logs";
+    let mut service = RelayService::new(
+        RelayServiceConfig::new("relay-socket-loop-e2e", 4)
+            .expect("config")
+            .with_log_peer_ids(true),
+    );
+    log_stage(
+        test,
+        "reserve",
+        "accept a relay reservation that can race udp and tcp/tls 443 fallback",
+    );
+    service
+        .reserve(
+            500,
+            reservation_id(703),
+            "socket-loop-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve socket-loop relay");
+
+    let mut socket_loop = RelaySocketLoop::new(
+        RelayEndpointDirectoryQuota {
+            max_udp_endpoints: 4,
+            max_tcp_tls_streams: 4,
+        },
+        RelayQuota::default().max_packet_bytes,
+        1024,
+    )
+    .expect("socket loop");
+    let source_udp = SocketAddr::from(([203, 0, 113, 31], 47_031));
+    let destination_udp = SocketAddr::from(([203, 0, 113, 32], 47_032));
+    let source_stream = RelayTcpTlsStreamId::new(731).expect("source stream");
+    let destination_stream = RelayTcpTlsStreamId::new(732).expect("destination stream");
+
+    log_stage(
+        test,
+        "admit",
+        "bind concrete socket endpoints to authenticated peers before bytes are decoded",
+    );
+    socket_loop
+        .admit_udp_endpoint(peer(1), source_udp)
+        .expect("admit source udp");
+    socket_loop
+        .admit_udp_endpoint(peer(2), destination_udp)
+        .expect("admit destination udp");
+    socket_loop
+        .admit_tcp_tls_stream(peer(1), source_stream)
+        .expect("admit source tcp");
+    socket_loop
+        .admit_tcp_tls_stream(peer(2), destination_stream)
+        .expect("admit destination tcp");
+
+    let udp_frame = RelayWireFrame::new(
+        reservation_id(703),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(RelayTransport::Udp, b"loop-e2e-udp-ciphertext", 1, 510),
+    );
+    let udp_datagram = udp_frame
+        .encode(RelayQuota::default().max_packet_bytes)
+        .expect("encode udp datagram");
+    log_stage(
+        test,
+        "udp-ingress",
+        "udp socket reads are resolved through endpoint admission before relay forwarding",
+    );
+    let udp_forwarded = socket_loop
+        .ingest_udp_datagram(&mut service, 520, source_udp, &udp_datagram)
+        .expect("ingest udp datagram");
+    assert_eq!(udp_forwarded.to_peer_id(), peer(2));
+    assert_eq!(
+        service
+            .proof_artifact(reservation_id(703))
+            .expect("udp proof")
+            .packets_forwarded,
+        1
+    );
+
+    log_stage(
+        test,
+        "udp-egress",
+        "udp writer resolves destination endpoint before consuming queued packets",
+    );
+    let udp_write = socket_loop
+        .drain_udp_datagram_for_peer(&mut service, peer(2))
+        .expect("drain udp")
+        .expect("udp write");
+    assert_eq!(udp_write.dst_addr(), destination_udp);
+    let decoded_udp =
+        RelayWireFrame::decode(udp_write.payload(), RelayQuota::default().max_packet_bytes)
+            .expect("decode udp write");
+    assert_eq!(decoded_udp.from_peer_id(), peer(1));
+    assert_eq!(
+        decoded_udp.packet().opaque_bytes(),
+        b"loop-e2e-udp-ciphertext"
+    );
+
+    let tcp_frame = RelayWireFrame::new(
+        reservation_id(703),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(
+            RelayTransport::TcpTls443,
+            b"loop-e2e-tcp-ciphertext",
+            2,
+            530,
+        ),
+    );
+    let tcp_record = tcp_frame
+        .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+        .expect("encode tcp record");
+    log_stage(
+        test,
+        "tcp-partial-read",
+        "tcp/tls reads retain incomplete records and forward once the record completes",
+    );
+    assert_eq!(
+        socket_loop
+            .ingest_tcp_tls_stream_bytes(&mut service, 540, source_stream, &tcp_record[..3])
+            .expect("partial tcp read"),
+        Vec::new()
+    );
+    assert_eq!(
+        socket_loop
+            .tcp_tls_pending_len(source_stream)
+            .expect("pending tcp bytes"),
+        3
+    );
+    let tcp_forwarded = socket_loop
+        .ingest_tcp_tls_stream_bytes(&mut service, 541, source_stream, &tcp_record[3..])
+        .expect("complete tcp read");
+    assert_eq!(tcp_forwarded.len(), 1);
+    assert_eq!(tcp_forwarded[0].to_peer_id(), peer(2));
+
+    log_stage(
+        test,
+        "tcp-egress",
+        "tcp/tls writer receives stream id plus length-prefixed opaque record",
+    );
+    let tcp_write = socket_loop
+        .drain_tcp_tls_record_for_peer(&mut service, peer(2))
+        .expect("drain tcp")
+        .expect("tcp write");
+    assert_eq!(tcp_write.stream_id(), destination_stream);
+    assert_eq!(
+        tcp_write.opaque_bytes(),
+        u64::try_from(b"loop-e2e-tcp-ciphertext".len()).expect("ciphertext len fits")
+    );
+    let decoded_tcp = RelayWireFrame::decode_complete_tcp_tls_record(
+        tcp_write.bytes(),
+        RelayQuota::default().max_packet_bytes,
+    )
+    .expect("decode tcp write");
+    assert_eq!(decoded_tcp.packet().transport(), RelayTransport::TcpTls443);
+    assert_eq!(
+        decoded_tcp.packet().opaque_bytes(),
+        b"loop-e2e-tcp-ciphertext"
+    );
+
+    log_stage(
+        test,
+        "tcp-fail-closed",
+        "a hostile tcp record closes the admitted stream and preserves relay proof counters",
+    );
+    let bad_frame = RelayWireFrame::new(
+        reservation_id(703),
+        nonce(0xfeed_f500),
+        peer(3),
+        packet_sent_at(
+            RelayTransport::TcpTls443,
+            b"loop-e2e-bad-ciphertext",
+            3,
+            550,
+        ),
+    );
+    let bad_record = bad_frame
+        .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+        .expect("encode bad record");
+    assert_eq!(
+        socket_loop
+            .ingest_tcp_tls_stream_bytes(&mut service, 560, source_stream, &bad_record)
+            .expect_err("hostile stream record"),
+        RelayError::UnauthorizedPeer
+    );
+    assert_eq!(
+        socket_loop
+            .tcp_tls_pending_len(source_stream)
+            .expect_err("source stream closed after hostile record"),
+        RelayError::UnknownRelayEndpoint
+    );
+    let proof = service
+        .proof_artifact(reservation_id(703))
+        .expect("socket-loop proof");
+    assert_eq!(proof.packets_forwarded, 2);
+    assert_eq!(
+        proof.opaque_bytes_forwarded,
+        u64::try_from(b"loop-e2e-udp-ciphertext".len() + b"loop-e2e-tcp-ciphertext".len())
+            .expect("ciphertext lengths fit")
+    );
+    assert!(proof.e2e_proof_preserved);
+    assert!(service.events().iter().any(|event| {
+        event.kind == RelayEventKind::AuthorizationRejected
+            && event.quota_decision == "endpoint_peer_mismatch_rejected"
+            && event.transport == Some(RelayTransport::TcpTls443)
+    }));
 }
 
 #[test]
