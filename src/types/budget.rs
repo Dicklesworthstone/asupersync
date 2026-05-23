@@ -40,6 +40,10 @@
 //! 3. All downstream operations inherit and respect the budget
 //! 4. When budget is exhausted, operations return `Outcome::Cancelled`
 //!
+//! Budget deadlines are absolute `Time` instants. Convert duration-style
+//! request timeouts with [`Budget::with_timeout`] at request start instead of
+//! passing a duration-shaped `Time` to [`Budget::with_deadline`].
+//!
 //! ## Example: Request Timeout Middleware
 //!
 //! ```ignore
@@ -57,9 +61,9 @@
 //!     next: Next<B>,
 //!     config: &ServerConfig,
 //! ) -> Outcome<Response, TimeoutError> {
-//!     // Convert wall-clock timeout to lab-compatible Time
-//!     let deadline = Time::from_secs(config.request_timeout.as_secs());
-//!     let budget = Budget::new().with_deadline(deadline);
+//!     // Capture the current logical time from the runtime or lab clock.
+//!     let now = Time::from_secs(1_000);
+//!     let budget = Budget::new().with_timeout(now, config.request_timeout);
 //!
 //!     // Get or create Cx, attach budget
 //!     let cx = req.extensions()
@@ -116,8 +120,13 @@
 //! // Unlimited budget (default)
 //! let unlimited = Budget::unlimited();
 //!
-//! // With specific deadline
+//! // With an absolute logical deadline
 //! let timed = Budget::with_deadline_secs(30);
+//!
+//! // With a relative timeout from the current logical time
+//! # use std::time::Duration;
+//! let now = Time::from_secs(1_000);
+//! let request = Budget::new().with_timeout(now, Duration::from_secs(30));
 //!
 //! // Builder pattern for multiple constraints
 //! let complex = Budget::new()
@@ -207,9 +216,11 @@ impl Budget {
         Self::INFINITE
     }
 
-    /// Creates a budget with only a deadline constraint (in seconds).
+    /// Creates a budget with only an absolute deadline constraint (in seconds).
     ///
-    /// This is a convenience constructor for HTTP timeout scenarios.
+    /// The value is a logical instant since the runtime epoch, not a timeout
+    /// duration. For a per-operation timeout, use
+    /// [`with_timeout`](Self::with_timeout) with the current logical time.
     ///
     /// # Example
     ///
@@ -230,7 +241,11 @@ impl Budget {
         }
     }
 
-    /// Creates a budget with only a deadline constraint (in nanoseconds).
+    /// Creates a budget with only an absolute deadline constraint (in nanoseconds).
+    ///
+    /// The value is a logical instant since the runtime epoch, not a timeout
+    /// duration. For a per-operation timeout, use
+    /// [`with_timeout`](Self::with_timeout) with the current logical time.
     ///
     /// # Example
     ///
@@ -251,11 +266,40 @@ impl Budget {
         }
     }
 
-    /// Sets the deadline.
+    /// Sets the absolute logical deadline.
+    ///
+    /// The deadline is an instant, not a duration. For example,
+    /// `Time::from_secs(30)` means the runtime/lab clock value `30s`, not
+    /// "30 seconds from now". For relative per-operation timeouts, use
+    /// [`with_timeout`](Self::with_timeout).
     #[inline]
     #[must_use]
     pub const fn with_deadline(mut self, deadline: Time) -> Self {
         self.deadline = Some(deadline);
+        self
+    }
+
+    /// Sets the deadline to `now + timeout`.
+    ///
+    /// Use this for request, RPC, database, and other per-operation timeout
+    /// budgets. The caller supplies `now` explicitly so production and lab
+    /// runtimes use the same deterministic time source.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
+    /// let now = Time::from_secs(100);
+    /// let budget = Budget::new().with_timeout(now, Duration::from_secs(30));
+    ///
+    /// assert_eq!(budget.deadline, Some(Time::from_secs(130)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn with_timeout(mut self, now: Time, timeout: Duration) -> Self {
+        self.deadline = Some(now + timeout);
         self
     }
 
@@ -1643,6 +1687,38 @@ mod tests {
     fn with_deadline_ns_constructor() {
         let budget = Budget::with_deadline_ns(30_000_000_000);
         assert_eq!(budget.deadline, Some(Time::from_nanos(30_000_000_000)));
+    }
+
+    #[test]
+    fn with_timeout_sets_deadline_relative_to_now() {
+        let now = Time::from_secs(100);
+        let budget = Budget::new().with_timeout(now, Duration::from_secs(30));
+
+        assert_eq!(budget.deadline, Some(Time::from_secs(130)));
+        assert_eq!(budget.remaining_time(now), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn with_timeout_saturates_at_max_time() {
+        let now = Time::MAX.saturating_sub_nanos(5);
+        let budget = Budget::new().with_timeout(now, Duration::from_nanos(10));
+
+        assert_eq!(budget.deadline, Some(Time::MAX));
+    }
+
+    #[test]
+    fn with_timeout_keeps_other_constraints() {
+        let now = Time::from_secs(7);
+        let budget = Budget::new()
+            .with_poll_quota(42)
+            .with_cost_quota(99)
+            .with_priority(200)
+            .with_timeout(now, Duration::from_secs(3));
+
+        assert_eq!(budget.deadline, Some(Time::from_secs(10)));
+        assert_eq!(budget.poll_quota, 42);
+        assert_eq!(budget.cost_quota, Some(99));
+        assert_eq!(budget.priority, 200);
     }
 
     #[test]

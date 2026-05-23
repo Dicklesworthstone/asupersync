@@ -1362,15 +1362,17 @@ If a leak is detected while the thread is already unwinding, a `Panic` response 
 ### Budget Configuration
 
 ```rust
+let now = Time::from_secs(1_000); // current logical time from the runtime or lab clock
+
 // Request timeout with poll budget
 let request_budget = Budget::new()
-    .with_deadline_secs(30)       // 30 second timeout
+    .with_timeout(now, Duration::from_secs(30))
     .with_poll_quota(10_000)      // Max 10k polls
     .with_priority(100);          // Normal priority
 
 // Cleanup budget (tighter for faster shutdown)
 let cleanup_budget = Budget::new()
-    .with_deadline_secs(5)
+    .with_timeout(now, Duration::from_secs(5))
     .with_poll_quota(500);
 ```
 
