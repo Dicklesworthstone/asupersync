@@ -377,13 +377,15 @@ mod tests {
                 single.chunk(),
                 "many advances and one equivalent advance must expose the same next chunk",
             );
+            let segmented_tail = drain_to_vec(segmented);
             prop_assert_eq!(
-                drain_to_vec(segmented).as_slice(),
+                segmented_tail.as_slice(),
                 &expected[total_advanced..],
                 "segmented advances must leave the expected concatenated suffix",
             );
+            let single_tail = drain_to_vec(single);
             prop_assert_eq!(
-                drain_to_vec(single).as_slice(),
+                single_tail.as_slice(),
                 &expected[total_advanced..],
                 "single advance must leave the expected concatenated suffix",
             );

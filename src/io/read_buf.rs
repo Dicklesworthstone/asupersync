@@ -270,13 +270,13 @@ mod tests {
             expected.extend_from_slice(advanced_tail);
 
             prop_assert_eq!(
-                advanced_filled,
-                expected,
+                advanced_filled.as_slice(),
+                expected.as_slice(),
                 "advance must expose the preinitialized backing bytes after the written prefix",
             );
             prop_assert_eq!(
-                advanced_filled,
-                explicit_filled,
+                advanced_filled.as_slice(),
+                explicit_filled.as_slice(),
                 "advancing over initialized bytes must match explicitly putting the same bytes",
             );
             prop_assert_eq!(

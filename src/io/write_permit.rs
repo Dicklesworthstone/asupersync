@@ -374,13 +374,13 @@ mod tests {
             prop_assert!(fresh_result.is_ok(), "fresh permit commit should succeed");
 
             prop_assert_eq!(
-                cleared_output,
-                fresh_output,
+                cleared_output.as_slice(),
+                fresh_output.as_slice(),
                 "clear plus restage must commit the same bytes as a fresh permit",
             );
             prop_assert_eq!(
-                cleared_output,
-                retained,
+                cleared_output.as_slice(),
+                retained.as_slice(),
                 "discarded staged bytes must not leak into committed output",
             );
         }

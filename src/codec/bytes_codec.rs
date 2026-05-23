@@ -155,8 +155,9 @@ mod tests {
             if expected.is_empty() {
                 prop_assert!(decoded.is_none(), "empty wire image should not yield a frame");
             } else {
+                let decoded = decoded.expect("non-empty wire image should decode");
                 prop_assert_eq!(
-                    decoded.expect("non-empty wire image should decode").as_ref(),
+                    decoded.as_ref(),
                     expected.as_slice(),
                     "decoded segmented payload must match concatenated input",
                 );
