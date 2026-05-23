@@ -636,6 +636,65 @@ fn test_atp_replay_artifacts_reject_ledger_entry_detached_from_trace_artifact()
 }
 
 #[test]
+fn test_atp_replay_artifacts_reject_manifest_metadata_drift()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let crashpack = CrashpackBuilder::new()
+        .with_metadata("transfer_id", "tx-manifest")
+        .build()
+        .expect("crashpack builds");
+
+    crashpack.emit_atp_trace(temp_dir.path())?;
+
+    let manifest_path = temp_dir.path().join("manifest");
+    let manifest = std::fs::read_to_string(&manifest_path)?;
+    std::fs::write(
+        &manifest_path,
+        manifest.replace(
+            "metadata.transfer_id: tx-manifest",
+            "metadata.transfer_id: tx-drift",
+        ),
+    )?;
+
+    let err = AtpReplayCoordinator::validate_replay_artifacts(temp_dir.path())
+        .expect_err("manifest metadata must remain bound to evidence ledger metadata");
+    assert!(
+        err.to_string().contains("manifest metadata mismatch"),
+        "unexpected replay artifact validation error: {err}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_atp_replay_artifacts_reject_manifest_seed_drift() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp_dir = TempDir::new()?;
+    let crashpack = CrashpackBuilder::new()
+        .with_seed("lab-seed", 123)
+        .build()
+        .expect("crashpack builds");
+
+    crashpack.emit_atp_trace(temp_dir.path())?;
+
+    let manifest_path = temp_dir.path().join("manifest");
+    let manifest = std::fs::read_to_string(&manifest_path)?;
+    std::fs::write(
+        &manifest_path,
+        manifest.replace("  lab-seed: 123", "  lab-seed: 124"),
+    )?;
+
+    let err = AtpReplayCoordinator::validate_replay_artifacts(temp_dir.path())
+        .expect_err("manifest seeds must remain bound to evidence ledger seeds");
+    assert!(
+        err.to_string().contains("manifest seed mismatch"),
+        "unexpected replay artifact validation error: {err}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_atp_replay_artifacts_reject_replay_command_detached_from_log_artifact()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;

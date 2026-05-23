@@ -188,6 +188,7 @@ impl AtpReplayCoordinator {
                 ledger.schema_version
             )));
         }
+        validate_manifest_seed_and_metadata(&manifest, &ledger)?;
 
         for artifact in REQUIRED_LEDGER_ARTIFACT_PATHS {
             let artifact = PathBuf::from(artifact);
@@ -858,6 +859,114 @@ fn validate_manifest_reference(
     }
 
     Ok(())
+}
+
+fn validate_manifest_seed_and_metadata(
+    manifest: &str,
+    ledger: &AtpEvidenceLedger,
+) -> Result<(), ReplayError> {
+    let manifest_metadata = parse_manifest_metadata(manifest)?;
+    if manifest_metadata != ledger.metadata {
+        return Err(replay_validation_failed(format!(
+            "manifest metadata mismatch: manifest {:?}, evidence ledger {:?}",
+            manifest_metadata, ledger.metadata
+        )));
+    }
+
+    let manifest_seeds = parse_manifest_seeds(manifest)?;
+    if manifest_seeds != ledger.seeds {
+        return Err(replay_validation_failed(format!(
+            "manifest seed mismatch: manifest {:?}, evidence ledger {:?}",
+            manifest_seeds, ledger.seeds
+        )));
+    }
+
+    Ok(())
+}
+
+fn parse_manifest_metadata(manifest: &str) -> Result<BTreeMap<String, String>, ReplayError> {
+    let mut metadata = BTreeMap::new();
+
+    for (line_index, raw_line) in manifest.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("metadata.") else {
+            continue;
+        };
+        let (key, value) = rest.split_once(':').ok_or_else(|| {
+            replay_validation_failed(format!(
+                "manifest metadata field is invalid at line {line_number}: {line}"
+            ))
+        })?;
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(replay_validation_failed(format!(
+                "manifest metadata field has empty key at line {line_number}"
+            )));
+        }
+        if metadata
+            .insert(key.to_string(), value.trim().to_string())
+            .is_some()
+        {
+            return Err(replay_validation_failed(format!(
+                "manifest metadata field {key} is duplicated"
+            )));
+        }
+    }
+
+    Ok(metadata)
+}
+
+fn parse_manifest_seeds(manifest: &str) -> Result<BTreeMap<String, u64>, ReplayError> {
+    let mut seeds = BTreeMap::new();
+    let mut in_seeds = false;
+
+    for (line_index, raw_line) in manifest.lines().enumerate() {
+        let line_number = line_index + 1;
+        let indent = raw_line
+            .chars()
+            .take_while(|ch| ch.is_ascii_whitespace())
+            .count();
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if indent == 0 {
+            in_seeds = line == "seeds:";
+            continue;
+        }
+        if !in_seeds {
+            continue;
+        }
+
+        let (name, seed) = line.split_once(':').ok_or_else(|| {
+            replay_validation_failed(format!(
+                "manifest seed field is invalid at line {line_number}: {line}"
+            ))
+        })?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(replay_validation_failed(format!(
+                "manifest seed field has empty name at line {line_number}"
+            )));
+        }
+        let seed = seed.trim().parse::<u64>().map_err(|err| {
+            replay_validation_failed(format!(
+                "manifest seed {name} is invalid at line {line_number}: {err}"
+            ))
+        })?;
+        if seeds.insert(name.to_string(), seed).is_some() {
+            return Err(replay_validation_failed(format!(
+                "manifest seed {name} is duplicated"
+            )));
+        }
+    }
+
+    Ok(seeds)
 }
 
 fn validate_replay_command(output_dir: &Path, replay_command: &str) -> Result<(), ReplayError> {
