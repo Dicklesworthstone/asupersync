@@ -522,14 +522,15 @@ mod tests {
         }
 
         fn new(key: &[u8], message: &[u8]) -> Self {
-            let mut hasher = blake3::Hasher::new();
+            use sha2::{Sha256, Digest};
+            let mut hasher = Sha256::new();
             hasher.update(b"AUTH_TAG");
             hasher.update(key);
             hasher.update(message);
             let hash = hasher.finalize();
 
             let mut data = [0u8; 16];
-            data.copy_from_slice(&hash.as_bytes()[..16]);
+            data.copy_from_slice(&hash[..16]);
             Self { data }
         }
 
