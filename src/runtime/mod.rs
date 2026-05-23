@@ -147,6 +147,8 @@ pub mod resource_cleanup_verifier;
 pub mod resource_monitor;
 pub mod scheduler;
 pub mod sharded_state;
+#[cfg(test)]
+pub mod sharded_state_conformance;
 /// Async wrapper for blocking pool operations.
 pub mod spawn_blocking;
 pub mod state;
