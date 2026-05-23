@@ -251,6 +251,8 @@ pub mod distributed_primitives_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod messaging_primitives_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod database_primitives_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod bytes_io_time_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cx_obligation_trace_metamorphic_tests;
