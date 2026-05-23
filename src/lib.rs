@@ -258,6 +258,8 @@ pub mod database_grpc_metamorphic_tests;
 pub mod sync_scheduler_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_service_messaging_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod lab_trace_observability_security_metamorphic_tests;
 
 // Re-exports for convenient access to core types
 pub use config::{
