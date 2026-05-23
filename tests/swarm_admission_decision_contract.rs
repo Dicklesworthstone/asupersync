@@ -441,6 +441,16 @@ fn run_deterministic_swarm_workload_fixture(workload_count: usize, seed: u64) ->
             SwarmWorkloadLeaseTransition::ReleasedByRegionClose
         );
         assert!(
+            receipts[0]
+                .replay_pointer
+                .starts_with("swarm-workload-lease://lease/")
+        );
+        assert!(
+            receipts[0]
+                .replay_pointer
+                .ends_with("/transition/released_by_region_close")
+        );
+        assert!(
             governor.unregister_region_envelope(region_id).is_some(),
             "region envelope should be removed after region-close lease release"
         );

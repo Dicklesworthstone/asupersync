@@ -935,6 +935,8 @@ impl SwarmWorkloadLease {
 pub struct SwarmWorkloadLeaseReceipt {
     /// Lease id affected by the operation.
     pub lease_id: SwarmWorkloadLeaseId,
+    /// Stable replay/audit pointer for this lifecycle transition.
+    pub replay_pointer: String,
     /// Workload id affected by the operation.
     pub workload_id: String,
     /// Owner metadata bound to the lease.
@@ -2442,8 +2444,14 @@ impl SwarmPressureGovernor {
     ) -> SwarmWorkloadLeaseReceipt {
         let transition_reason = reason.as_ref().to_string();
         let reason = lease.context_reason(&transition_reason);
+        let replay_pointer = format!(
+            "swarm-workload-lease://lease/{}/transition/{}",
+            lease.lease_id.as_u64(),
+            transition.as_str()
+        );
         SwarmWorkloadLeaseReceipt {
             lease_id: lease.lease_id,
+            replay_pointer,
             workload_id: lease.workload_id.clone(),
             owner: lease.owner.clone(),
             proof_lane: lease.proof_lane,
@@ -4099,6 +4107,10 @@ mod tests {
         assert_eq!(acquired.state, SwarmWorkloadLeaseState::Active);
         assert_eq!(acquired.transition, SwarmWorkloadLeaseTransition::Acquired);
         assert_eq!(acquired.transition_reason, "workload lease acquired");
+        assert_eq!(
+            acquired.replay_pointer,
+            "swarm-workload-lease://lease/1/transition/acquired"
+        );
         assert_eq!(acquired.cancellation_budget, Some(cancellation_budget));
         assert!(acquired.reason.contains("workload lease acquired"));
         assert!(acquired.reason.contains("cancellation_budget_ms=750"));
@@ -4112,6 +4124,10 @@ mod tests {
             SwarmWorkloadLeaseTransition::Committed
         );
         assert_eq!(committed.transition_reason, "workload lease committed");
+        assert_eq!(
+            committed.replay_pointer,
+            "swarm-workload-lease://lease/1/transition/committed"
+        );
         assert_eq!(committed.cancellation_budget, Some(cancellation_budget));
         assert!(committed.reason.contains("cancellation_budget_ms=750"));
         let old_expiry = committed.expires_at;
@@ -4122,6 +4138,10 @@ mod tests {
         assert_eq!(renewed.state, SwarmWorkloadLeaseState::Committed);
         assert_eq!(renewed.transition, SwarmWorkloadLeaseTransition::Renewed);
         assert_eq!(renewed.transition_reason, "workload lease renewed");
+        assert_eq!(
+            renewed.replay_pointer,
+            "swarm-workload-lease://lease/1/transition/renewed"
+        );
         assert_eq!(renewed.cancellation_budget, Some(cancellation_budget));
         assert!(renewed.expires_at > old_expiry);
         assert!(renewed.reason.contains("renewals=1"));
@@ -4152,6 +4172,10 @@ mod tests {
         assert_eq!(released.state, SwarmWorkloadLeaseState::Released);
         assert_eq!(released.transition, SwarmWorkloadLeaseTransition::Released);
         assert_eq!(released.transition_reason, "workload lease released");
+        assert_eq!(
+            released.replay_pointer,
+            "swarm-workload-lease://lease/1/transition/released"
+        );
         assert_eq!(released.cancellation_budget, Some(cancellation_budget));
         assert!(released.reason.contains("cancellation_budget_ms=750"));
         assert!(released.terminal_at.is_some());
@@ -4382,6 +4406,10 @@ mod tests {
             aborted.transition_reason,
             "cancelled before proof lane started"
         );
+        assert_eq!(
+            aborted.replay_pointer,
+            "swarm-workload-lease://lease/1/transition/aborted"
+        );
         assert!(
             aborted
                 .reason
@@ -4431,6 +4459,10 @@ mod tests {
         assert_eq!(expired[0].state, SwarmWorkloadLeaseState::Expired);
         assert_eq!(expired[0].transition, SwarmWorkloadLeaseTransition::Expired);
         assert_eq!(expired[0].transition_reason, "workload lease expired");
+        assert_eq!(
+            expired[0].replay_pointer,
+            "swarm-workload-lease://lease/2/transition/expired"
+        );
         assert_eq!(
             governor.metrics().live_workload_feedback_reports,
             0,
@@ -4861,6 +4893,10 @@ mod tests {
         assert_eq!(
             receipts[0].transition_reason,
             "workload lease released by region close"
+        );
+        assert_eq!(
+            receipts[0].replay_pointer,
+            "swarm-workload-lease://lease/1/transition/released_by_region_close"
         );
         assert!(
             receipts[0]
