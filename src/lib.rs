@@ -244,6 +244,8 @@ pub mod test_logging;
 pub mod test_ndjson;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_utils;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod plan_trace_metamorphic_tests;
 
 // Re-exports for convenient access to core types
 pub use config::{
