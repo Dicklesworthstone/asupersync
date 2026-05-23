@@ -315,6 +315,7 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
         "manifest",
         "journal",
         "journal.digest",
+        "evidence-ledger.json",
         "pathlog",
         "quiclog",
         "repairlog",
@@ -335,6 +336,7 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
     assert!(manifest.contains("violations: 1"));
     assert!(manifest.contains(&format!("journal_digest: {expected_journal_digest}")));
     assert!(manifest.contains("journal_digest_artifact: journal.digest"));
+    assert!(manifest.contains("evidence_ledger: evidence-ledger.json"));
     assert!(manifest.contains("metadata.transfer_id: tx-emit"));
     assert!(manifest.contains("seeds:"));
     assert!(manifest.contains("lab-seed: 42"));
@@ -348,6 +350,44 @@ fn test_atp_crashpack_emits_required_artifacts() -> Result<(), Box<dyn std::erro
     let journal_digest = std::fs::read_to_string(temp_dir.path().join("journal.digest"))?;
     assert!(journal_digest.contains(&format!("digest: {expected_journal_digest}")));
     assert!(journal_digest.contains(&format!("bytes: {}", journal.len())));
+
+    let evidence_ledger = std::fs::read_to_string(temp_dir.path().join("evidence-ledger.json"))?;
+    let evidence_ledger =
+        AtpEvidenceLedger::import_json(&evidence_ledger).expect("evidence ledger imports");
+    assert_eq!(evidence_ledger.schema_version, 1);
+    assert_eq!(evidence_ledger.seeds.get("lab-seed"), Some(&42));
+    assert_eq!(
+        evidence_ledger.metadata.get("transfer_id"),
+        Some(&"tx-emit".to_string())
+    );
+    assert_eq!(evidence_ledger.entries.len(), 1);
+    assert_eq!(evidence_ledger.entries[0].oracle_name, "manifest_integrity");
+    assert_eq!(evidence_ledger.entries[0].timestamp, 0);
+    assert!(!evidence_ledger.entries[0].evidence.passed);
+    assert_eq!(
+        evidence_ledger.entries[0].artifact_path,
+        Some(PathBuf::from("transfer.atp-trace"))
+    );
+    assert!(
+        evidence_ledger
+            .artifact_paths
+            .contains(&PathBuf::from("evidence-ledger.json"))
+    );
+    assert!(
+        evidence_ledger
+            .artifact_paths
+            .contains(&PathBuf::from("artifacts/pathlog"))
+    );
+    assert_eq!(
+        evidence_ledger
+            .artifact_paths
+            .iter()
+            .filter(|path| path.as_path() == std::path::Path::new("artifacts/pathlog"))
+            .count(),
+        1,
+        "evidence ledger artifact paths should be de-duplicated"
+    );
+    assert_eq!(evidence_ledger.evidence_summary().strong, 1);
 
     assert!(journal.contains("oracle: manifest_integrity"));
     assert!(journal.contains("type: manifest_integrity"));

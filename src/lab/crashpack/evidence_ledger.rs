@@ -59,7 +59,7 @@ impl AtpEvidenceLedger {
         artifact_path: Option<PathBuf>,
         timestamp: u64,
     ) {
-        self.record_artifact_path(artifact_path.as_ref());
+        self.record_optional_artifact_path(artifact_path.as_ref());
         let entry = AtpEvidenceEntry {
             oracle_name: oracle_name.into(),
             evidence,
@@ -70,11 +70,17 @@ impl AtpEvidenceLedger {
         self.entries.push(entry);
     }
 
-    fn record_artifact_path(&mut self, artifact_path: Option<&PathBuf>) {
+    /// Record an artifact path for this evidence session.
+    pub fn record_artifact_path(&mut self, artifact_path: impl Into<PathBuf>) {
+        let artifact_path = artifact_path.into();
+        if !self.artifact_paths.contains(&artifact_path) {
+            self.artifact_paths.push(artifact_path); // ubs:ignore - pushing to vector, not path join
+        }
+    }
+
+    fn record_optional_artifact_path(&mut self, artifact_path: Option<&PathBuf>) {
         if let Some(path) = artifact_path {
-            if !self.artifact_paths.contains(path) {
-                self.artifact_paths.push(path.clone()); // ubs:ignore - pushing to vector, not path join
-            }
+            self.record_artifact_path(path.clone());
         }
     }
 

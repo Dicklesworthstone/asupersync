@@ -40,11 +40,14 @@ pub use replay::{
 };
 
 use crate::lab::oracle::OracleStats;
+use crate::lab::oracle::evidence::{
+    BayesFactor, EvidenceEntry, EvidenceLine, EvidenceStrength, LogLikelihoodContributions,
+};
 use crate::trace::{TraceBuffer, TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// ATP crashpack schema version for serialization compatibility.
@@ -396,6 +399,12 @@ impl AtpCrashpack {
             format!("digest: {journal_digest}\nbytes: {}\n", journal_data.len()),
         )?;
 
+        // Emit deterministic evidence ledger before the manifest so the
+        // manifest can point at the exact ledger artifact.
+        let evidence_ledger_path = output_dir.join("evidence-ledger.json");
+        let evidence_ledger = self.generate_evidence_ledger();
+        std::fs::write(&evidence_ledger_path, evidence_ledger.export_json()?)?;
+
         // Emit manifest after the journal so it can point at the exact digest.
         let manifest_path = output_dir.join("manifest");
         let manifest_data = self.generate_manifest(&journal_digest)?;
@@ -414,7 +423,7 @@ impl AtpCrashpack {
 
     fn generate_manifest(&self, journal_digest: &str) -> Result<String, CrashpackError> {
         let mut manifest = format!(
-            "# ATP Crashpack Manifest\nschema_version: {}\nviolations: {}\njournal_digest: {journal_digest}\njournal_digest_artifact: journal.digest\n",
+            "# ATP Crashpack Manifest\nschema_version: {}\nviolations: {}\njournal_digest: {journal_digest}\njournal_digest_artifact: journal.digest\nevidence_ledger: evidence-ledger.json\n",
             self.schema_version,
             self.oracle_results
                 .iter()
@@ -474,6 +483,46 @@ impl AtpCrashpack {
         }
 
         Ok(journal)
+    }
+
+    fn generate_evidence_ledger(&self) -> AtpEvidenceLedger {
+        let mut ledger = AtpEvidenceLedger::new();
+
+        for (name, seed) in &self.seeds {
+            ledger.record_seed(name.clone(), *seed);
+        }
+
+        for (key, value) in &self.metadata {
+            ledger.add_metadata(key.clone(), value.clone());
+        }
+
+        for artifact in [
+            "transfer.atp-trace",
+            "manifest",
+            "journal",
+            "journal.digest",
+            "evidence-ledger.json",
+            "pathlog",
+            "quiclog",
+            "repairlog",
+            "replay_command.sh",
+        ] {
+            ledger.record_artifact_path(PathBuf::from(artifact));
+        }
+
+        for artifact in &self.artifact_paths {
+            ledger.record_artifact_path(PathBuf::from(artifact));
+        }
+
+        for result in &self.oracle_results {
+            ledger.record_oracle_result(
+                result.oracle_name.clone(),
+                evidence_for_oracle_result(result),
+                Some(PathBuf::from("transfer.atp-trace")),
+            );
+        }
+
+        ledger
     }
 
     fn emit_specialized_logs(&self, output_dir: &Path) -> Result<(), CrashpackError> {
@@ -582,6 +631,92 @@ fn seed_env_suffix(name: &str) -> String {
 fn journal_digest_ref(journal_data: &str) -> String {
     let digest = Sha256::digest(journal_data.as_bytes());
     format!("sha256:{}", hex::encode(digest))
+}
+
+fn evidence_for_oracle_result(result: &TransferOracleResult) -> EvidenceEntry {
+    let log10_bf = if result.passed {
+        -1.0
+    } else {
+        result
+            .violations
+            .iter()
+            .map(|violation| severity_log10_bf(&violation.severity))
+            .reduce(f64::max)
+            .unwrap_or(0.5)
+    };
+
+    let strength = EvidenceStrength::from_log10_bf(log10_bf);
+    let max_severity = result
+        .violations
+        .iter()
+        .max_by_key(|violation| severity_rank(&violation.severity))
+        .map(|violation| severity_label(&violation.severity))
+        .unwrap_or("none");
+
+    EvidenceEntry {
+        invariant: result.oracle_name.clone(),
+        passed: result.passed,
+        bayes_factor: BayesFactor {
+            log10_bf,
+            hypothesis: format!("{} violation", result.oracle_name),
+            strength,
+        },
+        log_likelihoods: LogLikelihoodContributions {
+            structural: log10_bf / 2.0,
+            detection: log10_bf / 2.0,
+            total: log10_bf,
+        },
+        evidence_lines: vec![EvidenceLine {
+            equation: "BF = P(oracle evidence | violation) / P(oracle evidence | clean)"
+                .to_string(),
+            substitution: format!(
+                "passed={}, violations={}, events_recorded={}, entities_tracked={}, max_severity={max_severity}",
+                result.passed,
+                result.violations.len(),
+                result.stats.events_recorded,
+                result.stats.entities_tracked
+            ),
+            intuition: if result.passed {
+                format!(
+                    "{} produced deterministic clean evidence",
+                    result.oracle_name
+                )
+            } else {
+                format!(
+                    "{} reported {} deterministic violation(s)",
+                    result.oracle_name,
+                    result.violations.len()
+                )
+            },
+        }],
+    }
+}
+
+fn severity_log10_bf(severity: &ViolationSeverity) -> f64 {
+    match severity {
+        ViolationSeverity::Low => 0.6,
+        ViolationSeverity::Medium => 1.0,
+        ViolationSeverity::High => 1.6,
+        ViolationSeverity::Critical => 2.4,
+    }
+}
+
+fn severity_label(severity: &ViolationSeverity) -> &'static str {
+    match severity {
+        ViolationSeverity::Low => "low",
+        ViolationSeverity::Medium => "medium",
+        ViolationSeverity::High => "high",
+        ViolationSeverity::Critical => "critical",
+    }
+}
+
+fn severity_rank(severity: &ViolationSeverity) -> u8 {
+    match severity {
+        ViolationSeverity::Low => 0,
+        ViolationSeverity::Medium => 1,
+        ViolationSeverity::High => 2,
+        ViolationSeverity::Critical => 3,
+    }
 }
 
 /// Errors during crashpack operations.
