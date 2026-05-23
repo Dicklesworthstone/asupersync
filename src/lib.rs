@@ -243,6 +243,8 @@ pub mod actor_genserver_monitor_evidence_link_process_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cancel_cx_runtime_channel_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod channel_ordering_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod bytes_io_time_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cx_obligation_trace_metamorphic_tests;
@@ -290,6 +292,8 @@ pub mod public_api_golden_tests;
 pub mod raptorq_deep_dive_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod raptorq_rfc6330_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod supervision_genserver_actor_io_fs_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
