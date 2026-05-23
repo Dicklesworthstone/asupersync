@@ -135,10 +135,11 @@ impl DurationHistory {
         }
         let mut values: Vec<u64> = self.samples.iter().copied().collect();
         let pct = percentile.clamp(0.0, 1.0);
-        let scaled = (pct * 1_000_000.0).round() as u64;
-        let len = values.len() as u64;
-        let rank = (scaled * len).div_ceil(1_000_000);
-        let idx = rank.saturating_sub(1).min(len.saturating_sub(1)) as usize;
+        let len = values.len();
+
+        // Use standard percentile rank calculation: P * (N-1) for 0-based indexing
+        let rank = (pct * (len as f64 - 1.0)).round() as usize;
+        let idx = rank.min(len - 1);
 
         let (_, &mut value, _) = values.select_nth_unstable(idx);
         Some(value)
@@ -173,6 +174,32 @@ pub(crate) struct DeadlineTaskSnapshot {
 }
 
 impl DeadlineTaskSnapshot {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        task_id: TaskId,
+        region_id: RegionId,
+        is_terminal: bool,
+        created_at: Time,
+        deadline: Option<Time>,
+        last_checkpoint: Option<Time>,
+        last_checkpoint_message: Option<String>,
+        checkpoint_count: u64,
+        task_type: Option<String>,
+    ) -> Self {
+        Self {
+            task_id,
+            region_id,
+            is_terminal,
+            created_at,
+            deadline,
+            last_checkpoint,
+            last_checkpoint_message,
+            checkpoint_count,
+            task_type,
+        }
+    }
+
     #[must_use]
     pub(crate) fn from_task_record(task: &TaskRecord) -> Self {
         let (deadline, last_checkpoint, last_checkpoint_message, checkpoint_count, task_type) =

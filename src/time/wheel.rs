@@ -594,9 +594,9 @@ impl TimerWheel {
             return min_deadline;
         }
 
-        for (idx, level) in self.levels.iter().enumerate() {
-            let shift = idx * 8;
-            let level_tick = self.current_tick >> shift;
+        for (_idx, level) in self.levels.iter().enumerate() {
+            let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
+            let level_tick = now_nanos / level.resolution_ns;
             let current_slot = (level_tick % (SLOTS_PER_LEVEL as u64)) as usize;
 
             for i in 0..SLOTS_PER_LEVEL {
@@ -654,7 +654,7 @@ impl TimerWheel {
             return;
         }
 
-        for (idx, level) in self.levels.iter_mut().enumerate() {
+        for (_idx, level) in self.levels.iter_mut().enumerate() {
             if delta < level.range_ns() {
                 let tick = entry.deadline.as_nanos() / level.resolution_ns;
 
@@ -819,9 +819,9 @@ impl TimerWheel {
 
     fn promote_coalescing_window_entries(&mut self, boundary: Time, ready: &mut Vec<TimerEntry>) {
         let boundary_ns = boundary.as_nanos();
-        for (idx, level) in self.levels.iter_mut().enumerate() {
-            let shift = idx * 8;
-            let level_tick_current = self.current_tick >> shift;
+        for (_idx, level) in self.levels.iter_mut().enumerate() {
+            let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
+            let level_tick_current = now_nanos / level.resolution_ns;
             let level_tick_boundary = boundary_ns / level.resolution_ns;
 
             if level_tick_boundary < level_tick_current {
@@ -980,9 +980,9 @@ impl TimerWheel {
             .filter(|e| self.is_live(e) && e.deadline <= coalesced_time)
             .count();
 
-        for (idx, level) in self.levels.iter().enumerate() {
-            let shift = idx * 8;
-            let level_tick_current = self.current_tick >> shift;
+        for (_idx, level) in self.levels.iter().enumerate() {
+            let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
+            let level_tick_current = now_nanos / level.resolution_ns;
             let level_tick_boundary = window_end_ns / level.resolution_ns;
 
             if level_tick_boundary < level_tick_current {
@@ -2939,7 +2939,5 @@ mod tests {
 }
 
 #[cfg(test)]
-mod metamorphic_tests {
-    #![allow(dead_code, unused_imports)]
-    include!("../time/wheel_metamorphic_tests.rs");
-}
+#[path = "wheel_metamorphic_tests.rs"]
+mod metamorphic_tests;
