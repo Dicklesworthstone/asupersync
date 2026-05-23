@@ -176,6 +176,15 @@ fn fixture_text(fixture: &str) -> String {
 }
 
 fn classify_fixture(fixture: &str, command: &str, touched_files: &[&str]) -> Value {
+    classify_fixture_with_extra_args(fixture, command, touched_files, &[])
+}
+
+fn classify_fixture_with_extra_args(
+    fixture: &str,
+    command: &str,
+    touched_files: &[&str],
+    extra_args: &[&str],
+) -> Value {
     let fixture_path = format!("{FIXTURE_ROOT}/{fixture}");
     let mut args = vec![
         "--classify-rch-log",
@@ -185,6 +194,7 @@ fn classify_fixture(fixture: &str, command: &str, touched_files: &[&str]) -> Val
         "--touched-files",
     ];
     args.extend_from_slice(touched_files);
+    args.extend_from_slice(extra_args);
     args.extend_from_slice(&["--output", "json"]);
     proof_runner_json(&args)
 }
@@ -1926,6 +1936,24 @@ fn proof_runner_rch_outcome_contract_names_required_fixtures() {
         );
     }
 
+    let required_output_fields: BTreeSet<&str> = contract["required_output_fields"]
+        .as_array()
+        .expect("required output fields")
+        .iter()
+        .map(|field| field.as_str().expect("field string"))
+        .collect();
+    for required in [
+        "schema_version",
+        "rch_outcome",
+        "validation_frontier_record",
+        "closeout_summary",
+    ] {
+        assert!(
+            required_output_fields.contains(required),
+            "missing required output field {required}"
+        );
+    }
+
     let required_outcome_fields: BTreeSet<&str> = contract["required_rch_outcome_fields"]
         .as_array()
         .expect("required outcome fields")
@@ -1945,6 +1973,32 @@ fn proof_runner_rch_outcome_contract_names_required_fixtures() {
         assert!(
             required_outcome_fields.contains(required),
             "missing required outcome field {required}"
+        );
+    }
+
+    assert_eq!(
+        contract["closeout_summary_schema"].as_str(),
+        Some("proof-runner-closeout-summary-v1")
+    );
+    let required_closeout_fields: BTreeSet<&str> = contract["required_closeout_summary_fields"]
+        .as_array()
+        .expect("required closeout summary fields")
+        .iter()
+        .map(|field| field.as_str().expect("field string"))
+        .collect();
+    for required in [
+        "schema_version",
+        "bead_id",
+        "likely_owner",
+        "proof_claim",
+        "green_proof_claimed",
+        "first_blocker",
+        "beads_comment",
+        "agent_mail_body",
+    ] {
+        assert!(
+            required_closeout_fields.contains(required),
+            "missing required closeout field {required}"
         );
     }
 
@@ -2088,6 +2142,62 @@ fn proof_runner_classifies_local_cargo_error_blocker() {
         Some("tests/proof_runner_contract.rs")
     );
     assert_eq!(frontier["green_proof_claimed"].as_bool(), Some(false));
+}
+
+#[test]
+fn proof_runner_classify_rch_log_emits_bead_owner_closeout_summary() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture";
+    let result = classify_fixture_with_extra_args(
+        "cargo_error.log",
+        command,
+        &["tests/proof_runner_contract.rs"],
+        &[
+            "--bead-id",
+            "asupersync-oxqrae.1",
+            "--likely-owner",
+            "DustyGorge",
+        ],
+    );
+    let frontier = &result["validation_frontier_record"];
+    let closeout = &result["closeout_summary"];
+
+    assert_eq!(
+        frontier["likely_bead"].as_str(),
+        Some("asupersync-oxqrae.1")
+    );
+    assert_eq!(frontier["likely_owner"].as_str(), Some("DustyGorge"));
+    assert_eq!(
+        frontier["error_buckets"][0]["likely_bead"].as_str(),
+        Some("asupersync-oxqrae.1")
+    );
+    assert_eq!(
+        frontier["error_buckets"][0]["likely_owner"].as_str(),
+        Some("DustyGorge")
+    );
+    assert_eq!(
+        closeout["schema_version"].as_str(),
+        Some("proof-runner-closeout-summary-v1")
+    );
+    assert_eq!(closeout["bead_id"].as_str(), Some("asupersync-oxqrae.1"));
+    assert_eq!(closeout["likely_owner"].as_str(), Some("DustyGorge"));
+    assert_eq!(closeout["proof_claim"].as_str(), Some("no-green-proof"));
+    assert_eq!(closeout["green_proof_claimed"].as_bool(), Some(false));
+    assert_eq!(
+        closeout["first_blocker"]["file"].as_str(),
+        Some("tests/proof_runner_contract.rs")
+    );
+    assert!(
+        closeout["beads_comment"]
+            .as_str()
+            .expect("beads closeout comment")
+            .contains("NO_GREEN_PROOF bead=asupersync-oxqrae.1")
+    );
+    assert!(
+        closeout["agent_mail_body"]
+            .as_str()
+            .expect("agent mail body")
+            .contains("green_proof_claimed=false")
+    );
 }
 
 #[test]

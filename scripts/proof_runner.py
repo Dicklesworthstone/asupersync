@@ -1321,6 +1321,67 @@ def error_buckets_from_blocker(
     ]
 
 
+def closeout_summary_from_frontier(
+    outcome: Dict[str, Any],
+    frontier: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build deterministic Beads/Agent Mail closeout text from a classified run."""
+    green_proof_claimed = bool(frontier.get("green_proof_claimed"))
+    first_blocker = frontier.get("first_blocker") or {}
+    blocker_file = normalize_repo_path(str(first_blocker.get("file") or ""))
+    blocker_line = int(first_blocker.get("line") or 0)
+    if blocker_file:
+        blocker_ref = f"{blocker_file}:{blocker_line}" if blocker_line else blocker_file
+    else:
+        blocker_ref = "none"
+
+    proof_claim = "green-proof" if green_proof_claimed else "no-green-proof"
+    bead_id = frontier.get("likely_bead") or None
+    likely_owner = str(frontier.get("likely_owner") or "")
+    decision = str(frontier.get("decision") or "")
+    error_class = str(frontier.get("error_class") or "")
+    proof_lane_id = str(frontier.get("proof_lane_id") or "")
+    command = str(frontier.get("command") or outcome.get("command") or "")
+    rch_result = frontier.get("rch_result") or {}
+    rch_admission = str(rch_result.get("admission") or "not-applicable")
+    remote_exit_status = outcome.get("remote_exit_status")
+    summary = str(frontier.get("summary") or outcome.get("summary") or "")
+    prefix = "PASS" if green_proof_claimed else "NO_GREEN_PROOF"
+
+    beads_comment = (
+        f"{prefix} bead={bead_id or 'unmapped'} lane={proof_lane_id} "
+        f"decision={decision} error_class={error_class} "
+        f"first_blocker={blocker_ref} rch_admission={rch_admission} "
+        f"remote_exit={remote_exit_status if remote_exit_status is not None else 'unknown'} "
+        f"green_proof_claimed={str(green_proof_claimed).lower()}"
+    )
+    agent_mail_body = (
+        f"{beads_comment}\n"
+        f"Summary: {summary}\n"
+        f"Command: {command}"
+    )
+
+    return {
+        "schema_version": "proof-runner-closeout-summary-v1",
+        "bead_id": bead_id,
+        "likely_owner": likely_owner,
+        "proof_lane_id": proof_lane_id,
+        "decision": decision,
+        "error_class": error_class,
+        "proof_claim": proof_claim,
+        "green_proof_claimed": green_proof_claimed,
+        "source_log_path": outcome.get("source_log_path"),
+        "source_log_sha256": outcome.get("source_log_sha256"),
+        "remote_exit_status": remote_exit_status,
+        "rch_admission": rch_admission,
+        "worker": rch_result.get("worker"),
+        "first_blocker": frontier.get("first_blocker"),
+        "affected_files": frontier.get("affected_files") or [],
+        "beads_comment": beads_comment,
+        "agent_mail_body": agent_mail_body,
+    }
+
+
 class ValidationFrontierRecord:
     """Builder for validation frontier ledger records."""
 
@@ -1333,6 +1394,8 @@ class ValidationFrontierRecord:
         dirty_tree_summary: Optional[Dict[str, Any]] = None,
         rch_result: Optional[Dict[str, Any]] = None,
         exit_status: Optional[int] = None,
+        likely_bead: Optional[str] = None,
+        likely_owner: str = "",
     ):
         self.command = command
         self.proof_lane_id = proof_lane_id
@@ -1350,10 +1413,14 @@ class ValidationFrontierRecord:
             "file": "",
             "line": 0
         }
-        self.likely_owner = ""
-        self.likely_bead = None
+        self.likely_owner = likely_owner
+        self.likely_bead = likely_bead
         self.supplemental_proof_command = ""
         self.summary = ""
+
+    def _likely_owner(self, default: str) -> str:
+        """Return an explicit owner hint when supplied, otherwise the classifier default."""
+        return self.likely_owner or default
 
     def _base(
         self,
@@ -1410,6 +1477,7 @@ class ValidationFrontierRecord:
         """Mark as externally blocked."""
         normalized_file = normalize_repo_path(file)
         blocker_summary = blocker_message or summary
+        owner = self._likely_owner(owner)
         first_blocker = blocker_object(normalized_file, line, error_class, blocker_summary)
         return self._base(
             "blocked-external",
@@ -1440,6 +1508,7 @@ class ValidationFrontierRecord:
 
     def as_pass(self, supplemental: str = "") -> Dict[str, Any]:
         """Mark as passed."""
+        owner = self._likely_owner("local_change")
         return self._base(
             "pass",
             "none",
@@ -1450,7 +1519,7 @@ class ValidationFrontierRecord:
                 "line": 0,
             },
             None,
-            "local_change",
+            owner,
             supplemental,
             "preflight checks passed",
             exit_status=0,
@@ -1472,6 +1541,7 @@ class ValidationFrontierRecord:
         normalized_file = normalize_repo_path(file)
         blocker_summary = blocker_message or summary
         first_blocker = blocker_object(normalized_file, line, error_class, blocker_summary)
+        owner = self._likely_owner("local_change")
         return self._base(
             "failed-local",
             error_class,
@@ -1482,7 +1552,7 @@ class ValidationFrontierRecord:
                 "line": line,
             },
             first_blocker,
-            "local_change",
+            owner,
             "",
             summary,
             error_buckets_from_blocker(
@@ -1490,7 +1560,7 @@ class ValidationFrontierRecord:
                 normalized_file,
                 line,
                 blocker_summary,
-                "local_change",
+                owner,
                 self.likely_bead,
                 self.touched_files,
                 error_code=error_code,
@@ -2069,6 +2139,8 @@ class ProofRunner:
         proof_lane_id: str,
         rch_result: Optional[Dict[str, Any]] = None,
         exit_status: Optional[int] = None,
+        likely_bead: Optional[str] = None,
+        likely_owner: str = "",
     ) -> ValidationFrontierRecord:
         """Build a frontier record with live shared-main context attached."""
         normalized_touched = [normalize_repo_path(path) for path in touched_files]
@@ -2080,6 +2152,8 @@ class ProofRunner:
             dirty_tree_summary=self.git.dirty_tree_summary(normalized_touched),
             rch_result=rch_result,
             exit_status=exit_status,
+            likely_bead=likely_bead,
+            likely_owner=likely_owner,
         )
 
     def _repo_json(self, relative_path: str) -> Dict[str, Any]:
@@ -3194,6 +3268,8 @@ class ProofRunner:
         command: str,
         log_path: str,
         touched_files: List[str],
+        likely_bead: Optional[str] = None,
+        likely_owner: str = "",
     ) -> Dict[str, Any]:
         """Classify a saved rch transcript as a machine-readable proof outcome."""
         source_log = Path(log_path)
@@ -3208,6 +3284,8 @@ class ProofRunner:
             infer_proof_lane_id(command, "rch-classified"),
             rch_result=rch_result_from_outcome(outcome),
             exit_status=outcome.get("remote_exit_status"),
+            likely_bead=likely_bead,
+            likely_owner=likely_owner,
         )
         blocker = outcome["first_blocker"]
         scope = outcome["command_scope"]
@@ -3248,6 +3326,7 @@ class ProofRunner:
             "schema_version": RCH_OUTCOME_SCHEMA_VERSION,
             "rch_outcome": outcome,
             "validation_frontier_record": frontier,
+            "closeout_summary": closeout_summary_from_frontier(outcome, frontier),
         }
 
     def list_operator_recipes(self) -> Dict[str, Any]:
@@ -3329,6 +3408,18 @@ def main():
     parser.add_argument(
         "--classify-rch-log",
         help="Classify a saved rch output transcript instead of running lane preflight"
+    )
+    parser.add_argument(
+        "--bead-id",
+        "--likely-bead",
+        dest="bead_id",
+        default="",
+        help="Bead id to attach to --classify-rch-log frontier and closeout output"
+    )
+    parser.add_argument(
+        "--likely-owner",
+        default="",
+        help="Owner hint to attach to --classify-rch-log frontier and closeout output"
     )
     parser.add_argument(
         "--list-operator-recipes",
@@ -3516,6 +3607,8 @@ def main():
                 args.command,
                 args.classify_rch_log,
                 args.touched_files,
+                likely_bead=args.bead_id or None,
+                likely_owner=args.likely_owner,
             )
             if args.output == "json":
                 print(json.dumps(result, indent=2))

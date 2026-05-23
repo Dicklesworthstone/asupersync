@@ -6,7 +6,8 @@
   "required_output_fields": [
     "schema_version",
     "rch_outcome",
-    "validation_frontier_record"
+    "validation_frontier_record",
+    "closeout_summary"
   ],
   "required_rch_outcome_fields": [
     "command",
@@ -43,6 +44,26 @@
     "truncated_rustc_output",
     "rch_admission_refusal",
     "rch-control-plane-inconsistent"
+  ],
+  "closeout_summary_schema": "proof-runner-closeout-summary-v1",
+  "required_closeout_summary_fields": [
+    "schema_version",
+    "bead_id",
+    "likely_owner",
+    "proof_lane_id",
+    "decision",
+    "error_class",
+    "proof_claim",
+    "green_proof_claimed",
+    "source_log_path",
+    "source_log_sha256",
+    "remote_exit_status",
+    "rch_admission",
+    "worker",
+    "first_blocker",
+    "affected_files",
+    "beads_comment",
+    "agent_mail_body"
   ],
   "fixtures": [
     {

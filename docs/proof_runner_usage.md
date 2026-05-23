@@ -122,6 +122,26 @@ affected files, and `green_proof_claimed`. Closeout text may only claim a green
 proof when `green_proof_claimed=true` and the cited lane's own verdict supports
 the claim.
 
+Saved RCH transcript classification also emits a deterministic
+`closeout_summary` object for Beads and Agent Mail. Pass `--bead-id` (alias
+`--likely-bead`) and `--likely-owner` when the transcript belongs to a known
+slice:
+
+```bash
+python3 scripts/proof_runner.py \
+  --classify-rch-log tests/fixtures/proof_runner/cargo_error.log \
+  --command "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target cargo test -p asupersync --test proof_runner_contract -- --nocapture" \
+  --touched-files tests/proof_runner_contract.rs \
+  --bead-id asupersync-oxqrae.1 \
+  --likely-owner DustyGorge \
+  --output json
+```
+
+The `closeout_summary.beads_comment` and `closeout_summary.agent_mail_body`
+strings are safe to paste as summaries. They use `NO_GREEN_PROOF` whenever the
+classified transcript is failed or externally blocked, even when a blocker is
+well identified, so closeouts do not accidentally overstate evidence.
+
 ## Available Proof Lanes
 
 The proof runner reads from `artifacts/proof_lane_manifest_v1.json`. Common lanes:
