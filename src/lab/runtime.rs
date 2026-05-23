@@ -1064,12 +1064,12 @@ impl LabRuntime {
                         .state
                         .timer_driver_handle()
                         .map_or(0, |h| h.process_timers());
-                    auto_advances += 1;
-                    total_wakeups += wakeups as u64;
+                    auto_advances = auto_advances.saturating_add(1);
+                    total_wakeups = total_wakeups.saturating_add(wakeups as u64);
                     continue;
                 }
                 // A timer or reactor event is already due at the current time.
-                total_wakeups += self.pump_due_system_events() as u64;
+                total_wakeups = total_wakeups.saturating_add(self.pump_due_system_events() as u64);
                 continue;
             }
 
@@ -1080,7 +1080,7 @@ impl LabRuntime {
 
             // Not quiescent but nothing to advance — try one more step
             // (there may be I/O or finalizers to process)
-            stuck_counter += 1;
+            stuck_counter = stuck_counter.saturating_add(1);
             if stuck_counter > 1000 {
                 break AutoAdvanceTermination::StuckBailout;
             }
@@ -1377,7 +1377,7 @@ impl LabRuntime {
             .position(
                 |event| matches!(event, ReplayEvent::TaskCompleted { outcome, .. } if *outcome > 0),
             )
-            .unwrap_or(replay_trace.events.len() - 1);
+            .unwrap_or(replay_trace.events.len().saturating_sub(1));
 
         crate::trace::minimal_divergent_prefix(&replay_trace, failure_index).events
     }

@@ -108,7 +108,7 @@ const fn build_exp_table() -> [u8; 512] {
     let mut i = 0usize;
     while i < 255 {
         table[i] = val as u8;
-        table[i + 255] = val as u8; // mirror for mod-free lookup
+        table[i.saturating_add(255)] = val as u8; // mirror for mod-free lookup
         val <<= 1;
         if val & 0x100 != 0 {
             val ^= 0x100 | POLY;

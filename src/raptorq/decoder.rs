@@ -374,7 +374,7 @@ impl DenseFactorSignature {
                     continue;
                 }
                 while unsolved_cursor < unsolved.len() && unsolved[unsolved_cursor] < col {
-                    unsolved_cursor += 1;
+                    unsolved_cursor = unsolved_cursor.saturating_add(1);
                 }
                 if unsolved_cursor >= unsolved.len() {
                     break;
@@ -606,7 +606,7 @@ fn first_inconsistent_dense_row(
 ) -> Option<usize> {
     (0..n_rows).find(|&row| {
         let row_off = row * n_cols;
-        a[row_off..row_off + n_cols]
+        a[row_off..row_off.saturating_add(n_cols)]
             .iter()
             .all(|coef| coef.is_zero())
             && b[row].iter().any(|&byte| byte != 0)
@@ -751,7 +751,7 @@ fn sparse_first_dense_columns(
                     continue;
                 }
                 while unsolved_cursor < unsolved.len() && unsolved[unsolved_cursor] < col {
-                    unsolved_cursor += 1;
+                    unsolved_cursor = unsolved_cursor.saturating_add(1);
                 }
                 if unsolved_cursor >= unsolved.len() {
                     break;
@@ -1121,7 +1121,7 @@ fn apply_dense_factor_cache_observation(
 
 fn row_nonzero_count(a: &[Gf256], n_cols: usize, row: usize) -> usize {
     let row_off = row * n_cols;
-    a[row_off..row_off + n_cols]
+    a[row_off..row_off.saturating_add(n_cols)]
         .iter()
         .filter(|coef| !coef.is_zero())
         .count()
