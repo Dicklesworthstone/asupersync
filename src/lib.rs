@@ -253,6 +253,8 @@ pub mod obligation_combinator_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod plan_trace_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod raptorq_deep_dive_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod supervision_genserver_actor_io_fs_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod sync_scheduler_metamorphic_tests;
