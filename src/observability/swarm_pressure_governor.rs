@@ -2058,6 +2058,7 @@ impl SwarmPressureGovernor {
         reason: impl AsRef<str>,
     ) -> SwarmWorkloadLeaseReceipt {
         let transition_reason = reason.as_ref().to_string();
+        let reason = lease.context_reason(&transition_reason);
         SwarmWorkloadLeaseReceipt {
             lease_id: lease.lease_id,
             workload_id: lease.workload_id.clone(),
@@ -2073,8 +2074,8 @@ impl SwarmPressureGovernor {
             expires_at: lease.expires_at,
             terminal_at: lease.terminal_at,
             transition,
-            reason: lease.context_reason(&transition_reason),
             transition_reason,
+            reason,
         }
     }
 
@@ -3863,6 +3864,47 @@ mod tests {
         assert_eq!(
             metrics.live_workload_feedback_reports, 0,
             "region close release should clear matching workload pressure feedback"
+        );
+    }
+
+    #[test]
+    fn test_release_region_workload_leases_marks_region_close_transition() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let region_id = RegionId::new_for_test(54, 2);
+        let request = SwarmWorkloadAdmissionRequest::new(
+            "region-close-transition",
+            SwarmAdmissionOwner::new("DustyGorge"),
+        );
+        let decision = governor
+            .check_workload_admission(&cx, &request)
+            .expect("workload admission should classify");
+        let lease = governor
+            .acquire_workload_lease(region_id, &request, &decision)
+            .expect("admitted workload should acquire a lease");
+
+        let receipts = governor.release_region_workload_leases(region_id);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].lease_id, lease.lease_id);
+        assert_eq!(receipts[0].state, SwarmWorkloadLeaseState::Released);
+        assert_eq!(
+            receipts[0].transition,
+            SwarmWorkloadLeaseTransition::ReleasedByRegionClose
+        );
+        assert_eq!(
+            receipts[0].transition_reason,
+            "workload lease released by region close"
+        );
+        assert!(
+            receipts[0]
+                .reason
+                .contains("workload lease released by region close")
         );
     }
 
