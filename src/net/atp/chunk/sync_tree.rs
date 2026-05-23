@@ -38,7 +38,7 @@ impl ChunkingProfileTrait for SyncTreeProfile {
             return Ok(Vec::new());
         }
 
-        let chunk_plan = Self::chunk_plan(data.len() as u64);
+        let chunk_plan = Self::chunk_plan(utils::data_len_u64(data)?);
         let cdc_params = chunk_plan.cdc_params.as_ref().ok_or_else(|| {
             ChunkingProfileError::InvalidChunkParameters(
                 "sync tree profile requires CDC parameters".to_string(),
@@ -48,11 +48,16 @@ impl ChunkingProfileTrait for SyncTreeProfile {
         // Use enhanced CDC that considers line structure for source code
         let positions = Self::find_enhanced_cdc_boundaries(
             data,
-            cdc_params.window_size as usize,
+            usize::try_from(cdc_params.window_size).map_err(|_| {
+                ChunkingProfileError::InvalidChunkParameters(format!(
+                    "CDC window size {} exceeds usize::MAX",
+                    cdc_params.window_size
+                ))
+            })?,
             chunk_plan.target_chunk_size,
             chunk_plan.min_chunk_size,
             chunk_plan.max_chunk_size,
-        );
+        )?;
 
         let boundaries = utils::positions_to_boundaries(
             data,
@@ -67,7 +72,7 @@ impl ChunkingProfileTrait for SyncTreeProfile {
                     similarity_score,
                 }
             },
-        );
+        )?;
 
         utils::validate_boundary_ordering(&boundaries)?;
         Ok(boundaries)
@@ -174,9 +179,10 @@ impl SyncTreeProfile {
         avg_chunk_size: u64,
         min_chunk_size: u64,
         max_chunk_size: u64,
-    ) -> Vec<u64> {
-        if data.len() < min_chunk_size as usize {
-            return vec![data.len() as u64];
+    ) -> Result<Vec<u64>, ChunkingProfileError> {
+        let data_len = utils::data_len_u64(data)?;
+        if data_len < min_chunk_size {
+            return Ok(vec![data_len]);
         }
 
         let mut boundaries = Vec::new();
@@ -188,7 +194,13 @@ impl SyncTreeProfile {
 
         for (i, &byte) in data.iter().enumerate() {
             let hash = rolling_hash.update(byte);
-            let current_pos = i as u64 + 1;
+            let current_pos = utils::usize_to_u64(i, "sync-tree boundary index")?
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ChunkingProfileError::InvalidChunkParameters(format!(
+                        "sync-tree boundary position overflow at index {i}"
+                    ))
+                })?;
             let chunk_size_since_last = current_pos - last_boundary;
 
             // Check for boundary conditions
@@ -209,11 +221,11 @@ impl SyncTreeProfile {
         }
 
         // Add final boundary
-        if last_boundary < data.len() as u64 {
-            boundaries.push(data.len() as u64);
+        if last_boundary < data_len {
+            boundaries.push(data_len);
         }
 
-        boundaries
+        Ok(boundaries)
     }
 
     /// Enhanced boundary detection that considers code structure.
@@ -384,7 +396,7 @@ impl SyncTreeProfile {
         let has_code = Self::has_code_patterns(data);
 
         // Adjust chunk sizes based on content analysis
-        let base_plan = Self::chunk_plan(data.len() as u64);
+        let base_plan = Self::chunk_plan(u64::try_from(data.len()).unwrap_or(u64::MAX));
 
         if text_ratio > 0.8 && has_code {
             // High-quality source code: use smaller chunks for better deduplication

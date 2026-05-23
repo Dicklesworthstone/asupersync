@@ -39,8 +39,8 @@ impl ChunkingProfileTrait for SparseImageProfile {
             return Ok(Vec::new());
         }
 
-        let chunk_plan = Self::chunk_plan(data.len() as u64);
-        let sparse_regions = Self::detect_sparse_regions(data);
+        let chunk_plan = Self::chunk_plan(utils::data_len_u64(data)?);
+        let sparse_regions = Self::detect_sparse_regions(data)?;
 
         let positions = Self::find_sparse_aware_boundaries(data, &chunk_plan, &sparse_regions)?;
 
@@ -57,7 +57,7 @@ impl ChunkingProfileTrait for SparseImageProfile {
                     hole_metadata,
                 }
             },
-        );
+        )?;
 
         utils::validate_boundary_ordering(&boundaries)?;
         Ok(boundaries)
@@ -188,7 +188,7 @@ impl SparseImageProfile {
     }
 
     /// Detect sparse regions in the data.
-    fn detect_sparse_regions(data: &[u8]) -> Vec<SparseRegion> {
+    fn detect_sparse_regions(data: &[u8]) -> Result<Vec<SparseRegion>, ChunkingProfileError> {
         let mut regions = Vec::new();
         let min_hole_size = 4096usize; // Minimum 4KB hole to be worth detecting
 
@@ -198,10 +198,13 @@ impl SparseImageProfile {
             let scan_size = remaining.min(1024 * 1024); // Scan in 1MB chunks
             let scan_data = &data[i..i + scan_size];
 
-            let region = Self::analyze_region_type(scan_data, i as u64);
+            let region = Self::analyze_region_type(
+                scan_data,
+                utils::usize_to_u64(i, "sparse scan offset")?,
+            )?;
 
-            let next_start = region.start as usize;
-            let next_end = region.end as usize;
+            let next_start = utils::u64_to_usize(region.start, "sparse region start")?;
+            let next_end = utils::u64_to_usize(region.end, "sparse region end")?;
 
             // Only create regions for significant sparse areas
             if region.region_type != SparseRegionType::DataFilled
@@ -218,47 +221,64 @@ impl SparseImageProfile {
             }
         }
 
-        regions
+        Ok(regions)
     }
 
     /// Analyze a region to determine its type and characteristics.
-    fn analyze_region_type(data: &[u8], start_offset: u64) -> SparseRegion {
+    fn analyze_region_type(
+        data: &[u8],
+        start_offset: u64,
+    ) -> Result<SparseRegion, ChunkingProfileError> {
         if data.is_empty() {
-            return SparseRegion {
+            return Ok(SparseRegion {
                 start: start_offset,
                 end: start_offset,
                 region_type: SparseRegionType::DataFilled,
                 fill_pattern: Vec::new(),
-            };
+            });
         }
 
         // Check for zero-filled region
         if let Some(zero_length) = Self::find_zero_run(data) {
-            return SparseRegion {
+            return Ok(SparseRegion {
                 start: start_offset,
-                end: start_offset + zero_length,
+                end: start_offset.checked_add(zero_length).ok_or_else(|| {
+                    ChunkingProfileError::SparseHoleDetectionFailed(
+                        "zero-filled sparse region end overflow".to_string(),
+                    )
+                })?,
                 region_type: SparseRegionType::ZeroFilled,
                 fill_pattern: vec![0],
-            };
+            });
         }
 
         // Check for pattern-filled region
         if let Some((pattern, pattern_length)) = Self::find_pattern_run(data) {
-            return SparseRegion {
+            return Ok(SparseRegion {
                 start: start_offset,
-                end: start_offset + pattern_length,
+                end: start_offset.checked_add(pattern_length).ok_or_else(|| {
+                    ChunkingProfileError::SparseHoleDetectionFailed(
+                        "pattern-filled sparse region end overflow".to_string(),
+                    )
+                })?,
                 region_type: SparseRegionType::PatternFilled,
                 fill_pattern: pattern,
-            };
+            });
         }
 
         // Default to data-filled region
-        SparseRegion {
+        Ok(SparseRegion {
             start: start_offset,
-            end: start_offset + data.len() as u64,
+            end: start_offset
+                .checked_add(utils::data_len_u64(data)?)
+                .ok_or_else(|| {
+                    ChunkingProfileError::SparseHoleDetectionFailed(
+                        "data sparse region end overflow".to_string(),
+                    )
+                })?,
             region_type: SparseRegionType::DataFilled,
             fill_pattern: Vec::new(),
-        }
+        })
     }
 
     /// Find run of zero bytes starting from the beginning.
@@ -268,7 +288,7 @@ impl SparseImageProfile {
         let zero_count = data.iter().take_while(|&&b| b == 0).count();
 
         if zero_count >= min_run_length {
-            Some(zero_count as u64)
+            u64::try_from(zero_count).ok()
         } else {
             None
         }
@@ -283,20 +303,24 @@ impl SparseImageProfile {
         for pattern_size in 1..=max_pattern_size.min(data.len() / 4) {
             let pattern = &data[0..pattern_size];
 
-            let mut run_length = 0;
-            let mut pos = 0;
+            let mut run_length: usize = 0;
+            let mut pos: usize = 0;
 
-            while pos + pattern_size <= data.len() {
-                if &data[pos..pos + pattern_size] == pattern {
-                    run_length += pattern_size;
-                    pos += pattern_size;
+            while let Some(end) = pos.checked_add(pattern_size) {
+                if end > data.len() {
+                    break;
+                }
+
+                if &data[pos..end] == pattern {
+                    run_length = run_length.checked_add(pattern_size)?;
+                    pos = end;
                 } else {
                     break;
                 }
             }
 
             if run_length >= min_run_length {
-                return Some((pattern.to_vec(), run_length as u64));
+                return Some((pattern.to_vec(), u64::try_from(run_length).ok()?));
             }
         }
 
@@ -310,9 +334,11 @@ impl SparseImageProfile {
         sparse_regions: &[SparseRegion],
     ) -> Result<Vec<u64>, ChunkingProfileError> {
         let mut boundaries = Vec::new();
-        let target_size = chunk_plan.target_chunk_size as usize;
-        let min_size = chunk_plan.min_chunk_size as usize;
-        let max_size = chunk_plan.max_chunk_size as usize;
+        let target_size = utils::u64_to_usize(chunk_plan.target_chunk_size, "target chunk size")?;
+        let min_size = utils::u64_to_usize(chunk_plan.min_chunk_size, "minimum chunk size")?;
+        let max_size = utils::u64_to_usize(chunk_plan.max_chunk_size, "maximum chunk size")?;
+        let merge_threshold =
+            utils::checked_usize_add(target_size, min_size, "sparse remainder threshold")?;
 
         let mut current_pos = 0;
 
@@ -320,24 +346,34 @@ impl SparseImageProfile {
             let remaining = data.len() - current_pos;
 
             // Check if we're at the start of a sparse region
-            let sparse_region = sparse_regions
-                .iter()
-                .find(|region| region.start == current_pos as u64);
+            let sparse_region = sparse_regions.iter().find(|region| {
+                utils::usize_to_u64(current_pos, "sparse current position")
+                    .is_ok_and(|current| region.start == current)
+            });
 
             let chunk_size = if let Some(region) = sparse_region {
                 // Handle sparse region specially
-                let region_size = (region.end - region.start) as usize;
+                let region_size = region
+                    .end
+                    .checked_sub(region.start)
+                    .ok_or_else(|| {
+                        ChunkingProfileError::SparseHoleDetectionFailed(format!(
+                            "sparse region end {} is before start {}",
+                            region.end, region.start
+                        ))
+                    })
+                    .and_then(|size| utils::u64_to_usize(size, "sparse region size"))?;
                 match region.region_type {
                     SparseRegionType::ZeroFilled | SparseRegionType::PatternFilled => {
                         // For sparse regions, use larger chunks to skip over holes efficiently
-                        region_size.min(max_size)
+                        region_size.min(max_size).min(remaining)
                     }
                     SparseRegionType::DataFilled => {
                         // For data regions, use normal chunking
-                        target_size.min(region_size).max(min_size)
+                        target_size.min(region_size).max(min_size).min(remaining)
                     }
                 }
-            } else if remaining <= target_size + min_size {
+            } else if remaining <= merge_threshold {
                 // Take all remaining data
                 remaining
             } else {
@@ -345,8 +381,12 @@ impl SparseImageProfile {
                 target_size
             };
 
-            current_pos += chunk_size;
-            boundaries.push(current_pos as u64);
+            current_pos = current_pos.checked_add(chunk_size).ok_or_else(|| {
+                ChunkingProfileError::InvalidChunkParameters(
+                    "sparse chunk position overflow".to_string(),
+                )
+            })?;
+            boundaries.push(utils::usize_to_u64(current_pos, "sparse chunk boundary")?);
         }
 
         Ok(boundaries)
@@ -359,7 +399,8 @@ impl SparseImageProfile {
         sparse_regions: &[SparseRegion],
     ) -> (bool, Option<SparseHoleMetadata>) {
         // Check if this chunk overlaps with any sparse regions
-        let chunk_end = chunk_offset + chunk_data.len() as u64;
+        let chunk_end =
+            chunk_offset.saturating_add(u64::try_from(chunk_data.len()).unwrap_or(u64::MAX));
 
         for region in sparse_regions {
             if region.start < chunk_end && region.end > chunk_offset {
@@ -398,7 +439,7 @@ impl SparseImageProfile {
         // Check for inline sparsity within the chunk
         if Self::is_chunk_mostly_sparse(chunk_data) {
             let hole_metadata = SparseHoleMetadata {
-                hole_size: chunk_data.len() as u64,
+                hole_size: u64::try_from(chunk_data.len()).unwrap_or(u64::MAX),
                 hole_type: "inline-sparse".to_string(),
                 attributes: BTreeMap::new(),
             };
@@ -439,11 +480,15 @@ impl SparseImageProfile {
         let mut matches = 0;
         let mut pos = pattern_size;
 
-        while pos + pattern_size <= data.len() {
-            if &data[pos..pos + pattern_size] == pattern {
+        while let Some(end) = pos.checked_add(pattern_size) {
+            if end > data.len() {
+                break;
+            }
+
+            if &data[pos..end] == pattern {
                 matches += 1;
             }
-            pos += pattern_size;
+            pos = end;
         }
 
         let total_blocks = data.len() / pattern_size;
@@ -462,7 +507,7 @@ impl SparseImageProfile {
         let mut sparse_size = 0u64;
 
         for boundary in boundaries {
-            total_size += boundary.size_bytes;
+            total_size = total_size.saturating_add(boundary.size_bytes);
 
             if let Some(ChunkMetadata::SparseImage {
                 is_sparse_hole,
@@ -472,9 +517,9 @@ impl SparseImageProfile {
             {
                 if *is_sparse_hole {
                     if let Some(metadata) = hole_metadata {
-                        sparse_size += metadata.hole_size;
+                        sparse_size = sparse_size.saturating_add(metadata.hole_size);
                     } else {
-                        sparse_size += boundary.size_bytes;
+                        sparse_size = sparse_size.saturating_add(boundary.size_bytes);
                     }
                 }
             }
@@ -600,7 +645,7 @@ mod tests {
         data.extend(vec![2u8; 1000]); // More data
         data.extend(b"TEST".repeat(2000)); // Pattern hole
 
-        let regions = SparseImageProfile::detect_sparse_regions(&data);
+        let regions = SparseImageProfile::detect_sparse_regions(&data).unwrap();
         assert!(regions.len() >= 2); // Should find zero and pattern regions
 
         // Check for zero region

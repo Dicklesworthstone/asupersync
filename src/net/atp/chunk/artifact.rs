@@ -42,7 +42,7 @@ impl ChunkingProfileTrait for ArtifactProfile {
             return Ok(Vec::new());
         }
 
-        let chunk_plan = Self::chunk_plan(data.len() as u64);
+        let chunk_plan = Self::chunk_plan(utils::data_len_u64(data)?);
         let cdc_params = chunk_plan.cdc_params.as_ref().ok_or_else(|| {
             ChunkingProfileError::InvalidChunkParameters(
                 "artifact profile requires deterministic CDC parameters".to_string(),
@@ -52,7 +52,12 @@ impl ChunkingProfileTrait for ArtifactProfile {
         // Use deterministic boundary detection
         let positions = Self::find_deterministic_boundaries(
             data,
-            cdc_params.window_size as usize,
+            usize::try_from(cdc_params.window_size).map_err(|_| {
+                ChunkingProfileError::InvalidChunkParameters(format!(
+                    "CDC window size {} exceeds usize::MAX",
+                    cdc_params.window_size
+                ))
+            })?,
             chunk_plan.target_chunk_size,
             chunk_plan.min_chunk_size,
             chunk_plan.max_chunk_size,
@@ -72,7 +77,7 @@ impl ChunkingProfileTrait for ArtifactProfile {
                     proof_strength,
                 }
             },
-        );
+        )?;
 
         utils::validate_boundary_ordering(&boundaries)?;
         Ok(boundaries)
@@ -188,8 +193,9 @@ impl ArtifactProfile {
         min_chunk_size: u64,
         max_chunk_size: u64,
     ) -> Result<Vec<u64>, ChunkingProfileError> {
-        if data.len() < min_chunk_size as usize {
-            return Ok(vec![data.len() as u64]);
+        let data_len = utils::data_len_u64(data)?;
+        if data_len < min_chunk_size {
+            return Ok(vec![data_len]);
         }
 
         let mut boundaries = Vec::new();
@@ -227,8 +233,8 @@ impl ArtifactProfile {
         }
 
         // Add final boundary
-        if last_boundary < data.len() as u64 {
-            boundaries.push(data.len() as u64);
+        if last_boundary < data_len {
+            boundaries.push(data_len);
         }
 
         Ok(boundaries)
@@ -644,7 +650,7 @@ impl ArtifactProfile {
         let mut proof_strength_distribution = std::collections::HashMap::new();
 
         for boundary in boundaries {
-            total_size += boundary.size_bytes;
+            total_size = total_size.saturating_add(boundary.size_bytes);
             unique_hashes.insert(boundary.content_hash);
 
             if let Some(ChunkMetadata::Artifact { proof_strength, .. }) = &boundary.metadata {

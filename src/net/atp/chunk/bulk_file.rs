@@ -41,9 +41,12 @@ impl ChunkingProfileTrait for BulkFileProfile {
             return Ok(Vec::new());
         }
 
-        let chunk_plan = Self::chunk_plan(data.len() as u64);
-        let target_size = chunk_plan.target_chunk_size as usize;
-        let min_size = chunk_plan.min_chunk_size as usize;
+        let data_len = utils::data_len_u64(data)?;
+        let chunk_plan = Self::chunk_plan(data_len);
+        let target_size = utils::u64_to_usize(chunk_plan.target_chunk_size, "target chunk size")?;
+        let min_size = utils::u64_to_usize(chunk_plan.min_chunk_size, "minimum chunk size")?;
+        let merge_threshold =
+            utils::checked_usize_add(target_size, min_size, "bulk remainder threshold")?;
 
         let mut positions = Vec::new();
         let mut current_pos = 0usize;
@@ -52,14 +55,18 @@ impl ChunkingProfileTrait for BulkFileProfile {
             let remaining = data.len() - current_pos;
 
             // Use target size, but avoid tiny remainder chunks
-            let chunk_size = if remaining <= target_size + min_size {
+            let chunk_size = if remaining <= merge_threshold {
                 remaining // Take all remaining data
             } else {
                 target_size
             };
 
-            current_pos += chunk_size;
-            positions.push(current_pos as u64);
+            current_pos = current_pos.checked_add(chunk_size).ok_or_else(|| {
+                ChunkingProfileError::InvalidChunkParameters(
+                    "bulk chunk position overflow".to_string(),
+                )
+            })?;
+            positions.push(utils::usize_to_u64(current_pos, "bulk chunk boundary")?);
         }
 
         let boundaries = utils::positions_to_boundaries(
@@ -67,10 +74,10 @@ impl ChunkingProfileTrait for BulkFileProfile {
             &positions,
             ChunkStrategy::FixedSize,
             |_index, _offset, size, _chunk_data| {
-                let throughput_tier = Self::determine_throughput_tier(size, data.len() as u64);
+                let throughput_tier = Self::determine_throughput_tier(size, data_len);
                 ChunkMetadata::BulkFile { throughput_tier }
             },
-        );
+        )?;
 
         utils::validate_boundary_ordering(&boundaries)?;
         Ok(boundaries)
@@ -216,7 +223,7 @@ impl BulkFileProfile {
         latency_ms: u64,
     ) -> std::time::Duration {
         let safe_target = chunk_plan.target_chunk_size.max(1);
-        let num_chunks = (object_size_bytes + safe_target - 1) / safe_target;
+        let num_chunks = object_size_bytes.saturating_add(safe_target - 1) / safe_target;
 
         let transfer_time_ms =
             (object_size_bytes as f64 * 8.0) / (bandwidth_mbps.max(1) as f64 * 1000.0);

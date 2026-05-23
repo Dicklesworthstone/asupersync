@@ -38,7 +38,7 @@ impl ChunkingProfileTrait for StreamProfile {
             return Ok(Vec::new());
         }
 
-        let chunk_plan = Self::chunk_plan(data.len() as u64);
+        let chunk_plan = Self::chunk_plan(utils::data_len_u64(data)?);
         let positions = Self::find_stream_boundaries(data, &chunk_plan)?;
 
         let boundaries = utils::positions_to_boundaries(
@@ -55,7 +55,7 @@ impl ChunkingProfileTrait for StreamProfile {
                     early_consumption_safe,
                 }
             },
-        );
+        )?;
 
         utils::validate_boundary_ordering(&boundaries)?;
         Self::validate_stream_properties(&boundaries)?;
@@ -151,8 +151,10 @@ impl StreamProfile {
         data: &[u8],
         chunk_plan: &ChunkPlan,
     ) -> Result<Vec<u64>, ChunkingProfileError> {
-        let target_size = chunk_plan.target_chunk_size as usize;
-        let min_size = chunk_plan.min_chunk_size as usize;
+        let target_size = utils::u64_to_usize(chunk_plan.target_chunk_size, "target chunk size")?;
+        let min_size = utils::u64_to_usize(chunk_plan.min_chunk_size, "minimum chunk size")?;
+        let merge_threshold =
+            utils::checked_usize_add(target_size, min_size, "stream remainder threshold")?;
 
         let mut boundaries = Vec::new();
         let mut pos = 0;
@@ -161,14 +163,18 @@ impl StreamProfile {
             let remaining = data.len() - pos;
 
             // Use fixed size, but handle remainder gracefully
-            let chunk_size = if remaining <= target_size + min_size {
+            let chunk_size = if remaining <= merge_threshold {
                 remaining // Take all remaining data to avoid tiny last chunk
             } else {
                 target_size
             };
 
-            pos += chunk_size;
-            boundaries.push(pos as u64);
+            pos = pos.checked_add(chunk_size).ok_or_else(|| {
+                ChunkingProfileError::InvalidChunkParameters(
+                    "stream chunk position overflow".to_string(),
+                )
+            })?;
+            boundaries.push(utils::usize_to_u64(pos, "stream chunk boundary")?);
         }
 
         Ok(boundaries)
@@ -188,7 +194,11 @@ impl StreamProfile {
         }
 
         // Last chunk requires all previous chunks
-        if chunk_index as usize >= total_chunks.saturating_sub(1) {
+        let is_last_chunk = match usize::try_from(chunk_index) {
+            Ok(index) => index >= total_chunks.saturating_sub(1),
+            Err(_) => true,
+        };
+        if is_last_chunk {
             return false;
         }
 
@@ -367,7 +377,7 @@ impl StreamProfile {
 
         let completion_ratio = if let Some(total_size) = total_expected_size {
             if total_size > 0 {
-                (boundary.byte_offset + boundary.size_bytes) as f64 / total_size as f64
+                boundary.byte_offset.saturating_add(boundary.size_bytes) as f64 / total_size as f64
             } else {
                 1.0
             }
@@ -409,7 +419,9 @@ impl StreamProfile {
             std::time::Duration::from_millis((first_chunk_transfer_ms + latency_ms as f64) as u64);
 
         // Full stream latency
-        let total_size: u64 = boundaries.iter().map(|b| b.size_bytes).sum();
+        let total_size = boundaries.iter().fold(0u64, |acc, boundary| {
+            acc.saturating_add(boundary.size_bytes)
+        });
         let total_transfer_ms = (total_size as f64 * 8.0) / (safe_bw * 1000.0);
         let total_latency_overhead_ms = boundaries.len() as f64 * latency_ms as f64;
         let full_stream_latency = std::time::Duration::from_millis(
@@ -418,10 +430,9 @@ impl StreamProfile {
 
         // Early consumption latency (chunks available for early consumption)
         let early_chunks = Self::get_early_consumption_chunks(boundaries);
-        let early_consumption_size: u64 = early_chunks
-            .iter()
-            .map(|&idx| boundaries[idx].size_bytes)
-            .sum();
+        let early_consumption_size = early_chunks.iter().fold(0u64, |acc, &idx| {
+            acc.saturating_add(boundaries[idx].size_bytes)
+        });
         let early_transfer_ms = (early_consumption_size as f64 * 8.0) / (safe_bw * 1000.0);
         let early_latency_overhead_ms = early_chunks.len() as f64 * latency_ms as f64;
         let early_consumption_latency = std::time::Duration::from_millis(
@@ -440,7 +451,9 @@ impl StreamProfile {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or(std::time::Duration::from_secs(0))
-            .as_nanos() as u64
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX)
     }
 
     /// Validate that stream chunks can be processed incrementally.

@@ -39,6 +39,42 @@ pub mod utils {
         hasher.finalize().into()
     }
 
+    /// Convert an input length to the on-wire u64 offset domain.
+    pub fn data_len_u64(data: &[u8]) -> Result<u64, ChunkingProfileError> {
+        usize_to_u64(data.len(), "input length")
+    }
+
+    /// Convert a u64 chunk-plan size to a host slice index.
+    pub fn u64_to_usize(value: u64, label: &str) -> Result<usize, ChunkingProfileError> {
+        usize::try_from(value).map_err(|_| {
+            ChunkingProfileError::InvalidChunkParameters(format!(
+                "{label} {value} exceeds usize::MAX"
+            ))
+        })
+    }
+
+    /// Convert a host slice index or length to the on-wire u64 offset domain.
+    pub fn usize_to_u64(value: usize, label: &str) -> Result<u64, ChunkingProfileError> {
+        u64::try_from(value).map_err(|_| {
+            ChunkingProfileError::InvalidChunkParameters(format!(
+                "{label} {value} exceeds u64::MAX"
+            ))
+        })
+    }
+
+    /// Checked addition for host-sized chunk arithmetic.
+    pub fn checked_usize_add(
+        lhs: usize,
+        rhs: usize,
+        label: &str,
+    ) -> Result<usize, ChunkingProfileError> {
+        lhs.checked_add(rhs).ok_or_else(|| {
+            ChunkingProfileError::InvalidChunkParameters(format!(
+                "{label} overflows usize: {lhs} + {rhs}"
+            ))
+        })
+    }
+
     /// Rolling hash implementation for content-defined chunking.
     pub struct RollingHash {
         window_size: usize,
@@ -96,9 +132,10 @@ pub mod utils {
         avg_chunk_size: u64,
         min_chunk_size: u64,
         max_chunk_size: u64,
-    ) -> Vec<u64> {
-        if data.len() < min_chunk_size as usize {
-            return vec![data.len() as u64];
+    ) -> Result<Vec<u64>, ChunkingProfileError> {
+        let data_len = data_len_u64(data)?;
+        if data_len < min_chunk_size {
+            return Ok(vec![data_len]);
         }
 
         let mut boundaries = Vec::new();
@@ -110,7 +147,13 @@ pub mod utils {
 
         for (i, &byte) in data.iter().enumerate() {
             let hash = rolling_hash.update(byte);
-            let current_pos = i as u64 + 1;
+            let current_pos = usize_to_u64(i, "CDC boundary index")?
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ChunkingProfileError::InvalidChunkParameters(format!(
+                        "CDC boundary position overflow at index {i}"
+                    ))
+                })?;
             let chunk_size_since_last = current_pos - last_boundary;
 
             // Check for boundary conditions
@@ -131,11 +174,11 @@ pub mod utils {
         }
 
         // Add final boundary if not already present
-        if last_boundary < data.len() as u64 {
-            boundaries.push(data.len() as u64);
+        if last_boundary < data_len {
+            boundaries.push(data_len);
         }
 
-        boundaries
+        Ok(boundaries)
     }
 
     /// Validate that chunk boundaries are properly ordered and non-overlapping.
@@ -162,14 +205,27 @@ pub mod utils {
                 )));
             }
 
-            if boundary.index != i as u32 {
+            let expected_index = u32::try_from(i).map_err(|_| {
+                ChunkingProfileError::InvalidChunkParameters(format!(
+                    "boundary index {i} exceeds u32::MAX"
+                ))
+            })?;
+
+            if boundary.index != expected_index {
                 return Err(ChunkingProfileError::InvalidChunkParameters(format!(
                     "boundary {} has incorrect index: expected {}, got {}",
-                    i, i, boundary.index
+                    i, expected_index, boundary.index
                 )));
             }
 
-            last_end = boundary.byte_offset + boundary.size_bytes;
+            last_end = boundary
+                .byte_offset
+                .checked_add(boundary.size_bytes)
+                .ok_or_else(|| {
+                    ChunkingProfileError::InvalidChunkParameters(format!(
+                        "boundary {i} overflows end offset"
+                    ))
+                })?;
         }
 
         Ok(())
@@ -181,30 +237,61 @@ pub mod utils {
         positions: &[u64],
         strategy: ChunkStrategy,
         metadata_fn: impl Fn(u32, u64, u64, &[u8]) -> ChunkMetadata,
-    ) -> Vec<ChunkBoundary> {
+    ) -> Result<Vec<ChunkBoundary>, ChunkingProfileError> {
         let mut boundaries = Vec::new();
         let mut last_pos = 0u64;
+        let data_len = data_len_u64(data)?;
 
         for (index, &pos) in positions.iter().enumerate() {
-            let chunk_start = last_pos as usize;
-            let chunk_end = pos as usize;
-            let chunk_data = &data[chunk_start..chunk_end];
-            let chunk_size = pos - last_pos;
+            if pos <= last_pos {
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "position {index} is not strictly increasing: previous {last_pos}, got {pos}"
+                )));
+            }
+
+            if pos > data_len {
+                return Err(ChunkingProfileError::InvalidChunkParameters(format!(
+                    "position {index} exceeds data length: position {pos}, len {data_len}"
+                )));
+            }
+
+            let boundary_index = u32::try_from(index).map_err(|_| {
+                ChunkingProfileError::InvalidChunkParameters(format!(
+                    "position index {index} exceeds u32::MAX"
+                ))
+            })?;
+            let chunk_start = u64_to_usize(last_pos, "chunk start")?;
+            let chunk_end = u64_to_usize(pos, "chunk end")?;
+            let chunk_data = data.get(chunk_start..chunk_end).ok_or_else(|| {
+                ChunkingProfileError::InvalidChunkParameters(format!(
+                    "chunk slice {chunk_start}..{chunk_end} is outside input"
+                ))
+            })?;
+            let chunk_size = pos.checked_sub(last_pos).ok_or_else(|| {
+                ChunkingProfileError::InvalidChunkParameters(format!(
+                    "position {index} underflows chunk size"
+                ))
+            })?;
 
             let boundary = ChunkBoundary {
-                index: index as u32,
+                index: boundary_index,
                 byte_offset: last_pos,
                 size_bytes: chunk_size,
                 content_hash: compute_chunk_hash(chunk_data),
                 strategy,
-                metadata: Some(metadata_fn(index as u32, last_pos, chunk_size, chunk_data)),
+                metadata: Some(metadata_fn(
+                    boundary_index,
+                    last_pos,
+                    chunk_size,
+                    chunk_data,
+                )),
             };
 
             boundaries.push(boundary);
             last_pos = pos;
         }
 
-        boundaries
+        Ok(boundaries)
     }
 
     #[cfg(test)]
@@ -246,7 +333,8 @@ pub mod utils {
                 1024, // avg chunk size
                 512,  // min chunk size
                 2048, // max chunk size
-            );
+            )
+            .unwrap();
 
             // Check that all chunks respect size constraints
             let mut last_pos = 0u64;
@@ -317,6 +405,58 @@ pub mod utils {
             ];
 
             assert!(validate_boundary_ordering(&invalid_boundaries).is_err());
+        }
+
+        #[test]
+        fn boundary_ordering_rejects_end_offset_overflow() {
+            let first = ChunkBoundary {
+                index: 0,
+                byte_offset: 0,
+                size_bytes: u64::MAX,
+                content_hash: [1; 32],
+                strategy: ChunkStrategy::FixedSize,
+                metadata: Some(ChunkMetadata::BulkFile {
+                    throughput_tier: ThroughputTier::Standard,
+                }),
+            };
+            let overflowing_second = ChunkBoundary {
+                index: 1,
+                byte_offset: u64::MAX,
+                size_bytes: 1,
+                content_hash: [2; 32],
+                strategy: ChunkStrategy::FixedSize,
+                metadata: Some(ChunkMetadata::BulkFile {
+                    throughput_tier: ThroughputTier::Standard,
+                }),
+            };
+
+            let result = validate_boundary_ordering(&[first, overflowing_second]);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn positions_to_boundaries_rejects_invalid_positions() {
+            let data = b"abcdefgh";
+
+            let descending = positions_to_boundaries(
+                data,
+                &[4, 3],
+                ChunkStrategy::FixedSize,
+                |_index, _offset, _size, _chunk_data| ChunkMetadata::BulkFile {
+                    throughput_tier: ThroughputTier::Standard,
+                },
+            );
+            assert!(descending.is_err());
+
+            let out_of_range = positions_to_boundaries(
+                data,
+                &[9],
+                ChunkStrategy::FixedSize,
+                |_index, _offset, _size, _chunk_data| ChunkMetadata::BulkFile {
+                    throughput_tier: ThroughputTier::Standard,
+                },
+            );
+            assert!(out_of_range.is_err());
         }
 
         #[test]
