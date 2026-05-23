@@ -2568,3 +2568,360 @@ fn mr_dense_row_operation_consistency() {
         }
     });
 }
+
+// ============================================================================
+// Phase 3: Codec Round-Trip and Bytes Operation Metamorphic Relations
+// ============================================================================
+
+/// MR-CodecRoundTripIdentity: decode(encode(x)) = x for valid inputs.
+///
+/// Property: Encoding then decoding should recover original data.
+///
+/// Why this catches bugs:
+///   - Codec state corruption during encode/decode cycles
+///   - Data loss or transformation bugs
+///   - Inconsistent frame boundaries in delimited codecs
+#[test]
+fn mr_codec_roundtrip_identity() {
+    use crate::codec::{BytesCodec, LinesCodec, LengthDelimitedCodec};
+    use crate::codec::{Decoder, Encoder};
+    use crate::bytes::{Bytes, BytesMut};
+    use std::io;
+
+    proptest!(|(data: Vec<u8>)| {
+        if !data.is_empty() {
+            // Test BytesCodec round-trip
+            {
+                let codec = BytesCodec::new();
+                let mut encode_buf = BytesMut::new();
+
+                if let Ok(()) = codec.encode(Bytes::from(data.clone()), &mut encode_buf) {
+                    let mut decode_result = encode_buf.freeze();
+                    match codec.decode(&mut decode_result) {
+                        Ok(Some(decoded)) => {
+                            prop_assert_eq!(
+                                decoded.as_ref(), data.as_slice(),
+                                "BytesCodec round-trip failed: data corruption detected"
+                            );
+                        }
+                        Ok(None) => {
+                            prop_assert!(false, "BytesCodec decode returned None unexpectedly");
+                        }
+                        Err(e) => {
+                            prop_assert!(false, "BytesCodec decode failed: {:?}", e);
+                        }
+                    }
+                }
+            }
+
+            // Test LengthDelimitedCodec round-trip
+            {
+                let codec = LengthDelimitedCodec::new();
+                let mut encode_buf = BytesMut::new();
+
+                if let Ok(()) = codec.encode(Bytes::from(data.clone()), &mut encode_buf) {
+                    let mut decode_input = encode_buf.freeze();
+                    match codec.decode(&mut decode_input) {
+                        Ok(Some(decoded)) => {
+                            prop_assert_eq!(
+                                decoded.as_ref(), data.as_slice(),
+                                "LengthDelimitedCodec round-trip failed: data corruption"
+                            );
+                        }
+                        Ok(None) => {
+                            // Incomplete frame is acceptable for this codec
+                        }
+                        Err(e) => {
+                            prop_assert!(false, "LengthDelimitedCodec decode failed: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// MR-CodecStreamingConsistency: Chunked decoding equals full decoding.
+///
+/// Property: Decoding data in chunks should produce the same result as decoding all at once.
+///
+/// Why this catches bugs:
+///   - State management issues in streaming decoders
+///   - Frame boundary detection bugs
+///   - Partial buffer handling errors
+#[test]
+fn mr_codec_streaming_consistency() {
+    use crate::codec::{LengthDelimitedCodec, Decoder};
+    use crate::bytes::{Bytes, BytesMut};
+
+    proptest!(|(
+        data: Vec<u8>,
+        chunk_size in 1usize..=100usize,
+    )| {
+        if !data.is_empty() && chunk_size > 0 {
+            let codec = LengthDelimitedCodec::new();
+            let mut encode_buf = BytesMut::new();
+
+            // First encode the data
+            if let Ok(()) = codec.encode(Bytes::from(data.clone()), &mut encode_buf) {
+                let encoded_data = encode_buf.freeze();
+
+                // Full decode
+                let full_codec = LengthDelimitedCodec::new();
+                let mut full_input = encoded_data.clone();
+                let full_result = full_codec.decode(&mut full_input);
+
+                // Chunked decode
+                let chunked_codec = LengthDelimitedCodec::new();
+                let mut chunked_results = Vec::new();
+                let chunks: Vec<Bytes> = encoded_data
+                    .chunks(chunk_size)
+                    .map(|chunk| Bytes::copy_from_slice(chunk))
+                    .collect();
+
+                for chunk in chunks {
+                    let mut chunk_input = chunk;
+                    if let Ok(Some(decoded)) = chunked_codec.decode(&mut chunk_input) {
+                        chunked_results.push(decoded);
+                    }
+                }
+
+                match (&full_result, chunked_results.len()) {
+                    (Ok(Some(full_decoded)), 1) => {
+                        prop_assert_eq!(
+                            full_decoded.as_ref(), chunked_results[0].as_ref(),
+                            "Codec streaming consistency violation: chunked decode differs from full decode"
+                        );
+                        prop_assert_eq!(
+                            full_decoded.as_ref(), data.as_slice(),
+                            "Codec streaming sanity check failed: full decode corrupted data"
+                        );
+                    }
+                    (Ok(Some(_)), n) if n != 1 => {
+                        prop_assert!(false,
+                            "Streaming consistency: expected 1 chunk result, got {}",
+                            n
+                        );
+                    }
+                    (Ok(None), 0) => {
+                        // Both incomplete is acceptable
+                    }
+                    _ => {
+                        // Other mismatches acceptable due to frame boundaries
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// MR-BytesSplitComposition: split_to(n) + remainder = original.
+///
+/// Property: Splitting bytes and recombining should recreate the original.
+///
+/// Why this catches bugs:
+///   - Off-by-one errors in split position calculation
+///   - Reference counting issues with split operations
+///   - Data corruption during split operations
+#[test]
+fn mr_bytes_split_composition() {
+    use crate::bytes::Bytes;
+
+    proptest!(|(
+        data: Vec<u8>,
+        split_pos: usize,
+    )| {
+        if !data.is_empty() && split_pos <= data.len() {
+            let original = Bytes::from(data.clone());
+            let original_copy = original.clone();
+
+            // Perform split
+            let left = original.slice(..split_pos);
+            let right = original.slice(split_pos..);
+
+            // Recombine by concatenation
+            let mut recombined = Vec::new();
+            recombined.extend_from_slice(&left);
+            recombined.extend_from_slice(&right);
+
+            prop_assert_eq!(
+                recombined, data,
+                "Bytes split composition failed: split_to({}) + remainder != original",
+                split_pos
+            );
+
+            // Verify original is unchanged
+            prop_assert_eq!(
+                original_copy.as_ref(), data.as_slice(),
+                "Bytes split mutated original data"
+            );
+        }
+    });
+}
+
+/// MR-BytesSliceConsistency: slice operations should preserve data integrity.
+///
+/// Property: Slicing bytes should return exact subranges without corruption.
+///
+/// Why this catches bugs:
+///   - Boundary calculation errors in slice operations
+///   - Reference offset bugs in shared data
+///   - Range validation issues
+#[test]
+fn mr_bytes_slice_consistency() {
+    use crate::bytes::Bytes;
+
+    proptest!(|(
+        data: Vec<u8>,
+        start: usize,
+        len: usize,
+    )| {
+        if !data.is_empty() && start < data.len() {
+            let end = std::cmp::min(start + len, data.len());
+            if start <= end {
+                let bytes = Bytes::from(data.clone());
+
+                // Test slice operation
+                let sliced = bytes.slice(start..end);
+                let expected = &data[start..end];
+
+                prop_assert_eq!(
+                    sliced.as_ref(), expected,
+                    "Bytes slice inconsistency: slice({}..{}) returned wrong data",
+                    start, end
+                );
+
+                // Test that slice doesn't affect original
+                prop_assert_eq!(
+                    bytes.as_ref(), data.as_slice(),
+                    "Bytes slice mutated original data"
+                );
+            }
+        }
+    });
+}
+
+/// MR-BytesMutFreezeInvariance: freeze() should preserve data exactly.
+///
+/// Property: Freezing a mutable buffer should create an immutable copy with identical data.
+///
+/// Why this catches bugs:
+///   - Data corruption during mutable to immutable conversion
+///   - Reference sharing bugs between mutable and immutable views
+///   - State inconsistency in freeze operation
+#[test]
+fn mr_bytes_mut_freeze_invariance() {
+    use crate::bytes::{Bytes, BytesMut};
+
+    proptest!(|(data: Vec<u8>)| {
+        if !data.is_empty() {
+            let mut bytes_mut = BytesMut::from(data.as_slice());
+            let pre_freeze_data = bytes_mut.to_vec();
+
+            // Freeze the mutable buffer
+            let frozen = bytes_mut.freeze();
+
+            prop_assert_eq!(
+                frozen.as_ref(), pre_freeze_data.as_slice(),
+                "BytesMut freeze() changed data during conversion"
+            );
+
+            prop_assert_eq!(
+                frozen.as_ref(), data.as_slice(),
+                "BytesMut freeze() corrupted original data"
+            );
+        }
+    });
+}
+
+/// MR-BytesMutSplitOffComposition: split_off(n) + remainder = original.
+///
+/// Property: Splitting mutable bytes should preserve total data content.
+///
+/// Why this catches bugs:
+///   - Data loss during mutable buffer split operations
+///   - Incorrect buffer capacity management
+///   - Reference counting bugs in mutable split
+#[test]
+fn mr_bytes_mut_split_off_composition() {
+    use crate::bytes::BytesMut;
+
+    proptest!(|(
+        data: Vec<u8>,
+        split_pos: usize,
+    )| {
+        if !data.is_empty() && split_pos <= data.len() {
+            let original_data = data.clone();
+            let mut bytes_mut = BytesMut::from(data.as_slice());
+
+            if split_pos < bytes_mut.len() {
+                // Perform split_off operation
+                let right_part = bytes_mut.split_off(split_pos);
+                let left_part = bytes_mut.to_vec();
+
+                // Recombine and verify
+                let mut recombined = left_part;
+                recombined.extend_from_slice(&right_part);
+
+                prop_assert_eq!(
+                    recombined, original_data,
+                    "BytesMut split_off composition failed: left + right != original"
+                );
+            }
+        }
+    });
+}
+
+/// MR-BytesCloneIndependence: cloned bytes should be independent.
+///
+/// Property: Cloning bytes should create logically independent copies.
+///
+/// Why this catches bugs:
+///   - Shared mutable state between clones
+///   - Reference counting issues
+///   - Unintended data sharing bugs
+#[test]
+fn mr_bytes_clone_independence() {
+    use crate::bytes::{Bytes, BytesMut};
+
+    proptest!(|(data: Vec<u8>)| {
+        if !data.is_empty() {
+            // Test immutable bytes clone independence
+            let bytes1 = Bytes::from(data.clone());
+            let bytes2 = bytes1.clone();
+
+            // Both should have identical content
+            prop_assert_eq!(
+                bytes1.as_ref(), bytes2.as_ref(),
+                "Cloned Bytes have different content"
+            );
+
+            // Test that slicing one doesn't affect the other
+            if data.len() > 1 {
+                let slice1 = bytes1.slice(1..);
+                prop_assert_eq!(
+                    bytes2.as_ref(), data.as_slice(),
+                    "Slicing cloned Bytes affected original clone"
+                );
+            }
+
+            // Test mutable bytes clone independence
+            let mut bytes_mut1 = BytesMut::from(data.as_slice());
+            let bytes_mut2 = bytes_mut1.clone();
+
+            prop_assert_eq!(
+                bytes_mut1.as_ref(), bytes_mut2.as_ref(),
+                "Cloned BytesMut have different content"
+            );
+
+            // Modify one and verify other is unaffected
+            if !data.is_empty() {
+                bytes_mut1.truncate(data.len().saturating_sub(1));
+                prop_assert_eq!(
+                    bytes_mut2.as_ref(), data.as_slice(),
+                    "Modifying cloned BytesMut affected original clone"
+                );
+            }
+        }
+    });
+}
