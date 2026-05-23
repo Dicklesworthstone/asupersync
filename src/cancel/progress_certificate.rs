@@ -597,8 +597,8 @@ impl ProgressCertificate {
         let initial = self.initial_potential.unwrap_or(0.0);
 
         // Expected potential at step t: V₀ - t·mu.
-        // lambda = residual potential assuming expected progress:
-        //   lambda = V₀ - t·mu  (= expected current potential)
+        // We want lambda such that V₀ - t·mu + lambda = 0 (quiescence threshold)
+        // Therefore: lambda = t·mu - V₀ (excess beyond expected progress)
         // But we cap lambda at 0 from below — if expected progress
         // already exceeds V₀, the bound is trivially satisfied.
         #[allow(clippy::cast_precision_loss)]

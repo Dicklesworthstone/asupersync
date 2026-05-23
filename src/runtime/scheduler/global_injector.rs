@@ -315,10 +315,19 @@ impl GlobalInjector {
         if let Some(mut pending) = self.ready_combiner.pending.try_lock() {
             if self.ready_combiner.active.load(Ordering::Acquire) {
                 pending.push(entry);
-                self.ready_combiner
-                    .deferred_injections
-                    .fetch_add(1, Ordering::Relaxed);
-                return;
+                // Double-check active state after pushing to prevent race condition
+                // where combiner sets active=false between our check and push.
+                if self.ready_combiner.active.load(Ordering::Acquire) {
+                    self.ready_combiner
+                        .deferred_injections
+                        .fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                // Race detected: combiner became inactive, remove OUR entry from pending and fallback
+                // Only pop if the last entry is the one we just pushed (FIFO ordering protection)
+                if pending.last().map(|last| last.task == entry.task && last.priority == entry.priority).unwrap_or(false) {
+                    pending.pop();
+                }
             }
         }
 
