@@ -1716,13 +1716,50 @@ async fn dispatch_envelope<S: GenServer>(server: &mut S, cx: &Cx, envelope: Enve
             reply_permit,
         } => {
             let reply = Reply::<S::Reply>::new(cx, reply_permit);
-            server.handle_call(cx, request, reply).await;
+            // Wrap handler in panic isolation to prevent cascading failures
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Box::pin(server.handle_call(cx, request, reply))
+            }));
+            match result {
+                Ok(fut) => {
+                    fut.await;
+                }
+                Err(_panic_payload) => {
+                    cx.trace("gen_server::handle_call_panic_isolated");
+                    // Panic isolated - server continues processing other messages
+                    // The reply handle will be dropped, properly aborting the obligation
+                }
+            }
         }
         Envelope::Cast { msg } => {
-            server.handle_cast(cx, msg).await;
+            // Wrap handler in panic isolation to prevent cascading failures
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Box::pin(server.handle_cast(cx, msg))
+            }));
+            match result {
+                Ok(fut) => {
+                    fut.await;
+                }
+                Err(_panic_payload) => {
+                    cx.trace("gen_server::handle_cast_panic_isolated");
+                    // Panic isolated - server continues processing other messages
+                }
+            }
         }
         Envelope::Info { msg } => {
-            server.handle_info(cx, msg).await;
+            // Wrap handler in panic isolation to prevent cascading failures
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Box::pin(server.handle_info(cx, msg))
+            }));
+            match result {
+                Ok(fut) => {
+                    fut.await;
+                }
+                Err(_panic_payload) => {
+                    cx.trace("gen_server::handle_info_panic_isolated");
+                    // Panic isolated - server continues processing other messages
+                }
+            }
         }
     }
 }
@@ -7062,16 +7099,16 @@ mod tests {
 // ============================================================================
 
 #[cfg(test)]
+#[path = "gen_server_conformance_tests.rs"]
 mod gen_server_conformance_tests;
 
 #[cfg(test)]
 mod conformance_integration {
-    use super::gen_server_conformance_tests::GenServerConformanceHarness;
-    use crate::test_utils::init_test;
+    use super::gen_server_conformance_tests::{GenServerConformanceHarness, TestVerdict};
 
     #[test]
     fn gen_server_conformance_suite() {
-        init_test("gen_server_conformance_suite");
+        crate::test_utils::init_test_logging();
 
         let mut harness = GenServerConformanceHarness::new();
 
@@ -7083,10 +7120,10 @@ mod conformance_integration {
 
         for result in results {
             match result.verdict {
-                crate::gen_server_conformance_tests::TestVerdict::Pass => {
+                TestVerdict::Pass => {
                     passes += 1;
                 }
-                crate::gen_server_conformance_tests::TestVerdict::Fail(reason) => {
+                TestVerdict::Fail(reason) => {
                     failures.push(format!("{}: {}", result.test_name, reason));
                 }
             }
@@ -7096,7 +7133,10 @@ mod conformance_integration {
             panic!("GenServer conformance failures:\n{}", failures.join("\n"));
         }
 
-        assert!(passes > 0, "No conformance tests passed - harness may be broken");
+        assert!(
+            passes > 0,
+            "No conformance tests passed - harness may be broken"
+        );
 
         crate::test_complete!("gen_server_conformance_suite");
     }

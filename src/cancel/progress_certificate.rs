@@ -609,7 +609,13 @@ impl ProgressCertificate {
         // Azuma–Hoeffding: P(Sₜ ≥ lambda) ≤ exp(-2·lambda² / (t·c²))
         let exponent = -2.0 * lambda * lambda / (t_f * step_bound * step_bound);
 
-        exponent.exp()
+        // Protect against numerical underflow: if exponent is extremely negative,
+        // saturate to 0.0 rather than relying on IEEE underflow behavior
+        if exponent < -700.0 {
+            0.0
+        } else {
+            exponent.exp()
+        }
     }
 
     /// Computes the Ville's maximal inequality bound.
@@ -669,7 +675,14 @@ impl ProgressCertificate {
             return 1.0;
         }
 
-        (-lambda * lambda / denom).exp()
+        let exponent = -lambda * lambda / denom;
+        // Protect against numerical underflow: if exponent is extremely negative,
+        // saturate to 0.0 rather than relying on IEEE underflow behavior
+        if exponent < -700.0 {
+            0.0
+        } else {
+            exponent.exp()
+        }
     }
 
     /// Returns the current drain phase.
