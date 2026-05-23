@@ -75,52 +75,28 @@ fn test_atp_e2e_proof_suite_integration() -> Result<(), Box<dyn std::error::Erro
     // Finish forensics capture
     let _artifact_path = forensics.finish_capture()?;
 
-    println!("ATP E2E proof suite integration test completed successfully");
     Ok(())
 }
 
 #[test]
 fn test_atp_crash_matrix_basic() -> Result<(), Box<dyn std::error::Error>> {
-    // Test basic crash matrix functionality without full ATP context
-    let crash_points = vec![
-        AtpCrashPoint::PreJournalAppend,
-        AtpCrashPoint::PostJournalAppend,
-        AtpCrashPoint::PostBitmapUpdate,
-        AtpCrashPoint::PostChunkWrite,
-        AtpCrashPoint::PostFsync,
-        AtpCrashPoint::PostRepairDecode,
-        AtpCrashPoint::PostFinalRename,
-        AtpCrashPoint::PostProofEmission,
-        AtpCrashPoint::DuringCompaction,
-    ];
-
-    for crash_point in crash_points {
-        println!("Testing crash point: {:?}", crash_point);
-
-        // Create basic test context
+    for crash_point in AtpCrashPoint::ALL {
         let fault_injector = FaultInjector::new();
+        let fault_point = crash_point.fault_point();
 
-        // Configure crash injection
-        let point_str = match crash_point {
-            AtpCrashPoint::PreJournalAppend => "pre_journal_append",
-            AtpCrashPoint::PostJournalAppend => "post_journal_append",
-            AtpCrashPoint::PostBitmapUpdate => "post_bitmap_update",
-            AtpCrashPoint::PostChunkWrite => "post_chunk_write",
-            AtpCrashPoint::PostFsync => "post_fsync",
-            AtpCrashPoint::PostRepairDecode => "post_repair_decode",
-            AtpCrashPoint::PostFinalRename => "post_final_rename",
-            AtpCrashPoint::PostProofEmission => "post_proof_emission",
-            AtpCrashPoint::DuringCompaction => "during_compaction",
-        };
+        assert!(
+            fault_injector.should_inject(&fault_point).is_none(),
+            "unconfigured crash point {crash_point:?} unexpectedly injected {fault_point:?}"
+        );
 
-        fault_injector.inject_crash_at(point_str);
-
-        // Verify crash would be injected
-        // (We can't actually crash in this test, but we can verify configuration)
-        println!("Crash configuration verified for: {}", point_str);
+        fault_injector.inject_crash_at(crash_point.as_str());
+        let observed_fault = fault_injector.should_inject(&fault_point);
+        assert!(
+            matches!(observed_fault, Some(FaultType::Crash)),
+            "configured crash point {crash_point:?} did not trigger {fault_point:?}: {observed_fault:?}"
+        );
     }
 
-    println!("ATP crash matrix basic test completed successfully");
     Ok(())
 }
 
@@ -941,7 +917,6 @@ fn test_atp_obligation_tracking_basic() -> Result<(), Box<dyn std::error::Error>
     // Test region quiescence
     tracker.validate_region_quiescence()?;
 
-    println!("ATP obligation tracking basic test completed successfully");
     Ok(())
 }
 
