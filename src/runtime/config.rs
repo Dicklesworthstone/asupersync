@@ -10681,3 +10681,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod config_metamorphic;
