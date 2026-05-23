@@ -914,9 +914,12 @@ impl PacketBuffer {
         let packet_count = if payload_len == 0 {
             1
         } else {
-            payload_len / max_payload + 1
+            // Calculate packet count with overflow protection
+            (payload_len / max_payload).saturating_add(1)
         };
-        let mut result = Vec::with_capacity(payload_len + packet_count * 4);
+        // Calculate total capacity with overflow protection (payload + headers)
+        let header_size = packet_count.saturating_mul(4);
+        let mut result = Vec::with_capacity(payload_len.saturating_add(header_size));
 
         loop {
             let remaining = payload_len.saturating_sub(offset);
@@ -1170,7 +1173,8 @@ fn mysql_native_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError
     let password_hash = ZeroizingBytes::new(sha1(password.as_bytes()));
     let double_hash = ZeroizingBytes::new(sha1(password_hash.as_slice()));
 
-    let mut combined_bytes = Vec::with_capacity(nonce.len() + 20);
+    // Calculate capacity with overflow protection (nonce + SHA1 hash size)
+    let mut combined_bytes = Vec::with_capacity(nonce.len().saturating_add(20));
     combined_bytes.extend_from_slice(nonce);
     combined_bytes.extend_from_slice(double_hash.as_slice());
     let combined = ZeroizingBytes::new(combined_bytes);
@@ -2851,7 +2855,8 @@ impl MySqlConnection {
             ));
         }
 
-        let null_bitmap_len = (columns.len() + 7 + 2) / 8;
+        // Calculate NULL bitmap length with overflow protection
+        let null_bitmap_len = columns.len().saturating_add(7).saturating_add(2) / 8;
         let null_bitmap = reader.read_bytes(null_bitmap_len)?;
         if (null_bitmap[0] & 0b0000_0011) != 0 {
             return Err(MySqlError::Protocol(
