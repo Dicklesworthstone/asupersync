@@ -325,12 +325,19 @@ impl RelayTcpTlsStreamBuffer {
     ///
     /// # Errors
     ///
-    /// Returns relay frame validation errors for malformed records. On error,
-    /// the buffered bytes are left intact so the caller can close the stream and
-    /// preserve the offending bytes for deterministic diagnostics.
+    /// Returns relay frame validation errors for malformed records and
+    /// [`RelayError::PacketTooLarge`] when an advertised record can never fit
+    /// under this adapter's pending-byte bound. On error, the buffered bytes are
+    /// left intact so the caller can close the stream and preserve the offending
+    /// bytes for deterministic diagnostics.
     pub fn pop_next_frame(&mut self) -> Result<Option<RelayWireFrame>, RelayError> {
         match RelayWireFrame::decode_tcp_tls_record(&self.buffered, self.max_payload_bytes)? {
-            RelayWireRecordDecode::NeedMore { .. } => Ok(None),
+            RelayWireRecordDecode::NeedMore { minimum_len } => {
+                if minimum_len > self.max_buffered_bytes {
+                    return Err(RelayError::PacketTooLarge);
+                }
+                Ok(None)
+            }
             RelayWireRecordDecode::Complete { frame, consumed } => {
                 self.buffered.drain(..consumed);
                 Ok(Some(frame))
@@ -2759,6 +2766,21 @@ mod tests {
         assert_eq!(tight_stream.pending_len(), first_record.len());
         tight_stream.clear();
         assert_eq!(tight_stream.pending_len(), 0);
+
+        let undersized_cap = first_record.len() - 1;
+        let mut undersized_stream =
+            RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, undersized_cap)
+                .expect("undersized stream buffer still holds minimum record header");
+        undersized_stream
+            .push_bytes(&first_record[..undersized_cap])
+            .expect("fill undersized buffer with incomplete record");
+        assert_eq!(
+            undersized_stream
+                .pop_next_frame()
+                .expect_err("record that can never fit the buffer fails closed"),
+            RelayError::PacketTooLarge
+        );
+        assert_eq!(undersized_stream.pending_len(), undersized_cap);
 
         let udp_frame = RelayWireFrame::new(
             reservation_id(39),

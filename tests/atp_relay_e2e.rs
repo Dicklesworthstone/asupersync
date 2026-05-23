@@ -455,6 +455,26 @@ fn relay_wire_frames_feed_udp_and_tcp_tls_fallback_without_trusting_plaintext() 
         followup_forwarded.packet().opaque_bytes(),
         b"encrypted-wire-tcp-followup"
     );
+    let packet_count_before_undersized = tcp_service
+        .proof_artifact(reservation_id(501))
+        .expect("tcp proof before undersized stream")
+        .packets_forwarded;
+    let mut undersized_stream_buffer =
+        RelayTcpTlsStreamBuffer::new(RelayQuota::default().max_packet_bytes, tcp_record.len() - 1)
+            .expect("undersized stream buffer still accepts relay header");
+    assert_eq!(
+        tcp_service
+            .forward_tcp_tls_stream_bytes(325, &mut undersized_stream_buffer, &tcp_record)
+            .expect_err("record larger than pending buffer fails closed"),
+        RelayError::PacketTooLarge
+    );
+    assert_eq!(
+        tcp_service
+            .proof_artifact(reservation_id(501))
+            .expect("tcp proof after undersized stream")
+            .packets_forwarded,
+        packet_count_before_undersized
+    );
     let tcp_proof = tcp_service
         .proof_artifact(reservation_id(501))
         .expect("tcp proof");
