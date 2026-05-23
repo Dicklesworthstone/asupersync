@@ -1432,6 +1432,7 @@ impl AtpAutotunePolicy {
                     | AtpBottleneckKind::CongestionWindow
                     | AtpBottleneckKind::SendBufferPressure
                     | AtpBottleneckKind::ReceiveBufferPressure
+                    | AtpBottleneckKind::RelayCost
                     | AtpBottleneckKind::MigrationInstability
             )
         });
@@ -1871,6 +1872,30 @@ mod tests {
         assert_eq!(decision.settings.in_flight_bytes, current.in_flight_bytes);
         assert_eq!(decision.settings.stream_count, current.stream_count);
         assert!(decision.settings.repair_symbols_per_second < current.repair_symbols_per_second);
+    }
+
+    #[test]
+    fn relay_cost_backs_off_transport_without_repair_backoff() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let mut telemetry = healthy_telemetry();
+        telemetry.relay_cost_micros_per_mib = Some(policy.relay_cost_micros_per_mib + 1);
+
+        let decision = policy.decide(current, &telemetry);
+
+        assert!(decision.fail_closed);
+        assert!(
+            decision
+                .bottlenecks
+                .iter()
+                .any(|signal| signal.kind == AtpBottleneckKind::RelayCost)
+        );
+        assert!(decision.settings.in_flight_bytes < current.in_flight_bytes);
+        assert_eq!(decision.settings.stream_count, current.stream_count - 1);
+        assert_eq!(
+            decision.settings.repair_symbols_per_second,
+            current.repair_symbols_per_second
+        );
     }
 
     #[test]
