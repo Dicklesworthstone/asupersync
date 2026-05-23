@@ -864,12 +864,8 @@ mod tests {
     mod metamorphic {
         use super::*;
         use proptest::prelude::*;
-        use std::collections::HashMap;
 
-        fn extract_priorities(
-            tasks: &[TaskId],
-            arena: &Arena<TaskRecord>,
-        ) -> Vec<u8> {
+        fn extract_priorities(tasks: &[TaskId], arena: &Arena<TaskRecord>) -> Vec<u8> {
             tasks
                 .iter()
                 .map(|&task_id| {
@@ -885,9 +881,7 @@ mod tests {
         /// Category: Additive (f(x + c) = permute(f(x)))
         #[test]
         fn mr_priority_offset_preserves_relative_ordering() {
-            let fixtures = [
-                (0, 10), (1, 30), (2, 20), (3, 50), (4, 40)
-            ];
+            let fixtures = [(0, 10), (1, 30), (2, 20), (3, 50), (4, 40)];
             let offset = 100u8;
 
             // Build baseline heap
@@ -917,7 +911,8 @@ mod tests {
             let offset_priorities = extract_priorities(&offset_popped, &offset_arena);
             for (baseline_prio, offset_prio) in baseline_priorities.iter().zip(&offset_priorities) {
                 assert_eq!(
-                    *offset_prio, baseline_prio.saturating_add(offset),
+                    *offset_prio,
+                    baseline_prio.saturating_add(offset),
                     "each priority should be shifted by exactly {offset}"
                 );
             }
@@ -950,10 +945,20 @@ mod tests {
         #[test]
         fn mr_subset_monotonicity_preserves_priority_bounds() {
             let all_fixtures = [
-                (0, 10), (1, 60), (2, 20), (3, 80), (4, 30), (5, 70), (6, 40), (7, 50)
+                (0, 10),
+                (1, 60),
+                (2, 20),
+                (3, 80),
+                (4, 30),
+                (5, 70),
+                (6, 40),
+                (7, 50),
             ];
             let subset_fixtures = [
-                (1, 60), (3, 80), (5, 70), (7, 50) // Remove lower-priority items
+                (1, 60),
+                (3, 80),
+                (5, 70),
+                (7, 50), // Remove lower-priority items
             ];
 
             // Build full heap
@@ -987,7 +992,8 @@ mod tests {
                 assert!(
                     window[0] >= window[1],
                     "subset must maintain descending priority order: {} >= {}",
-                    window[0], window[1]
+                    window[0],
+                    window[1]
                 );
             }
 
@@ -1000,9 +1006,7 @@ mod tests {
         /// Category: Invertive (different paths to same state)
         #[test]
         fn mr_clear_rebuild_equivalence() {
-            let fixtures = [
-                (0, 25), (1, 75), (2, 50), (3, 100), (4, 10)
-            ];
+            let fixtures = [(0, 25), (1, 75), (2, 50), (3, 100), (4, 10)];
 
             // Build fresh heap
             let mut fresh_arena = setup_arena(fixtures.len() as u32);
@@ -1087,7 +1091,8 @@ mod tests {
                 "different-priority noise must not disrupt FIFO ordering within priority band"
             );
             assert_eq!(
-                baseline_fifo, fifo_tasks.to_vec(),
+                baseline_fifo,
+                fifo_tasks.to_vec(),
                 "same-priority items must pop in FIFO order"
             );
         }
@@ -1168,7 +1173,8 @@ mod tests {
             let scaled_priorities = extract_priorities(&scaled_popped, &scaled_arena);
             for (baseline_prio, scaled_prio) in baseline_priorities.iter().zip(&scaled_priorities) {
                 assert_eq!(
-                    *scaled_prio, baseline_prio.saturating_mul(scale_factor),
+                    *scaled_prio,
+                    baseline_prio.saturating_mul(scale_factor),
                     "each priority should be scaled by factor {scale_factor}"
                 );
             }
@@ -1181,8 +1187,8 @@ mod tests {
                 operations in prop::collection::vec(
                     prop::strategy::Union::new([
                         (0..50u32, 0..255u8).prop_map(|(id, prio)| ("push", id, prio)).boxed(),
-                        (0..50u32, 0u8).prop_map(|(id, _)| ("pop", id, 0)).boxed(),
-                        (0..50u32, 0u8).prop_map(|(id, _)| ("remove", id, 0)).boxed(),
+                        (0..50u32).prop_map(|id| ("pop", id, 0)).boxed(),
+                        (0..50u32).prop_map(|id| ("remove", id, 0)).boxed(),
                     ]), 1..20
                 )
             ) {
@@ -1190,10 +1196,14 @@ mod tests {
                 let mut heap = IntrusivePriorityHeap::new();
 
                 for (op, task_id, priority) in operations {
-                    match op.as_str() {
+                    match op {
                         "push" => heap.push(task(task_id), priority, &mut arena),
-                        "pop" => { heap.pop(&mut arena); },
-                        "remove" => { heap.remove(task(task_id), &mut arena); },
+                        "pop" => {
+                            let _ = heap.pop(&mut arena);
+                        }
+                        "remove" => {
+                            heap.remove(task(task_id), &mut arena);
+                        }
                         _ => unreachable!(),
                     }
 
