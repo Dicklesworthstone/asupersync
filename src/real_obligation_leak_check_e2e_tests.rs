@@ -1312,15 +1312,6 @@ impl ObligationCleanupHarness {
         Ok(())
     }
 }
-        fs::write(
-            artifact_dir.join("summary.json"),
-            serde_json::to_string_pretty(&summary)
-                .expect("structured obligation E2E summary should serialize"),
-        )?;
-
-        Ok(())
-    }
-}
 
 /// Runs the focused no-mock client-disconnect obligation cleanup E2E scenario.
 ///

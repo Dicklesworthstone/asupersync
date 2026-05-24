@@ -277,7 +277,7 @@ mod conformance_tests {
 
     impl<T> Arbitrary for MockResult<T>
     where
-        T: Arbitrary + Clone,
+        T: Arbitrary + Clone + 'static,
     {
         type Parameters = T::Parameters;
         type Strategy = BoxedStrategy<Self>;
@@ -295,7 +295,7 @@ mod conformance_tests {
 
     impl<T> Arbitrary for RaceInput<T>
     where
-        T: Arbitrary + Clone,
+        T: Arbitrary + Clone + 'static,
     {
         type Parameters = T::Parameters;
         type Strategy = BoxedStrategy<Self>;
@@ -645,7 +645,7 @@ mod conformance_tests {
             let result1 = mock_race(inputs.clone());
             let result2 = mock_race(inputs.clone());
 
-            prop_assert_eq!(result1, result2, "Race should be deterministic");
+            prop_assert_eq!(result1.clone(), result2, "Race should be deterministic");
 
             if let Some(result) = result1 {
                 // Winner should be the fastest successful input
@@ -715,7 +715,7 @@ mod conformance_tests {
             };
 
             // Create all-failure sequence to test backoff
-            let results: Vec<_> = (0..max_attempts)
+            let results: Vec<MockResult<u32>> = (0..max_attempts)
                 .map(|i| MockResult::RetryableError(format!("fail_{}", i)))
                 .collect();
 
@@ -865,7 +865,7 @@ mod edge_case_tests {
     /// Test race with all failures
     #[test]
     fn edge_case_race_all_failures() {
-        let inputs = vec![
+        let inputs: Vec<RaceInput<u32>> = vec![
             RaceInput {
                 id: 1,
                 result: MockResult::RetryableError("fail1".to_string()),
@@ -904,7 +904,7 @@ mod edge_case_tests {
     /// Test quorum with zero threshold
     #[test]
     fn edge_case_quorum_zero_threshold() {
-        let inputs = vec![
+        let inputs: Vec<MockResult<u32>> = vec![
             MockResult::RetryableError("fail".to_string()),
             MockResult::PermanentError("fail2".to_string()),
         ];

@@ -22,6 +22,31 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    // Helper functions for consistent hash ring golden test. Kept inside
+    // `mod tests` so they're in scope for the cfg(test) callers below.
+    fn simple_hash(input: &str) -> u64 {
+        // Simple deterministic hash for testing (not cryptographically secure)
+        let mut hash = 0u64;
+        for byte in input.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+        }
+        hash
+    }
+
+    fn find_node(virtual_nodes: &[(u64, String, usize)], key_hash: u64) -> String {
+        // Find the first virtual node with hash >= key_hash (clockwise on ring)
+        for (vnode_hash, node_name, _) in virtual_nodes {
+            if *vnode_hash >= key_hash {
+                return node_name.clone();
+            }
+        }
+        // Wrap around to the first node
+        virtual_nodes
+            .first()
+            .map(|(_, name, _)| name.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
     /// Golden artifact testing infrastructure
     struct GoldenTester {
         test_name: String,
@@ -981,9 +1006,11 @@ mod tests {
         }
         output.push_str("\n");
 
-        // NATS frame serialization
+        // NATS frame serialization. Cast each `b"..."` byte literal to
+        // `&[u8]` so the vec doesn't lock to the first element's array size
+        // (`&[u8; N]`) and refuse the others.
         output.push_str("## NATS Frame Serialization\n");
-        let nats_frames = vec![
+        let nats_frames: Vec<(&str, &[u8])> = vec![
             ("connect", b"CONNECT {\"verbose\":false,\"pedantic\":false,\"tls_required\":false,\"name\":\"asupersync\",\"lang\":\"rust\",\"version\":\"0.1.0\"}\r\n"),
             ("pub_message", b"PUB events.user.login 12\r\n{\"user\":\"123\"}\r\n"),
             ("sub_request", b"SUB events.*.login queue_1 1\r\n"),
@@ -998,9 +1025,10 @@ mod tests {
         }
         output.push_str("\n");
 
-        // Redis frame serialization (RESP protocol)
+        // Redis frame serialization (RESP protocol). Same `&[u8]` annotation
+        // as nats_frames so the differently-sized byte literals coexist.
         output.push_str("## Redis RESP Frame Serialization\n");
-        let redis_frames = vec![
+        let redis_frames: Vec<(&str, &[u8])> = vec![
             ("simple_string", b"+OK\r\n"),
             ("error", b"-ERR unknown command\r\n"),
             ("integer", b":42\r\n"),
@@ -1541,10 +1569,12 @@ debug_mode = false
         trajectory_bytes.extend_from_slice(&1.0f64.to_be_bytes()); // Initial E-value
         trajectory_bytes.extend_from_slice(&0.05f64.to_be_bytes()); // Confidence level
 
-        // Trajectory points: Step (4 bytes) + E-value (8 bytes) + Event type (1 byte)
+        // Trajectory points: Step (4 bytes) + E-value (8 bytes) + Event type (1 byte).
+        // Cast e_value to f64 so to_be_bytes resolves; tuple literal otherwise
+        // leaves the float as an untyped `{float}` placeholder that has no methods.
         for (step, e_value, event_type, _) in &trajectory_points {
             trajectory_bytes.extend_from_slice(&(*step as u32).to_be_bytes());
-            trajectory_bytes.extend_from_slice(&e_value.to_be_bytes());
+            trajectory_bytes.extend_from_slice(&(*e_value as f64).to_be_bytes());
             let event_byte = match *event_type {
                 "Initial" => 0x00,
                 "Update" => 0x01,
@@ -1883,25 +1913,7 @@ debug_mode = false
     }
 }
 
-// Helper functions for consistent hash ring golden test
-#[allow(dead_code)]
-fn simple_hash(input: &str) -> u64 {
-    // Simple deterministic hash for testing (not cryptographically secure)
-    let mut hash = 0u64;
-    for byte in input.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
-    }
-    hash
-}
+// Helpers moved inside `mod tests` (see top of file) so the test code can
+// actually see them; the prior file-level position left them out of scope
+// of the cfg(test) module and the test callers failed with E0425.
 
-#[allow(dead_code)]
-fn find_node(virtual_nodes: &[(u64, String, usize)], key_hash: u64) -> String {
-    // Find the first virtual node with hash >= key_hash (clockwise on ring)
-    for (vnode_hash, node_name, _) in virtual_nodes {
-        if *vnode_hash >= key_hash {
-            return node_name.clone();
-        }
-    }
-    // Wrap around to the first node
-    virtual_nodes.first().map(|(_, name, _)| name.clone()).unwrap_or_else(|| "unknown".to_string())
-}

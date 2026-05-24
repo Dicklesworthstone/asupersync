@@ -358,6 +358,8 @@ pub mod real_raptorq_systematic_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_service_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_server_session_evidence_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_sqlite_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_supervision_e2e_tests;
